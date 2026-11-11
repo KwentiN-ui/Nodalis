@@ -23,11 +23,13 @@
 //! relations and defaults ([`law`]) and the integration of slave faces ([`geometry`]).
 //! No CalculiX code was consulted.
 
+pub mod ccd;
 pub mod geometry;
 pub mod law;
 pub mod output;
 
-use std::collections::HashSet;
+use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
 
 use plxs_core::contact::{Adjust, ContactKind};
 use plxs_core::state::{ContactPointState, ContactStatus};
@@ -40,7 +42,7 @@ use law::{FrictionLaw, Law};
 /// How far (in typical master edge lengths) a face-to-face point may lie beside the closest
 /// master face and still touch it: points over a convex edge between two faces project
 /// onto the edge with a small sideways offset.
-const BESIDE_TOLERANCE: f64 = 0.01;
+pub const BESIDE_TOLERANCE: f64 = 0.01;
 
 /// A point of the slave side a spring acts on: a slave node (node-to-face) or an integration
 /// point of a slave face (face-to-face).
@@ -55,6 +57,12 @@ pub struct SlavePoint {
     /// Slave face (index into [`Pair::slave_faces`]) and natural coordinates, `None` for a
     /// node.
     pub face: Option<(u32, [f64; 2])>,
+    /// Distance the point keeps from the master surface: the radius of a rope or beam whose
+    /// axis node it is (`CONTACT RADIUS=`) when it is tied to the master, zero for others
+    /// (an untied rope touches with the points of its circumference, [`SlavePoint::ring`]).
+    pub offset: f64,
+    /// A point on a rope's circumference: off its axis node `nodes[0]` (with offset 0).
+    pub ring: Option<RopeRing>,
 }
 
 /// A contact pair prepared for the solver.
@@ -90,9 +98,48 @@ pub struct Pair {
     pub active: bool,
     /// Mean edge length of the master faces.
     pub typical: f64,
+    /// Node-to-face springs carry compression only (set for dynamic steps by
+    /// [`ContactModel::begin_step`]): the tension CalculiX's smoothed relation keeps within
+    /// the cutoff would pull a body towards a surface before it arrives and hold it back
+    /// as it bounces off.
+    pub compression_only: bool,
     /// Candidate master faces per point, from the last [`ContactModel::prepare`].
     candidates: Vec<Vec<u32>>,
+    /// The corner nodes on the boundary of the master surface (on an edge of only one
+    /// master face), see [`Pair::inner_edge`].
+    master_boundary: HashSet<u32>,
 }
+
+/// The first impact of a slave point on a master face within an increment
+/// ([`ContactModel::first_impact`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Impact {
+    /// Fraction of the increment at which the point reaches the face (conservative: at
+    /// most the touch).
+    pub fraction: f64,
+    pub pair: usize,
+    pub point: usize,
+    pub face: u32,
+    /// The distance between them at the start and the pair's typical master edge length.
+    pub distance: f64,
+    pub typical: f64,
+    /// Whether the point ends on the other side of the face (went through it).
+    pub through: bool,
+}
+
+impl Impact {
+    /// Where to cut the increment (as a fraction of it) so that the first part ends just
+    /// before the touch: a fifth of the remaining approach before it, or half a typical
+    /// edge length when that is less (the springs of the next part then reach the face).
+    pub fn cut(&self) -> f64 {
+        let lead = (0.5 * self.typical / self.distance.max(1e-300)).min(0.2);
+        self.fraction * (1.0 - lead)
+    }
+}
+
+/// A master face cut into flat pieces, with their points at the start and the end of an
+/// increment.
+type SweptFace = (ccd::Pieces, Vec<[f64; 3]>, Vec<[f64; 3]>);
 
 /// The result of one point in an evaluation.
 #[derive(Clone, Debug)]
@@ -107,6 +154,8 @@ pub struct PointResult {
     pub shear: [f64; 2],
     /// Spring energy of the point (area included).
     pub energy: f64,
+    /// The part of `energy` stored by the normal spring (without the friction's stick).
+    pub normal_energy: f64,
     /// Force on the slave point.
     pub force: [f64; 3],
     pub master_face: Option<u32>,
@@ -135,6 +184,10 @@ struct Kinematics {
     master_face: u32,
     area: f64,
     cutoff: f64,
+    /// The distance to the master when the normal is the direction to a shared edge or
+    /// corner of the master (see [`Pair::kinematics`]): the normal turns as the point
+    /// moves, which adds `p / distance` across it to the tangent.
+    corner: Option<f64>,
 }
 
 /// A contact spring element: global DOFs, symmetric tangent (row-major) and internal force.
@@ -147,6 +200,28 @@ pub struct ContactElement {
     /// The unsymmetric rest of the consistent tangent (sliding friction: the shear follows
     /// the pressure, `μ dp/dd`), row-major like `ke`; empty when there is none.
     pub unsymmetric: Vec<f64>,
+    /// The part of `fe` from the damping of the spring ([`Damping`]); empty without.
+    pub damping: Vec<f64>,
+    /// The part of `fe` from the normal spring alone (no damping, no friction); empty for
+    /// tied contact.
+    pub normal: Vec<f64>,
+    /// The pair and the point (or mortar node) the spring belongs to.
+    pub source: (u32, u32),
+}
+
+/// Damping of the normal springs in a dynamic step: the pressure `p + c ḋ` with the rate of
+/// overclosure `ḋ` and `c = coefficient · dp/dd`, never below zero (it does not pull a
+/// surface back as it lifts off). Only points that were closed at the start of the
+/// increment are damped: the force of a point that closes stays continuous, and the
+/// iterations of an increment never switch the damping on or off.
+#[derive(Clone, Debug, Default)]
+pub struct Damping {
+    /// The velocities of all DOFs at the displacements of the evaluation.
+    pub velocities: Vec<f64>,
+    /// `c / (dp/dd)`, a time.
+    pub coefficient: f64,
+    /// `dv/du` of the time integration, for the tangent.
+    pub rate: f64,
 }
 
 impl ContactElement {
@@ -209,6 +284,12 @@ pub struct ContactModel {
     pub warnings: Vec<String>,
     /// The last evaluation (for the outputs of a converged increment).
     pub last: Option<Evaluation>,
+    /// Damping of the springs for the next evaluations (dynamic steps), `None` otherwise.
+    pub damping: Option<Damping>,
+    /// A factor on the stiffness of every point's relation (normal and stick), per pair
+    /// and point; missing entries are 1. The explicit integration lowers it where a
+    /// penalty spring would be too stiff for its time step.
+    pub stiffness_scale: Vec<Vec<f64>>,
 }
 
 /// Young's modulus of the first material (CalculiX's reference for defaults).
@@ -220,6 +301,127 @@ fn first_young(model: &Model) -> f64 {
         .map(|e| e.young)
         .next()
         .unwrap_or(0.0)
+}
+
+/// A node on the axis of a general beam with a contact radius (a rope).
+#[derive(Clone, Debug, Default)]
+struct RopeNode {
+    radius: f64,
+    /// The length of beam the node stands for: half of each element at it.
+    length: f64,
+    /// The nodes it is joined to along the rope (dense indices).
+    neighbours: Vec<u32>,
+}
+
+/// The nodes on the axis of general beams with a contact radius (ropes), per dense node.
+fn rope_nodes(model: &Model) -> HashMap<u32, RopeNode> {
+    use plxs_core::section::{BeamProfile, SectionKind};
+    let mut out: HashMap<u32, RopeNode> = HashMap::new();
+    for element in &model.elements {
+        if element.kind != plxs_core::ElementType::U1 {
+            continue;
+        }
+        let Some(section) = element.section.and_then(|s| model.sections.get(s as usize)) else {
+            continue;
+        };
+        let SectionKind::Beam {
+            profile:
+                BeamProfile::General {
+                    contact_radius: Some(radius),
+                    ..
+                },
+            ..
+        } = &section.kind
+        else {
+            continue;
+        };
+        // After the expansion a U1 element holds the rotation helper of each node too.
+        let ends = match element.nodes.len() {
+            4 => [element.nodes[0], element.nodes[2]],
+            _ => [element.nodes[0], element.nodes[1]],
+        };
+        let Some(dense) = ends
+            .iter()
+            .map(|&id| model.nodes.index(id))
+            .collect::<Option<Vec<u32>>>()
+        else {
+            continue;
+        };
+        let length = geometry::norm(sub(
+            model.nodes.coordinates[dense[1] as usize],
+            model.nodes.coordinates[dense[0] as usize],
+        ));
+        for (k, &n) in dense.iter().enumerate() {
+            let entry = out.entry(n).or_default();
+            entry.radius = entry.radius.max(*radius);
+            entry.length += 0.5 * length;
+            entry.neighbours.push(dense[1 - k]);
+        }
+    }
+    out
+}
+
+/// Two unit vectors across a unit axis and across each other.
+fn across(axis: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    // The global axis most across it.
+    let k = (0..3)
+        .min_by(|&i, &j| axis[i].abs().total_cmp(&axis[j].abs()))
+        .unwrap_or(0);
+    let mut e = [0.0; 3];
+    e[k] = 1.0;
+    let e1 = normalized(sub(e, scale(axis, dot(e, axis))));
+    (e1, cross(axis, e1))
+}
+
+/// How many points around its circumference a rope node touches with
+/// ([`SlavePoint::ring`]).
+pub const ROPE_RING_POINTS: usize = 16;
+
+/// A point on the circumference of a rope: the rope's axis node, the radius off it, in a
+/// direction across the rope's current axis. A rope in a groove of its own radius touches
+/// it over half its circumference at once; with only the axis node (its distance to the
+/// nearest face less the radius) it held on to the one face nearest, and in a groove all
+/// faces are about as near: the rope was pushed from one flank to the other, unsupported
+/// sideways, and the solver cut back until it gave up.
+#[derive(Clone, Debug)]
+pub struct RopeRing {
+    pub radius: f64,
+    /// The rope's axis at the node in the reference configuration: from the first to the
+    /// second node (dense indices), the node itself at an end of the rope.
+    pub axis: [u32; 2],
+    pub rest_axis: [f64; 3],
+    /// The direction of the point off the axis in the reference configuration, across
+    /// `rest_axis`; it turns with the axis.
+    pub rest_direction: [f64; 3],
+}
+
+impl RopeRing {
+    /// The point's offset from the axis node in a configuration: the reference direction
+    /// turned by the rotation that takes the reference axis on to the current one (the
+    /// rope does not twist the points around: it is round).
+    fn offset(&self, current: &[[f64; 3]]) -> [f64; 3] {
+        let axis = normalized(sub(
+            current[self.axis[1] as usize],
+            current[self.axis[0] as usize],
+        ));
+        let a = self.rest_axis;
+        let d = self.rest_direction;
+        // Rodrigues' rotation from a to axis, applied to d: d + v x d + v x (v x d) / (1 + c)
+        // with v = a x axis, c = a . axis.
+        let v = cross(a, axis);
+        let c = dot(a, axis);
+        if c <= -0.999 {
+            return scale(d, self.radius);
+        }
+        let vd = cross(v, d);
+        let vvd = cross(v, vd);
+        let turned = [
+            d[0] + vd[0] + vvd[0] / (1.0 + c),
+            d[1] + vd[1] + vvd[1] / (1.0 + c),
+            d[2] + vd[2] + vvd[2] / (1.0 + c),
+        ];
+        scale(normalized(turned), self.radius)
+    }
 }
 
 /// Young's modulus of the material of an element (dense index).
@@ -321,25 +523,75 @@ impl ContactModel {
                             area[*n as usize] += a;
                         }
                     }
-                    if is_node_surface && slave_faces.is_empty() {
+                    let ropes = rope_nodes(model);
+                    let all_ropes = nodes.iter().all(|n| ropes.contains_key(n));
+                    if is_node_surface && slave_faces.is_empty() && !all_ropes {
                         out.warnings.push(format!(
                             "node surface {} has no exterior faces; unit areas are used for its contact springs",
                             pair.slave
                         ));
                     }
+                    let coords = &model.nodes.coordinates;
                     for n in nodes {
-                        let a = if area[n as usize] > 0.0 {
-                            area[n as usize]
-                        } else {
-                            1.0
-                        };
-                        points.push(SlavePoint {
-                            nodes: vec![n],
-                            weights: vec![1.0],
-                            area: a,
-                            face: None,
-                        });
-                        cutoff.push(law.node_cutoff(c0, a));
+                        let rope = ropes.get(&n);
+                        match rope {
+                            // A rope touches with its circumference; tied to the master it
+                            // keeps its axis node at its radius off it.
+                            Some(rope) if !law.is_tied() && !rope.neighbours.is_empty() => {
+                                let (a, b) = match rope.neighbours[..] {
+                                    [one] => (n.min(one), n.max(one)),
+                                    [first, second, ..] => (first, second),
+                                    [] => unreachable!(),
+                                };
+                                let rest_axis =
+                                    normalized(sub(coords[b as usize], coords[a as usize]));
+                                let (e1, e2) = across(rest_axis);
+                                let arc = std::f64::consts::TAU * rope.radius
+                                    / ROPE_RING_POINTS as f64
+                                    * rope.length;
+                                for k in 0..ROPE_RING_POINTS {
+                                    let angle =
+                                        std::f64::consts::TAU * k as f64 / ROPE_RING_POINTS as f64;
+                                    let (sin, cos) = angle.sin_cos();
+                                    points.push(SlavePoint {
+                                        nodes: vec![n],
+                                        weights: vec![1.0],
+                                        area: arc,
+                                        face: None,
+                                        offset: 0.0,
+                                        ring: Some(RopeRing {
+                                            radius: rope.radius,
+                                            axis: [a, b],
+                                            rest_axis,
+                                            rest_direction: [
+                                                cos * e1[0] + sin * e2[0],
+                                                cos * e1[1] + sin * e2[1],
+                                                cos * e1[2] + sin * e2[2],
+                                            ],
+                                        }),
+                                    });
+                                    cutoff.push(law.node_cutoff(c0, arc));
+                                }
+                            }
+                            _ => {
+                                // A rope node presses on the strip of its diameter along
+                                // its length.
+                                let a = match rope {
+                                    Some(rope) => 2.0 * rope.radius * rope.length,
+                                    None if area[n as usize] > 0.0 => area[n as usize],
+                                    None => 1.0,
+                                };
+                                points.push(SlavePoint {
+                                    nodes: vec![n],
+                                    weights: vec![1.0],
+                                    area: a,
+                                    face: None,
+                                    offset: rope.map_or(0.0, |rope| rope.radius),
+                                    ring: None,
+                                });
+                                cutoff.push(law.node_cutoff(c0, a));
+                            }
+                        }
                     }
                 }
                 _ => {
@@ -352,6 +604,8 @@ impl ContactModel {
                                 weights: fp.n.clone(),
                                 area: w * fp.jacobian,
                                 face: Some((f as u32, *p)),
+                                offset: 0.0,
+                                ring: None,
                             });
                             // Face-to-face springs act on overclosure only; the cutoff only
                             // decides which tied points are coupled.
@@ -396,8 +650,11 @@ impl ContactModel {
                 mortar_nodes: Vec::new(),
                 active: true,
                 typical,
+                compression_only: false,
                 candidates: Vec::new(),
+                master_boundary: HashSet::new(),
             };
+            prepared.master_boundary = boundary_corners(&prepared.master);
 
             if mortar && !prepared.law.is_tied() {
                 let mut by_node: std::collections::BTreeMap<u32, Vec<(u32, f64)>> =
@@ -460,6 +717,14 @@ impl ContactModel {
                     typical.max(distance.min(1e6)),
                     distance.min(1e6),
                 );
+                // Rope nodes move to their radius off the surface.
+                let offsets: HashMap<u32, f64> = (prepared.points.iter())
+                    .filter(|q| q.face.is_none())
+                    .filter_map(|q| {
+                        let radius = q.ring.as_ref().map_or(q.offset, |r| r.radius);
+                        (radius > 0.0).then_some((q.nodes[0], radius))
+                    })
+                    .collect();
                 let mut moved = 0;
                 for n in slave_nodes {
                     if master_nodes.contains(&n)
@@ -468,17 +733,18 @@ impl ContactModel {
                         continue;
                     }
                     let x = coords[n as usize];
+                    let offset = offsets.get(&n).copied().unwrap_or(0.0);
                     let mut best: Option<(f64, [f64; 3])> = None;
                     for &f in grid.candidates(x) {
                         let (_, fp) = prepared.master[f as usize].project(&coords, x);
                         let d = geometry::norm(sub(x, fp.x));
                         if best.is_none_or(|b| d < b.0) {
-                            best = Some((d, fp.x));
+                            best = Some((d, sub(fp.x, scale(fp.normal, -offset))));
                         }
                     }
                     if let Some((d, y)) = best
-                        && d <= distance
-                        && d > 0.0
+                        && (d - offset).abs() <= distance
+                        && (d - offset).abs() > 0.0
                     {
                         model.nodes.coordinates[n as usize] = y;
                         moved += 1;
@@ -496,9 +762,9 @@ impl ContactModel {
             prepared.prepare_candidates(coords);
             let initial: Vec<Option<(u32, f64)>> = (0..prepared.points.len())
                 .map(|p| {
-                    prepared
-                        .closest(p, coords)
-                        .map(|(f, _, fp, x)| (f, dot(sub(x, fp.x), fp.normal)))
+                    prepared.closest(p, coords, None).map(|(f, _, fp, x)| {
+                        (f, dot(sub(x, fp.x), fp.normal) - prepared.points[p].offset)
+                    })
                 })
                 .collect();
             prepared.initial = initial;
@@ -516,12 +782,38 @@ impl ContactModel {
         self.pairs.iter().any(|p| p.active)
     }
 
+    /// The nodes of the pairs in force (slave points and master faces), sorted.
+    pub fn nodes(&self) -> Vec<u32> {
+        let mut nodes: Vec<u32> = (self.pairs.iter().filter(|p| p.active))
+            .flat_map(|pair| {
+                (pair.points.iter().flat_map(|p| p.nodes.iter().copied()))
+                    .chain(pair.master.iter().flat_map(|f| f.nodes.iter().copied()))
+            })
+            .collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes
+    }
+
+    /// How far the nodes may move after [`ContactModel::prepare`] before its candidate
+    /// master faces may miss one: the candidates reach two typical master edge lengths
+    /// beyond a point, so that a slave and a master node moving towards each other by half
+    /// of that leave it complete.
+    pub fn search_reach(&self) -> f64 {
+        (self.pairs.iter().filter(|p| p.active && p.typical > 0.0))
+            .map(|p| p.typical)
+            .fold(f64::INFINITY, f64::min)
+    }
+
     /// Applies `*MODEL CHANGE` and `*CHANGE FRICTION` of a step; the pairs switched off are
-    /// kept in `state.inactive_pairs`.
+    /// kept in `state.inactive_pairs`. In a dynamic step node-to-face springs carry
+    /// compression only ([`Pair::compression_only`]).
     pub fn begin_step(&mut self, step: &Step, state: &mut State) -> Vec<String> {
         let mut warnings = Vec::new();
+        let dynamic = matches!(step.procedure, plxs_core::step::Procedure::Dynamic(_));
         for pair in &mut self.pairs {
             pair.active = !state.inactive_pairs.contains(&(pair.index as u32));
+            pair.compression_only = dynamic;
         }
         for change in &step.contact_changes {
             match change {
@@ -600,9 +892,11 @@ impl ContactModel {
                 // (observed: ccx drops a node that slid past the master's edge in an
                 // earlier step, and keeps one that slides off within the increment).
                 for p in 0..pair.points.len() {
-                    let beside = pair.closest(p, &current).is_none_or(|(f, natural, ..)| {
-                        !pair.master[f as usize].contains(natural, 1e-3)
-                    });
+                    let beside = pair
+                        .closest(p, &current, None)
+                        .is_none_or(|(f, natural, ..)| {
+                            !pair.master[f as usize].contains(natural, 1e-3)
+                        });
                     if beside {
                         pair.candidates[p].clear();
                     }
@@ -624,11 +918,10 @@ impl ContactModel {
                 // A point's spring couples it with one master face: a block per candidate
                 // face (not one over all candidates, which would couple the master faces
                 // among each other and fill the factor for nothing).
-                for p in 0..pair.points.len() {
-                    for &f in &pair.candidates[p] {
-                        blocks.push(pair.point_face_dofs(&[p as u32], f));
-                    }
-                }
+                let pair = &*pair;
+                blocks.par_extend((0..pair.points.len()).into_par_iter().flat_map_iter(|p| {
+                    (pair.candidates[p].iter()).map(move |&f| pair.point_face_dofs(&[p as u32], f))
+                }));
             } else {
                 // A mortar node couples all its integration points.
                 for (_, points) in &pair.mortar_nodes {
@@ -643,9 +936,149 @@ impl ContactModel {
             }
         }
         // The integration points of one slave face share their blocks.
-        blocks.sort_unstable();
+        blocks.par_sort_unstable();
         blocks.dedup();
         blocks
+    }
+
+    /// The earliest impact of a slave point on a master face while both move on straight
+    /// lines from the displacements `u0` to `u1` (continuous collision detection, see
+    /// [`ccd`]). Only points `eligible(pair, point)` are checked, and only against faces
+    /// they start more than `farther` typical master edge lengths away from: a point closer
+    /// than that is in reach of the springs (the candidates of [`ContactModel::prepare`]),
+    /// a point in contact touches its face already. `through_only` counts only points that
+    /// end on the other side of the face they meet. Tied pairs are left out.
+    pub fn first_impact(
+        &self,
+        coords: &[[f64; 3]],
+        u0: &[f64],
+        u1: &[f64],
+        farther: f64,
+        through_only: bool,
+        eligible: &(dyn Fn(usize, usize) -> bool + Sync),
+    ) -> Option<Impact> {
+        let start = current_configuration(coords, u0);
+        let end = current_configuration(coords, u1);
+        let mut first: Option<Impact> = None;
+        for (pi, pair) in self.pairs.iter().enumerate() {
+            if !pair.active || pair.law.is_tied() || pair.master.is_empty() {
+                continue;
+            }
+            let near = farther * pair.typical;
+            // Nothing moves far enough to close the distance: no search.
+            let moved = |nodes: &mut dyn Iterator<Item = &u32>| {
+                nodes
+                    .map(|&n| geometry::norm(sub(end[n as usize], start[n as usize])))
+                    .fold(0.0, f64::max)
+            };
+            let slave_moved = moved(&mut pair.points.iter().flat_map(|p| &p.nodes));
+            let master_moved = moved(&mut pair.master.iter().flat_map(|f| &f.nodes));
+            if slave_moved + master_moved <= near {
+                continue;
+            }
+            // The flat pieces of the master faces at the start and the end and the boxes
+            // they sweep.
+            let faces: Vec<SweptFace> = pair
+                .master
+                .par_iter()
+                .map(|face| {
+                    let pieces = ccd::pieces(face);
+                    let a = pieces.positions(face, &start);
+                    let b = pieces.positions(face, &end);
+                    (pieces, a, b)
+                })
+                .collect();
+            let boxes: Vec<([f64; 3], [f64; 3])> =
+                faces.iter().map(|(_, a, b)| ccd::swept_box(a, b)).collect();
+            let grid = ccd::swept_grid(&boxes, pair.typical);
+            let hit = (0..pair.points.len())
+                .into_par_iter()
+                .filter(|&p| eligible(pi, p))
+                .map_init(Vec::new, |found, p| {
+                    let x0 = pair.position(p, &start);
+                    let x1 = pair.position(p, &end);
+                    let (lo, hi) = ccd::swept_box(&[x0], &[x1]);
+                    grid.candidates_in(lo, hi, found);
+                    let own = &pair.points[p].nodes;
+                    let mut best: Option<Impact> = None;
+                    for &f in found.iter() {
+                        let face = &pair.master[f as usize];
+                        if face.nodes.iter().any(|n| own.contains(n)) {
+                            continue;
+                        }
+                        let (lo_f, hi_f) = boxes[f as usize];
+                        if (0..3).any(|d| hi[d] < lo_f[d] || lo[d] > hi_f[d]) {
+                            continue;
+                        }
+                        let (pieces, a, b) = &faces[f as usize];
+                        for t in &pieces.triangles {
+                            let corners0 = [a[t[0]], a[t[1]], a[t[2]]];
+                            let corners1 = [b[t[0]], b[t[1]], b[t[2]]];
+                            let d0 = ccd::point_triangle_distance(
+                                x0,
+                                corners0[0],
+                                corners0[1],
+                                corners0[2],
+                            );
+                            if d0 <= near {
+                                continue;
+                            }
+                            let limit = best.as_ref().map_or(1.0, |b| b.fraction);
+                            let x = [x0, corners0[0], corners0[1], corners0[2]];
+                            let motion = [
+                                sub(x1, x0),
+                                sub(corners1[0], corners0[0]),
+                                sub(corners1[1], corners0[1]),
+                                sub(corners1[2], corners0[2]),
+                            ];
+                            if let Some(fraction) =
+                                ccd::additive_ccd(x, motion, ccd::SEPARATION, limit)
+                            {
+                                // Through: on the other side of the piece at the end.
+                                let side0 =
+                                    ccd::signed_distance(x0, corners0[0], corners0[1], corners0[2]);
+                                let side1 =
+                                    ccd::signed_distance(x1, corners1[0], corners1[1], corners1[2]);
+                                let through = side0 * side1 < 0.0;
+                                if through_only && !through {
+                                    continue;
+                                }
+                                best = Some(Impact {
+                                    fraction,
+                                    pair: pi,
+                                    point: p,
+                                    face: f,
+                                    distance: d0,
+                                    typical: pair.typical,
+                                    through,
+                                });
+                            }
+                        }
+                    }
+                    best
+                })
+                .flatten()
+                .min_by(|a, b| a.fraction.total_cmp(&b.fraction));
+            if let Some(hit) = hit
+                && first.as_ref().is_none_or(|f| hit.fraction < f.fraction)
+            {
+                first = Some(hit);
+            }
+        }
+        first
+    }
+
+    /// Whether the slave point `point` of pair `pair` has a spring in `evaluation` (mortar
+    /// pairs are evaluated per mortar node: always taken as seen).
+    pub fn has_spring(&self, evaluation: &Evaluation, pair: usize, point: usize) -> bool {
+        if !self.pairs[pair].mortar_nodes.is_empty() {
+            return true;
+        }
+        evaluation
+            .points
+            .get(pair)
+            .and_then(|r| r.get(point))
+            .is_none_or(|r| r.element)
     }
 
     /// Evaluates all springs at the displacements `u` from the states `start` (plastic
@@ -665,18 +1098,55 @@ impl ContactModel {
             } else {
                 pair.mortar_nodes.len()
             };
+            let boxes: Vec<Bounds> = pair.master.iter().map(|f| f.bounds(&current)).collect();
+            // The points one by one in parallel (the search for their master faces is most
+            // of a contact evaluation), then gathered in their order.
+            let evaluated: Vec<(PointResult, Option<ContactElement>)> = (0..count)
+                .into_par_iter()
+                .map(|p| {
+                    let previous = start
+                        .get(pi)
+                        .and_then(|s| s.get(p))
+                        .copied()
+                        .unwrap_or_default();
+                    let damping = self.damping.as_ref();
+                    let scale = self
+                        .stiffness_scale
+                        .get(pi)
+                        .and_then(|s| s.get(p))
+                        .copied()
+                        .unwrap_or(1.0);
+                    let (result, mut element) = if pair.mortar_nodes.is_empty() {
+                        pair.evaluate_point(
+                            p,
+                            &current,
+                            u,
+                            &previous,
+                            predictor,
+                            damping,
+                            scale,
+                            Some(&boxes),
+                        )
+                    } else {
+                        pair.evaluate_mortar_node(
+                            p,
+                            &current,
+                            u,
+                            &previous,
+                            predictor,
+                            damping,
+                            scale,
+                            Some(&boxes),
+                        )
+                    };
+                    if let Some(element) = element.as_mut() {
+                        element.source = (pi as u32, p as u32);
+                    }
+                    (result, element)
+                })
+                .collect();
             let mut results = Vec::with_capacity(count);
-            for p in 0..count {
-                let previous = start
-                    .get(pi)
-                    .and_then(|s| s.get(p))
-                    .copied()
-                    .unwrap_or_default();
-                let (result, element) = if pair.mortar_nodes.is_empty() {
-                    pair.evaluate_point(p, &current, u, &previous, predictor)
-                } else {
-                    pair.evaluate_mortar_node(p, &current, u, &previous, predictor)
-                };
+            for (result, element) in evaluated {
                 if let Some(element) = element {
                     evaluation.elements.push(element);
                     if result.element {
@@ -690,6 +1160,10 @@ impl ContactModel {
         evaluation
     }
 }
+
+/// The overclosure (in typical master edge lengths) over which the linear relation of a
+/// dynamic step starts rounded ([`Law::rounded_pressure`]).
+pub const ROUNDING: f64 = 1e-5;
 
 /// How deep (in typical master edge lengths) one Newton correction may push a contact
 /// point into the master before the correction is shortened (see
@@ -751,7 +1225,7 @@ impl ContactModel {
                 // beside every master face it could be projected on (the master moved, for
                 // a curved master as the slave of a flat surface), and the deep overclosure
                 // would go unseen.
-                let Ok(kin) = pair.kinematics(p, &current, u) else {
+                let Ok(kin) = pair.kinematics(p, &current, u, None) else {
                     continue;
                 };
                 let mut change = 0.0;
@@ -760,12 +1234,17 @@ impl ContactModel {
                         change += c * du[node as usize * 3 + d] * kin.normal[d];
                     }
                 }
-                let (before, after) = (kin.gap, kin.gap + change);
-                if -after <= limit || -before >= limit {
+                let (before, after) = (-kin.gap, -kin.gap - change);
+                // A point may overclose by the limit more than it already is: a soft part
+                // pressed hard is in equilibrium near the limit (p / K is a few percent of
+                // an edge of rubber), and a cap at the limit itself shortened every
+                // correction to nothing.
+                let target = before.max(0.0) + limit;
+                if after <= target || before >= limit {
                     continue;
                 }
                 // The gap changes about linearly with the length of the step.
-                let f = (before + limit) / (before - after);
+                let f = (target - before) / (after - before);
                 cap = cap.min(f);
             }
         }
@@ -840,7 +1319,7 @@ impl ContactModel {
             }
             let results = evaluation.points.get(pi);
             for p in 0..pair.points.len() {
-                let Ok(kin) = pair.kinematics(p, &current, u) else {
+                let Ok(kin) = pair.kinematics(p, &current, u, None) else {
                     continue;
                 };
                 let (closed, pressure) = if pair.law.is_tied() {
@@ -869,6 +1348,9 @@ impl ContactModel {
     }
 }
 
+/// The bounding box of a master face: lowest and highest coordinates.
+type Bounds = ([f64; 3], [f64; 3]);
+
 impl Pair {
     /// The sorted DOFs of the slave nodes of `points` and the nodes of master face `face`.
     fn point_face_dofs(&self, points: &[u32], face: u32) -> Vec<u32> {
@@ -883,6 +1365,11 @@ impl Pair {
         dofs
     }
 
+    /// The candidate master faces of every point from the last [`ContactModel::prepare`].
+    pub fn candidates(&self) -> &[Vec<u32>] {
+        &self.candidates
+    }
+
     /// Natural coordinates of a slave point's current position and the slave face normal
     /// there (face-to-face), or the node's position.
     fn position(&self, p: usize, current: &[[f64; 3]]) -> [f64; 3] {
@@ -894,16 +1381,21 @@ impl Pair {
                 x[d] += w * c[d];
             }
         }
-        x
+        match &point.ring {
+            Some(ring) => geometry::add(x, ring.offset(current)),
+            None => x,
+        }
     }
 
     /// Candidate master faces of every point: those whose box, inflated by two typical
     /// edge lengths plus the cutoff, contains the point.
     fn prepare_candidates(&mut self, current: &[[f64; 3]]) {
-        let reach = self.cutoff.iter().copied().fold(0.0, f64::max);
+        let reach = self.cutoff.iter().copied().fold(0.0, f64::max)
+            + self.points.iter().map(|q| q.offset).fold(0.0, f64::max);
         let margin = 2.0 * self.typical + reach;
         let grid = FaceGrid::new(&self.master, current, self.typical.max(margin), margin);
         self.candidates = (0..self.points.len())
+            .into_par_iter()
             .map(|p| {
                 let x = self.position(p, current);
                 let mut c: Vec<u32> = grid.candidates(x).to_vec();
@@ -920,6 +1412,7 @@ impl Pair {
         &self,
         p: usize,
         current: &[[f64; 3]],
+        boxes: Option<&[Bounds]>,
     ) -> Option<(u32, [f64; 2], geometry::FacePoint, [f64; 3])> {
         let point = &self.points[p];
         let x = self.position(p, current);
@@ -927,31 +1420,73 @@ impl Pair {
         if candidates.is_empty() {
             return None;
         }
-        let slave_nodes: HashSet<u32> = point.nodes.iter().copied().collect();
-        let mut best: Option<(f64, bool, u32, [f64; 2], geometry::FacePoint)> = None;
+        // The bounding boxes of the faces, computed once per evaluation where given.
+        let box_distance = |f: u32| match boxes {
+            Some(b) => geometry::outside(b[f as usize], x),
+            None => self.master[f as usize].box_distance(current, x),
+        };
+        let own = |f: u32| {
+            self.master[f as usize]
+                .nodes
+                .iter()
+                .any(|n| point.nodes.contains(n))
+        };
+        // First the face whose box lies nearest (a face the point projects into is mostly
+        // that one); then only the faces whose box is nearer than the best distance so far
+        // need a projection. The choice does not depend on the order: a face the point
+        // projects into wins, among those the closest, among equally close the first.
+        let mut nearest: Option<(f64, u32)> = None;
         for &f in candidates {
-            let face = &self.master[f as usize];
-            if face.nodes.iter().any(|n| slave_nodes.contains(n)) {
-                continue;
-            }
-            let (natural, fp) = face.project(current, x);
-            let distance = geometry::norm(sub(x, fp.x));
-            let interior = face.is_interior(natural);
-            // Prefer a face the point projects into; among those the closest.
-            let better = match &best {
-                None => true,
-                Some((d, i, ..)) => (interior && !i) || (interior == *i && distance < *d),
-            };
-            if better {
-                best = Some((distance, interior, f, natural, fp));
+            let reach = box_distance(f);
+            if nearest.is_none_or(|(r, g)| reach < r || (reach == r && f < g)) && !own(f) {
+                nearest = Some((reach, f));
             }
         }
-        best.map(|(_, _, f, natural, fp)| (f, natural, fp, x))
+        let (_, first) = nearest?;
+        let mut best: Option<(f64, bool, u32, [f64; 2])> = None;
+        let consider = |f: u32, best: &mut Option<(f64, bool, u32, [f64; 2])>| {
+            let face = &self.master[f as usize];
+            let natural = face.project_natural(current, x);
+            let distance = geometry::norm(sub(x, face.point(current, natural)));
+            let interior = face.is_interior(natural);
+            // Prefer a face the point projects into; among those the closest (the first of
+            // equally close ones in the order of the candidates).
+            let better = match best {
+                None => true,
+                Some((d, i, g, _)) => {
+                    (interior && !*i)
+                        || (interior == *i && (distance < *d || (distance == *d && f < *g)))
+                }
+            };
+            if better {
+                *best = Some((distance, interior, f, natural));
+            }
+        };
+        consider(first, &mut best);
+        for &f in candidates {
+            if f == first {
+                continue;
+            }
+            if let Some((d, true, ..)) = best
+                && box_distance(f) > d
+            {
+                continue;
+            }
+            if own(f) {
+                continue;
+            }
+            consider(f, &mut best);
+        }
+        best.map(|(_, _, f, natural)| {
+            let fp = self.master[f as usize].at(current, natural);
+            (f, natural, fp, x)
+        })
     }
 
     /// One point: its result and, when a spring exists, the element.
     /// One integration point or slave node: its result and, when a spring exists, the
     /// element.
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_point(
         &self,
         p: usize,
@@ -959,9 +1494,12 @@ impl Pair {
         u: &[f64],
         previous: &ContactPointState,
         predictor: bool,
+        damping: Option<&Damping>,
+        stiffness: f64,
+        boxes: Option<&[Bounds]>,
     ) -> (PointResult, Option<ContactElement>) {
-        match self.kinematics(p, current, u) {
-            Ok(kin) => self.respond(&kin, previous, predictor),
+        match self.kinematics(p, current, u, boxes) {
+            Ok(kin) => self.respond(&kin, previous, predictor, damping, stiffness),
             Err((x, gap)) => (self.open_result(x, gap, self.points[p].area), None),
         }
     }
@@ -971,6 +1509,7 @@ impl Pair {
     /// `ḡ_k = Σ a g / Σ a` and the node carries the force `p_k Σ a` (the dual-basis mortar
     /// condition of CalculiX for hard contact; for a penalty relation the nodal pressure is
     /// that of the weighted gap).
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_mortar_node(
         &self,
         k: usize,
@@ -978,6 +1517,9 @@ impl Pair {
         u: &[f64],
         previous: &ContactPointState,
         predictor: bool,
+        damping: Option<&Damping>,
+        stiffness: f64,
+        boxes: Option<&[Bounds]>,
     ) -> (PointResult, Option<ContactElement>) {
         let (node, points) = &self.mortar_nodes[k];
         let x = current[*node as usize];
@@ -994,7 +1536,7 @@ impl Pair {
             let p = p as usize;
             let a = w * self.points[p].area;
             all_area += a;
-            let Ok(kin) = self.kinematics(p, current, u) else {
+            let Ok(kin) = self.kinematics(p, current, u, boxes) else {
                 continue;
             };
             total += a;
@@ -1044,8 +1586,9 @@ impl Pair {
             master_face,
             area: total,
             cutoff,
+            corner: None,
         };
-        self.respond(&kin, previous, predictor)
+        self.respond(&kin, previous, predictor, damping, stiffness)
     }
 
     /// The result of a point without a spring.
@@ -1062,6 +1605,7 @@ impl Pair {
             tangential: [0.0; 2],
             shear: [0.0; 2],
             energy: 0.0,
+            normal_energy: 0.0,
             force: [0.0; 3],
             master_face: None,
             area,
@@ -1077,6 +1621,7 @@ impl Pair {
         p: usize,
         current: &[[f64; 3]],
         u: &[f64],
+        boxes: Option<&[Bounds]>,
     ) -> std::result::Result<Kinematics, ([f64; 3], f64)> {
         let point = &self.points[p];
         let x = self.position(p, current);
@@ -1092,14 +1637,14 @@ impl Pair {
             let (natural, fp) = self.master[f as usize].project(current, x);
             Some((f, natural, fp, x))
         } else {
-            self.closest(p, current)
+            self.closest(p, current, boxes)
         };
-        let Some((f, _natural, fp, x)) = found else {
+        let Some((f, natural, fp, x)) = found else {
             return Err((x, 0.0));
         };
         let face = &self.master[f as usize];
-        let n = fp.normal;
-        let geometric_gap = dot(sub(x, fp.x), n);
+        let mut n = fp.normal;
+        let mut geometric_gap = dot(sub(x, fp.x), n);
         // A face-to-face point beside the master surface (its foot point clamped to an edge
         // or corner of the closest face, the point itself off to the side) touches nothing:
         // the distance along the normal of the clamped foot point is no overclosure. Without
@@ -1107,12 +1652,52 @@ impl Pair {
         // false overclosure of the order of its overhang. Node-to-face points are sorted out
         // at the start of the increment instead (`prepare`).
         if !tied && self.kind != ContactKind::NodeToSurface {
-            let r = sub(x, fp.x);
+            let mut r = sub(x, fp.x);
+            // Edges of plane and axisymmetric elements: only the in-plane offset counts
+            // (their out-of-plane DOF is no displacement).
+            if face.planar.is_some() {
+                r[2] = 0.0;
+            }
             let lateral = geometry::norm(sub(r, scale(n, geometric_gap)));
-            if lateral > BESIDE_TOLERANCE * self.typical {
+            if lateral > BESIDE_TOLERANCE * self.typical && !self.inner_edge(p, f, &fp.n) {
                 return Err((x, 0.0));
             }
         }
+        // A point whose foot point is clamped to an edge or corner the master faces share
+        // projects into none of them: it lies in the wedge between their normals at a kink
+        // (beneath a concave kink when it is pressed in, outside a convex one when open).
+        // There the closest point of the master is the edge or corner itself, and the
+        // direction to it is the normal: it turns continuously from the normal of one face
+        // to that of the other across the wedge. The normal of whichever face won the tie of
+        // equal distances instead jumped by the kink angle at the wedge's border, and a point
+        // pressed into the kink between a fillet and a straight flank flipped between the
+        // two faces in every Newton iteration (the residual alternated between two values
+        // until the increment was cut back to nothing).
+        let mut corner = None;
+        if !tied && !face.is_interior(natural) {
+            let mut r = sub(x, fp.x);
+            if face.planar.is_some() {
+                r[2] = 0.0;
+            }
+            let distance = geometry::norm(r);
+            let along = dot(r, n);
+            if distance > 1e-9 * self.typical
+                && along != 0.0
+                && geometry::norm(sub(r, scale(n, along))) > 1e-6 * distance
+                // A rope beside the master's border touches its edge, if at all, at its
+                // radius from the edge: the distance to the edge counts, not the one along
+                // the normal of the face, which would let the rope rest on the face's plane
+                // far beyond its end.
+                && (self.inner_edge(p, f, &fp.n) || point.offset > 0.0)
+            {
+                let sign = along.signum();
+                n = scale(r, sign / distance);
+                geometric_gap = sign * distance;
+                corner = Some(distance);
+            }
+        }
+        // A rope touches with its surface, the radius off its axis.
+        geometric_gap -= point.offset;
         let initial_gap = self.initial[p].map_or(0.0, |(_, g)| g);
         let gap = match self.clearance {
             Some(c) => geometric_gap - initial_gap + c,
@@ -1144,16 +1729,52 @@ impl Pair {
             master_face: f,
             area: point.area,
             cutoff: self.cutoff[p],
+            corner,
         })
+    }
+
+    /// Whether the edge or corner of master face `f` that a clamped foot point (shape
+    /// function values `n`) lies on is shared with another master face. A point deep in a
+    /// dent of a soft master (a lever pressed 2 mm into rubber) lies beyond the end of both
+    /// faces at a concave kink and projects onto that edge with a sideways offset; it is
+    /// no point beside the master surface, which only exists at the surface's boundary.
+    fn inner_edge(&self, p: usize, f: u32, n: &[f64]) -> bool {
+        let face = &self.master[f as usize];
+        // The shape functions of the nodes off an edge vanish on it.
+        let edge: Vec<u32> = (face.nodes.iter().zip(n))
+            .filter(|(_, v)| v.abs() > 1e-9)
+            .map(|(&node, _)| node)
+            .collect();
+        // A corner shared by the faces around it is no inner corner where it lies on the
+        // boundary of the master surface: a point far beyond the end of a bore projects on
+        // to one of its corners, and the corner's neighbours along the end share it too.
+        if let [corner] = edge[..]
+            && self.master_boundary.contains(&corner)
+        {
+            return false;
+        }
+        !edge.is_empty()
+            && self.candidates.get(p).is_some_and(|candidates| {
+                candidates.iter().any(|&g| {
+                    g != f && {
+                        let other = &self.master[g as usize];
+                        edge.iter().all(|node| other.nodes.contains(node))
+                    }
+                })
+            })
     }
 
     /// The spring of a point (or mortar node) from its kinematics: the pressure relation,
     /// friction with return mapping, the element.
+    /// The spring of a point from its kinematics; a factor multiplies the stiffness of the
+    /// relation (`stiffness`: pressure and its slope, the stick stiffness and the energies).
     fn respond(
         &self,
         kin: &Kinematics,
         previous: &ContactPointState,
         predictor: bool,
+        damping: Option<&Damping>,
+        stiffness: f64,
     ) -> (PointResult, Option<ContactElement>) {
         let tied = self.law.is_tied();
         let n = kin.normal;
@@ -1176,12 +1797,22 @@ impl Pair {
         // the relation at zero overclosure, without a force: the first iteration of a step
         // that starts touching then sees the contact instead of a floating body.
         let open_face = !tied && !node_to_face && overclosure <= 0.0;
-        if !exists || (open_face && !predictor) {
+        // Likewise an open node-to-face spring that carries no tension (dynamic steps).
+        let open_node = !tied && node_to_face && self.compression_only && overclosure <= 0.0;
+        // In a dynamic step a linear relation starts rounded (see `Law::rounded_pressure`).
+        let smoothing = (damping.is_some() && !open_face && !open_node && !tied)
+            .then_some(ROUNDING * self.typical)
+            .filter(|_| matches!(self.law, Law::Linear { .. }));
+        if !exists || ((open_face || open_node) && !predictor) {
             return (self.open_result(x, gap, kin.area), None);
         }
         let (pressure, dp) = if tied {
             // Tied: the stiffness acts on the change of the geometric gap.
             self.law.node_pressure(-(geometric_gap - initial_gap))
+        } else if open_node {
+            (0.0, self.law.node_pressure(0.0).1)
+        } else if let Some(delta) = smoothing {
+            self.law.rounded_pressure(overclosure, delta)
         } else if node_to_face {
             self.law.node_pressure(overclosure)
         } else if open_face {
@@ -1192,6 +1823,7 @@ impl Pair {
         } else {
             self.law.face_pressure(overclosure)
         };
+        let (pressure, dp) = (stiffness * pressure, stiffness * dp);
 
         // Tangential basis and relative displacement.
         let t1 = normalized(sub(kin.tangent, scale(n, dot(kin.tangent, n))));
@@ -1216,7 +1848,7 @@ impl Pair {
             // Node-to-face springs keep their friction in tension as well (observed: ccx
             // reports shear at nodes with a negative CPRESS), bounded by μ |p|.
             Some(friction) if tied || pressure > 0.0 || (node_to_face && pressure < 0.0) => {
-                let lambda = friction.stick;
+                let lambda = stiffness * friction.stick;
                 let trial = [
                     lambda * (tangential[0] - slip[0]),
                     lambda * (tangential[1] - slip[1]),
@@ -1249,12 +1881,17 @@ impl Pair {
                     coupling = [dlimit * dir[0], dlimit * dir[1]];
                 }
             }
-            Some(friction) if open_face || (predictor && !tied) => {
+            Some(friction) if (open_face || (predictor && !tied)) && damping.is_none() => {
                 // Within the cutoff but not touching: the stick stiffness as a predictor,
-                // without a force, like the normal stiffness above.
+                // without a force, like the normal stiffness above. Not in a dynamic step,
+                // where the mass holds a sliding body: the stick stiffness would stop it in
+                // the first iteration and leave the following ones far from the slip.
                 slip = tangential;
                 status = ContactStatus::Open;
-                tangent = [[friction.stick, 0.0], [0.0, friction.stick]];
+                tangent = [
+                    [stiffness * friction.stick, 0.0],
+                    [0.0, stiffness * friction.stick],
+                ];
             }
             _ => {
                 // No friction or no pressure: slides freely, the slip follows the motion.
@@ -1281,6 +1918,29 @@ impl Pair {
         if node_to_face && !tied && pressure <= 0.0 && self.friction.is_some() {
             status = ContactStatus::Open;
         }
+        // Damping of a pressed spring: the normal pressure becomes `p + q`.
+        let spring_pressure = pressure;
+        let (pressure, dp, damping_pressure) = match damping {
+            Some(damping)
+                if !tied
+                    && pressure > 0.0
+                    && !open_face
+                    && previous.status != ContactStatus::Open =>
+            {
+                let mut rate = 0.0;
+                for (&node, &c) in kin.nodes.iter().zip(&kin.coefficients) {
+                    for (d, nd) in n.iter().enumerate() {
+                        rate -= c * damping.velocities[node as usize * 3 + d] * nd;
+                    }
+                }
+                let c = damping.coefficient * dp;
+                let q = (c * rate).max(-pressure);
+                // Lifting off the damping cancels the pressure; the tangent stays that of
+                // the damped spring, the same on both sides of the limit.
+                (pressure + q, dp + c * damping.rate, q)
+            }
+            _ => (pressure, dp, 0.0),
+        };
 
         let mut dofs: Vec<u32> = Vec::with_capacity(3 * kin.nodes.len());
         for &node in &kin.nodes {
@@ -1312,6 +1972,23 @@ impl Pair {
                     for l in 0..2 {
                         *v += tangent[k][l] * ts[k][i] * ts[l][j];
                     }
+                }
+            }
+        }
+        // The normal towards a shared edge or corner turns with the point: the force
+        // p n = p r / |r| (pressed in) changes across n by p / |r|, as much as the normal
+        // stiffness for a linear relation. Without it Newton's corrections across the normal
+        // overshoot and swing back and forth. Only where it stiffens: a point that is open
+        // but pulled by the relation (exponential, within its reach) would make the tangent
+        // indefinite, which the iterative solver cannot take.
+        if let Some(distance) = kin.corner {
+            let sign = if kin.geometric_gap < 0.0 { 1.0 } else { -1.0 };
+            let a = (sign * pressure / distance).max(0.0);
+            let dims = if planar { 2 } else { 3 };
+            for i in 0..dims {
+                for j in 0..dims {
+                    let identity = if i == j { 1.0 } else { 0.0 };
+                    kernel[i][j] += a * (identity - n[i] * n[j]);
                 }
             }
         }
@@ -1350,15 +2027,19 @@ impl Pair {
         } else {
             Vec::new()
         };
-        let energy = area
-            * (if node_to_face && !tied {
-                node_energy(&self.law, overclosure)
-            } else if tied {
-                let d = -(geometric_gap - initial_gap);
-                0.5 * pressure * d
-            } else {
-                self.law.face_energy(overclosure)
-            } + tangential_energy);
+        // The spring pressure already carries the scale; the energies of the relation not.
+        let normal_energy = if let Some(delta) = smoothing {
+            stiffness * self.law.rounded_energy(overclosure, delta)
+        } else if node_to_face && !tied {
+            stiffness * node_energy(&self.law, overclosure)
+        } else if tied {
+            let d = -(geometric_gap - initial_gap);
+            0.5 * spring_pressure * d
+        } else {
+            stiffness * self.law.face_energy(overclosure)
+        };
+        let energy = area * (normal_energy + tangential_energy);
+        let normal_energy = area * normal_energy;
         let force = [
             -area * traction[0],
             -area * traction[1],
@@ -1376,6 +2057,7 @@ impl Pair {
             tangential: reported_tangential,
             shear,
             energy,
+            normal_energy,
             force,
             master_face: Some(f),
             area,
@@ -1387,8 +2069,32 @@ impl Pair {
             Some(ContactElement {
                 dofs,
                 ke,
+                damping: if damping_pressure != 0.0 {
+                    // The normal part of the traction from the damping.
+                    let mut f = vec![0.0; 3 * m];
+                    for (a, &c) in coefficients.iter().enumerate() {
+                        for d in 0..3 {
+                            f[a * 3 + d] = -c * area * damping_pressure * n[d];
+                        }
+                    }
+                    f
+                } else {
+                    Vec::new()
+                },
+                normal: if tied {
+                    Vec::new()
+                } else {
+                    let mut f = vec![0.0; 3 * m];
+                    for (a, &c) in coefficients.iter().enumerate() {
+                        for d in 0..3 {
+                            f[a * 3 + d] = -c * area * spring_pressure * n[d];
+                        }
+                    }
+                    f
+                },
                 fe,
                 unsymmetric,
+                source: (0, 0),
             }),
         )
     }
@@ -1413,4 +2119,29 @@ fn node_energy(law: &Law, d: f64) -> f64 {
         sum += factor * law.node_pressure(h * i as f64).0;
     }
     sum * h / 3.0
+}
+
+/// The corner nodes on the boundary of a surface of faces: the corners of the edges that
+/// only one face has (for edges of plane elements, their ends that only one edge has).
+fn boundary_corners(faces: &[ContactFace]) -> HashSet<u32> {
+    let mut edges: HashMap<[u32; 2], u32> = HashMap::new();
+    let mut ends: HashMap<u32, u32> = HashMap::new();
+    for face in faces {
+        let corners = &face.nodes[..face.corners.min(face.nodes.len())];
+        if corners.len() == 2 {
+            for &n in corners {
+                *ends.entry(n).or_default() += 1;
+            }
+            continue;
+        }
+        for k in 0..corners.len() {
+            let (a, b) = (corners[k], corners[(k + 1) % corners.len()]);
+            *edges.entry([a.min(b), a.max(b)]).or_default() += 1;
+        }
+    }
+    (edges.into_iter())
+        .filter(|&(_, count)| count == 1)
+        .flat_map(|(edge, _)| edge)
+        .chain(ends.into_iter().filter(|&(_, c)| c == 1).map(|(n, _)| n))
+        .collect()
 }

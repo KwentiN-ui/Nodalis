@@ -31,9 +31,11 @@ pub(super) fn frame_rect(
     frame: &file::Frame,
     graph: &Snarl<u64>,
     sizes: &HashMap<u64, egui::Vec2>,
+    shown: &BTreeSet<u64>,
 ) -> Option<egui::Rect> {
+    // Only the blocks of the group shown: a frame lies in one group.
     let blocks = (graph.nodes_pos_ids())
-        .filter(|(_, _, id)| frame.nodes.contains(id))
+        .filter(|(_, _, id)| frame.nodes.contains(id) && shown.contains(id))
         .fold(egui::Rect::NOTHING, |all, (_, pos, id)| {
             let size = sizes.get(id).copied().unwrap_or(UNDRAWN);
             all.union(egui::Rect::from_min_size(pos, size))
@@ -76,7 +78,7 @@ impl Viewer {
         ui.set_clip_rect(painter.clip_rect());
         let text_color = ui.visuals().text_color();
         for index in 0..self.frames.len() {
-            let Some(rect) = frame_rect(&self.frames[index], snarl, &self.sizes) else {
+            let Some(rect) = frame_rect(&self.frames[index], snarl, &self.sizes, &self.here) else {
                 continue;
             };
             let frame = &self.frames[index];
@@ -284,7 +286,7 @@ impl ProjectApp {
                 continue;
             };
             let frame = (self.frames.iter()).position(|frame| {
-                frame_rect(frame, &self.graph, &self.block_sizes)
+                frame_rect(frame, &self.graph, &self.block_sizes, &self.shown)
                     .is_some_and(|rect| rect.contains(center))
             });
             if let Some(frame) = frame {
@@ -320,12 +322,14 @@ impl ProjectApp {
             return;
         }
         let graph = to_graph * pointer;
-        let hovered = (self.graph.nodes_pos_ids()).find_map(|(_, pos, id)| {
-            let size = self.block_sizes.get(id).copied().unwrap_or(UNDRAWN);
-            egui::Rect::from_min_size(pos, size)
-                .contains(graph)
-                .then_some(*id)
-        });
+        let hovered = (self.graph.nodes_pos_ids())
+            .filter(|(_, _, id)| self.shown.contains(id))
+            .find_map(|(_, pos, id)| {
+                let size = self.block_sizes.get(id).copied().unwrap_or(UNDRAWN);
+                egui::Rect::from_min_size(pos, size)
+                    .contains(graph)
+                    .then_some(*id)
+            });
         let targets = match hovered {
             Some(_) if !self.selected.is_empty() => self.selected.clone(),
             Some(id) => vec![id],
@@ -344,6 +348,38 @@ impl ProjectApp {
             self.act(&ctx, Action::DeleteAll(targets));
         } else if key(none, egui::Key::H) {
             self.act(&ctx, Action::Compact(targets));
+        } else if key(
+            egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+            egui::Key::G,
+        ) {
+            let groups: Vec<u64> = (targets.iter().copied())
+                .filter(|id| {
+                    self.nodes
+                        .iter()
+                        .any(|n| n.id == *id && n.kind() == Kind::Group)
+                })
+                .collect();
+            self.act(&ctx, Action::Ungroup(groups));
+        } else if key(egui::Modifiers::COMMAND, egui::Key::G) {
+            self.act(&ctx, Action::Group(targets));
+        } else if key(egui::Modifiers::COMMAND, egui::Key::Tab) {
+            self.act(&ctx, Action::LeaveGroup);
+        } else if key(none, egui::Key::Tab) {
+            // Tab opens the group under the pointer or selected, else goes out, as in
+            // Blender.
+            let group = match targets[..] {
+                [id] => Some(id),
+                _ => hovered,
+            }
+            .filter(|id| {
+                self.nodes
+                    .iter()
+                    .any(|n| n.id == *id && n.kind() == Kind::Group)
+            });
+            match group {
+                Some(id) => self.act(&ctx, Action::EnterGroup(id)),
+                None => self.act(&ctx, Action::LeaveGroup),
+            }
         } else if key(egui::Modifiers::COMMAND, egui::Key::J) {
             self.act(&ctx, Action::Frame(targets));
         } else if key(egui::Modifiers::ALT, egui::Key::P) {

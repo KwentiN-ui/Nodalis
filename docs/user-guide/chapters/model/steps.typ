@@ -10,7 +10,8 @@ step cannot be changed after it was created.
 #note[Every step writes `OP=NEW` for its boundary conditions and loads. What applies in a step is
 exactly what is listed under it in the tree.]
 
-#screenshot("step.png", [Static step])
+#screenshot("step.png", [A new static step with its defaults; the note below appears in a model
+  with hyperelastic materials])
 
 In a model with contact regions the dialog also lists #ui("Contacts in this step"): regions
 switched off or on and friction coefficients changed from this step on, see
@@ -22,7 +23,7 @@ Every step shows a pictogram of its type in front of its name, so that you can t
 apart whatever you named them. Hover over the pictogram or the name to read the type.
 
 #screenshot("step-types.png", [Static, frequency, complex frequency, buckle, heat transfer,
-  coupled, dynamic, modal dynamics, steady state dynamics and sensitivity steps])
+  coupled, dynamic, modal superposition, steady state dynamics and sensitivity steps])
 
 #screenshot("step-type-tooltip.png", [Tooltip of a step])
 
@@ -38,9 +39,92 @@ fields and outputs, and stays selected. #ui("Move Up") is disabled on the first 
 
 #screenshot("step-move-menu.png", [Context menu of a step])
 
-Steps that build on the previous one, such as a step with #ui("Perturbation"), take the state of
-whatever step now precedes them, so check the order after moving. The step numbers of existing
-results refer to the order at the time of the run.
+Steps that build on the previous one, such as a frequency step with the base state
+#ui("End of ..."), take the state of whatever step now precedes them, so check the order after
+moving: the #ui("Start") section of each step names the step it builds on. The step numbers of
+existing results refer to the order at the time of the run.
+
+=== What a step takes from the steps before <step-handover>
+
+The steps of an analysis form a chain. Two kinds of steps make it up:
+
+- Static, visco, dynamic and heat transfer steps *continue* the chain: each starts from the state
+  at the end of the active step before it (displacements, stresses, plastic and creep strains,
+  contact status, velocities, temperatures) and passes its own end state on. The first step
+  starts from the unloaded model with the initial conditions (@initial-conditions).
+- Frequency, buckle, complex frequency, steady state dynamics and sensitivity steps *probe* the
+  model: they are computed about a base state and leave the state as they found it. The step
+  after them starts where the step before them ended.
+
+Every step dialog begins with the section #ui("Start"), which says this for the step with the
+names of the steps involved. The model tree repeats its first line as the first, italic row
+under each step; double-click it to open the step.
+
+#screenshot("step-start.png", [The Start section of a frequency step about the state at the end
+  of the static step before it])
+
+#screenshot("step-start-static.png", [A static step after it continues the static step before the
+  frequency step; the load it no longer has ramps down to zero])
+
+#screenshot("step-start-tree.png", [The first row under each step in the model tree])
+
+The project window shows the same chain as a trace at the left of the step rows of the analysis
+block (@project-window), and the results timeline marks the steps that leave the state as they
+found it (@results-timeline).
+
+#fields(
+  [Base state], [Frequency, buckle, complex frequency and steady state dynamics steps, and the
+    eigenmodes of a Dynamic step with modal superposition: what they are computed about. #ui("Unloaded model") (default) uses the
+    linear stiffness of the model without stresses. #ui("End of <step>") uses the state the
+    named step leaves, with the stiffening by its stresses and its contact status
+    (`*STEP, PERTURBATION`): a tensioned string, a bolted joint or a spinning rotor. Only the
+    last continuing step before can be the base; to build on an earlier one, move the step.],
+  [Starts from], [The state the step starts from: #ui("Unloaded model"), #ui("End of <step>")
+    with the method of a dynamic step, and initial conditions where they act (temperatures in
+    the first step, velocities in the first dynamic step). The line below lists what carries
+    over. A deactivated step in between is named and left out.],
+  [Uses], [What the step reads or computes for itself: the eigenmodes of a complex frequency or
+    steady state dynamics step (or those an Eigenmodes link gives), the solution of the step
+    before a sensitivity step.],
+  [Loads], [In a static or visco step after one: every load moves linearly from its value at
+    the end of that step to the value of this step. A load the step no longer has ramps down to
+    zero; they are listed.],
+  [Temperatures], [Temperatures a step before was given and this one is not go back to the
+    initial temperatures over the step (@defined-fields-steps).],
+  [Model-wide], [What holds in every step: constraints, contact, bolts, and the coupling of a
+    rigid remote force of another step, which keeps its face rigid here too.],
+  [Passes on], [What the next active step gets: the end state, or nothing for a probing step.],
+)
+
+==== Step overview <step-overview>
+
+#menu("Steps", "Step Overview") (also in the context menu of #ui("Steps") in the tree) shows
+every boundary condition, load, defined field and history output, and every model-wide item,
+against the steps. The second row says where each step starts. Each cell compares the item with the step
+the step starts from, for a probing step its base:
+
+#fields(
+  [Created], [The step has the item and the step it starts from does not.],
+  [Same, Changed], [Both have it, with the same or with other values, region or amplitude.],
+  [Off], [The step has the item, deactivated.],
+  [Removed], [The step it starts from has the item and this one does not.],
+  [Ramps to 0], [A load a static or visco step no longer has: it moves down to zero over the
+    step.],
+  [Model-wide], [Constraints, ties, contact and bolts act in every step. A contact switched off
+    from a step on reads #ui("Off from here"), a bolt names its action in the step.],
+)
+
+An empty cell is an item the step does not have and did not have before, or one a step of that
+type cannot take (loads in a frequency step). Click a cell to open the item in that step, or a
+step name to open the step. The context menu of a cell copies the item to all following steps
+that can take it, in place of the one there (#ui("Copy to Following Steps")), or removes it
+from them (#ui("Remove from Following Steps")). The context menu of a boundary condition, load,
+defined field or history output in the tree offers the same two entries. Undo takes either
+back.
+
+#screenshot("step-overview.png", [Step overview: the pressure of Preload ramps down to zero in
+  Unload, the frequency step Modes takes no loads, and the contact region Flange is switched
+  off from Unload on])
 
 === Equation solver <equation-solver>
 
@@ -52,14 +136,18 @@ solved:
   [Automatic], [(default) The solver chooses. A static or heat transfer step with
     50 000 equations and more whose unknowns are translations (or temperatures) only, i.e.
     a solid model, solves iteratively: the multigrid converges in a few dozen iterations
-    there and beats the factorization by far. Models with rotations (shells, beams), the
+    there and beats the factorization by far. Models with shells, membranes, beams or
+    trusses (the solver expands them into solids, but the multigrid does not fit the bending
+    of such thin elements and hardly converges on them), the
     eigenvalue iteration of frequency and buckle steps and implicit dynamic steps (one
     factorization serves many systems) and smaller models solve directly while the factor
     fits: the solver first estimates its memory, and if that exceeds 60 % of the memory the
     computer has free, the step solves iteratively. If the chosen solver fails, the other
     one takes over once: a factorization that does not fit into the memory continues
-    iteratively, an iteration that does not converge within 2000 iterations continues
-    directly. Leave it here unless you have a reason not to.],
+    iteratively, an iteration that does not converge within 2000 iterations, or that stalls
+    on the way (after 200 iterations, and every 100 after that, the residual has to be at
+    most half of what it was 200 iterations before), continues directly. Leave it here
+    unless you have a reason not to.],
   [Direct], [A sparse direct factorization (LDLᵀ). It solves every system, including
     tangents near buckling and parts held only by contact, but needs memory for the factor,
     which grows quickly with the model: about 2.4 GB for a solid block of 170 000 equations.],
@@ -73,8 +161,10 @@ solved:
     visco, implicit and explicit dynamic and heat transfer steps, and the eigenvalue
     iteration of frequency and buckle steps (see below). It only solves positive
     definite systems: the model must be held against every rigid body motion, and a tangent
-    that loses its stiffness (close to buckling) stops it. Then the analysis stops with a
-    message that names the direct solver.],
+    that loses its stiffness (close to buckling) stops it. A tangent that turns indefinite
+    only during the iterations of an increment (a part lifting off and floating on weak
+    springs) cuts the increment back; one that is indefinite from the start of an increment
+    stops the analysis with a message that names the direct solver.],
 )
 
 #screenshot("equation-solver.png", [Equation solver of a static step])
@@ -86,8 +176,8 @@ frequency step needs no #ui("Lower frequency") bound for it; with one it solves 
 Without a factorization there is no Sturm sequence check that no eigenvalue was missed;
 instead the iteration restarts with a fresh start vector until no new eigenvalue turns up
 among the wanted ones, which also finds the second copies of double eigenvalues (symmetric
-parts). Complex frequency, modal dynamics and steady state dynamics steps work on the modes of
-a frequency step, so the choice there applies to them as well; sensitivity steps always solve
+parts). Complex frequency and steady state dynamics steps and Dynamic steps by modal
+superposition work on the modes of a frequency step, so the choice there applies to them as well; sensitivity steps always solve
 directly and do not offer it. The monitor reports
 the automatic choice, e.g. "automatic equation solver: 173394 equations of translations
 only; solving iteratively" or, with the estimated memory, "the factor of 173394 equations
@@ -99,8 +189,15 @@ The monitor shows how a solve went: for the direct solver the size of the factor
 times of ordering, factorization and solution; for the iterative one the levels of the
 multigrid hierarchy with their sizes, its memory relative to the matrix, the number of
 iterations and the remaining relative residual (below 1e-12). The results of both solvers
-agree to that accuracy. In a nonlinear step the hierarchy is rebuilt for every Newton
-iteration, which costs about as much as a few iterations of the solve.
+agree to that accuracy. In a nonlinear step the hierarchy is kept over the Newton
+iterations while that is cheaper than building it again (the monitor reports the
+rebuilds). A node held by a stiff spring in one direction only (a gap or contact spring)
+is scaled by its whole stiffness block, so that its other directions still converge.
+Bodies that touch only through contact, such as a pin in a bore, are coarsened
+one by one, so that each keeps its own rigid body motion on the coarse levels; and the
+first solve with a hierarchy learns the shapes that converge slowest (the bending of thin
+walls, for example) and adds them to the coarse space of the next one, which cuts the
+iterations of the following solves by a fifth to a third on such models.
 
 On a computer with a discrete graphics card, the iterative solver runs on the card for
 models of 100 000 equations and more. It detects this by itself, and there is nothing to
@@ -124,21 +221,59 @@ any size.
 
 === Static
 
+A static step needs three settings: how long it lasts, how many results it keeps, and whether
+the deformations are large. How the solver divides the step into increments follows from
+them, so a step runs to its end without further settings.
+
+#screenshot("static-step.png", [A static step with large deformations and ten frames; the
+  advanced settings open])
+
 #fields(
-  [Nonlinear geometry (Nlgeom)], [Large deformations (`NLGEOM`).],
-  [Incrementation], [#ui("Default") leaves the incrementation to CalculiX. #ui("Automatic") uses
-    the time and increment values below, #ui("Direct") uses fixed increments.],
-  [Max. increments], [Largest number of increments (`INC`).],
-  [Time period], [Length of the step (default 1).],
-  [Initial / Min. / Max. increment], [Increment sizes for automatic incrementation.],
+  [Duration], [Length of the step (default 1). Without an amplitude the loads ramp up
+    linearly over it. For materials without creep only its ratio to the amplitudes matters,
+    so it is a pseudo time.],
+  [Frames], [Result frames kept over the duration, evenly spaced, the last one at the end
+    (default 1). The solver ends an increment on every frame, so the frames fall on exact
+    times. A linear step is solved once per frame with one factorization of the stiffness.],
+  [Large deformations (Nlgeom)], [The equilibrium is found in the deformed shape (`NLGEOM`):
+    large displacements and rotations, loads that follow the surface, stiffening, snap
+    through. Each increment iterates. Switching it on raises 1 frame to 10, to show the
+    load history.],
 )
+
+Under #ui("Advanced settings") the automatic choices can be overridden; the box opens by
+itself when something there differs from the defaults. A ticked box next to a value sets it,
+an unticked one shows the automatic value greyed out.
+
+#fields(
+  [Increments], [#ui("Automatic") (default): an increment grows by half after two that
+    converged easily and is cut back after one that failed. #ui("Fixed"): every increment has
+    the given #ui("Size"), shortened only to end on the frames; an increment that does not
+    converge fails the step.],
+  [Initial], [Size of the first increment. Automatic: one frame interval, with large
+    deformations at most a tenth of the duration. It never exceeds #ui("Largest").],
+  [Smallest], [The step fails when a cutback would make an increment shorter. Automatic:
+    1e-5 of the duration.],
+  [Largest], [No increment gets longer. Automatic: the duration, as the frames already end
+    increments.],
+  [Increment limit], [Stops the step after this many increments. Off by default: the step
+    takes as many increments as it needs, and #ui("Smallest") still stops one that gets
+    stuck.],
+  [Equation solver], [How the systems of equations are solved (@equation-solver).],
+)
+
+Other programs differ mainly in names: Abaqus and CalculiX ask for the initial, minimum and
+maximum increment and stop after 100 increments unless told otherwise; Ansys Mechanical asks
+for substeps and keeps results at evenly spaced points. Nodalis asks for the frames and
+derives the rest.
 
 === Frequency
 
 Computes eigenfrequencies and mode shapes (`*FREQUENCY`). A frequency step takes no loads.
 
 #fields(
-  [Perturbation], [Uses the stress state of the previous step (prestress).],
+  [Base state], [#ui("Unloaded model") (default), or the state at the end of the step before
+    with its prestress (@step-handover).],
   [Number of eigenfrequencies], [Default 10.],
   [Lower / Upper frequency bound], [Optional range of frequencies to compute.],
   [Store matrices and eigenmodes], [Writes the `.eig` file (`STORAGE=YES`).],
@@ -156,8 +291,8 @@ Computes buckling factors and buckling modes (`*BUCKLE`). The loads of the step 
 load: the critical load is the buckling factor times these loads.
 
 #fields(
-  [Preload from previous step (Perturbation)], [Takes the state of the previous step as
-    preload.],
+  [Base state], [#ui("Unloaded model") (default), or the state at the end of the step before
+    as a preload that the buckling factor does not scale (@step-handover).],
   [Number of buckling factors], [Default 1.],
   [Accuracy], [Convergence tolerance of the eigenvalue solver (default 1e-4).],
   [Equation solver], [How the reference solution and the systems of the eigenvalue
@@ -186,7 +321,8 @@ together with supports and mechanical loads.
   [Nonlinear geometry], [Coupled steps only.],
 )
 
-Incrementation and equation solver are the same as for a static step.
+Duration, frames, the advanced settings and the equation solver are the same as for a static
+step. In a transient step the duration is real time.
 
 === Visco
 
@@ -237,9 +373,10 @@ active step. Hovering over a variable shows what it is.
 
 #fields(
   [Type], [#ui("Node Output") (region of nodes), #ui("Element Output") (parts, element set or
-    selection) or #ui("Contact Output") (a contact pair).],
+    selection), #ui("Contact Output") (a contact pair or a compression only support) or #ui("Energies") (the whole model,
+    Dynamic steps only, see @dynamic-step).],
   [Variables], [Node: `RF U V NT RFL`. Element: `S E ME PEEQ HFL ENER ELSE ELKE EVOL EBHE`.
-    Contact: `CDIS CSTR CELS CNUM CF`.],
+    Contact: `CDIS CSTR CELS CNUM CF`. Energies: `ALLIE ALLKE ALLWK ALLVD`.],
   [Totals], [#ui("Yes") adds the sum over the region, #ui("Only") writes only the sum.],
 )
 
@@ -247,8 +384,29 @@ active step. Hovering over a variable shows what it is.
 
 CalculiX prints a history output at every increment, so a step gives one row per increment:
 a linear static step one row, a nonlinear step (Nlgeom, contact, plasticity) as many rows as it
-takes increments, a frequency or buckle step one row per mode. A history output also stays in
-effect in the following steps until a step defines history outputs of the same type (node, element or contact) of its own.
+takes increments, a frequency or buckle step one row per mode.
+
+==== One output for several steps <history-shared>
+
+A history output belongs to the model, and each step lists the ones it prints. A new step
+prints the history outputs of the last step before it (a Dynamic step prints the
+#ui("Energies") as well), and a step prints exactly the history outputs listed under it,
+nothing carried over from the steps before. The same output in several steps stays one output:
+
+- selecting it in one step highlights it in every step that prints it;
+- #ui("Edit …"), #ui("Activate") and #ui("Deactivate") change it for all of these steps;
+- #ui("Delete") removes it from every step;
+- #ui("Remove from This Step") in its context menu stops only this step from printing it;
+- #ui("Add to Following Steps") lets every following step that can print it print it too,
+  #ui("Remove from Following Steps") takes it out of them. The step overview has the same
+  entries (@step-overview).
+
+Since an output is one item, its name is unique in the model, and the Results workspace shows
+one table for it over all steps that print it. A sensitivity step prints no history outputs,
+and the #ui("Energies") only print in Dynamic steps.
+
+#screenshot("history-output-shared.png", [The history output Reactions printed by three steps,
+  selected in More_Load and highlighted in Load and Modes])
 
 When results are opened, the `.dat` file is read too, and the history outputs appear on the
 Results workspace (@history-outputs).

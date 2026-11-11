@@ -101,6 +101,18 @@ pub struct SearchParameters {
     /// Young's modulus of each part's material, where known, for choosing the master.
     pub stiffness: Vec<Option<f64>>,
     pub filter: GeometryFilter,
+    /// Of each part, whether its shell faces are the skin of a solid with their normals
+    /// pointing out of it (the display of CAD solids, see [`crate::orient_outward`]): only
+    /// their top side can touch, so that faces of two solids lying side by side in one
+    /// plane, e.g. on a plane of symmetry, do not count as touching. Parts left out are
+    /// two-sided.
+    pub one_sided: Vec<bool>,
+    /// Of each part, whether its shell faces are the skin of a solid (the display of CAD
+    /// solids): the borders of its faces are no free edges of shells and are not searched.
+    /// Drawn out across their faces like the edges of shells, they would reach into the
+    /// faces of the neighbours beside a face and join faces that do not touch, e.g. two
+    /// faces of one part meeting at an edge, into the pairs. Parts left out have edges.
+    pub solid_skins: Vec<bool>,
 }
 
 /// A master and a slave side of a contact pair found, each a set of surfaces.
@@ -454,6 +466,10 @@ fn contact_surfaces(
     for face in patch_faces(mesh, skins) {
         if !searched.get(face.surface.0).copied().unwrap_or(false)
             || !parameters.filter.takes(face.surface.1)
+            || face.surface.1 == SurfaceKind::ShellBottom
+                && parameters.one_sided.get(face.surface.0) == Some(&true)
+            || face.surface.1 == SurfaceKind::ShellEdge
+                && parameters.solid_skins.get(face.surface.0) == Some(&true)
         {
             continue;
         }
@@ -1242,6 +1258,7 @@ mod tests {
             })
             .unwrap();
             mesh.parts.push(Part {
+                bodies: Vec::new(),
                 name: format!("PART-{}", b + 1),
                 elements: vec![b as u32 + 1],
             });
@@ -1267,6 +1284,8 @@ mod tests {
             group_by,
             stiffness,
             filter: GeometryFilter::default(),
+            one_sided: Vec::new(),
+            solid_skins: Vec::new(),
         };
         find_contact_pairs(mesh, &skins, &vec![true; mesh.parts.len()], &parameters)
     }
@@ -1290,6 +1309,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "BEAM".into(),
             elements: (1..=4).collect(),
         });
@@ -1315,6 +1335,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "DISC".into(),
             elements: (101..101 + n).collect(),
         });
@@ -1439,6 +1460,7 @@ mod tests {
             }
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: name.into(),
             elements,
         });
@@ -1471,6 +1493,7 @@ mod tests {
             }
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: name.into(),
             elements,
         });
@@ -1523,6 +1546,8 @@ mod tests {
             group_by: GroupBy::Parts,
             stiffness: Vec::new(),
             filter: only_solids,
+            one_sided: Vec::new(),
+            solid_skins: Vec::new(),
         };
         assert!(find_contact_pairs(&mesh, &skins, &[true, true], &parameters).is_empty());
     }

@@ -178,6 +178,9 @@ struct Pipelines {
 pub struct ViewportRenderer {
     globals: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// The same globals with the section view off, for the parts kept out of the section.
+    unclipped_globals: wgpu::Buffer,
+    unclipped_bind_group: wgpu::BindGroup,
     plain: Pipelines,
     /// Draw the scene for the LIC pass, which then puts it into the colour texture.
     with_lic: Pipelines,
@@ -190,6 +193,8 @@ pub struct ViewportRenderer {
     /// Section faces of the parts, drawn while the section view is on.
     sections: Vec<GpuMesh>,
     clip: Option<ClipPlane>,
+    /// Parts, by index, that the section view leaves whole.
+    unclipped: Vec<bool>,
     /// Draw only the section faces of the parts and their outlines, e.g. to read results on
     /// the plane.
     sections_only: bool,
@@ -202,12 +207,16 @@ pub struct ViewportRenderer {
 impl ViewportRenderer {
     pub fn new(device: &wgpu::Device) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("viewport.wgsl"));
-        let globals = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("viewport globals"),
-            size: std::mem::size_of::<Globals>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let globals_buffer = |label| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: std::mem::size_of::<Globals>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let globals = globals_buffer("viewport globals");
+        let unclipped_globals = globals_buffer("viewport globals unclipped");
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("viewport globals"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -221,14 +230,18 @@ impl ViewportRenderer {
                 count: None,
             }],
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("viewport globals"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: globals.as_entire_binding(),
-            }],
-        });
+        let globals_bind_group = |buffer: &wgpu::Buffer| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("viewport globals"),
+                layout: &bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                }],
+            })
+        };
+        let bind_group = globals_bind_group(&globals);
+        let unclipped_bind_group = globals_bind_group(&unclipped_globals);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viewport"),
             bind_group_layouts: &[Some(&bind_group_layout)],
@@ -278,6 +291,8 @@ impl ViewportRenderer {
         Self {
             globals,
             bind_group,
+            unclipped_globals,
+            unclipped_bind_group,
             plain: Pipelines::new(device, &shader, &layout, false),
             with_lic: Pipelines::new(device, &shader, &layout, true),
             lic_pipeline,
@@ -286,6 +301,7 @@ impl ViewportRenderer {
             parts: Vec::new(),
             sections: Vec::new(),
             clip: None,
+            unclipped: Vec::new(),
             sections_only: false,
             targets: Targets::new(device, 1, 1),
             drawn: None,
@@ -317,6 +333,15 @@ impl ViewportRenderer {
     pub fn set_clip_plane(&mut self, clip: Option<ClipPlane>) {
         if self.clip != clip {
             self.clip = clip;
+            self.drawn = None;
+        }
+    }
+
+    /// Parts, by index, that the section view leaves whole, e.g. a rope running through
+    /// cut sheaves.
+    pub fn set_unclipped_parts(&mut self, unclipped: &[bool]) {
+        if self.unclipped != unclipped {
+            self.unclipped = unclipped.to_vec();
             self.drawn = None;
         }
     }
@@ -457,6 +482,11 @@ impl ViewportRenderer {
             palette: palette(options.contour),
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        let unclipped = Globals {
+            clip_options: [0.0; 4],
+            ..globals
+        };
+        queue.write_buffer(&self.unclipped_globals, 0, bytemuck::bytes_of(&unclipped));
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewport"),
@@ -520,25 +550,46 @@ impl ViewportRenderer {
             pass.draw(0..3, 0..1);
             // Section faces belong to their part and share its visibility.
             let sections_only = self.sections_only && self.clip.is_some();
-            // Meshes with whether they are drawn whole: with only the sections shown, the
-            // parts keep just their outline for orientation.
+            let unclipped = |index: usize| {
+                self.clip.is_some() && self.unclipped.get(index).copied().unwrap_or(false)
+            };
+            // Meshes with whether they are drawn whole and whether the section cuts them:
+            // with only the sections shown, the parts keep just their outline for
+            // orientation; a part kept out of the section shows whole and has no faces.
             let sections = self
                 .sections
                 .iter()
                 .zip(&self.parts)
+                .enumerate()
                 .filter(|_| self.clip.is_some())
-                .map(|(section, part)| (section, part.visible, true));
+                .filter(move |(index, _)| !unclipped(*index))
+                .map(|(_, (section, part))| (section, part.visible, true, true));
             let visible = || {
-                self.parts
-                    .iter()
-                    .map(|p| (p, p.visible, !sections_only))
+                (self.parts.iter().enumerate())
+                    .map(|(index, p)| {
+                        let clipped = !unclipped(index);
+                        (p, p.visible, !sections_only || !clipped, clipped)
+                    })
                     .chain(sections.clone())
-                    .filter(|(_, visible, _)| *visible)
-                    .map(|(p, _, whole)| (p, whole))
+                    .filter(|(_, visible, _, _)| *visible)
+                    .map(|(p, _, whole, clipped)| (p, whole, clipped))
+            };
+            let mut bound_clipped = true;
+            let mut bind = |pass: &mut wgpu::RenderPass, clipped: bool| {
+                if clipped != bound_clipped {
+                    bound_clipped = clipped;
+                    let group = if clipped {
+                        &self.bind_group
+                    } else {
+                        &self.unclipped_bind_group
+                    };
+                    pass.set_bind_group(0, group, &[]);
+                }
             };
             pass.set_pipeline(&pipelines.surface);
-            for (part, _) in visible().filter(|(_, whole)| *whole) {
+            for (part, _, clipped) in visible().filter(|(_, whole, _)| *whole) {
                 if let (Some(vertices), Some(triangles)) = (&part.vertices, &part.triangles) {
+                    bind(&mut pass, clipped);
                     pass.set_vertex_buffer(0, vertices.buffer.slice(..));
                     if lic_targets.is_some() {
                         let directions = (part.directions.as_ref().map(|d| &d.buffer))
@@ -554,8 +605,9 @@ impl ViewportRenderer {
             }
             if options.mesh_edges {
                 pass.set_pipeline(&pipelines.mesh_edge);
-                for (part, _) in visible().filter(|(_, whole)| *whole) {
+                for (part, _, clipped) in visible().filter(|(_, whole, _)| *whole) {
                     if let (Some(vertices), Some(edges)) = (&part.vertices, &part.mesh_edges) {
+                        bind(&mut pass, clipped);
                         pass.set_vertex_buffer(0, vertices.buffer.slice(..));
                         pass.set_index_buffer(edges.buffer.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..edges.count, 0, 0..1);
@@ -563,31 +615,36 @@ impl ViewportRenderer {
                 }
             }
             pass.set_pipeline(&pipelines.wireframe);
-            for (part, _) in visible().filter(|(_, whole)| *whole) {
+            for (part, _, clipped) in visible().filter(|(_, whole, _)| *whole) {
                 if let Some(lines) = &part.wireframe_edges {
+                    bind(&mut pass, clipped);
                     pass.set_vertex_buffer(0, lines.buffer.slice(..));
                     pass.draw(0..lines.count, 0..1);
                 }
             }
             pass.set_pipeline(&pipelines.edge);
-            for (part, _) in visible() {
+            for (part, _, clipped) in visible() {
                 if let Some(lines) = &part.feature_edges {
+                    bind(&mut pass, clipped);
                     pass.set_vertex_buffer(0, lines.buffer.slice(..));
                     pass.draw(0..lines.count, 0..1);
                 }
             }
             pass.set_pipeline(&pipelines.wide_edge);
             // Arrows are wide lines too, so that their colours read over the surfaces.
-            for (part, _) in visible().filter(|(_, whole)| *whole) {
+            for (part, _, clipped) in visible().filter(|(_, whole, _)| *whole) {
                 if let Some(lines) = &part.glyphs {
+                    bind(&mut pass, clipped);
                     pass.set_vertex_buffer(0, lines.buffer.slice(..));
                     pass.draw(0..6, 0..lines.count / 2);
                 }
             }
-            for lines in visible().filter_map(|(p, whole)| p.wide_edges.as_ref().filter(|_| whole))
-            {
-                pass.set_vertex_buffer(0, lines.buffer.slice(..));
-                pass.draw(0..6, 0..lines.count / 2);
+            for (part, _, clipped) in visible().filter(|(_, whole, _)| *whole) {
+                if let Some(lines) = &part.wide_edges {
+                    bind(&mut pass, clipped);
+                    pass.set_vertex_buffer(0, lines.buffer.slice(..));
+                    pass.draw(0..6, 0..lines.count / 2);
+                }
             }
         }
         if let Some(lic) = lic_targets {

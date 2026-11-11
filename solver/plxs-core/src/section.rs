@@ -95,6 +95,10 @@ pub enum BeamProfile {
         torsion: f64,
         shear_area_1: Option<f64>,
         shear_area_2: Option<f64>,
+        /// `CONTACT RADIUS=` (own parameter): node-to-surface contact keeps the beam's axis
+        /// this far from the master surface, the radius of a rope.
+        #[serde(default)]
+        contact_radius: Option<f64>,
     },
 }
 
@@ -108,6 +112,11 @@ pub struct Spring {
     pub stiffness: SpringStiffness,
     /// `ORIENTATION` is not written by Nodalis; springs act along global axes.
     pub orientation: Option<String>,
+    /// `STABILIZE` (own parameter): the spring also resists the displacement within each
+    /// increment of a nonlinear static step with this factor times its stiffness, a force
+    /// that starts from zero in every increment and so leaves none behind. Zero: none.
+    #[serde(default)]
+    pub stabilize: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -31,6 +31,32 @@ plane $z = "const"$ the components 3, 4 and 5. Any other plane gets a local coor
 its nodes (`*TRANSFORM, TYPE=R`) with the local x axis along the normal, and `*BOUNDARY` holds
 the local components 1, 5 and 6.
 
+=== Beams on the plane <symmetry-beams>
+
+A beam can lie on the symmetry plane itself, such as a rope running in the groove of a pulley
+cut in half along its axis. Select its nodes together with the cut faces, or in a boundary
+condition of its own (a straight beam alone fixes no plane: enter the normal). The plane holds
+the beam's displacement normal to it and its rotations about the two in-plane axes; the
+rotation about the normal stays free, so the beam bends in the plane.
+
+The half model holds only half of such a beam. With #ui("Halve their section") (on by
+default), Nodalis gives every beam element whose nodes all lie in the region half its section
+when it writes the input file: half the area, second moments of area and torsion stiffness,
+and so half the mass. The dialog says how many beam elements that are. Stresses stay those of
+the full beam; section forces and reactions are those of the half model. Loads on the beam are
+not halved: apply half of a point load such as the rope tension yourself, as for any load on
+the cut plane. A rope keeps its full contact radius and touches the halved pulley with the
+half of its circumference that lies in the model.
+
+#screenshot("symmetry-beams.png", [A rope on the symmetry plane of a half pulley: the
+rope's 80 elements get half their section])
+
+#limitation[Beams with a rectangular, circular, pipe or box profile are expanded into solid
+elements by the solver. On a symmetry plane their cross sections are held against turning, so
+they hardly bend, and they cannot be halved; the model check warns (*Expanded beams on a
+symmetry plane*). Give them a general profile with the same values instead. General, I, T, U,
+L, sketched and rope profiles are computed as beams and work on the plane.]
+
 === Warnings <symmetry-warnings>
 
 If the selection makes no sense as a symmetry plane, the dialog says so in red, and the model
@@ -43,6 +69,8 @@ check marks the boundary condition with a warning sign (@model-check):
   Enter the normal, or the input file cannot be written.
 - *Axisymmetric*: in an axisymmetric model only a line of constant y (perpendicular to the axis)
   is a symmetry plane.
+- *Expanded beams*: beams with a rectangular, circular, pipe or box profile on the plane, see
+  @symmetry-beams.
 - *Shared nodes*: CalculiX reads every boundary condition and point load at the nodes of a
   skewed plane in its local system. Zero displacements in all directions, such as a fixed
   support at an edge of the plane, are the same in any system and give no warning.

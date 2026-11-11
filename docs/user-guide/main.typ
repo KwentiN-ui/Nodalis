@@ -33,6 +33,7 @@
 #include "chapters/model/model-properties.typ"
 #include "chapters/model/materials.typ"
 #include "chapters/model/plastic.typ"
+#include "chapters/model/hyperelastic.typ"
 #include "chapters/model/sections.typ"
 #include "chapters/model/shell-section.typ"
 #include "chapters/model/membrane-section.typ"
@@ -51,8 +52,8 @@
 #include "chapters/model/creep.typ"
 #include "chapters/model/bcs-loads.typ"
 #include "chapters/model/symmetry.typ"
-#include "chapters/model/pre-tension.typ"
 #include "chapters/model/moving-load.typ"
+#include "chapters/model/excitation.typ"
 #include "chapters/model/defined-fields.typ"
 
 #include "chapters/analysis/run.typ"

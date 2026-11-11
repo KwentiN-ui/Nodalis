@@ -15,6 +15,8 @@ use crate::{FeModel, Load, LoadKind, ModelItem, Region, Step, Tie};
 /// A bolt cut through its shank: the faces on the two sides of the cut and its preload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Bolt {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
@@ -27,33 +29,45 @@ pub struct Bolt {
     /// Direction of the preload; `None` takes the normal of the cut.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis: Option<[f64; 3]>,
+    /// The faces of the internal thread the bolt is screwed into, on the nut or the part
+    /// with the tapped hole; empty when the user joins the bolt there himself. The faces of
+    /// the bolt that face them are tied to them where they are ([`FeModel::resolve_thread`]).
+    #[serde(default = "no_faces", skip_serializing_if = "Region::is_empty")]
+    pub thread: Region,
     pub color: [u8; 3],
+}
+
+fn no_faces() -> Region {
+    Region::Faces(Vec::new())
 }
 
 impl Bolt {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             side_a: Region::Faces(Vec::new()),
             side_b: Region::Faces(Vec::new()),
             preload: Preload::Force(0.0),
             axis: None,
+            thread: no_faces(),
             color: [230, 140, 0],
         }
     }
 
-    pub fn regions(&self) -> [&Region; 2] {
-        [&self.side_a, &self.side_b]
+    /// The sides of the cut and the thread.
+    pub fn regions(&self) -> [&Region; 3] {
+        [&self.side_a, &self.side_b, &self.thread]
     }
 
-    pub fn regions_mut(&mut self) -> [&mut Region; 2] {
-        [&mut self.side_a, &mut self.side_b]
+    pub fn regions_mut(&mut self) -> [&mut Region; 3] {
+        [&mut self.side_a, &mut self.side_b, &mut self.thread]
     }
 
     /// The nodes of both sides of the cut, of their faces too.
     pub fn nodes(&self, mesh: &FeMesh) -> BTreeSet<NodeId> {
-        self.regions()
+        [&self.side_a, &self.side_b]
             .into_iter()
             .flat_map(|region| side_nodes(region, mesh))
             .collect()
@@ -110,11 +124,18 @@ impl From<Preload> for BoltAction {
     }
 }
 
-/// What a bolt does in one step instead of the automatic action ([`FeModel::bolt_action`]).
+/// What a bolt does in one step instead of the automatic action ([`FeModel::bolt_action`]),
+/// and the amplitude its load or adjustment follows there.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BoltChange {
-    pub bolt: String,
+    pub bolt: crate::Id,
     pub action: BoltAction,
+    /// The step keeps the automatic action; the change only gives the amplitude.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto: bool,
+    /// The amplitude of the load or adjustment; `None` is the step's default ramp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amplitude: Option<crate::Id>,
 }
 
 /// How the two sides of a bolt's cut are joined in the input file.
@@ -133,6 +154,17 @@ pub struct ResolvedBolt {
     pub shank_axis: Option<[f64; 3]>,
     /// Why, in words, for the dialog.
     pub why: String,
+}
+
+/// The bolt's side of the tie to its internal thread ([`FeModel::resolve_thread`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedThread {
+    /// The outer faces of the bolt tied to the thread.
+    pub bolt_faces: Vec<(ElementId, u8)>,
+    /// The distance of the nearest of them to the thread.
+    pub gap: f64,
+    /// The position tolerance of the tie: farther than every node of those faces.
+    pub tolerance: f64,
 }
 
 /// What [`FeModel::lower_bolts`] added, by the bolt each item stands for.
@@ -172,9 +204,16 @@ impl FeModel {
     pub fn bolt_action(&self, bolt: &Bolt, index: usize) -> Option<BoltAction> {
         let auto = self.auto_bolt_action(bolt, index)?;
         let action = (self.steps[index].bolt_changes.iter())
-            .find(|c| c.bolt == bolt.name)
+            .find(|c| c.bolt == bolt.id && !c.auto)
             .map_or(auto, |c| c.action);
         (action != BoltAction::Open).then_some(action)
+    }
+
+    /// The amplitude the bolt's load or adjustment follows in the step `index`.
+    pub fn bolt_amplitude(&self, bolt: &Bolt, index: usize) -> Option<crate::Id> {
+        (self.steps.get(index)?.bolt_changes.iter())
+            .find(|c| c.bolt == bolt.id)?
+            .amplitude
     }
 
     /// What the bolt does in the step `index` without a change: the preload in the first
@@ -207,7 +246,35 @@ impl FeModel {
         if b.is_empty()
             && let Some(shank) = Shank::of(&a, mesh)
         {
-            return shank.cut(&a, mesh);
+            // Across the middle of the free part of the shank: beside the part of it in the
+            // thread, which a cut must not split from the thread.
+            let engaged = match self.thread_faces(bolt, mesh) {
+                Ok(Some(thread)) => (thread.bolt_faces.iter())
+                    .flat_map(|&f| face_nodes(mesh, f))
+                    .filter_map(|n| mesh.node(n))
+                    .map(|p| dot(p, shank.axis))
+                    .fold(None, |range: Option<(f64, f64)>, t| {
+                        Some(range.map_or((t, t), |(lo, hi)| (lo.min(t), hi.max(t))))
+                    }),
+                _ => None,
+            };
+            let middle = match engaged {
+                None => 0.5 * (shank.start + shank.end),
+                Some((lo, hi)) => {
+                    let below = (shank.start, lo.min(shank.end));
+                    let above = (hi.max(shank.start), shank.end);
+                    let (from, to) = if below.1 - below.0 >= above.1 - above.0 {
+                        below
+                    } else {
+                        above
+                    };
+                    if to <= from {
+                        return Err("the thread takes the whole shank: no free part to cut".into());
+                    }
+                    0.5 * (from + to)
+                }
+            };
+            return shank.cut(&a, mesh, middle);
         }
         let nodes = |faces: &[(ElementId, u8)]| -> BTreeSet<NodeId> {
             faces.iter().flat_map(|&f| face_nodes(mesh, f)).collect()
@@ -252,6 +319,145 @@ impl FeModel {
                 }
             ),
         })
+    }
+
+    /// How the bolt is joined to its internal thread: the outer faces of the bolt nearest to
+    /// the thread faces, a band half an element wide beyond the nearest, on the thread's
+    /// side of the cut, tied to them where they are. They are the shank in a tapped hole
+    /// (the bore picked as the thread), or the end face of a bolt simplified to a cylinder
+    /// that stops short of the part it is screwed into. `None` without thread faces.
+    pub fn resolve_thread(
+        &self,
+        bolt: &Bolt,
+        mesh: &FeMesh,
+    ) -> Result<Option<ResolvedThread>, String> {
+        let Some(mut thread) = self.thread_faces(bolt, mesh)? else {
+            return Ok(None);
+        };
+        let Ok(cut) = self.resolve_bolt(bolt, mesh) else {
+            return Ok(Some(thread));
+        };
+        // The plane of the cut: the centre of its faces, square to the preload.
+        let points: Vec<[f64; 3]> = (cut.cut_faces.iter())
+            .filter_map(|&f| face_centre(mesh, f))
+            .collect();
+        let normal = bolt.axis.or(cut.shank_axis).or_else(|| {
+            let mut sum = [0.0; 3];
+            for n in cut.cut_faces.iter().filter_map(|&f| face_normal(mesh, f)) {
+                (0..3).for_each(|k| sum[k] += n[k]);
+            }
+            (dot(sum, sum) > 0.0).then_some(sum)
+        });
+        let (Some(normal), false) = (normal, points.is_empty()) else {
+            return Ok(Some(thread));
+        };
+        let k = points.len() as f64;
+        let origin = [0, 1, 2].map(|d| points.iter().map(|p| p[d]).sum::<f64>() / k);
+        let side = |p: [f64; 3]| dot([0, 1, 2].map(|d| p[d] - origin[d]), normal);
+        // The side of the thread: where most of the bolt faces tied to it lie.
+        let sides: Vec<f64> = (thread.bolt_faces.iter())
+            .map(|&f| face_centre(mesh, f).map_or(0.0, side))
+            .collect();
+        let thread_side = sides.iter().sum::<f64>().signum();
+        let kept: Vec<(ElementId, u8)> = (thread.bolt_faces.iter().zip(&sides))
+            .filter(|(_, s)| s.signum() == thread_side)
+            .map(|(&f, _)| f)
+            .collect();
+        if kept.is_empty() {
+            return Err("the thread lies on the cut".into());
+        }
+        thread.bolt_faces = kept;
+        Ok(Some(thread))
+    }
+
+    /// [`Self::resolve_thread`] without regard to the cut.
+    fn thread_faces(&self, bolt: &Bolt, mesh: &FeMesh) -> Result<Option<ResolvedThread>, String> {
+        let thread = solid_faces(&bolt.thread, mesh);
+        if thread.is_empty() {
+            return if bolt.thread.is_empty() {
+                Ok(None)
+            } else {
+                Err("the thread has no faces of solid elements".into())
+            };
+        }
+        // The elements of the bolt: the bodies (or parts) of its cut, without that of the
+        // thread when both are bodies of one compound part.
+        let body_of = |element: ElementId| -> Option<Vec<ElementId>> {
+            let part = mesh.parts.iter().find(|p| p.elements.contains(&element))?;
+            Some(
+                (part.bodies.iter())
+                    .find(|b| b.elements.contains(&element))
+                    .map_or_else(|| part.elements.clone(), |b| b.elements.clone()),
+            )
+        };
+        let sides: BTreeSet<ElementId> = (solid_faces(&bolt.side_a, mesh).into_iter())
+            .chain(solid_faces(&bolt.side_b, mesh))
+            .map(|(e, _)| e)
+            .collect();
+        let nut: BTreeSet<ElementId> = (thread.iter())
+            .filter_map(|&(e, _)| body_of(e))
+            .flatten()
+            .collect();
+        let mut elements: BTreeSet<ElementId> = BTreeSet::new();
+        for &e in &sides {
+            if !elements.contains(&e)
+                && let Some(body) = body_of(e)
+            {
+                elements.extend(body);
+            }
+        }
+        elements.retain(|e| !nut.contains(e));
+        if elements.is_empty() {
+            return Err("the bolt is the part of the thread: no faces of the bolt left".into());
+        }
+        // The outer faces of the bolt: those no other of its elements shares.
+        let mut faces: BTreeMap<Vec<NodeId>, Option<(ElementId, u8)>> = BTreeMap::new();
+        for element in elements.iter().filter_map(|&e| mesh.element(e)) {
+            if element.shape.family() != plx_mesh::ElementFamily::Solid {
+                continue;
+            }
+            for (i, face) in element.faces().iter().enumerate() {
+                let key = corner_key(element, face.corners);
+                faces
+                    .entry(key)
+                    .and_modify(|f| *f = None)
+                    .or_insert(Some((element.id, (i + 1) as u8)));
+            }
+        }
+        let outer: Vec<(ElementId, u8)> = faces.into_values().flatten().collect();
+        let centres: Vec<[f64; 3]> = (outer.iter())
+            .map(|&f| face_centre(mesh, f).unwrap_or([f64::NAN; 3]))
+            .collect();
+        let distances = crate::contact_check::distances(mesh, &thread, &centres);
+        let Some(nearest) = distances
+            .iter()
+            .copied()
+            .filter(|d| d.is_finite())
+            .reduce(f64::min)
+        else {
+            return Err("no face of the bolt near the thread".into());
+        };
+        let band = nearest + 0.5 * mean_size(&outer, mesh);
+        let bolt_faces: Vec<(ElementId, u8)> = (outer.iter().zip(&distances))
+            .filter(|(_, d)| **d <= band)
+            .map(|(&f, _)| f)
+            .collect();
+        // Far enough for every node of those faces.
+        let nodes: Vec<[f64; 3]> = (bolt_faces.iter())
+            .flat_map(|&f| face_nodes(mesh, f))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|n| mesh.node(n))
+            .collect();
+        let farthest = (crate::contact_check::distances(mesh, &thread, &nodes).into_iter())
+            .filter(|d| d.is_finite())
+            .fold(nearest, f64::max);
+        let size = mean_size(&thread, mesh);
+        Ok(Some(ResolvedThread {
+            bolt_faces,
+            gap: nearest,
+            tolerance: farthest + 0.1 * size.max(farthest),
+        }))
     }
 
     /// The nodes on the cut of a bolt: of both its sides, or of the faces the slice through
@@ -312,8 +518,8 @@ impl FeModel {
         for &r in origin.replaced.keys() {
             let region = &mut lowered.contact_regions[r];
             region.active = false;
-            let name = region.name.clone();
-            lowered.remove_contact_changes(&name);
+            let id = region.id;
+            lowered.remove_contact_changes(id);
         }
         let mut taken: BTreeSet<String> = (self.steps.iter())
             .flat_map(|s| s.loads.iter().map(|l| l.name.clone()))
@@ -332,9 +538,23 @@ impl FeModel {
                 lowered.ties.push(tie);
                 origin.tie_bolts.push(b);
             }
+            if let Ok(Some(thread)) = self.resolve_thread(bolt, mesh) {
+                let mut tie = Tie::new(unique(&format!("{name}_Thread"), &mut taken));
+                tie.master = bolt.thread.clone();
+                tie.slave = Region::Faces(thread.bolt_faces);
+                tie.position_tolerance = Some(thread.tolerance);
+                tie.adjust = false;
+                lowered.ties.push(tie);
+                origin.tie_bolts.push(b);
+            }
+            let load_id = crate::Id::new();
             for s in 0..self.steps.len() {
                 let Some(action) = self.bolt_action(bolt, s) else {
                     continue;
+                };
+                let amplitude = match action {
+                    BoltAction::Load(_) | BoltAction::Adjust(_) => self.bolt_amplitude(bolt, s),
+                    _ => None,
                 };
                 let (value, by_displacement, lock) = match action {
                     BoltAction::Load(f) => (f, false, false),
@@ -343,6 +563,7 @@ impl FeModel {
                     BoltAction::Open => continue,
                 };
                 lowered.steps[s].loads.push(Load {
+                    id: load_id,
                     name: name.clone(),
                     active: true,
                     visible: true,
@@ -353,9 +574,12 @@ impl FeModel {
                         lock,
                         direction: bolt.axis.or(resolved.shank_axis),
                     },
-                    amplitude: None,
+                    amplitude,
                     factor_amplitude: None,
+                    tables: Default::default(),
                     distribution: None,
+                    system: None,
+                    follower: false,
                 });
                 origin.load_bolts[s].push(b);
             }
@@ -364,18 +588,9 @@ impl FeModel {
     }
 
     /// Drops the step changes of a bolt that is deleted.
-    pub fn remove_bolt_changes(&mut self, name: &str) {
+    pub fn remove_bolt_changes(&mut self, bolt: crate::Id) {
         for step in &mut self.steps {
-            step.bolt_changes.retain(|c| c.bolt != name);
-        }
-    }
-
-    /// Follows a renamed bolt: the step changes keep referring to it.
-    pub fn rename_bolt(&mut self, old: &str, new: &str) {
-        for change in self.steps.iter_mut().flat_map(|s| &mut s.bolt_changes) {
-            if change.bolt == old {
-                change.bolt = new.to_string();
-            }
+            step.bolt_changes.retain(|c| c.bolt != bolt);
         }
     }
 }
@@ -576,7 +791,12 @@ impl Shank {
     /// The slice across the middle of the shank: the faces between the elements inside the
     /// shank below the middle and those above it, on the elements below. The slice follows
     /// the element faces, so the mesh needs no new nodes.
-    fn cut(&self, faces: &[(ElementId, u8)], mesh: &FeMesh) -> Result<ResolvedBolt, String> {
+    fn cut(
+        &self,
+        faces: &[(ElementId, u8)],
+        mesh: &FeMesh,
+        middle: f64,
+    ) -> Result<ResolvedBolt, String> {
         let elements: BTreeSet<ElementId> = faces.iter().map(|&(e, _)| e).collect();
         let parts: Vec<&plx_mesh::Part> = (mesh.parts.iter())
             .filter(|p| p.elements.iter().any(|e| elements.contains(e)))
@@ -590,7 +810,6 @@ impl Shank {
                 .collect(),
             None => mesh.elements().iter().collect(),
         };
-        let middle = 0.5 * (self.start + self.end);
         let reach = self.radius + 0.25 * mean_size(faces, mesh);
         let mut below = Vec::new();
         let mut above: BTreeMap<Vec<NodeId>, ()> = BTreeMap::new();

@@ -22,6 +22,11 @@ selected at once. Gmsh with OpenCASCADE reads the files, so Gmsh must be availab
   CalculiX: upper case, letters, digits, `-` and `_`, German umlauts written out (`Stütze`
   becomes `STUETZE`). A name that is already taken gets a number appended (`OBEN-2`). Parts
   without a name in the file are called `SOLID-1`, `SHELL-1` or `LINE-1`.
+- Curves that lie outside any face become line parts. The pieces of a composite curve, a
+  straight piece that runs on into an arc for example, stay one line part: pieces that meet end
+  to end without a kink, and where no third curve ends, belong together, and the line is meshed
+  as a whole with a shared node at the joint. Curves that meet at a corner, as the members of a
+  frame do, stay parts of their own.
 
 #screenshot("geometry.png", [Imported geometry on the Geometry tab])
 
@@ -53,8 +58,9 @@ not belong to a face become line parts (for beams and trusses). Faces that share
 shell part, as a surface split into several faces in the CAD program. Part names are taken from the
 CAD file where it has names, otherwise they are `SOLID-1`, `SHELL-1`, `LINE-1` and so on.
 
-The context menu of a geometry part has #ui("Create Mesh"), #ui("Properties ..."),
-#ui("Hide")/#ui("Show") and #ui("Delete"). Deleting a geometry part keeps a mesh that was already
+The context menu of a geometry part has #ui("Create Mesh"), the entries of the compound parts
+(@compound-parts), #ui("Properties ..."), #ui("Hide")/#ui("Show") and #ui("Delete").
+Deleting a geometry part keeps a mesh that was already
 created from it.
 
 === Split faces
@@ -72,6 +78,44 @@ Its faces are meshed together, so the nodes on their borders are shared and no t
 needed between them, and each face can still be picked on its own.
 
 #screenshot("split-shell.png", [A plate with discs split out of it: one part, one common mesh, one disc picked])
+
+=== Compound parts <compound-parts>
+
+A CAD model is often cut into several solids so that the mesher copes with it, for example a
+block cut into pieces that can each be meshed with hexahedra. A *compound part* joins such pieces
+into one part of the FE model again:
+
+1. Select the parts in the Geometry tree (#key("Ctrl") or #key("Shift") adds to the selection).
+2. Choose #ui("Create Compound Part") in their context menu.
+
+The compound part appears in the Geometry tree like a folder, named `COMPOUND-1` and so on, with
+the parts it joins under it. The context menu of a part offers #ui("Add to Compound") with a
+submenu of the compound parts, and #ui("Remove from Compound") for a part that is in one. The
+context menu of the compound part has #ui("Create Mesh"), a #ui("Name") field with
+#ui("Rename"), and #ui("Dissolve"), which makes its parts parts of their own again.
+
+- Each part of a compound is meshed on its own, with its own mesh setup, as before. In the FE
+  Model workspace the compound is *one* part: sections, loads, boundary conditions and the
+  contact detection see one part.
+- Where the pieces touch, the input file ties them, as a bonded contact region does
+  (@contact-regions): the touching faces are found when the input file is written, with the
+  tolerance of a contact detection on the mesh, and written as `*TIE`. The pieces are tied where
+  they are: a gap between them within the tolerance, such as the play of a pin in its hole, is
+  bridged, not closed, so the nodes stay in place and no element is pulled inside out. These
+  ties do not appear in the tree; problems the model check finds on them are shown on the
+  compound part.
+- Changing a compound joins the existing mesh anew at once, without meshing again. Sections and
+  other items on a part that joins a compound move to the compound; when a compound is dissolved,
+  they apply to each of its parts.
+- Renaming the compound part in the FE Model workspace (#ui("Properties ...")) renames the
+  compound too, so the name stays when it is meshed again.
+- A contact detection never creates contact regions between pieces of the same compound.
+
+#note[The pieces keep their own nodes on the faces they share, as with a bonded contact. Where
+the meshes of the pieces are very different in size, the tie interpolates between them; the
+stresses right at the cut are then less accurate than inside a piece.]
+
+#screenshot("compound-part.png", [A bracket cut into three solids for the mesher, joined into one compound part])
 
 === Geometry for 2D models
 

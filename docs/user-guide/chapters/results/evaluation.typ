@@ -23,6 +23,13 @@ Move a type from #ui("Available") to #ui("Active") and set its properties:
 / Circular pattern: copies the model #ui("Number of items") times by #ui("Angle") about the axis
   through two points.
 
+In a 2D model the window offers only what stays in the model plane: symmetries about the X and Y
+axis (not Z), patterns with X and Y coordinates, and a circular pattern about the Z axis through
+one #ui("Center Point"). A 2D axisymmetric model keeps the circular pattern about its y axis, which
+revolves the section into a 3D body.
+
+#screenshot("transformation-2d.png", [Transformations of a 2D model: no Z axis])
+
 Several transformations are applied one after the other. Vector and tensor results are mirrored
 or rotated with the copies, and legend and labels include them. #ui("Apply") shows the
 transformations, #ui("Close") applies them and closes the window, and #ui("Off") shows the
@@ -111,6 +118,26 @@ order keeps the selected columns but clears a selection of rows.
 #screenshot("history-table-sorted.png", [Rows sorted by the displacement of node 1, and the
   plot of the time over it])
 
+=== Plots across tables <history-plot-tables>
+
+Several tables can be open at once: a double-click on another component opens it in a window of
+its own, and a double-click on one already open brings its window to the front. A plot takes the
+columns selected in all open tables. A plain click on a header starts a new selection, and the
+other tables clear theirs; #key("Ctrl")-click headers in another window to add its columns.
+The column selected first is the x axis and is marked #ui("(X)"); the other windows show how
+many columns are selected elsewhere, and #ui("Plot") in any of them draws them all.
+
+For a spring curve, for example, open `U3` under `DISPLACEMENTS` and `RF3` under `FORCES`,
+click the `U3` column of the node, #key("Ctrl")-click the `RF3` column of the same node in the
+other window and press #key("Ctrl+P"): the force is drawn over the displacement. The rows are
+those of the x axis' table, in its order; a row of another table belongs to the row with the
+same step and increment (or the same step and time). Where a table has no such row, or the row
+lies outside the rows selected in that table, the curve has a gap. Curves of a plot across
+tables name their component as well, e.g. `RF3 59016`.
+
+#screenshot("history-table-across.png", [The total reaction force `RF1` of a snap-fit over the
+  displacement `U1` of one node, from two tables])
+
 === Steps in the plot <history-plot-steps>
 
 A plot over the step, increment or time column shows the steps as bands behind the curves, with
@@ -174,6 +201,9 @@ the other side of the path. #ui("Show in Box") puts it back into its box.
 #screenshot("path-plot-on-path.png", [The same plot drawn onto its path])
 
 #screenshot("path-plot-flipped.png", [The plot dragged across the path: negative height, other side])
+
+On a deformed shape the plot stands on the path as the view draws it: its baseline follows the
+deformed path, point by point, so the plot always starts at the deformed toe or start point.
 
 #ui("Edit ...") in the context menu, or a double-click on the plot, opens #ui("Edit Annotation").
 Changes show at once; #ui("Cancel") restores the plot.

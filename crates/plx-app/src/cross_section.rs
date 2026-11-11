@@ -3,7 +3,7 @@
 //! axes through it.
 
 use egui::{Color32, FontId, Pos2, Rect, Shape, Stroke, Ui, pos2, vec2};
-use plx_model::{BeamProfile, CrossSection, Quantity, Sketch, UnitSystem};
+use plx_model::{BeamProfile, CrossSection, Quantity, RopeBending, Sketch, UnitSystem};
 
 use crate::{expose, numeric, setup, style};
 
@@ -30,38 +30,58 @@ pub fn form(ui: &mut Ui, cross_section: &mut CrossSection, units: UnitSystem) {
             }
         });
     ui.end_row();
+    if matches!(profile, BeamProfile::Rope { .. }) {
+        rope_bending(ui, profile);
+    }
     dimensions(ui, profile, units);
     if profile.needs_reduced_integration() {
         ui.label("");
         ui.weak("Pipe and box need beams on lines with 3 nodes (B32R).");
         ui.end_row();
     }
-    if !profile.is_native() {
+    let sketch = matches!(profile, BeamProfile::Sketch(_));
+    // The note of a general profile shares the cell of the preview below it: a row of its
+    // own kept the height of the row that was there before switching the profile.
+    if !profile.is_native() && sketch {
         ui.label("");
-        ui.scope(|ui| {
-            ui.set_max_width(SKETCH.x);
-            let note = "A general beam (user element U1): lines with 2 nodes, the axis through \
-                        the centroid, linear Static and Frequency steps only.";
-            ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap())
-        })
-        .inner
-        .on_hover_text(
-            "The solver has beam sections of its own for rectangles, circles, pipes and boxes \
-             only. Other profiles are written by their area and second moments of area about \
-             the principal axes, for the user element U1. It takes neither large \
-             deformations (Nlgeom) nor buckling, its torsion stiffness is k G (I11 + I22), \
-             and the results show no stresses on it.",
-        );
+        general_note(ui, profile);
         ui.end_row();
     }
     match profile {
         BeamProfile::Sketch(sketch) => crate::sketch::rows(ui, sketch, units),
         _ => {
             ui.label("");
-            preview(ui, profile, units);
+            ui.vertical(|ui| {
+                if !profile.is_native() {
+                    general_note(ui, profile);
+                }
+                preview(ui, profile, units);
+            });
             ui.end_row();
         }
     }
+}
+
+/// The note that a profile is computed as the general beam U1.
+fn general_note(ui: &mut Ui, profile: &BeamProfile) {
+    ui.scope(|ui| {
+        ui.set_max_width(SKETCH.x);
+        let note = if matches!(profile, BeamProfile::Rope { .. }) {
+            "A general beam (U1); Young's modulus is the rope modulus. Use Nlgeom."
+        } else {
+            "A general beam (user element U1): lines with 2 nodes, the axis through \
+             the centroid, corotational under Nlgeom."
+        };
+        ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap())
+    })
+    .inner
+    .on_hover_text(
+        "The solver has beam sections of its own for rectangles, circles, pipes and boxes \
+         only. Other profiles are written by their area and second moments of area about \
+         the principal axes, for the user element U1, which the solver computes as a \
+         corotational beam under large deformations (Nlgeom). Its torsion stiffness is \
+         k G (I11 + I22), and the results show no stresses on it.",
+    );
 }
 
 /// A profile of the kind of `kind` about as large as `like`, so that switching the kind
@@ -113,7 +133,61 @@ fn scaled_like(kind: &BeamProfile, like: &BeamProfile) -> BeamProfile {
         }
         // The outline of the profile it was, to draw on from there.
         BeamProfile::Sketch(_) => BeamProfile::Sketch(Sketch::of(like)),
+        BeamProfile::Rope { .. } => BeamProfile::Rope {
+            diameter: size,
+            wire: size / 16.0,
+            fill: 0.55,
+            bending: RopeBending::DEFAULT,
+        },
     }
+}
+
+/// How the bending stiffness of a rope is given; switching keeps the stiffness.
+fn rope_bending(ui: &mut Ui, profile: &mut BeamProfile) {
+    let BeamProfile::Rope {
+        bending: current, ..
+    } = *profile
+    else {
+        return;
+    };
+    ui.label("Bending stiffness");
+    egui::ComboBox::from_id_salt("rope bending")
+        .selected_text(current.label())
+        .width(crate::dock::fit_width(ui, 200.0))
+        .show_ui(ui, |ui| {
+            for other in [RopeBending::Share(0.0), RopeBending::Inertia(0.0)] {
+                let selected = std::mem::discriminant(&other) == std::mem::discriminant(&current);
+                if ui.selectable_label(selected, other.label()).clicked() && !selected {
+                    *profile = switch_rope_bending(profile, other);
+                }
+            }
+        })
+        .response
+        .on_hover_text(
+            "Between slip and stick: a share between the rope with sliding wires (0, every \
+             wire bends on its own) and the rope with sticking wires (1, one section). \
+             Measured: EI / E of a bending test under tension, with E the rope modulus of \
+             the material.",
+        );
+    ui.end_row();
+}
+
+/// `profile` with its bending given the other way, at the same stiffness.
+fn switch_rope_bending(profile: &BeamProfile, to: RopeBending) -> BeamProfile {
+    let mut out = profile.clone();
+    let Some([slip, stick, used]) = profile.rope_inertias() else {
+        return out;
+    };
+    if let BeamProfile::Rope { bending, .. } = &mut out {
+        *bending = match to {
+            RopeBending::Share(_) if stick > slip => {
+                RopeBending::Share(((used - slip) / (stick - slip)).clamp(0.0, 1.0))
+            }
+            RopeBending::Share(_) => RopeBending::DEFAULT,
+            RopeBending::Inertia(_) => RopeBending::Inertia(used),
+        };
+    }
+    out
 }
 
 /// The dimension fields of a profile, each one an exposable parameter.
@@ -291,8 +365,34 @@ fn clip_to(rect: Rect, start: Pos2, direction: egui::Vec2) -> Pos2 {
     start + direction * t.max(0.0)
 }
 
-/// Area, centroid and second moments of area of a profile as text, in the model's units.
+/// Area, centroid and second moments of area of a profile as text, in the model's units;
+/// for a rope its metallic area and the second moments of the two limits.
 fn properties(ui: &mut Ui, profile: &BeamProfile, units: UnitSystem) {
+    if let Some([slip, stick, used]) = profile.rope_inertias() {
+        let length = plx_model::STORED.factor_to(Quantity::Length, units);
+        let unit = units.unit(Quantity::Length);
+        let value = |v: f64, power: i32| {
+            let shown = numeric::fit(v * length.powi(power), |t| t.len() <= 9);
+            format!("{shown} {unit}^{power}")
+        };
+        let solid = std::f64::consts::PI * profile.size()[0].powi(4) / 64.0;
+        let lines = [
+            format!(
+                "Metallic A = {}",
+                value(profile.rope_area().unwrap_or(0.0), 2)
+            ),
+            format!("I slip = {}, stick = {}", value(slip, 4), value(stick, 4)),
+            format!(
+                "I = {} ({:.1} % of solid)",
+                value(used, 4),
+                100.0 * used / solid
+            ),
+        ];
+        for line in lines {
+            ui.label(egui::RichText::new(line).small());
+        }
+        return;
+    }
     property_lines(ui, profile.properties(), profile.size(), units);
 }
 
@@ -362,6 +462,14 @@ mod tests {
             assert!(scaled_like(kind, &rect).is_valid(), "{kind:?}");
         }
         let general = scaled_like(&BeamProfile::ALL[8], &rect);
+        // A rope switched between its two ways of giving the bending keeps its stiffness.
+        let rope = scaled_like(&BeamProfile::ALL[10], &rect);
+        let measured = switch_rope_bending(&rope, RopeBending::Inertia(0.0));
+        let back = switch_rope_bending(&measured, RopeBending::Share(0.0));
+        assert_eq!(measured.properties().i11, rope.properties().i11);
+        assert!(
+            (back.properties().i11 - rope.properties().i11).abs() < 1e-9 * rope.properties().i11
+        );
         assert_eq!(general.properties().i11, rect.properties().i11);
     }
 

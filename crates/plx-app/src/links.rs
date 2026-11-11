@@ -89,6 +89,8 @@ pub struct MeshCopy {
     pub mesh_inputs: BTreeMap<String, u64>,
     pub mesh_sets: Vec<plx_model::MeshSet>,
     pub element_types: Vec<plx_model::PartElementType>,
+    /// The operations the mesh has applied, so that the copy meshes alike.
+    pub mesh_operations: Vec<plx_model::MeshOperation>,
 }
 
 impl MeshCopy {
@@ -99,6 +101,7 @@ impl MeshCopy {
             mesh_inputs: data.mesh_inputs.clone(),
             mesh_sets: data.fe.mesh_sets.clone(),
             element_types: data.fe.element_types.clone(),
+            mesh_operations: data.fe.mesh_operations.clone(),
         }
     }
 }
@@ -332,6 +335,7 @@ fn chain_fingerprint(fe: &FeModel, steps: &[Step]) -> u64 {
     hash.add_debug(&fe.properties.kind);
     hash.add_debug(&fe.properties.global_results);
     hash.add_debug(&steps);
+    hash.add_debug(&fe.printed_history_outputs(steps));
     hash.finish()
 }
 
@@ -364,6 +368,7 @@ pub fn apply_chain(
     target.steps = source.steps[..=step].to_vec();
     let inherited = names(&target.steps);
     target.steps.extend(own);
+    target.adopt_history_outputs(source);
     inherited
 }
 
@@ -376,7 +381,9 @@ fn names(steps: &[Step]) -> Vec<String> {
 pub fn split_after(fe: &FeModel, index: usize, new: &mut FeModel) -> FeModel {
     let mut kept = fe.clone();
     kept.steps.truncate(index + 1);
+    kept.drop_unused_history_outputs();
     new.steps = fe.steps[index + 1..].to_vec();
+    new.adopt_history_outputs(fe);
     kept
 }
 
@@ -386,6 +393,7 @@ pub fn merge_into(source: &mut FeModel, target: &FeModel, link: &Link) -> Vec<St
     let own = own_steps(target, link);
     let moved = names(&own);
     source.steps.extend(own);
+    source.adopt_history_outputs(target);
     moved
 }
 
@@ -413,7 +421,7 @@ pub enum ResultsUse {
     /// The temperatures as a defined field of a step:
     /// `["Setup", "Steps", step, "Temperatures"]`.
     Temperature,
-    /// The eigenmodes of a frequency step, for modal dynamics and steady state dynamics:
+    /// The eigenmodes of a frequency step, for steady state dynamics:
     /// `["Setup", "Steps", step, "Eigenmodes"]`.
     Modes,
     /// The temperatures the model starts at: `["Setup", "Initial Conditions", "Temperature"]`.
@@ -752,6 +760,7 @@ pub fn fingerprint(data: Data, path: &[String]) -> u64 {
             hash.add_debug(data.mesh_inputs);
             hash.add_debug(&data.fe.mesh_sets);
             hash.add_debug(&data.fe.element_types);
+            hash.add_debug(&data.fe.mesh_operations);
         }
         [cell, rest @ ..] if cell == SETUP => setup_fingerprint(&mut hash, data.fe, rest),
         _ => {}
@@ -821,6 +830,7 @@ fn category_fingerprint(hash: &mut Fnv, fe: &FeModel, category: &str, name: Opti
                 }
             }
             hash.add_debug(&steps);
+            hash.add_debug(&fe.printed_history_outputs(&steps));
         }
         _ => {}
     }
@@ -897,6 +907,9 @@ fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: M
     // The global steps of the target's submodel boundary conditions stay as a results link
     // set them.
     let global_steps = submodel_steps(target);
+    // Items refer to each other by id: an item copied over the target's own of the same
+    // name takes over the references to it.
+    let before = target.item_ids();
     match category {
         "Features" => {
             copy(
@@ -969,12 +982,14 @@ fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: M
         ),
         "Steps" => {
             copy(&mut target.steps, &source.steps, |s| &s.name, name);
+            target.adopt_history_outputs(source);
             for (step, global) in global_steps {
                 set_global_step(target, &step, global);
             }
         }
         _ => {}
     }
+    target.follow_replaced(&before);
 }
 
 /// The global step each step's submodel boundary conditions read, by step name.
@@ -1339,7 +1354,7 @@ pub fn path_of(fe: &FeModel, item: &TreeItem) -> Option<Vec<String>> {
         | TreeItem::NodeSet(_)
         | TreeItem::ElementSet(_)
         | TreeItem::Surface(_) => Some(vec![MESH.to_owned()]),
-        TreeItem::MeshItem(_) => Some(vec![MESH.to_owned()]),
+        TreeItem::MeshItem(_) | TreeItem::MeshOperation(_) => Some(vec![MESH.to_owned()]),
         TreeItem::Material(i) => entry("Materials", &fe.materials.get(*i)?.name),
         TreeItem::CrossSection(i) => entry(CROSS_SECTIONS, &fe.cross_sections.get(*i)?.name),
         TreeItem::Section(i) => entry("Sections", &fe.sections.get(*i)?.name),
@@ -1409,6 +1424,7 @@ mod tests {
     #[test]
     fn a_geometry_link_takes_the_shapes_and_leaves_the_mesh_setup_to_the_target() {
         let shapes = |brep: &str| Geometry {
+            compounds: Vec::new(),
             source: "part.step".into(),
             brep: brep.into(),
             meshing: Default::default(),
@@ -1468,6 +1484,7 @@ mod tests {
             size: 1.0,
         };
         let shapes = |brep: &str, signatures| Geometry {
+            compounds: Vec::new(),
             source: "part.step".into(),
             brep: brep.into(),
             meshing: Default::default(),
@@ -1653,6 +1670,7 @@ mod tests {
     fn steps_keep_the_global_step_a_results_link_set() {
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Submodel-1".into(),
             active: true,
@@ -1809,7 +1827,7 @@ mod tests {
         let heat = Step::new_heat_transfer("Heat");
         let mut target = FeModel::default();
         target.steps.push(Step::new_static("Load"));
-        target.steps.push(Step::new_modal_dynamics("Shake"));
+        target.steps.push(Step::new_steady_state_dynamics("Shake"));
         let slot = |parts: &[&str]| results_slot(&heat, &target, &path(parts));
         // Dropped on a step, they go to the input of it that fits.
         assert_eq!(
@@ -1867,6 +1885,7 @@ mod tests {
             path(&["Setup", "Steps", "Load", "Global results"])
         );
         target.steps[1].boundary_conditions.push(BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Cut".into(),
             active: true,

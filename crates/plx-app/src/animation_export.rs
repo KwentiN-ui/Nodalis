@@ -118,6 +118,7 @@ pub struct Recording {
     pub file: String,
     /// Animation frame and playing state from before, restored at the end.
     pub restore: (usize, bool),
+    cancelled: bool,
 }
 
 /// What the app does next for a recording.
@@ -147,7 +148,13 @@ impl Recording {
             encoder,
             file,
             restore,
+            cancelled: false,
         }
+    }
+
+    /// Stops the recording at the next update.
+    pub fn cancel(&mut self) {
+        self.cancelled = true;
     }
 
     pub fn first_frame(&self) -> usize {
@@ -162,7 +169,7 @@ impl Recording {
     /// Takes the capture of the frame on screen if it arrived, or requests it; `view` is the
     /// 3D view in points.
     pub fn update(mut self, ctx: &Context, view: Rect) -> (Option<Self>, Step) {
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if self.cancelled || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             return (None, Step::Cancelled);
         }
         ctx.request_repaint();

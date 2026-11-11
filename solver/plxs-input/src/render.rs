@@ -14,6 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use plxs_core::amplitude::Signal;
 use plxs_core::constraints::{RigidBodyNodes, TransformKind};
 use plxs_core::contact::{Adjust, ContactKind, GapConductance, SurfaceBehavior};
 use plxs_core::element::ElementType;
@@ -22,8 +23,8 @@ use plxs_core::mesh::Surface;
 use plxs_core::section::{BeamProfile, SectionKind, SpringStiffness};
 use plxs_core::step::{
     ContactChange, DefaultAmplitude, DefinedFieldKind, DistributedLoadKind, EquationSolver,
-    FieldOutput, FluxKind, HistoryOutput, Incrementation, Loads, ModalDamping, OutputDimension,
-    Procedure, Totals,
+    FieldOutput, FluxKind, Follower, HistoryOutput, Incrementation, Loads, ModalDamping,
+    OutputDimension, Procedure, Totals,
 };
 use plxs_core::{Analysis, Model, Step};
 
@@ -117,6 +118,19 @@ impl Out {
 
 /// A number that reads back as the same `f64`: the shortest form that does, plain when that
 /// is short, else with an exponent.
+/// `MASS SCALING=`, `TIME STEP=` and `SHELL INERTIA=` of an explicit or automatic `*DYNAMIC`.
+fn explicit_controls(header: &mut String, controls: &plxs_core::step::ExplicitControls) {
+    if let Some(target) = controls.mass_scaling {
+        let _ = write!(header, ", Mass scaling={}", number(target));
+    }
+    if let Some(dt) = controls.time_step {
+        let _ = write!(header, ", Time step={}", number(dt));
+    }
+    if controls.full_shell_inertia {
+        header.push_str(", Shell inertia=Full");
+    }
+}
+
 pub(crate) fn number(value: f64) -> String {
     if value.is_nan() {
         return String::new();
@@ -252,6 +266,22 @@ fn materials(out: &mut Out, model: &Model) {
                 out.numbers(&[row.young, row.poisson, row.temperature]);
             }
         }
+        if let Some(hyper) = &material.hyperelastic {
+            use plxs_core::material::HyperelasticModel as H;
+            let model = match hyper.model {
+                H::NeoHooke => "Neo Hooke".to_string(),
+                H::MooneyRivlin => "Mooney-Rivlin".to_string(),
+                H::Polynomial(n) => format!("Polynomial, N={n}"),
+                H::ReducedPolynomial(n) => format!("Reduced polynomial, N={n}"),
+                H::Yeoh => "Yeoh".to_string(),
+                H::Ogden(n) => format!("Ogden, N={n}"),
+                H::ArrudaBoyce => "Arruda-Boyce".to_string(),
+            };
+            out.keyword(&format!("*Hyperelastic, {model}"));
+            let mut values = hyper.constants.clone();
+            values.push(0.0);
+            out.numbers(&values);
+        }
         if let Some(plastic) = &material.plastic {
             let hardening = match plastic.hardening {
                 plxs_core::material::Hardening::Isotropic => "Isotropic",
@@ -358,6 +388,7 @@ fn sections(out: &mut Out, model: &Model) {
                         torsion,
                         shear_area_1,
                         shear_area_2,
+                        ..
                     } => {
                         let mut values = vec![*area, *i11, *i12, *i22, *torsion];
                         match (shear_area_1, shear_area_2) {
@@ -379,17 +410,28 @@ fn sections(out: &mut Out, model: &Model) {
                 if *offset2 != 0.0 {
                     let _ = write!(header, ", Offset2={}", number(*offset2));
                 }
+                if let BeamProfile::General {
+                    contact_radius: Some(r),
+                    ..
+                } = profile
+                {
+                    let _ = write!(header, ", Contact radius={}", number(*r));
+                }
                 out.keyword(&header);
                 out.numbers(&values);
                 out.numbers(normal);
             }
             SectionKind::Spring(spring) => {
                 let nonlinear = matches!(spring.stiffness, SpringStiffness::Nonlinear(_));
-                out.keyword(&if nonlinear {
+                let mut header = if nonlinear {
                     format!("*Spring, Elset={elset}, Nonlinear")
                 } else {
                     format!("*Spring, Elset={elset}")
-                });
+                };
+                if spring.stabilize > 0.0 {
+                    let _ = write!(header, ", Stabilize={}", number(spring.stabilize));
+                }
+                out.keyword(&header);
                 // SPRING2 takes both degrees of freedom, SPRING1 one.
                 let two = spring.dof1 != spring.dof2
                     || (model.sets.element_sets.get(elset)).is_some_and(|ids| {
@@ -465,6 +507,25 @@ fn constraints(out: &mut Out, model: &Model) {
             "*Rigid body, {nodes}, Ref node={}, Rot node={}",
             body.reference_node, body.rotation_node
         ));
+    }
+    for joint in &constraints.joints {
+        out.keyword(&format!("*Joint, Name={}", joint.name));
+        let [first, second] = joint.ends.map(|end| end.unwrap_or([0, 0]));
+        out.line(&format!(
+            "{}, {}, {}, {}",
+            first[0], first[1], second[0], second[1]
+        ));
+        let [x, y, _] = joint.axes;
+        let o = joint.origin;
+        let frame: Vec<String> = [o, x, y].iter().flatten().map(|&v| number(v)).collect();
+        out.line(&frame.join(", "));
+        let held: Vec<String> = (1..=6)
+            .filter(|&d| joint.fixed[d - 1])
+            .map(|d| d.to_string())
+            .collect();
+        if !held.is_empty() {
+            out.line(&held.join(", "));
+        }
     }
     if !constraints.equations.is_empty() {
         out.keyword("*Equation");
@@ -603,6 +664,20 @@ fn contact(out: &mut Out, model: &Model) {
             number(clearance.value)
         ));
     }
+    for support in &contact.compression_only {
+        let mut header = format!(
+            "*Compression only, Surface={}, Clearance={}",
+            support.surface,
+            number(support.clearance)
+        );
+        if let Some(stiffness) = support.stiffness {
+            let _ = write!(header, ", Stiffness={}", number(stiffness));
+        }
+        if support.flipped {
+            header.push_str(", Flip");
+        }
+        out.keyword(&header);
+    }
 }
 
 fn friction_line(out: &mut Out, friction: &plxs_core::contact::Friction) {
@@ -624,10 +699,38 @@ fn amplitudes(out: &mut Out, model: &Model) {
         if amplitude.shift_y != 0.0 {
             let _ = write!(header, ", Shifty={}", number(amplitude.shift_y));
         }
+        let values: Vec<f64> = match amplitude.signal {
+            Some(Signal::Pulse { start, width }) => {
+                header.push_str(", Shape=Pulse");
+                vec![start, width]
+            }
+            Some(Signal::Sine {
+                start,
+                end,
+                frequency,
+                phase,
+            }) => {
+                header.push_str(", Shape=Sine");
+                vec![start, end, frequency, phase.to_degrees()]
+            }
+            Some(Signal::Chirp {
+                start,
+                end,
+                from,
+                to,
+                logarithmic,
+            }) => {
+                header.push_str(", Shape=Chirp");
+                if logarithmic {
+                    header.push_str(", Sweep=Log");
+                }
+                vec![start, end, from, to]
+            }
+            None => (amplitude.points.iter())
+                .flat_map(|&(t, v)| [t, v])
+                .collect(),
+        };
         out.keyword(&header);
-        let values: Vec<f64> = (amplitude.points.iter())
-            .flat_map(|&(t, v)| [t, v])
-            .collect();
         out.numbers(&values);
     }
 }
@@ -689,6 +792,18 @@ fn steps(out: &mut Out, analysis: &Analysis) {
             boundaries(out, step, false);
         }
         out.comment(&format!("{} ++++++++++++++++++++", step.name));
+        // CalculiX has no keyword for an isolated group; the input file says what Nodalis
+        // does there.
+        if step.isolation.opens {
+            out.comment(if step.isolation.unloaded {
+                "Nodalis: from the unloaded model, the state before this step returns after the group"
+            } else {
+                "Nodalis: the state before this step returns after the group"
+            });
+        }
+        if step.isolation.closes {
+            out.comment("Nodalis: end of the group, the state before it returns");
+        }
         let mut header = String::from("*Step");
         if step.nlgeom {
             header.push_str(", Nlgeom");
@@ -748,6 +863,13 @@ fn solver_parameter(header: &mut String, solver: EquationSolver) {
     let _ = write!(header, ", Solver={name}");
 }
 
+/// `FRAMES=` (Nodalis): result frames evenly spaced over the step.
+fn frames_parameter(header: &mut String, increments: &Incrementation) {
+    if let Some(frames) = increments.frames {
+        let _ = write!(header, ", Frames={frames}");
+    }
+}
+
 /// The incrementation line: initial, period, minimum, maximum, missing ones empty.
 fn increments_line(out: &mut Out, increments: &Incrementation) {
     let values = [
@@ -803,6 +925,7 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
             if settings.increments.direct {
                 header.push_str(", Direct");
             }
+            frames_parameter(&mut header, &settings.increments);
             if settings.time_reset {
                 header.push_str(", Time reset");
             }
@@ -818,6 +941,7 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
             if settings.increments.direct {
                 header.push_str(", Direct");
             }
+            frames_parameter(&mut header, &settings.increments);
             out.keyword(&header);
             increments_line(out, &settings.increments);
         }
@@ -888,6 +1012,7 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
             if let Some(count) = settings.frequency_count {
                 let _ = write!(header, ", Frequency={count}");
             }
+            frames_parameter(&mut header, &settings.increments);
             out.keyword(&header);
             increments_line(out, &settings.increments);
         }
@@ -897,11 +1022,26 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
             if let Some(alpha) = settings.alpha {
                 let _ = write!(header, ", Alpha={}", number(alpha));
             }
-            if settings.explicit {
-                header.push_str(", Explicit");
+            match settings.integration {
+                plxs_core::step::Integration::Implicit => {}
+                plxs_core::step::Integration::Explicit(c) => {
+                    header.push_str(", Integration=Explicit");
+                    explicit_controls(&mut header, &c);
+                }
+                plxs_core::step::Integration::Automatic {
+                    explicit,
+                    switch_factor,
+                } => {
+                    header.push_str(", Integration=Automatic");
+                    explicit_controls(&mut header, &explicit);
+                    let _ = write!(header, ", Switch={}", number(switch_factor));
+                }
             }
             if settings.increments.direct {
                 header.push_str(", Direct");
+            }
+            if settings.event_frames {
+                header.push_str(", Events");
             }
             out.keyword(&header);
             increments_line(out, &settings.increments);
@@ -911,6 +1051,14 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
                     number(rayleigh.alpha),
                     number(rayleigh.beta)
                 ));
+            }
+            if let Some(damping) = &settings.damping_ratio {
+                let mut line = format!("*Damping, Ratio={}", number(damping.ratio));
+                if let Some(lower) = damping.lower {
+                    let _ = write!(line, ", Lower={}", number(lower));
+                }
+                let _ = write!(line, ", Upper={}", number(damping.upper));
+                out.keyword(&line);
             }
         }
         Procedure::ModalDynamics(settings) => {
@@ -1078,7 +1226,13 @@ fn loads(out: &mut Out, loads: &Loads, carried: &Loads) {
         &loads.concentrated,
         !carried.concentrated.is_empty(),
         |l| {
-            amplitude_parameter("Amplitude", &l.amplitude) + &case_and_sector(l.load_case, l.sector)
+            amplitude_parameter("Amplitude", &l.amplitude)
+                + &case_and_sector(l.load_case, l.sector)
+                + &match &l.follower {
+                    None => String::new(),
+                    Some(Follower::Nodes(nodes)) => format!(", Follower={nodes}"),
+                    Some(Follower::Rotation(node)) => format!(", Follower rotation={node}"),
+                }
         },
         |l| format!("{}, {}, {}", l.region, l.dof, number(l.value)),
     );
@@ -1282,7 +1436,10 @@ fn history_output_header(keyword: &str, set: &str, output: &HistoryOutput) -> St
         let _ = write!(header, ", {set}={name}");
     }
     if let Some((slave, master)) = &output.surfaces {
-        let _ = write!(header, ", Slave={slave}, Master={master}");
+        let _ = write!(header, ", Slave={slave}");
+        if !master.is_empty() {
+            let _ = write!(header, ", Master={master}");
+        }
     }
     if output.frequency != 1 {
         let _ = write!(header, ", Frequency={}", output.frequency);

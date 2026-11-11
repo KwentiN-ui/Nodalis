@@ -452,6 +452,7 @@ pub(crate) fn sweep_mesh<'a>(
     let mut builder = Builder::new(coords, motion, levels, quadratic);
     let mut mesh = FeMesh::default();
     let mut part_elements = Part {
+        bodies: Vec::new(),
         name: part.to_string(),
         elements: Vec::new(),
     };

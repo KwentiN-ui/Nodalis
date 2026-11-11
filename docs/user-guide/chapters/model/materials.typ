@@ -10,8 +10,9 @@ check box. A new material starts with #ui("Elasticity") switched on.
 #fields(
   [Density], [Needed for frequency steps and transient heat transfer.
     Written as `*DENSITY`.],
-  [Elasticity], [#ui("Young's modulus") and #ui("Poisson's ratio") (0 to 0.5). Written as
-    `*ELASTIC`.],
+  [Elasticity], [#ui("Model") #ui("Linear elastic") with #ui("Young's modulus") and
+    #ui("Poisson's ratio") (0 to 0.5), written as `*ELASTIC`; or a hyperelastic model for
+    rubber (@hyperelasticity), written as `*HYPERELASTIC`.],
   [Thermal conductivity], [Written as `*CONDUCTIVITY`.],
   [Specific heat], [Needed for transient heat transfer. Written as `*SPECIFIC HEAT`.],
   [Thermal expansion], [#ui("Expansion coefficient") and #ui("Reference temperature") (default
@@ -20,6 +21,11 @@ check box. A new material starts with #ui("Elasticity") switched on.
 
 Values can be typed in any unit of the right kind, for example `210 GPa` or `7.85 g/cm³`
 (@numeric-input).
+
+Selecting a material in the model tree shows where it is used: the sections that have it are
+marked in the tree, and the parts of those sections are highlighted in the 3D view.
+
+#screenshot("material-usage.png", [Selected material with its sections and parts])
 
 === Material library <material-library>
 
@@ -40,7 +46,8 @@ plastics in the category #ui("Plastics"): PLA, PETG, ABS, PA6, PA12, PET, PC, PP
 Each has density, Young's modulus, Poisson's ratio, thermal expansion, thermal conductivity and
 specific heat. The values are typical room-temperature means from datasheets. Plastics vary a
 lot with grade, moisture, temperature and, for 3D printing, with print orientation and infill,
-so treat them as starting points and replace them with the values of your material.
+so treat them as starting points and replace them with the values of your material. The
+category #ui("Elastomers") holds hyperelastic generic rubbers (@hyperelasticity).
 
 Libraries saved by an older version are updated when they are opened: missing generic
 materials are added, and the former S235 is renamed to Generic Steel if you have not changed

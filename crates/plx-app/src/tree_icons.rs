@@ -47,7 +47,11 @@ pub enum TreeIcon {
     Running,
     Warning,
     Geometry,
+    /// A compound part of the geometry: pieces joined along a seam.
+    Compound,
     MeshSetup,
+    /// A mesh operation such as a transform: a part moved along an arrow.
+    MeshOperation,
     HotSpot,
     Plane,
     Path,
@@ -99,7 +103,9 @@ fn pixmap(icon: TreeIcon) -> &'static Pixmap {
         TreeIcon::Running => &RUNNING,
         TreeIcon::Warning => &WARNING,
         TreeIcon::Geometry => &GEOMETRY,
+        TreeIcon::Compound => &COMPOUND,
         TreeIcon::MeshSetup => &MESH_SETUP,
+        TreeIcon::MeshOperation => &MESH_OPERATION,
         TreeIcon::Plane => &PLANE,
         TreeIcon::Path => &PATH,
         TreeIcon::PlaneResult => &PLANE_RESULT,
@@ -159,6 +165,11 @@ pub enum StepGlyph {
     CoupledTempDisp,
     UncoupledTempDisp,
     Dynamic,
+    /// A Dynamic step integrated explicitly.
+    ExplicitDynamic,
+    /// A Dynamic step that switches between implicit and explicit integration.
+    AutomaticDynamic,
+    /// A Dynamic step by modal superposition.
     ModalDynamics,
     SteadyStateDynamics,
     Sensitivity,
@@ -177,7 +188,9 @@ impl StepGlyph {
             StepGlyph::CoupledTempDisp => "Coupled Temperature-Displacement",
             StepGlyph::UncoupledTempDisp => "Uncoupled Temperature-Displacement",
             StepGlyph::Dynamic => "Dynamic",
-            StepGlyph::ModalDynamics => "Modal Dynamics",
+            StepGlyph::ExplicitDynamic => "Dynamic (explicit)",
+            StepGlyph::AutomaticDynamic => "Dynamic (automatic)",
+            StepGlyph::ModalDynamics => "Dynamic (modal superposition)",
             StepGlyph::SteadyStateDynamics => "Steady State Dynamics",
             StepGlyph::Sensitivity => "Sensitivity",
             StepGlyph::Visco => "Visco",
@@ -195,8 +208,12 @@ impl From<&StepKind> for StepGlyph {
             StepKind::HeatTransfer(_) => StepGlyph::HeatTransfer,
             StepKind::CoupledTempDisp(_) => StepGlyph::CoupledTempDisp,
             StepKind::UncoupledTempDisp(_) => StepGlyph::UncoupledTempDisp,
-            StepKind::Dynamic(_) => StepGlyph::Dynamic,
-            StepKind::ModalDynamics(_) => StepGlyph::ModalDynamics,
+            StepKind::Dynamic(d) => match d.method {
+                plx_model::DynamicMethod::Direct => StepGlyph::Dynamic,
+                plx_model::DynamicMethod::Explicit => StepGlyph::ExplicitDynamic,
+                plx_model::DynamicMethod::Automatic => StepGlyph::AutomaticDynamic,
+                plx_model::DynamicMethod::Modal { .. } => StepGlyph::ModalDynamics,
+            },
             StepKind::SteadyStateDynamics(_) => StepGlyph::SteadyStateDynamics,
             StepKind::Sensitivity(_) => StepGlyph::Sensitivity,
             StepKind::Visco(_) => StepGlyph::Visco,
@@ -345,6 +362,20 @@ fn paint_step_type(painter: &Painter, min: Pos2, glyph: StepGlyph) {
         StepGlyph::Dynamic => {
             painter.circle_stroke(at(8.0, 8.0), 6.5, Stroke::new(1.5, BLUE));
             line(&[(8.0, 3.5), (8.0, 8.0), (11.0, 10.0)], INK);
+        }
+        // The clock of the Dynamic step, smaller, struck by an impact flash: many tiny
+        // time steps through a shock.
+        StepGlyph::ExplicitDynamic => {
+            painter.circle_stroke(at(6.5, 9.5), 5.0, Stroke::new(1.5, BLUE));
+            line(&[(6.5, 6.0), (6.5, 9.5), (8.5, 11.0)], INK);
+            line(&[(14.5, 0.8), (11.0, 5.5), (13.5, 5.5), (10.5, 9.8)], RED);
+        }
+        // The clock of the Dynamic step, its right half struck by the flash of the explicit
+        // one: implicit and explicit in one step.
+        StepGlyph::AutomaticDynamic => {
+            painter.circle_stroke(at(7.0, 8.5), 6.0, Stroke::new(1.5, BLUE));
+            line(&[(7.0, 4.5), (7.0, 8.5), (10.0, 10.5)], INK);
+            line(&[(15.0, 0.8), (12.0, 5.0), (14.2, 5.0), (11.5, 9.0)], RED);
         }
         // Two superposed modes over time.
         StepGlyph::ModalDynamics => {
@@ -1482,6 +1513,35 @@ const WARNING: Pixmap = Pixmap {
     ],
 };
 
+/// A compound part: one block cut into two pieces, the seam where they are tied.
+const COMPOUND: Pixmap = Pixmap {
+    colors: &[
+        [60, 84, 121, 255],
+        [178, 204, 233, 255],
+        [204, 223, 243, 255],
+        [119, 155, 209, 255],
+        [230, 150, 60, 255],
+    ],
+    rows: [
+        "...AAAAAAAAAAAAA",
+        "..ACCCCCECCCCCAA",
+        ".ACCCCCECCCCCADA",
+        "AAAAAAAAAAAAADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADA.",
+        "ABBBBBEBBBBBAA..",
+        "AAAAAAAAAAAAA...",
+    ],
+};
+
 /// Geometry.ico
 const GEOMETRY: Pixmap = Pixmap {
     colors: &[
@@ -1514,6 +1574,33 @@ const GEOMETRY: Pixmap = Pixmap {
 };
 
 /// Mesh_refinement.ico
+const MESH_OPERATION: Pixmap = Pixmap {
+    colors: &[
+        [80, 80, 80, 255],
+        [170, 170, 170, 255],
+        [220, 40, 40, 255],
+        [150, 150, 150, 255],
+    ],
+    rows: [
+        "DDDDDD..........",
+        "D....D..........",
+        "D....D..........",
+        "D....D..........",
+        "D....DC.........",
+        "DDDDDD.C.C......",
+        "........CC......",
+        ".......CCC......",
+        "................",
+        ".........AAAAAAA",
+        ".........ABBABBA",
+        ".........ABBABBA",
+        ".........AAAAAAA",
+        ".........ABBABBA",
+        ".........ABBABBA",
+        ".........AAAAAAA",
+    ],
+};
+
 const MESH_SETUP: Pixmap = Pixmap {
     colors: &[
         [255, 0, 0, 94],
@@ -1711,7 +1798,9 @@ mod tests {
             TreeIcon::Running,
             TreeIcon::Warning,
             TreeIcon::Geometry,
+            TreeIcon::Compound,
             TreeIcon::MeshSetup,
+            TreeIcon::MeshOperation,
             TreeIcon::HotSpot,
             TreeIcon::Plane,
             TreeIcon::Path,

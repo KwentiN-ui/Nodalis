@@ -12,8 +12,10 @@ plxs-constraints.workspace = true
 plxs-contact.workspace = true
 plxs-linalg.workspace = true
 plxs-elements.workspace = true
+plxs-materials.workspace = true
 plxs-assembly.workspace = true
 plxs-output.workspace = true
+plxs-explicit.workspace = true
 rayon.workspace = true
 
 [lints]

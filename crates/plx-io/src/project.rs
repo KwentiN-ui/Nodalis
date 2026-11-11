@@ -101,6 +101,18 @@ pub enum ProjectNode {
     Math(MathBlock),
     /// One of several numbers, picked by its index.
     Switch(SwitchBlock),
+    /// A plot of the numbers linked to it, drawn in the block.
+    Plot(PlotBlock),
+    /// What is linked to it, drawn in the block: a mesh, a number or a series.
+    #[serde(alias = "MeshPreview")]
+    Preview(Preview),
+    /// Blocks put together into one, which opens into a schematic of its own, like a node
+    /// group of Blender.
+    Group(NodeGroup),
+    /// The block inside a group that gives the group's inputs to the blocks in it.
+    GroupInput(GroupEnd),
+    /// The block inside a group that takes what the group gives out.
+    GroupOutput(GroupEnd),
 }
 
 impl ProjectNode {
@@ -123,6 +135,10 @@ impl ProjectNode {
             Self::Note(n) => n.id,
             Self::Math(m) => m.id,
             Self::Switch(s) => s.id,
+            Self::Plot(p) => p.id,
+            Self::Preview(m) => m.id,
+            Self::Group(g) => g.id,
+            Self::GroupInput(g) | Self::GroupOutput(g) => g.id,
         }
     }
 
@@ -144,6 +160,10 @@ impl ProjectNode {
             Self::Note(n) => &n.name,
             Self::Math(m) => &m.name,
             Self::Switch(s) => &s.name,
+            Self::Plot(p) => &p.name,
+            Self::Preview(m) => &m.name,
+            Self::Group(g) => &g.name,
+            Self::GroupInput(g) | Self::GroupOutput(g) => &g.name,
         }
     }
 
@@ -166,6 +186,10 @@ impl ProjectNode {
             Self::Note(n) => n.position,
             Self::Math(m) => m.position,
             Self::Switch(s) => s.position,
+            Self::Plot(p) => p.position,
+            Self::Preview(m) => m.position,
+            Self::Group(g) => g.position,
+            Self::GroupInput(g) | Self::GroupOutput(g) => g.position,
         }
     }
 }
@@ -296,6 +320,12 @@ pub struct MeasureBlock {
     pub value: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evaluated: Option<u64>,
+    /// Of a measure of a series, the values as last computed, in SI units.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub series: Vec<f64>,
+    /// Of the whole history of a step, the time (or frequency) of each of its values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub times: Vec<f64>,
 }
 
 /// A parameter study: the numbers it gives to other blocks and reads back, as columns of a
@@ -369,9 +399,13 @@ pub struct MathBlock {
     pub units: plx_model::UnitSystem,
     #[serde(default)]
     pub operation: plx_model::MathOp,
-    /// What its numbers are; `None` until a link gives it the kind of the other end.
+    /// What its numbers are; `None` until a link gives it the kind of the other end. Of a
+    /// product or quotient, the kind of its result.
     #[serde(default)]
     pub kind: Option<plx_model::ValueKind>,
+    /// Of a product or quotient, the kinds of A and B; `None` while open.
+    #[serde(default)]
+    pub operands: [Option<plx_model::ValueKind>; 2],
     /// The values of its inputs, in SI units.
     #[serde(default)]
     pub values: Vec<f64>,
@@ -394,6 +428,99 @@ pub struct SwitchBlock {
     /// The choices, in SI units.
     #[serde(default)]
     pub choices: Vec<f64>,
+}
+
+/// A Plot block: draws the numbers and series linked to it in the block, as a line, points
+/// or a histogram.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PlotBlock {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    #[serde(default)]
+    pub kind: plx_model::PlotKind,
+    /// The bins of a histogram.
+    #[serde(default = "default_bins")]
+    pub bins: u32,
+}
+
+fn default_bins() -> u32 {
+    10
+}
+
+/// A Preview block: what is linked to it, drawn in the block: a small picture of a mesh
+/// beside the analysis it belongs to, a number, or a series with its statistics. What it
+/// shows comes by its link on every load. Format 21 called it Mesh Preview.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Preview {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+}
+
+/// A node group: blocks of the schematic put together into one block, which opens into a
+/// schematic of its own with a Group Input and a Group Output block, like a node group of
+/// Blender. Its links are those of the blocks in it: [`Project::links`] keeps them from block
+/// to block, as Update Project follows them; the sockets keep only how the wires of a link
+/// run through the group, to draw them at each level.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NodeGroup {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The ids of the blocks right inside it: its Group Input and Group Output blocks, and
+    /// groups in it with their own blocks.
+    #[serde(default)]
+    pub nodes: Vec<u64>,
+    /// What it takes, in the order of its pins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<GroupSocket>,
+    /// What it gives.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<GroupSocket>,
+}
+
+/// The Group Input or Group Output block of a group; it cannot be deleted.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GroupEnd {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+}
+
+/// An input or output of a node group: a pin on the group's block, and the same on its Group
+/// Input or Group Output block inside.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GroupSocket {
+    /// Stays the same when the socket is renamed; the pins of the socket are
+    /// `["Socket", id]`.
+    pub id: u32,
+    pub name: String,
+    /// The path of the pin the socket was made from, which gives it its type: its colour and
+    /// what it can be linked to.
+    #[serde(default)]
+    pub kind: Vec<String>,
+    /// Where its wire comes from: of an input, a pin outside the group; of an output, one
+    /// inside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<GroupPin>,
+    /// Where its wires go: of an input, pins inside the group; of an output, outside.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<GroupPin>,
+}
+
+/// A pin of the schematic: the row of `path` of block `node`, or `["Socket", id]` of a
+/// group or its Group Input or Group Output block.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct GroupPin {
+    pub node: u64,
+    pub path: Vec<String>,
 }
 
 /// A frame of the project schematic: a named, tinted rectangle around the blocks it holds,
@@ -719,7 +846,7 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
 
 /// The oldest format that can still be opened. While Nodalis is being designed, a new
 /// format is not converted: older projects are refused.
-pub const FIRST_PROJECT_FORMAT: u32 = 16;
+pub const FIRST_PROJECT_FORMAT: u32 = 21;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
@@ -1022,10 +1149,134 @@ mod tests {
             }
         }
         mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: name.into(),
             elements,
         });
         [bottom, top]
+    }
+
+    /// Writes a project of an assembly of a base, plates, bolts and rubber pads with part
+    /// groups and a contact detection whose rules give each kind of pair its type, for the
+    /// user guide's screenshots: `PLX_RULES_DEMO=path cargo test rules_demo -- --ignored`.
+    #[test]
+    #[ignore]
+    fn contact_rules_demo_project() {
+        use plx_model::{
+            ContactBehavior, ContactDetection, ContactRule, PartFilter, PartGroup, PartTerm,
+            RuleAction,
+        };
+        let Some(path) = std::env::var_os("PLX_RULES_DEMO") else {
+            return;
+        };
+        let mut mesh = FeMesh::default();
+        let mm = 1e-3;
+        let mut first = 1;
+        let mut block = |mesh: &mut FeMesh, name: &str, origin: [f64; 3], size: [f64; 3]| {
+            let n = size.map(|s| ((s / 5.0).round() as u32).max(1));
+            add_block(
+                mesh,
+                name,
+                first,
+                origin.map(|v| v * mm),
+                size.map(|v| v * mm),
+                n,
+            );
+            first += 10_000;
+        };
+        block(&mut mesh, "Base", [0.0, 0.0, 0.0], [160.0, 40.0, 10.0]);
+        for i in 0..4 {
+            let x = 40.0 * f64::from(i);
+            block(
+                &mut mesh,
+                &format!("Plate_{}", i + 1),
+                [x, 0.0, 10.0],
+                [40.0, 40.0, 5.0],
+            );
+            for (k, dx) in [5.0, 25.0].into_iter().enumerate() {
+                let name = format!("Bolt_M10_{}", 2 * i + k as u32 + 1);
+                block(&mut mesh, &name, [x + dx, 15.0, 15.0], [10.0, 10.0, 10.0]);
+            }
+        }
+        block(&mut mesh, "Pad_left", [0.0, 0.0, -5.0], [20.0, 40.0, 5.0]);
+        block(
+            &mut mesh,
+            "Pad_right",
+            [140.0, 0.0, -5.0],
+            [20.0, 40.0, 5.0],
+        );
+        let mut model = FeModel::default();
+        let (steel, rubber) = (plx_model::Id::new(), plx_model::Id::new());
+        for (id, name, young) in [(steel, "Steel", 210e9), (rubber, "Rubber", 10e6)] {
+            model.materials.push(Material {
+                id,
+                name: name.into(),
+                density: Some(7850.0),
+                elastic: Some(plx_model::Elastic {
+                    young,
+                    poisson: 0.3,
+                }),
+                ..Default::default()
+            });
+        }
+        let names: Vec<String> = mesh.parts.iter().map(|p| p.name.clone()).collect();
+        let (pads, metal): (Vec<String>, Vec<String>) =
+            names.into_iter().partition(|n| n.starts_with("Pad"));
+        for (name, material, parts) in [("Steel", steel, metal), ("Rubber", rubber, pads)] {
+            model.sections.push(plx_model::Section {
+                name: name.into(),
+                material: Some(material),
+                region: Region::Parts(parts),
+                thickness: 1.0,
+                kind: plx_model::SectionKind::Solid,
+            });
+        }
+        let group = |name: &str, term: PartTerm| PartGroup {
+            filter: PartFilter {
+                include: vec![term],
+                exclude: Vec::new(),
+            },
+            ..PartGroup::new(name)
+        };
+        let groups = [
+            group("Housing", PartTerm::Part("Base".into())),
+            group("Plates", PartTerm::Pattern("Plate*".into())),
+            group("Bolts", PartTerm::Pattern("Bolt*".into())),
+            group("Pads", PartTerm::Material(rubber)),
+        ];
+        let of = |g: &PartGroup| PartFilter {
+            include: vec![PartTerm::Group(g.id)],
+            exclude: Vec::new(),
+        };
+        let mut detection = ContactDetection::new("Assembly");
+        detection.rules = vec![
+            ContactRule {
+                side_a: of(&groups[2]),
+                side_b: PartFilter::all(),
+                action: RuleAction::Type(ContactBehavior::Frictional { mu: 0.12 }),
+            },
+            ContactRule {
+                side_a: of(&groups[1]),
+                side_b: of(&groups[1]),
+                action: RuleAction::Exclude,
+            },
+            ContactRule {
+                side_a: of(&groups[3]),
+                side_b: PartFilter::all(),
+                action: RuleAction::Type(ContactBehavior::Frictionless),
+            },
+        ];
+        model.part_groups = groups.to_vec();
+        model.contact_detections.push(detection);
+        let skins: Vec<_> = (mesh.parts.iter())
+            .map(|p| plx_mesh::extract_part_skin(&mesh, p, 30.0))
+            .collect();
+        let visible = vec![true; mesh.parts.len()];
+        let report = model.detect_contacts(0, &mesh, &skins, &visible).unwrap();
+        println!("{}", report.summary("Assembly"));
+        model.steps.push(plx_model::Step::new_static("Step-1"));
+        let project = single(None, &mesh, &model, None);
+        save_project(std::path::Path::new(&path), &project).unwrap();
     }
 
     /// Writes a project of a base plate, a block bonded onto it and a cap resting on the
@@ -1078,7 +1329,9 @@ mod tests {
         };
         let base_top: Vec<_> = base_top.into_iter().filter(|f| inside(&mesh, f)).collect();
         let mut model = FeModel::default();
+        let steel = plx_model::Id::new();
         model.materials.push(Material {
+            id: steel,
             name: "Steel".into(),
             density: Some(7850.0),
             elastic: Some(plx_model::Elastic {
@@ -1089,7 +1342,7 @@ mod tests {
         });
         model.sections.push(plx_model::Section {
             name: "Solid_Section-1".into(),
-            material: "Steel".into(),
+            material: Some(steel),
             region: Region::Parts(vec!["Base".into(), "Block".into(), "Cap".into()]),
             thickness: 1.0,
             kind: plx_model::SectionKind::Solid,
@@ -1113,6 +1366,7 @@ mod tests {
         }
         let mut step = plx_model::Step::new_static("Step-1");
         step.boundary_conditions.push(plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Fixed-1".into(),
             active: true,
@@ -1124,6 +1378,7 @@ mod tests {
         // The cap held sideways at its top, pressed down.
         let cap_nodes = Region::Faces(cap_top.clone()).nodes(&mesh);
         step.boundary_conditions.push(plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Guide-1".into(),
             active: true,
@@ -1140,6 +1395,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(plx_model::Load {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Pressure-1".into(),
             active: true,
@@ -1148,6 +1404,9 @@ mod tests {
             kind: plx_model::LoadKind::Pressure(5e6),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
+            system: None,
+            follower: false,
         });
         // A second step pressing harder, to show the contacts of a step.
         if std::env::var_os("PLX_CONTACT_DEMO_STEPS").is_some() {
@@ -1161,6 +1420,433 @@ mod tests {
         }
         let project = single(None, &mesh, &model, None);
         save_project(std::path::Path::new(&path), &project).unwrap();
+    }
+
+    /// Writes a project of a steel column twisted at its top by a force in a cylindrical
+    /// system that follows the deformation, for the user guide's screenshot of follower
+    /// loads: `PLX_FOLLOWER_DEMO=path cargo test follower_demo -- --ignored`.
+    #[test]
+    #[ignore]
+    fn follower_demo_project() {
+        let Some(path) = std::env::var_os("PLX_FOLLOWER_DEMO") else {
+            return;
+        };
+        let mut mesh = FeMesh::default();
+        let [bottom, top] = add_block(
+            &mut mesh,
+            "Column",
+            1,
+            [0.0, 0.0, 0.0],
+            [0.02, 0.02, 0.1],
+            [4, 4, 20],
+        );
+        let mut model = FeModel::default();
+        model.materials.push(Material {
+            name: "Steel".into(),
+            density: Some(7850.0),
+            elastic: Some(plx_model::Elastic {
+                young: 2.1e11,
+                poisson: 0.3,
+            }),
+            ..Default::default()
+        });
+        model.sections.push(plx_model::Section {
+            name: "Solid_Section-1".into(),
+            material: model.materials.last().map(|m| m.id),
+            region: Region::Parts(vec!["Column".into()]),
+            thickness: 1.0,
+            kind: plx_model::SectionKind::Solid,
+        });
+        let mut axis = plx_model::CoordinateSystem::new("Column_Axis");
+        axis.kind = plx_model::CoordinateSystemKind::Cylindrical;
+        axis.origin = [0.01, 0.01, 0.1];
+        axis.point_x = [0.02, 0.01, 0.1];
+        axis.point_xy = [0.01, 0.02, 0.1];
+        let system = axis.id;
+        model.coordinate_systems.push(axis);
+        let mut step = plx_model::Step::new_static("Step-1");
+        if let plx_model::StepKind::Static(settings) = &mut step.kind {
+            settings.nlgeom = true;
+        }
+        step.boundary_conditions.push(plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
+            distribution: None,
+            name: "Fixed-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(bottom),
+            kind: plx_model::BoundaryKind::displacement([Some(0.0); 6]),
+            amplitude: None,
+        });
+        let mut load = plx_model::Load::new(
+            "Force-1",
+            Region::Faces(top),
+            plx_model::LoadKind::Force {
+                value: [0.0, 500.0, 0.0],
+                each_node: false,
+            },
+        );
+        load.system = Some(system);
+        load.follower = true;
+        step.loads.push(load);
+        model.steps.push(step);
+        let project = single(None, &mesh, &model, None);
+        save_project(std::path::Path::new(&path), &project).unwrap();
+    }
+
+    /// Writes a project of a beam with three steps that print the same history output, for
+    /// the user guide's screenshot of history outputs shared by steps:
+    /// `PLX_HISTORY_DEMO=path cargo test history_demo -- --ignored`.
+    #[test]
+    #[ignore]
+    fn history_demo_project() {
+        let Some(path) = std::env::var_os("PLX_HISTORY_DEMO") else {
+            return;
+        };
+        let mut mesh = FeMesh::default();
+        let [bottom, top] = add_block(
+            &mut mesh,
+            "Beam",
+            1,
+            [0.0, 0.0, 0.0],
+            [0.02, 0.02, 0.2],
+            [2, 2, 10],
+        );
+        let mut model = FeModel::default();
+        model.materials.push(Material {
+            name: "Steel".into(),
+            density: Some(7850.0),
+            elastic: Some(plx_model::Elastic {
+                young: 2.1e11,
+                poisson: 0.3,
+            }),
+            ..Default::default()
+        });
+        model.sections.push(plx_model::Section {
+            name: "Solid_Section-1".into(),
+            material: model.materials.last().map(|m| m.id),
+            region: Region::Parts(vec!["Beam".into()]),
+            thickness: 1.0,
+            kind: plx_model::SectionKind::Solid,
+        });
+        let mut step = plx_model::Step::new_static("Load");
+        step.boundary_conditions.push(plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
+            distribution: None,
+            name: "Fixed-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(bottom),
+            kind: plx_model::BoundaryKind::displacement([Some(0.0); 6]),
+            amplitude: None,
+        });
+        step.loads.push(plx_model::Load::new(
+            "Force-1",
+            Region::Faces(top.clone()),
+            plx_model::LoadKind::Force {
+                value: [0.0, 100.0, 0.0],
+                each_node: false,
+            },
+        ));
+        let mut more = step.clone();
+        more.name = "More_Load".into();
+        let mut modes = plx_model::Step::new_frequency("Modes");
+        modes.boundary_conditions = step.boundary_conditions.clone();
+        model.steps = vec![step, more, modes];
+        let reactions = plx_model::HistoryOutput::node("Reactions", Region::Faces(top));
+        let id = reactions.id;
+        model.put_history_output(0, reactions);
+        model.steps[1].history_outputs.push(id);
+        model.steps[2].history_outputs.push(id);
+        let project = single(None, &mesh, &model, None);
+        save_project(std::path::Path::new(&path), &project).unwrap();
+    }
+
+    /// Writes a project of a cantilever bent far by a force at its tip, with Measure blocks
+    /// of whole histories and field values, Math, Plot and Preview blocks, for the user
+    /// guide's screenshots of the Visualize blocks:
+    /// `PLX_VISUALIZE_DEMO=path cargo test visualize_demo -- --ignored`.
+    #[test]
+    #[ignore]
+    fn visualize_demo_project() {
+        use plx_model::{MathOp, MeasureKind, MeasureRegion, PlotKind};
+        let Some(path) = std::env::var_os("PLX_VISUALIZE_DEMO") else {
+            return;
+        };
+        let mut mesh = FeMesh::default();
+        let [bottom, top] = add_block(
+            &mut mesh,
+            "Beam",
+            1,
+            [0.0, 0.0, 0.0],
+            [0.02, 0.02, 0.2],
+            [2, 2, 12],
+        );
+        let mut model = FeModel::default();
+        model.materials.push(Material {
+            name: "Steel".into(),
+            density: Some(7850.0),
+            elastic: Some(plx_model::Elastic {
+                young: 2.1e11,
+                poisson: 0.3,
+            }),
+            ..Default::default()
+        });
+        model.sections.push(plx_model::Section {
+            name: "Solid_Section-1".into(),
+            material: model.materials.last().map(|m| m.id),
+            region: Region::Parts(vec!["Beam".into()]),
+            thickness: 1.0,
+            kind: plx_model::SectionKind::Solid,
+        });
+        let mut step = plx_model::Step::new_static("Load");
+        if let plx_model::StepKind::Static(stat) = &mut step.kind {
+            stat.frames = 20;
+            stat.nlgeom = true;
+        }
+        step.boundary_conditions.push(plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
+            distribution: None,
+            name: "Fixed-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(bottom.clone()),
+            kind: plx_model::BoundaryKind::displacement([Some(0.0); 6]),
+            amplitude: None,
+        });
+        step.loads.push(plx_model::Load::new(
+            "Force-1",
+            Region::Faces(top.clone()),
+            plx_model::LoadKind::Force {
+                value: [0.0, 80_000.0, 0.0],
+                each_node: false,
+            },
+        ));
+        model.steps = vec![step];
+        let tip = plx_model::HistoryOutput::node("Tip", Region::Faces(top));
+        let mut support = plx_model::HistoryOutput::node("Support", Region::Faces(bottom));
+        support.variables = vec!["RF".into()];
+        support.totals = plx_model::Totals::Only;
+        model.put_history_output(0, tip);
+        model.put_history_output(0, support);
+        let mut project = single(None, &mesh, &model, None);
+        if let Some(ProjectNode::Analysis(analysis)) = project.nodes.first_mut() {
+            analysis.name = "Cantilever".into();
+            analysis.position = [0.0, 0.0];
+        }
+        let history = |set: &str, field: &str, component: &str| MeasureKind::History {
+            set: set.into(),
+            field: field.into(),
+            component: component.into(),
+            whole: true,
+        };
+        let measure = |id, name: &str, position, kind| {
+            ProjectNode::Measure(MeasureBlock {
+                id,
+                name: name.into(),
+                position,
+                units: plx_model::UnitSystem::MmTonSC,
+                kind,
+                ..Default::default()
+            })
+        };
+        let math = |id, name: &str, position, operation, values: Vec<f64>| {
+            ProjectNode::Math(MathBlock {
+                id,
+                name: name.into(),
+                position,
+                units: plx_model::UnitSystem::MmTonSC,
+                operation,
+                values,
+                ..Default::default()
+            })
+        };
+        let plot = |id, name: &str, position, kind| {
+            ProjectNode::Plot(PlotBlock {
+                id,
+                name: name.into(),
+                position,
+                units: plx_model::UnitSystem::MmTonSC,
+                kind,
+                bins: 12,
+            })
+        };
+        project.nodes.extend([
+            ProjectNode::Preview(Preview {
+                id: 2,
+                name: "Beam".into(),
+                position: [0.0, 250.0],
+            }),
+            measure(
+                3,
+                "Tip",
+                [260.0, -60.0],
+                history("TIP", "DISPLACEMENTS", "U2"),
+            ),
+            measure(
+                4,
+                "Support",
+                [260.0, 90.0],
+                history("SUPPORT", "TOTAL_FORCE", "RF2"),
+            ),
+            math(5, "Force", [500.0, 90.0], MathOp::Multiply, vec![0.0, -1.0]),
+            plot(6, "Force over Deflection", [740.0, -60.0], PlotKind::Line),
+            measure(
+                7,
+                "Stresses",
+                [260.0, 240.0],
+                MeasureKind::FieldValues {
+                    field: "STRESS".into(),
+                    component: "MISES".into(),
+                    region: MeasureRegion::All,
+                },
+            ),
+            math(
+                8,
+                "Max Stress",
+                [500.0, 240.0],
+                MathOp::SeriesMax,
+                vec![0.0],
+            ),
+            plot(9, "Stress Histogram", [740.0, 200.0], PlotKind::Histogram),
+            ProjectNode::Preview(Preview {
+                id: 10,
+                name: "Peak Stress".into(),
+                position: [980.0, 240.0],
+            }),
+            ProjectNode::Preview(Preview {
+                id: 11,
+                name: "Deflection".into(),
+                position: [980.0, -60.0],
+            }),
+        ]);
+        let link = |source, item: &[&str], target, slot: &[&str]| Link {
+            source,
+            target,
+            item: item.iter().map(|s| s.to_string()).collect(),
+            slot: slot.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let results = ["Results", "Load"];
+        let value = ["Value", "Result"];
+        project.links = vec![
+            link(1, &["Mesh"], 2, &[]),
+            link(1, &results, 3, &["Measure"]),
+            link(1, &results, 4, &["Measure"]),
+            link(1, &results, 7, &["Measure"]),
+            link(4, &value, 5, &["Parameters", "a"]),
+            link(3, &value, 6, &["Parameters", "x"]),
+            link(5, &value, 6, &["Parameters", "y"]),
+            link(7, &value, 8, &["Parameters", "a"]),
+            link(7, &value, 9, &["Parameters", "values"]),
+            link(8, &value, 10, &["Parameters", "Input"]),
+            link(3, &value, 11, &["Parameters", "Input"]),
+        ];
+        save_project(std::path::Path::new(&path), &project).unwrap();
+    }
+
+    /// Writes a project of a rubber pad (Yeoh) on a fixed base, compressed by 30 % from
+    /// the top, for the user guide's screenshots of hyperelastic materials:
+    /// `PLX_RUBBER_DEMO=path cargo test rubber_demo -- --ignored`.
+    #[test]
+    #[ignore]
+    fn rubber_demo_project() {
+        let Some(path) = std::env::var_os("PLX_RUBBER_DEMO") else {
+            return;
+        };
+        let mut mesh = FeMesh::default();
+        let mm = 1e-3;
+        let [bottom, top] = add_block(
+            &mut mesh,
+            "Pad",
+            1,
+            [0.0, 0.0, 0.0],
+            [40.0 * mm, 40.0 * mm, 20.0 * mm],
+            [10, 10, 5],
+        );
+        let mut model = FeModel::default();
+        model.materials.push(Material {
+            name: "Rubber".into(),
+            density: Some(1100.0),
+            hyperelastic: Some(plx_model::Hyperelastic {
+                model: plx_model::HyperelasticModel::Yeoh,
+                constants: vec![0.55e6, -0.02e6, 0.004e6],
+                poisson: 0.49,
+                test_data: Vec::new(),
+            }),
+            ..Default::default()
+        });
+        // Test data from Ogden's classic fit to Treloar's natural rubber (in the CalculiX form).
+        if std::env::var_os("PLX_RUBBER_DEMO_DATA").is_some() {
+            let ogden = plx_model::Hyperelastic {
+                model: plx_model::HyperelasticModel::Ogden(3),
+                constants: vec![0.41e6, 1.3, 0.003e6, 5.0, 0.01e6, -2.0],
+                poisson: 0.49,
+                test_data: Vec::new(),
+            };
+            let hyper = model.materials[0].hyperelastic.as_mut().unwrap();
+            *hyper = hyper.with_model(plx_model::HyperelasticModel::Ogden(3));
+            for (mode, largest) in [
+                (plx_model::TestMode::Uniaxial, 6.0),
+                (plx_model::TestMode::Biaxial, 3.0),
+            ] {
+                for i in 1..=10 {
+                    let strain = largest * f64::from(i) / 10.0;
+                    hyper
+                        .test_data
+                        .push(plx_model::hyperelastic_fit::TestPoint {
+                            mode,
+                            strain,
+                            // Four digits, as measured.
+                            stress: (ogden.nominal_stress(mode, 1.0 + strain) / 1e3).round() * 1e3,
+                        });
+                }
+            }
+        }
+        model.sections.push(plx_model::Section {
+            name: "Solid_Section-1".into(),
+            material: model.materials.last().map(|m| m.id),
+            region: Region::Parts(vec!["Pad".into()]),
+            thickness: 1.0,
+            kind: plx_model::SectionKind::Solid,
+        });
+        let mut step = plx_model::Step::new_static("Step-1");
+        step.boundary_conditions.push(plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
+            distribution: None,
+            name: "Fixed-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(bottom),
+            kind: plx_model::BoundaryKind::displacement([Some(0.0); 6]),
+            amplitude: None,
+        });
+        step.boundary_conditions.push(plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
+            distribution: None,
+            name: "Pressed-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(top),
+            kind: plx_model::BoundaryKind::displacement([
+                Some(0.0),
+                Some(0.0),
+                Some(-6.0 * mm),
+                None,
+                None,
+                None,
+            ]),
+            amplitude: None,
+        });
+        if let plx_model::StepKind::Static(settings) = &mut step.kind {
+            settings.control.initial = Some(0.1);
+        }
+        model.steps.push(step);
+        let project = single(None, &mesh, &model, None);
+        save_project(std::path::Path::new(&path), &project).unwrap();
+        if let Some(inp) = std::env::var_os("PLX_RUBBER_DEMO_INP") {
+            std::fs::write(inp, crate::inp::write_inp(&mesh, &model, "").unwrap()).unwrap();
+        }
     }
 
     #[test]
@@ -1183,8 +1869,10 @@ mod tests {
         let mesh = read_inp(&root.join("testdata/block_c3d20r.inp"))
             .unwrap()
             .mesh;
+        let [rp, plane, interaction, region, detection] = [(); 5].map(|_| plx_model::Id::new());
         let model = FeModel {
             bolts: Vec::new(),
+            history_outputs: Vec::new(),
             cross_sections: Vec::new(),
             distributions: Vec::new(),
             properties: Default::default(),
@@ -1199,14 +1887,17 @@ mod tests {
                 Step::new_static("Step-1"),
                 Step {
                     contact_changes: vec![plx_model::ContactChange {
-                        region: "Region-1".into(),
+                        region,
                         active: Some(false),
                         friction: Some(0.3),
                     }],
                     ..Step::new_coupled("Step-2")
                 },
             ],
-            reference_points: vec![plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])],
+            reference_points: vec![plx_model::ReferencePoint {
+                id: rp,
+                ..plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])
+            }],
             coordinate_systems: vec![plx_model::CoordinateSystem {
                 kind: plx_model::CoordinateSystemKind::Cylindrical,
                 ..plx_model::CoordinateSystem::new("Coordinate_System-1")
@@ -1214,19 +1905,20 @@ mod tests {
             planes: vec![plx_model::Plane {
                 source: plx_model::PlaneSource::ThreePoints {
                     points: [
-                        plx_model::PointRef::ReferencePoint("RP-1".into()),
+                        plx_model::PointRef::ReferencePoint(rp),
                         plx_model::PointRef::Coordinates([1.0, 0.0, 0.0]),
                         plx_model::PointRef::Coordinates([0.0, 1.0, 0.0]),
                     ],
                 },
+                id: plane,
                 ..plx_model::Plane::new("Plane-1")
             }],
             result_planes: vec![plx_model::ResultPlane {
                 name: "Plane_Result-1".into(),
-                plane: "Plane-1".into(),
+                plane,
             }],
             result_paths: vec![plx_model::ResultPath {
-                start: plx_model::PointRef::ReferencePoint("RP-1".into()),
+                start: plx_model::PointRef::ReferencePoint(rp),
                 ..plx_model::ResultPath::new("Path-1")
             }],
             mesh_sets: vec![plx_model::MeshSet::new(
@@ -1237,6 +1929,15 @@ mod tests {
             element_types: vec![plx_model::PartElementType {
                 part: "EALL".into(),
                 type_name: "C3D20".into(),
+            }],
+            mesh_operations: vec![plx_model::MeshOperation {
+                name: "Transform-1".into(),
+                parts: vec!["EALL".into()],
+                kind: plx_model::MeshOperationKind::Transform(plx_mesh::MeshTransform::Rotate {
+                    point: [1.0, 2.0, 3.0],
+                    axis: [0.0, 0.0, 1.0],
+                    angle: 30.0,
+                }),
             }],
             exposed: vec![plx_model::Exposed {
                 key: 1,
@@ -1258,6 +1959,7 @@ mod tests {
                 ..plx_model::NodeTie::new("Node_Tie-1")
             }],
             surface_interactions: vec![SurfaceInteraction {
+                id: interaction,
                 name: "Surface_Interaction-1".into(),
                 properties: vec![
                     InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tabular(vec![
@@ -1270,8 +1972,7 @@ mod tests {
             contact_pairs: vec![ContactPair {
                 adjustment_size: Some(0.01),
                 clearance: None,
-                master_color: [255, 0, 0],
-                ..ContactPair::new("Contact_Pair-1", "Surface_Interaction-1")
+                ..ContactPair::new("Contact_Pair-1", Some(interaction))
             }],
             contact_regions: vec![plx_model::ContactRegion {
                 side_a: Region::Parts(vec!["A".into()]),
@@ -1282,18 +1983,32 @@ mod tests {
                     tolerance: Some(1e-4),
                     ..Default::default()
                 },
-                detected_by: Some("Contacts".into()),
+                detected_by: Some(detection),
                 edited: true,
+                id: region,
                 ..plx_model::ContactRegion::new(
                     "Frictional - A to B",
                     plx_model::ContactBehavior::Frictional { mu: 0.2 },
                 )
             }],
+            part_groups: vec![plx_model::PartGroup {
+                filter: plx_model::PartFilter {
+                    include: vec![plx_model::PartTerm::Pattern("A*".into())],
+                    exclude: vec![plx_model::PartTerm::Part("B".into())],
+                },
+                ..plx_model::PartGroup::new("Group A")
+            }],
             contact_detections: vec![plx_model::ContactDetection {
-                parts: vec!["A".into()],
+                scope: plx_model::PartFilter::parts(["A"]),
+                rules: vec![plx_model::ContactRule {
+                    side_a: plx_model::PartFilter::parts(["A"]),
+                    side_b: plx_model::PartFilter::all(),
+                    action: plx_model::RuleAction::Exclude,
+                }],
                 tolerance: Some(2e-4),
                 grouping: plx_model::DetectionGrouping::Graph,
                 behavior: plx_model::ContactBehavior::Rough,
+                id: detection,
                 ..plx_model::ContactDetection::new("Contacts")
             }],
             contact_defaults: plx_model::ContactDefaults {
@@ -1318,6 +2033,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("block.ndl");
         let geometry = Geometry {
+            compounds: Vec::new(),
             source: "block.step".into(),
             brep: "DBRep_DrawableShape\n\"quoted\" lines\n".into(),
             meshing: MeshingParameters::for_diagonal(100.0),
@@ -1446,6 +2162,7 @@ mod tests {
             position: [10.0, 200.0],
             units: plx_model::UnitSystem::MmTonSC,
             cross_sections: vec![plx_model::CrossSection {
+                id: plx_model::Id::new(),
                 name: "Tube".into(),
                 profile: plx_model::BeamProfile::Pipe {
                     radius: 0.02,
@@ -1524,7 +2241,7 @@ mod tests {
         let parameters = ParameterSet {
             id: 6,
             name: "Parameters".into(),
-            position: [0.0, 300.0],
+            position: [0.0, 250.0],
             units: plx_model::UnitSystem::MmTonSC,
             parameters: vec![plx_model::Parameter::new(
                 "length",
@@ -1564,6 +2281,7 @@ mod tests {
                     frequency: 12.5,
                     whirl: plx_model::campbell::Whirl::Backward,
                     unstable: false,
+                    nodal_diameter: None,
                 }],
             }],
             focus: Some([100.0, 200.0]),
@@ -1594,6 +2312,10 @@ mod tests {
             units: plx_model::UnitSystem::MmTonSC,
             operation: plx_model::MathOp::Multiply,
             kind: Some(plx_model::ValueKind::LENGTH),
+            operands: [
+                Some(plx_model::ValueKind::LENGTH),
+                Some(plx_model::ValueKind::Factor),
+            ],
             values: vec![0.1, 2.0],
         };
         saved.nodes.push(ProjectNode::Math(math.clone()));

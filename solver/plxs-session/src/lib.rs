@@ -28,8 +28,8 @@ use plxs_procedures::{ProcedureContext, run_step};
 pub use cache::StepCache;
 pub use check::{Check, check_analysis, check_input, format_diagnostic};
 pub use job::{
-    JobOptions, JobOutcome, KeptResults, format_event, run_analysis_keeping, run_input_file,
-    run_job, run_job_keeping,
+    JobOptions, JobOutcome, JobProfile, KeptResults, ProfileSink, format_event,
+    run_analysis_keeping, run_input_file, run_job, run_job_keeping,
 };
 pub use plxs_procedures::StepOutcome;
 pub use plxs_procedures::fields::unsupported_outputs;
@@ -83,6 +83,9 @@ pub struct Session {
     options: SessionOptions,
     /// [`restart::model_fingerprint`] of the model as given, before ties moved nodes.
     fingerprint: u64,
+    /// The state before an isolated group of steps ([`plxs_core::step::Isolation`]), which
+    /// returns after its last step.
+    kept: Option<(State, Option<f64>)>,
 }
 
 /// A pool of `threads` threads (0: all cores).
@@ -116,7 +119,7 @@ impl Session {
         let mut pending_warnings = constraints.warnings.clone();
         pending_warnings.extend(contact.warnings.iter().cloned());
         let (table, pattern) = pool.install(|| -> Result<_> {
-            let mut table = ElementTable::new(&model, 0.0)?;
+            let mut table = ElementTable::new_after_ties(&model, 0.0, &constraints.moved)?;
             // Nodes outside every element that constraints tie in (rigid body reference
             // and rotation nodes) keep their DOFs; the out-of-plane DOF of plane nodes
             // stays held.
@@ -163,11 +166,54 @@ impl Session {
             threads,
             options,
             fingerprint,
+            kept: None,
         })
     }
 
     /// Computes a step on the current state; events go to `progress`.
     pub fn run_step(&mut self, step: &Step, progress: &mut dyn Progress) -> Result<StepOutcome> {
+        if step.isolation.opens {
+            self.open_group(step.isolation.unloaded);
+        }
+        let outcome = self.run_one_step(step, progress);
+        if step.isolation.closes {
+            self.close_group();
+        }
+        outcome
+    }
+
+    /// Keeps the state for the end of an isolated group; with `unloaded` the group starts
+    /// from the unloaded model, at the time the steps before it reached.
+    fn open_group(&mut self, unloaded: bool) {
+        self.kept = Some((self.state.clone(), self.average_force));
+        if unloaded {
+            self.state = State {
+                steps_done: self.state.steps_done,
+                total_time: self.state.total_time,
+                displacements: plxs_core::state::NodalField::zeros(self.model.nodes.len(), 3),
+                stored_modes: self.state.stored_modes.clone(),
+                ..State::default()
+            };
+            self.average_force = None;
+            self.stiffness = None;
+            self.contact_pattern = None;
+        }
+    }
+
+    /// Returns to the state before the isolated group that ends here; the steps of the
+    /// group still count.
+    fn close_group(&mut self) {
+        if let Some((state, average_force)) = self.kept.take() {
+            let steps_done = self.state.steps_done;
+            self.state = state;
+            self.state.steps_done = steps_done;
+            self.average_force = average_force;
+            self.stiffness = None;
+            self.contact_pattern = None;
+        }
+    }
+
+    fn run_one_step(&mut self, step: &Step, progress: &mut dyn Progress) -> Result<StepOutcome> {
         let step_number = self.state.steps_done + 1;
         progress.event(ProgressEvent::Step { step: step_number });
         for warning in std::mem::take(&mut self.pending_warnings) {
@@ -192,6 +238,7 @@ impl Session {
             contact: std::mem::take(&mut self.contact),
             contact_pattern: self.contact_pattern.take(),
             profile: std::mem::take(&mut self.profile),
+            segment: None,
         };
         // The procedure runs on the session's pool in a thread of its own; events come
         // through a channel so that the caller's (not necessarily `Send`) progress sink
@@ -269,12 +316,26 @@ impl Session {
         &self.results
     }
 
+    pub fn results_mut(&mut self) -> &mut Results {
+        &mut self.results
+    }
+
     /// Time per phase of the steps so far, with the symbolic analyses the direct solver
     /// reused.
     pub fn profile(&self) -> plxs_procedures::profile::Profile {
         let mut profile = self.profile.clone();
         profile.analyses_reused = self.solver.analyses_reused();
         profile
+    }
+
+    /// Threads the session computes on.
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
+
+    /// Degrees of freedom of the model, before constraints are eliminated.
+    pub fn degrees_of_freedom(&self) -> usize {
+        self.pattern.dimension()
     }
 
     /// Rows of the `.sta` file so far.
@@ -316,7 +377,7 @@ impl Session {
             ));
         }
         let mut session = Session::new(model, options)?;
-        check_layout(&session.model, &snapshot.state)?;
+        check_layout(&session.model, &session.table, &snapshot.state)?;
         session.state = snapshot.state;
         session.average_force = snapshot.average_force;
         Ok(session)
@@ -351,9 +412,12 @@ fn read_stored_modes(
     Ok(modes)
 }
 
-fn check_layout(model: &Model, state: &State) -> Result<()> {
+/// The fields at integration points have an entry for every continuum element of the
+/// element table only: springs, gaps and general beams (U1) have no integration points
+/// there.
+fn check_layout(model: &Model, table: &ElementTable, state: &State) -> Result<()> {
     let nodes = model.nodes.len();
-    let elements = model.elements.len();
+    let elements = table.layout.offsets.len().saturating_sub(1);
     let nodal = |name: &str, field: Option<&plxs_core::state::NodalField>| -> Result<()> {
         match field {
             Some(f) if f.per_node == 0 || f.values.len() != nodes * f.per_node => {
@@ -376,7 +440,7 @@ fn check_layout(model: &Model, state: &State) -> Result<()> {
     ] {
         if !field.offsets.is_empty() && field.offsets.len() != elements + 1 {
             return Err(Error::Unsupported(format!(
-                "the restart state does not fit the model: {name} of {} elements, the model has {elements}",
+                "the restart state does not fit the model: {name} of {} elements, the model has {elements} with integration points",
                 field.offsets.len() - 1
             )));
         }

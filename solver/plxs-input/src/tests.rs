@@ -415,6 +415,78 @@ fn equations_and_generated_sets_are_read() {
 }
 
 #[test]
+fn joints_read_and_render_back() {
+    let text = cube(
+        "*Node\n9, 0.5, 0.5, 1\n10, 0.5, 0.5, 1\n*Joint, Name=Hinge\n9, 10, 0, 0\n\
+0.5, 0.5, 1, 0, 2, 0, -1, 0, 0\n1, 2, 3, 4, 5\n\
+*Step\n*Static\n*Boundary\nFIX, 1, 3\n*End step\n",
+    );
+    let analysis = read(&text).unwrap();
+    let joint = &analysis.model.constraints.joints[0];
+    assert_eq!(joint.name, "HINGE");
+    assert_eq!(joint.ends, [Some([9, 10]), None]);
+    // The directions are normalized; z follows from x and y.
+    assert_eq!(
+        joint.axes,
+        [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+    );
+    assert_eq!(joint.fixed, [true, true, true, true, true, false]);
+    let again = read(&super::render(&analysis)).unwrap();
+    assert_eq!(
+        again.model.constraints.joints,
+        analysis.model.constraints.joints
+    );
+    let parallel = text.replace("-1, 0, 0\n1, 2", "0, 3, 0\n1, 2");
+    assert!(read(&parallel).is_err());
+}
+
+#[test]
+fn the_stabilization_of_springs_reads_and_renders_back() {
+    use plxs_core::section::SectionKind;
+    let text = cube(
+        "*Element, Type=SPRING1, Elset=WEAK\n2, 5\n\
+*Spring, Elset=WEAK, Stabilize=1000\n1\n0.5\n\
+*Step\n*Static\n*Boundary\nFIX, 1, 3\n*End step\n",
+    );
+    let stabilize = |analysis: &plxs_core::Analysis| {
+        (analysis.model.sections.iter())
+            .find_map(|s| match &s.kind {
+                SectionKind::Spring(spring) => Some(spring.stabilize),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let analysis = read(&text).unwrap();
+    assert_eq!(stabilize(&analysis), 1000.0);
+    let rendered = super::render(&analysis);
+    assert!(rendered.contains(", Stabilize=1000"), "{rendered}");
+    assert_eq!(stabilize(&read(&rendered).unwrap()), 1000.0);
+    let without = text.replace(", Stabilize=1000", "");
+    assert_eq!(stabilize(&read(&without).unwrap()), 0.0);
+    assert!(read(&text.replace("Stabilize=1000", "Stabilize=-1")).is_err());
+}
+
+#[test]
+fn event_frames_of_a_dynamic_step_read_and_render_back() {
+    let text = cube("*Step\n*Dynamic, Direct, Events\n0.001, 0.1\n*End step\n");
+    let analysis = read(&text).unwrap();
+    let Procedure::Dynamic(dynamic) = &analysis.steps[0].procedure else {
+        panic!("not a dynamic step");
+    };
+    assert!(dynamic.event_frames);
+    let rendered = super::render(&analysis);
+    assert!(
+        rendered.contains("*Dynamic, Direct, Events\n"),
+        "{rendered}"
+    );
+    let plain = read(&cube("*Step\n*Dynamic, Direct\n0.001, 0.1\n*End step\n")).unwrap();
+    let Procedure::Dynamic(dynamic) = &plain.steps[0].procedure else {
+        panic!("not a dynamic step");
+    };
+    assert!(!dynamic.event_frames);
+}
+
+#[test]
 fn a_no_analysis_step_reads_the_model_only() {
     let analysis = read(&cube("*Step\n*No analysis\n*End step\n")).unwrap();
     assert!(matches!(analysis.steps[0].procedure, Procedure::NoAnalysis));
@@ -514,4 +586,104 @@ fn numbers_render_exactly_and_short() {
     }
     assert_eq!(number(210000.0), "210000");
     assert_eq!(number(7.85e-9), "7.85e-9");
+}
+
+#[test]
+fn hyperelastic_models_are_read_and_rendered_back() {
+    use plxs_core::material::HyperelasticModel as H;
+    for (card, model, count) in [
+        ("*Hyperelastic, Neo Hooke\n0.5, 0.01\n", H::NeoHooke, 2),
+        (
+            "*Hyperelastic, Mooney-Rivlin\n0.4, 0.1, 0.01, 20\n",
+            H::MooneyRivlin,
+            3,
+        ),
+        (
+            "*Hyperelastic, Yeoh\n0.5, -0.01, 0.001, 0.01, 0, 0\n",
+            H::Yeoh,
+            6,
+        ),
+        (
+            "*Hyperelastic, Polynomial, N=2\n0.4, 0.1, 0.01, 0, 0.002, 0.01, 0\n",
+            H::Polynomial(2),
+            7,
+        ),
+        (
+            "*Hyperelastic, Ogden, N=3\n0.6, 1.3, 0.002, 5, -0.01, -2, 0.01, 0\n0\n",
+            H::Ogden(3),
+            9,
+        ),
+        (
+            "*Hyperelastic, Arruda-Boyce\n0.5, 7, 0.01\n",
+            H::ArrudaBoyce,
+            3,
+        ),
+    ] {
+        let text = cube("*Step\n*Static\n*Boundary\nFIX, 1, 3\n*End step\n")
+            .replace("*Elastic\n210000, 0.3\n", card);
+        let analysis = read(&text).unwrap_or_else(|e| panic!("{card}: {e:?}"));
+        let hyper = analysis.model.materials[0].hyperelastic.clone().unwrap();
+        assert_eq!(hyper.model, model, "{card}");
+        assert_eq!(hyper.constants.len(), count, "{card}");
+        let again = read(&super::render(&analysis)).unwrap();
+        assert_eq!(again.model.materials, analysis.model.materials, "{card}");
+    }
+    let missing = cube("*Step\n*Static\n*End step\n")
+        .replace("*Elastic\n210000, 0.3\n", "*Hyperelastic\n0.5, 0.01\n");
+    assert!(read(&missing).is_err());
+    let temperatures = cube("*Step\n*Static\n*End step\n").replace(
+        "*Elastic\n210000, 0.3\n",
+        "*Hyperelastic, Neo Hooke\n0.5, 0.01, 20\n0.4, 0.01, 80\n",
+    );
+    assert!(read(&temperatures).is_err());
+}
+
+/// Signal amplitudes read with their parameters, render back the same and reject what the
+/// solver cannot evaluate.
+#[test]
+fn signal_amplitudes_read_and_render_back() {
+    use plxs_core::amplitude::Signal;
+    let step = "*Amplitude, Name=Kick, Shape=Pulse\n0.1, 0.002\n\
+*Amplitude, Name=Shake, Shape=Sine\n0, 1, 50, 90\n\
+*Amplitude, Name=Sweep, Shape=Chirp, Sweep=Log\n0.2, 0.8, 10, 1000\n\
+*Step\n*Dynamic, Direct\n0.001, 1\n*Boundary\nFIX, 1, 3, 0\n*Cload\n5, 3, -1, , SWEEP\n*End step\n";
+    let analysis = read(&cube(step)).unwrap();
+    let signal = |name: &str| analysis.model.amplitude(name).unwrap().signal.clone();
+    assert_eq!(
+        signal("KICK"),
+        Some(Signal::Pulse {
+            start: 0.1,
+            width: 0.002
+        })
+    );
+    let Some(Signal::Sine { phase, .. }) = signal("SHAKE") else {
+        panic!("{:?}", signal("SHAKE"))
+    };
+    assert!((phase - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    assert!((analysis.model.amplitude("SHAKE").unwrap().value(0.0) - 1.0).abs() < 1e-12);
+    assert!(matches!(
+        signal("SWEEP"),
+        Some(Signal::Chirp {
+            logarithmic: true,
+            ..
+        })
+    ));
+    let again = read(&super::render(&analysis)).unwrap();
+    for name in ["KICK", "SHAKE", "SWEEP"] {
+        let a = signal(name).unwrap();
+        let b = again.model.amplitude(name).unwrap().signal.clone().unwrap();
+        for t in [0.0, 0.1, 0.101, 0.3, 0.55, 0.9] {
+            assert!((a.value(t) - b.value(t)).abs() < 1e-9, "{name} at {t}");
+        }
+    }
+    for wrong in [
+        "*Amplitude, Name=A, Shape=Pulse\n0.1, 0\n",
+        "*Amplitude, Name=A, Shape=Sine\n0, 1, 50\n",
+        "*Amplitude, Name=A, Shape=Chirp, Sweep=Log\n0, 1, 0, 100\n",
+        "*Amplitude, Name=A, Shape=Sine\n1, 0.5, 50, 0\n",
+        "*Amplitude, Name=A, Shape=Square\n0, 1\n",
+        "*Amplitude, Name=A, Sweep=Log\n0, 0, 1, 1\n",
+    ] {
+        assert!(read(&cube(wrong)).is_err(), "{wrong}");
+    }
 }

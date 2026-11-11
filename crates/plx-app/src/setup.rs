@@ -12,15 +12,16 @@ use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
     AXIS_LABELS, Amplitude, BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition,
     BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, CrossSection,
-    CyclicSymmetry, DefinedField, DefinedFieldKind, Displacement, Distribution, DynamicProcedure,
-    DynamicStep, Elastic, FeModel, Field, FieldOutput, Formulation, FrequencyStep, GLOBAL,
-    Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
+    CyclicSymmetry, Damping, DampingRange, DefinedField, DefinedFieldKind, Displacement,
+    Distribution, DynamicMethod, DynamicStep, Elastic, FeModel, Field, FieldOutput, Formulation,
+    FrequencyStep, GravityDirection, Hardening, HeatTransferStep, HistoryKind, HistoryOutput,
+    Hyperelastic, HyperelasticModel, Id, IncrementControl, IncrementSize, InitialCondition,
     InitialConditionKind, ItemRef, LinearSolverChoice, Load, LoadKind, Material, MeshSet,
-    ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie, OutputDimension,
-    OutputKind, PlasticPoint, Quantity, Region, RemoteBehavior, RemoteForce, Section, SectionKind,
-    SensitivityStep, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
-    SurfaceInteraction, SymmetryError, Tie, UnitSystem, ViscoStep, Wheel, next_name,
-    symmetry_plane,
+    ModalDamping, ModeDamping, ModelSpace, MovingLoad, NodeTie, NumericalDamping, OutputDimension,
+    OutputKind, PlasticPoint, Quantity, RayleighDamping, Region, RemoteBehavior, RemoteForce,
+    STANDARD_GRAVITY, Section, SectionKind, SensitivityStep, SetKind, StaticStep,
+    SteadyStateDynamicsStep, Step, StepKind, StepLimit, SurfaceInteraction, SymmetryError,
+    TestMode, Tie, TimeStep, UnitSystem, ViscoStep, Wheel, next_name, symmetry_plane,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
@@ -74,6 +75,8 @@ pub enum NewItem {
     ContactRegion,
     /// A search for contact regions, kept to run it again.
     ContactDetection,
+    /// A named set of parts chosen by a filter.
+    PartGroup,
     /// A bolt preloaded across a cut through its shank.
     Bolt,
     ContactPair,
@@ -113,6 +116,9 @@ pub(crate) enum Source {
     /// The point of a remote displacement boundary condition, offered among the reference
     /// points.
     RemotePoint,
+    /// Fixed ground, the end of a spring that has no region. A draft with it stands for no
+    /// region: its [`RegionDraft::region`] is empty, callers ask [`RegionDraft::is_world`].
+    World,
 }
 
 impl Source {
@@ -124,6 +130,7 @@ impl Source {
             Source::ElementSet => "Element Set",
             Source::Surface => "Surface",
             Source::ReferencePoint | Source::RemotePoint => "Reference Point",
+            Source::World => "World",
         }
     }
 }
@@ -144,6 +151,8 @@ pub(crate) struct RegionDraft {
     geometry: History<CadEntity>,
     parts: PartPicks,
     set: String,
+    /// The reference point, or the remote displacement or force whose point the region is.
+    point: Option<Id>,
 }
 
 pub(crate) const NODE_SOURCES: &[Source] = &[Source::Selection, Source::NodeSet, Source::Surface];
@@ -158,6 +167,16 @@ pub(crate) const SUPPORT_SOURCES: &[Source] = &[
 /// Nodes, or the point of a rigid body or a remote displacement: for nodal history outputs,
 /// which print the forces and moments of a point too.
 pub(crate) const HISTORY_NODE_SOURCES: &[Source] = &[
+    Source::Selection,
+    Source::NodeSet,
+    Source::Surface,
+    Source::ReferencePoint,
+    Source::RemotePoint,
+];
+/// An end of a spring: ground, nodes, or a point of a rigid body, a displacement or a
+/// remote force.
+pub(crate) const SPRING_END_SOURCES: &[Source] = &[
+    Source::World,
     Source::Selection,
     Source::NodeSet,
     Source::Surface,
@@ -191,6 +210,7 @@ impl RegionDraft {
             geometry: History::default(),
             parts: PartPicks::default(),
             set: String::new(),
+            point: None,
         }
     }
 
@@ -230,19 +250,21 @@ impl RegionDraft {
             Region::Geometry(entities) => {
                 draft.geometry = History::from_items(entities.iter().copied());
             }
-            Region::NodeSet(set)
-            | Region::ElementSet(set)
-            | Region::Surface(set)
-            | Region::ReferencePoint(set)
-            | Region::RemotePoint(set) => {
+            Region::NodeSet(set) | Region::ElementSet(set) | Region::Surface(set) => {
                 draft.source = match region {
                     Region::NodeSet(_) => Source::NodeSet,
                     Region::ElementSet(_) => Source::ElementSet,
-                    Region::ReferencePoint(_) => Source::ReferencePoint,
-                    Region::RemotePoint(_) => Source::RemotePoint,
                     _ => Source::Surface,
                 };
                 draft.set = set.clone();
+            }
+            Region::ReferencePoint(point) => {
+                draft.source = Source::ReferencePoint;
+                draft.point = Some(*point);
+            }
+            Region::RemotePoint(point) => {
+                draft.source = Source::RemotePoint;
+                draft.point = Some(*point);
             }
         }
         draft
@@ -299,9 +321,25 @@ impl RegionDraft {
             Source::NodeSet => Region::NodeSet(self.set.clone()),
             Source::ElementSet => Region::ElementSet(self.set.clone()),
             Source::Surface => Region::Surface(self.set.clone()),
-            Source::ReferencePoint => Region::ReferencePoint(self.set.clone()),
-            Source::RemotePoint => Region::RemotePoint(self.set.clone()),
+            // Without a point chosen the region is empty, see `is_empty`.
+            Source::ReferencePoint => {
+                (self.point).map_or(Region::Nodes(Vec::new()), Region::ReferencePoint)
+            }
+            Source::RemotePoint => {
+                (self.point).map_or(Region::Nodes(Vec::new()), Region::RemotePoint)
+            }
+            Source::World => Region::Nodes(Vec::new()),
         }
+    }
+
+    /// Fixed ground, the end of a spring.
+    pub(crate) fn is_world(&self) -> bool {
+        self.source == Source::World
+    }
+
+    /// A reference point or the point of a displacement or remote force.
+    pub(crate) fn is_point(&self) -> bool {
+        matches!(self.source, Source::ReferencePoint | Source::RemotePoint)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -313,6 +351,8 @@ impl RegionDraft {
                 Target::Lines => self.edges.items().is_empty(),
             },
             Source::Parts => self.parts.is_empty(),
+            Source::ReferencePoint | Source::RemotePoint => self.point.is_none(),
+            Source::World => false,
             _ => self.set.is_empty(),
         }
     }
@@ -577,6 +617,9 @@ impl RegionDraft {
                     }
                 });
             wanted |= self.source != source;
+            if self.source != source {
+                self.prefill(&model.fe, &model.mesh);
+            }
             match self.source {
                 Source::Selection => {
                     ui.horizontal(|ui| {
@@ -604,6 +647,9 @@ impl RegionDraft {
                 }
                 Source::Parts => wanted |= self.parts.ui(ui, active),
                 Source::ReferencePoint | Source::RemotePoint => self.point_ui(ui, model),
+                Source::World => {
+                    ui.weak("Fixed ground.");
+                }
                 Source::NodeSet | Source::ElementSet | Source::Surface => {
                     let names: Vec<&String> = match self.source {
                         Source::NodeSet => model.mesh.node_sets.keys().collect(),
@@ -627,14 +673,48 @@ impl RegionDraft {
         wanted
     }
 
+    /// Chooses the first item of the kind just selected as the source, so that a model with
+    /// a single reference point or set needs no click on the combo box.
+    fn prefill(&mut self, fe: &FeModel, mesh: &FeMesh) {
+        match self.source {
+            Source::ReferencePoint => {
+                let valid = self
+                    .point
+                    .is_some_and(|id| fe.reference_point(id).is_some());
+                if !valid {
+                    self.point = fe.reference_points.first().map(|p| p.id);
+                    // Without reference points the first point of a remote displacement
+                    // or force is offered in their place.
+                    if self.point.is_none() && self.sources.contains(&Source::RemotePoint) {
+                        let (remotes, forces) = fe.remote_points(mesh);
+                        if let Some(&(id, _)) = remotes.first().or(forces.first()) {
+                            (self.source, self.point) = (Source::RemotePoint, Some(id));
+                        }
+                    }
+                }
+            }
+            Source::NodeSet | Source::ElementSet | Source::Surface => {
+                let mut names: Vec<&String> = match self.source {
+                    Source::NodeSet => mesh.node_sets.keys().collect(),
+                    Source::ElementSet => mesh.element_sets.keys().collect(),
+                    _ => mesh.surfaces.keys().collect(),
+                };
+                if !names.iter().any(|n| **n == self.set) {
+                    self.set = names.drain(..).next().cloned().unwrap_or_default();
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// The reference points, and where the region takes them the points of the remote
-    /// displacements, by name.
+    /// displacements and forces, listed by name and kept by id.
     fn point_ui(&mut self, ui: &mut Ui, model: &Model) {
-        let points: Vec<&str> = (model.fe.reference_points.iter())
-            .map(|p| p.name.as_str())
+        let points: Vec<(Id, &str)> = (model.fe.reference_points.iter())
+            .map(|p| (p.id, p.name.as_str()))
             .collect();
         let (remotes, forces) = if self.sources.contains(&Source::RemotePoint) {
-            model.fe.remote_point_names(&model.mesh)
+            model.fe.remote_points(&model.mesh)
         } else {
             Default::default()
         };
@@ -646,15 +726,21 @@ impl RegionDraft {
                 "The model has no reference points (Features)."
             });
         }
-        let (mut source, mut set) = (self.source, self.set.clone());
+        let selected = match (self.source, self.point) {
+            (Source::ReferencePoint, Some(id)) => (model.fe.reference_point(id))
+                .map_or("(missing reference point)".to_string(), |p| p.name.clone()),
+            (Source::RemotePoint, Some(id)) => model.fe.name_or_missing(Some(id)),
+            _ => String::new(),
+        };
+        let (mut source, mut point) = (self.source, self.point);
         egui::ComboBox::from_id_salt("region set")
-            .selected_text(self.set.as_str())
+            .selected_text(selected)
             .width(crate::dock::fit_width(ui, 200.0))
             .show_ui(ui, |ui| {
-                for &name in &points {
-                    let chosen = source == Source::ReferencePoint && set == name;
+                for &(id, name) in &points {
+                    let chosen = source == Source::ReferencePoint && point == Some(id);
                     if ui.selectable_label(chosen, name).clicked() {
-                        (source, set) = (Source::ReferencePoint, name.to_string());
+                        (source, point) = (Source::ReferencePoint, Some(id));
                     }
                 }
                 if !remotes.is_empty() {
@@ -664,10 +750,10 @@ impl RegionDraft {
                     ui.weak("Displacements on a point");
                 }
                 let any_remotes = !remotes.is_empty();
-                for name in remotes {
-                    let chosen = source == Source::RemotePoint && set == name;
+                for (id, name) in remotes {
+                    let chosen = source == Source::RemotePoint && point == Some(id);
                     if ui.selectable_label(chosen, name).clicked() {
-                        (source, set) = (Source::RemotePoint, name.to_string());
+                        (source, point) = (Source::RemotePoint, Some(id));
                     }
                 }
                 if !forces.is_empty() {
@@ -676,14 +762,14 @@ impl RegionDraft {
                     }
                     ui.weak("Remote forces");
                 }
-                for name in forces {
-                    let chosen = source == Source::RemotePoint && set == name;
+                for (id, name) in forces {
+                    let chosen = source == Source::RemotePoint && point == Some(id);
                     if ui.selectable_label(chosen, name).clicked() {
-                        (source, set) = (Source::RemotePoint, name.to_string());
+                        (source, point) = (Source::RemotePoint, Some(id));
                     }
                 }
             });
-        (self.source, self.set) = (source, set);
+        (self.source, self.point) = (source, point);
     }
 
     pub(crate) fn highlight(&self, model: &Model) -> Highlight {
@@ -757,6 +843,15 @@ pub(crate) fn contact_target(fe: &FeModel) -> Target {
 }
 
 /// Pressure and surface traction act on element faces, in 2D models on their edges.
+/// What the region of a step of `kind` picks: the surface nodes of a design region, the
+/// rotating parts or element sets of a complex frequency step.
+fn step_region_picks(kind: &StepKind, fe: &FeModel) -> (&'static [Source], Target) {
+    match kind {
+        StepKind::ComplexFrequency(_) => (ELEMENT_SOURCES, Target::Faces),
+        _ => (NODE_SOURCES, face_target(fe)),
+    }
+}
+
 pub(crate) fn face_target(fe: &FeModel) -> Target {
     if fe.properties.space.is_2d() {
         Target::Edges
@@ -765,15 +860,39 @@ pub(crate) fn face_target(fe: &FeModel) -> Target {
     }
 }
 
-/// The components of a force; 2D models have none along z.
-fn force_rows(ui: &mut Ui, force: &mut [f64; 3], two_d: bool, units: UnitSystem) {
-    let count = if two_d { 2 } else { 3 };
-    let labels = ["F1", "F2", "F3"].into_iter().zip(Field::VECTOR);
-    for (value, (label, field)) in force.iter_mut().zip(labels).take(count) {
+/// Rows of the components of a force, moment or pressure, each with its table button.
+#[allow(clippy::too_many_arguments)]
+fn component_rows(
+    ui: &mut Ui,
+    values: &mut [f64],
+    tables: &mut [Option<plx_model::ValueTable>; 3],
+    labels: &[&str],
+    fields: &[Field],
+    quantity: Quantity,
+    load_name: &str,
+    period: f64,
+    units: UnitSystem,
+) {
+    for (c, value) in values.iter_mut().enumerate() {
+        let (label, field) = (labels[c], fields[c]);
         ui.label(label);
-        expose::field(ui, field, |ui| {
-            ui.add(numeric::quantity(value, units, Quantity::Force).speed(1.0))
-        });
+        let start = *value;
+        crate::value_table::value_with_table(
+            ui,
+            egui::Id::new(("load value table", c)),
+            &mut tables[c],
+            &format!("{label} of {load_name}"),
+            label,
+            quantity,
+            units,
+            start,
+            period,
+            |ui| {
+                expose::field(ui, field, |ui| {
+                    ui.add(numeric::quantity(value, units, quantity).speed(1.0))
+                })
+            },
+        );
         ui.end_row();
     }
 }
@@ -872,16 +991,7 @@ fn behavior_label(behavior: RemoteBehavior) -> &'static str {
 /// and the wheels relative to the vehicle's reference point.
 fn moving_rows(ui: &mut Ui, moving: &mut MovingLoad, fe: &FeModel, two_d: bool, units: UnitSystem) {
     ui.label("Coordinate system");
-    egui::ComboBox::from_id_salt("moving load system")
-        .selected_text(moving.system.as_str())
-        .width(crate::dock::fit_width(ui, 200.0))
-        .show_ui(ui, |ui| {
-            let names = std::iter::once(GLOBAL)
-                .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()));
-            for name in names {
-                ui.selectable_value(&mut moving.system, name.to_string(), name);
-            }
-        });
+    crate::pick_item::system_combo(ui, "moving load system", &mut moving.system, fe, 200.0);
     ui.end_row();
     let axes = if two_d { 2 } else { 3 };
     let axis_row = |ui: &mut Ui, label: &str, axis: &mut usize, hover: &str| {
@@ -1138,8 +1248,8 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
         // The point is drawn as a feature; the body it drives is the constraint's region.
         Region::ReferencePoint(_) => {}
         // The point of a remote displacement exists only in the input file; its region shows.
-        Region::RemotePoint(name) => {
-            if let Some((region, _)) = model.fe.remote_point_named(&model.mesh, name) {
+        Region::RemotePoint(id) => {
+            if let Some((region, _)) = model.fe.remote_point_of(&model.mesh, *id) {
                 return region_highlight(model, region);
             }
         }
@@ -1184,12 +1294,12 @@ enum Draft {
     /// A contact region with side A as master and side B as slave of the drafts.
     ContactRegion(plx_model::ContactRegion, MasterSlave, RegionView),
     ContactDetection(plx_model::ContactDetection),
-    /// A bolt with side A as master and side B as slave of the drafts, and its action in
-    /// each step (`None` automatic).
+    PartGroup(plx_model::PartGroup),
+    /// A bolt with the sides of its cut and its thread, and what it does in each step.
     Bolt(
         plx_model::Bolt,
-        MasterSlave,
-        Vec<Option<plx_model::BoltAction>>,
+        crate::bolts::BoltSides,
+        Vec<crate::bolts::BoltStep>,
         crate::bolts::BoltView,
     ),
     /// The settings the contact regions share.
@@ -1215,12 +1325,12 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
         | Draft::MeshSet(_, r, _) => Some(r),
         Draft::ContactPair(_, regions)
         | Draft::Tie(_, regions)
-        | Draft::ContactRegion(_, regions, _)
-        | Draft::Bolt(_, regions, ..) => Some(regions.current()),
+        | Draft::ContactRegion(_, regions, _) => Some(regions.current()),
+        Draft::Bolt(_, sides, ..) => Some(sides.current()),
         Draft::Constraint(c) => Some(c.region()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
-        Draft::Step(step, r) if step.kind.design_region().is_some() => Some(r),
+        Draft::Step(step, r) if step.kind.region().is_some() => Some(r),
         _ => None,
     }
 }
@@ -1235,12 +1345,12 @@ fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
         | Draft::MeshSet(_, r, _) => Some(r),
         Draft::ContactPair(_, regions)
         | Draft::Tie(_, regions)
-        | Draft::ContactRegion(_, regions, _)
-        | Draft::Bolt(_, regions, ..) => Some(regions.current_mut()),
+        | Draft::ContactRegion(_, regions, _) => Some(regions.current_mut()),
+        Draft::Bolt(_, sides, ..) => Some(sides.current_mut()),
         Draft::Constraint(c) => Some(c.region_mut()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
-        Draft::Step(step, r) if step.kind.design_region().is_some() => Some(r),
+        Draft::Step(step, r) if step.kind.region().is_some() => Some(r),
         _ => None,
     }
 }
@@ -1298,15 +1408,22 @@ const RADIATION: &str = "Radiation";
 const GRAVITY: &str = "Gravity";
 const CENTRIFUGAL: &str = "Centrifugal_Load";
 const MOVING: &str = "Moving_Load";
+const EXCITATION: &str = "Excitation";
 
 /// Whether the boundary condition dialog offers a preview of the motion: a prescribed
 /// displacement that follows an amplitude of the model.
 fn previews_motion(bc: &BoundaryCondition, fe: &FeModel) -> bool {
-    matches!(bc.kind, BoundaryKind::Displacement(_))
-        && bc
-            .amplitude
-            .as_deref()
-            .is_some_and(|a| fe.amplitude(a).is_some())
+    motion_of(bc, fe).is_some()
+}
+
+/// The motion a displacement boundary condition prescribes over time, if it follows an
+/// amplitude or tables.
+fn motion_of(bc: &BoundaryCondition, fe: &FeModel) -> Option<crate::motion_preview::Motion> {
+    let BoundaryKind::Displacement(displacement) = &bc.kind else {
+        return None;
+    };
+    let amplitude = bc.amplitude.and_then(|a| fe.amplitude(a));
+    crate::motion_preview::Motion::of(displacement, amplitude)
 }
 
 /// The boundary condition kinds of the dialog: label, default name and the kind.
@@ -1330,9 +1447,19 @@ fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 4] {
         (
             "Symmetry",
             SYMMETRY,
-            BoundaryKind::Symmetry { normal: None },
+            BoundaryKind::Symmetry {
+                normal: None,
+                halve_beams: true,
+            },
         ),
     ]
+}
+
+/// Whether the model offers a boundary condition kind for new ones: a submodel boundary
+/// condition only in a model defined as a submodel in its properties.
+fn offers_boundary(fe: &FeModel, kind: &BoundaryKind) -> bool {
+    !matches!(kind, BoundaryKind::Submodel { .. })
+        || fe.properties.kind == plx_model::ModelKind::Submodel
 }
 
 fn boundary_kind_name(kind: &BoundaryKind) -> &'static str {
@@ -1384,19 +1511,48 @@ fn displacement_rows(
     }
 }
 
-/// The coordinate system of a remote displacement or remote force.
-fn system_row(ui: &mut Ui, system: &mut String, fe: &FeModel) {
+/// The coordinate system the components of a force, moment or excitation are given in,
+/// and whether the load follows the deformation.
+fn direction_rows(
+    ui: &mut Ui,
+    system: &mut Option<Id>,
+    follower: &mut bool,
+    fe: &FeModel,
+    nlgeom: bool,
+) {
     ui.label("Coordinate system");
-    egui::ComboBox::from_id_salt("remote system")
-        .selected_text(system.as_str())
-        .width(crate::dock::fit_width(ui, 200.0))
-        .show_ui(ui, |ui| {
-            let names = std::iter::once(GLOBAL)
-                .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()));
-            for name in names {
-                ui.selectable_value(system, name.to_string(), name);
-            }
+    crate::pick_item::system_combo(ui, "load system", system, fe, 200.0);
+    ui.end_row();
+    let cylindrical = (system.and_then(|id| fe.coordinate_system(id)))
+        .is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
+    if cylindrical {
+        ui.label("");
+        ui.weak("Components 1, 2, 3 are radial, tangential and axial at every node.");
+        ui.end_row();
+    }
+    ui.label("");
+    ui.checkbox(follower, "Follow the deformation")
+        .on_hover_text(
+            "A follower load: under large deformations its direction turns with the region, \
+         by the rotation that fits the motion of its nodes best (at a reference point with \
+         the rigid body, at a single beam or shell node with its rotation).",
+        );
+    ui.end_row();
+    if *follower {
+        ui.label("");
+        ui.weak(if nlgeom {
+            "The direction turns with the region; the size stays."
+        } else {
+            "Takes effect with large deformations (Nlgeom) only."
         });
+        ui.end_row();
+    }
+}
+
+/// The coordinate system of a remote displacement or remote force.
+pub(crate) fn system_row(ui: &mut Ui, system: &mut Option<Id>, fe: &FeModel) {
+    ui.label("Coordinate system");
+    crate::pick_item::system_combo(ui, "remote system", system, fe, 200.0);
     ui.end_row();
 }
 
@@ -1410,12 +1566,12 @@ fn point_rows(
     units: UnitSystem,
 ) {
     let fe = &model.fe;
-    let system = fe.coordinate_system_or_global(&remote.system);
+    let system = fe.coordinate_system_or_global(remote.system);
     let cylindrical = system
         .as_ref()
         .is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
     ui.label("Location");
-    ui.horizontal_wrapped(|ui| {
+    crate::layout::wrapped_row(ui, |ui| {
         if ui.radio(remote.location.is_none(), "Centroid").clicked() {
             remote.location = None;
         }
@@ -1568,12 +1724,19 @@ fn formulation_hint(
 }
 
 /// Rows of a symmetry boundary condition: where the normal of the plane comes from, the
-/// plane found for the region and a warning when the region is no plane.
-fn symmetry_rows(ui: &mut egui::Ui, normal: &mut Option<[f64; 3]>, region: &Region, model: &Model) {
+/// plane found for the region, a warning when the region is no plane and whether beams on
+/// the plane get half their section.
+fn symmetry_rows(
+    ui: &mut egui::Ui,
+    normal: &mut Option<[f64; 3]>,
+    halve_beams: &mut bool,
+    region: &Region,
+    model: &Model,
+) {
     let space = model.fe.properties.space;
     let plane = symmetry_plane(&model.mesh, region, space, *normal);
     ui.label("Plane normal");
-    ui.horizontal_wrapped(|ui| {
+    crate::layout::wrapped_row(ui, |ui| {
         if ui.radio(normal.is_none(), "From selection").clicked() {
             *normal = None;
         }
@@ -1616,14 +1779,43 @@ fn symmetry_rows(ui: &mut egui::Ui, normal: &mut Option<[f64; 3]>, region: &Regi
         ui.end_row();
     }
     ui.label("");
-    ui.weak("Holds the displacement normal to the plane and,");
+    let text = "Holds the displacement normal to the plane and, for beams and shells, the \
+                rotations about the in-plane axes. Select the faces in the cut plane, and \
+                beams lying on it.";
+    ui.add(egui::Label::new(egui::RichText::new(text).weak()).wrap());
     ui.end_row();
-    ui.label("");
-    ui.weak("for beams and shells, the rotations about the");
-    ui.end_row();
-    ui.label("");
-    ui.weak("in-plane axes. Select the faces in the cut plane.");
-    ui.end_row();
+    let beams = model.fe.beams_on_plane(&model.mesh, region);
+    if beams.total > 0 {
+        ui.label("Beams on the plane");
+        ui.checkbox(halve_beams, "Halve their section");
+        ui.end_row();
+        let text = if *halve_beams {
+            format!(
+                "{} beam elements get half their area, second moments and mass. \
+                 Halve the loads on them yourself.",
+                beams.total - beams.expanded
+            )
+        } else {
+            format!(
+                "{} beam elements lie on the plane with their full section.",
+                beams.total
+            )
+        };
+        ui.label("");
+        ui.add(egui::Label::new(egui::RichText::new(text).weak()).wrap());
+        ui.end_row();
+        if beams.expanded > 0 {
+            ui.label("");
+            let text = format!(
+                "{} of them have a rectangular, circular, pipe or box profile. The solver \
+                 expands these into solids, which the plane holds too stiffly and cannot \
+                 halve: give them a general profile.",
+                beams.expanded
+            );
+            ui.add(egui::Label::new(egui::RichText::new(text).color(crate::style::error())).wrap());
+            ui.end_row();
+        }
+    }
 }
 
 /// Rows of a submodel boundary condition: the displacements
@@ -1655,9 +1847,29 @@ const DOF_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
 
 /// The load kinds of the dialog, the force first: label, default name and the kind with zero
 /// values.
+/// The axis direction closest to an acceleration vector, the one it points along most.
+fn nearest_direction(vector: [f64; 3]) -> GravityDirection {
+    let axis = (0..3)
+        .max_by(|&a, &b| vector[a].abs().total_cmp(&vector[b].abs()))
+        .unwrap_or(2);
+    match (axis, vector[axis] >= 0.0) {
+        (0, true) => GravityDirection::PlusX,
+        (0, false) => GravityDirection::MinusX,
+        (1, true) => GravityDirection::PlusY,
+        (1, false) => GravityDirection::MinusY,
+        (_, true) if vector[2] != 0.0 => GravityDirection::PlusZ,
+        _ => GravityDirection::MinusZ,
+    }
+}
+
 fn load_kinds() -> [(&'static str, &'static str, LoadKind); 13] {
     [
         ("Force", FORCE, LoadKind::force([0.0; 3])),
+        (
+            "Excitation (impulse, sine, chirp)",
+            EXCITATION,
+            LoadKind::Excitation(plx_model::Excitation::default()),
+        ),
         (
             "Remote Force",
             REMOTE_FORCE,
@@ -1665,7 +1877,11 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 13] {
         ),
         ("Moment", MOMENT, LoadKind::Moment([0.0; 3])),
         ("Pressure", PRESSURE, LoadKind::Pressure(0.0)),
-        ("Gravity", GRAVITY, LoadKind::Gravity([0.0, 0.0, -9.81])),
+        (
+            "Gravity",
+            GRAVITY,
+            LoadKind::StandardGravity(GravityDirection::MinusZ),
+        ),
         (
             "Centrifugal load",
             CENTRIFUGAL,
@@ -1679,16 +1895,6 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 13] {
             "Moving Load",
             MOVING,
             LoadKind::Moving(MovingLoad::default()),
-        ),
-        (
-            "Pre-tension (bolt preload)",
-            PRE_TENSION,
-            LoadKind::PreTension {
-                value: 0.0,
-                by_displacement: false,
-                lock: false,
-                direction: None,
-            },
         ),
         ("Concentrated Flux", CFLUX, LoadKind::ConcentratedFlux(0.0)),
         ("Surface Flux", SURFACE_FLUX, LoadKind::SurfaceFlux(0.0)),
@@ -1778,9 +1984,10 @@ fn load_kind_name(kind: &LoadKind) -> &'static str {
         LoadKind::BodyFlux(_) => BODY_FLUX,
         LoadKind::Film { .. } => FILM,
         LoadKind::Radiation { .. } => RADIATION,
-        LoadKind::Gravity(_) => GRAVITY,
+        LoadKind::Gravity(_) | LoadKind::StandardGravity(_) => GRAVITY,
         LoadKind::Centrifugal { .. } => CENTRIFUGAL,
         LoadKind::Moving(_) => MOVING,
+        LoadKind::Excitation(_) => EXCITATION,
     }
 }
 
@@ -1795,12 +2002,14 @@ enum LoadTarget {
 fn load_target(kind: &LoadKind) -> LoadTarget {
     match kind {
         LoadKind::Force { .. }
+        | LoadKind::Excitation(_)
         | LoadKind::RemoteForce(_)
         | LoadKind::Moment(_)
         | LoadKind::ConcentratedFlux(_) => LoadTarget::Nodes,
-        LoadKind::BodyFlux(_) | LoadKind::Gravity(_) | LoadKind::Centrifugal { .. } => {
-            LoadTarget::Elements
-        }
+        LoadKind::BodyFlux(_)
+        | LoadKind::Gravity(_)
+        | LoadKind::StandardGravity(_)
+        | LoadKind::Centrifugal { .. } => LoadTarget::Elements,
         _ => LoadTarget::Faces,
     }
 }
@@ -1813,7 +2022,9 @@ fn load_picks(kind: &LoadKind, fe: &FeModel) -> (&'static [Source], Target) {
         LoadTarget::Nodes if !kind.is_thermal() => (SUPPORT_SOURCES, Target::Nodes),
         LoadTarget::Nodes => (NODE_SOURCES, Target::Nodes),
         LoadTarget::Faces => (FACE_SOURCES, face_target(fe)),
-        LoadTarget::Elements => (SOLID_SOURCES, face_target(fe)),
+        // Body loads act on elements: whole parts or element sets. Picked faces or edges
+        // hold no elements.
+        LoadTarget::Elements => (ELEMENT_SOURCES, face_target(fe)),
     }
 }
 
@@ -1835,15 +2046,17 @@ fn load_region(
 /// shows it for a few seconds.
 pub(crate) fn dropped_note(ui: &Ui, dropped: bool) {
     let until = dropped.then(|| ui.input(|i| i.time) + DROPPED_NOTE_SECONDS);
-    ui.data_mut(|d| d.insert_temp(crate::ids::window(ui.ctx(), "dropped note"), until));
+    // The id outside the closure: the context is locked while it runs.
+    let id = crate::ids::window(ui.ctx(), "dropped note");
+    ui.data_mut(|d| d.insert_temp(id, until));
 }
 
 const DROPPED_NOTE_SECONDS: f64 = 6.0;
 
 /// The hint row left by [`dropped_note`].
 pub(crate) fn show_dropped_note(ui: &mut Ui) {
-    let until =
-        ui.data(|d| d.get_temp::<Option<f64>>(crate::ids::window(ui.ctx(), "dropped note")));
+    let id = crate::ids::window(ui.ctx(), "dropped note");
+    let until = ui.data(|d| d.get_temp::<Option<f64>>(id));
     if let Some(Some(until)) = until
         && ui.input(|i| i.time) < until
     {
@@ -1869,19 +2082,15 @@ impl Editor {
                 }),
                 ..Material::default()
             }),
-            NewItem::CrossSection => Draft::CrossSection(CrossSection {
-                name: next_name(CrossSection::PREFIX, names(&fe.cross_sections, |c| &c.name)),
+            NewItem::CrossSection => Draft::CrossSection(CrossSection::new(
+                next_name(CrossSection::PREFIX, names(&fe.cross_sections, |c| &c.name)),
                 // Ten by ten millimetres, in SI units.
-                profile: BeamProfile::Rect { a: 0.01, b: 0.01 },
-            }),
+                BeamProfile::Rect { a: 0.01, b: 0.01 },
+            )),
             NewItem::Section => Draft::Section(
                 Section {
                     name: next_name("Solid_Section", names(&fe.sections, |s| &s.name)),
-                    material: fe
-                        .materials
-                        .first()
-                        .map(|m| m.name.clone())
-                        .unwrap_or_default(),
+                    material: fe.materials.first().map(|m| m.id),
                     region: Region::Parts(Vec::new()),
                     thickness: plx_model::unit_thickness(),
                     kind: SectionKind::Solid,
@@ -1927,20 +2136,16 @@ impl Editor {
                 let target = fe.steps.get(step)?;
                 let existing = names(&target.boundary_conditions, |b| &b.name);
                 // The first kind the step takes: a heat transfer step only temperatures.
-                let (_, name, kind) = boundary_kinds()
-                    .into_iter()
-                    .find(|(_, _, kind)| target.kind.supports_boundary(kind))?;
+                let (_, name, kind) = boundary_kinds().into_iter().find(|(_, _, kind)| {
+                    target.kind.supports_boundary(kind) && offers_boundary(fe, kind)
+                })?;
                 Draft::BoundaryCondition(
                     step,
-                    BoundaryCondition {
-                        distribution: None,
-                        name: next_name(name, existing),
-                        active: true,
-                        visible: true,
-                        region: Region::Nodes(Vec::new()),
+                    BoundaryCondition::new(
+                        next_name(name, existing),
+                        Region::Nodes(Vec::new()),
                         kind,
-                        amplitude: None,
-                    },
+                    ),
                     RegionDraft::new(SUPPORT_SOURCES, Target::Nodes),
                 )
             }
@@ -1953,16 +2158,11 @@ impl Editor {
                     .find(|(_, _, kind)| target.kind.supports_load(kind))?;
                 Draft::Load(
                     step,
-                    Load {
-                        distribution: None,
-                        name: next_name(name, existing),
-                        active: true,
-                        visible: true,
-                        region: Region::Nodes(Vec::new()),
-                        kind: kind.clone(),
-                        amplitude: None,
-                        factor_amplitude: None,
-                    },
+                    Load::new(
+                        next_name(name, existing),
+                        Region::Nodes(Vec::new()),
+                        kind.clone(),
+                    ),
                     load_region(&kind, None, fe, &FeMesh::default()),
                 )
             }
@@ -1977,14 +2177,14 @@ impl Editor {
                 Draft::FieldOutput(step, output)
             }
             NewItem::ContactHistoryOutput(step, contact) => {
-                let target = fe.steps.get(step)?;
+                fe.steps.get(step)?;
                 let pair = match contact {
-                    ContactItem::Region(i) => &fe.contact_regions.get(i)?.name,
-                    ContactItem::Pair(i) => &fe.contact_pairs.get(i)?.name,
+                    ContactItem::Region(i) => fe.contact_regions.get(i)?.id,
+                    ContactItem::Pair(i) => fe.contact_pairs.get(i)?.id,
                 };
                 let mut output = HistoryOutput::contact(
-                    next_name("CH_Output", names(&target.history_outputs, |h| &h.name)),
-                    pair.clone(),
+                    next_name("CH_Output", names(&fe.history_outputs, |h| &h.name)),
+                    Some(pair),
                 );
                 // The contact forces too, summed over the slave side.
                 output.variables.push("CF".into());
@@ -2003,9 +2203,9 @@ impl Editor {
                 Draft::FieldOutput(step, output)
             }
             NewItem::HistoryOutput(step) => {
-                let target = fe.steps.get(step)?;
+                fe.steps.get(step)?;
                 let output = HistoryOutput::node(
-                    next_name("NH_Output", names(&target.history_outputs, |h| &h.name)),
+                    next_name("NH_Output", names(&fe.history_outputs, |h| &h.name)),
                     Region::Nodes(Vec::new()),
                 );
                 let region = history_region(&output.kind, fe, &FeMesh::default());
@@ -2014,10 +2214,8 @@ impl Editor {
             NewItem::Constraint => Draft::Constraint(ConstraintDraft::new(fe)),
             NewItem::SurfaceInteraction => {
                 let existing = names(&fe.surface_interactions, |s| &s.name);
-                let interaction = SurfaceInteraction {
-                    name: next_name("Surface_Interaction", existing),
-                    properties: Vec::new(),
-                };
+                let interaction =
+                    SurfaceInteraction::new(next_name("Surface_Interaction", existing), Vec::new());
                 let view = contacts::InteractionView::new(&interaction);
                 Draft::SurfaceInteraction(interaction, view)
             }
@@ -2025,7 +2223,7 @@ impl Editor {
                 let name = next_name("Contact_Region", names(&fe.contact_regions, |r| &r.name));
                 Draft::ContactRegion(
                     plx_model::ContactRegion::new(name, plx_model::ContactBehavior::Bonded),
-                    MasterSlave::new(contact_target(fe)),
+                    MasterSlave::new_region(contact_target(fe)),
                     RegionView::default(),
                 )
             }
@@ -2033,8 +2231,8 @@ impl Editor {
                 let name = next_name("Bolt", names(&fe.bolts, |b| &b.name));
                 Draft::Bolt(
                     plx_model::Bolt::new(name),
-                    MasterSlave::new(contact_target(fe)),
-                    vec![None; fe.steps.len()],
+                    crate::bolts::BoltSides::new(contact_target(fe)),
+                    vec![Default::default(); fe.steps.len()],
                     Default::default(),
                 )
             }
@@ -2047,14 +2245,21 @@ impl Editor {
                 };
                 Draft::ContactDetection(plx_model::ContactDetection::new(name))
             }
+            NewItem::PartGroup => {
+                let existing = names(&fe.part_groups, |g| &g.name);
+                let name = if existing.is_empty() {
+                    "Group".to_owned()
+                } else {
+                    next_name("Group", existing)
+                };
+                Draft::PartGroup(plx_model::PartGroup::new(name))
+            }
             NewItem::ContactPair => {
                 let existing = names(&fe.contact_pairs, |c| &c.name);
-                let interaction = (fe.surface_interactions.first())
-                    .map(|s| s.name.clone())
-                    .unwrap_or_default();
+                let interaction = fe.surface_interactions.first().map(|s| s.id);
                 Draft::ContactPair(
                     ContactPair::new(next_name("Contact_Pair", existing), interaction),
-                    MasterSlave::new(contact_target(fe)),
+                    MasterSlave::new_pair(contact_target(fe)),
                 )
             }
             NewItem::Tie => {
@@ -2179,12 +2384,9 @@ impl Editor {
             }
             TreeItem::Step(i) => {
                 let step = fe.steps.get(i)?.clone();
-                let design = step
-                    .kind
-                    .design_region()
-                    .cloned()
-                    .unwrap_or(Region::Nodes(Vec::new()));
-                let region = RegionDraft::from_region(&design, NODE_SOURCES, face_target(fe), mesh);
+                let own = (step.kind.region().cloned()).unwrap_or(Region::Nodes(Vec::new()));
+                let (sources, target) = step_region_picks(&step.kind, fe);
+                let region = RegionDraft::from_region(&own, sources, target, mesh);
                 (Draft::Step(step, region), i)
             }
             TreeItem::BoundaryCondition(s, i) => {
@@ -2213,7 +2415,7 @@ impl Editor {
                 (Draft::FieldOutput(s, output), i)
             }
             TreeItem::HistoryOutput(s, i) => {
-                let output = fe.steps.get(s)?.history_outputs.get(i)?.clone();
+                let output = fe.step_history_output(s, i)?.clone();
                 let region = history_region(&output.kind, fe, mesh);
                 (Draft::HistoryOutput(s, output, region), i)
             }
@@ -2238,13 +2440,17 @@ impl Editor {
             }
             TreeItem::ContactPair(i) => {
                 let pair = fe.contact_pairs.get(i)?.clone();
-                let regions =
-                    MasterSlave::from_regions(&pair.master, &pair.slave, contact_target(fe), mesh);
+                let regions = MasterSlave::pair_from_regions(
+                    &pair.master,
+                    &pair.slave,
+                    contact_target(fe),
+                    mesh,
+                );
                 (Draft::ContactPair(pair, regions), i)
             }
             TreeItem::ContactRegion(i) => {
                 let region = fe.contact_regions.get(i)?.clone();
-                let sides = MasterSlave::from_regions(
+                let sides = MasterSlave::region_from_regions(
                     &region.side_a,
                     &region.side_b,
                     contact_target(fe),
@@ -2259,11 +2465,11 @@ impl Editor {
                 Draft::ContactDetection(fe.contact_detections.get(i)?.clone()),
                 i,
             ),
+            TreeItem::PartGroup(i) => (Draft::PartGroup(fe.part_groups.get(i)?.clone()), i),
             TreeItem::Bolt(i) => {
                 let bolt = fe.bolts.get(i)?.clone();
-                let sides =
-                    MasterSlave::from_regions(&bolt.side_a, &bolt.side_b, contact_target(fe), mesh);
-                let actions = crate::bolts::step_actions(fe, &bolt.name);
+                let sides = crate::bolts::BoltSides::of(&bolt, contact_target(fe), mesh);
+                let actions = crate::bolts::step_actions(fe, bolt.id);
                 (Draft::Bolt(bolt, sides, actions, Default::default()), i)
             }
             TreeItem::Group("Contacts") => (Draft::Connections(fe.contact_defaults.clone()), 0),
@@ -2343,6 +2549,7 @@ impl Editor {
             Draft::ContactPair(c, _) => ("Contact Pair", &c.name),
             Draft::ContactRegion(r, ..) => ("Contact Region", &r.name),
             Draft::ContactDetection(d) => ("Contact Detection", &d.name),
+            Draft::PartGroup(g) => ("Part Group", &g.name),
             Draft::Bolt(b, ..) => ("Bolt", &b.name),
             Draft::Connections(_) => return "Connections".into(),
             Draft::Tie(t, _) => ("Tie", &t.name),
@@ -2362,16 +2569,22 @@ impl Editor {
     /// The boundary condition or load being edited as it would be applied: its step, its
     /// index (`None` for a new one) and the symbol item, for the 3D view.
     pub fn step_item(&self) -> Option<(usize, Option<usize>, crate::symbols::Item)> {
-        let (step, kind, region) = match &self.draft {
+        let (step, kind, region, system) = match &self.draft {
             Draft::BoundaryCondition(s, bc, r) => {
-                (*s, crate::symbols::Kind::Boundary(bc.kind.clone()), r)
+                (*s, crate::symbols::Kind::Boundary(bc.kind.clone()), r, None)
             }
-            Draft::Load(s, load, r) => (*s, crate::symbols::Kind::Load(load.kind.clone()), r),
+            Draft::Load(s, load, r) => (
+                *s,
+                crate::symbols::Kind::Load(load.kind.clone()),
+                r,
+                load.system,
+            ),
             _ => return None,
         };
         let item = crate::symbols::Item {
             kind,
             region: region.region(),
+            system,
             selected: true,
         };
         Some((step, self.index, item))
@@ -2397,12 +2610,8 @@ impl Editor {
             return None;
         };
         let preview = self.motion.as_mut()?;
-        let BoundaryKind::Displacement(Displacement { values, .. }) = bc.kind else {
-            return None;
-        };
-        let amplitude = model.fe.amplitude(bc.amplitude.as_deref()?)?;
-        let values = [values[0], values[1], values[2]];
-        Some(preview.frame(now, model, region.region(), values, amplitude))
+        let motion = motion_of(bc, &model.fe)?;
+        Some(preview.frame(now, model, region.region(), &motion))
     }
 
     /// Whether clicks in the 3D view pick for this dialog.
@@ -2441,8 +2650,8 @@ impl Editor {
         match &self.draft {
             Draft::ContactPair(_, regions)
             | Draft::Tie(_, regions)
-            | Draft::ContactRegion(_, regions, _)
-            | Draft::Bolt(_, regions, ..) => regions.highlight(model),
+            | Draft::ContactRegion(_, regions, _) => regions.highlight(model),
+            Draft::Bolt(_, sides, ..) => sides.highlight(model),
             Draft::Constraint(c) => c.highlight(model),
             _ => self
                 .region()
@@ -2452,10 +2661,11 @@ impl Editor {
 
     /// Tells the dialog which exposed parameters of the model value links give, by key, and
     /// from which block.
-    /// The parts a contact detection being edited searches; empty for all visible ones.
-    pub fn detection_parts(&self) -> Option<&[String]> {
+    /// The parts a contact detection being edited searches.
+    pub fn detection_filter(&self) -> Option<&plx_model::PartFilter> {
         match &self.draft {
-            Draft::ContactDetection(detection) => Some(&detection.parts),
+            Draft::ContactDetection(detection) => Some(&detection.scope),
+            Draft::PartGroup(group) => Some(&group.filter),
             _ => None,
         }
     }
@@ -2702,15 +2912,16 @@ impl Editor {
                     section.name = next_name(section.kind.prefix(), taken.iter().copied());
                 }
                 ui.label("Material");
-                egui::ComboBox::from_id_salt("section material")
-                    .selected_text(section.material.as_str())
-                    .width(crate::dock::fit_width(ui, 200.0))
-                    .show_ui(ui, |ui| {
-                        for material in &model.fe.materials {
-                            let name = material.name.clone();
-                            ui.selectable_value(&mut section.material, name, &material.name);
-                        }
-                    });
+                let materials = (model.fe.materials.iter()).map(|m| (m.id, m.name.as_str()));
+                let chosen = &mut section.material;
+                crate::pick_item::item_combo(
+                    ui,
+                    "section material",
+                    chosen,
+                    materials,
+                    None,
+                    200.0,
+                );
                 ui.end_row();
                 let membrane = matches!(section.kind, SectionKind::Membrane { .. });
                 match &mut section.kind {
@@ -2780,13 +2991,37 @@ impl Editor {
                 let sectors = (model.fe.cyclic_tie())
                     .and_then(|t| t.cyclic_sectors(&model.mesh))
                     .and_then(Result::ok);
-                step_form(ui, step, self.index.is_none(), &model.fe, sectors);
+                step_form(ui, step, self.index, &model.fe, &model.mesh, sectors);
                 crate::connections::step_contacts(ui, &model.fe, step, self.index);
-                if step.kind.design_region().is_some() {
-                    region.ui_labeled(ui, model, "Design region", "design region", true);
-                    ui.label("");
-                    ui.weak("Surface nodes that may move; the solver ignores inner nodes.");
-                    ui.end_row();
+                // The kind may have changed: the region picks what the new kind takes.
+                let (sources, target) = step_region_picks(&step.kind, &model.fe);
+                if region.sources != sources {
+                    *region = region.converted(sources, target, &model.mesh).0;
+                }
+                match step.kind {
+                    StepKind::Sensitivity(_) => {
+                        region.ui_labeled(ui, model, "Design region", "design region", true);
+                        ui.label("");
+                        ui.weak("Surface nodes that may move; the solver ignores inner nodes.");
+                        ui.end_row();
+                    }
+                    StepKind::ComplexFrequency(_) => {
+                        region.ui_labeled(ui, model, "Rotating parts", "rotating parts", true);
+                        ui.label("");
+                        ui.weak(if region.is_empty() {
+                            "None picked: the whole model rotates."
+                        } else {
+                            "Only these rotate; the rest of the model stands still."
+                        });
+                        ui.end_row();
+                        ui.label("");
+                        ui.weak(
+                            "The rotating materials need a density.\n\
+                             Results are the complex modes only.",
+                        );
+                        ui.end_row();
+                    }
+                    _ => {}
                 }
             }
             Draft::BoundaryCondition(step, bc, region) => {
@@ -2805,6 +3040,11 @@ impl Editor {
                         for (label, name, kind) in boundary_kinds() {
                             // Only the kinds the step takes.
                             if step_kind.is_some_and(|s| !s.supports_boundary(&kind)) {
+                                continue;
+                            }
+                            // Submodel only for a model defined as one; a boundary condition
+                            // that already is one keeps its entry.
+                            if current != name && !offers_boundary(&model.fe, &kind) {
                                 continue;
                             }
                             if ui.selectable_label(current == name, label).clicked()
@@ -2835,13 +3075,11 @@ impl Editor {
                     _ if two_d => vec![0, 1],
                     _ => (0..6).collect(),
                 };
-                let values = match &mut bc.kind {
-                    BoundaryKind::Displacement(displacement) => Some(&mut displacement.values),
-                    _ => None,
-                };
-                if let Some(values) = values {
+                let period = step_kind.map_or(1.0, StepKind::period);
+                let bc_name = bc.name.clone();
+                if let BoundaryKind::Displacement(displacement) = &mut bc.kind {
                     for i in dofs {
-                        let (value, label) = (&mut values[i], DOF_LABELS[i]);
+                        let (value, label) = (&mut displacement.values[i], DOF_LABELS[i]);
                         let mut set = value.is_some();
                         ui.checkbox(&mut set, label);
                         let mut number = value.unwrap_or(0.0);
@@ -2851,14 +3089,38 @@ impl Editor {
                         } else {
                             Quantity::Angle
                         };
-                        let field = numeric::quantity(&mut number, units, quantity).speed(0.01);
                         let path = if i < 3 {
                             Field::VECTOR[i]
                         } else {
                             Field::ROTATION[i - 3]
                         };
-                        expose::field(ui, path, |ui| ui.add_enabled(set, field));
+                        // A held degree of freedom can follow a table instead of the value.
+                        if set {
+                            let start = number;
+                            crate::value_table::value_with_table(
+                                ui,
+                                egui::Id::new(("bc value table", i)),
+                                &mut displacement.tables[i],
+                                &format!("{label} of {bc_name}"),
+                                label,
+                                quantity,
+                                units,
+                                start,
+                                period,
+                                |ui| {
+                                    let field =
+                                        numeric::quantity(&mut number, units, quantity).speed(0.01);
+                                    expose::field(ui, path, |ui| ui.add(field))
+                                },
+                            );
+                        } else {
+                            let field = numeric::quantity(&mut number, units, quantity).speed(0.01);
+                            expose::field(ui, path, |ui| ui.add_enabled(false, field));
+                        }
                         *value = set.then_some(number);
+                        if !set {
+                            displacement.tables[i] = None;
+                        }
                         ui.end_row();
                     }
                 }
@@ -2870,8 +3132,12 @@ impl Editor {
                 if let BoundaryKind::Submodel { step, dofs } = &mut bc.kind {
                     submodel_rows(ui, *step, dofs, two_d, &model.fe);
                 }
-                if let BoundaryKind::Symmetry { normal } = &mut bc.kind {
-                    symmetry_rows(ui, normal, &region.region(), model);
+                if let BoundaryKind::Symmetry {
+                    normal,
+                    halve_beams,
+                } = &mut bc.kind
+                {
+                    symmetry_rows(ui, normal, halve_beams, &region.region(), model);
                 }
                 if bc.kind.takes_amplitude() {
                     let playing = self.motion.is_some();
@@ -2897,6 +3163,13 @@ impl Editor {
                             }
                         },
                     );
+                    if let BoundaryKind::Displacement(displacement) = &bc.kind
+                        && (0..6).any(|d| displacement.table(d).is_some())
+                    {
+                        ui.label("");
+                        ui.weak("Values with a table (T) follow it instead of the amplitude.");
+                        ui.end_row();
+                    }
                     if !previews_motion(bc, &model.fe) {
                         self.motion = None;
                     } else if toggle {
@@ -2951,6 +3224,7 @@ impl Editor {
                             {
                                 let moved = load_target(&kind) != load_target(&load.kind);
                                 load.kind = kind;
+                                load.tables = Default::default();
                                 rename_default(&mut load.name, current, name, &taken);
                                 if moved {
                                     let (sources, target) = load_picks(&load.kind, &model.fe);
@@ -2968,6 +3242,12 @@ impl Editor {
                 if !matches!(load.kind, LoadKind::Pressure(_)) {
                     load.distribution = None;
                 }
+                // Tables of components the kind does not have are dropped.
+                for c in load.kind.table_components()..3 {
+                    load.tables[c] = None;
+                }
+                let period = step_kind.map_or(1.0, StepKind::period);
+                let load_name = load.name.clone();
                 match &mut load.kind {
                     LoadKind::Moment(moment) => {
                         if two_d {
@@ -2975,17 +3255,17 @@ impl Editor {
                             ui.weak("Moments need a 3D model.");
                             ui.end_row();
                         } else {
-                            let labels = ["M1", "M2", "M3"].into_iter().zip(Field::VECTOR);
-                            for (value, (label, field)) in moment.iter_mut().zip(labels) {
-                                ui.label(label);
-                                expose::field(ui, field, |ui| {
-                                    ui.add(
-                                        numeric::quantity(value, units, Quantity::Moment)
-                                            .speed(1.0),
-                                    )
-                                });
-                                ui.end_row();
-                            }
+                            component_rows(
+                                ui,
+                                moment,
+                                &mut load.tables,
+                                &["M1", "M2", "M3"],
+                                &Field::VECTOR,
+                                Quantity::Moment,
+                                &load_name,
+                                period,
+                                units,
+                            );
                         }
                         ui.label("");
                         ui.weak(
@@ -2993,20 +3273,37 @@ impl Editor {
                              the region that has rotations (beams, shells).",
                         );
                         ui.end_row();
+                        let nlgeom = step_kind.is_some_and(|k| model.fe.step_nlgeom(k));
+                        direction_rows(ui, &mut load.system, &mut load.follower, &model.fe, nlgeom);
                     }
                     LoadKind::Pressure(pressure) => {
-                        ui.label("Pressure");
-                        expose::field(ui, Field::Value, |ui| {
-                            ui.add(
-                                numeric::quantity(pressure, units, Quantity::Pressure).speed(0.1),
-                            )
-                        });
-                        ui.end_row();
+                        component_rows(
+                            ui,
+                            std::slice::from_mut(pressure),
+                            &mut load.tables,
+                            &["Pressure"],
+                            &[Field::Value],
+                            Quantity::Pressure,
+                            &load_name,
+                            period,
+                            units,
+                        );
                         let reference = &mut load.distribution;
                         distribution_row(ui, "load distribution", reference, &model.fe);
                     }
                     LoadKind::Force { value, each_node } => {
-                        force_rows(ui, value, two_d, units);
+                        let count = if two_d { 2 } else { 3 };
+                        component_rows(
+                            ui,
+                            &mut value[..count],
+                            &mut load.tables,
+                            &["F1", "F2", "F3"],
+                            &Field::VECTOR,
+                            Quantity::Force,
+                            &load_name,
+                            period,
+                            units,
+                        );
                         ui.label("");
                         ui.checkbox(each_node, "Apply to all nodes individually");
                         ui.end_row();
@@ -3019,68 +3316,25 @@ impl Editor {
                         });
                         ui.end_row();
                         revolution_hint(ui, axisymmetric);
+                        let nlgeom = step_kind.is_some_and(|k| model.fe.step_nlgeom(k));
+                        direction_rows(ui, &mut load.system, &mut load.follower, &model.fe, nlgeom);
                     }
                     LoadKind::RemoteForce(remote) => {
                         remote_force_rows(ui, remote, &region.region(), model, units);
                     }
-                    LoadKind::PreTension {
-                        value,
-                        by_displacement,
-                        lock,
-                        direction,
-                    } => {
-                        // Force, displacement or lock: one choice of the two flags.
-                        let mut by = (*lock, *by_displacement);
-                        ui.label("Preload by");
-                        ui.horizontal_wrapped(|ui| {
-                            ui.radio_value(&mut by, (false, false), "Force");
-                            ui.radio_value(&mut by, (false, true), "Displacement");
-                            ui.radio_value(&mut by, (true, *by_displacement), "Lock")
-                                .on_hover_text(
-                                    "Keeps the length the bolt has at the end of the previous \
-                                     step; the bolt force then follows the other loads.",
-                                );
-                        });
-                        (*lock, *by_displacement) = by;
+                    LoadKind::Excitation(excitation) => {
+                        crate::excitation_rows::excitation_rows(
+                            ui, excitation, period, two_d, units,
+                        );
+                        revolution_hint(ui, axisymmetric);
+                        let nlgeom = step_kind.is_some_and(|k| model.fe.step_nlgeom(k));
+                        direction_rows(ui, &mut load.system, &mut load.follower, &model.fe, nlgeom);
+                    }
+                    LoadKind::PreTension { .. } => {
+                        // Written for bolts only; a Bolt under Connections makes them.
+                        ui.label("");
+                        ui.weak("Bolt preloads are made by a Bolt under Connections.");
                         ui.end_row();
-                        if *lock {
-                            ui.label("");
-                            ui.weak("Length of the previous step");
-                        } else if *by_displacement {
-                            ui.label("Shortening");
-                            expose::field(ui, Field::Value, |ui| {
-                                ui.add(
-                                    numeric::quantity(value, units, Quantity::Length).speed(0.001),
-                                )
-                            });
-                        } else {
-                            ui.label("Force");
-                            expose::field(ui, Field::Value, |ui| {
-                                ui.add(numeric::quantity(value, units, Quantity::Force).speed(1.0))
-                            });
-                        }
-                        ui.end_row();
-                        let mut given = direction.is_some();
-                        ui.label("Direction");
-                        ui.checkbox(&mut given, "Given (otherwise the surface normal)");
-                        ui.end_row();
-                        let mut values = direction.unwrap_or([1.0, 0.0, 0.0]);
-                        for (value, label) in values.iter_mut().zip(["    X", "    Y", "    Z"]) {
-                            ui.label(label);
-                            ui.add_enabled(given, numeric::drag_value(value).speed(0.01));
-                            ui.end_row();
-                        }
-                        *direction = given.then_some(values);
-                        for line in [
-                            "Select the element faces on one side of a cut through the bolt shank.",
-                            "A positive force pulls the two sides together; a displacement shortens the bolt.",
-                            "The shortening counts from the start: 0 loosens the bolt.",
-                            "Lock in a later step to keep the bolt at its length.",
-                        ] {
-                            ui.label("");
-                            ui.weak(line);
-                            ui.end_row();
-                        }
                     }
                     LoadKind::ConcentratedFlux(flux) => {
                         ui.label("Heat flux");
@@ -3128,24 +3382,92 @@ impl Editor {
                         });
                         ui.end_row();
                     }
-                    LoadKind::Gravity(acceleration) => {
-                        let count = if two_d { 2 } else { 3 };
-                        let labels = ["g1", "g2", "g3"].into_iter().zip(Field::VECTOR);
-                        for (value, (label, field)) in
-                            acceleration.iter_mut().zip(labels).take(count)
-                        {
-                            ui.label(label);
-                            expose::field(ui, field, |ui| {
-                                ui.add(
-                                    numeric::quantity(value, units, Quantity::Acceleration)
-                                        .speed(0.1),
-                                )
+                    LoadKind::Gravity(_) | LoadKind::StandardGravity(_) => {
+                        // Standard gravity along an axis, or an acceleration vector.
+                        let standard = matches!(load.kind, LoadKind::StandardGravity(_));
+                        ui.label("Definition");
+                        let mut to_standard = standard;
+                        egui::ComboBox::from_id_salt("gravity definition")
+                            .selected_text(if standard {
+                                "Standard Gravity"
+                            } else {
+                                "User Defined"
+                            })
+                            .width(crate::dock::fit_width(ui, 200.0))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut to_standard, true, "Standard Gravity");
+                                ui.selectable_value(&mut to_standard, false, "User Defined");
                             });
-                            ui.end_row();
-                        }
-                        ui.label("");
-                        ui.weak("Acceleration vector; the materials need a density.");
                         ui.end_row();
+                        if to_standard != standard {
+                            // Switching keeps what the user sees: the standard gravity takes
+                            // over the nearest axis of the vector, the vector the standard one.
+                            load.kind = if to_standard {
+                                LoadKind::StandardGravity(
+                                    load.kind
+                                        .gravity_vector()
+                                        .map_or(GravityDirection::MinusZ, nearest_direction),
+                                )
+                            } else {
+                                LoadKind::Gravity(load.kind.gravity_vector().unwrap_or_default())
+                            };
+                        }
+                        match &mut load.kind {
+                            LoadKind::StandardGravity(direction) => {
+                                let directions: &[GravityDirection] = if two_d {
+                                    &GravityDirection::PLANAR
+                                } else {
+                                    &GravityDirection::ALL
+                                };
+                                // A 2D model has no Z direction.
+                                if !directions.contains(direction) {
+                                    *direction = GravityDirection::MinusY;
+                                }
+                                ui.label("Direction");
+                                egui::ComboBox::from_id_salt("gravity direction")
+                                    .selected_text(direction.label())
+                                    .width(crate::dock::fit_width(ui, 200.0))
+                                    .show_ui(ui, |ui| {
+                                        for d in directions {
+                                            ui.selectable_value(direction, *d, d.label());
+                                        }
+                                    });
+                                ui.end_row();
+                                ui.label("");
+                                ui.weak(format!(
+                                    "g = {} {}; the materials need a density.",
+                                    numeric::format_physical(
+                                        units.shown(STANDARD_GRAVITY, Quantity::Acceleration)
+                                    ),
+                                    units.unit(Quantity::Acceleration)
+                                ));
+                                ui.end_row();
+                            }
+                            LoadKind::Gravity(acceleration) => {
+                                let count = if two_d { 2 } else { 3 };
+                                // A 2D model has no Z component.
+                                if two_d {
+                                    acceleration[2] = 0.0;
+                                }
+                                let labels = ["g1", "g2", "g3"].into_iter().zip(Field::VECTOR);
+                                for (value, (label, field)) in
+                                    acceleration.iter_mut().zip(labels).take(count)
+                                {
+                                    ui.label(label);
+                                    expose::field(ui, field, |ui| {
+                                        ui.add(
+                                            numeric::quantity(value, units, Quantity::Acceleration)
+                                                .speed(0.1),
+                                        )
+                                    });
+                                    ui.end_row();
+                                }
+                                ui.label("");
+                                ui.weak("Acceleration vector; the materials need a density.");
+                                ui.end_row();
+                            }
+                            _ => {}
+                        }
                     }
                     LoadKind::Centrifugal { point, axis, speed } => {
                         ui.label("Rotational speed");
@@ -3228,7 +3550,17 @@ impl Editor {
                 } else {
                     "Amplitude"
                 };
-                amplitude_row(ui, label, "load amplitude", &mut load.amplitude, &model.fe);
+                // An excitation follows its signal.
+                if matches!(load.kind, LoadKind::Excitation(_)) {
+                    load.amplitude = None;
+                } else {
+                    amplitude_row(ui, label, "load amplitude", &mut load.amplitude, &model.fe);
+                }
+                if (0..3).any(|c| load.table(c).is_some()) {
+                    ui.label("");
+                    ui.weak("Values with a table (T) follow it instead of the amplitude.");
+                    ui.end_row();
+                }
                 if let Some(factor) = factor {
                     let label = format!("Amplitude {factor}");
                     let reference = &mut load.factor_amplitude;
@@ -3336,7 +3668,7 @@ impl Editor {
                 ui.end_row();
                 ui.label("Source");
                 let by_value = field.kind.takes_region();
-                ui.horizontal_wrapped(|ui| {
+                crate::layout::wrapped_row(ui, |ui| {
                     if ui.radio(by_value, "By value").clicked() && !by_value {
                         field.kind = DefinedFieldKind::Temperature(20.0);
                     }
@@ -3478,6 +3810,36 @@ impl Editor {
                 name_row(ui, &mut detection.name);
                 connections::detection_form(ui, model, detection, self.detection_scope.as_ref());
             }
+            Draft::PartGroup(group) => {
+                name_row(ui, &mut group.name);
+                let context = match &self.detection_scope {
+                    Some(scope) => scope.context.clone(),
+                    None => crate::part_filter_ui::cached_context(ui.ctx(), &model.fe, &model.mesh),
+                };
+                ui.label("Parts");
+                crate::part_filter_ui::filter_editor(
+                    ui,
+                    "part group",
+                    &model.fe,
+                    &mut group.filter,
+                    &context,
+                    "All parts",
+                );
+                ui.end_row();
+                ui.label("");
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(
+                            "The group follows its filter: parts added or renamed later join \
+                             it when they match. Contact detections use groups in their \
+                             scope and rules.",
+                        )
+                        .weak(),
+                    )
+                    .wrap(),
+                );
+                ui.end_row();
+            }
             Draft::Connections(defaults) => connections::connections_form(ui, &model.fe, defaults),
             Draft::Tie(tie, regions) => {
                 name_row(ui, &mut tie.name);
@@ -3503,13 +3865,20 @@ impl Editor {
             Draft::Load(step, ..) => names(&fe.steps[*step].loads, |l| &l.name),
             Draft::InitialCondition(..) => names(&fe.initial_conditions, |i| &i.name),
             Draft::FieldOutput(step, _) => names(&fe.steps[*step].field_outputs, |f| &f.name),
-            Draft::HistoryOutput(step, ..) => names(&fe.steps[*step].history_outputs, |h| &h.name),
+            // One output of the model, whichever steps print it.
+            Draft::HistoryOutput(_, output, _) => {
+                return (fe.history_outputs.iter())
+                    .filter(|h| h.id != output.id)
+                    .map(|h| h.name.as_str())
+                    .collect();
+            }
             Draft::DefinedField(step, ..) => names(&fe.steps[*step].defined_fields, |f| &f.name),
             Draft::Constraint(_) => fe.constraints.iter().map(Constraint::name).collect(),
             Draft::SurfaceInteraction(..) => names(&fe.surface_interactions, |s| &s.name),
             Draft::ContactPair(..) => names(&fe.contact_pairs, |c| &c.name),
             Draft::ContactRegion(..) => names(&fe.contact_regions, |r| &r.name),
             Draft::ContactDetection(..) => names(&fe.contact_detections, |d| &d.name),
+            Draft::PartGroup(..) => names(&fe.part_groups, |g| &g.name),
             Draft::Bolt(..) => names(&fe.bolts, |b| &b.name),
             Draft::Connections(_) => Vec::new(),
             Draft::Tie(..) => names(&fe.ties, |t| &t.name),
@@ -3548,6 +3917,7 @@ impl Editor {
             Draft::ContactPair(c, _) => &c.name,
             Draft::ContactRegion(r, ..) => &r.name,
             Draft::ContactDetection(d) => &d.name,
+            Draft::PartGroup(g) => &g.name,
             Draft::Bolt(b, ..) => &b.name,
             Draft::Connections(_) => return Ok(()),
             Draft::Tie(t, _) => &t.name,
@@ -3582,7 +3952,7 @@ impl Editor {
             return Err(problem);
         }
         if let Draft::Section(section, _) = &self.draft {
-            if !fe.materials.iter().any(|m| m.name == section.material) {
+            if section.material.and_then(|m| fe.material(m)).is_none() {
                 return Err("Please select a material; create one under Materials first.".into());
             }
             match &section.kind {
@@ -3601,7 +3971,11 @@ impl Editor {
                 }
                 SectionKind::Shell { .. } | SectionKind::Membrane { .. } => {}
                 SectionKind::Beam(beam) => {
-                    if fe.cross_section(&beam.cross_section).is_none() {
+                    if beam
+                        .cross_section
+                        .and_then(|c| fe.cross_section(c))
+                        .is_none()
+                    {
                         return Err("Please select a cross-section; create one under \
                                     Sections > Cross-Sections first."
                             .into());
@@ -3615,7 +3989,7 @@ impl Editor {
             }
         }
         match &self.draft {
-            Draft::Constraint(c) => c.validate()?,
+            Draft::Constraint(c) => c.validate(fe)?,
             Draft::ContactPair(pair, regions) => {
                 contacts::validate_contact_pair(pair, fe)?;
                 regions.validate()?;
@@ -3635,6 +4009,16 @@ impl Editor {
             Draft::Material(material) => {
                 if let Some(problem) = material.creep.as_ref().and_then(|c| c.problem()) {
                     return Err(problem.into());
+                }
+                if let Some(hyper) = &material.hyperelastic {
+                    if let Some(problem) = hyper.problem() {
+                        return Err(problem);
+                    }
+                    if material.plastic.is_some() || material.creep.is_some() {
+                        return Err("A hyperelastic material cannot be plastic or creep: \
+                                    untick Plasticity and Creep."
+                            .into());
+                    }
                 }
             }
             Draft::CrossSection(cross_section) => {
@@ -3657,7 +4041,9 @@ impl Editor {
             }
         }
         if let Draft::BoundaryCondition(_, bc, _) = &self.draft
-            && let BoundaryKind::Symmetry { normal: Some(n) } = bc.kind
+            && let BoundaryKind::Symmetry {
+                normal: Some(n), ..
+            } = bc.kind
             && n.iter().all(|v| *v == 0.0)
         {
             return Err("The normal must not be the zero vector.".into());
@@ -3676,7 +4062,17 @@ impl Editor {
                 StepKind::Buckle(settings) => validate_buckle_step(settings)?,
                 StepKind::HeatTransfer(settings)
                 | StepKind::CoupledTempDisp(settings)
-                | StepKind::UncoupledTempDisp(settings) => validate_heat_transfer_step(settings)?,
+                | StepKind::UncoupledTempDisp(settings) => {
+                    validate_heat_transfer_step(settings)?;
+                    if let Some(problem) = settings.increments.problem() {
+                        return Err(problem);
+                    }
+                }
+                StepKind::Static(settings) => {
+                    if let Some(problem) = settings.problem() {
+                        return Err(problem);
+                    }
+                }
                 StepKind::Sensitivity(settings) => {
                     if let Some(problem) = settings.problem() {
                         return Err(problem);
@@ -3687,17 +4083,15 @@ impl Editor {
                         return Err(problem);
                     }
                 }
-                StepKind::ModalDynamics(settings) => {
-                    if let Some(problem) = settings.problem() {
-                        return Err(problem);
-                    }
-                }
                 StepKind::SteadyStateDynamics(settings) => {
                     if let Some(problem) = settings.problem() {
                         return Err(problem);
                     }
                 }
                 StepKind::Visco(settings) => {
+                    if let Some(problem) = settings.increments.problem() {
+                        return Err(problem);
+                    }
                     if settings.creep_tolerance <= 0.0 {
                         return Err("The creep strain tolerance must be positive.".into());
                     }
@@ -3707,7 +4101,6 @@ impl Editor {
                         return Err(problem);
                     }
                 }
-                StepKind::Static(_) => {}
             }
         }
         Ok(())
@@ -3798,6 +4191,7 @@ impl Editor {
             Draft::ContactDetection(..) => {
                 Some(TreeItem::ContactDetection(fe.contact_detections.len()))
             }
+            Draft::PartGroup(..) => Some(TreeItem::PartGroup(fe.part_groups.len())),
             Draft::Bolt(..) => Some(TreeItem::Bolt(fe.bolts.len())),
             Draft::Tie(..) => Some(TreeItem::Tie(fe.ties.len())),
             Draft::NodeTie(..) => Some(TreeItem::NodeTie(fe.node_ties.len())),
@@ -3850,37 +4244,16 @@ impl Editor {
         let index = self.index;
         let from_step = self.from_step;
         match self.draft {
-            Draft::Material(material) => {
-                // Sections follow a renamed material.
-                if let Some(old) = index.and_then(|i| fe.materials.get(i)) {
-                    let old = old.name.clone();
-                    for section in fe.sections.iter_mut().filter(|s| s.material == old) {
-                        section.material = material.name.clone();
-                    }
-                }
-                put(&mut fe.materials, index, material);
-            }
+            // Items refer to the others by id: they follow a renamed one.
+            Draft::Material(material) => put(&mut fe.materials, index, material),
             Draft::Section(mut section, region) => {
                 section.region = region.region();
                 put(&mut fe.sections, index, section);
             }
-            Draft::CrossSection(cross_section) => {
-                // Beam sections follow a renamed cross-section.
-                if let Some(old) = index.and_then(|i| fe.cross_sections.get(i)) {
-                    let old = old.name.clone();
-                    for section in &mut fe.sections {
-                        if let SectionKind::Beam(beam) = &mut section.kind
-                            && beam.cross_section == old
-                        {
-                            beam.cross_section = cross_section.name.clone();
-                        }
-                    }
-                }
-                put(&mut fe.cross_sections, index, cross_section);
-            }
+            Draft::CrossSection(cross_section) => put(&mut fe.cross_sections, index, cross_section),
             Draft::Step(mut step, region) => {
-                if let Some(design) = step.kind.design_region_mut() {
-                    *design = region.region();
+                if let Some(own) = step.kind.region_mut() {
+                    *own = region.region();
                 }
                 match index.and_then(|i| fe.steps.get_mut(i)) {
                     // The dialog edits the settings; the step's items stay.
@@ -3892,6 +4265,7 @@ impl Editor {
                     None => {
                         copy_items_of_last_step(fe, &mut step);
                         fe.steps.push(step);
+                        print_energies(fe, fe.steps.len() - 1);
                     }
                 }
             }
@@ -3908,18 +4282,11 @@ impl Editor {
                     bc.active = moved.active;
                 }
                 let list = &mut fe.steps[s].boundary_conditions;
-                let mut renamed = None;
                 if let Some(existing) = index.and_then(|i| list.get(i)) {
                     bc.active = existing.active;
-                    renamed = Some(existing.name.clone()).filter(|old| *old != bc.name);
                 }
-                let remote = matches!(bc.kind, BoundaryKind::Displacement(_));
-                let new = bc.name.clone();
+                // History outputs of a remote displacement's point refer to it by id.
                 put(list, index, bc);
-                // History outputs of a remote displacement's point follow a renamed one.
-                if let Some(old) = renamed.filter(|_| remote) {
-                    fe.rename_remote_point(&old, &new);
-                }
             }
             Draft::Load(s, mut load, region) => {
                 load.region = region.region();
@@ -3931,18 +4298,11 @@ impl Editor {
                     load.active = moved.active;
                 }
                 let list = &mut fe.steps[s].loads;
-                let mut renamed = None;
                 if let Some(existing) = index.and_then(|i| list.get(i)) {
                     load.active = existing.active;
-                    renamed = Some(existing.name.clone()).filter(|old| *old != load.name);
                 }
-                let remote = matches!(load.kind, LoadKind::RemoteForce(_));
-                let new = load.name.clone();
+                // History outputs of a remote force's point refer to it by id.
                 put(list, index, load);
-                // History outputs of a remote force's point follow a renamed one.
-                if let Some(old) = renamed.filter(|_| remote) {
-                    fe.rename_remote_point(&old, &new);
-                }
             }
             Draft::InitialCondition(mut condition, region) => {
                 condition.region = region.region();
@@ -3980,35 +4340,19 @@ impl Editor {
                     region.active = existing.active;
                     // A detected region the user changed is kept when detecting again.
                     region.edited |= region.detected_by.is_some() && region != *existing;
-                    let old = existing.name.clone();
-                    fe.rename_contact_pair(&old, &region.name);
                 }
                 put(&mut fe.contact_regions, index, region);
             }
-            Draft::ContactDetection(detection) => {
-                if let Some(existing) = index.and_then(|i| fe.contact_detections.get(i)) {
-                    let old = existing.name.clone();
-                    for region in &mut fe.contact_regions {
-                        if region.detected_by.as_deref() == Some(old.as_str()) {
-                            region.detected_by = Some(detection.name.clone());
-                        }
-                    }
-                    for tie in &mut fe.node_ties {
-                        if tie.detected_by.as_deref() == Some(old.as_str()) {
-                            tie.detected_by = Some(detection.name.clone());
-                        }
-                    }
-                }
-                put(&mut fe.contact_detections, index, detection);
-            }
+            Draft::ContactDetection(detection) => put(&mut fe.contact_detections, index, detection),
+            Draft::PartGroup(group) => put(&mut fe.part_groups, index, group),
             Draft::Bolt(mut bolt, sides, actions, _) => {
-                (bolt.side_a, bolt.side_b) = sides.regions();
+                (bolt.side_a, bolt.side_b, bolt.thread) = sides.regions();
                 if let Some(existing) = index.and_then(|i| fe.bolts.get(i)) {
                     bolt.active = existing.active;
-                    let old = existing.name.clone();
-                    fe.remove_bolt_changes(&old);
+                    let old = existing.id;
+                    fe.remove_bolt_changes(old);
                 }
-                crate::bolts::set_step_actions(fe, &bolt.name, &actions);
+                crate::bolts::set_step_actions(fe, bolt.id, &actions);
                 put(&mut fe.bolts, index, bolt);
             }
             Draft::Connections(defaults) => fe.contact_defaults = defaults,
@@ -4033,13 +4377,14 @@ impl Editor {
                     *target = region.region();
                 }
                 output.normalize_variables();
-                let list = &mut fe.steps[s].history_outputs;
-                if let Some(existing) = index.and_then(|i| list.get(i)) {
+                // Edited once for every step that prints it.
+                if let Some(existing) = fe.history_output(output.id) {
                     output.active = existing.active;
                 }
-                put(list, index, output);
+                fe.put_history_output(s, output);
             }
             Draft::Constraint(draft) => {
+                fe.reference_points.extend(draft.new_point());
                 let mut constraint = draft.finish();
                 if let Some(existing) = index.and_then(|i| fe.constraints.get(i)) {
                     *constraint.active_mut() = existing.active();
@@ -4047,41 +4392,17 @@ impl Editor {
                 put(&mut fe.constraints, index, constraint);
             }
             Draft::SurfaceInteraction(interaction, _) => {
-                // Contact pairs follow a renamed interaction.
-                if let Some(old) = index.and_then(|i| fe.surface_interactions.get(i)) {
-                    let old = old.name.clone();
-                    for pair in fe.contact_pairs.iter_mut().filter(|c| c.interaction == old) {
-                        pair.interaction = interaction.name.clone();
-                    }
-                }
-                put(&mut fe.surface_interactions, index, interaction);
+                put(&mut fe.surface_interactions, index, interaction)
             }
             Draft::ContactPair(mut pair, regions) => {
                 (pair.master, pair.slave) = regions.regions();
                 if let Some(existing) = index.and_then(|i| fe.contact_pairs.get(i)) {
                     pair.active = existing.active;
-                    // Contact history outputs follow a renamed pair.
-                    let old = existing.name.clone();
-                    fe.rename_contact_pair(&old, &pair.name);
                 }
                 put(&mut fe.contact_pairs, index, pair);
             }
-            Draft::Amplitude(amplitude, _) => {
-                // Boundary conditions and loads follow a renamed amplitude.
-                if let Some(old) = index.and_then(|i| fe.amplitudes.get(i)) {
-                    let old = old.name.clone();
-                    fe.rename_amplitude(&old, &amplitude.name);
-                }
-                put(&mut fe.amplitudes, index, amplitude);
-            }
-            Draft::Distribution(distribution, _) => {
-                // Pressures and temperatures follow a renamed distribution.
-                if let Some(old) = index.and_then(|i| fe.distributions.get(i)) {
-                    let old = old.name.clone();
-                    fe.rename_distribution(&old, &distribution.name);
-                }
-                put(&mut fe.distributions, index, distribution);
-            }
+            Draft::Amplitude(amplitude, _) => put(&mut fe.amplitudes, index, amplitude),
+            Draft::Distribution(distribution, _) => put(&mut fe.distributions, index, distribution),
             Draft::MeshSet(mut set, region, replaces) => {
                 set.region = region.region();
                 // Items on the set follow a new name.
@@ -4130,10 +4451,20 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
         (index < items.len()).then(|| items.remove(index)).is_some()
     }
     match *item {
-        TreeItem::Material(i) => remove(&mut fe.materials, i),
+        TreeItem::Material(i) => {
+            if let Some(id) = fe.materials.get(i).map(|m| m.id) {
+                fe.forget_in_filters(id);
+            }
+            remove(&mut fe.materials, i)
+        }
         TreeItem::Section(i) => remove(&mut fe.sections, i),
         TreeItem::CrossSection(i) => remove(&mut fe.cross_sections, i),
-        TreeItem::Step(i) => remove(&mut fe.steps, i),
+        TreeItem::Step(i) => {
+            let removed = remove(&mut fe.steps, i);
+            // What only the step printed goes with it.
+            fe.drop_unused_history_outputs();
+            removed
+        }
         TreeItem::BoundaryCondition(s, i) => fe
             .steps
             .get_mut(s)
@@ -4146,10 +4477,14 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
             .steps
             .get_mut(s)
             .is_some_and(|st| remove(&mut st.field_outputs, i)),
-        TreeItem::HistoryOutput(s, i) => fe
-            .steps
-            .get_mut(s)
-            .is_some_and(|st| remove(&mut st.history_outputs, i)),
+        // Out of every step that prints it.
+        TreeItem::HistoryOutput(s, i) => match fe.step_history_output(s, i).map(|h| h.id) {
+            Some(id) => {
+                fe.delete_history_output(id);
+                true
+            }
+            None => false,
+        },
         TreeItem::DefinedField(s, i) => fe
             .steps
             .get_mut(s)
@@ -4158,42 +4493,50 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::Constraint(i) => remove(&mut fe.constraints, i),
         TreeItem::SurfaceInteraction(i) => remove(&mut fe.surface_interactions, i),
         TreeItem::ContactPair(i) | TreeItem::ContactRegion(i) => {
-            let name = match item {
-                TreeItem::ContactPair(_) => fe.contact_pairs.get(i).map(|p| p.name.clone()),
-                _ => fe.contact_regions.get(i).map(|r| r.name.clone()),
+            let id = match item {
+                TreeItem::ContactPair(_) => fe.contact_pairs.get(i).map(|p| p.id),
+                _ => fe.contact_regions.get(i).map(|r| r.id),
             };
-            let Some(name) = name else {
+            let Some(id) = id else {
                 return false;
             };
-            fe.remove_contact_changes(&name);
+            fe.remove_contact_changes(id);
             match item {
                 TreeItem::ContactPair(_) => remove(&mut fe.contact_pairs, i),
                 _ => remove(&mut fe.contact_regions, i),
             }
         }
         TreeItem::Bolt(i) => {
-            let Some(name) = fe.bolts.get(i).map(|b| b.name.clone()) else {
+            let Some(id) = fe.bolts.get(i).map(|b| b.id) else {
                 return false;
             };
-            fe.remove_bolt_changes(&name);
+            fe.remove_bolt_changes(id);
             remove(&mut fe.bolts, i)
         }
+        TreeItem::PartGroup(i) => {
+            let Some(id) = fe.part_groups.get(i).map(|g| g.id) else {
+                return false;
+            };
+            fe.part_groups.remove(i);
+            fe.forget_in_filters(id);
+            true
+        }
         TreeItem::ContactDetection(i) => {
-            let Some(name) = fe.contact_detections.get(i).map(|d| d.name.clone()) else {
+            let Some(id) = fe.contact_detections.get(i).map(|d| d.id) else {
                 return false;
             };
             fe.contact_detections.remove(i);
             // Its regions go with it, except those the user changed, which stay as regions
             // of their own.
             fe.contact_regions.retain_mut(|r| {
-                if r.detected_by.as_deref() != Some(name.as_str()) {
+                if r.detected_by != Some(id) {
                     return true;
                 }
                 r.detected_by = None;
                 std::mem::take(&mut r.edited)
             });
             fe.node_ties.retain_mut(|t| {
-                if t.detected_by.as_deref() != Some(name.as_str()) {
+                if t.detected_by != Some(id) {
                     return true;
                 }
                 t.detected_by = None;
@@ -4238,9 +4581,7 @@ fn active_mut<'a>(fe: &'a mut FeModel, item: &TreeItem) -> Option<&'a mut bool> 
         TreeItem::FieldOutput(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.field_outputs.get_mut(i))
             .map(|f| &mut f.active),
-        TreeItem::HistoryOutput(s, i) => (fe.steps.get_mut(s))
-            .and_then(|st| st.history_outputs.get_mut(i))
-            .map(|h| &mut h.active),
+        TreeItem::HistoryOutput(s, i) => fe.step_history_output_mut(s, i).map(|h| &mut h.active),
         TreeItem::DefinedField(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.defined_fields.get_mut(i))
             .map(|f| &mut f.active),
@@ -4318,8 +4659,6 @@ pub fn swap_master_slave(fe: &mut FeModel, item: &TreeItem) -> bool {
                 let free = next_name(&name, others);
                 fe.contact_pairs[i].name = free;
             }
-            let new = fe.contact_pairs[i].name.clone();
-            fe.rename_contact_pair(&old, &new);
             true
         }
         TreeItem::ContactRegion(i) => fe.contact_regions.get_mut(i).map(|r| r.flip()).is_some(),
@@ -4343,26 +4682,47 @@ pub fn swap_master_slave(fe: &mut FeModel, item: &TreeItem) -> bool {
     }
 }
 
+/// The indices of the sections that have the material at `material`.
+pub fn sections_using_material(fe: &FeModel, material: usize) -> Vec<usize> {
+    let Some(id) = fe.materials.get(material).map(|m| m.id) else {
+        return Vec::new();
+    };
+    (fe.sections.iter().enumerate())
+        .filter(|(_, s)| s.material == Some(id))
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// How an item selected in the tree shows in the 3D view: its region, or master and slave.
 pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
     let fe = &model.fe;
+    // A mesh operation shows the parts it changes.
+    if let TreeItem::MeshOperation(i) = *item {
+        return (fe.mesh_operations.get(i))
+            .map(|o| Highlight::parts(o.part_indices(&model.mesh)))
+            .unwrap_or_default();
+    }
     let master_slave = match *item {
         TreeItem::Constraint(i) => fe.constraints.get(i).and_then(Constraint::master_slave),
         TreeItem::ContactPair(i) => fe.contact_pairs.get(i).map(|c| [&c.master, &c.slave]),
         TreeItem::Tie(i) => fe.ties.get(i).map(|t| [&t.master, &t.slave]),
         TreeItem::ContactRegion(i) => fe.contact_regions.get(i).map(|r| [&r.side_a, &r.side_b]),
-        TreeItem::Bolt(i) => fe.bolts.get(i).map(|b| [&b.side_a, &b.side_b]),
+        TreeItem::Bolt(i) => {
+            return fe.bolts.get(i).map_or_else(Highlight::default, |bolt| {
+                crate::bolts::bolt_highlight(model, &bolt.side_a, &bolt.side_b, &bolt.thread)
+            });
+        }
         TreeItem::HistoryOutput(s, i) => {
-            let output = fe.steps.get(s).and_then(|st| st.history_outputs.get(i));
+            let output = fe.step_history_output(s, i);
             match output.map(|h| &h.kind) {
-                Some(HistoryKind::Contact { pair }) => (fe.contact_pairs.iter())
-                    .find(|c| c.name == *pair)
-                    .map(|c| [&c.master, &c.slave])
-                    .or_else(|| {
-                        (fe.contact_regions.iter())
-                            .find(|r| r.name == *pair)
-                            .map(|r| [&r.side_a, &r.side_b])
-                    }),
+                Some(HistoryKind::Contact { pair: Some(pair) }) => {
+                    if let Some(support) = fe.compression_only(*pair) {
+                        return region_highlight(model, &support.region);
+                    }
+                    (fe.contact_pair(*pair))
+                        .map(|c| [&c.master, &c.slave])
+                        .or_else(|| fe.contact_region(*pair).map(|r| [&r.side_a, &r.side_b]))
+                }
                 _ => None,
             }
         }
@@ -4370,6 +4730,14 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
     };
     if let Some([master, slave]) = master_slave {
         return contacts::master_slave_highlight(model, master, slave);
+    }
+    if let TreeItem::Material(i) = *item {
+        // Where a material is used: the regions of the sections that have it.
+        let mut highlight = Highlight::default();
+        for section in sections_using_material(fe, i) {
+            highlight.extend(region_highlight(model, &fe.sections[section].region));
+        }
+        return highlight;
     }
     if let (Some(kind), Some(name)) = (crate::tree::set_kind(item), crate::tree::set_name(item)) {
         return region_highlight(model, &kind.reference(name));
@@ -4472,7 +4840,7 @@ pub fn item_region<'a>(fe: &'a FeModel, item: &TreeItem) -> Option<&'a Region> {
             .get(i)
             .map(|b| &b.region),
         TreeItem::Load(s, i) => fe.steps.get(s)?.loads.get(i).map(|l| &l.region),
-        TreeItem::HistoryOutput(s, i) => fe.steps.get(s)?.history_outputs.get(i)?.kind.region(),
+        TreeItem::HistoryOutput(s, i) => fe.step_history_output(s, i)?.kind.region(),
         TreeItem::DefinedField(s, i) => (fe.steps.get(s)?.defined_fields.get(i))
             .filter(|f| f.kind.takes_region())
             .map(|f| &f.region),
@@ -4512,9 +4880,9 @@ fn history_output_form(
 ) {
     name_row(ui, &mut output.name);
     ui.label("Type");
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let current = output.kind.prefix();
-        let pair = (model.fe.contact_pairs.first()).map_or(String::new(), |c| c.name.clone());
+        let pair = model.fe.contact_pair_choices().first().map(|c| c.0);
         let kinds = [
             HistoryKind::Node {
                 region: Region::Nodes(Vec::new()),
@@ -4523,6 +4891,7 @@ fn history_output_form(
                 region: Region::Parts(Vec::new()),
             },
             HistoryKind::Contact { pair },
+            HistoryKind::Energies,
         ];
         for kind in kinds {
             let selected = kind.prefix() == current;
@@ -4534,7 +4903,8 @@ fn history_output_form(
                 let defaults = match &kind {
                     HistoryKind::Node { region } => HistoryOutput::node("", region.clone()),
                     HistoryKind::Element { region } => HistoryOutput::element("", region.clone()),
-                    HistoryKind::Contact { pair } => HistoryOutput::contact("", pair.clone()),
+                    HistoryKind::Contact { pair } => HistoryOutput::contact("", *pair),
+                    HistoryKind::Energies => HistoryOutput::energies(""),
                 };
                 output.variables = defaults.variables;
                 rename_default(&mut output.name, current, kind.prefix(), taken);
@@ -4552,7 +4922,13 @@ fn history_output_form(
     egui::Grid::new("history variables")
         .spacing([10.0, 2.0])
         .show(ui, |ui| {
-            for row in choices.chunks(5) {
+            // The energies' names are long: two per row.
+            let per_row = if output.kind == HistoryKind::Energies {
+                2
+            } else {
+                5
+            };
+            for row in choices.chunks(per_row) {
                 for &variable in row {
                     let mut on = output.variables.iter().any(|v| v == variable);
                     let checkbox = ui
@@ -4573,32 +4949,41 @@ fn history_output_form(
         output.normalize_variables();
     }
     ui.end_row();
-    ui.label("Totals");
-    egui::ComboBox::from_id_salt("history totals")
-        .selected_text(output.totals.label())
-        .width(crate::dock::fit_width(ui, 200.0))
-        .show_ui(ui, |ui| {
-            for totals in plx_model::Totals::ALL {
-                ui.selectable_value(&mut output.totals, totals, totals.label());
-            }
-        });
-    ui.end_row();
+    let energies = output.kind == HistoryKind::Energies;
+    if !energies {
+        ui.label("Totals");
+        egui::ComboBox::from_id_salt("history totals")
+            .selected_text(output.totals.label())
+            .width(crate::dock::fit_width(ui, 200.0))
+            .show_ui(ui, |ui| {
+                for totals in plx_model::Totals::ALL {
+                    ui.selectable_value(&mut output.totals, totals, totals.label());
+                }
+            });
+        ui.end_row();
+    }
     match &mut output.kind {
+        HistoryKind::Energies => {
+            ui.label("");
+            ui.weak(
+                "Sums over the whole model at every time\n\
+                 step of a Dynamic step; other steps do\n\
+                 not print them. Internal + kinetic energy\n\
+                 + dissipation = external work + energy at\n\
+                 the start, up to the numerical damping.",
+            );
+            ui.end_row();
+        }
         HistoryKind::Contact { pair } => {
             ui.label("Contact Pair");
-            egui::ComboBox::from_id_salt("history contact pair")
-                .selected_text(pair.as_str())
-                .width(crate::dock::fit_width(ui, 200.0))
-                .show_ui(ui, |ui| {
-                    for name in model.fe.contact_pair_names() {
-                        ui.selectable_value(pair, name.to_owned(), name);
-                    }
-                });
+            let choices = model.fe.contact_pair_choices();
+            crate::pick_item::item_combo(ui, "history contact pair", pair, choices, None, 200.0);
             ui.end_row();
             ui.label("");
             ui.weak(
                 "The solver writes the values of all contact elements;
-                 the pair defines the surfaces of the contact forces CF.",
+                 the pair defines the surfaces of the contact forces CF.
+                 A compression only support gives the force it carries.",
             );
             ui.end_row();
         }
@@ -4617,7 +5002,7 @@ fn history_output_form(
 fn point_hint(region: &Region, fe: &FeModel, mesh: &FeMesh) -> Option<&'static str> {
     let behavior = match region {
         Region::ReferencePoint(_) => RemoteBehavior::Rigid,
-        Region::RemotePoint(name) => fe.remote_point_named(mesh, name)?.1,
+        Region::RemotePoint(id) => fe.remote_point_of(mesh, *id)?.1,
         _ => return None,
     };
     Some(match behavior {
@@ -4743,10 +5128,13 @@ fn validate_history_output(
         return Err("Please select at least one variable.".into());
     }
     match &output.kind {
+        HistoryKind::Energies => {}
         HistoryKind::Contact { pair } => {
-            if !fe.contact_pair_names().contains(&pair.as_str()) {
+            if !(fe.contact_pair_choices().iter()).any(|(id, _)| Some(*id) == *pair) {
                 return Err(
-                    "Please select a contact pair; create one under Contact Pairs first.".into(),
+                    "Please select a contact pair or compression only support; create one \
+                     first."
+                        .into(),
                 );
             }
         }
@@ -4796,16 +5184,15 @@ pub(crate) fn name_row(ui: &mut Ui, name: &mut String) {
 /// Profile, normal and offsets of a beam section, with CalculiX's directions: the
 /// 1-direction is the normal, the 2-direction the beam axis crossed with it.
 fn beam_form(ui: &mut Ui, beam: &mut BeamSection, fe: &FeModel, units: UnitSystem) {
-    if fe.cross_section(&beam.cross_section).is_none()
-        && let Some(first) = fe.cross_sections.first()
-        && beam.cross_section.is_empty()
+    if let Some(first) = fe.cross_sections.first()
+        && beam.cross_section.is_none()
     {
-        beam.cross_section = first.name.clone();
+        beam.cross_section = Some(first.id);
     }
     ui.label("Cross-section");
-    let text = match beam.cross_section.as_str() {
-        "" => "Select …",
-        name => name,
+    let text = match beam.cross_section {
+        None => "Select …".to_string(),
+        Some(id) => fe.name_or_missing(Some(id)),
     };
     egui::ComboBox::from_id_salt("beam cross-section")
         .selected_text(text)
@@ -4813,12 +5200,11 @@ fn beam_form(ui: &mut Ui, beam: &mut BeamSection, fe: &FeModel, units: UnitSyste
         .show_ui(ui, |ui| {
             for cross_section in &fe.cross_sections {
                 let label = format!("{} ({})", cross_section.name, cross_section.profile.label());
-                let name = cross_section.name.clone();
-                ui.selectable_value(&mut beam.cross_section, name, label);
+                ui.selectable_value(&mut beam.cross_section, Some(cross_section.id), label);
             }
         });
     ui.end_row();
-    match fe.cross_section(&beam.cross_section) {
+    match beam.cross_section.and_then(|c| fe.cross_section(c)) {
         Some(cross_section) => {
             ui.label("");
             crate::cross_section::preview(ui, &cross_section.profile, units);
@@ -4840,7 +5226,7 @@ fn beam_form(ui: &mut Ui, beam: &mut BeamSection, fe: &FeModel, units: UnitSyste
         }
     }
     ui.label("Normal (1-direction)");
-    ui.horizontal_wrapped(|ui| {
+    crate::layout::wrapped_row(ui, |ui| {
         let automatic = matches!(beam.orientation, BeamOrientation::Automatic);
         if ui.radio(automatic, "Automatic").clicked() && !automatic {
             beam.orientation = BeamOrientation::Automatic;
@@ -4893,33 +5279,7 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     });
     material.density = has_density.then_some(density);
     ui.end_row();
-    let mut elastic = material.elastic.is_some();
-    ui.checkbox(&mut elastic, "Elasticity");
-    ui.end_row();
-    let mut values = material.elastic.unwrap_or(Elastic {
-        young: 0.0,
-        poisson: 0.0,
-    });
-    ui.label("    Young's modulus");
-    expose::field(ui, Field::Young, |ui| {
-        ui.add_enabled(
-            elastic,
-            numeric::physical(&mut values.young, units, Quantity::Pressure),
-        )
-    });
-    ui.end_row();
-    ui.label("    Poisson's ratio");
-    expose::field(ui, Field::Poisson, |ui| {
-        ui.add_enabled(
-            elastic,
-            numeric::drag_value(&mut values.poisson)
-                .range(0.0..=0.5)
-                .speed(0.01)
-                .max_decimals(4),
-        )
-    });
-    ui.end_row();
-    material.elastic = elastic.then_some(values);
+    elastic_rows(ui, material, units);
     plastic_rows(ui, material, units);
     creep_rows(ui, material, units);
     for (label, value, quantity, field) in [
@@ -4972,6 +5332,509 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     );
     ui.end_row();
     material.expansion = expands.then_some(expansion);
+}
+
+/// The elasticity of the material form: linear (Hooke) or one of the hyperelastic models.
+/// Switching between them keeps the stiffness at small strains.
+fn elastic_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
+    let mut elastic = material.elastic.is_some() || material.hyperelastic.is_some();
+    let was_elastic = elastic;
+    ui.checkbox(&mut elastic, "Elasticity");
+    ui.end_row();
+    if !elastic {
+        material.elastic = None;
+        material.hyperelastic = None;
+    } else if !was_elastic {
+        material.elastic = Some(Elastic {
+            young: 0.0,
+            poisson: 0.0,
+        });
+    }
+    let model = material.hyperelastic.as_ref().map(|h| h.model);
+    ui.label("    Model");
+    ui.add_enabled_ui(elastic, |ui| {
+        egui::ComboBox::from_id_salt("elastic model")
+            .selected_text(model.map_or("Linear elastic", HyperelasticModel::label))
+            .width(crate::dock::fit_width(ui, 200.0))
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(model.is_none(), "Linear elastic")
+                    .clicked()
+                    && let Some(hyper) = material.hyperelastic.take()
+                {
+                    material.elastic = Some(hyper.small_strain());
+                }
+                ui.separator();
+                ui.weak("Hyperelastic (rubber)");
+                for choice in HyperelasticModel::ALL {
+                    if ui
+                        .selectable_label(model == Some(choice), choice.label())
+                        .clicked()
+                    {
+                        let base = material.hyperelastic.clone().unwrap_or_else(|| {
+                            // From linear elasticity: the same shear modulus, at most
+                            // nearly incompressible.
+                            let e = material.elastic.unwrap_or(Elastic {
+                                young: 0.0,
+                                poisson: 0.0,
+                            });
+                            let poisson = if e.young > 0.0 {
+                                e.poisson.clamp(0.0, 0.499)
+                            } else {
+                                0.49
+                            };
+                            let mu = e.young / (2.0 * (1.0 + e.poisson));
+                            if mu > 0.0 {
+                                Hyperelastic::neo_hooke(mu, poisson)
+                            } else {
+                                Hyperelastic::default()
+                            }
+                        });
+                        material.hyperelastic = Some(base.with_model(choice));
+                        material.elastic = None;
+                    }
+                }
+            });
+    });
+    ui.end_row();
+    match &mut material.hyperelastic {
+        Some(hyper) => hyperelastic_rows(ui, hyper, units),
+        None => {
+            let mut values = material.elastic.unwrap_or(Elastic {
+                young: 0.0,
+                poisson: 0.0,
+            });
+            ui.label("    Young's modulus");
+            expose::field(ui, Field::Young, |ui| {
+                ui.add_enabled(
+                    elastic,
+                    numeric::physical(&mut values.young, units, Quantity::Pressure),
+                )
+            });
+            ui.end_row();
+            ui.label("    Poisson's ratio");
+            expose::field(ui, Field::Poisson, |ui| {
+                ui.add_enabled(
+                    elastic,
+                    numeric::drag_value(&mut values.poisson)
+                        .range(0.0..=0.5)
+                        .speed(0.01)
+                        .max_decimals(4),
+                )
+            });
+            ui.end_row();
+            material.elastic = elastic.then_some(values);
+        }
+    }
+}
+
+/// The constants of a hyperelastic material, its compressibility, what follows for small
+/// strains and an estimate from the Shore A hardness.
+fn hyperelastic_rows(ui: &mut Ui, hyper: &mut Hyperelastic, units: UnitSystem) {
+    use plx_model::hyperelastic::ParameterKind;
+    ui.label("");
+    ui.label(
+        egui::RichText::new(hyper.model.description())
+            .small()
+            .weak(),
+    );
+    ui.end_row();
+    let parameters = hyper.model.parameters();
+    hyper.constants.resize(parameters.len(), 0.0);
+    for (parameter, value) in parameters.iter().zip(hyper.constants.iter_mut()) {
+        ui.label(format!("    {}", parameter.name));
+        match parameter.kind {
+            ParameterKind::Stress => {
+                ui.add(numeric::physical(value, units, Quantity::Pressure));
+            }
+            ParameterKind::Number => {
+                ui.add(numeric::drag_value(value).speed(0.0));
+            }
+        }
+        ui.end_row();
+    }
+    ui.label("    Poisson's ratio");
+    ui.add(
+        numeric::drag_value(&mut hyper.poisson)
+            .range(0.0..=0.4999)
+            .speed(0.001)
+            .max_decimals(4),
+    )
+    .on_hover_text(
+        "How compressible the material is at small strains. Rubber is nearly \
+         incompressible: 0.49 to 0.499. Values close to 0.5 make linear elements stiff \
+         (locking); prefer quadratic elements.",
+    );
+    ui.end_row();
+    let pressure = |value: f64| {
+        let factor = plx_model::STORED.factor_to(Quantity::Pressure, units);
+        let unit = units.unit(Quantity::Pressure);
+        format!(
+            "{} {unit}",
+            numeric::format_physical(fit_digits(value * factor))
+        )
+    };
+    let small = hyper.small_strain();
+    ui.label("");
+    ui.label(
+        egui::RichText::new(format!(
+            "Small strains: shear modulus {}, Young's modulus {}, bulk modulus {}.",
+            pressure(hyper.initial_shear_modulus()),
+            pressure(small.young),
+            pressure(hyper.initial_bulk_modulus()),
+        ))
+        .small()
+        .weak(),
+    );
+    ui.end_row();
+    ui.label("    Shore A hardness");
+    ui.horizontal(|ui| {
+        let id = ui.id().with("shore a");
+        let mut hardness: f64 = ui.data(|d| d.get_temp(id)).unwrap_or(50.0);
+        ui.add(
+            numeric::drag_value(&mut hardness)
+                .range(10.0..=90.0)
+                .speed(0.5),
+        );
+        ui.data_mut(|d| d.insert_temp(id, hardness));
+        if ui
+            .button("Estimate")
+            .on_hover_text(
+                "Sets the constants from Young's modulus after Gent: \
+                 E = 0.0981 (56 + 7.62 H) / (0.1375 (254 - 2.54 H)) MPa. A rough estimate \
+                 for small strains; test data are better.",
+            )
+            .clicked()
+        {
+            let young = Hyperelastic::shore_a_young_mpa(hardness) * 1e6;
+            let mu = young / (2.0 * (1.0 + hyper.poisson));
+            hyper.constants = hyper.model.equivalent(mu);
+        }
+    });
+    ui.end_row();
+    test_data_rows(ui, hyper, units);
+    if let Some(problem) = hyper.problem() {
+        ui.label("");
+        ui.colored_label(ui.visuals().warn_fg_color, problem);
+        ui.end_row();
+    } else if let Some((mode, stretch)) = hyper.unstable_stretch() {
+        ui.label("");
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!(
+                "Unstable in {} {} beyond a stretch of {stretch:.2}.",
+                mode.label().to_lowercase(),
+                if stretch < 1.0 {
+                    "compression"
+                } else {
+                    "tension"
+                }
+            ),
+        );
+        ui.end_row();
+    }
+}
+
+/// The test data of a hyperelastic material: points of nominal stress over nominal strain
+/// in the three basic tests, pasted or typed in, the fit of the model's constants to them
+/// and a plot of the curves of the model against the points.
+fn test_data_rows(ui: &mut Ui, hyper: &mut Hyperelastic, units: UnitSystem) {
+    use plx_model::hyperelastic_fit::{TestPoint, fit};
+    let id = ui.id().with("hyperelastic test data");
+    let factor = plx_model::STORED.factor_to(Quantity::Pressure, units);
+    let unit = units.unit(Quantity::Pressure);
+    ui.label("    Test data");
+    let open_id = id.with("open");
+    let mut open: bool = ui.data(|d| d.get_temp(open_id)).unwrap_or(false);
+    ui.horizontal(|ui| {
+        if ui
+            .button("Fit to Test Data...")
+            .on_hover_text("Enter test curves and fit the constants of the model to them.")
+            .clicked()
+        {
+            open = true;
+        }
+        if !hyper.test_data.is_empty() {
+            ui.weak(format!("{} points", hyper.test_data.len()));
+        }
+    });
+    ui.end_row();
+    egui::Window::new(format!("Test Data: {}", hyper.model.label()))
+        .id(crate::ids::window(ui.ctx(), open_id.with("window")))
+        .open(&mut open)
+        .default_size([460.0, 640.0])
+        .default_pos(ui.ctx().content_rect().center() - egui::vec2(230.0, 320.0))
+        .resizable(true)
+        .show(ui.ctx(), |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Nominal strain (change of length / original length) and nominal stress \
+                     (force / original area) of uniaxial, equibiaxial or planar tests. The \
+                     more modes, the better the fit holds in all directions.",
+                )
+                .small()
+                .weak(),
+            );
+            // Pasting: two columns, strain and stress, one point per line.
+            let mut mode: TestMode = ui.data(|d| d.get_temp(id.with("mode"))).unwrap_or_default();
+            let mut text: String = ui
+                .data(|d| d.get_temp(id.with("paste")))
+                .unwrap_or_default();
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt(id.with("paste mode"))
+                    .selected_text(mode.label())
+                    .show_ui(ui, |ui| {
+                        for choice in TestMode::ALL {
+                            ui.selectable_value(&mut mode, choice, choice.label());
+                        }
+                    });
+                ui.label(format!("strain, stress [{unit}]"));
+            });
+            ui.add(
+                egui::TextEdit::multiline(&mut text)
+                    .desired_rows(3)
+                    .desired_width(260.0)
+                    .hint_text("Paste two columns, e.g. from a spreadsheet:\n0.1  0.21\n0.5  0.68"),
+            );
+            ui.horizontal(|ui| {
+                let parsed = parse_test_points(&text, mode, factor);
+                if ui
+                    .add_enabled(!parsed.is_empty(), egui::Button::new("Add points"))
+                    .on_hover_text("Adds the pasted points to the table.")
+                    .clicked()
+                {
+                    hyper.test_data.extend(parsed);
+                    text.clear();
+                }
+                if ui
+                    .add_enabled(!hyper.test_data.is_empty(), egui::Button::new("Clear all"))
+                    .clicked()
+                {
+                    hyper.test_data.clear();
+                }
+            });
+            ui.data_mut(|d| {
+                d.insert_temp(id.with("mode"), mode);
+                d.insert_temp(id.with("paste"), text);
+            });
+            // The points.
+            let mut remove = None;
+            if !hyper.test_data.is_empty() {
+                egui::ScrollArea::vertical()
+                    .id_salt(id.with("points"))
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new(id.with("grid"))
+                            .num_columns(4)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.strong("Test");
+                                ui.strong("Strain");
+                                ui.strong(format!("Stress [{unit}]"));
+                                ui.label("");
+                                ui.end_row();
+                                for (i, point) in hyper.test_data.iter_mut().enumerate() {
+                                    egui::ComboBox::from_id_salt(id.with(("point mode", i)))
+                                        .selected_text(point.mode.label())
+                                        .width(90.0)
+                                        .show_ui(ui, |ui| {
+                                            for choice in TestMode::ALL {
+                                                ui.selectable_value(
+                                                    &mut point.mode,
+                                                    choice,
+                                                    choice.label(),
+                                                );
+                                            }
+                                        });
+                                    ui.add(numeric::drag_value(&mut point.strain).speed(0.0));
+                                    ui.add(numeric::without_unit(
+                                        &mut point.stress,
+                                        units,
+                                        Quantity::Pressure,
+                                    ));
+                                    if ui.small_button("Remove").clicked() {
+                                        remove = Some(i);
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
+            if let Some(i) = remove {
+                hyper.test_data.remove(i);
+            }
+            if ui.button("Add row").clicked() {
+                let next = hyper.test_data.last().map_or(
+                    TestPoint {
+                        mode,
+                        strain: 0.1,
+                        stress: 0.0,
+                    },
+                    |p| TestPoint {
+                        strain: p.strain + 0.1,
+                        ..*p
+                    },
+                );
+                hyper.test_data.push(next);
+            }
+            // The fit.
+            let outcome_id = id.with("outcome");
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !hyper.test_data.is_empty(),
+                        egui::Button::new(format!("Fit {}", hyper.model.label())),
+                    )
+                    .on_hover_text(
+                        "Sets the constants of the model to those that match the test data \
+                         best (least relative error, taking the material as incompressible). \
+                         Poisson's ratio stays.",
+                    )
+                    .clicked()
+                {
+                    let outcome = match fit(hyper.model, &hyper.test_data) {
+                        Ok(result) => {
+                            // Six significant digits are more than test data hold.
+                            hyper.constants =
+                                result.constants.iter().map(|&c| fit_digits(c)).collect();
+                            let mut text = format!(
+                                "Fitted: relative error {:.1} % (RMS).",
+                                100.0 * result.relative_error
+                            );
+                            if let Some((mode, stretch)) = result.unstable {
+                                text.push_str(&format!(
+                                    " Unstable in {} at a stretch of {stretch:.2}: try \
+                                     another model or data of more modes.",
+                                    mode.label().to_lowercase()
+                                ));
+                            }
+                            text
+                        }
+                        Err(error) => error.to_string(),
+                    };
+                    ui.data_mut(|d| d.insert_temp(outcome_id, outcome));
+                }
+            });
+            if let Some(outcome) = ui.data(|d| d.get_temp::<String>(outcome_id)) {
+                ui.label(egui::RichText::new(outcome).small());
+            }
+            test_data_plot(ui, hyper, factor, unit);
+        });
+    ui.data_mut(|d| d.insert_temp(open_id, open));
+}
+
+/// Points of two columns (nominal strain, nominal stress in the shown unit) from pasted
+/// text; lines that are not two numbers are skipped (e.g. a header).
+fn parse_test_points(
+    text: &str,
+    mode: TestMode,
+    factor: f64,
+) -> Vec<plx_model::hyperelastic_fit::TestPoint> {
+    text.lines()
+        .filter_map(|line| {
+            let values: Vec<f64> = line
+                .split(|c: char| c.is_whitespace() || c == ';' || c == ',')
+                .filter(|t| !t.is_empty())
+                .map(|t| t.parse::<f64>())
+                .collect::<Result<_, _>>()
+                .ok()?;
+            match values.as_slice() {
+                [strain, stress] => Some(plx_model::hyperelastic_fit::TestPoint {
+                    mode,
+                    strain: *strain,
+                    stress: stress / factor,
+                }),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// The nominal stress of the model over the strain in each test mode with data (all three
+/// without data), and the test points.
+fn test_data_plot(ui: &mut Ui, hyper: &Hyperelastic, factor: f64, unit: &str) {
+    use egui_plot::{Legend, Line, Plot, Points};
+    let modes: Vec<TestMode> = if hyper.test_data.is_empty() {
+        TestMode::ALL.to_vec()
+    } else {
+        (TestMode::ALL.into_iter())
+            .filter(|m| hyper.test_data.iter().any(|p| p.mode == *m))
+            .collect()
+    };
+    let largest = (hyper.test_data.iter())
+        .map(|p| p.strain)
+        .fold(1.0_f64, f64::max);
+    let smallest = (hyper.test_data.iter())
+        .map(|p| p.strain)
+        .fold(0.0_f64, f64::min);
+    let colors = [
+        egui::Color32::from_rgb(31, 119, 180),
+        egui::Color32::from_rgb(214, 39, 40),
+        egui::Color32::from_rgb(44, 160, 44),
+    ];
+    let valid = hyper.problem().is_none();
+    // Curves far above the data would squeeze the points to the axis: they end at twice
+    // the largest test stress.
+    let ceiling = (hyper.test_data.iter())
+        .map(|p| 2.0 * p.stress.abs() * factor)
+        .fold(0.0_f64, f64::max);
+    let ceiling = if ceiling > 0.0 {
+        ceiling
+    } else {
+        f64::INFINITY
+    };
+    Plot::new(ui.id().with("hyperelastic curves"))
+        .height(220.0)
+        .width(ui.available_width().max(200.0))
+        .legend(
+            Legend::default()
+                .follow_insertion_order(true)
+                .position(egui_plot::Corner::LeftTop),
+        )
+        .x_axis_label("Nominal strain")
+        .y_axis_label(format!("Nominal stress [{unit}]"))
+        .allow_scroll(false)
+        .show(ui, |plot_ui| {
+            for mode in modes {
+                let color = colors[TestMode::ALL.iter().position(|m| *m == mode).unwrap_or(0)];
+                if valid {
+                    let from = if mode == TestMode::Uniaxial {
+                        smallest.max(-0.6)
+                    } else {
+                        0.0
+                    };
+                    let curve: Vec<[f64; 2]> = (0..=100)
+                        .map(|i| {
+                            let strain = from + (largest - from) * f64::from(i) / 100.0;
+                            [strain, hyper.nominal_stress(mode, 1.0 + strain) * factor]
+                        })
+                        .filter(|p| p[1].abs() <= ceiling)
+                        .collect();
+                    plot_ui.line(Line::new(mode.label(), curve).color(color).width(2.0));
+                }
+                let points: Vec<[f64; 2]> = (hyper.test_data.iter())
+                    .filter(|p| p.mode == mode)
+                    .map(|p| [p.strain, p.stress * factor])
+                    .collect();
+                if !points.is_empty() {
+                    plot_ui.points(
+                        Points::new(format!("{} test", mode.label()), points)
+                            .color(color)
+                            .radius(3.5),
+                    );
+                }
+            }
+        });
+}
+
+/// A value rounded to six significant digits for display.
+fn fit_digits(value: f64) -> f64 {
+    if value == 0.0 || !value.is_finite() {
+        return value;
+    }
+    let digits = 6 - value.abs().log10().ceil() as i32;
+    let scale = 10f64.powi(digits);
+    (value * scale).round() / scale
 }
 
 /// The plasticity of the material form: the hardening rule and the hardening curve as an
@@ -5163,11 +6026,42 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
     if step.kind.supports_defined_fields() {
         step.defined_fields = last.defined_fields.clone();
     }
+    // History outputs go on like the supports: the new step prints those of the last step
+    // that prints history, past sensitivity steps in between. They stay one output each.
+    let source = (fe.steps.iter().rev()).find(|s| s.kind.prints_history());
+    step.history_outputs = (source.into_iter().flat_map(|s| &s.history_outputs))
+        .filter(|&&id| {
+            (fe.history_output(id)).is_some_and(|o| step.kind.supports_history_output(&o.kind))
+        })
+        .copied()
+        .collect();
+}
+
+/// A new Dynamic step prints the energies of the model: the output of the model that
+/// prints them, or a new one.
+fn print_energies(fe: &mut FeModel, s: usize) {
+    if !matches!(fe.steps[s].kind, StepKind::Dynamic(_))
+        || (fe.step_history_outputs(s).iter()).any(|o| o.kind == HistoryKind::Energies)
+    {
+        return;
+    }
+    let output = (fe.history_outputs.iter())
+        .find(|o| o.kind == HistoryKind::Energies)
+        .cloned()
+        .unwrap_or_else(|| {
+            let taken = names(&fe.history_outputs, |h| &h.name);
+            if taken.contains(&"Energies") {
+                HistoryOutput::energies(next_name("Energies", taken))
+            } else {
+                HistoryOutput::energies("Energies")
+            }
+        });
+    fe.put_history_output(s, output);
 }
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field
 /// outputs (none for eigenvalue steps, which keep their mode shapes), in order.
-fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 12] {
+fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 11] {
     let heat = HeatTransferStep::default();
     [
         (
@@ -5183,11 +6077,6 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 12] 
         (
             DYNAMIC_LABEL,
             StepKind::Dynamic(DynamicStep::default()),
-            FieldOutput::dynamic_defaults(),
-        ),
-        (
-            MODAL_DYNAMICS_LABEL,
-            StepKind::ModalDynamics(ModalDynamicsStep::default()),
             FieldOutput::dynamic_defaults(),
         ),
         (
@@ -5239,7 +6128,6 @@ const HEAT_TRANSFER_LABEL: &str = "Heat Transfer";
 const COUPLED_LABEL: &str = "Coupled Temperature-Displacement";
 const UNCOUPLED_LABEL: &str = "Uncoupled Temperature-Displacement";
 const DYNAMIC_LABEL: &str = "Dynamic (time integration)";
-const MODAL_DYNAMICS_LABEL: &str = "Modal Dynamics (from stored modes)";
 const STEADY_STATE_LABEL: &str = "Steady State Dynamics (frequency response)";
 const COMPLEX_FREQUENCY_LABEL: &str = "Complex Frequency (rotating, Coriolis)";
 const BUCKLE_LABEL: &str = "Buckle";
@@ -5251,7 +6139,6 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
         StepKind::Static(_) => STATIC_LABEL,
         StepKind::Frequency(_) => FREQUENCY_LABEL,
         StepKind::Dynamic(_) => DYNAMIC_LABEL,
-        StepKind::ModalDynamics(_) => MODAL_DYNAMICS_LABEL,
         StepKind::SteadyStateDynamics(_) => STEADY_STATE_LABEL,
         StepKind::ComplexFrequency(_) => COMPLEX_FREQUENCY_LABEL,
         StepKind::Buckle(_) => BUCKLE_LABEL,
@@ -5266,13 +6153,29 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
 /// The step dialog. The kind is chosen when the step is created, from the list of
 /// step types; switching it starts with that kind's default field outputs.
 /// `cyclic_sectors` is the number of sectors of a cyclic symmetric model.
+/// `index` is that of the step edited, `None` for a new one.
 fn step_form(
     ui: &mut Ui,
     step: &mut Step,
-    creating: bool,
+    index: Option<usize>,
     fe: &FeModel,
+    mesh: &FeMesh,
     cyclic_sectors: Option<u32>,
 ) {
+    let creating = index.is_none();
+    // What a Dynamic step derives from the rest of the model: the shortest amplitude
+    // segment its loads follow, and the state it starts from.
+    let dynamic = match &step.kind {
+        StepKind::Dynamic(settings) => Some(DynamicContext {
+            amplitude_interval: fe.amplitude_interval(step, settings.duration),
+            stable_step: settings
+                .method
+                .uses_explicit()
+                .then(|| stable_step_estimate(ui.ctx(), fe, mesh, !settings.full_shell_inertia))
+                .flatten(),
+        }),
+        _ => None,
+    };
     name_row(ui, &mut step.name);
     ui.label("Type");
     if creating {
@@ -5292,14 +6195,19 @@ fn step_form(
         ui.label(step_kind_label(&step.kind));
     }
     ui.end_row();
+    start_section(ui, step, index, fe);
     let units = fe.properties.units;
     match &mut step.kind {
         StepKind::Static(settings) => static_form(ui, settings, units),
         StepKind::Frequency(settings) => frequency_form(ui, settings, units, cyclic_sectors),
-        StepKind::Dynamic(settings) => dynamic_form(ui, settings, units),
-        StepKind::ModalDynamics(settings) => modal_dynamics_form(ui, settings, units),
-        StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
-        StepKind::ComplexFrequency(settings) => complex_frequency_form(ui, settings, units),
+        StepKind::Dynamic(settings) => {
+            let context = dynamic.unwrap_or_default();
+            dynamic_form(ui, settings, units, &context)
+        }
+        StepKind::SteadyStateDynamics(settings) => {
+            steady_state_form(ui, settings, units, fe.properties.stored_modes.is_some())
+        }
+        StepKind::ComplexFrequency(settings) => complex_frequency_form(ui, settings, fe),
         StepKind::Buckle(settings) => buckle_form(ui, settings),
         StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::CoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, true),
@@ -5308,13 +6216,145 @@ fn step_form(
         StepKind::Sensitivity(settings) => sensitivity_form(ui, settings, units),
         StepKind::Visco(settings) => visco_form(ui, settings, units),
     }
+    // Hyperelastic materials switch large deformations on in the steps that deform them.
+    if !step.kind.nlgeom()
+        && plx_model::hyperelastic::switched_on_by_hyperelasticity(&step.kind)
+        && fe.has_hyperelastic()
+    {
+        ui.label("");
+        ui.weak("Large deformations are on: the model has hyperelastic materials.");
+        ui.end_row();
+    }
+}
+
+/// The first section of every step dialog: what the step starts from, what it uses of other
+/// steps and what it passes on, with the names of those steps ([`FeModel::handover`]).
+/// Frequency and buckle steps, and the modes of a modal dynamic step, choose their base
+/// state here.
+fn start_section(ui: &mut Ui, step: &mut Step, index: Option<usize>, fe: &FeModel) {
+    let handover = fe.handover(index.unwrap_or(fe.steps.len()), step);
+    ui.strong("Start");
+    ui.separator();
+    ui.end_row();
+    let modal = matches!(&step.kind, StepKind::Dynamic(_));
+    if handover.base.is_some()
+        && let Some(base) = step.kind.base_mut()
+    {
+        ui.label("Base state").on_hover_text(if modal {
+            "What the superposed eigenmodes are computed about: the unloaded model, or the \
+             state the steps before leave with the stiffening by its stresses (a tensioned \
+             string, a spinning rotor). The step itself starts from the state before it \
+             either way."
+        } else {
+            "What the step is computed about: the unloaded model, or the state the steps \
+             before leave, with its deformation, the stiffening by its stresses and its \
+             contact status. The step leaves that state as it found it."
+        });
+        let label = |b: plx_model::Base| match b {
+            plx_model::Base::Unloaded => "Unloaded model".to_owned(),
+            plx_model::Base::PreviousState => (handover.previous_state.clone())
+                .unwrap_or_else(|| "End of the step before (none)".into()),
+        };
+        egui::ComboBox::from_id_salt("step base state")
+            .selected_text(label(*base))
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                for option in plx_model::Base::ALL {
+                    let enabled =
+                        option == plx_model::Base::Unloaded || handover.previous_state.is_some();
+                    ui.add_enabled_ui(enabled, |ui| {
+                        ui.selectable_value(base, option, label(option));
+                    });
+                }
+            });
+        ui.end_row();
+        if base.is_preloaded() && handover.previous_state.is_none() {
+            ui.label("");
+            ui.weak("No step before leaves a state: the base is the unloaded model.");
+            ui.end_row();
+        }
+    }
+    if !(handover.base.is_some() && !step.kind.continues_state()) {
+        ui.label("Starts from");
+        ui.label(wrap_list(&handover.starts_from));
+        ui.end_row();
+    }
+    let shows_state = match handover.base {
+        Some(base) if !step.kind.continues_state() => base.is_preloaded(),
+        _ => true,
+    };
+    if shows_state && !handover.carried.is_empty() {
+        ui.label("");
+        ui.weak(wrap_list(&handover.carried));
+        ui.end_row();
+    }
+    for name in &handover.skipped {
+        ui.label("");
+        ui.weak(format!("{name} is off and left out."));
+        ui.end_row();
+    }
+    for (i, used) in handover.uses.iter().enumerate() {
+        ui.label(if i == 0 { "Uses" } else { "" });
+        ui.label(wrap_list(used));
+        ui.end_row();
+    }
+    if let Some(loads) = &handover.loads {
+        ui.label("Loads");
+        ui.label(wrap_list(loads));
+        ui.end_row();
+        if !handover.removed_loads.is_empty() {
+            ui.label("");
+            ui.weak(wrap_list(&format!(
+                "ramping down to 0: {}",
+                handover.removed_loads.join(", ")
+            )));
+            ui.end_row();
+        }
+    }
+    if let Some(temperatures) = &handover.temperatures {
+        ui.label("Temperatures");
+        ui.label(wrap_list(temperatures));
+        ui.end_row();
+    }
+    if !handover.model_wide.is_empty() {
+        ui.label("Model-wide").on_hover_text(
+            "Hold in every step: constraints, contact, bolts and the couplings of remote \
+             forces, also those of other steps.",
+        );
+        ui.label(wrap_list(&handover.model_wide.join(", ")));
+        ui.end_row();
+    }
+    ui.label("Passes on");
+    ui.label(wrap_list(&handover.passes_on));
+    ui.end_row();
+    ui.label("");
+    ui.separator();
+    ui.end_row();
+}
+
+/// A long line broken between words, so that the dialog keeps its width.
+fn wrap_list(text: &str) -> String {
+    const WIDTH: usize = 34;
+    let mut out = String::new();
+    let mut line = 0;
+    for word in text.split(' ') {
+        if line > 0 && line + 1 + word.len() > WIDTH {
+            out.push('\n');
+            line = 0;
+        } else if line > 0 {
+            out.push(' ');
+            line += 1;
+        }
+        out.push_str(word);
+        line += word.len();
+    }
+    out
 }
 
 /// Settings of a visco step: those of a static step over the creep time and the creep
 /// strain tolerance of the automatic increments.
 fn visco_form(ui: &mut Ui, settings: &mut ViscoStep, units: UnitSystem) {
     increments_form(ui, &mut settings.increments, units, true);
-    solver_row(ui, &mut settings.increments.solver);
     ui.label("Creep strain tolerance");
     ui.add(
         numeric::drag_value(&mut settings.creep_tolerance)
@@ -5401,7 +6441,6 @@ fn heat_transfer_form(
     settings.deltmx = limited.then_some(deltmx);
     ui.end_row();
     increments_form(ui, &mut settings.increments, units, coupled);
-    solver_row(ui, &mut settings.increments.solver);
     if !settings.steady_state {
         ui.label("");
         ui.weak("Transient: materials need density and specific heat.");
@@ -5409,104 +6448,512 @@ fn heat_transfer_form(
     }
 }
 
-/// Settings of a dynamic step: the time integration, then the increments as in a static
-/// step, then the Rayleigh damping.
-fn dynamic_form(ui: &mut Ui, settings: &mut DynamicStep, units: UnitSystem) {
-    ui.label("Procedure");
-    egui::ComboBox::from_id_salt("dynamic procedure")
-        .selected_text(settings.procedure.label())
+/// What the dialog of a Dynamic step shows besides its settings.
+#[derive(Default)]
+struct DynamicContext {
+    /// The shortest segment of the amplitudes its loads follow.
+    amplitude_interval: Option<f64>,
+    /// Explicit integration: the stable time step estimated from the mesh.
+    stable_step: Option<plx_model::StableStepEstimate>,
+}
+
+/// [`FeModel::explicit_time_step_estimate`], kept between frames of the dialog while the
+/// mesh, the sections and the materials stay.
+fn stable_step_estimate(
+    ctx: &egui::Context,
+    fe: &FeModel,
+    mesh: &FeMesh,
+    scaled_shells: bool,
+) -> Option<plx_model::StableStepEstimate> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    scaled_shells.hash(&mut hasher);
+    mesh.elements().len().hash(&mut hasher);
+    mesh.node_count().hash(&mut hasher);
+    format!("{:?}{:?}", fe.sections, fe.materials).hash(&mut hasher);
+    let key = hasher.finish();
+    let id = egui::Id::new("explicit stable step estimate");
+    type Cached = (u64, Option<plx_model::StableStepEstimate>);
+    if let Some((k, estimate)) = ctx.data(|d| d.get_temp::<Cached>(id))
+        && k == key
+    {
+        return estimate;
+    }
+    let estimate = fe.explicit_time_step_estimate(mesh, scaled_shells);
+    ctx.data_mut(|d| d.insert_temp::<Cached>(id, (key, estimate.clone())));
+    estimate
+}
+
+/// A time or frequency with its unit, to four significant digits.
+fn shown(value: f64, units: UnitSystem, quantity: Quantity) -> String {
+    let value = plx_model::STORED.convert(value, quantity, units);
+    let text = numeric::fit(value, |t| t.len() <= 7);
+    match units.unit(quantity) {
+        "" => text,
+        unit => format!("{text} {unit}"),
+    }
+}
+
+/// Settings of a Dynamic step: how long, how many result frames and how damped; the time
+/// step and the integration under Advanced.
+fn dynamic_form(
+    ui: &mut Ui,
+    settings: &mut DynamicStep,
+    units: UnitSystem,
+    context: &DynamicContext,
+) {
+    ui.label("Duration");
+    expose::field(ui, Field::Duration, |ui| {
+        ui.add(numeric::physical(
+            &mut settings.duration,
+            units,
+            Quantity::Time,
+        ))
+    });
+    ui.end_row();
+    ui.label("Frames").on_hover_text(
+        "Result frames kept over the duration, evenly spaced; the last one at the end.",
+    );
+    expose::field(ui, Field::Frames, |ui| {
+        ui.add(numeric::count(&mut settings.frames).range(1..=DynamicStep::MAX_FRAMES))
+    });
+    ui.end_row();
+    let integration = settings.integration(context.amplitude_interval);
+    ui.label("");
+    ui.weak(format!(
+        "A frame every {}",
+        shown(settings.frame_interval(), units, Quantity::Time)
+    ));
+    ui.end_row();
+    let modal = matches!(settings.method, DynamicMethod::Modal { .. });
+    let explicit = settings.method.is_explicit();
+    ui.label("");
+    ui.add_enabled(
+        !modal,
+        egui::Checkbox::new(&mut settings.event_frames, "Frames at contact events"),
+    )
+    .on_hover_text(if explicit {
+        "Also a frame whenever a contact closes or opens (within a few time steps), \
+         between the evenly spaced frames."
+    } else {
+        "Also a frame whenever a contact closes or opens and at the sub-steps of an \
+         impact, between the evenly spaced frames. Not with modal superposition."
+    });
+    ui.end_row();
+
+    ui.label("Method").on_hover_text(settings.method.hint());
+    egui::ComboBox::from_id_salt("dynamic method")
+        .selected_text(settings.method.label())
         .show_ui(ui, |ui| {
-            for choice in DynamicProcedure::ALL {
-                ui.selectable_value(&mut settings.procedure, choice, choice.label());
+            // 0 implicit, 1 explicit, 2 automatic, 3 modal.
+            let current = match settings.method {
+                DynamicMethod::Direct => 0,
+                DynamicMethod::Explicit => 1,
+                DynamicMethod::Automatic => 2,
+                DynamicMethod::Modal { .. } => 3,
+            };
+            let mut choice = current;
+            for (i, method) in [
+                DynamicMethod::Direct,
+                DynamicMethod::Explicit,
+                DynamicMethod::Automatic,
+                DynamicMethod::Modal {
+                    modes: 0,
+                    base: plx_model::Base::Unloaded,
+                },
+            ]
+            .iter()
+            .enumerate()
+            {
+                ui.selectable_value(&mut choice, i, method.label())
+                    .on_hover_text(method.hint());
+            }
+            if choice != current {
+                settings.method = match choice {
+                    0 => DynamicMethod::Direct,
+                    1 => DynamicMethod::Explicit,
+                    2 => DynamicMethod::Automatic,
+                    _ => {
+                        settings.large_deformations = false;
+                        DynamicMethod::Modal {
+                            modes: DynamicMethod::DEFAULT_MODES,
+                            base: plx_model::Base::Unloaded,
+                        }
+                    }
+                };
             }
         });
     ui.end_row();
-    ui.label("Alpha (HHT)");
-    ui.add(
-        numeric::drag_value(&mut settings.alpha)
-            .range(-1.0 / 3.0..=0.0)
-            .speed(0.01)
-            .max_decimals(4),
-    );
-    ui.end_row();
-    ui.label("");
-    ui.weak("Numerical damping of the time integration, -1/3 to 0; -0.05 is the default.");
-    ui.end_row();
-    increments_form(ui, &mut settings.increments, units, true);
-    solver_row(ui, &mut settings.increments.solver);
-    let mut damped = settings.damping.is_some();
-    ui.label("");
-    ui.checkbox(&mut damped, "Rayleigh damping");
-    ui.end_row();
-    let mut damping = settings.damping.unwrap_or_default();
-    ui.label("    Alpha (mass)");
-    ui.add_enabled(
-        damped,
-        numeric::physical(&mut damping.alpha, units, Quantity::Frequency),
-    );
-    ui.end_row();
-    ui.label("    Beta (stiffness)");
-    ui.add_enabled(
-        damped,
-        numeric::physical(&mut damping.beta, units, Quantity::Time),
-    );
-    ui.end_row();
-    ui.label("");
-    ui.weak("Damping ratio zeta at circular frequency omega: alpha = 2 zeta omega,");
-    ui.end_row();
-    ui.label("");
-    ui.weak("beta = 2 zeta / omega. Loads need a stepped amplitude to act at once.");
-    ui.end_row();
-    settings.damping = damped.then_some(damping);
-}
-
-/// Settings of a modal dynamics step: the time increments, then the modal damping.
-fn modal_dynamics_form(ui: &mut Ui, settings: &mut ModalDynamicsStep, units: UnitSystem) {
-    ui.label("");
-    ui.checkbox(
-        &mut settings.steady_state,
-        "Steady state (until the response repeats)",
-    );
-    ui.end_row();
-    ui.label("Time increment");
-    ui.add(numeric::physical(
-        &mut settings.increment,
-        units,
-        Quantity::Time,
-    ));
-    ui.end_row();
-    if settings.steady_state {
-        ui.label("Relative error");
-        ui.add(
-            numeric::drag_value(&mut settings.relative_error)
-                .range(0.0..=1.0)
-                .speed(0.001)
-                .max_decimals(6),
+    let automatic = matches!(settings.method, DynamicMethod::Automatic);
+    if explicit || automatic {
+        match &context.stable_step {
+            Some(estimate) => {
+                let scaled = settings.mass_scaling.filter(|t| *t > estimate.time_step);
+                let steps = (settings.duration / scaled.unwrap_or(estimate.time_step)).ceil();
+                let place = match estimate.thickness {
+                    Some(t) => format!(
+                        "{}, {} thickness",
+                        estimate.section,
+                        shown(t, units, Quantity::Length)
+                    ),
+                    None => estimate.section.clone(),
+                };
+                ui.label("");
+                if automatic {
+                    let factor = settings
+                        .switch_factor
+                        .unwrap_or(DynamicStep::DEFAULT_SWITCH_FACTOR);
+                    let explicit_step = scaled.unwrap_or(estimate.time_step);
+                    ui.weak(if factor > 0.0 {
+                        format!(
+                            "Stable time step ~ {} ({place}),\nexplicit where implicit steps \
+                             fall below {}",
+                            shown(explicit_step, units, Quantity::Time),
+                            shown(factor * explicit_step, units, Quantity::Time)
+                        )
+                    } else {
+                        "Switch factor 0: implicit throughout".into()
+                    });
+                } else {
+                    ui.weak(format!(
+                        "Stable time step ~ {} ({place}),\n{}about {} steps for the duration",
+                        shown(estimate.time_step, units, Quantity::Time),
+                        match scaled {
+                            Some(t) =>
+                                format!("{} with mass scaling, ", shown(t, units, Quantity::Time)),
+                            None => String::new(),
+                        },
+                        numeric::fit(steps, |t| t.len() <= 8)
+                    ));
+                }
+                ui.end_row();
+                if steps > 1e6 && explicit {
+                    ui.label("");
+                    ui.weak("Consider a shorter duration or\nmass scaling (Advanced).");
+                    ui.end_row();
+                }
+            }
+            None if explicit => {
+                ui.label("");
+                ui.weak("The solver finds the time step from the mesh.");
+                ui.end_row();
+            }
+            None => {}
+        }
+    }
+    if let DynamicMethod::Modal { modes, .. } = &mut settings.method {
+        ui.label("    Modes").on_hover_text(
+            "The lowest eigenmodes superposed. The highest of them must lie above the \
+             frequencies the loads excite; the solver output names it.",
         );
+        expose::field(ui, Field::Modes, |ui| {
+            ui.add(numeric::count(modes).range(1..=10_000))
+        });
         ui.end_row();
-    } else {
-        ui.label("Time period");
-        ui.add(numeric::physical(
-            &mut settings.time_period,
-            units,
-            Quantity::Time,
-        ));
+        ui.label("");
+        ui.weak("Linear only: no contact, no large\ndeformations, no plasticity.");
         ui.end_row();
     }
-    ui.label("Max. increments");
-    ui.add(numeric::drag_value(&mut settings.max_increments).range(1..=1_000_000));
+
+    ui.label("Damping");
+    let kind = |d: &Damping| match d {
+        Damping::None => 0,
+        Damping::Ratio { .. } => 1,
+        Damping::Rayleigh(_) => 2,
+    };
+    let labels = ["None", "Damping ratio", "Rayleigh coefficients"];
+    let mut chosen = kind(&settings.damping);
+    egui::ComboBox::from_id_salt("dynamic damping")
+        .selected_text(labels[chosen])
+        .show_ui(ui, |ui| {
+            for (i, label) in labels.iter().enumerate() {
+                ui.selectable_value(&mut chosen, i, *label);
+            }
+        });
+    ui.end_row();
+    if chosen != kind(&settings.damping) {
+        settings.damping = match chosen {
+            0 => Damping::None,
+            1 => Damping::Ratio {
+                zeta: 0.02,
+                range: DampingRange::Automatic,
+            },
+            _ => Damping::Rayleigh(RayleighDamping::default()),
+        };
+    }
+    match &mut settings.damping {
+        Damping::None => {}
+        Damping::Ratio { zeta, range } => {
+            ui.label("    Ratio");
+            expose::field(ui, Field::DampingRatio, |ui| {
+                ui.add(
+                    numeric::drag_value(zeta)
+                        .range(0.0..=1.0)
+                        .speed(0.001)
+                        .max_decimals(6),
+                )
+            });
+            ui.end_row();
+            ui.label("");
+            ui.weak(format!(
+                "= {} % of critical damping",
+                numeric::fit(*zeta * 100.0, |t| t.len() <= 6)
+            ));
+            ui.end_row();
+            ui.label("    Frequency range").on_hover_text(
+                "The ratio is met exactly at both ends of the range and is lower between \
+                 them; outside it rises.",
+            );
+            let mut between = matches!(range, DampingRange::Between(..));
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut between, false, "Automatic")
+                    .on_hover_text(
+                        "From the lowest eigenfrequency of the model, which the solver computes \
+                     at the start of the step, to the highest frequency the time step \
+                     resolves.",
+                    );
+                ui.radio_value(&mut between, true, "Between");
+            });
+            ui.end_row();
+            match (between, *range) {
+                (true, DampingRange::Automatic) => {
+                    let upper = integration.resolved_frequency();
+                    *range = DampingRange::Between(upper / 10.0, upper);
+                }
+                (false, DampingRange::Between(..)) => *range = DampingRange::Automatic,
+                _ => {}
+            }
+            if let DampingRange::Between(f1, f2) = range {
+                ui.label("        Lower frequency");
+                ui.add(numeric::physical(f1, units, Quantity::Frequency));
+                ui.end_row();
+                ui.label("        Upper frequency");
+                ui.add(numeric::physical(f2, units, Quantity::Frequency));
+                ui.end_row();
+            } else if explicit {
+                ui.label("");
+                ui.weak("At the lowest eigenfrequency, mass-\nproportional (explicit)");
+                ui.end_row();
+            } else {
+                ui.label("");
+                ui.weak(format!(
+                    "Lowest eigenfrequency to {}",
+                    shown(integration.resolved_frequency(), units, Quantity::Frequency)
+                ));
+                ui.end_row();
+            }
+        }
+        Damping::Rayleigh(damping) => {
+            ui.label("    Alpha (mass)");
+            ui.add(numeric::physical(
+                &mut damping.alpha,
+                units,
+                Quantity::Frequency,
+            ));
+            ui.end_row();
+            ui.label("    Beta (stiffness)");
+            ui.add(numeric::physical(&mut damping.beta, units, Quantity::Time));
+            ui.end_row();
+            ui.label("");
+            ui.weak("C = alpha M + beta K");
+            ui.end_row();
+        }
+    }
+
+    ui.label("");
+    ui.add_enabled(
+        !modal,
+        egui::Checkbox::new(&mut settings.large_deformations, "Large deformations"),
+    )
+    .on_hover_text(
+        "Large displacements and rotations: a pendulum, a mechanism, a body that turns \
+         or bends far. Each time step iterates; rigid bodies turn by finite angles. Not \
+         with modal superposition.",
+    );
+    ui.end_row();
+    if settings.large_deformations && !explicit {
+        ui.label("");
+        ui.weak("Time steps are split where needed.");
+        ui.end_row();
+    }
+
+    // Advanced: open while something in it differs from the defaults.
+    let id = ui.id().with("dynamic advanced");
+    let custom = settings.time_step != TimeStep::Automatic
+        || settings.frequency_limit.is_some()
+        || settings.numerical_damping != NumericalDamping::Normal
+        || settings.solver != LinearSolverChoice::Automatic
+        || ((explicit || automatic)
+            && (settings.mass_scaling.is_some() || settings.full_shell_inertia))
+        || (automatic && settings.switch_factor.is_some());
+    let mut advanced = ui.data(|d| d.get_temp(id)).unwrap_or(custom);
+    ui.label("");
+    ui.checkbox(&mut advanced, "Advanced settings");
+    ui.end_row();
+    ui.data_mut(|d| d.insert_temp(id, advanced));
+    if advanced {
+        ui.label("Time step");
+        let mut fixed = matches!(settings.time_step, TimeStep::Fixed(_));
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut fixed, false, "Automatic")
+                .on_hover_text(if explicit {
+                    "The stable time step of the mesh."
+                } else {
+                    "Short enough for the frames, a tenth of the shortest segment of the \
+                 amplitudes the loads follow, and the frequency limit."
+                });
+            ui.radio_value(&mut fixed, true, "At most");
+        });
+        ui.end_row();
+        match (fixed, settings.time_step) {
+            (true, TimeStep::Automatic) => {
+                settings.time_step = TimeStep::Fixed(integration.increment)
+            }
+            (false, TimeStep::Fixed(_)) => settings.time_step = TimeStep::Automatic,
+            _ => {}
+        }
+        if let TimeStep::Fixed(dt) = &mut settings.time_step {
+            ui.label("");
+            ui.add(numeric::physical(dt, units, Quantity::Time));
+            ui.end_row();
+        }
+        if automatic {
+            ui.label("Switch factor").on_hover_text(
+                "Implicit time steps shorter than this many stable explicit time steps go \
+                 on explicitly: an implicit step costs about as much as 30 to 100 explicit \
+                 ones. 0 never switches; a large value switches at the first impact.",
+            );
+            let mut factor = settings
+                .switch_factor
+                .unwrap_or(DynamicStep::DEFAULT_SWITCH_FACTOR);
+            ui.add(
+                numeric::drag_value(&mut factor)
+                    .range(0.0..=1e6)
+                    .speed(1.0)
+                    .max_decimals(3),
+            );
+            ui.end_row();
+            settings.switch_factor =
+                (factor != DynamicStep::DEFAULT_SWITCH_FACTOR).then_some(factor);
+        }
+        if explicit || automatic {
+            ui.label("Mass scaling").on_hover_text(
+                "Elements whose stable time step is shorter than this one get the mass that \
+                 lifts it there (small or thin elements). The solver reports the mass added; \
+                 above a few per cent of the model it changes the response.",
+            );
+            let mut scaled = settings.mass_scaling.is_some();
+            let mut target = settings.mass_scaling.unwrap_or_else(|| {
+                context
+                    .stable_step
+                    .as_ref()
+                    .map_or(settings.frame_interval(), |e| 2.0 * e.time_step)
+            });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut scaled, "To time step");
+                ui.add_enabled(
+                    scaled,
+                    numeric::physical(&mut target, units, Quantity::Time),
+                );
+            });
+            ui.end_row();
+            settings.mass_scaling = scaled.then_some(target);
+            ui.label("Shell inertia").on_hover_text(
+                "Scaled: shells get more inertia in their thickness modes only (stretch, \
+                 shear and rotation through the thickness), so that their thickness does \
+                 not set the time step; translations and the mass stay as they are. Full: \
+                 the whole inertia, with a time step several times shorter for thin shells.",
+            );
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut settings.full_shell_inertia, false, "Scaled");
+                ui.radio_value(&mut settings.full_shell_inertia, true, "Full");
+            });
+            ui.end_row();
+        }
+        if !explicit {
+            ui.label("Max. frequency").on_hover_text(
+                "The time step resolves vibrations up to this frequency with 20 steps per period. \
+             Higher ones are damped out by the numerical damping.",
+            );
+            let mut limited = settings.frequency_limit.is_some();
+            let mut limit =
+                (settings.frequency_limit).unwrap_or_else(|| integration.resolved_frequency());
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut limited, "");
+                ui.add_enabled(
+                    limited,
+                    numeric::physical(&mut limit, units, Quantity::Frequency),
+                );
+            });
+            ui.end_row();
+            settings.frequency_limit = limited.then_some(limit);
+            ui.label("Numerical damping").on_hover_text(
+                "Removes the high frequencies the time step cannot resolve. Normal damps them \
+             slightly, None conserves the energy, Strong damps them as much as possible.",
+            );
+            egui::ComboBox::from_id_salt("numerical damping")
+                .selected_text(settings.numerical_damping.label())
+                .show_ui(ui, |ui| {
+                    for choice in NumericalDamping::ALL {
+                        ui.selectable_value(
+                            &mut settings.numerical_damping,
+                            choice,
+                            choice.label(),
+                        );
+                    }
+                });
+            ui.end_row();
+            solver_row(ui, &mut settings.solver);
+        }
+    }
+    if explicit {
+        ui.label("");
+        ui.weak(
+            "Loads act at once; give a load an\namplitude for a ramp or pulse.\nMaterials need a density.",
+        );
+        ui.end_row();
+        return;
+    }
+    // Recomputed: the settings may have changed above.
+    let integration = settings.integration(context.amplitude_interval);
+    let reason = match integration.limited_by {
+        StepLimit::Frames => "one per frame",
+        StepLimit::Amplitude => "for the amplitudes and signals of the loads",
+        StepLimit::Frequency => "for the frequency limit",
+        StepLimit::Fixed => "as set",
+    };
+    ui.label("");
+    ui.weak(format!(
+        "Time step {} ({reason}),\n{} increments",
+        shown(integration.increment, units, Quantity::Time),
+        integration.increments(settings)
+    ));
     ui.end_row();
     ui.label("");
     ui.weak(
-        "Needs a Frequency step with stored modes before it. Loads without an amplitude \
-         act at once and stay constant.",
+        "Loads act at once; give a load an\namplitude for a ramp, pulse or\nvibration. \
+         Materials need a density.",
     );
     ui.end_row();
-    modal_damping_rows(ui, &mut settings.damping, units);
 }
 
 /// Settings of a steady state dynamics step: the frequency sweep, then the modal damping.
-fn steady_state_form(ui: &mut Ui, settings: &mut SteadyStateDynamicsStep, units: UnitSystem) {
+/// `linked`: the eigenmodes come from another analysis through an Eigenmodes link.
+fn steady_state_form(
+    ui: &mut Ui,
+    settings: &mut SteadyStateDynamicsStep,
+    units: UnitSystem,
+    linked: bool,
+) {
+    if !linked {
+        ui.label("Modes").on_hover_text(
+            "The lowest eigenmodes the response is superposed from, computed by the step \
+             itself about its base state. The highest of them must lie above the upper \
+             frequency.",
+        );
+        ui.add(numeric::count(&mut settings.modes).range(1..=10_000));
+        ui.end_row();
+    }
     ui.label("");
     ui.checkbox(&mut settings.harmonic, "Harmonic excitation");
     ui.end_row();
@@ -5544,9 +6991,6 @@ fn steady_state_form(ui: &mut Ui, settings: &mut SteadyStateDynamicsStep, units:
             ui.end_row();
         }
     }
-    ui.label("");
-    ui.weak("Needs a Frequency step with stored modes before it.");
-    ui.end_row();
     modal_damping_rows(ui, &mut settings.damping, units);
 }
 
@@ -5650,7 +7094,7 @@ fn validate_heat_transfer_step(settings: &HeatTransferStep) -> Result<(), String
 /// heat transfer, frequency and buckle.
 fn solver_row(ui: &mut Ui, solver: &mut LinearSolverChoice) {
     ui.label("Equation solver");
-    ui.horizontal_wrapped(|ui| {
+    crate::layout::wrapped_row(ui, |ui| {
         for choice in LinearSolverChoice::ALL {
             ui.radio_value(solver, choice, choice.name())
                 .on_hover_text(solver_hint(choice));
@@ -5686,12 +7130,6 @@ fn frequency_form(
     units: UnitSystem,
     cyclic_sectors: Option<u32>,
 ) {
-    ui.label("");
-    ui.checkbox(
-        &mut settings.perturbation,
-        "Perturbation (prestress from previous step)",
-    );
-    ui.end_row();
     ui.label("Number of eigenfrequencies");
     expose::field(ui, Field::Modes, |ui| {
         ui.add(numeric::drag_value(&mut settings.num_frequencies).range(1..=10_000))
@@ -5756,7 +7194,8 @@ fn nodal_diameter_rows(ui: &mut Ui, range: &mut Option<[u32; 2]>, sectors: u32) 
 /// Settings of a complex frequency step: the rotation, the stress stiffening by it, the
 /// numbers of modes and the solver. The step is complete on its own; the solver preloads and
 /// computes the eigenmodes in steps of its own.
-fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep, units: UnitSystem) {
+fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep, fe: &FeModel) {
+    let units = fe.properties.units;
     ui.label("Rotational speed");
     expose::field(ui, Field::Speed, |ui| {
         ui.add(numeric::quantity(&mut settings.speed, units, Quantity::RotationalSpeed).speed(1.0))
@@ -5773,25 +7212,72 @@ fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep, unit
     };
     ui.weak(format!("= {} rpm", numeric::format_physical(rpm)));
     ui.end_row();
-    for ((value, label), field) in (settings.point.iter_mut())
-        .zip(["Axis point X", "Axis point Y", "Axis point Z"])
-        .zip(Field::LOCATION)
-    {
-        ui.label(label);
-        expose::field(ui, field, |ui| {
-            ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1))
-        });
-        ui.end_row();
-    }
-    for ((value, label), field) in (settings.axis.iter_mut())
-        .zip(["Axis direction X", "Axis direction Y", "Axis direction Z"])
-        .zip(Field::AXIS)
-    {
-        ui.label(label);
-        expose::field(ui, field, |ui| {
-            ui.add(numeric::drag_value(value).speed(0.01))
-        });
-        ui.end_row();
+    // The axis: the z axis of a coordinate system, or a point and a direction.
+    const TYPED: &str = "Point and direction";
+    ui.label("Rotation axis");
+    egui::ComboBox::from_id_salt("rotation axis")
+        .selected_text(match settings.system {
+            Some(id) => format!("z axis of {}", fe.name_or_missing(Some(id))),
+            None => TYPED.to_string(),
+        })
+        .width(crate::dock::fit_width(ui, 200.0))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut settings.system, None, TYPED);
+            for system in &fe.coordinate_systems {
+                let label = format!("z axis of {}", system.name);
+                ui.selectable_value(&mut settings.system, Some(system.id), label);
+            }
+        })
+        .response
+        .on_hover_text(
+            "A coordinate system (Features > Coordinate System) puts the axis through its \
+             origin along its z axis, e.g. one placed at the hub by picking on the geometry.",
+        );
+    ui.end_row();
+    if settings.system.is_some() {
+        match settings.axis_in(fe) {
+            Ok((point, axis)) => {
+                ui.label("");
+                let length = |v: f64| shown(v, units, Quantity::Length);
+                let number = |v: f64| numeric::format_physical((v * 1e6).round() / 1e6);
+                ui.weak(format!(
+                    "through ({}, {}, {}),\ndirection ({}, {}, {})",
+                    length(point[0]),
+                    length(point[1]),
+                    length(point[2]),
+                    number(axis[0]),
+                    number(axis[1]),
+                    number(axis[2]),
+                ));
+                ui.end_row();
+            }
+            Err(problem) => {
+                ui.label("");
+                ui.colored_label(ui.visuals().error_fg_color, problem);
+                ui.end_row();
+            }
+        }
+    } else {
+        for ((value, label), field) in (settings.point.iter_mut())
+            .zip(["Axis point X", "Axis point Y", "Axis point Z"])
+            .zip(Field::LOCATION)
+        {
+            ui.label(label);
+            expose::field(ui, field, |ui| {
+                ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1))
+            });
+            ui.end_row();
+        }
+        for ((value, label), field) in (settings.axis.iter_mut())
+            .zip(["Axis direction X", "Axis direction Y", "Axis direction Z"])
+            .zip(Field::AXIS)
+        {
+            ui.label(label);
+            expose::field(ui, field, |ui| {
+                ui.add(numeric::drag_value(value).speed(0.01))
+            });
+            ui.end_row();
+        }
     }
     ui.label("Stress stiffening");
     ui.checkbox(&mut settings.stiffening, "Centrifugal prestress")
@@ -5814,9 +7300,6 @@ fn complex_frequency_form(ui: &mut Ui, settings: &mut ComplexFrequencyStep, unit
     ui.add(numeric::drag_value(&mut settings.num_modes).range(least..=10_000));
     ui.end_row();
     solver_row(ui, &mut settings.solver);
-    ui.label("");
-    ui.weak("Rotates the whole model; the materials\nneed a density. Results are the\ncomplex modes only.");
-    ui.end_row();
 }
 
 fn validate_frequency_step(settings: &FrequencyStep) -> Result<(), String> {
@@ -5831,12 +7314,6 @@ fn validate_frequency_step(settings: &FrequencyStep) -> Result<(), String> {
 /// The buckle step view: perturbation, solver, number of buckling factors and
 /// accuracy.
 fn buckle_form(ui: &mut Ui, settings: &mut BuckleStep) {
-    ui.label("");
-    ui.checkbox(
-        &mut settings.perturbation,
-        "Preload from previous step (Perturbation)",
-    );
-    ui.end_row();
     ui.label("Number of buckling factors");
     ui.add(numeric::drag_value(&mut settings.num_factors).range(1..=10_000));
     ui.end_row();
@@ -5858,82 +7335,157 @@ fn validate_buckle_step(settings: &BuckleStep) -> Result<(), String> {
 
 fn static_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem) {
     increments_form(ui, settings, units, true);
-    solver_row(ui, &mut settings.solver);
 }
 
-/// Nonlinear geometry and increments of a step with a time period; `mechanical`
-/// shows the geometric nonlinearity, which only steps with displacements have.
+/// Duration, result frames and large deformations of a step that runs over a (pseudo)
+/// time, then under Advanced the increments and the equation solver, all automatic by
+/// default. `mechanical` shows the large deformations, which only steps with displacements
+/// have.
 fn increments_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem, mechanical: bool) {
+    ui.label("Duration").on_hover_text(
+        "Length of the step. Without an amplitude the loads ramp up linearly over it; for \
+         rate-independent materials only its ratio to the amplitudes matters.",
+    );
+    expose::field(ui, Field::Duration, |ui| {
+        ui.add(numeric::physical(
+            &mut settings.duration,
+            units,
+            Quantity::Time,
+        ))
+    });
+    ui.end_row();
+    ui.label("Frames").on_hover_text(
+        "Result frames kept over the duration, evenly spaced; the last one at the end. The \
+         solver takes as many increments as it needs and ends one on every frame.",
+    );
+    expose::field(ui, Field::Frames, |ui| {
+        ui.add(numeric::count(&mut settings.frames).range(1..=StaticStep::MAX_FRAMES))
+    });
+    ui.end_row();
+    if settings.frames > 1 {
+        ui.label("");
+        ui.weak(format!(
+            "A frame every {}",
+            shown(settings.frame_interval(), units, Quantity::Time)
+        ));
+        ui.end_row();
+    }
     if mechanical {
         ui.label("");
-        ui.checkbox(&mut settings.nlgeom, "Nonlinear geometry (Nlgeom)");
+        let was = settings.nlgeom;
+        ui.checkbox(&mut settings.nlgeom, "Large deformations (Nlgeom)")
+            .on_hover_text(
+                "Large displacements and rotations: the equilibrium is found in the deformed \
+                 shape, loads follow it, stiffening and snap-through show. Each increment \
+                 iterates. Off, the deformations are small (linear unless contact or \
+                 plasticity make the step nonlinear).",
+            );
         ui.end_row();
+        // A nonlinear step is usually looked at over its load history.
+        if settings.nlgeom && !was && settings.frames == 1 {
+            settings.frames = 10;
+        }
     }
-    ui.label("Incrementation");
-    egui::ComboBox::from_id_salt("incrementation")
-        .selected_text(incrementation_label(settings.incrementation))
-        .show_ui(ui, |ui| {
-            for choice in [
-                Incrementation::Default,
-                Incrementation::Automatic,
-                Incrementation::Direct,
-            ] {
-                let label = incrementation_label(choice);
-                ui.selectable_value(&mut settings.incrementation, choice, label);
-            }
+
+    // Advanced: open while something in it differs from the defaults.
+    let id = ui.id().with("increments advanced");
+    let custom = settings.control != IncrementControl::default()
+        || settings.solver != LinearSolverChoice::Automatic;
+    let mut advanced = ui.data(|d| d.get_temp(id)).unwrap_or(custom);
+    ui.label("");
+    ui.checkbox(&mut advanced, "Advanced settings");
+    ui.end_row();
+    ui.data_mut(|d| d.insert_temp(id, advanced));
+    let automatic = StaticStep {
+        control: IncrementControl::default(),
+        ..settings.clone()
+    }
+    .plan(settings.nlgeom);
+    if advanced {
+        ui.label("Increments");
+        let mut fixed = matches!(settings.control.size, IncrementSize::Fixed(_));
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut fixed, false, "Automatic")
+                .on_hover_text(
+                    "Grow after increments that converge easily, are cut back after failed ones.",
+                );
+            ui.radio_value(&mut fixed, true, "Fixed").on_hover_text(
+                "Always the same size, shortened to end on the frames. An increment that \
+                 does not converge fails the step.",
+            );
         });
-    ui.end_row();
-    let custom = settings.incrementation != Incrementation::Default;
-    let automatic = settings.incrementation == Incrementation::Automatic;
-    ui.label("Max. increments");
-    ui.add_enabled(
-        custom,
-        numeric::drag_value(&mut settings.max_increments).range(1..=1_000_000),
-    );
-    ui.end_row();
-    for (label, value, enabled, field) in [
-        (
-            "Time period",
-            &mut settings.time_period,
-            custom,
-            Some(Field::TimePeriod),
-        ),
-        (
-            "Initial increment",
-            &mut settings.initial_increment,
-            custom,
-            Some(Field::InitialIncrement),
-        ),
-        (
-            "Min. increment",
-            &mut settings.min_increment,
-            automatic,
-            None,
-        ),
-        (
-            "Max. increment",
-            &mut settings.max_increment,
-            automatic,
-            None,
-        ),
-    ] {
-        ui.label(label);
-        let mut add =
-            |ui: &mut Ui| ui.add_enabled(enabled, numeric::physical(value, units, Quantity::Time));
-        match field {
-            Some(field) => expose::field(ui, field, add),
-            None => add(ui),
-        };
         ui.end_row();
+        match (fixed, settings.control.size) {
+            (true, IncrementSize::Automatic) => {
+                settings.control.size = IncrementSize::Fixed(automatic.initial)
+            }
+            (false, IncrementSize::Fixed(_)) => settings.control.size = IncrementSize::Automatic,
+            _ => {}
+        }
+        if let IncrementSize::Fixed(dt) = &mut settings.control.size {
+            ui.label("    Size");
+            ui.add(numeric::physical(dt, units, Quantity::Time));
+            ui.end_row();
+        } else {
+            let rows: [(&str, &str, &mut Option<f64>, f64); 3] = [
+                (
+                    "    Initial",
+                    "Size of the first increment. Automatic: a frame interval, with large \
+                     deformations at most a tenth of the duration; never more than the \
+                     largest increment.",
+                    &mut settings.control.initial,
+                    automatic.initial,
+                ),
+                (
+                    "    Smallest",
+                    "The step fails when cutbacks would make an increment shorter. \
+                     Automatic: 1e-5 of the duration.",
+                    &mut settings.control.minimum,
+                    automatic.minimum,
+                ),
+                (
+                    "    Largest",
+                    "No increment gets longer. Automatic: the duration (the frames still \
+                     end increments).",
+                    &mut settings.control.maximum,
+                    automatic.maximum,
+                ),
+            ];
+            for (label, hint, value, derived) in rows {
+                ui.label(label).on_hover_text(hint);
+                optional_time(ui, value, derived, units);
+                ui.end_row();
+            }
+        }
+        ui.label("Increment limit").on_hover_text(
+            "Stops the step after this many increments. Off, the step takes as many as it \
+             needs; the smallest increment still stops one that gets stuck.",
+        );
+        let mut limited = settings.control.limit.is_some();
+        let mut limit = settings.control.limit.unwrap_or(1000);
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut limited, "");
+            ui.add_enabled(limited, numeric::count(&mut limit).range(1..=u32::MAX));
+        });
+        ui.end_row();
+        settings.control.limit = limited.then_some(limit);
+        solver_row(ui, &mut settings.solver);
     }
 }
 
-fn incrementation_label(incrementation: Incrementation) -> &'static str {
-    match incrementation {
-        Incrementation::Default => "Default",
-        Incrementation::Automatic => "Automatic",
-        Incrementation::Direct => "Direct",
-    }
+/// A time that is derived unless the box is ticked: unticked, the derived value is shown
+/// greyed out; ticking starts from it.
+fn optional_time(ui: &mut Ui, value: &mut Option<f64>, derived: f64, units: UnitSystem) {
+    let mut set = value.is_some();
+    let mut shown_value = value.unwrap_or(derived);
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut set, "").on_hover_text("Off: automatic");
+        ui.add_enabled(
+            set,
+            numeric::physical(&mut shown_value, units, Quantity::Time),
+        );
+    });
+    *value = set.then_some(shown_value);
 }
 
 #[cfg(test)]
@@ -5947,10 +7499,11 @@ mod tests {
         assert_eq!(editor.title(), "Create Contact Detection: Contacts");
         assert_eq!(editor.detection(&fe), Some(0));
         editor.apply(&mut fe);
+        let detection = fe.contact_detections[0].id;
         let found = |name: &str, edited| plx_model::ContactRegion {
             side_a: Region::Faces(vec![(1, 2)]),
             side_b: Region::Faces(vec![(2, 1)]),
-            detected_by: Some("Contacts".into()),
+            detected_by: Some(detection),
             edited,
             ..plx_model::ContactRegion::new(name, plx_model::ContactBehavior::Bonded)
         };
@@ -5966,14 +7519,15 @@ mod tests {
         }
         editor.apply(&mut fe);
         assert!(fe.contact_regions[1].edited);
-        // Renaming the detection renames it in its regions.
+        // A renamed detection is still the one of its regions.
         let mut editor = Editor::edit(&TreeItem::ContactDetection(0), &fe, &mesh).unwrap();
         if let Draft::ContactDetection(detection) = &mut editor.draft {
             detection.name = "Bolts".into();
         }
         assert_eq!(editor.detection(&fe), Some(0));
         editor.apply(&mut fe);
-        assert_eq!(fe.contact_regions[0].detected_by.as_deref(), Some("Bolts"));
+        assert_eq!(fe.contact_regions[0].detected_by, Some(detection));
+        assert_eq!(fe.contact_detections[0].name, "Bolts");
         // Deleting it deletes what it found; a region the user changed stays, as one of
         // their own.
         assert!(delete(&mut fe, &TreeItem::ContactDetection(0)));
@@ -6045,6 +7599,49 @@ mod tests {
     }
 
     #[test]
+    fn the_dropped_note_does_not_lock_up_the_ui() {
+        // Changing the type of a load whose picks do not fit used to deadlock on the egui
+        // context lock. Run a frame on its own thread so a deadlock fails instead of hangs.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ctx = egui::Context::default();
+            let mut shown = false;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                egui::Grid::new("grid").show(ui, |ui| {
+                    dropped_note(ui, true);
+                    let before = ui.min_rect().height();
+                    show_dropped_note(ui);
+                    shown = ui.min_rect().height() > before;
+                });
+            });
+            output.textures_delta.clear();
+            let _ = sender.send(shown);
+        });
+        let shown = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the dropped note deadlocked");
+        assert!(shown);
+    }
+
+    #[test]
+    fn a_region_source_starts_with_the_first_item() {
+        let mut fe = FeModel::default();
+        let mesh = FeMesh::default();
+        let mut region = RegionDraft::new(SUPPORT_SOURCES, Target::Nodes);
+        region.source = Source::ReferencePoint;
+        region.prefill(&fe, &mesh);
+        assert!(region.is_empty());
+        let point = plx_model::ReferencePoint::new("RP-1", [0.0; 3]);
+        let id = point.id;
+        fe.reference_points.push(point);
+        fe.reference_points
+            .push(plx_model::ReferencePoint::new("RP-2", [1.0; 3]));
+        region.prefill(&fe, &mesh);
+        assert_eq!(region.region(), Region::ReferencePoint(id));
+        assert!(!region.is_empty());
+    }
+
+    #[test]
     fn a_new_load_is_a_force() {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
@@ -6068,7 +7665,12 @@ mod tests {
             unreachable!()
         };
         assert!(region.sources.contains(&Source::RemotePoint));
-        let point = Region::RemotePoint("Remote_Displacement-1".into());
+        let mut remote = BoundaryCondition::new(
+            "Remote_Displacement-1",
+            Region::Nodes(vec![1]),
+            BoundaryKind::Displacement(plx_model::Displacement::rigid([Some(0.0); 6])),
+        );
+        let point = Region::RemotePoint(remote.id);
         let draft = RegionDraft::from_region(
             &point,
             HISTORY_NODE_SOURCES,
@@ -6079,12 +7681,15 @@ mod tests {
         // History outputs follow a renamed remote displacement.
         let mut output = HistoryOutput::node("NH_Output-1", point);
         output.normalize_variables();
-        fe.steps[0].history_outputs.push(output);
-        fe.rename_remote_point("Remote_Displacement-1", "Shaft");
+        fe.put_history_output(0, output);
+        remote.name = "Shaft".into();
+        let id = remote.id;
+        fe.steps[0].boundary_conditions.push(remote);
         assert_eq!(
-            fe.steps[0].history_outputs[0].kind.region(),
-            Some(&Region::RemotePoint("Shaft".into()))
+            fe.history_outputs[0].kind.region(),
+            Some(&Region::RemotePoint(id))
         );
+        assert_eq!(fe.name_of(id), Some("Shaft"));
     }
 
     #[test]
@@ -6140,6 +7745,7 @@ mod tests {
         let mut fe = FeModel::default();
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Displacement_Rotation-1"),
             distribution: None,
             name: "Displacement_Rotation-1".into(),
             active: true,
@@ -6243,11 +7849,11 @@ mod tests {
         assert_eq!(fe.cross_sections[0].name, "Cross_Section-1");
         fe.sections.push(Section {
             name: "Beam_Section-1".into(),
-            material: String::new(),
+            material: None,
             region: Region::Parts(Vec::new()),
             thickness: 1.0,
             kind: SectionKind::Beam(BeamSection {
-                cross_section: "Cross_Section-1".into(),
+                cross_section: Some(fe.cross_sections[0].id),
                 ..BeamSection::DEFAULT
             }),
         });
@@ -6273,7 +7879,8 @@ mod tests {
         let SectionKind::Beam(beam) = &fe.sections[0].kind else {
             panic!("not a beam");
         };
-        assert_eq!(beam.cross_section, "Tube");
+        assert_eq!(beam.cross_section, Some(fe.cross_sections[0].id));
+        assert_eq!(fe.cross_sections[0].name, "Tube");
         assert!(delete(&mut fe, &TreeItem::CrossSection(0)));
         assert!(fe.cross_sections.is_empty());
     }
@@ -6314,6 +7921,7 @@ mod tests {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         fe.steps[0].boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Fixed-1"),
             distribution: None,
             name: "Fixed-1".into(),
             active: true,
@@ -6323,6 +7931,7 @@ mod tests {
             amplitude: None,
         });
         fe.steps[0].loads.push(Load {
+            id: crate::test_ids::named("Pressure-1"),
             distribution: None,
             name: "Pressure-1".into(),
             active: true,
@@ -6331,6 +7940,9 @@ mod tests {
             kind: LoadKind::Pressure(1.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
+            system: None,
+            follower: false,
         });
         let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
         if let Draft::Step(step, _) = &mut editor.draft {
@@ -6382,6 +7994,7 @@ mod tests {
         let step = &mut fe.steps[1];
         step.boundary_conditions = vec![
             BoundaryCondition {
+                id: crate::test_ids::named("Fixed-1"),
                 distribution: None,
                 name: "Fixed-1".into(),
                 active: true,
@@ -6391,6 +8004,7 @@ mod tests {
                 amplitude: None,
             },
             BoundaryCondition {
+                id: crate::test_ids::named("Temperature-1"),
                 distribution: None,
                 name: "Temperature-1".into(),
                 active: true,
@@ -6402,6 +8016,7 @@ mod tests {
         ];
         step.loads = vec![
             Load {
+                id: crate::test_ids::named("Pressure-1"),
                 distribution: None,
                 name: "Pressure-1".into(),
                 active: true,
@@ -6410,8 +8025,12 @@ mod tests {
                 kind: LoadKind::Pressure(1.0),
                 amplitude: None,
                 factor_amplitude: None,
+                tables: Default::default(),
+                system: None,
+                follower: false,
             },
             Load {
+                id: crate::test_ids::named("Convective_Film-1"),
                 distribution: None,
                 name: "Convective_Film-1".into(),
                 active: true,
@@ -6423,6 +8042,9 @@ mod tests {
                 },
                 amplitude: None,
                 factor_amplitude: None,
+                tables: Default::default(),
+                system: None,
+                follower: false,
             },
         ];
         // A heat transfer step after it keeps the temperature and the film only.
@@ -6461,6 +8083,49 @@ mod tests {
     }
 
     #[test]
+    fn new_steps_print_the_history_outputs_of_the_last_one() {
+        let mut fe = FeModel::default();
+        fe.steps.push(Step::new_static("Step-1"));
+        let output = HistoryOutput::node("NH_Output-1", Region::Parts(Vec::new()));
+        let id = output.id;
+        fe.put_history_output(0, output);
+        // A sensitivity step prints none; the static step after it prints them again.
+        let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
+        if let Draft::Step(step, _) = &mut editor.draft {
+            step.kind = StepKind::Sensitivity(Default::default());
+        }
+        editor.apply(&mut fe);
+        assert!(fe.steps[1].history_outputs.is_empty());
+        Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
+        assert_eq!(fe.steps[2].history_outputs, [id]);
+        // One output for both: editing it in one step changes it in the other.
+        let mut editor =
+            Editor::edit(&TreeItem::HistoryOutput(2, 0), &fe, &FeMesh::default()).unwrap();
+        if let Draft::HistoryOutput(_, output, _) = &mut editor.draft {
+            output.variables = vec!["U".into()];
+        }
+        editor.apply(&mut fe);
+        assert_eq!(fe.history_outputs.len(), 1);
+        assert_eq!(fe.step_history_outputs(0)[0].variables, ["U"]);
+        // A Dynamic step prints the energies besides them.
+        let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
+        if let Draft::Step(step, _) = &mut editor.draft {
+            step.kind = StepKind::Dynamic(DynamicStep::default());
+        }
+        editor.apply(&mut fe);
+        let names: Vec<&str> = (fe.step_history_outputs(3).iter())
+            .map(|h| h.name.as_str())
+            .collect();
+        assert_eq!(names, ["NH_Output-1", "Energies"]);
+        // Deleting it in one step deletes it in all; a deleted step takes along what only
+        // it printed.
+        assert!(delete(&mut fe, &TreeItem::HistoryOutput(0, 0)));
+        assert!(fe.steps.iter().all(|s| !s.history_outputs.contains(&id)));
+        assert!(delete(&mut fe, &TreeItem::Step(3)));
+        assert!(fe.history_outputs.is_empty());
+    }
+
+    #[test]
     fn initial_temperatures_are_created_and_switched() {
         let mut fe = FeModel::default();
         let mut editor = Editor::create(NewItem::InitialCondition, &fe).unwrap();
@@ -6487,6 +8152,7 @@ mod tests {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         fe.steps[0].loads.push(Load {
+            id: crate::test_ids::named("Force-1"),
             distribution: None,
             name: "Force-1".into(),
             active: true,
@@ -6495,6 +8161,9 @@ mod tests {
             kind: LoadKind::force([1.0, 0.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
+            system: None,
+            follower: false,
         });
         assert!(set_visible(&mut fe, &TreeItem::Load(0, 0), false));
         assert!(!fe.steps[0].loads[0].visible);
@@ -6511,6 +8180,7 @@ mod tests {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         fe.steps[0].boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Fixed-1"),
             distribution: None,
             name: "Fixed-1".into(),
             active: true,
@@ -6561,8 +8231,10 @@ mod tests {
     #[test]
     fn a_swapped_name_that_is_taken_gets_a_number() {
         let mut fe = FeModel::default();
-        fe.contact_pairs.push(ContactPair::new("A_to_B", ""));
-        fe.contact_pairs.push(ContactPair::new("B_to_A", ""));
+        fe.contact_pairs
+            .push(ContactPair::new("A_to_B", Some(crate::test_ids::named(""))));
+        fe.contact_pairs
+            .push(ContactPair::new("B_to_A", Some(crate::test_ids::named(""))));
         fe.contact_pairs[0].master = Region::Surface("A".into());
         assert!(swap_master_slave(&mut fe, &TreeItem::ContactPair(0)));
         assert_eq!(fe.contact_pairs[0].name, "B_to_A-1");
@@ -6581,6 +8253,7 @@ mod tests {
         }
         assert_eq!(fe.amplitudes[0].name, "Amplitude-1");
         let mut film = Load {
+            id: crate::test_ids::named("Film-1"),
             distribution: None,
             name: "Film-1".into(),
             active: true,
@@ -6590,8 +8263,11 @@ mod tests {
                 sink: 20.0,
                 coefficient: 1.0,
             },
-            amplitude: Some("Amplitude-1".into()),
-            factor_amplitude: Some("Amplitude-1".into()),
+            amplitude: Some(fe.amplitudes[0].id),
+            factor_amplitude: Some(fe.amplitudes[0].id),
+            tables: Default::default(),
+            system: None,
+            follower: false,
         };
         fe.steps[0].loads.push(film.clone());
         let mut editor = Editor::edit(&TreeItem::Amplitude(0), &fe, &FeMesh::default()).unwrap();
@@ -6600,11 +8276,12 @@ mod tests {
         }
         editor.apply(&mut fe);
         let load = &fe.steps[0].loads[0];
-        assert_eq!(load.amplitude.as_deref(), Some("Ramp"));
-        assert_eq!(load.factor_amplitude.as_deref(), Some("Ramp"));
+        assert_eq!(load.amplitude, Some(fe.amplitudes[0].id));
+        assert_eq!(load.factor_amplitude, Some(fe.amplitudes[0].id));
+        assert_eq!(fe.amplitudes[0].name, "Ramp");
         // A pressure has no film coefficient to scale.
         film.kind = LoadKind::Pressure(1.0);
-        film.factor_amplitude = Some("Ramp".into());
+        film.factor_amplitude = Some(fe.amplitudes[0].id);
         Editor {
             draft: Draft::Load(0, film, RegionDraft::new(FACE_SOURCES, Target::Faces)),
             index: Some(0),
@@ -6637,6 +8314,7 @@ mod tests {
         let (plate, columns) = (part("PLATTE"), part("STUETZEN"));
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Feet"),
             distribution: None,
             name: "Feet".into(),
             active: true,
@@ -6646,6 +8324,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            id: crate::test_ids::named("Pressure"),
             distribution: None,
             name: "Pressure".into(),
             active: true,
@@ -6654,9 +8333,15 @@ mod tests {
             kind: LoadKind::Pressure(1.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
+            system: None,
+            follower: false,
         });
         model.fe.steps.push(step);
-        let mut pair = ContactPair::new("Contact_Pair-1", "Interaction-1");
+        let mut pair = ContactPair::new(
+            "Contact_Pair-1",
+            Some(crate::test_ids::named("Interaction-1")),
+        );
         pair.master = Region::Parts(vec!["PLATTE".into()]);
         pair.slave = Region::Parts(vec!["STUETZEN".into()]);
         model.fe.contact_pairs.push(pair);
@@ -6671,6 +8356,36 @@ mod tests {
             [TreeItem::ContactPair(0), TreeItem::BoundaryCondition(0, 0)].into()
         );
         assert_eq!(acting(&[plate, columns]).len(), 3);
+    }
+
+    #[test]
+    fn sections_using_material_by_id() {
+        let mut fe = FeModel::default();
+        for name in ["Steel", "Alu"] {
+            let mut m = Material {
+                name: name.into(),
+                ..Default::default()
+            };
+            m.id = crate::test_ids::named(name);
+            fe.materials.push(m);
+        }
+        let section = |name: &str, material: Option<plx_model::Id>| Section {
+            name: name.into(),
+            material,
+            region: Region::Parts(vec!["A".into()]),
+            thickness: 1.0,
+            kind: SectionKind::Solid,
+        };
+        let (steel, alu) = (fe.materials[0].id, fe.materials[1].id);
+        fe.sections = vec![
+            section("S1", Some(steel)),
+            section("S2", Some(alu)),
+            section("S3", Some(steel)),
+            section("S4", None),
+        ];
+        assert_eq!(sections_using_material(&fe, 0), vec![0, 2]);
+        assert_eq!(sections_using_material(&fe, 1), vec![1]);
+        assert!(sections_using_material(&fe, 5).is_empty());
     }
 
     #[test]
@@ -6708,7 +8423,7 @@ mod tests {
         // A section on the set follows its new name.
         model.fe.sections.push(Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: Some(crate::test_ids::named("Steel")),
             region: Region::ElementSet("Beam".into()),
             thickness: 1.0,
             kind: SectionKind::Solid,

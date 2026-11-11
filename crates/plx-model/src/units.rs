@@ -190,7 +190,7 @@ impl Quantity {
 }
 
 /// Powers of length, mass, time, temperature and angle a quantity is made of.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Dimension {
     pub length: i8,
     pub mass: i8,
@@ -210,7 +210,7 @@ impl Dimension {
         }
     }
 
-    fn powi(self, n: i8) -> Self {
+    pub fn powi(self, n: i8) -> Self {
         Self::new(
             self.length * n,
             self.mass * n,
@@ -220,7 +220,7 @@ impl Dimension {
         )
     }
 
-    fn times(self, other: Self) -> Self {
+    pub fn times(self, other: Self) -> Self {
         Self::new(
             self.length + other.length,
             self.mass + other.mass,
@@ -228,6 +228,63 @@ impl Dimension {
             self.temperature + other.temperature,
             self.angle + other.angle,
         )
+    }
+
+    /// This dimension divided by `other`.
+    pub fn over(self, other: Self) -> Self {
+        self.times(other.powi(-1))
+    }
+
+    /// Whether it is a pure number, without unit.
+    pub fn is_none(self) -> bool {
+        self == Self::default()
+    }
+
+    /// The quantity of this dimension, `None` for a pure number or one no quantity has. Of
+    /// those that share one, a moment goes before an energy, and a temperature is a change
+    /// of temperature: a product or quotient of temperatures has no zero of its scale.
+    pub fn quantity(self) -> Option<Quantity> {
+        Quantity::ALL
+            .into_iter()
+            .filter(|q| *q != Quantity::Temperature)
+            .find(|q| q.dimension() == self)
+    }
+
+    /// The dimension in SI base units, such as "kg/(m s²)", short for the narrow fields of
+    /// the blocks.
+    pub fn si(self) -> String {
+        let units = [
+            ("kg", self.mass),
+            ("m", self.length),
+            ("s", self.time),
+            ("K", self.temperature),
+            ("rad", self.angle),
+        ];
+        let part = |(unit, power): (&str, i8)| match power {
+            1 => unit.to_owned(),
+            2 => format!("{unit}²"),
+            3 => format!("{unit}³"),
+            _ => format!("{unit}^{power}"),
+        };
+        let over: Vec<String> = (units.into_iter())
+            .filter(|(_, power)| *power > 0)
+            .map(part)
+            .collect();
+        let under: Vec<String> = (units.into_iter())
+            .filter(|(_, power)| *power < 0)
+            .map(|(unit, power)| part((unit, -power)))
+            .collect();
+        let over = if over.is_empty() {
+            "1".to_owned()
+        } else {
+            over.join(" ")
+        };
+        match under.len() {
+            0 if over == "1" => "no unit".to_owned(),
+            0 => over,
+            1 => format!("{over}/{}", under[0]),
+            _ => format!("{over}/({})", under.join(" ")),
+        }
     }
 }
 

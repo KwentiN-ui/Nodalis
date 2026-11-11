@@ -1,6 +1,9 @@
 //! Constraints written as CalculiX elements, the way the `CalculixFileWriter` splits
 //! them: springs to ground become `SPRING1` elements with one `*Spring` section per node
-//! and direction, compression only supports become `GAPUNI` elements to fixed ground nodes.
+//! and direction. Compression only supports on faces of solids or 2D elements become a
+//! `*Compression only` surface of the solver (gaps at the integration points of the faces:
+//! `GAPUNI` elements at the nodes leave the corners of quadratic faces without load and the
+//! stresses checkered); those on shells become `GAPUNI` elements to fixed ground nodes.
 //! Springs to a surface become `SPRING2` elements from each node of
 //! the region to a new node that `*Equation`s tie to the closest point of the master
 //! surface. Contact regions of no separation become one `*Equation` per slave node that
@@ -10,7 +13,8 @@ use std::collections::BTreeMap;
 
 use plx_mesh::{ElementId, FeMesh, NodeId};
 use plx_model::{
-    CompressionOnly, Constraint, ContactBehavior, ContactRegion, FeModel, SideRoles, Spring,
+    CompressionOnly, Constraint, ContactBehavior, ContactRegion, FeModel, ModelSpace, Region,
+    SideRoles, Spring, SpringLayout,
 };
 
 use super::{Members, Sets, WriteError, empty, number};
@@ -32,6 +36,11 @@ pub(super) struct Generated {
     /// The dummy plastic material that makes the solver solve gaps nonlinearly, by
     /// its name.
     pub material: Option<String>,
+    /// `*Compression only` supports on element surfaces.
+    pub compression_only: Vec<plxs_core::contact::CompressionOnly>,
+    /// The surface of each compression only support written as a surface support, which a
+    /// contact history output prints the contact forces of.
+    pub support_surfaces: Vec<(plx_model::Id, String)>,
 }
 
 /// An `*Element` block of generated elements.
@@ -49,6 +58,8 @@ pub(super) enum GeneratedSection {
         elset: String,
         dofs: Vec<u8>,
         stiffness: f64,
+        /// `Stabilize=`, see [`Spring::stabilize`]; zero for none.
+        stabilize: f64,
     },
     /// `*Gap`: clearance, direction, and spring stiffness and tensile force if given.
     Gap {
@@ -85,6 +96,8 @@ pub(super) fn springs(
         gaps: Vec::new(),
         ground: Vec::new(),
         dofs: if model.properties.space.is_2d() { 2 } else { 3 },
+        space: model.properties.space,
+        stabilize: 0.0,
     };
     let mut nonlinear = false;
     // The lowered model keeps the active regions of no separation only.
@@ -96,13 +109,17 @@ pub(super) fn springs(
     }
     for constraint in model.constraints.iter().filter(|c| c.active()) {
         match constraint {
-            Constraint::Spring(spring) => writer.spring(sets, spring)?,
+            Constraint::Spring(spring) => {
+                writer.stabilize = spring.stabilize;
+                writer.spring(sets, spring)?;
+                writer.stabilize = 0.0;
+            }
             Constraint::CompressionOnly(support) => {
                 writer.compression_only(sets, support)?;
                 nonlinear |= support.nonlinear;
             }
             // Written as `*Rigid body` by the caller.
-            Constraint::RigidBody(_) => {}
+            Constraint::RigidBody(_) | Constraint::Joint(_) => {}
             Constraint::Tie(_) | Constraint::NodeTie(_) => {}
         }
     }
@@ -143,6 +160,9 @@ struct Writer {
     ground: Vec<NodeId>,
     /// Translational degrees of freedom of the model: ccx crashes on more than two in 2D.
     dofs: usize,
+    space: ModelSpace,
+    /// `Stabilize=` of the springs written now ([`Spring::stabilize`]).
+    stabilize: f64,
 }
 
 impl Writer {
@@ -168,16 +188,23 @@ impl Writer {
         name: &str,
         groups: Vec<(String, Vec<Vec<NodeId>>, [f64; 3])>,
     ) {
+        self.springs_in(sets, name, groups, self.dofs);
+    }
+
+    /// [`Writer::springs`] in the first `dofs` degrees of freedom.
+    fn springs_in(
+        &mut self,
+        sets: &mut Sets,
+        name: &str,
+        groups: Vec<(String, Vec<Vec<NodeId>>, [f64; 3])>,
+        dofs: usize,
+    ) {
         let two_nodes = (groups.first())
             .and_then(|(_, springs, _)| springs.first())
             .is_some_and(|nodes| nodes.len() == 2);
         let mut block = Vec::new();
         for (group, springs, stiffness) in groups {
-            for (dof, k) in (1..)
-                .zip(stiffness)
-                .take(self.dofs)
-                .filter(|(_, k)| *k != 0.0)
-            {
+            for (dof, k) in (1..).zip(stiffness).take(dofs).filter(|(_, k)| *k != 0.0) {
                 let mut elements = Vec::new();
                 for nodes in &springs {
                     let element = self.element();
@@ -192,6 +219,7 @@ impl Writer {
                     elset: set,
                     dofs: if two_nodes { vec![dof, dof] } else { vec![dof] },
                     stiffness: k,
+                    stabilize: self.stabilize,
                 });
             }
         }
@@ -208,32 +236,77 @@ impl Writer {
     }
 
     fn spring(&mut self, sets: &mut Sets, spring: &Spring) -> Result<(), WriteError> {
-        let weights = spring_shares(sets.mesh, spring);
+        let Some(layout) = spring.layout() else {
+            return Err(WriteError::InvalidConstraint {
+                item: spring.name.clone(),
+                reason: "both ends are World".into(),
+            });
+        };
+        let name = super::name(&spring.name);
+        let selection = match layout {
+            SpringLayout::SelectionToWorld { selection }
+            | SpringLayout::SelectionToSurface { selection, .. }
+            | SpringLayout::SelectionToPoint { selection, .. } => selection,
+            SpringLayout::PointToWorld { point } => {
+                // Translations on the reference node, rotations on the rotation node.
+                let ([reference, rotation], _) = super::point_nodes(sets, &spring.name, point)?;
+                self.point_springs(sets, &name, spring, [vec![reference], vec![rotation]]);
+                return Ok(());
+            }
+            SpringLayout::PointToPoint { first, second } => {
+                let ([r1, w1], _) = super::point_nodes(sets, &spring.name, first)?;
+                let ([r2, w2], _) = super::point_nodes(sets, &spring.name, second)?;
+                if r1 == r2 {
+                    return Err(WriteError::InvalidConstraint {
+                        item: spring.name.clone(),
+                        reason: "both ends are the same point".into(),
+                    });
+                }
+                self.point_springs(sets, &name, spring, [vec![r1, r2], vec![w1, w2]]);
+                return Ok(());
+            }
+        };
+        let weights = spring_shares(sets.mesh, spring, selection);
         if weights.is_empty() {
             return Err(empty(&spring.name, "nodes"));
         }
-        let name = super::name(&spring.name);
-        let Some(master) = &spring.master else {
-            // Springs of equal stiffness share their sections.
-            let first = weights.values().next().copied().unwrap_or(0.0);
-            let springs = if weights.values().all(|&w| w == first) {
-                let nodes = weights.keys().map(|&node| vec![node]).collect();
-                vec![(name.clone(), nodes, spring.stiffness.map(|k| k * first))]
-            } else {
-                (weights.iter())
+        let surface = match layout {
+            SpringLayout::SelectionToSurface { surface, .. } => surface,
+            SpringLayout::SelectionToPoint { point, .. } => {
+                // Every node gets springs to the point's reference node.
+                let ([reference, _], _) = super::point_nodes(sets, &spring.name, point)?;
+                let springs = (weights.iter())
+                    .filter(|&(&node, _)| node != reference)
                     .map(|(&node, w)| {
                         let k = spring.stiffness.map(|k| k * w);
-                        (format!("{name}_{node}"), vec![vec![node]], k)
+                        (format!("{name}_{node}"), vec![vec![node, reference]], k)
                     })
-                    .collect()
-            };
-            self.springs(sets, &name, springs);
-            return Ok(());
+                    .collect();
+                self.springs(sets, &name, springs);
+                return Ok(());
+            }
+            _ => {
+                // Springs of equal stiffness share their sections.
+                let first = weights.values().next().copied().unwrap_or(0.0);
+                let springs = if weights.values().all(|&w| w == first) {
+                    let nodes = weights.keys().map(|&node| vec![node]).collect();
+                    vec![(name.clone(), nodes, spring.stiffness.map(|k| k * first))]
+                } else {
+                    (weights.iter())
+                        .map(|(&node, w)| {
+                            let k = spring.stiffness.map(|k| k * w);
+                            (format!("{name}_{node}"), vec![vec![node]], k)
+                        })
+                        .collect()
+                };
+                self.springs(sets, &name, springs);
+                return Ok(());
+            }
         };
         let mesh = sets.mesh;
-        let target = Target::new(mesh, &master.faces(mesh));
+        let target = Target::new(mesh, &surface.faces(mesh));
         if target.faces.is_empty() {
-            return Err(empty(&spring.name, "element faces on the master side"));
+            return Err(empty(&spring.name, "element faces on the second end"));
         }
         let mut springs = Vec::new();
         for (&node, &w) in &weights {
@@ -263,6 +336,30 @@ impl Writer {
         }
         self.springs(sets, &name, springs);
         Ok(())
+    }
+
+    /// Springs of a point to ground (one node each) or between two points (two nodes each):
+    /// the translational ones on the reference nodes, the rotational ones on the rotation
+    /// nodes, whose displacements are the point's rotations. A plane model turns about z
+    /// only, the third degree of freedom of the rotation node; an axisymmetric one not at
+    /// all.
+    fn point_springs(
+        &mut self,
+        sets: &mut Sets,
+        name: &str,
+        spring: &Spring,
+        [reference, rotation]: [Vec<NodeId>; 2],
+    ) {
+        let [r1, r2, r3] = spring.acting_rotational();
+        let rotational = match self.space {
+            ModelSpace::ThreeD => [r1, r2, r3],
+            ModelSpace::PlaneStress | ModelSpace::PlaneStrain => [0.0, 0.0, r3],
+            ModelSpace::Axisymmetric => [0.0; 3],
+        };
+        let springs = vec![(name.to_string(), vec![reference], spring.stiffness)];
+        self.springs(sets, name, springs);
+        let rotations = vec![(format!("{name}_Rotation"), vec![rotation], rotational)];
+        self.springs_in(sets, &format!("{name}_Rotation"), rotations, 3);
     }
 
     /// One equation per slave node within the tolerance of the master side: the slave node
@@ -355,6 +452,32 @@ impl Writer {
         if weights.is_empty() {
             return Err(empty(&support.name, "element faces"));
         }
+        let on_shells = (faces.iter()).any(|(e, _)| mesh.element(*e).is_none_or(|e| e.is_shell()));
+        if !on_shells {
+            // The stiffness of the whole surface, or of every node, as a stiffness per area;
+            // the tensile force of CalculiX's gaps has no counterpart.
+            let stiffness = support.spring_stiffness.map(|k| {
+                if support.each_node {
+                    k * weights.len() as f64 / area
+                } else {
+                    k / area
+                }
+            });
+            let surface = sets.surface(&support.name, "Surface", &support.region)?;
+            self.out
+                .support_surfaces
+                .push((support.id, surface.clone()));
+            self.out
+                .compression_only
+                .push(plxs_core::contact::CompressionOnly {
+                    // The solver model knows its surfaces by their normalized names.
+                    surface: super::ir_name(&surface),
+                    clearance: support.clearance,
+                    stiffness,
+                    flipped: support.flipped,
+                });
+            return Ok(());
+        }
         // Normal of each node: the mean of the outward normals of its faces.
         let mut normals: BTreeMap<NodeId, [f64; 3]> = BTreeMap::new();
         for &(element, face) in &faces {
@@ -446,8 +569,7 @@ impl Writer {
 /// The factor of a spring's stiffness at each node of its region: like a force on faces by
 /// area (lumped, so that every node gets a positive share), on edges by length and on points
 /// in equal shares, or 1 at every node with `each_node`. Nodes with no share get no spring.
-fn spring_shares(mesh: &FeMesh, spring: &Spring) -> BTreeMap<NodeId, f64> {
-    let region = &spring.region;
+fn spring_shares(mesh: &FeMesh, spring: &Spring, region: &Region) -> BTreeMap<NodeId, f64> {
     if spring.each_node {
         return region.nodes(mesh).into_iter().map(|n| (n, 1.0)).collect();
     }

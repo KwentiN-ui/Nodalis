@@ -78,6 +78,13 @@ fn same_data(a: Option<&ProjectNode>, b: Option<&ProjectNode>) -> bool {
         (Some(ProjectNode::Note(a)), Some(ProjectNode::Note(b))) => a.text == b.text,
         (Some(ProjectNode::Math(a)), Some(ProjectNode::Math(b))) => a == b,
         (Some(ProjectNode::Switch(a)), Some(ProjectNode::Switch(b))) => a == b,
+        (Some(ProjectNode::Plot(a)), Some(ProjectNode::Plot(b))) => a == b,
+        (Some(ProjectNode::Preview(_)), Some(ProjectNode::Preview(_))) => true,
+        (Some(ProjectNode::Group(a)), Some(ProjectNode::Group(b))) => {
+            a.nodes == b.nodes && a.inputs == b.inputs && a.outputs == b.outputs
+        }
+        (Some(ProjectNode::GroupInput(_)), Some(ProjectNode::GroupInput(_)))
+        | (Some(ProjectNode::GroupOutput(_)), Some(ProjectNode::GroupOutput(_))) => true,
         _ => false,
     }
 }
@@ -102,6 +109,9 @@ pub(super) struct History {
     /// The highest id a block had: ids of deleted blocks are not given again, so that undo
     /// can bring them back.
     pub(super) highest_id: u64,
+    /// Changes made, undone and redone so far, for autosave; another project does not
+    /// start it again.
+    pub(super) edits: u64,
 }
 
 impl History {
@@ -117,11 +127,13 @@ impl History {
     pub(super) fn clear(&mut self) {
         *self = Self {
             highest_id: self.highest_id,
+            edits: self.edits,
             ..Self::default()
         };
     }
 
     fn push(&mut self, change: Change) {
+        self.edits += 1;
         self.undo.push(change);
         self.redo.clear();
         if self.undo.len() > DEPTH {
@@ -264,6 +276,7 @@ impl ProjectApp {
         match self.restore(ctx, change) {
             Ok(change) => {
                 self.history.redo.push(change);
+                self.history.edits += 1;
                 self.output.push("Undone".into());
             }
             Err(change) => self.history.undo.push(change),
@@ -278,6 +291,7 @@ impl ProjectApp {
         match self.restore(ctx, change) {
             Ok(change) => {
                 self.history.undo.push(change);
+                self.history.edits += 1;
                 self.output.push("Redone".into());
             }
             Err(change) => self.history.redo.push(change),
@@ -391,6 +405,8 @@ impl ProjectApp {
         self.applied.clear();
         self.sync_due = true;
         self.history.positions = self.positions();
+        // Blocks brought back stay in the groups the change kept them in.
+        self.known = self.nodes.iter().map(|n| n.id).collect();
         Ok(Change {
             before: after,
             removed,

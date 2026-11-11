@@ -2,9 +2,9 @@
 
 use std::collections::HashSet;
 
-use plxs_core::amplitude::Amplitude;
+use plxs_core::amplitude::{Amplitude, Signal};
 use plxs_core::constraints::{
-    CyclicSymmetryModel, Equation, EquationTerm, RigidBody, RigidBodyNodes, Submodel, Tie,
+    CyclicSymmetryModel, Equation, EquationTerm, Joint, RigidBody, RigidBodyNodes, Submodel, Tie,
     Transform, TransformKind,
 };
 use plxs_core::contact::{
@@ -13,19 +13,20 @@ use plxs_core::contact::{
 };
 use plxs_core::element::{Element, ElementType};
 use plxs_core::material::{
-    Conductivity, Creep, CreepRow, Density, Elastic, ElasticRow, Expansion, Hardening, Material,
-    Plastic, PlasticRow, SpecificHeat, TemperatureValue,
+    Conductivity, Creep, CreepRow, Density, Elastic, ElasticRow, Expansion, Hardening,
+    Hyperelastic, HyperelasticModel, Material, Plastic, PlasticRow, SpecificHeat, TemperatureValue,
 };
 use plxs_core::mesh::{ElementId, ElementRef, NodeId, NodeRef, Surface, SurfaceFace};
 use plxs_core::model::{Analysis, DesignVariables, RestartRead};
 use plxs_core::section::{BeamProfile, Gap, Section, SectionKind, Spring, SpringStiffness};
 use plxs_core::step::{
     Boundary, Buckle, ComplexFrequency, ConcentratedFlux, ConcentratedLoad, ContactChange,
-    Controls, CyclicModes, DefaultAmplitude, DefinedField, DefinedFieldKind, DesignResponse,
-    DistributedFlux, DistributedLoad, DistributedLoadKind, Dynamic, EquationSolver, FieldOutput,
-    Film, Filter, FluxKind, Frequency, HeatTransfer, HistoryOutput, Incrementation, ModalDamping,
-    ModalDynamics, OutputDimension, Procedure, Radiate, Rayleigh, RestartWrite, Sensitivity,
-    Static, SteadyStateDynamics, Step, Totals, Visco,
+    Controls, CyclicModes, DampingRatio, DefaultAmplitude, DefinedField, DefinedFieldKind,
+    DesignResponse, DistributedFlux, DistributedLoad, DistributedLoadKind, Dynamic, EquationSolver,
+    ExplicitControls, FieldOutput, Film, Filter, FluxKind, Follower, Frequency, HeatTransfer,
+    HistoryOutput, Incrementation, Integration, ModalDamping, ModalDynamics, OutputDimension,
+    Procedure, Radiate, Rayleigh, RestartWrite, Sensitivity, Static, SteadyStateDynamics, Step,
+    Totals, Visco,
 };
 use plxs_core::{Error, normalized_name};
 
@@ -76,7 +77,6 @@ const KNOWN_UNSUPPORTED: &[&str] = &[
     "*GEOMETRICTOLERANCE",
     "*GREEN",
     "*HCF",
-    "*HYPERELASTIC",
     "*HYPERFOAM",
     "*INTERPOLATION",
     "*KINEMATIC",
@@ -237,6 +237,7 @@ impl Reader {
             "*ELASTIC" => self.elastic(k, data)?,
             "*PLASTIC" => self.plastic(k, data)?,
             "*CREEP" => self.creep(k, data)?,
+            "*HYPERELASTIC" => self.hyperelastic(k, data)?,
             "*EXPANSION" => self.expansion(k, data)?,
             "*CONDUCTIVITY" => {
                 let rows = self.temperature_table(k, data)?;
@@ -259,6 +260,7 @@ impl Reader {
             "*GAP" => self.gap(k, data)?,
             "*EQUATION" => self.equation(k, data)?,
             "*RIGIDBODY" => self.rigid_body(k)?,
+            "*JOINT" => self.joint(k, data)?,
             "*TIE" => self.tie(k, data)?,
             "*CYCLICSYMMETRYMODEL" => self.cyclic_symmetry_model(k, data)?,
             "*TRANSFORM" => self.transform(k, data)?,
@@ -270,6 +272,7 @@ impl Reader {
             "*GAPCONDUCTANCE" => self.gap_conductance(k, data)?,
             "*CONTACTPAIR" => self.contact_pair(k, data)?,
             "*CLEARANCE" => self.clearance(k)?,
+            "*COMPRESSIONONLY" => self.compression_only(k)?,
             "*AMPLITUDE" => self.amplitude(k, data)?,
             "*INITIALCONDITIONS" => self.initial_conditions(k, data)?,
             "*PHYSICALCONSTANTS" => self.physical_constants(k)?,
@@ -642,6 +645,68 @@ impl Reader {
         Ok(())
     }
 
+    /// `*HYPERELASTIC` with one of the strain energy models; the constants of the first
+    /// temperature (temperature dependent constants are not supported).
+    fn hyperelastic(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
+        k.check_parameters(&[
+            "NEO HOOKE",
+            "MOONEY-RIVLIN",
+            "POLYNOMIAL",
+            "REDUCED POLYNOMIAL",
+            "YEOH",
+            "OGDEN",
+            "ARRUDA-BOYCE",
+            "N",
+        ])?;
+        let order = || -> Result<u8, Error> {
+            match k.integer("N")?.unwrap_or(1) {
+                n @ 1..=3 => Ok(n as u8),
+                n => Err(k.error(format!("N={n} is not supported, only 1 to 3"))),
+            }
+        };
+        let model = if k.has("NEO HOOKE") {
+            HyperelasticModel::NeoHooke
+        } else if k.has("MOONEY-RIVLIN") {
+            HyperelasticModel::MooneyRivlin
+        } else if k.has("REDUCED POLYNOMIAL") {
+            HyperelasticModel::ReducedPolynomial(order()?)
+        } else if k.has("POLYNOMIAL") {
+            HyperelasticModel::Polynomial(order()?)
+        } else if k.has("YEOH") {
+            HyperelasticModel::Yeoh
+        } else if k.has("OGDEN") {
+            HyperelasticModel::Ogden(order()?)
+        } else if k.has("ARRUDA-BOYCE") {
+            HyperelasticModel::ArrudaBoyce
+        } else {
+            return Err(k.error(
+                "no strain energy model given (NEO HOOKE, MOONEY-RIVLIN, POLYNOMIAL, \
+                 REDUCED POLYNOMIAL, YEOH, OGDEN or ARRUDA-BOYCE)",
+            ));
+        };
+        let mut values = Vec::new();
+        for d in data {
+            values.extend(numbers(k, d)?);
+        }
+        let count = model.constant_count();
+        if values.len() < count {
+            return Err(k.error(format!(
+                "{count} constants expected, {} given",
+                values.len()
+            )));
+        }
+        // One temperature: the constants and an optional temperature.
+        if values.len() > count + 1 {
+            return Err(k.error("temperature dependent constants are not supported"));
+        }
+        values.truncate(count);
+        self.current_material(k)?.hyperelastic = Some(Hyperelastic {
+            model,
+            constants: values,
+        });
+        Ok(())
+    }
+
     fn expansion(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
         k.check_parameters(&["TYPE", "ZERO"])?;
         if let Some(t) = k.value("TYPE")
@@ -777,6 +842,7 @@ impl Reader {
             "OFFSET2",
             "ORIENTATION",
             "NODAL THICKNESS",
+            "CONTACT RADIUS",
         ])?;
         if k.has("ORIENTATION") || k.has("NODAL THICKNESS") {
             return Err(k.error("ORIENTATION and NODAL THICKNESS are not supported"));
@@ -838,6 +904,7 @@ impl Reader {
                     torsion: v[4],
                     shear_area_1: v.get(5).copied(),
                     shear_area_2: v.get(6).copied(),
+                    contact_radius: k.number("CONTACT RADIUS")?,
                 }
             }
             other => return Err(k.error(format!("SECTION={other} is not supported"))),
@@ -883,7 +950,7 @@ impl Reader {
     }
 
     fn spring(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
-        k.check_parameters(&["ELSET", "NONLINEAR", "ORIENTATION"])?;
+        k.check_parameters(&["ELSET", "NONLINEAR", "ORIENTATION", "STABILIZE"])?;
         if k.has("ORIENTATION") {
             return Err(k.error("ORIENTATION is not supported"));
         }
@@ -903,6 +970,13 @@ impl Reader {
         }
         let dof1 = dofs[0] as u8;
         let dof2 = dofs.get(1).map(|d| *d as u8).unwrap_or(dof1);
+        let stabilize = match k.value("STABILIZE") {
+            None => 0.0,
+            Some(v) => match v.trim().parse::<f64>() {
+                Ok(f) if f.is_finite() && f >= 0.0 => f,
+                _ => return Err(k.error("STABILIZE needs a factor of zero or more")),
+            },
+        };
         let stiffness = if k.has("NONLINEAR") {
             let mut rows = Vec::new();
             for d in &data[1..] {
@@ -937,6 +1011,7 @@ impl Reader {
                 dof2,
                 stiffness,
                 orientation: None,
+                stabilize,
             }),
         });
         Ok(())
@@ -1026,6 +1101,64 @@ impl Reader {
             nodes,
             reference_node,
             rotation_node,
+        });
+        Ok(())
+    }
+
+    /// `*JOINT, NAME=..`: the reference and rotation nodes of both ends (0 for ground), the
+    /// origin with the local x and y directions, and the held relative degrees of freedom
+    /// (1-3 translations, 4-6 rotations, local).
+    fn joint(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
+        k.check_parameters(&["NAME"])?;
+        let name = k.value("NAME").map(normalized_name).unwrap_or_default();
+        let (nodes, frame, dofs) = match data {
+            [nodes, frame] => (nodes, frame, None),
+            [nodes, frame, dofs] => (nodes, frame, Some(dofs)),
+            _ => return Err(k.error("data lines are nodes, frame and held DOFs")),
+        };
+        let n = numbers(k, nodes)?;
+        if n.len() != 4 {
+            return Err(data_error(k, nodes, "four nodes are needed (0 for ground)"));
+        }
+        let end = |r: f64, q: f64| (r > 0.0).then_some([r as NodeId, q as NodeId]);
+        let f = numbers(k, frame)?;
+        if f.len() != 9 {
+            return Err(data_error(k, frame, "origin, x and y direction are needed"));
+        }
+        let unit = |v: [f64; 3]| {
+            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            (l > 0.0).then(|| [v[0] / l, v[1] / l, v[2] / l])
+        };
+        let (Some(x), Some(y)) = (unit([f[3], f[4], f[5]]), unit([f[6], f[7], f[8]])) else {
+            return Err(data_error(k, frame, "the directions must not be zero"));
+        };
+        let Some(z) = unit([
+            x[1] * y[2] - x[2] * y[1],
+            x[2] * y[0] - x[0] * y[2],
+            x[0] * y[1] - x[1] * y[0],
+        ]) else {
+            return Err(data_error(k, frame, "x and y must not be parallel"));
+        };
+        let y = [
+            z[1] * x[2] - z[2] * x[1],
+            z[2] * x[0] - z[0] * x[2],
+            z[0] * x[1] - z[1] * x[0],
+        ];
+        let mut fixed = [false; 6];
+        if let Some(line) = dofs {
+            for d in numbers(k, line)? {
+                if !(1.0..=6.0).contains(&d) {
+                    return Err(data_error(k, line, "degrees of freedom are 1 to 6"));
+                }
+                fixed[d as usize - 1] = true;
+            }
+        }
+        self.model().constraints.joints.push(Joint {
+            name,
+            ends: [end(n[0], n[1]), end(n[2], n[3])],
+            origin: [f[0], f[1], f[2]],
+            axes: [x, y, z],
+            fixed,
         });
         Ok(())
     }
@@ -1329,6 +1462,29 @@ impl Reader {
         Ok(())
     }
 
+    /// `*COMPRESSION ONLY, SURFACE=name[, CLEARANCE=d][, STIFFNESS=k][, FLIP]` (plxs only):
+    /// see [`plxs_core::contact::CompressionOnly`].
+    fn compression_only(&mut self, k: &Keyword) -> Result<(), Error> {
+        k.check_parameters(&["SURFACE", "CLEARANCE", "STIFFNESS", "FLIP"])?;
+        let Some(surface) = k.value("SURFACE").map(normalized_name) else {
+            return Err(k.error("SURFACE is needed"));
+        };
+        let stiffness = k.number("STIFFNESS")?;
+        if stiffness.is_some_and(|s| s <= 0.0 || s.is_nan()) {
+            return Err(k.error("STIFFNESS must be positive"));
+        }
+        self.model()
+            .contact
+            .compression_only
+            .push(plxs_core::contact::CompressionOnly {
+                surface,
+                clearance: k.number("CLEARANCE")?.unwrap_or(0.0),
+                stiffness,
+                flipped: k.has("FLIP"),
+            });
+        Ok(())
+    }
+
     fn clearance(&mut self, k: &Keyword) -> Result<(), Error> {
         k.check_parameters(&["MASTER", "SLAVE", "VALUE"])?;
         let (Some(master), Some(slave), Some(value)) =
@@ -1347,7 +1503,7 @@ impl Reader {
     // ----- Amplitudes, initial conditions, constants ------------------------------------
 
     fn amplitude(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
-        k.check_parameters(&["NAME", "TIME", "SHIFTX", "SHIFTY", "USER"])?;
+        k.check_parameters(&["NAME", "TIME", "SHIFTX", "SHIFTY", "USER", "SHAPE", "SWEEP"])?;
         let Some(name) = k.value("NAME").map(normalized_name) else {
             return Err(k.error("no NAME given"));
         };
@@ -1358,16 +1514,28 @@ impl Reader {
         for d in data {
             values.extend(numbers(k, d)?);
         }
-        if values.len() % 2 != 0 {
-            return Err(k.error("time and value come in pairs"));
+        let signal = match k.value("SHAPE") {
+            None | Some("TABLE") => None,
+            Some(shape) => Some(signal(k, shape, &values)?),
+        };
+        if signal.is_none() && k.has("SWEEP") {
+            return Err(k.error("SWEEP needs SHAPE=CHIRP"));
         }
-        let points: Vec<(f64, f64)> = values.chunks(2).map(|p| (p[0], p[1])).collect();
+        let points: Vec<(f64, f64)> = if signal.is_some() {
+            Vec::new()
+        } else {
+            if values.len() % 2 != 0 {
+                return Err(k.error("time and value come in pairs"));
+            }
+            values.chunks(2).map(|p| (p[0], p[1])).collect()
+        };
         self.model().amplitudes.push(Amplitude {
             name,
             total_time: k.value("TIME") == Some("TOTALTIME"),
             shift_x: k.number("SHIFTX")?.unwrap_or(0.0),
             shift_y: k.number("SHIFTY")?.unwrap_or(0.0),
             points,
+            signal,
         });
         Ok(())
     }
@@ -1557,6 +1725,7 @@ impl Reader {
         k.check_parameters(&[
             "SOLVER",
             "DIRECT",
+            "FRAMES",
             "EXPLICIT",
             "TIME RESET",
             "TOTAL TIME AT START",
@@ -1577,6 +1746,7 @@ impl Reader {
         k.check_parameters(&[
             "SOLVER",
             "DIRECT",
+            "FRAMES",
             "CETOL",
             "TIME RESET",
             "TOTAL TIME AT START",
@@ -1674,6 +1844,7 @@ impl Reader {
         k.check_parameters(&[
             "SOLVER",
             "DIRECT",
+            "FRAMES",
             "STEADY STATE",
             "DELTMX",
             "FREQUENCY",
@@ -1712,13 +1883,54 @@ impl Reader {
             "RELATIVE TO ABSOLUTE",
             "TIME RESET",
             "TOTAL TIME AT START",
+            "EVENTS",
+            "INTEGRATION",
+            "MASS SCALING",
+            "TIME STEP",
+            "SWITCH",
+            "SHELL INERTIA",
         ])?;
+        let full_shell_inertia = match k.value("SHELL INERTIA").map(|t| t.to_ascii_uppercase()) {
+            None => false,
+            Some(t) if t == "FULL" => true,
+            Some(t) if t == "SCALED" => false,
+            Some(other) => {
+                return Err(Error::input(
+                    "*DYNAMIC",
+                    format!("SHELL INERTIA={other}: expected FULL or SCALED"),
+                ));
+            }
+        };
+        let controls = ExplicitControls {
+            mass_scaling: k.number("MASS SCALING")?,
+            time_step: k.number("TIME STEP")?,
+            full_shell_inertia,
+        };
+        let integration = match k.value("INTEGRATION").map(|t| t.to_ascii_uppercase()) {
+            None if k.has("EXPLICIT") => Integration::Explicit(controls),
+            None => Integration::Implicit,
+            Some(t) if t == "IMPLICIT" => Integration::Implicit,
+            Some(t) if t == "EXPLICIT" => Integration::Explicit(controls),
+            Some(t) if t == "AUTOMATIC" => Integration::Automatic {
+                explicit: controls,
+                switch_factor: k
+                    .number("SWITCH")?
+                    .unwrap_or(Integration::DEFAULT_SWITCH_FACTOR),
+            },
+            Some(other) => {
+                return Err(k.error(format!(
+                    "INTEGRATION={other}: expected IMPLICIT, EXPLICIT or AUTOMATIC"
+                )));
+            }
+        };
         let procedure = Procedure::Dynamic(Dynamic {
             solver: solver(k)?,
             alpha: k.number("ALPHA")?,
-            explicit: k.has("EXPLICIT"),
+            integration,
             increments: incrementation(k, data)?,
             rayleigh: None,
+            damping_ratio: None,
+            event_frames: k.has("EVENTS"),
         });
         // CalculiX applies the loads of a dynamic step at once unless the step asks for a
         // ramp (observed with ccx 2.21: `*STEP` without `AMPLITUDE=` gives the same
@@ -1730,7 +1942,20 @@ impl Reader {
     }
 
     fn damping(&mut self, k: &Keyword) -> Result<(), Error> {
-        k.check_parameters(&["ALPHA", "BETA", "STRUCTURAL"])?;
+        k.check_parameters(&["ALPHA", "BETA", "STRUCTURAL", "RATIO", "LOWER", "UPPER"])?;
+        if let Some(ratio) = k.number("RATIO")? {
+            let upper = (k.number("UPPER")?).ok_or_else(|| k.error("RATIO needs UPPER"))?;
+            let damping = DampingRatio {
+                ratio,
+                lower: k.number("LOWER")?,
+                upper,
+            };
+            match &mut self.current_step(k)?.procedure {
+                Procedure::Dynamic(d) => d.damping_ratio = Some(damping),
+                _ => self.warn("*DAMPING outside of a *DYNAMIC step is ignored".to_string()),
+            }
+            return Ok(());
+        }
         let rayleigh = Rayleigh {
             alpha: k.number("ALPHA")?.unwrap_or(0.0),
             beta: k.number("BETA")?.unwrap_or(0.0),
@@ -1981,10 +2206,26 @@ impl Reader {
             "TIME DELAY",
             "USER",
             "OMEGA0",
+            "FOLLOWER",
+            "FOLLOWER ROTATION",
         ])?;
         if k.has("USER") || k.has("TIME DELAY") || k.has("OMEGA0") {
             return Err(k.error("USER, TIME DELAY and OMEGA0 are not supported"));
         }
+        let follower = match (k.value("FOLLOWER"), k.value("FOLLOWER ROTATION")) {
+            (Some(_), Some(_)) => {
+                return Err(k.error("FOLLOWER and FOLLOWER ROTATION exclude each other"));
+            }
+            (Some(nodes), None) => Some(Follower::Nodes(node_ref(nodes))),
+            (None, Some(node)) => match node.trim().parse::<NodeId>() {
+                Ok(id) => Some(Follower::Rotation(id)),
+                Err(_) => return Err(k.error("FOLLOWER ROTATION needs a node number")),
+            },
+            (None, None) if k.has("FOLLOWER") || k.has("FOLLOWER ROTATION") => {
+                return Err(k.error("FOLLOWER needs the nodes the load turns with"));
+            }
+            (None, None) => None,
+        };
         let amplitude = k.value("AMPLITUDE").map(normalized_name);
         let load_case = k.integer("LOAD CASE")?.map(|c| c as u8);
         let sector = k.integer("SECTOR")?;
@@ -2005,6 +2246,7 @@ impl Reader {
                 amplitude: amplitude.clone(),
                 load_case,
                 sector,
+                follower: follower.clone(),
             });
         }
         let op_new = k.value("OP") == Some("NEW");
@@ -2383,6 +2625,10 @@ impl Reader {
                 (FileKind::Contact, Some(slave), Some(master)) => {
                     Some((normalized_name(slave), normalized_name(master)))
                 }
+                // A compression only surface: its master is the ground.
+                (FileKind::Contact, Some(slave), None) => {
+                    Some((normalized_name(slave), String::new()))
+                }
                 _ => None,
             },
         };
@@ -2434,6 +2680,67 @@ fn parse_id(k: &Keyword, d: &Data<'_>, text: &str) -> Result<u32, Error> {
     text.trim()
         .parse::<u32>()
         .map_err(|_| data_error(k, d, format!("{text} is not a node or element number")))
+}
+
+/// The signal of an `*AMPLITUDE, SHAPE=...`: its numbers on the data lines are
+/// `start, width` of a pulse, `start, end, frequency, phase` of a sine (phase in degrees) and
+/// `start, end, start frequency, end frequency` of a chirp.
+fn signal(k: &Keyword, shape: &str, values: &[f64]) -> Result<Signal, Error> {
+    let take = |n: usize, what: &str| -> Result<&[f64], Error> {
+        if values.len() != n {
+            return Err(k.error(format!("SHAPE={shape} needs {what} on its data line")));
+        }
+        Ok(values)
+    };
+    let signal = match shape {
+        "PULSE" => {
+            let v = take(2, "start and width")?;
+            if v[1] <= 0.0 {
+                return Err(k.error("the width of a pulse must be positive"));
+            }
+            Signal::Pulse {
+                start: v[0],
+                width: v[1],
+            }
+        }
+        "SINE" => {
+            let v = take(4, "start, end, frequency and phase")?;
+            Signal::Sine {
+                start: v[0],
+                end: v[1],
+                frequency: v[2],
+                phase: v[3].to_radians(),
+            }
+        }
+        "CHIRP" => {
+            let v = take(4, "start, end, start frequency and end frequency")?;
+            let logarithmic = match k.value("SWEEP") {
+                None | Some("LINEAR") => false,
+                Some("LOG" | "LOGARITHMIC") => true,
+                Some(other) => return Err(k.error(format!("unknown SWEEP={other}"))),
+            };
+            if logarithmic && (v[2] <= 0.0 || v[3] <= 0.0) {
+                return Err(k.error("a logarithmic sweep needs positive frequencies"));
+            }
+            Signal::Chirp {
+                start: v[0],
+                end: v[1],
+                from: v[2],
+                to: v[3],
+                logarithmic,
+            }
+        }
+        other => return Err(k.error(format!("unknown SHAPE={other}"))),
+    };
+    if let Signal::Sine { frequency, .. } = signal
+        && frequency <= 0.0
+    {
+        return Err(k.error("the frequency must be positive"));
+    }
+    if signal.end().is_nan() || signal.end() <= signal.start() {
+        return Err(k.error("the signal must end after it starts"));
+    }
+    Ok(signal)
 }
 
 fn numbers(k: &Keyword, d: &Data<'_>) -> Result<Vec<f64>, Error> {
@@ -2525,5 +2832,9 @@ fn incrementation(k: &Keyword, data: &[Data<'_>]) -> Result<Incrementation, Erro
         minimum: at(2),
         maximum: at(3),
         direct: k.has("DIRECT"),
+        frames: match k.integer("FRAMES")? {
+            Some(0) => return Err(k.error("FRAMES must be at least 1")),
+            frames => frames,
+        },
     })
 }

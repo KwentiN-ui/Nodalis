@@ -100,15 +100,18 @@ pub struct Model {
     geometry_index: std::sync::OnceLock<crate::geometry_selection::GeometryIndex>,
     /// Hot spots defined on a results file, with their values.
     pub hot_spots: crate::hot_spots::HotSpots,
-    /// Keys of the features of these results that come from the FE model, see
-    /// [`FeModel::add_missing_features`]; the others were made on the results.
-    pub inherited_features: Vec<String>,
+    /// The shared features of the FE model, see [`plx_model::FeModel::shared_features`], as
+    /// these results last took them over, in stored units; results follow later changes.
+    pub shared_from: Option<plx_model::FeModel>,
     /// Plots of result paths shown in the 3D view.
     pub path_plots: Vec<crate::path_plot::PathPlot>,
     /// Faces and parts drawn in the highlight colour.
     pub highlight: Highlight,
     /// The section view plane in render coordinates; picking ignores what it cuts off.
     pub clip: Option<ClipPlane>,
+    /// Parts, by index, that the section view leaves whole: neither cut nor clipped for
+    /// picking.
+    pub uncut: HashSet<usize>,
     /// Centre of the mesh; render positions are relative to it.
     origin: DVec3,
     skins: Vec<PartSkin>,
@@ -385,7 +388,6 @@ fn companion_input(results: &Path) -> Option<PathBuf> {
 /// would show as a part per gap. Returns whether the input defines contact.
 fn adopt_input_parts(
     mesh: &mut FeMesh,
-    increments: &mut [plx_results::Increment],
     input: &Path,
     units: UnitSystem,
     sections: &mut InputSections,
@@ -393,7 +395,7 @@ fn adopt_input_parts(
     match read_inp(input) {
         Ok(mut import) => {
             mesh.remove_elements(&import.skipped_elements);
-            adopt_general_beams(mesh, increments, &import.mesh);
+            adopt_general_beams(mesh, &import.mesh);
             *sections = shown_sections(&mut import, units);
             let parts: Vec<_> = (import.mesh.parts.into_iter())
                 .map(|mut part| {
@@ -413,45 +415,14 @@ fn adopt_input_parts(
 }
 
 /// Adds the user elements U1 of general beam sections, which the solver leaves out of the
-/// results, from the input it ran: their nodes are there, so they are drawn as lines. Their
-/// stresses and strains are section forces, not stresses, so the nodes that belong to them
-/// only show none.
-fn adopt_general_beams(
-    mesh: &mut FeMesh,
-    increments: &mut [plx_results::Increment],
-    input: &FeMesh,
-) {
-    let mut beam_nodes = std::collections::BTreeSet::new();
+/// results, from the input it ran: their nodes are there, so they are drawn as lines and
+/// coloured by their results (the solver writes the normal stress along the beam there).
+fn adopt_general_beams(mesh: &mut FeMesh, input: &FeMesh) {
     for element in input.elements() {
         let missing = mesh.element(element.id).is_none()
             && element.nodes.iter().all(|&n| mesh.node(n).is_some());
         if missing && element.type_name.eq_ignore_ascii_case("U1") {
-            beam_nodes.extend(element.nodes.iter().copied());
             let _ = mesh.add_element(element.clone());
-        }
-    }
-    if beam_nodes.is_empty() {
-        return;
-    }
-    for element in mesh.elements() {
-        if !element.type_name.eq_ignore_ascii_case("U1") {
-            for node in &element.nodes {
-                beam_nodes.remove(node);
-            }
-        }
-    }
-    let indices: Vec<usize> = (beam_nodes.iter())
-        .filter_map(|&n| mesh.node_index(n))
-        .collect();
-    for field in increments.iter_mut().flat_map(|i| &mut i.fields) {
-        if matches!(field.rank, plx_results::FieldRank::Tensor(_)) {
-            for component in &mut field.components {
-                for &index in &indices {
-                    if let Some(value) = component.values.get_mut(index) {
-                        *value = f32::NAN;
-                    }
-                }
-            }
         }
     }
 }
@@ -536,15 +507,8 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
             crate::results::convert_results(&mut mesh, &mut increments, units);
             // The results group the elements by material; the input it ran, named like the
             // results, knows the parts.
-            contact = companion_input(path).map(|input| {
-                adopt_input_parts(
-                    &mut mesh,
-                    &mut increments,
-                    &input,
-                    units,
-                    &mut input_sections,
-                )
-            });
+            contact = companion_input(path)
+                .map(|input| adopt_input_parts(&mut mesh, &input, units, &mut input_sections));
             (
                 mesh,
                 warnings,
@@ -679,6 +643,26 @@ pub fn load_analysis(path: &Path, analysis: plx_io::project::ProjectAnalysis) ->
 }
 
 impl Model {
+    /// Takes over the reference points, coordinate systems and planes of the FE model `fe`,
+    /// in stored units, when they changed since these results last did; returns whether
+    /// they did.
+    pub fn follow_shared_features(&mut self, fe: &plx_model::FeModel) -> bool {
+        if (self.shared_from.as_ref()).is_some_and(|taken| taken.same_shared_features(fe)) {
+            return false;
+        }
+        let mut features = fe.shared_features();
+        features.convert_features(&plx_model::convert::Conversion::new(
+            plx_model::STORED,
+            self.stored_units(),
+        ));
+        self.fe.set_shared_features(&features);
+        // Points on picked nodes or faces sit where the results' mesh has them; those that
+        // cannot be placed keep the position of the FE model.
+        let _ = self.fe.update_reference_points(&self.mesh);
+        self.shared_from = Some(fe.shared_features());
+        true
+    }
+
     /// What the user defined on these results, for results bound to a project.
     pub fn results_settings(&self) -> Option<plx_results::ResultsSettings> {
         let view = self.results.as_ref()?;
@@ -694,7 +678,6 @@ impl Model {
                 .map(|part| part.name.clone())
                 .collect(),
             mesh: Some(self.mesh.fingerprint()),
-            inherited_features: self.inherited_features.clone(),
             ..view.settings()
         })
         .map(|mut settings| {
@@ -722,7 +705,6 @@ impl Model {
         self.fe.planes = settings.planes.clone();
         self.fe.result_paths = settings.result_paths.clone();
         self.fe.result_planes = settings.result_planes.clone();
-        self.inherited_features = settings.inherited_features.clone();
         self.hot_spots.definitions = settings.hot_spots.clone();
         let view = &settings.view;
         for part in &mut self.parts {
@@ -808,10 +790,11 @@ impl Model {
             geometry_topology: Default::default(),
             geometry_index: Default::default(),
             hot_spots: Default::default(),
-            inherited_features: Vec::new(),
+            shared_from: None,
             path_plots: Vec::new(),
             highlight: Highlight::default(),
             clip: None,
+            uncut: HashSet::new(),
             origin,
             skins,
             section_cells: Default::default(),
@@ -1035,6 +1018,84 @@ impl Model {
         }
     }
 
+    /// Makes the skin of results of expanded shells the one of the shells of the mesh the
+    /// analysis was solved on, as the FE Model view shows them. Solver results know nothing
+    /// of that mesh: the expanded solids of neighbouring shells share nodes only where their
+    /// normals agree, so the skin would be one slab per element with walls between them, and
+    /// the outlines of CAD faces would be guessed from the angles between element faces.
+    ///
+    /// Elements of the same id are the same element. The nodes of results that stand for one
+    /// node of the shells (the same side of the thickness) count as one when faces and edges
+    /// are matched, and the CAD faces of the shells lie on the bottom and top face of their
+    /// solids. Returns whether the skins changed.
+    pub fn adopt_project_surface(&mut self, project: &FeMesh) -> bool {
+        use plx_mesh::ElementFamily::{Solid, Surface};
+        let mut weld: Vec<usize> = (0..self.mesh.node_count()).collect();
+        let mut canonical: HashMap<(plx_mesh::NodeId, u8), usize> = HashMap::new();
+        let mut expanded = BTreeSet::new();
+        for solved in self.mesh.elements() {
+            let Some(own) = project.element(solved.id) else {
+                continue;
+            };
+            if own.shape.family() != Surface || solved.shape.family() != Solid {
+                continue;
+            }
+            // Bottom corners, top corners, then for quadratic solids the midside nodes of
+            // the bottom and top and those between them, each as the corners and mids of
+            // the shell.
+            let corners = solved.nodes.len() / if solved.nodes.len() > 8 { 5 } else { 2 };
+            let quadratic = solved.nodes.len() > 8;
+            if own.nodes.len() != if quadratic { 2 * corners } else { corners } {
+                continue;
+            }
+            expanded.insert(solved.id);
+            for (k, &node) in solved.nodes.iter().enumerate() {
+                let (shell_node, slot) = match k / corners {
+                    0 => (own.nodes[k], 0),
+                    1 => (own.nodes[k % corners], 2),
+                    2 => (own.nodes[corners + k % corners], 0),
+                    3 => (own.nodes[corners + k % corners], 2),
+                    _ => (own.nodes[k % corners], 1),
+                };
+                let Some(index) = self.mesh.node_index(node) else {
+                    continue;
+                };
+                weld[index] = *canonical.entry((shell_node, slot)).or_insert(index);
+            }
+        }
+        if expanded.is_empty() {
+            return false;
+        }
+        // The CAD faces of shells lie on the bottom and top face of their solids.
+        if !project.cad.faces.is_empty() && self.mesh.cad.faces.is_empty() {
+            let faces: BTreeMap<i32, Vec<(ElementId, u8)>> = (project.cad.faces.iter())
+                .map(|(&tag, on_face)| {
+                    let kept: Vec<_> = (on_face.iter())
+                        .filter(|(element, _)| expanded.contains(element))
+                        .flat_map(|&(element, _)| [(element, 1), (element, 2)])
+                        .collect();
+                    (tag, kept)
+                })
+                .filter(|(_, kept)| !kept.is_empty())
+                .collect();
+            // Nodes of the results are numbered anew: selections by CAD entity are made in
+            // the FE Model, only the faces outline.
+            self.mesh.cad = plx_mesh::CadMap {
+                faces,
+                ..Default::default()
+            };
+        }
+        self.skins = (self.mesh.parts.iter())
+            .map(|part| {
+                plx_mesh::extract_part_skin_welded(&self.mesh, part, FEATURE_ANGLE_DEG, Some(&weld))
+            })
+            .collect();
+        self.skin_lookup = Default::default();
+        self.part_nodes = Default::default();
+        self.section_cells = Default::default();
+        true
+    }
+
     /// Replaces the mesh, e.g. by a newly generated one; the FE model stays.
     pub fn set_mesh(&mut self, mut mesh: FeMesh) {
         // The user's sets are found on the new mesh by their selections, and its parts get
@@ -1254,11 +1315,13 @@ impl Model {
         self.update_plain_nodes();
     }
 
-    fn update_plain_nodes(&mut self) {
+    /// Nodes of hidden parts count like those of parts without contours: they leave the
+    /// legend range and the extremes.
+    pub fn update_plain_nodes(&mut self) {
         let Some(view) = &mut self.results else {
             return;
         };
-        if self.parts.iter().all(|p| p.contours) {
+        if self.parts.iter().all(|p| p.contours && p.visible) {
             view.plain_nodes.clear();
             return;
         }
@@ -1266,7 +1329,7 @@ impl Model {
         let mut plain = vec![false; count];
         let mut coloured = vec![false; count];
         for (index, info) in self.parts.iter().enumerate() {
-            let target = if info.contours {
+            let target = if info.contours && info.visible {
                 &mut coloured
             } else {
                 &mut plain
@@ -1605,7 +1668,7 @@ impl Model {
             .map(move |s| {
                 let profile = match &s.kind {
                     plx_model::SectionKind::Beam(beam) => (cross_sections.iter())
-                        .find(|c| c.name == beam.cross_section)
+                        .find(|c| Some(c.id) == beam.cross_section)
                         .map(|c| &c.profile),
                     _ => None,
                 };
@@ -1702,6 +1765,7 @@ impl Model {
             let whole = highlight && self.highlight.parts.contains(&index);
             mesh.append(beam_mesh(
                 coords,
+                self.mesh.coords(),
                 skin,
                 self.origin,
                 info.color,
@@ -1741,6 +1805,9 @@ impl Model {
             .zip(&self.parts)
             .enumerate()
             .map(|(index, (cells, info))| {
+                if self.uncut.contains(&index) {
+                    return RenderMesh::default();
+                }
                 let color = color(info);
                 let mut mesh = section_mesh(
                     cells,
@@ -1764,6 +1831,9 @@ impl Model {
             let moved = transform_coords(&coords, &instance);
             let parts = meshes.iter_mut().zip(cells).zip(&self.parts);
             for (index, ((mesh, cells), info)) in parts.enumerate() {
+                if self.uncut.contains(&index) {
+                    continue;
+                }
                 let color = color(info);
                 let scalars = scalars.as_deref();
                 let mut copy =
@@ -1982,6 +2052,12 @@ impl Model {
         }
         if let Some(old) = self.mesh.rename_part(index, &name) {
             self.fe.rename_part(&old, &name);
+            // A compound part keeps its name when it is meshed anew.
+            if let Some(geometry) = &mut self.geometry
+                && let Some(c) = geometry.compound_named(&old)
+            {
+                geometry.compounds[c].name.clone_from(&name);
+            }
         }
         self.parts[index].name = name;
         Ok(())
@@ -1997,6 +2073,11 @@ impl Model {
         }
         self.edit_mesh(|_, _| {});
         Ok(())
+    }
+
+    /// Whether the section view cuts off a point of a part, relative to the model origin.
+    fn clipped(&self, part: usize, point: Vec3) -> bool {
+        !self.uncut.contains(&part) && self.clip.is_some_and(|clip| clip.distance(point) < 0.0)
     }
 
     /// The nearest visible face hit by a ray, both relative to the model origin.
@@ -2019,7 +2100,7 @@ impl Model {
                         continue;
                     };
                     let point = origin + direction * t;
-                    if self.clip.is_some_and(|clip| clip.distance(point) < 0.0) {
+                    if self.clipped(part, point) {
                         continue;
                     }
                     if best.is_none_or(|(nearest, _)| t < nearest) {
@@ -2063,9 +2144,7 @@ impl Model {
                 };
                 let on_ray = origin + u * t;
                 let on_line = a + (b - a) * s;
-                if on_ray.distance(on_line) > tolerance(on_ray)
-                    || self.clip.is_some_and(|clip| clip.distance(on_line) < 0.0)
-                {
+                if on_ray.distance(on_line) > tolerance(on_ray) || self.clipped(part, on_line) {
                     continue;
                 }
                 if best.is_none_or(|(nearest, _)| t < nearest) {
@@ -2397,7 +2476,7 @@ mod tests {
     }
 
     #[test]
-    fn general_beams_are_taken_from_the_input_without_their_section_forces() {
+    fn general_beams_are_taken_from_the_input() {
         let node_mesh = || {
             let mut mesh = FeMesh::default();
             for id in 1..=4 {
@@ -2418,33 +2497,9 @@ mod tests {
         input.add_element(element(1, "U1", vec![1, 2])).unwrap();
         input.add_element(element(2, "U1", vec![2, 3])).unwrap();
         input.add_element(element(3, "T3D2", vec![3, 4])).unwrap();
-        let component = |name: &str| plx_results::Component {
-            name: name.into(),
-            values: vec![1.0; 4],
-            derived: false,
-        };
-        let stress = ["SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX"]
-            .map(component)
-            .to_vec();
-        let mut increments = vec![plx_results::Increment {
-            step: 1,
-            increment: 1,
-            kind: plx_results::AnalysisKind::Static,
-            value: 1.0,
-            fields: vec![
-                plx_results::Field::new("STRESS", stress),
-                plx_results::Field::new("DISP", ["D1", "D2", "D3"].map(component).to_vec()),
-            ],
-            nodal_diameter: None,
-        }];
-        adopt_general_beams(&mut mesh, &mut increments, &input);
+        adopt_general_beams(&mut mesh, &input);
         assert_eq!(mesh.element_count(), 3);
         assert_eq!(mesh.element(1).unwrap().type_name, "U1");
-        let sxx = &increments[0].fields[0].components[0].values;
-        // Node 3 belongs to the truss too and keeps its stress.
-        assert!(sxx[0].is_nan() && sxx[1].is_nan());
-        assert_eq!(sxx[2..], [1.0, 1.0]);
-        assert_eq!(increments[0].fields[1].components[0].values, vec![1.0; 4]);
     }
 
     fn testdata(name: &str) -> PathBuf {
@@ -2501,7 +2556,7 @@ mod tests {
         let (first, second) = (model.parts[0].name.clone(), model.parts[1].name.clone());
         model.fe.sections.push(plx_model::Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: Some(crate::test_ids::named("Steel")),
             region: plx_model::Region::Parts(vec![first.clone()]),
             thickness: 1.0,
             kind: SectionKind::Solid,
@@ -2746,6 +2801,24 @@ mod tests {
         assert!(hits > 50, "{hits}");
     }
 
+    #[test]
+    fn uncut_parts_have_no_section_faces_and_stay_pickable() {
+        let mut model = load(&testdata("wuerfel_c3d10.inp"), UnitSystem::Unitless)
+            .unwrap()
+            .model;
+        let center = model.origin;
+        let faces = model.section_meshes(center, DVec3::Z, true);
+        assert!(!faces[0].triangles.is_empty());
+        let clip = plx_render::clip_plane(center, DVec3::Z, model.origin);
+        model.clip = Some(clip);
+        let below = Vec3::new(0.0, 0.0, -1e-3) + (center - model.origin).as_vec3();
+        assert!(model.clipped(0, below));
+        model.uncut.insert(0);
+        assert!(!model.clipped(0, below));
+        let faces = model.section_meshes(center, DVec3::Z, true);
+        assert!(faces[0].triangles.is_empty() && faces[0].feature_edges.is_empty());
+    }
+
     /// Times a click on a part of a large assembly and the redrawn scene with it
     /// highlighted: `NODALIS_PICK_BENCH=file.step cargo test --release -p plx-app
     /// pick_bench -- --ignored --nocapture`.
@@ -2888,6 +2961,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "BEAM".into(),
             elements: vec![1, 2],
         });
@@ -3022,6 +3096,7 @@ mod tests {
         let (fixed, pulled) = (nodes_at(0.0), nodes_at(100.0));
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Fix"),
             distribution: None,
             name: "Fix".into(),
             active: true,
@@ -3031,6 +3106,7 @@ mod tests {
             amplitude: None,
         });
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Pull"),
             distribution: None,
             name: "Pull".into(),
             active: true,
@@ -3042,6 +3118,7 @@ mod tests {
         model.fe = FeModel {
             properties: Default::default(),
             materials: vec![Material {
+                id: crate::test_ids::named("Steel"),
                 name: "Steel".into(),
                 density: None,
                 elastic: Some(Elastic {
@@ -3052,7 +3129,7 @@ mod tests {
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
-                material: "Steel".into(),
+                material: Some(crate::test_ids::named("Steel")),
                 region: Region::Parts(vec!["SOLID-1".into()]),
                 thickness: 1.0,
                 kind: SectionKind::Solid,
@@ -3073,6 +3150,101 @@ mod tests {
         let sxx = &stress.component("S11").unwrap().values;
         let max = sxx.iter().copied().fold(f32::MIN, f32::max);
         assert!(max > 300.0 && max < 1500.0, "largest stress {max}");
+    }
+
+    /// Results of expanded shells are skinned like the shells of the mesh the analysis ran on:
+    /// no walls between neighbours, and the CAD faces outlined as in the FE Model view
+    /// although they meet without a crease.
+    #[test]
+    fn results_outline_the_cad_faces_of_the_project_mesh() {
+        let mut project = FeMesh::default();
+        for (id, c) in [
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [20.0, 0.0, 0.0],
+            [20.0, 10.0, 0.0],
+            [10.0, 10.0, 0.0],
+            [0.0, 10.0, 0.0],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            project.set_node(id as u32 + 1, c);
+        }
+        for (id, nodes) in [(1, vec![1, 2, 5, 6]), (2, vec![2, 3, 4, 5])] {
+            project
+                .add_element(plx_mesh::Element {
+                    id,
+                    type_name: "S4".into(),
+                    shape: plx_mesh::ElementShape::Quad4,
+                    nodes,
+                })
+                .unwrap();
+        }
+        project.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
+            name: "PLATE".into(),
+            elements: vec![1, 2],
+        });
+        project.cad.faces.insert(1, vec![(1, 1)]);
+        project.cad.faces.insert(2, vec![(2, 1)]);
+        project
+            .cad
+            .nodes
+            .insert(plx_mesh::CadEntity::Face(1), vec![1, 2, 5, 6]);
+        project
+            .cad
+            .nodes
+            .insert(plx_mesh::CadEntity::Face(2), vec![2, 3, 4, 5]);
+
+        // The results show each shell as a solid of its thickness; where their normals
+        // differ they have nodes of their own, here the second element's.
+        let mut solved = FeMesh::default();
+        for (element, ring) in [(1u32, [1u32, 2, 5, 6]), (2, [2, 3, 4, 5])] {
+            let own = |n: u32, side: u32| n + 10 * side + 100 * element;
+            for &n in &ring {
+                let c = project.node(n).unwrap();
+                solved.set_node(own(n, 1), [c[0], c[1], -0.5]);
+                solved.set_node(own(n, 2), [c[0], c[1], 0.5]);
+            }
+            let nodes = (ring.iter().map(|&n| own(n, 1)))
+                .chain(ring.iter().map(|&n| own(n, 2)))
+                .collect();
+            solved
+                .add_element(plx_mesh::Element {
+                    id: element,
+                    type_name: "C3D8".into(),
+                    shape: plx_mesh::ElementShape::Hex8,
+                    nodes,
+                })
+                .unwrap();
+        }
+        solved.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
+            name: "PLATE".into(),
+            elements: vec![1, 2],
+        });
+        // Feature edges on the top of the plate where the two CAD faces meet.
+        let features = |model: &Model| -> usize {
+            let coords = model.mesh.coords();
+            (model.skin(0).edges.iter())
+                .filter(|e| {
+                    e.feature
+                        && [e.a, e.b]
+                            .iter()
+                            .all(|&n| coords[n][0] == 10.0 && coords[n][2] == 0.5)
+                })
+                .count()
+        };
+        let mut results = Model::new(Path::new("plate.frd"), solved);
+        assert_eq!(results.skin(0).faces.len(), 12, "a slab per element");
+        assert!(results.adopt_project_surface(&project));
+        assert_eq!(
+            results.skin(0).faces.len(),
+            10,
+            "no walls between the elements"
+        );
+        assert_eq!(features(&results), 1, "the border of the two CAD faces");
     }
 
     /// Shells of a shell section are drawn as the solid of its thickness, placed by its
@@ -3099,13 +3271,14 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: "Plate".into(),
             elements: vec![1],
         });
         let mut model = Model::new(Path::new("plate.inp"), mesh);
         model.fe.sections.push(plx_model::Section {
             name: "Shell_Section-1".into(),
-            material: "Steel".into(),
+            material: Some(crate::test_ids::named("Steel")),
             region: plx_model::Region::Parts(vec!["Plate".into()]),
             thickness: 1.0,
             kind: SectionKind::Shell {
@@ -3146,17 +3319,18 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: "Beam".into(),
             elements: vec![1],
         });
         let mut model = Model::new(Path::new("beam.inp"), mesh);
         model.fe.sections.push(plx_model::Section {
             name: "Beam_Section-1".into(),
-            material: "Steel".into(),
+            material: Some(crate::test_ids::named("Steel")),
             region: plx_model::Region::Parts(vec!["Beam".into()]),
             thickness: 1.0,
             kind: SectionKind::Beam(plx_model::BeamSection {
-                cross_section: "Rect".into(),
+                cross_section: Some(crate::test_ids::named("Rect")),
                 orientation: BeamOrientation::Direction([0.0, 1.0, 0.0]),
                 offset: [0.0; 2],
             }),
@@ -3167,6 +3341,7 @@ mod tests {
         };
         assert_eq!(extent(&model), Vec3::new(10.0, 0.0, 0.0));
         model.fe.cross_sections.push(plx_model::CrossSection {
+            id: crate::test_ids::named("Rect"),
             name: "Rect".into(),
             profile: plx_model::BeamProfile::Rect { a: 4.0, b: 2.0 },
         });
@@ -3329,6 +3504,7 @@ S
         let part = model.mesh.parts[0].name.clone();
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Clamped"),
             distribution: None,
             name: "Clamped".into(),
             active: true,
@@ -3338,6 +3514,7 @@ S
             amplitude: None,
         });
         step.loads.push(Load {
+            id: crate::test_ids::named("Weight"),
             distribution: None,
             name: "Weight".into(),
             active: true,
@@ -3346,16 +3523,20 @@ S
             kind: LoadKind::Gravity([0.0, 0.0, -gravity]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
+            system: None,
+            follower: false,
         });
         let solid = Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: Some(crate::test_ids::named("Steel")),
             region: Region::Parts(vec![part]),
             thickness: 1.0,
             kind: SectionKind::Solid,
         };
         model.fe = FeModel {
             materials: vec![Material {
+                id: crate::test_ids::named("Steel"),
                 name: "Steel".into(),
                 density: Some(density),
                 elastic: Some(Elastic { young, poisson }),
@@ -3422,6 +3603,7 @@ S
             }))
             .unwrap();
             mesh.parts.push(plx_mesh::Part {
+                bodies: Vec::new(),
                 name: name.to_string(),
                 elements: vec![id],
             });
@@ -3440,6 +3622,7 @@ S
             ),
         ] {
             step.boundary_conditions.push(BoundaryCondition {
+                id: plx_model::Id::new(),
                 distribution: None,
                 name: name.into(),
                 active: true,
@@ -3451,6 +3634,7 @@ S
         }
         let fe = FeModel {
             materials: vec![Material {
+                id: crate::test_ids::named("S235"),
                 name: "S235".into(),
                 elastic: Some(Elastic {
                     young: 210000.0,
@@ -3460,7 +3644,7 @@ S
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
-                material: "S235".into(),
+                material: Some(crate::test_ids::named("S235")),
                 region: Region::Parts(names.map(String::from).to_vec()),
                 thickness: 1.0,
                 kind: SectionKind::Solid,
@@ -3540,7 +3724,10 @@ S
                 plx_results::transformation::SymmetryPlane::X,
             )],
             hot_spots: vec![plx_results::hot_spot::HotSpot::new("Hot_Spot-1")],
-            reference_points: vec![plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])],
+            reference_points: vec![plx_model::ReferencePoint {
+                id: crate::test_ids::named("RP-1"),
+                ..plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])
+            }],
             result_paths: vec![plx_model::ResultPath::new("Path-1")],
             plain_part_names: vec![model.parts[0].name.clone()],
             mesh: Some(model.mesh.fingerprint()),
@@ -3612,5 +3799,23 @@ S
         legacy.mesh = Some(model.mesh.fingerprint());
         model.restore_results_settings(&legacy, Vec::new());
         assert!(!model.parts[0].contours);
+        // Hidden parts leave the legend range like parts without contours.
+        model.parts[0].visible = true;
+        model.set_contours(&[0], true);
+        assert!(model.results.as_ref().unwrap().plain_nodes.is_empty());
+        model.parts[0].visible = false;
+        model.update_plain_nodes();
+        assert!(
+            model
+                .results
+                .as_ref()
+                .unwrap()
+                .plain_nodes
+                .iter()
+                .any(|&p| p)
+        );
+        model.parts[0].visible = true;
+        model.update_plain_nodes();
+        assert!(model.results.as_ref().unwrap().plain_nodes.is_empty());
     }
 }

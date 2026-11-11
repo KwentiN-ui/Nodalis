@@ -989,6 +989,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "darling"
+version = "0.20.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc7f46116c46ff9ab3eb1597a45688b6715c6e628b5c133e288e709a29bcb4ee"
+dependencies = [
+ "darling_core",
+ "darling_macro",
+]
+
+[[package]]
+name = "darling_core"
+version = "0.20.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d00b9596d185e565c2207a0b01f8bd1a135483d02d9b7b0a54b11da8d53412e"
+dependencies = [
+ "fnv",
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "strsim",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "darling_macro"
+version = "0.20.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc34b93ccb385b40dc71c6fceac4b2ad23662c7eeb248cf10d529b7e055b6ead"
+dependencies = [
+ "darling_core",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "dasp_sample"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1029,6 +1064,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
 dependencies = [
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "derive_builder"
+version = "0.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "507dfb09ea8b7fa618fcf76e953f4f5e192547945816d5358edffe39f6f94947"
+dependencies = [
+ "derive_builder_macro",
+]
+
+[[package]]
+name = "derive_builder_core"
+version = "0.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d5bcf7b024d6835cfb3d473887cd966994907effbe9227e8c8219824d06c4e8"
+dependencies = [
+ "darling",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "derive_builder_macro"
+version = "0.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab63b0e2bf4d5928aff72e83a7dace85d7bba5fe12dcc3c5a572d78caffd3f3c"
+dependencies = [
+ "derive_builder_core",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1588,6 +1654,12 @@ dependencies = [
  "miniz_oxide 0.9.1",
  "zlib-rs",
 ]
+
+[[package]]
+name = "fnv"
+version = "1.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "foldhash"
@@ -2154,6 +2226,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ident_case"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
+
+[[package]]
 name = "image"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2342,6 +2420,21 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "keepawake"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d950f8c457c023d71a2b7fa0a3550e8eb5127811895b666086ff10304911d9a"
+dependencies = [
+ "cfg-if",
+ "derive_builder",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "thiserror 2.0.21",
+ "windows",
+ "zbus",
 ]
 
 [[package]]
@@ -3024,6 +3117,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-io-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33fafba39597d6dc1fb709123dfa8289d39406734be322956a69f0931c73bb15"
+dependencies = [
+ "bitflags 2.13.2",
+ "block2 0.6.2",
+ "dispatch2",
+ "libc",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+]
+
+[[package]]
 name = "objc2-io-surface"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3422,7 +3529,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plx-app"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "chrono",
  "cpal",
@@ -3445,6 +3552,7 @@ dependencies = [
  "plx-results",
  "plx-solve",
  "plxs-core",
+ "plxs-explicit",
  "plxs-linalg",
  "plxs-session",
  "png",
@@ -3458,11 +3566,11 @@ dependencies = [
 
 [[package]]
 name = "plx-core"
-version = "0.2.5"
+version = "0.4.1"
 
 [[package]]
 name = "plx-io"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -3482,7 +3590,7 @@ dependencies = [
 
 [[package]]
 name = "plx-mesh"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "plx-core",
  "ron",
@@ -3492,7 +3600,7 @@ dependencies = [
 
 [[package]]
 name = "plx-mesher"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "libloading 0.9.0",
  "log",
@@ -3503,7 +3611,7 @@ dependencies = [
 
 [[package]]
 name = "plx-model"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "glam",
  "plx-core",
@@ -3515,7 +3623,7 @@ dependencies = [
 
 [[package]]
 name = "plx-render"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "bytemuck",
  "glam",
@@ -3529,7 +3637,7 @@ dependencies = [
 
 [[package]]
 name = "plx-results"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "glam",
  "plx-core",
@@ -3543,11 +3651,13 @@ dependencies = [
 
 [[package]]
 name = "plx-solve"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
+ "keepawake",
  "plx-results",
  "plxs-core",
  "plxs-input",
+ "plxs-procedures",
  "plxs-session",
  "rayon",
  "windows-sys 0.61.2",
@@ -3555,9 +3665,10 @@ dependencies = [
 
 [[package]]
 name = "plxs-assembly"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "plxs-constraints",
+ "plxs-contact",
  "plxs-core",
  "plxs-elements",
  "plxs-linalg",
@@ -3567,11 +3678,12 @@ dependencies = [
 
 [[package]]
 name = "plxs-cli"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "plx-io",
  "plxs-core",
  "plxs-elements",
+ "plxs-explicit",
  "plxs-input",
  "plxs-linalg",
  "plxs-output",
@@ -3581,25 +3693,27 @@ dependencies = [
 
 [[package]]
 name = "plxs-constraints"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "plxs-core",
  "plxs-elements",
  "plxs-linalg",
+ "rayon",
 ]
 
 [[package]]
 name = "plxs-contact"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "plxs-core",
  "plxs-elements",
  "plxs-materials",
+ "rayon",
 ]
 
 [[package]]
 name = "plxs-core"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -3607,14 +3721,35 @@ dependencies = [
 
 [[package]]
 name = "plxs-elements"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "plxs-core",
 ]
 
 [[package]]
+name = "plxs-explicit"
+version = "0.4.1"
+dependencies = [
+ "bytemuck",
+ "plxs-core",
+ "plxs-gpu",
+ "plxs-materials",
+ "rayon",
+]
+
+[[package]]
+name = "plxs-gpu"
+version = "0.4.1"
+dependencies = [
+ "ash",
+ "bytemuck",
+ "pollster 1.0.1",
+ "wgpu",
+]
+
+[[package]]
 name = "plxs-input"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "plx-io",
  "plx-mesh",
@@ -3624,27 +3759,26 @@ dependencies = [
 
 [[package]]
 name = "plxs-linalg"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "bytemuck",
  "faer",
  "plxs-core",
- "pollster 1.0.1",
+ "plxs-gpu",
  "rayon",
- "wgpu",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "plxs-materials"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "plxs-core",
 ]
 
 [[package]]
 name = "plxs-output"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "plxs-core",
  "postcard",
@@ -3655,21 +3789,23 @@ dependencies = [
 
 [[package]]
 name = "plxs-procedures"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "plxs-assembly",
  "plxs-constraints",
  "plxs-contact",
  "plxs-core",
  "plxs-elements",
+ "plxs-explicit",
  "plxs-linalg",
+ "plxs-materials",
  "plxs-output",
  "rayon",
 ]
 
 [[package]]
 name = "plxs-session"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "plxs-assembly",
  "plxs-constraints",
@@ -3687,7 +3823,7 @@ dependencies = [
 
 [[package]]
 name = "plxs-verify"
-version = "0.2.5"
+version = "0.4.1"
 dependencies = [
  "flate2",
  "plx-io",
@@ -4656,6 +4792,12 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "strsim"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "subtle"

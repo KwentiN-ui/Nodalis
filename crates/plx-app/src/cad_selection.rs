@@ -22,6 +22,8 @@ pub struct CadIndex {
     edge_vertices: BTreeMap<i32, Vec<i32>>,
     /// The CAD edge of each mesh segment along one by its end nodes, the smaller first.
     segment_edge: HashMap<[NodeId; 2], i32>,
+    /// The CAD edges meeting at each CAD vertex.
+    vertex_edges: HashMap<i32, Vec<i32>>,
 }
 
 impl CadIndex {
@@ -71,12 +73,39 @@ impl CadIndex {
                     .map(move |&[a, b]| ([a.min(b), a.max(b)], edge))
             })
             .collect();
+        let mut vertex_edges: HashMap<i32, Vec<i32>> = HashMap::new();
+        for (&edge, vertices) in &edge_vertices {
+            for &vertex in vertices {
+                vertex_edges.entry(vertex).or_default().push(edge);
+            }
+        }
         Self {
             face_of: cad.face_of().into_iter().collect(),
             face_edges,
             edge_vertices,
             segment_edge,
+            vertex_edges,
         }
+    }
+
+    /// The CAD edges reached from `start` across vertices where the edges on both sides bend
+    /// by no more than `angle` radians.
+    fn smooth_edges(&self, mesh: &FeMesh, start: i32, angle: f64) -> BTreeSet<i32> {
+        let mut seen = BTreeSet::from([start]);
+        let mut stack = vec![start];
+        while let Some(edge) = stack.pop() {
+            for &vertex in self.edge_vertices.get(&edge).into_iter().flatten() {
+                for &next in self.vertex_edges.get(&vertex).into_iter().flatten() {
+                    if !seen.contains(&next)
+                        && bend(mesh, vertex, edge, next).is_some_and(|b| b <= angle)
+                    {
+                        seen.insert(next);
+                        stack.push(next);
+                    }
+                }
+            }
+        }
+        seen
     }
 
     /// The vertex at an end of a CAD edge within `precision` of `point`, the nearest if both.
@@ -167,6 +196,65 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
             }
         }
     }
+}
+
+/// How much the path bends from one CAD edge into the next at their common vertex, in
+/// radians: 0 where the second continues the first straight on.
+fn bend(mesh: &FeMesh, vertex: i32, a: i32, b: i32) -> Option<f64> {
+    let node = *mesh.cad.nodes.get(&CadEntity::Vertex(vertex))?.first()?;
+    let origin = glam::DVec3::from(mesh.node(node)?);
+    // The direction leaving the vertex along the edge, by its mesh segment there.
+    let leaving = |edge: i32| -> Option<glam::DVec3> {
+        let segment = mesh
+            .cad
+            .segments
+            .get(&edge)?
+            .iter()
+            .find(|s| s.contains(&node))?;
+        let other = if segment[0] == node {
+            segment[1]
+        } else {
+            segment[0]
+        };
+        (glam::DVec3::from(mesh.node(other)?) - origin).try_normalize()
+    };
+    // Straight on, the directions leaving the vertex are opposite.
+    let between = leaving(a)?.dot(leaving(b)?).clamp(-1.0, 1.0).acos();
+    Some(std::f64::consts::PI - between)
+}
+
+/// What a click selects in the edge angle mode on a mesh generated from CAD geometry: the
+/// CAD edge nearest to the click and the edges that continue it at a bend of no more than
+/// `angle` degrees. For contact surfaces only edges of shells count. `None` where the mesh
+/// has no CAD entities or the click finds no edge.
+pub fn pick_edge_angle(
+    model: &Model,
+    hit: &Hit,
+    target: Target,
+    angle: f64,
+) -> Option<BTreeSet<CadEntity>> {
+    let index = model.cad_index();
+    let start = if hit.line {
+        line_edge(model, hit)?
+    } else {
+        let skin_face = model.skin(hit.part).faces.get(hit.face)?;
+        let element = model.mesh.elements()[skin_face.element].id;
+        let face = index.face(&model.mesh, (element, skin_face.face as u8 + 1))?;
+        (index.face_edges.get(&face)?.iter())
+            .filter_map(|&edge| Some((edge, edge_distance(model, edge, hit.point)?)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))?
+            .0
+    };
+    let edges = index.smooth_edges(&model.mesh, start, angle.to_radians());
+    let entities: BTreeSet<CadEntity> = if target == Target::Surfaces {
+        (edges.into_iter())
+            .map(CadEntity::Edge)
+            .filter(|e| !model.mesh.cad_faces(&[*e]).is_empty())
+            .collect()
+    } else {
+        edges.into_iter().map(CadEntity::Edge).collect()
+    };
+    (!entities.is_empty()).then_some(entities)
 }
 
 /// The CAD face an element face lies on.
@@ -452,6 +540,26 @@ mod tests {
             "{items:?}"
         );
 
+        // The edge angle mode picks CAD edges as well: the edges of the end face meet at
+        // right angles, so a small angle gives the one edge and a larger one the loop.
+        let hit = model
+            .pick(model.to_render([-50.0, 5.0, 9.95]), Vec3::X)
+            .unwrap();
+        let mut by_edge_angle = Picker::default();
+        by_edge_angle.select_by = crate::selection::SelectBy::GeometryEdgeAngle;
+        by_edge_angle.angle = 20.0;
+        let items = by_edge_angle.pick(&model, &hit, Target::Nodes, 0.1);
+        assert!(
+            matches!(&items, crate::selection::Items::Geometry(e) if e.len() == 1 && matches!(e.first(), Some(CadEntity::Edge(_)))),
+            "{items:?}"
+        );
+        by_edge_angle.angle = 95.0;
+        let items = by_edge_angle.pick(&model, &hit, Target::Nodes, 0.1);
+        assert!(
+            matches!(&items, crate::selection::Items::Geometry(e) if e.len() >= 4 && e.iter().all(|e| matches!(e, CadEntity::Edge(_)))),
+            "{items:?}"
+        );
+
         // Mixed with picked nodes the geometry turns into nodes; undo goes back to it.
         let mut draft = RegionDraft::from_region(&fixed, NODE_SOURCES, Target::Nodes, &model.mesh);
         let extra = model.mesh.node_ids()[0];
@@ -478,6 +586,7 @@ mod tests {
 
         model.fe = FeModel {
             materials: vec![Material {
+                id: crate::test_ids::named("Steel"),
                 name: "Steel".into(),
                 density: None,
                 elastic: Some(Elastic {
@@ -489,10 +598,11 @@ mod tests {
                 expansion: None,
                 plastic: None,
                 creep: None,
+                hyperelastic: None,
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
-                material: "Steel".into(),
+                material: Some(crate::test_ids::named("Steel")),
                 region: Region::Parts(vec!["SOLID-1".into()]),
                 thickness: 1.0,
                 kind: SectionKind::Solid,
@@ -502,6 +612,7 @@ mod tests {
         };
         let step = &mut model.fe.steps[0];
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Fix"),
             distribution: None,
             name: "Fix".into(),
             active: true,
@@ -511,6 +622,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            id: crate::test_ids::named("Pull"),
             distribution: None,
             name: "Pull".into(),
             active: true,
@@ -519,6 +631,9 @@ mod tests {
             kind: LoadKind::Pressure(-100.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
+            system: None,
+            follower: false,
         });
 
         let check = |model: &Model| {
@@ -570,10 +685,11 @@ mod tests {
     }
 
     /// A cantilever of two CAD lines along x, 0..60 and 60..100, meshed as beams: fixed at
-    /// x = 0, the lines tied at x = 60 and pulled down at x = 100, all picked on the lines
-    /// in the geometry mode. Meshed coarse, then both lines remeshed fine: the picks are CAD
-    /// vertices and edges, which find their nodes on both meshes, and the solver gives the
-    /// beam theory's tip deflection both times.
+    /// x = 0 and pulled down at x = 100, picked on the lines in the geometry mode. The lines
+    /// continue each other without a kink, so they are one part sharing the node at x = 60.
+    /// Meshed coarse, then remeshed fine: the picks are CAD vertices and edges, which find
+    /// their nodes on both meshes, and the solver gives the beam theory's tip deflection
+    /// both times.
     #[test]
     fn selections_on_lines_survive_remeshing() {
         if !gmsh_available() {
@@ -597,7 +713,7 @@ mod tests {
         geometry.meshing.max_size = 20.0;
         model.set_mesh(plx_mesher::generate_mesh(&geometry).unwrap().mesh);
         let lines: Vec<String> = model.mesh.parts.iter().map(|p| p.name.clone()).collect();
-        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines.len(), 1, "{lines:?}");
 
         // Looking down onto the lines at x, within 1 of them.
         let hit_at = |model: &Model, x: f64| {
@@ -634,7 +750,7 @@ mod tests {
             "{line:?}"
         );
         // A point, e.g. of a remote displacement, is the nearest end.
-        let point = Picker::default().pick(&model, &hit_at(&model, 80.0), Target::Point, 1.0);
+        let point = Picker::default().pick(&model, &hit_at(&model, 90.0), Target::Point, 1.0);
         let crate::selection::Items::Geometry(point) = point else {
             panic!("{point:?}");
         };
@@ -642,6 +758,7 @@ mod tests {
 
         model.fe = FeModel {
             materials: vec![Material {
+                id: crate::test_ids::named("Steel"),
                 name: "Steel".into(),
                 density: None,
                 elastic: Some(Elastic {
@@ -653,41 +770,32 @@ mod tests {
                 expansion: None,
                 plastic: None,
                 creep: None,
+                hyperelastic: None,
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
-                material: "Steel".into(),
+                material: Some(crate::test_ids::named("Steel")),
                 region: line.clone(),
                 thickness: 1.0,
                 kind: SectionKind::Beam(plx_model::BeamSection {
-                    cross_section: "Rect".into(),
+                    cross_section: Some(crate::test_ids::named("Rect")),
                     ..plx_model::BeamSection::DEFAULT
                 }),
             }],
             cross_sections: vec![plx_model::CrossSection {
+                id: crate::test_ids::named("Rect"),
                 name: "Rect".into(),
                 profile: plx_model::BeamProfile::Rect { a: 10.0, b: 10.0 },
-            }],
-            node_ties: vec![plx_model::NodeTie {
-                region: tied.clone(),
-                ..plx_model::NodeTie::new("Node_Tie-1")
             }],
             steps: vec![Step::new_static("Step-1")],
             ..FeModel::default()
         };
-        // The other line by its part.
-        let other = (lines.iter())
-            .find(|name| {
-                let part = Region::Parts(vec![(*name).clone()]);
-                part.elements(&model.mesh) != line.elements(&model.mesh)
-            })
-            .unwrap();
-        let mut second = model.fe.sections[0].clone();
-        second.name = "Section-2".into();
-        second.region = Region::Parts(vec![other.clone()]);
-        model.fe.sections.push(second);
+        // The section on the whole part: the line picked away from its ends is one of its
+        // two CAD edges.
+        model.fe.sections[0].region = Region::Parts(lines.clone());
         let step = &mut model.fe.steps[0];
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Fix"),
             distribution: None,
             name: "Fix".into(),
             active: true,
@@ -697,6 +805,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            id: crate::test_ids::named("Pull"),
             distribution: None,
             name: "Pull".into(),
             active: true,
@@ -708,11 +817,14 @@ mod tests {
             },
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
+            system: None,
+            follower: false,
         });
 
         let check = |model: &Model| {
             let mesh = &model.mesh;
-            for (region, x, count) in [(&fixed, 0.0, 1), (&tied, 60.0, 2), (&pulled, 100.0, 1)] {
+            for (region, x, count) in [(&fixed, 0.0, 1), (&tied, 60.0, 1), (&pulled, 100.0, 1)] {
                 assert!(region.missing_reference(mesh).is_none(), "{region:?}");
                 let nodes = region.nodes(mesh);
                 assert_eq!(nodes.len(), count, "{region:?}");
@@ -720,11 +832,9 @@ mod tests {
             }
             let elements = line.elements(mesh);
             assert!(!elements.is_empty());
-            assert_eq!(
-                elements,
-                Region::Parts(vec![lines.iter().find(|n| *n != other).unwrap().clone()])
-                    .elements(mesh)
-            );
+            // The edge picked is the part's first 60 of its 100.
+            let all = Region::Parts(lines.clone()).elements(mesh);
+            assert!(elements.len() < all.len(), "{elements:?} of {all:?}");
             elements.len()
         };
         let coarse = check(&model);

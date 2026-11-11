@@ -80,12 +80,6 @@ pub fn region_form(
     behavior_rows(ui, "contact region type", "Type", &mut region.behavior);
     sides.ui_named(ui, model, ["Side A", "Side B"]);
     (region.side_a, region.side_b) = sides.regions();
-    ui.label("Side A color");
-    ui.color_edit_button_srgb(&mut region.color_a);
-    ui.end_row();
-    ui.label("Side B color");
-    ui.color_edit_button_srgb(&mut region.color_b);
-    ui.end_row();
     let resolved = view.resolved(model, region).clone();
     ui.label("");
     ui.toggle_value(&mut view.advanced, "Advanced settings")
@@ -144,34 +138,35 @@ fn behavior_rows(ui: &mut Ui, id: &str, label: &str, behavior: &mut ContactBehav
 }
 
 /// The CAD geometry a contact detection searches, for its dialog.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DetectionScope {
-    /// The parts of the geometry and whether each is shown.
-    pub parts: Vec<(String, bool)>,
-    /// The parts searched, as the detection names them, and the derived tolerance for them.
-    pub auto: (Vec<String>, f64),
+    /// The parts of the geometry as filters see them.
+    pub context: std::sync::Arc<plx_model::PartContext>,
+    /// Of each part of the geometry, whether it is searched, and the derived tolerance for
+    /// them.
+    pub auto: (Vec<bool>, f64),
 }
 
 impl DetectionScope {
-    /// The scope of a detection of `parts` on the geometry display `geometry`.
-    pub fn new(model: &Model, geometry: &Model, parts: &[String]) -> Self {
+    /// The scope of a detection of `filter` on the geometry display `geometry`; `previous`
+    /// keeps its tolerance while the parts searched stay the same.
+    pub fn new(
+        ctx: &egui::Context,
+        model: &Model,
+        geometry: &Model,
+        filter: &plx_model::PartFilter,
+        previous: Option<&DetectionScope>,
+    ) -> Self {
+        let context = crate::part_filter_ui::cached_context(ctx, &model.fe, &geometry.mesh);
         let visible = detection_visibility(model, geometry);
-        let searched: Vec<bool> = (geometry.mesh.parts.iter().zip(&visible))
-            .map(|(part, &shown)| {
-                if parts.is_empty() {
-                    shown
-                } else {
-                    parts.contains(&part.name)
-                }
-            })
-            .collect();
-        let tolerance =
-            auto_geometry_detection_tolerance(&geometry.mesh, geometry.skins(), &searched);
+        let searched = filter.searched(&context, &visible);
+        let tolerance = match previous {
+            Some(p) if p.auto.0 == searched => p.auto.1,
+            _ => auto_geometry_detection_tolerance(&geometry.mesh, geometry.skins(), &searched),
+        };
         Self {
-            parts: (geometry.mesh.parts.iter().zip(visible))
-                .map(|(part, shown)| (part.name.clone(), shown))
-                .collect(),
-            auto: (parts.to_vec(), tolerance),
+            context,
+            auto: (searched, tolerance),
         }
     }
 }
@@ -199,12 +194,16 @@ pub fn detect(
         Some(display) => {
             let visible = detection_visibility(model, display);
             let dimensions = display.part_dimensions();
+            let compounds: Vec<Option<usize>> = (display.mesh.parts.iter())
+                .map(|p| model.geometry.as_ref()?.compound_of(&p.name))
+                .collect();
             let geometry = plx_model::DetectionGeometry {
                 mesh: &display.mesh,
                 skins: display.skins(),
                 entities: display.cad_entities(),
                 face_edges: display.face_edges(),
                 part_dimensions: &dimensions,
+                compounds: &compounds,
             };
             let mut report = (model.fe).detect_contacts_on_geometry(index, &geometry, &visible)?;
             // Line ends are tied by their nodes, which only the mesh has.
@@ -246,47 +245,22 @@ pub fn detection_form(
     scope: Option<&DetectionScope>,
 ) {
     let units = model.fe.properties.units;
-    let parts: Vec<(String, bool)> = match scope {
-        Some(scope) => scope.parts.clone(),
-        None => (model.mesh.parts.iter().zip(&model.parts))
-            .map(|(part, shown)| (part.name.clone(), shown.visible))
-            .collect(),
+    let context = match scope {
+        Some(scope) => scope.context.clone(),
+        None => crate::part_filter_ui::cached_context(ui.ctx(), &model.fe, &model.mesh),
     };
-    ui.label("Parts");
-    ui.vertical(|ui| {
-        let mut all = detection.parts.is_empty();
-        if ui
-            .checkbox(&mut all, "All visible parts")
-            .on_hover_text("Untick to choose the parts to search.")
-            .changed()
-        {
-            detection.parts = if all {
-                Vec::new()
-            } else {
-                (parts.iter())
-                    .filter(|(_, shown)| *shown)
-                    .map(|(name, _)| name.clone())
-                    .collect()
-            };
-        }
-        if !all {
-            egui::ScrollArea::vertical()
-                .max_height(160.0)
-                .id_salt("detection parts")
-                .show(ui, |ui| {
-                    for (name, _) in &parts {
-                        let mut on = detection.parts.contains(name);
-                        if ui.checkbox(&mut on, name).changed() {
-                            if on {
-                                detection.parts.push(name.clone());
-                            } else {
-                                detection.parts.retain(|p| p != name);
-                            }
-                        }
-                    }
-                });
-        }
-    });
+    ui.label("Search in").on_hover_text(
+        "The parts searched. Without parts to include, all visible parts are searched, less \
+         those excluded.",
+    );
+    crate::part_filter_ui::filter_editor(
+        ui,
+        "detection scope",
+        &model.fe,
+        &mut detection.scope,
+        &context,
+        "All visible parts",
+    );
     ui.end_row();
     ui.label("Tolerance").on_hover_text(if scope.is_some() {
         "Largest gap between surfaces that touch. Auto: 0.5 % of the size of the parts \
@@ -298,7 +272,7 @@ pub fn detection_form(
     ui.horizontal(|ui| {
         let auto = match scope {
             Some(scope) => scope.auto.1,
-            None => auto_tolerance(ui, model, &detection.parts),
+            None => auto_tolerance(ui, model, &detection.scope, &context),
         };
         let mut set = detection.tolerance.is_some();
         ui.checkbox(&mut set, "").on_hover_text(format!(
@@ -368,7 +342,12 @@ pub fn detection_form(
             }
         });
     ui.end_row();
-    behavior_rows(ui, "detection type", "Type", &mut detection.behavior);
+    ui.label("Rules").on_hover_text(
+        "Each pair found takes the type of the first rule whose sides match its parts; the \
+         last row gives the type of all other pairs.",
+    );
+    rules_table(ui, model, detection, &context);
+    ui.end_row();
     ui.label("");
     let searches = if scope.is_some() {
         "OK searches the CAD geometry of the parts, meshed or not: a region takes the whole \
@@ -382,18 +361,16 @@ pub fn detection_form(
     ui.end_row();
 }
 
-/// The derived tolerance of a detection of `parts`, kept while they and the mesh stay the
-/// same: it walks the skins of all parts searched.
-fn auto_tolerance(ui: &Ui, model: &Model, parts: &[String]) -> f64 {
-    let searched: Vec<bool> = (model.mesh.parts.iter().zip(&model.parts))
-        .map(|(part, shown)| {
-            if parts.is_empty() {
-                shown.visible
-            } else {
-                parts.contains(&part.name)
-            }
-        })
-        .collect();
+/// The derived tolerance of a detection of `filter`, kept while the parts it searches and
+/// the mesh stay the same: it walks the skins of all parts searched.
+fn auto_tolerance(
+    ui: &Ui,
+    model: &Model,
+    filter: &plx_model::PartFilter,
+    context: &plx_model::PartContext,
+) -> f64 {
+    let visible: Vec<bool> = model.parts.iter().map(|p| p.visible).collect();
+    let searched = filter.searched(context, &visible);
     let key = (
         searched.clone(),
         model.mesh.coords().len(),
@@ -411,6 +388,226 @@ fn auto_tolerance(ui: &Ui, model: &Model, parts: &[String]) -> f64 {
     value
 }
 
+/// The rules of a detection as a table: the sides each matches, the type it gives, how
+/// many of the regions found take it, and buttons to move or remove it. The rule being
+/// edited shows its two filters below the table. The last row is the type of all other
+/// pairs.
+fn rules_table(
+    ui: &mut Ui,
+    model: &Model,
+    detection: &mut ContactDetection,
+    context: &plx_model::PartContext,
+) {
+    use plx_model::{ContactRule, RuleAction};
+    let fe = &model.fe;
+    let editing_id = ui.id().with("detection rule editing");
+    let mut editing: Option<usize> = ui.data(|d| d.get_temp(editing_id)).flatten();
+    let counts = rule_counts(ui, model, detection, context);
+    let count_text = |i: usize| match counts.as_ref().and_then(|c| c.get(i)) {
+        Some(n) => n.to_string(),
+        None => "-".into(),
+    };
+    let mut action = None;
+    ui.vertical(|ui| {
+        // Two lines per rule, to fit the side panel: its sides, then its type, how many
+        // regions take it and the buttons to move or remove it.
+        let n = detection.rules.len();
+        for (i, rule) in detection.rules.iter_mut().enumerate() {
+            let open = editing == Some(i);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let sides = format!(
+                    "{}.  {}  to  {}",
+                    i + 1,
+                    rule.side_a.describe(fe),
+                    rule.side_b.describe(fe)
+                );
+                if ui
+                    .selectable_label(open, sides)
+                    .on_hover_text("Click to edit the sides of the rule.")
+                    .clicked()
+                {
+                    editing = if open { None } else { Some(i) };
+                }
+                ui.horizontal(|ui| {
+                    action_combo(ui, ("detection rule type", i), &mut rule.action, true);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("{} regions", count_text(i))).weak(),
+                        )
+                        .extend(),
+                    )
+                    .on_hover_text(
+                        "Regions of the last detection that take their type from the rule.",
+                    );
+                });
+                if open {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(i > 0, egui::Button::new("Move Up").small())
+                            .clicked()
+                        {
+                            action = Some((i, -1));
+                        }
+                        if ui
+                            .add_enabled(i + 1 < n, egui::Button::new("Move Down").small())
+                            .clicked()
+                        {
+                            action = Some((i, 1));
+                        }
+                        if ui.add(egui::Button::new("Remove").small()).clicked() {
+                            action = Some((i, 0));
+                        }
+                    });
+                }
+                if open {
+                    ui.separator();
+                    for (label, side, id) in [
+                        ("Side A", &mut rule.side_a, "rule side a"),
+                        ("Side B", &mut rule.side_b, "rule side b"),
+                    ] {
+                        ui.horizontal(|ui| {
+                            ui.label(label);
+                            crate::part_filter_ui::filter_editor(
+                                ui, id, fe, side, context, "Any part",
+                            );
+                        });
+                    }
+                    ui.weak(
+                        "A pair matches when the parts of one of its sides all pass Side A \
+                         and those of the other all pass Side B.",
+                    );
+                }
+            });
+        }
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label("All other pairs:  Any  to  Any");
+            ui.horizontal(|ui| {
+                let mut other = RuleAction::Type(detection.behavior);
+                action_combo(ui, "detection other type", &mut other, false);
+                if let RuleAction::Type(behavior) = other {
+                    detection.behavior = behavior;
+                }
+                ui.weak(format!("{} regions", count_text(n)));
+            });
+        });
+        if ui
+            .button("Add Rule")
+            .on_hover_text("Adds a rule above the type of all other pairs.")
+            .clicked()
+        {
+            let behavior = match detection.behavior {
+                ContactBehavior::Bonded => ContactBehavior::Frictional { mu: 0.15 },
+                _ => ContactBehavior::Bonded,
+            };
+            detection.rules.push(ContactRule::new(behavior));
+            editing = Some(detection.rules.len() - 1);
+        }
+        if let Some((i, step)) = action {
+            match step {
+                0 => {
+                    detection.rules.remove(i);
+                    editing = None;
+                }
+                _ => {
+                    let j = (i as isize + step) as usize;
+                    detection.rules.swap(i, j);
+                    if editing == Some(i) {
+                        editing = Some(j);
+                    }
+                }
+            }
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(editing_id, editing));
+}
+
+/// The type a rule gives, with its friction coefficient; `exclude` offers leaving the
+/// pairs out.
+fn action_combo(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    action: &mut plx_model::RuleAction,
+    exclude: bool,
+) {
+    use plx_model::RuleAction;
+    ui.horizontal(|ui| {
+        let current = match action {
+            RuleAction::Type(b) => b.name().to_string(),
+            RuleAction::Exclude => "Exclude".into(),
+        };
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(current.clone())
+            .width(105.0)
+            .show_ui(ui, |ui| {
+                for choice in ContactBehavior::ALL {
+                    let response = ui.selectable_label(current == choice.name(), choice.name());
+                    if response.on_hover_text(choice.summary()).clicked()
+                        && current != choice.name()
+                    {
+                        *action = RuleAction::Type(choice);
+                    }
+                }
+                if exclude
+                    && ui
+                        .selectable_label(current == "Exclude", "Exclude")
+                        .on_hover_text("No region for the pairs.")
+                        .clicked()
+                {
+                    *action = RuleAction::Exclude;
+                }
+            });
+        if let RuleAction::Type(ContactBehavior::Frictional { mu }) = action {
+            ui.add_sized(
+                [64.0, ui.spacing().interact_size.y],
+                numeric::drag_value(mu)
+                    .speed(0.01)
+                    .range(0.0..=5.0)
+                    .prefix("mu "),
+            );
+        }
+    });
+}
+
+/// How many regions of the detection each rule gives their type, `None` when the
+/// detection has not run. Worked out again only when the rules or the regions change.
+fn rule_counts(
+    ui: &Ui,
+    model: &Model,
+    detection: &ContactDetection,
+    context: &plx_model::PartContext,
+) -> Option<Vec<usize>> {
+    use std::hash::{Hash, Hasher};
+    let fe = &model.fe;
+    if !fe
+        .contact_regions
+        .iter()
+        .any(|r| r.detected_by == Some(detection.id))
+    {
+        return None;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    format!("{:?}{:?}", detection.rules, detection.behavior).hash(&mut hasher);
+    fe.contact_regions.len().hash(&mut hasher);
+    for r in &fe.contact_regions {
+        r.id.hash(&mut hasher);
+        r.edited.hash(&mut hasher);
+    }
+    model.mesh.elements().len().hash(&mut hasher);
+    format!("{:?}", fe.part_groups).hash(&mut hasher);
+    let key = hasher.finish();
+    let id = ui.id().with(("detection rule counts", detection.id));
+    if let Some((k, counts)) = ui.data(|d| d.get_temp::<(u64, Vec<usize>)>(id))
+        && k == key
+    {
+        return Some(counts);
+    }
+    let counts = fe.rule_counts(detection, &model.mesh, context);
+    ui.data_mut(|d| d.insert_temp(id, (key, counts.clone())));
+    Some(counts)
+}
+
 /// Why the detection cannot be applied as it is.
 pub fn validate_detection(detection: &ContactDetection) -> Result<(), String> {
     if detection
@@ -423,10 +620,14 @@ pub fn validate_detection(detection: &ContactDetection) -> Result<(), String> {
     if !(filter.solid || filter.shell || filter.shell_edge || filter.line_end) {
         return Err("Choose at least one kind of surface to search.".into());
     }
-    if let ContactBehavior::Frictional { mu } = detection.behavior
-        && !(mu.is_finite() && mu >= 0.0)
-    {
-        return Err("The friction coefficient must not be negative.".into());
+    let actions = (detection.rules.iter().map(|r| r.action))
+        .chain([plx_model::RuleAction::Type(detection.behavior)]);
+    for action in actions {
+        if let plx_model::RuleAction::Type(ContactBehavior::Frictional { mu }) = action
+            && !(mu.is_finite() && mu >= 0.0)
+        {
+            return Err("The friction coefficient must not be negative.".into());
+        }
     }
     Ok(())
 }
@@ -1047,7 +1248,7 @@ pub fn solved_contacts(
 }
 
 /// What the worksheet does to the selected regions.
-enum Change {
+pub(crate) enum Change {
     Behavior(ContactBehavior),
     Friction(f64),
     Flip,
@@ -1067,9 +1268,26 @@ pub fn worksheet(
     tree: &mut TreeState,
 ) {
     let view = TreeView::FeModel;
-    let rows: Vec<TreeItem> = (0..model.fe.contact_regions.len())
-        .map(TreeItem::ContactRegion)
+    // The filter keeps the rows whose name, detection or sides contain its text, or match
+    // it as a pattern; set from the contact matrix too.
+    let filter_id = worksheet_filter_id(ctx);
+    let mut filter: String = ctx.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+    let shown: Vec<usize> = (model.fe.contact_regions.iter().enumerate())
+        .filter(|(_, r)| {
+            let text = filter.trim();
+            text.is_empty()
+                || [
+                    r.name.clone(),
+                    model.fe.name_or_missing(r.detected_by),
+                    r.side_a.describe(&model.fe),
+                    r.side_b.describe(&model.fe),
+                ]
+                .iter()
+                .any(|t| plx_model::name_matches(text, t))
+        })
+        .map(|(i, _)| i)
         .collect();
+    let rows: Vec<TreeItem> = shown.iter().map(|&i| TreeItem::ContactRegion(i)).collect();
     let selected: Vec<usize> = (tree.selected_items(view).into_iter())
         .filter_map(|item| match item {
             TreeItem::ContactRegion(i) if !tree.linked.contains_key(&item) => Some(i),
@@ -1140,6 +1358,25 @@ pub fn worksheet(
                     }
                 });
             });
+            ui.horizontal(|ui| {
+                ui.label("Filter");
+                ui.add(
+                    egui::TextEdit::singleline(&mut filter)
+                        .hint_text("name, part or pattern such as Bolt*")
+                        .desired_width(240.0),
+                );
+                ui.weak(format!(
+                    "{} of {} regions",
+                    shown.len(),
+                    model.fe.contact_regions.len()
+                ));
+                if ui
+                    .add_enabled(!shown.is_empty(), egui::Button::new("Select Shown"))
+                    .clicked()
+                {
+                    tree.select_items(view, rows.clone());
+                }
+            });
             ui.separator();
             // A work window: Close at the bottom right, below the table.
             close = crate::dialog::close_bar(ui, "contact worksheet");
@@ -1177,7 +1414,8 @@ pub fn worksheet(
                                 ui.strong(title);
                             }
                             ui.end_row();
-                            for (i, region) in model.fe.contact_regions.iter().enumerate() {
+                            for &i in &shown {
+                                let region = &model.fe.contact_regions[i];
                                 let item = TreeItem::ContactRegion(i);
                                 let is_selected = tree.selected_items(view).contains(&item);
                                 let response = ui.selectable_label(is_selected, &region.name);
@@ -1198,7 +1436,9 @@ pub fn worksheet(
                                 if response.double_clicked() {
                                     tree.reveal = true;
                                 }
-                                match &region.detected_by {
+                                let detection =
+                                    (region.detected_by).map(|d| model.fe.name_or_missing(Some(d)));
+                                match &detection {
                                     Some(name) if region.edited => {
                                         ui.label(format!("{name}, changed")).on_hover_text(
                                             "Changed by you: detecting again keeps it.",
@@ -1218,8 +1458,8 @@ pub fn worksheet(
                                     other => other.name().to_owned(),
                                 };
                                 ui.label(behavior);
-                                ui.label(region.side_a.describe());
-                                ui.label(region.side_b.describe());
+                                ui.label(region.side_a.describe(&model.fe));
+                                ui.label(region.side_b.describe(&model.fe));
                                 let master = resolved.items.get(i).map(|r| r.a_is_master);
                                 ui.label(match master {
                                     Some(true) => "A",
@@ -1275,10 +1515,28 @@ pub fn worksheet(
     if close {
         *open = false;
     }
-    ctx.data_mut(|d| d.insert_temp(mu_id, mu));
+    ctx.data_mut(|d| {
+        d.insert_temp(mu_id, mu);
+        d.insert_temp(filter_id, filter);
+    });
     let Some(change) = change else {
         return;
     };
+    change_regions(model, selected, change, tree);
+}
+
+/// The key of the worksheet's filter text.
+pub fn worksheet_filter_id(ctx: &egui::Context) -> egui::Id {
+    crate::ids::window(ctx, "contact worksheet filter")
+}
+
+/// Changes the regions `selected` of the model at once.
+pub(crate) fn change_regions(
+    model: &mut Model,
+    selected: Vec<usize>,
+    change: Change,
+    tree: &mut TreeState,
+) {
     let fe = &mut model.fe;
     if let Change::Delete = change {
         let mut indices = selected;
@@ -1286,7 +1544,7 @@ pub fn worksheet(
         for i in indices.into_iter().rev() {
             if i < fe.contact_regions.len() {
                 let region = fe.contact_regions.remove(i);
-                fe.remove_contact_changes(&region.name);
+                fe.remove_contact_changes(region.id);
             }
         }
         tree.selected = None;
@@ -1324,18 +1582,7 @@ pub fn worksheet(
                 fe.contact_regions[i].name = plx_model::next_name(&name, others);
             }
         }
-        // History outputs and step changes follow the new names, by way of names no region
-        // has, so that a name passed on from one region to another is not followed twice.
-        let renamed: Vec<(usize, &String)> = (names.iter().enumerate())
-            .filter(|(i, old)| fe.contact_regions[*i].name != **old)
-            .collect();
-        for &(i, old) in &renamed {
-            fe.rename_contact_pair(old, &format!("\u{0}{i}"));
-        }
-        for &(i, _) in &renamed {
-            let new = fe.contact_regions[i].name.clone();
-            fe.rename_contact_pair(&format!("\u{0}{i}"), &new);
-        }
+        // History outputs and step changes refer to the regions by id: they follow.
     }
 }
 
@@ -1415,7 +1662,7 @@ pub fn step_contacts(ui: &mut Ui, fe: &FeModel, step: &mut plx_model::Step, inde
                         }
                     }
                     if wanted != region.state_in(step, before) {
-                        step.set_contact_state(&region.name, before, wanted);
+                        step.set_contact_state(region.id, before, wanted);
                     }
                     if wanted != before {
                         ui.weak("changed here");
@@ -1523,6 +1770,7 @@ mod tests {
         assert_eq!((plate_top.len(), block_bottom.len()), (1, 1));
 
         model.fe.materials.push(Material {
+            id: crate::test_ids::named("Steel"),
             name: "Steel".into(),
             density: None,
             elastic: Some(Elastic {
@@ -1534,16 +1782,18 @@ mod tests {
             expansion: None,
             plastic: None,
             creep: None,
+            hyperelastic: None,
         });
         model.fe.sections.push(Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: Some(crate::test_ids::named("Steel")),
             region: Region::Parts(names.clone()),
             thickness: 1.0,
             kind: SectionKind::Solid,
         });
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Fix"),
             distribution: None,
             name: "Fix".into(),
             active: true,
@@ -1553,6 +1803,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            id: crate::test_ids::named("Press"),
             distribution: None,
             name: "Press".into(),
             active: true,
@@ -1561,12 +1812,15 @@ mod tests {
             kind: LoadKind::Pressure(100.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
+            system: None,
+            follower: false,
         });
         model.fe.steps.push(step);
-        model
-            .fe
-            .contact_detections
-            .push(ContactDetection::new("Detection-1"));
+        model.fe.contact_detections.push(ContactDetection {
+            id: crate::test_ids::named("Detection-1"),
+            ..ContactDetection::new("Detection-1")
+        });
 
         // Nothing is meshed yet: the detection runs on the geometry.
         assert!(detection_display(&model, Some(&view)).is_some());
@@ -1674,6 +1928,7 @@ mod tests {
         assert_eq!((beam_bottom.len(), block_top.len()), (1, 1));
 
         model.fe.materials.push(Material {
+            id: crate::test_ids::named("Steel"),
             name: "Steel".into(),
             density: None,
             elastic: Some(Elastic {
@@ -1685,16 +1940,18 @@ mod tests {
             expansion: None,
             plastic: None,
             creep: None,
+            hyperelastic: None,
         });
         model.fe.sections.push(Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: Some(crate::test_ids::named("Steel")),
             region: Region::Parts(names.clone()),
             thickness: 1.0,
             kind: SectionKind::Solid,
         });
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            id: crate::test_ids::named("Fix"),
             distribution: None,
             name: "Fix".into(),
             active: true,
@@ -1704,6 +1961,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            id: crate::test_ids::named("Press"),
             distribution: None,
             name: "Press".into(),
             active: true,
@@ -1712,12 +1970,15 @@ mod tests {
             kind: LoadKind::Pressure(10.0),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
+            system: None,
+            follower: false,
         });
         model.fe.steps.push(step);
-        model
-            .fe
-            .contact_detections
-            .push(ContactDetection::new("Detection-1"));
+        model.fe.contact_detections.push(ContactDetection {
+            id: crate::test_ids::named("Detection-1"),
+            ..ContactDetection::new("Detection-1")
+        });
 
         let report = detect(&mut model, Some(&view), 0).unwrap();
         assert_eq!(report.added, 1, "{report:?}");

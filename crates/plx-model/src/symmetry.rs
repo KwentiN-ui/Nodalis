@@ -7,9 +7,11 @@
 
 use std::fmt;
 
-use plx_mesh::{ElementFamily, FeMesh};
+use std::collections::{BTreeSet, HashSet};
 
-use crate::{ModelSpace, Region};
+use plx_mesh::{ElementFamily, ElementId, FeMesh};
+
+use crate::{BoundaryKind, FeModel, ModelSpace, Region, SectionKind};
 
 /// How far the nodes may lie off the plane, relative to the extent of the region, before the
 /// region no longer counts as planar.
@@ -166,6 +168,84 @@ pub fn symmetry_plane(
         deviation,
         size,
     })
+}
+
+/// The beam elements a symmetry region holds on its plane.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BeamsOnPlane {
+    /// Line elements of beam sections with all their nodes in the region.
+    pub total: usize,
+    /// Those with a rectangular, circular, pipe or box profile, which the solver expands
+    /// into solids: holding the expanded section on the plane at every node locks its
+    /// bending, and it cannot be halved.
+    pub expanded: usize,
+}
+
+impl FeModel {
+    /// The beam elements whose nodes all lie in `nodes`, each with whether its profile is
+    /// one the solver expands into solids.
+    fn beams_within(
+        &self,
+        mesh: &FeMesh,
+        nodes: &HashSet<u32>,
+    ) -> impl Iterator<Item = (ElementId, bool)> {
+        let mut out = Vec::new();
+        if !nodes.is_empty() {
+            for section in &self.sections {
+                let SectionKind::Beam(beam) = &section.kind else {
+                    continue;
+                };
+                let expanded = (beam.cross_section)
+                    .and_then(|c| self.cross_section(c))
+                    .is_some_and(|c| c.profile.is_native());
+                for id in section.region.elements(mesh) {
+                    let Some(element) = mesh.element(id) else {
+                        continue;
+                    };
+                    if element.shape.family() == ElementFamily::Line
+                        && element.nodes.iter().all(|n| nodes.contains(n))
+                    {
+                        out.push((id, expanded));
+                    }
+                }
+            }
+        }
+        out.into_iter()
+    }
+
+    /// The beams a symmetry boundary condition on `region` holds on its plane.
+    pub fn beams_on_plane(&self, mesh: &FeMesh, region: &Region) -> BeamsOnPlane {
+        let nodes: HashSet<u32> = region.nodes(mesh).into_iter().collect();
+        let mut out = BeamsOnPlane::default();
+        for (_, expanded) in self.beams_within(mesh, &nodes) {
+            out.total += 1;
+            out.expanded += usize::from(expanded);
+        }
+        out
+    }
+
+    /// The beams a symmetry plane cuts in half: the line elements of beam sections whose
+    /// nodes all lie in the region of an active symmetry boundary condition that halves
+    /// beams (`BoundaryKind::Symmetry::halve_beams`), in any mechanical step. A beam on the
+    /// plane of a half model has half its section in the model: the solver gets half of it.
+    /// Beams the solver expands into solids are left out; they cannot be halved.
+    pub fn halved_beams(&self, mesh: &FeMesh) -> BTreeSet<ElementId> {
+        let mut on_plane: HashSet<u32> = HashSet::new();
+        for step in self.steps.iter().filter(|s| s.kind.is_mechanical()) {
+            for bc in step.boundary_conditions.iter().filter(|b| b.active) {
+                if let BoundaryKind::Symmetry {
+                    halve_beams: true, ..
+                } = bc.kind
+                {
+                    on_plane.extend(bc.region.nodes(mesh));
+                }
+            }
+        }
+        (self.beams_within(mesh, &on_plane))
+            .filter(|&(_, expanded)| !expanded)
+            .map(|(id, _)| id)
+            .collect()
+    }
 }
 
 /// Normal of the plane that fits the points best.

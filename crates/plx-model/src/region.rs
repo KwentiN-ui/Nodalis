@@ -27,17 +27,31 @@ pub enum Region {
     /// Faces, edges and vertices of the CAD geometry the mesh was generated from, picked
     /// on the geometry. They are found on the mesh again after remeshing.
     Geometry(Vec<CadEntity>),
-    /// A reference point by name, for boundary conditions and loads on a rigid body: the
+    /// A reference point by its id, for boundary conditions and loads on a rigid body: the
     /// body's reference node, which exists only in the input file, so the region has no
     /// nodes of the mesh.
-    ReferencePoint(String),
-    /// The point of a remote displacement boundary condition by the boundary condition's
-    /// name, for history outputs of its reaction forces and moments. Like a reference
-    /// point it exists only in the input file.
-    RemotePoint(String),
+    ReferencePoint(crate::Id),
+    /// The point of a remote displacement boundary condition or a remote force by the id of
+    /// the boundary condition or load, for history outputs of its reaction forces and
+    /// moments. Like a reference point it exists only in the input file.
+    RemotePoint(crate::Id),
 }
 
 impl Region {
+    /// Whether nothing is picked: no faces, nodes, edges, parts or CAD entities, or a set of
+    /// no name.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Region::Parts(v) => v.is_empty(),
+            Region::Nodes(v) => v.is_empty(),
+            Region::Faces(v) => v.is_empty(),
+            Region::Edges(v) => v.is_empty(),
+            Region::NodeSet(n) | Region::ElementSet(n) | Region::Surface(n) => n.is_empty(),
+            Region::Geometry(v) => v.is_empty(),
+            _ => false,
+        }
+    }
+
     /// Elements of the region, for sections. Node and face selections have none.
     pub fn elements(&self, mesh: &FeMesh) -> Vec<ElementId> {
         let mut ids: BTreeSet<ElementId> = BTreeSet::new();
@@ -92,6 +106,15 @@ impl Region {
         ids.into_iter().collect()
     }
 
+    /// Whether the region is made of line elements (beams, ropes) rather than faces: a
+    /// rope touching a surface with its nodes.
+    pub fn is_lines(&self, mesh: &FeMesh) -> bool {
+        self.faces(mesh).is_empty()
+            && (self.elements(mesh).iter())
+                .filter_map(|&e| mesh.element(e))
+                .any(|e| e.shape.family() == plx_mesh::ElementFamily::Line)
+    }
+
     /// Element faces of the region, for pressure loads.
     pub fn faces(&self, mesh: &FeMesh) -> Vec<(ElementId, u8)> {
         match self {
@@ -125,8 +148,9 @@ impl Region {
         }
     }
 
-    /// Short description for the GUI, e.g. "3 nodes".
-    pub fn describe(&self) -> String {
+    /// Short description for the GUI, e.g. "3 nodes", with the names of the items of
+    /// `model` it refers to.
+    pub fn describe(&self, model: &crate::FeModel) -> String {
         match self {
             Region::Parts(names) => names.join(", "),
             Region::Nodes(nodes) => format!("{} nodes", nodes.len()),
@@ -136,7 +160,10 @@ impl Region {
                 name.clone()
             }
             Region::Geometry(entities) => describe_entities(entities),
-            Region::ReferencePoint(name) | Region::RemotePoint(name) => name.clone(),
+            Region::ReferencePoint(id) => (model.reference_point(*id))
+                .map_or_else(|| "(missing reference point)".into(), |r| r.name.clone()),
+            Region::RemotePoint(id) => (model.remote_item_name(*id))
+                .map_or_else(|| "(missing point)".into(), str::to_string),
         }
     }
 
@@ -159,17 +186,17 @@ impl Region {
     }
 
     /// The reference point the region stands for, if it is one.
-    pub fn reference_point(&self) -> Option<&str> {
+    pub fn reference_point(&self) -> Option<crate::Id> {
         match self {
-            Region::ReferencePoint(name) => Some(name),
+            Region::ReferencePoint(id) => Some(*id),
             _ => None,
         }
     }
 
     /// The remote displacement whose point the region stands for, if it is one.
-    pub fn remote_point(&self) -> Option<&str> {
+    pub fn remote_point(&self) -> Option<crate::Id> {
         match self {
-            Region::RemotePoint(name) => Some(name),
+            Region::RemotePoint(id) => Some(*id),
             _ => None,
         }
     }

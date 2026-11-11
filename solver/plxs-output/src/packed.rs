@@ -15,9 +15,12 @@
 //! Chunks are compressed and decompressed in parallel. Floating-point values are kept
 //! exactly: the container is lossless.
 //!
-//! Layout: the caller's magic (8 bytes), the length of the table (u32, little endian), the
-//! table ([`Table`], postcard), then the compressed chunks back to back in the order of the
-//! table. All numbers are little endian.
+//! Layout: the caller's magic (8 bytes), the offset of the table from the start (u64,
+//! little endian), the compressed chunks back to back in the order of the table, then the
+//! table ([`Table`], postcard) at the end, so that a writer streams the chunks out as it
+//! compresses them and writes the table last. All numbers are little endian.
+
+use std::io::{Seek, SeekFrom, Write};
 
 use rayon::prelude::*;
 use serde::de::DeserializeOwned;
@@ -105,47 +108,129 @@ struct Table {
 
 /// Stores `value` behind `magic`; its arrays are taken out of it.
 pub fn pack<T: Packable>(magic: &[u8; 8], mut value: T) -> Vec<u8> {
-    let mut raw: Vec<(Encoding, Vec<u8>)> = vec![(Encoding::Bytes, Vec::new())];
-    value.arrays(&mut |array| raw.push(take_bytes(array)));
-    // Serializing plain data into memory does not fail.
-    raw[0].1 = postcard::to_stdvec(&value).unwrap_or_default();
+    pack_in_place(magic, &mut value)
+}
 
-    let pieces: Vec<(usize, &[u8])> = (raw.iter().enumerate())
-        .flat_map(|(i, (encoding, bytes))| bytes.chunks(encoding.chunk()).map(move |c| (i, c)))
-        .collect();
-    let compressed: Vec<Vec<u8>> = pieces
-        .par_iter()
-        .map_init(compressor, |compressor, &(i, chunk)| {
-            let shuffled = shuffle(chunk, raw[i].0.width());
+/// [`pack`] of a borrowed value, which keeps its arrays.
+pub fn pack_in_place<T: Packable>(magic: &[u8; 8], value: &mut T) -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    // Writing into memory does not fail.
+    let _ = pack_to(magic, value, &mut out);
+    out.into_inner()
+}
+
+/// Writes `value` behind `magic` to `out` and keeps its arrays: every array is encoded,
+/// compressed and written as it is visited, so that the memory beyond the value itself is
+/// one array's bytes and its compressed chunks (the results of a dynamic step with
+/// hundreds of frames are gigabytes, which a copy of them, or holding the whole container,
+/// would double).
+pub fn pack_to<T: Packable>(
+    magic: &[u8; 8],
+    value: &mut T,
+    out: &mut (impl Write + Seek),
+) -> std::io::Result<()> {
+    let start = out.stream_position()?;
+    out.write_all(magic)?;
+    out.write_all(&[0; 8])?;
+    // The skeleton first: the value with its arrays taken out, which go back afterwards.
+    let mut taken: Vec<Taken> = Vec::new();
+    value.arrays(&mut |array| taken.push(Taken::take(array)));
+    let skeleton = postcard::to_stdvec(&*value).unwrap_or_default();
+    let mut taken = taken.into_iter();
+    value.arrays(&mut |array| {
+        if let Some(taken) = taken.next() {
+            taken.put_back(array);
+        }
+    });
+    let mut datasets = vec![write_dataset(out, Encoding::Bytes, &skeleton)?];
+    drop(skeleton);
+    let mut failed = None;
+    value.arrays(&mut |array| {
+        if failed.is_some() {
+            return;
+        }
+        let (encoding, bytes) = encode_bytes(&array);
+        match write_dataset(out, encoding, &bytes) {
+            Ok(dataset) => datasets.push(dataset),
+            Err(e) => failed = Some(e),
+        }
+    });
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    let table_at = out.stream_position()? - start;
+    let table = postcard::to_stdvec(&Table { datasets }).unwrap_or_default();
+    out.write_all(&table)?;
+    out.seek(SeekFrom::Start(start + 8))?;
+    out.write_all(&table_at.to_le_bytes())?;
+    out.seek(SeekFrom::Start(start + table_at + table.len() as u64))?;
+    Ok(())
+}
+
+/// Writes the chunks of a dataset's bytes and returns its table entry.
+fn write_dataset(
+    out: &mut impl Write,
+    encoding: Encoding,
+    bytes: &[u8],
+) -> std::io::Result<Dataset> {
+    let mut dataset = Dataset {
+        encoding,
+        size: bytes.len() as u64,
+        chunks: Vec::new(),
+    };
+    // Batches of chunks, compressed in parallel, so that a large array is not held twice.
+    let batch = encoding.chunk() * rayon::current_num_threads().max(1) * 4;
+    for part in bytes.chunks(batch.max(1)) {
+        for chunk in compress(encoding, part) {
+            out.write_all(&chunk)?;
+            dataset.chunks.push(chunk.len() as u32);
+        }
+    }
+    Ok(dataset)
+}
+
+/// The chunks of a dataset's bytes, shuffled and compressed in parallel.
+fn compress(encoding: Encoding, bytes: &[u8]) -> Vec<Vec<u8>> {
+    bytes
+        .par_chunks(encoding.chunk())
+        .map_init(compressor, |compressor, chunk| {
+            let shuffled = shuffle(chunk, encoding.width());
             // Compressing into memory does not fail.
             (compressor.as_mut())
                 .and_then(|c| c.compress(&shuffled).ok())
                 .unwrap_or_else(|| zstd::bulk::compress(&shuffled, LEVEL).unwrap_or_default())
         })
-        .collect();
+        .collect()
+}
 
-    let mut table = Table {
-        datasets: (raw.iter())
-            .map(|(encoding, bytes)| Dataset {
-                encoding: *encoding,
-                size: bytes.len() as u64,
-                chunks: Vec::new(),
-            })
-            .collect(),
-    };
-    for (&(i, _), chunk) in pieces.iter().zip(&compressed) {
-        table.datasets[i].chunks.push(chunk.len() as u32);
+/// An array taken out of its value while the skeleton is serialized.
+enum Taken {
+    Ids(Vec<u32>),
+    F64(Vec<f64>),
+    F64x3(Vec<[f64; 3]>),
+    F32x3(Vec<[f32; 3]>),
+}
+
+impl Taken {
+    fn take(array: Array<'_>) -> Taken {
+        match array {
+            Array::Ids(ids) => Taken::Ids(std::mem::take(ids)),
+            Array::F64(values) => Taken::F64(std::mem::take(values)),
+            Array::F64x3(rows) => Taken::F64x3(std::mem::take(rows)),
+            Array::F32x3(rows) => Taken::F32x3(std::mem::take(rows)),
+        }
     }
-    let table = postcard::to_stdvec(&table).unwrap_or_default();
-    let mut out =
-        Vec::with_capacity(12 + table.len() + compressed.iter().map(Vec::len).sum::<usize>());
-    out.extend_from_slice(magic);
-    out.extend_from_slice(&(table.len() as u32).to_le_bytes());
-    out.extend_from_slice(&table);
-    for chunk in &compressed {
-        out.extend_from_slice(chunk);
+
+    fn put_back(self, array: Array<'_>) {
+        match (self, array) {
+            (Taken::Ids(v), Array::Ids(ids)) => *ids = v,
+            (Taken::F64(v), Array::F64(values)) => *values = v,
+            (Taken::F64x3(v), Array::F64x3(rows)) => *rows = v,
+            (Taken::F32x3(v), Array::F32x3(rows)) => *rows = v,
+            // `arrays` visits the same arrays in the same order every time.
+            _ => {}
+        }
     }
-    out
 }
 
 /// Reads a value [`pack`] stored behind `magic`.
@@ -154,14 +239,15 @@ pub fn unpack<T: Packable>(magic: &[u8; 8], bytes: &[u8]) -> Result<T, PackError
     let rest = bytes
         .strip_prefix(magic.as_slice())
         .ok_or_else(|| error("not results of this Nodalis version: solve again"))?;
-    let (length, rest) = rest
-        .split_first_chunk::<4>()
+    let (table_at, rest) = rest
+        .split_first_chunk::<8>()
         .ok_or_else(|| error("results cut short"))?;
-    let length = u32::from_le_bytes(*length) as usize;
-    if rest.len() < length {
-        return Err(error("results cut short"));
-    }
-    let (table, mut data) = rest.split_at(length);
+    let table_at = usize::try_from(u64::from_le_bytes(*table_at))
+        .ok()
+        .and_then(|at| at.checked_sub(16))
+        .filter(|at| *at <= rest.len())
+        .ok_or_else(|| error("results cut short"))?;
+    let (mut data, table) = rest.split_at(table_at);
     let table: Table =
         postcard::from_bytes(table).map_err(|e| PackError(format!("results not readable: {e}")))?;
 
@@ -232,13 +318,13 @@ fn compressor() -> Option<zstd::bulk::Compressor<'static>> {
     Some(compressor)
 }
 
-/// Takes the array out of its value as the bytes of a dataset.
-fn take_bytes(array: Array<'_>) -> (Encoding, Vec<u8>) {
+/// The bytes of a dataset of the array.
+fn encode_bytes(array: &Array<'_>) -> (Encoding, Vec<u8>) {
     match array {
         Array::Ids(ids) => {
             let mut previous = 0u32;
-            let bytes = (std::mem::take(ids).into_iter())
-                .flat_map(|id| {
+            let bytes = (ids.iter())
+                .flat_map(|&id| {
                     let delta = id.wrapping_sub(previous);
                     previous = id;
                     delta.to_le_bytes()
@@ -248,19 +334,17 @@ fn take_bytes(array: Array<'_>) -> (Encoding, Vec<u8>) {
         }
         Array::F64(values) => (
             Encoding::F64,
-            (std::mem::take(values).into_iter())
-                .flat_map(f64::to_le_bytes)
-                .collect(),
+            values.iter().copied().flat_map(f64::to_le_bytes).collect(),
         ),
         Array::F64x3(rows) => (
             Encoding::F64x3,
-            (std::mem::take(rows).into_iter().flatten())
+            (rows.iter().flatten().copied())
                 .flat_map(f64::to_le_bytes)
                 .collect(),
         ),
         Array::F32x3(rows) => (
             Encoding::F32x3,
-            (std::mem::take(rows).into_iter().flatten())
+            (rows.iter().flatten().copied())
                 .flat_map(f32::to_le_bytes)
                 .collect(),
         ),
@@ -444,6 +528,27 @@ mod tests {
         assert!(same_bits(&read, &original));
         // Smooth values and ascending ids compress.
         assert!(bytes.len() < postcard::to_stdvec(&original).unwrap().len());
+    }
+
+    #[test]
+    fn packing_in_place_keeps_the_value_and_streams_the_same_bytes() {
+        let original = results(300_001);
+        let mut packed = original.clone();
+        let bytes = pack_in_place(MAGIC, &mut packed);
+        assert!(
+            same_bits(&packed, &original),
+            "the arrays go back into the value"
+        );
+        assert_eq!(bytes, pack(MAGIC, original.clone()));
+        // Written behind other bytes of a file, the offsets are relative to the start.
+        let mut out = std::io::Cursor::new(b"prefix".to_vec());
+        out.set_position(6);
+        pack_to(MAGIC, &mut packed, &mut out).unwrap();
+        let written = out.into_inner();
+        assert_eq!(&written[..6], b"prefix");
+        assert_eq!(&written[6..], &bytes[..]);
+        let read: Results = unpack(MAGIC, &bytes).unwrap();
+        assert!(same_bits(&read, &original));
     }
 
     #[test]

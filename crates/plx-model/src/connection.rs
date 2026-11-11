@@ -14,14 +14,16 @@ use plx_mesh::{ElementId, FeMesh, NodeId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ContactMethod, ContactPair, FeModel, Friction, InteractionProperty, Region, STICK_SLOPE_RATIO,
-    StepKind, SurfaceBehavior, SurfaceInteraction, Tie,
+    ContactMethod, ContactPair, FeModel, Friction, Id, InteractionProperty, Region,
+    STICK_SLOPE_RATIO, StepKind, SurfaceBehavior, SurfaceInteraction, Tie,
 };
 
 /// Two surfaces of the model and how they behave towards each other. Which side becomes the
 /// master is derived, see [`ContactSettings::sides`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContactRegion {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
@@ -30,11 +32,9 @@ pub struct ContactRegion {
     pub behavior: ContactBehavior,
     #[serde(default)]
     pub settings: ContactSettings,
-    pub color_a: [u8; 3],
-    pub color_b: [u8; 3],
     /// The contact detection that found the region; `None` for a region made by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detected_by: Option<String>,
+    pub detected_by: Option<crate::Id>,
     /// Changed by the user after its detection: detecting again keeps it as it is.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub edited: bool,
@@ -43,17 +43,21 @@ pub struct ContactRegion {
 impl ContactRegion {
     pub fn new(name: impl Into<String>, behavior: ContactBehavior) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             side_a: Region::Faces(Vec::new()),
             side_b: Region::Faces(Vec::new()),
             behavior,
             settings: ContactSettings::default(),
-            color_a: [255, 0, 0],
-            color_b: [0, 0, 255],
             detected_by: None,
             edited: false,
         }
+    }
+
+    /// The parts, by index in `mesh`, of side A and of side B.
+    pub fn parts(&self, mesh: &FeMesh) -> (BTreeSet<usize>, BTreeSet<usize>) {
+        (parts_of(&self.side_a, mesh), parts_of(&self.side_b, mesh))
     }
 
     pub fn regions(&self) -> [&Region; 2] {
@@ -99,7 +103,6 @@ impl ContactRegion {
     /// Swaps side A and side B, together with a master side chosen by hand.
     pub fn flip(&mut self) {
         std::mem::swap(&mut self.side_a, &mut self.side_b);
-        std::mem::swap(&mut self.color_a, &mut self.color_b);
         self.settings.sides = self.settings.sides.map(SideRoles::flipped);
     }
 }
@@ -337,6 +340,16 @@ pub const STIFFNESS_FACTOR: f64 = 10.0;
 /// and the springs take about 1e-6 of the load, plus a share of the order 1e-6 E g / (p L)
 /// for a gap g closed under the pressure p; 1e-8 fails node to surface contact again.
 pub const WEAK_SPRING_FACTOR: f64 = 1e-6;
+/// How much stiffer than the weak springs a part held only by contact is held against the
+/// motion within one increment of a static step (`*Spring, Stabilize=`), 1e-5 E L. Once it
+/// lifts off again (a gasket the plate let go of, loose in its groove) the weak springs alone
+/// let a residual force far below the tolerance move it by tenths of a millimetre, and the
+/// Newton iterations threw it from wall to wall. A gasket compressed, sheared and let go of
+/// solves with 3 to 1e4 (1 not), its reaction forces differ by less than 1e-3 between 1e2
+/// and 1e4. The force begins at zero in every increment, but in the increment a part moves
+/// in it takes this factor times the weak springs' share: closing an initial gap g in one
+/// increment, 1e-5 E L g.
+pub const WEAK_SPRING_STABILIZATION: f64 = 10.0;
 /// The factor of a bonded region modeled as a tied contact, which should not give way.
 pub const TIED_STIFFNESS_FACTOR: f64 = 100.0;
 /// Tie tolerance in units of the slave side's mesh size.
@@ -371,6 +384,9 @@ pub struct Resolved {
     /// Plain-language reasons, one per decision, for the dialog: "Bonded as a tie
     /// constraint: linear, no contact iterations".
     pub why: Vec<String>,
+    /// A side is a rope or beam, whose nodes touch the other side: the region is a contact
+    /// pair of node to surface contact, whatever the formulation of the others.
+    pub node_to_surface: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -465,21 +481,46 @@ pub struct Lowered {
     /// The region of each contact region left in the lowered model: those of no separation,
     /// which the writer turns into equations.
     pub equation_regions: Vec<usize>,
+    /// The first of the regions that tie the bodies of compound parts, which come after the
+    /// user's regions; `None` without them.
+    pub first_compound: Option<usize>,
+    /// The compound part, by mesh index, of each region from `first_compound` on.
+    pub compound_parts: Vec<usize>,
 }
 
 impl Lowered {
     /// The contact region a tie or contact pair of the lowered model stands for, `None` for
     /// one the user defined.
     pub fn region_of(&self, item: crate::ModelItem) -> Option<usize> {
+        let user = |r: &usize| self.first_compound.is_none_or(|first| *r < first);
+        self.regions_of(item).into_iter().find(user)
+    }
+
+    /// The compound part, by mesh index, whose bodies a tie or contact pair of the lowered
+    /// model ties; `None` for one of a contact region of the user.
+    pub fn part_of(&self, item: crate::ModelItem) -> Option<usize> {
+        let first = self.first_compound?;
+        if self.region_of(item).is_some() {
+            return None;
+        }
+        let region = self.regions_of(item).into_iter().find(|&r| r >= first)?;
+        self.compound_parts.get(region - first).copied()
+    }
+
+    /// All regions a lowered item stands for: those of a tie that merges several.
+    fn regions_of(&self, item: crate::ModelItem) -> Vec<usize> {
         match item {
-            crate::ModelItem::Tie(i) => i
-                .checked_sub(self.first_tie)
-                .and_then(|i| self.tie_regions.get(i)?.first().copied()),
-            crate::ModelItem::ContactPair(i) => i
-                .checked_sub(self.first_pair)
-                .and_then(|i| self.pair_regions.get(i).copied()),
-            crate::ModelItem::ContactRegion(i) => self.equation_regions.get(i).copied(),
-            _ => None,
+            crate::ModelItem::Tie(i) => (i.checked_sub(self.first_tie))
+                .and_then(|i| self.tie_regions.get(i).cloned())
+                .unwrap_or_default(),
+            crate::ModelItem::ContactPair(i) => (i.checked_sub(self.first_pair))
+                .and_then(|i| self.pair_regions.get(i).copied())
+                .into_iter()
+                .collect(),
+            crate::ModelItem::ContactRegion(i) => {
+                self.equation_regions.get(i).copied().into_iter().collect()
+            }
+            _ => Vec::new(),
         }
     }
 }
@@ -489,8 +530,8 @@ struct Properties {
     young: HashMap<ElementId, f64>,
     conductivity: HashMap<ElementId, f64>,
     /// The distance each detection that found regions with an automatic tolerance searched
-    /// within, by its name.
-    detections: HashMap<String, f64>,
+    /// within, by its id.
+    detections: HashMap<Id, f64>,
 }
 
 /// What the derivation needs to know about the model.
@@ -503,6 +544,8 @@ struct Derivation<'a> {
     thermal: bool,
     /// The steps, which may switch regions off and on.
     steps: &'a [crate::Step],
+    /// The history outputs the steps refer to.
+    history_outputs: &'a [crate::HistoryOutput],
     /// The distance the detection that found the region searched within.
     detected_within: Option<f64>,
 }
@@ -526,6 +569,8 @@ struct Side {
     /// Mean edge length of the faces, weighted by area.
     mesh_size: f64,
     area: f64,
+    /// Beams or trusses without faces: a rope that touches the other side with its nodes.
+    lines: bool,
 }
 
 impl Side {
@@ -555,10 +600,14 @@ impl Side {
             area += face_area;
             weighted += face_area * size;
         }
+        let mut lines = false;
         if faces.is_empty() {
             for element in region.elements(mesh) {
                 largest(&mut young, &properties.young, element);
                 largest(&mut conductivity, &properties.conductivity, element);
+                lines |= mesh
+                    .element(element)
+                    .is_some_and(|e| e.shape.family() == plx_mesh::ElementFamily::Line);
             }
         }
         Self {
@@ -566,6 +615,7 @@ impl Side {
             conductivity,
             mesh_size: if area > 0.0 { weighted / area } else { 0.0 },
             area,
+            lines,
         }
     }
 
@@ -615,7 +665,15 @@ impl FeModel {
     /// The names contact history outputs can refer to: of the contact pairs and of the
     /// contact regions written as contact pairs.
     pub fn contact_pair_names(&self) -> Vec<&str> {
-        let pairs = self.contact_pairs.iter().map(|p| p.name.as_str());
+        (self.contact_pair_choices().into_iter())
+            .map(|(_, name)| name)
+            .collect()
+    }
+
+    /// The contact pairs, the contact regions written as contact pairs and the compression
+    /// only supports, which contact history outputs can print, by id and name.
+    pub fn contact_pair_choices(&self) -> Vec<(Id, &str)> {
+        let pairs = self.contact_pairs.iter().map(|p| (p.id, p.name.as_str()));
         let regions = (self.contact_regions.iter())
             .filter(|r| match r.behavior {
                 // A bonded region left to Auto becomes a tied contact when its contact values
@@ -625,13 +683,26 @@ impl FeModel {
                 }
                 behavior => behavior.separates(),
             })
-            .map(|r| r.name.as_str());
-        pairs.chain(regions).collect()
+            .map(|r| (r.id, r.name.as_str()));
+        // A compression only support is a contact with the ground.
+        let supports = self.constraints.iter().filter_map(|c| match c {
+            crate::Constraint::CompressionOnly(s) => Some((s.id, s.name.as_str())),
+            _ => None,
+        });
+        pairs.chain(regions).chain(supports).collect()
+    }
+
+    /// The compression only support with an id.
+    pub fn compression_only(&self, id: Id) -> Option<&crate::CompressionOnly> {
+        self.constraints.iter().find_map(|c| match c {
+            crate::Constraint::CompressionOnly(s) if s.id == id => Some(s),
+            _ => None,
+        })
     }
 
     /// Young's modulus of each element with a section whose material has one.
     pub(crate) fn young_of_elements(&self, mesh: &FeMesh) -> HashMap<ElementId, f64> {
-        self.material_of_elements(mesh, |m| m.elastic.map(|e| e.young))
+        self.material_of_elements(mesh, |m| m.small_strain_elastic().map(|e| e.young))
     }
 
     /// A property of the material of each element with a section whose material has it.
@@ -642,9 +713,7 @@ impl FeModel {
     ) -> HashMap<ElementId, f64> {
         let mut values = HashMap::new();
         for section in &self.sections {
-            let Some(value) = (self.materials.iter())
-                .find(|m| m.name == section.material)
-                .and_then(&property)
+            let Some(value) = (section.material.and_then(|m| self.material(m))).and_then(&property)
             else {
                 continue;
             };
@@ -658,15 +727,14 @@ impl FeModel {
     fn properties_of_elements(&self, mesh: &FeMesh) -> Properties {
         let detections = (self.contact_detections.iter())
             .filter(|d| {
-                (self.contact_regions.iter()).any(|r| {
-                    r.settings.tolerance.is_none() && r.detected_by.as_ref() == Some(&d.name)
-                })
+                (self.contact_regions.iter())
+                    .any(|r| r.settings.tolerance.is_none() && r.detected_by == Some(d.id))
             })
             .map(|d| {
                 let distance = d
                     .tolerance
-                    .unwrap_or_else(|| d.searched_diagonal(mesh) * 0.005);
-                (d.name.clone(), distance)
+                    .unwrap_or_else(|| d.searched_diagonal(self, mesh) * 0.005);
+                (d.id, distance)
             })
             .collect();
         Properties {
@@ -674,6 +742,16 @@ impl FeModel {
             conductivity: self.material_of_elements(mesh, |m| m.conductivity),
             detections,
         }
+    }
+
+    /// The contact radius of the beams of `region`: half the diameter of a rope profile on
+    /// its elements, the distance its axis keeps from a surface it touches.
+    pub fn contact_radius(&self, region: &Region, mesh: &FeMesh) -> Option<f64> {
+        let elements: BTreeSet<ElementId> = region.elements(mesh).into_iter().collect();
+        (self.sections.iter())
+            .filter(|s| s.region.elements(mesh).iter().any(|e| elements.contains(e)))
+            .find_map(|s| self.section_profile(&s.kind)?.contact_radius())
+            .filter(|r| *r > 0.0)
     }
 
     /// The formulation of all contact pairs and why: the one chosen at the connections, else
@@ -726,12 +804,12 @@ impl FeModel {
         formulation: ContactMethod,
     ) -> Resolved {
         let active = self.steps.iter().filter(|s| s.active);
-        let nlgeom = active.clone().any(|s| s.kind.nlgeom());
+        let nlgeom = active.clone().any(|s| self.step_nlgeom(&s.kind));
         let thermal = active.clone().any(|s| conducts_across_contacts(&s.kind));
         let a = Side::new(&region.side_a, mesh, properties);
         let b = Side::new(&region.side_b, mesh, properties);
         let detected_within = (region.detected_by.as_ref())
-            .and_then(|name| properties.detections.get(name))
+            .and_then(|id| properties.detections.get(id))
             .copied();
         let model = Derivation {
             formulation,
@@ -739,6 +817,7 @@ impl FeModel {
             nlgeom,
             thermal,
             steps: &self.steps,
+            history_outputs: &self.history_outputs,
             detected_within,
         };
         resolve(region, &a, &b, &model)
@@ -749,7 +828,32 @@ impl FeModel {
     /// added item comes from. Bonded regions whose slave sides share nodes become one tie, as
     /// the solver ties a node to one master only. Active regions of no separation stay, with
     /// their master and tolerance settled, for the writer to turn into equations.
+    ///
+    /// The bodies of compound parts are tied as bonded regions added after the user's, see
+    /// [`FeModel::compound_ties`]; [`Lowered::part_of`] tells the part of their ties.
     pub fn lower_contacts(&self, mesh: &FeMesh) -> (FeModel, Lowered) {
+        let compound = self.compound_ties(mesh);
+        if compound.is_empty() {
+            return self.lower_regions(mesh);
+        }
+        let mut extended = self.clone();
+        let first = extended.contact_regions.len();
+        let parts = compound.iter().map(|t| t.part).collect();
+        extended
+            .contact_regions
+            .extend(compound.into_iter().map(|t| t.region));
+        let (mut lowered, mut origin) = extended.lower_regions(mesh);
+        // The regions written stay the user's.
+        lowered
+            .contact_regions
+            .retain(|r| self.contact_regions.iter().any(|c| c.id == r.id));
+        origin.first_compound = Some(first);
+        origin.compound_parts = parts;
+        (lowered, origin)
+    }
+
+    /// [`Self::lower_contacts`] of the model's contact regions.
+    fn lower_regions(&self, mesh: &FeMesh) -> (FeModel, Lowered) {
         let mut lowered = self.clone();
         let mut origin = Lowered {
             first_tie: self.ties.len(),
@@ -767,20 +871,10 @@ impl FeModel {
         // Interactions of one region each, whose friction a step changes.
         let mut private: Vec<String> = Vec::new();
         for (r, (region, item)) in self.contact_regions.iter().zip(&resolved.items).enumerate() {
-            let (master, slave, master_color, slave_color) = if item.a_is_master {
-                (
-                    &region.side_a,
-                    &region.side_b,
-                    region.color_a,
-                    region.color_b,
-                )
+            let (master, slave) = if item.a_is_master {
+                (&region.side_a, &region.side_b)
             } else {
-                (
-                    &region.side_b,
-                    &region.side_a,
-                    region.color_b,
-                    region.color_a,
-                )
+                (&region.side_b, &region.side_a)
             };
             match &item.kind {
                 ResolvedKind::Tie { tolerance, adjust } => {
@@ -792,8 +886,6 @@ impl FeModel {
                     tie.adjust = *adjust;
                     tie.master = master.clone();
                     tie.slave = slave.clone();
-                    tie.master_color = master_color;
-                    tie.slave_color = slave_color;
                     let nodes: BTreeSet<NodeId> = if region.active {
                         slave.nodes(mesh).into_iter().collect()
                     } else {
@@ -848,33 +940,37 @@ impl FeModel {
                         .skip(self.surface_interactions.len())
                         .find(|i| i.properties == properties && !own && !private.contains(&i.name))
                     {
-                        Some(found) => found.name.clone(),
+                        Some(found) => found.id,
                         None => {
                             let taken: Vec<String> = (lowered.surface_interactions.iter())
                                 .map(|i| i.name.clone())
                                 .collect();
                             let name = unique_name(&interaction_name(region.behavior), &taken);
-                            lowered.surface_interactions.push(SurfaceInteraction {
-                                name: name.clone(),
-                                properties,
-                            });
+                            let interaction = SurfaceInteraction::new(name.clone(), properties);
+                            let id = interaction.id;
+                            lowered.surface_interactions.push(interaction);
                             if own {
-                                private.push(name.clone());
+                                private.push(name);
                             }
-                            name
+                            id
                         }
                     };
-                    let mut pair = ContactPair::new(region.name.clone(), interaction);
+                    // The pair keeps the region's id: history outputs and changes of the
+                    // steps on the region go to it.
+                    let mut pair = ContactPair::new(region.name.clone(), Some(interaction));
+                    pair.id = region.id;
                     pair.active = region.active;
-                    pair.method = resolved.formulation;
+                    pair.method = if item.node_to_surface {
+                        ContactMethod::NodeToSurface
+                    } else {
+                        resolved.formulation
+                    };
                     pair.small_sliding = *small_sliding;
                     pair.adjust = adjust.is_some();
                     pair.adjustment_size = *adjust;
                     pair.clearance = *clearance;
                     pair.master = master.clone();
                     pair.slave = slave.clone();
-                    pair.master_color = master_color;
-                    pair.slave_color = slave_color;
                     lowered.contact_pairs.push(pair);
                     origin.pair_regions.push(r);
                 }
@@ -885,24 +981,22 @@ impl FeModel {
             origin.tie_regions.push(regions);
         }
         // Changes in the steps are kept for the contact pairs; ties and equations stay.
-        let pairs: BTreeSet<String> = (lowered.contact_pairs.iter())
-            .map(|p| p.name.clone())
-            .collect();
+        let pairs: BTreeSet<Id> = lowered.contact_pairs.iter().map(|p| p.id).collect();
         // Contact values are printed for contact pairs only; of a region written as a tie
         // or as equations there are none (see the model check).
-        let regions: BTreeSet<&str> = self
-            .contact_regions
-            .iter()
-            .map(|r| r.name.as_str())
-            .collect();
+        let regions: BTreeSet<Id> = self.contact_regions.iter().map(|r| r.id).collect();
         for step in &mut lowered.steps {
             step.contact_changes.retain(|c| pairs.contains(&c.region));
-            step.history_outputs.retain(|o| match &o.kind {
-                crate::HistoryKind::Contact { pair } => {
-                    pairs.contains(pair) || !regions.contains(pair.as_str())
-                }
-                _ => true,
-            });
+        }
+        lowered.history_outputs.retain(|o| match &o.kind {
+            crate::HistoryKind::Contact { pair: Some(pair) } => {
+                pairs.contains(pair) || !regions.contains(pair)
+            }
+            _ => true,
+        });
+        let kept: BTreeSet<Id> = lowered.history_outputs.iter().map(|o| o.id).collect();
+        for step in &mut lowered.steps {
+            step.history_outputs.retain(|o| kept.contains(o));
         }
         // Contact results for the contact check after solving, where none are asked for.
         if (lowered.contact_pairs.iter().skip(origin.first_pair)).any(|p| p.active) {
@@ -956,18 +1050,39 @@ fn union(a: &Region, b: &Region, mesh: &FeMesh) -> Region {
 /// The derivation for one region.
 fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Resolved {
     let Derivation {
-        formulation,
+        mut formulation,
         defaults,
         nlgeom,
         thermal,
         steps,
+        history_outputs,
         detected_within,
     } = *model;
     let settings = &region.settings;
     let mut why = Vec::new();
+    // A rope or beam has nodes only: it is the slave of node to surface contact.
+    let node_to_surface = a.lines != b.lines;
+    let mut contact = region.behavior;
+    if node_to_surface {
+        formulation = ContactMethod::NodeToSurface;
+        why.push(
+            "Node to surface: the nodes of the rope or beam touch the other side, kept the \
+             contact radius of its profile away"
+                .into(),
+        );
+        if contact == ContactBehavior::NoSeparation {
+            contact = ContactBehavior::Frictionless;
+            why.push("No separation of a rope as frictionless contact".into());
+        }
+    }
     // Master: the coarser mesh, so that the finer mesh's nodes cannot pass through it; then
     // the stiffer material; then the larger area.
     let a_is_master = match settings.sides {
+        _ if node_to_surface => {
+            let side = if b.lines { "A" } else { "B" };
+            why.push(format!("Master: side {side}, the surface the rope touches"));
+            b.lines
+        }
         Some(roles) => {
             why.push("Master side as chosen".into());
             roles == SideRoles::AIsMaster
@@ -1013,7 +1128,11 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
         ),
         None => format!("Tolerance: {TOLERANCE_FACTOR} x mesh size"),
     };
-    let bonded_method = match (region.behavior, settings.bonded_method) {
+    let bonded_method = match (contact, settings.bonded_method) {
+        (ContactBehavior::Bonded, _) if node_to_surface => {
+            why.push("Bonded as a tied contact: a rope is held by node to surface contact".into());
+            Some(BondedMethod::Contact)
+        }
         (ContactBehavior::Bonded, Some(BondedMethod::Contact))
             if formulation != ContactMethod::SurfaceToSurface =>
         {
@@ -1038,7 +1157,8 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
             Some(BondedMethod::Contact)
         }
         (ContactBehavior::Bonded, None)
-            if region.prints_contact(steps) && formulation == ContactMethod::SurfaceToSurface =>
+            if region.prints_contact(steps, history_outputs)
+                && formulation == ContactMethod::SurfaceToSurface =>
         {
             why.push(
                 "Bonded as a tied contact: a history output prints its contact values, which \
@@ -1063,13 +1183,13 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
     let adjust_to_touch = match settings.interface {
         Some(InterfaceTreatment::AdjustToTouch) => true,
         Some(InterfaceTreatment::AsIs | InterfaceTreatment::Offset(_)) => false,
-        None => region.behavior == ContactBehavior::Bonded,
+        None => contact == ContactBehavior::Bonded,
     };
     let offset = match settings.interface {
         Some(InterfaceTreatment::Offset(offset)) => Some(offset),
         _ => None,
     };
-    let kind = if region.behavior == ContactBehavior::NoSeparation {
+    let kind = if contact == ContactBehavior::NoSeparation {
         why.push(
             "No separation as equations normal to the master side: linear, the sides slide \
              freely"
@@ -1129,15 +1249,11 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
             },
             (false, None) => SurfaceBehavior::Hard,
         };
-        let coefficient = if tied {
-            Some(0.1)
-        } else {
-            region.behavior.friction()
-        };
+        let coefficient = if tied { Some(0.1) } else { contact.friction() };
         let friction = coefficient.map(|coefficient| {
             // Rough and tied contact should not slide, frictional contact converges better
             // with the softer stick slope CalculiX recommends.
-            let ratio = if tied || region.behavior == ContactBehavior::Rough {
+            let ratio = if tied || contact == ContactBehavior::Rough {
                 1.0
             } else {
                 STICK_SLOPE_RATIO
@@ -1214,10 +1330,15 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
         mesh_size,
         conductivity,
         why,
+        node_to_surface,
     }
 }
 
-/// Whether a step type takes contact; the mortar formulation takes static steps only.
+/// Whether a step type takes contact; the mortar formulation takes static and dynamic
+/// steps only.
 pub fn mortar_supports(kind: &StepKind) -> bool {
-    matches!(kind, StepKind::Static(_) | StepKind::Visco(_))
+    matches!(
+        kind,
+        StepKind::Static(_) | StepKind::Visco(_) | StepKind::Dynamic(_)
+    )
 }

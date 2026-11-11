@@ -97,6 +97,8 @@ pub enum BlockTile {
     Campbell,
     MeshExport,
     Note,
+    Plot,
+    Preview,
 }
 
 /// A command. The project carries out those of the Project workspace, an analysis the
@@ -106,6 +108,7 @@ pub enum Cmd {
     // Project workspace.
     NewProject,
     OpenProject,
+    OpenRecent,
     SaveProject,
     SaveProjectAs,
     SaveWithoutResults,
@@ -123,6 +126,8 @@ pub enum Cmd {
     Place(BlockTile),
     FrameBlocks,
     Unframe,
+    GroupBlocks,
+    Ungroup,
     Compact,
     ShowAll,
     Minimap,
@@ -132,6 +137,7 @@ pub enum Cmd {
     MeshParameters,
     LocalMeshSize,
     ExtrudeMesh,
+    ThickenShellMesh,
     TetrahedralGmsh,
     MeshAll,
     MeshSelected,
@@ -167,6 +173,7 @@ pub enum Cmd {
     CoordinateSystem,
     Plane,
     DetectContacts,
+    PartGroup,
     ContactRegion,
     Bolt,
     Constraint,
@@ -175,7 +182,9 @@ pub enum Cmd {
     Tie,
     NodeTie,
     ContactWorksheet,
+    ContactMatrix,
     ConnectionSettings,
+    StepOverview,
     Step,
     BoundaryCondition,
     Load,
@@ -347,6 +356,9 @@ impl Command {
     pub fn tab_in(&self, workspace: Workspace) -> &'static str {
         if self.tab == "View" && workspace == Workspace::Results {
             "Display"
+        } else if self.tab == "Features" && workspace == Workspace::Results {
+            // Features are shared with the FE model; in the Results they help evaluating.
+            "Evaluate"
         } else {
             self.tab
         }
@@ -381,8 +393,11 @@ const PROJECT: &[Workspace] = &[Workspace::Project];
 const GEOMETRY: &[Workspace] = &[Workspace::Geometry];
 const FE_MODEL: &[Workspace] = &[Workspace::FeModel];
 const RESULTS: &[Workspace] = &[Workspace::Results];
+/// Reference points, coordinate systems and planes: the FE model and its results share them.
+const FEATURES: &[Workspace] = &[Workspace::FeModel, Workspace::Results];
 /// The ribbon group of the step, the increment and the animation of the results.
-const STEP_GROUP: &str = "Step and Increment";
+/// The group of the step and increment tiles; the ribbon folds it last.
+pub const STEP_GROUP: &str = "Step and Increment";
 const SOLVING: &[Workspace] = &[Workspace::Geometry, Workspace::FeModel];
 const VIEWING: &[Workspace] = &[Workspace::Geometry, Workspace::FeModel, Workspace::Results];
 const ALL: &[Workspace] = &[
@@ -501,6 +516,19 @@ fn build() -> Vec<Command> {
         Tool(Icon::Open),
         "Ctrl+O",
         "Opens a project file.",
+    ));
+    add(tile(
+        command(
+            C::OpenRecent,
+            "Open\nRecent",
+            p,
+            t,
+            "File",
+            Tool(Icon::OpenRecent),
+            "",
+            "Opens one of the projects opened last that still exist.",
+        ),
+        Tile::Panel,
     ));
     add(command(
         C::SaveProject,
@@ -756,6 +784,22 @@ fn build() -> Vec<Command> {
         "Places a block that writes the mesh linked to it to an input file.",
     ));
     add(place(
+        BlockTile::Plot,
+        "Plot",
+        "Evaluate",
+        "Visualize",
+        Node(NodeIcon::Plot),
+        "Places a block that plots series in the block: a line, points or a histogram.",
+    ));
+    add(place(
+        BlockTile::Preview,
+        "Preview",
+        "Evaluate",
+        "Visualize",
+        Node(NodeIcon::Picture),
+        "Places a block that shows what is linked to it: a mesh, a number or a series.",
+    ));
+    add(place(
         BlockTile::Note,
         "Note",
         "Annotate",
@@ -782,6 +826,26 @@ fn build() -> Vec<Command> {
         Shape(Glyph::Unframe),
         "Alt+P",
         "Takes the selected blocks out of their frame.",
+    ));
+    add(command(
+        C::GroupBlocks,
+        "Group",
+        p,
+        "Annotate",
+        "Groups",
+        Node(NodeIcon::Group),
+        "Ctrl+G",
+        "Puts the selected blocks into a node group, which opens into a schematic of its own.",
+    ));
+    add(command(
+        C::Ungroup,
+        "Ungroup",
+        p,
+        "Annotate",
+        "Groups",
+        Node(NodeIcon::GroupOutput),
+        "Ctrl+Alt+G",
+        "Puts the blocks of the selected groups back where the groups are.",
     ));
     // Commands shown on a second tab; the search lists the first.
     add(command(
@@ -886,6 +950,16 @@ fn build() -> Vec<Command> {
         Tool(Icon::ExtrudeMesh),
         "",
         "Hexahedra swept from a face mesh through a part.",
+    ));
+    add(command(
+        C::ThickenShellMesh,
+        "Thicken\nShell",
+        g,
+        t,
+        "Mesh Setup",
+        Tool(Icon::ThickenShellMesh),
+        "",
+        "Solid elements for picked shells: the face mesh offset along its normals in layers.",
     ));
     add(command(
         C::TetrahedralGmsh,
@@ -1194,7 +1268,7 @@ fn build() -> Vec<Command> {
     add(command(
         C::ReferencePoint,
         "Reference\nPoint",
-        f,
+        FEATURES,
         t,
         "Features",
         Tree(TreeIcon::ReferencePoint),
@@ -1204,7 +1278,7 @@ fn build() -> Vec<Command> {
     add(command(
         C::CoordinateSystem,
         "Coordinate\nSystem",
-        f,
+        FEATURES,
         t,
         "Features",
         Tree(TreeIcon::CoordinateSystem),
@@ -1214,7 +1288,7 @@ fn build() -> Vec<Command> {
     add(command(
         C::Plane,
         "Plane",
-        f,
+        FEATURES,
         t,
         "Features",
         Tree(TreeIcon::Plane),
@@ -1231,6 +1305,17 @@ fn build() -> Vec<Command> {
         Tree(TreeIcon::Contacts),
         "",
         "Finds the faces of parts that touch and makes contact regions.",
+    ));
+    add(command(
+        C::PartGroup,
+        "Part\nGroup",
+        f,
+        t,
+        "Detect",
+        Tree(TreeIcon::Part),
+        "",
+        "A named set of parts chosen by name, pattern or material, for the rules of contact \
+         detections.",
     ));
     add(command(
         C::ContactRegion,
@@ -1311,6 +1396,16 @@ fn build() -> Vec<Command> {
         Shape(Glyph::Worksheet),
         "",
         "The table of all contact regions.",
+    ));
+    add(command(
+        C::ContactMatrix,
+        "Contact\nMatrix",
+        f,
+        t,
+        "Review",
+        Shape(Glyph::Worksheet),
+        "",
+        "The contact regions between part groups, by type.",
     ));
     add(command(
         C::ConnectionSettings,
@@ -1425,6 +1520,17 @@ fn build() -> Vec<Command> {
         Tree(TreeIcon::HistoryOutput),
         "",
         "Values printed for a region in the last step.",
+    ));
+    add(command(
+        C::StepOverview,
+        "Step\nOverview",
+        f,
+        t,
+        "Review",
+        Shape(Glyph::Worksheet),
+        "",
+        "What every step has: boundary conditions, loads, defined fields and model-wide \
+         items against the steps.",
     ));
 
     // Results workspace: File holds what reads and writes results.
@@ -2311,6 +2417,8 @@ mod tests {
             BlockTile::Campbell,
             BlockTile::MeshExport,
             BlockTile::Note,
+            BlockTile::Plot,
+            BlockTile::Preview,
         ] {
             assert!(find(Cmd::Place(block)).is_some(), "{block:?}");
         }

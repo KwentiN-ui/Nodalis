@@ -102,6 +102,17 @@ the submodel #ui("Local") was solved from #ui("Step-1"): only #ui("Global") is o
 #screenshot("mesh-block-out-of-date.png", [After #ui("nx") of the box changed from 10 to 20, the
 mesh, solution and results of the analysis that takes the box's mesh are out of date])
 
+A green trace at the left of the rows of the steps, under #ui("Setup") > #ui("Steps") and under
+#ui("Results"), shows how the state flows through them (@step-handover). A filled dot is a step
+that passes its end state on; the line joins it to the next one. A ring is a step that leaves the
+state as it found it: a frequency, buckle, complex frequency or steady state dynamics step. When
+it is computed about the end of the step before, a short branch joins it to the line; computed
+about the unloaded model, it stands apart. The tooltip of each step row says where the step starts
+and what it passes on.
+
+#screenshot("chain-trace.png", [The trace of the steps: Modes branches off after Preload, Unload
+  continues Preload, Free is computed about the unloaded model])
+
 The pins on both sides of a row take and give links. Blue wires are references (geometry, mesh,
 setup items: the target has the same as the source), orange wires carry results into the inputs
 of steps and green wires carry the state after a step (@links). A round pin on the left takes
@@ -122,8 +133,8 @@ the state of another analysis (@data-links).
 - *Drag* a block by its header to move it. Drag the background to select the blocks in a
   rectangle, and click it to clear the selection. Drag with the middle mouse button to pan,
   scroll to pan up and down, and scroll with #key("Ctrl") held to zoom, from a tenth of the
-  true size up to four times it. #menu("Arrange", "Show All") (#key("Home")) fits all
-  blocks into the view.
+  true size up to four times it; the text is drawn again for the zoom, so it stays sharp when
+  magnified. #menu("Arrange", "Show All") (#key("Home")) fits all blocks into the view.
 - The *minimap* in the lower right corner shows all blocks and frames in small, with the part
   in view outlined; click or drag in it to move the view there.
   #menu("Arrange", "Minimap") shows or hides it.
@@ -152,6 +163,8 @@ the state of another analysis (@data-links).
     gives its steps back to that analysis and removes itself (@split-merge).],
   [Compact View (#key("H"))], [Shows only the header and the rows with a wire
     (@frames-notes); #ui("Show All Rows") shows the rest again.],
+  [Group Blocks (#key("Ctrl+G"))], [Puts the block, or the selected blocks it is one of, into
+    a new node group (@node-groups).],
   [Frame Blocks (#key("Ctrl+J"))], [Puts the block, or the selected blocks it is one of, in a
     new frame; #ui("Remove from Frame") (#key("Alt+P")) takes it out.],
   [Rename ... (#key("F2"))], [Gives the analysis a new name. Names are unique within a project.],
@@ -201,10 +214,52 @@ Large schematics stay readable with three things borrowed from Blender's node ed
 
 Frames, notes and compact blocks are saved with the project, and undo and redo cover them.
 
+#screenshot("schematic-zoom.png", [A block zoomed in: the text stays sharp])
+
 #screenshot("schematic-frames.png", [Two frames, a note and a compact analysis that shows only
   its linked rows])
 
 #screenshot("frame-menu.png", [The context menu of a frame with its colours])
+
+==== Node groups <node-groups>
+
+A *node group* puts blocks together into one block, as in Blender: a mesh with its analysis
+and the Measure blocks of its results, say, becomes one block #ui("Group") with the pins of
+what goes in and out. Select the blocks and press #key("Ctrl+G"), or choose
+#ui("Group Blocks") in the context menu of a block. The group block takes their place; every
+wire that ran into or out of the blocks now runs to a pin of the group, an input on the left
+or an output on the right, named after the pin it comes from.
+
+Double-click the header of the group, press #key("Tab") with the pointer on it, or choose
+#ui("Open Group") in its context menu to open it: the schematic then shows only the blocks
+inside, with a *Group Input* block on the left that gives the inputs of the group and a
+*Group Output* block on the right that takes its outputs. The path at the top left of the
+schematic tells where you are, such as #ui("Bracket › Group › Mesh study"); click a part
+of it to go back there. #key("Tab") on the background or #key("Ctrl+Tab") goes out one
+level. Groups can be put into groups, as deep as you like.
+
+#screenshot("node-groups.png", [Inside a group: the Group Input block gives the thickness to
+  the mesh, the Group Output block takes the stress the group gives out. The path at the top
+  left goes back to the project.])
+
+The Group Input and Group Output blocks belong to their group and cannot be deleted. Each has
+an *empty pin* at the bottom, a ring without fill. Drag a wire from the empty pin of the
+Group Input block to a block inside, or from a block inside to the empty pin of the Group
+Output block: the group gets a new input or output of that type, and the next empty pin
+comes below. Outside, link the new pin of the group like any other. Double-click the row of
+an input or output to rename it; once it has no wires left on either side it goes.
+
+The same empty pin marks every block that takes any number of inputs: the choices of a
+Switch block (@math-switch) and the outputs and inputs of a parameter study (@parameter-study).
+A wire dropped on it adds one more.
+
+Groups only arrange the schematic. A link through a group is the link between the blocks at
+its ends, which Update Project follows as before; it is made once the wires reach from one
+block to the other through the pins of the groups, and removed once one of them goes.
+#key("Ctrl+Alt+G") or #ui("Ungroup") puts the blocks of a group back where the group is,
+with the wires between them as before. #key("Shift+D") duplicates a group with the blocks
+inside and the links between them; #key("X") deletes it with all its blocks, and undo
+brings them back.
 
 ==== Keys of the schematic <schematic-keys>
 
@@ -221,6 +276,11 @@ block with #key("Shift") held; with #key("Shift") a rectangle adds to the select
     bottom, or #key("Ctrl+Z"), brings them back.],
   [#key("Shift+D")], [Duplicates the blocks.],
   [#key("H")], [Shows the blocks compact, or in full if they all are compact.],
+  [#key("Ctrl+G")], [Puts the blocks into a new node group (@node-groups).],
+  [#key("Ctrl+Alt+G")], [Puts the blocks of the groups back, without the groups.],
+  [#key("Tab")], [Opens the group under the pointer or selected; on the background, goes out
+    of the group shown.],
+  [#key("Ctrl+Tab")], [Goes out of the group shown, to the level around it.],
   [#key("Ctrl+J")], [Puts the blocks in a new frame.],
   [#key("Alt+P")], [Takes the blocks out of their frame.],
   [#key("F2")], [Renames the block.],
@@ -238,6 +298,7 @@ placed and worked on with the ribbon (@ribbon) and the keys above.
   [File > New Project], [Closes the project and starts a new, empty one.],
   [File > Open ... (#key("Ctrl+O"))], [Opens a project. Its analyses open when you
     double-click them.],
+  [File > Open Recent], [Lists the projects opened or saved last that still exist.],
   [File > Save (#key("Ctrl+S"))], [Saves the project with all analyses, also those whose
     windows are open (@files).],
   [File > Save As ... (#key("Ctrl+Shift+S"))], [Saves the project under a new name.],
@@ -347,4 +408,8 @@ Nodalis (meshing, model checks, restart, keeping the results) around those of Ca
     double-click on its name does the same. An analysis still being solved in the background
     opens once it is done.],
   [Clear Finished], [Removes the analyses that are done from the list.],
+  [Profile], [Shows where the solver spent its time for the picked analysis, left of the
+    output, once it is done (@solver-profile).],
+  [Copy Report], [Copies the version, the system, the size of the model and the profile of the
+    picked analysis as text, e.g. for an issue on GitHub.],
 )

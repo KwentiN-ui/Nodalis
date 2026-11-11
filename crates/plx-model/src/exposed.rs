@@ -4,22 +4,35 @@
 
 use serde::{Deserialize, Serialize};
 
+use plx_mesh::{FeMesh, MeshTransform};
+
 use crate::{
-    BoundaryKind, DefinedFieldKind, FeModel, InitialConditionKind, LoadKind, Quantity, SectionKind,
-    StepKind, ValueKind,
+    BoundaryKind, DefinedFieldKind, FeModel, InitialConditionKind, LoadKind, MeshOperationKind,
+    Quantity, SectionKind, StepKind, ValueKind,
 };
 
 /// The item of the model a field belongs to, by its name, and of the step it is in.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ItemRef {
-    Load { step: String, name: String },
-    BoundaryCondition { step: String, name: String },
-    DefinedField { step: String, name: String },
+    Load {
+        step: String,
+        name: String,
+    },
+    BoundaryCondition {
+        step: String,
+        name: String,
+    },
+    DefinedField {
+        step: String,
+        name: String,
+    },
     Material(String),
     Section(String),
     CrossSection(String),
     Step(String),
     InitialCondition(String),
+    /// A mesh operation of Mesh > Mesh Operations, such as a transform.
+    MeshOperation(String),
 }
 
 impl ItemRef {
@@ -32,7 +45,8 @@ impl ItemRef {
             | Self::Section(name)
             | Self::CrossSection(name)
             | Self::Step(name)
-            | Self::InitialCondition(name) => name,
+            | Self::InitialCondition(name)
+            | Self::MeshOperation(name) => name,
         }
     }
 
@@ -47,6 +61,7 @@ impl ItemRef {
             Self::CrossSection(_) => "Cross-Section",
             Self::Step(_) => "Step",
             Self::InitialCondition(_) => "Initial condition",
+            Self::MeshOperation(_) => "Mesh operation",
         }
     }
 
@@ -61,7 +76,8 @@ impl ItemRef {
             | Self::Section(name)
             | Self::CrossSection(name)
             | Self::Step(name)
-            | Self::InitialCondition(name) => new.clone_into(name),
+            | Self::InitialCondition(name)
+            | Self::MeshOperation(name) => new.clone_into(name),
         }
         item
     }
@@ -143,8 +159,17 @@ pub enum Field {
     I11,
     I22,
     ShearFactor,
-    TimePeriod,
-    InitialIncrement,
+    /// The diameters, fill factor and bending stiffness of a rope.
+    Diameter,
+    WireDiameter,
+    FillFactor,
+    RopeBending,
+    /// The duration of a static, heat transfer, visco or Dynamic step.
+    Duration,
+    /// The result frames of a static, heat transfer, visco or Dynamic step.
+    Frames,
+    /// The damping ratio of a Dynamic step.
+    DampingRatio,
     /// The number of eigenfrequencies of a frequency step.
     Modes,
     /// The coordinates of the point of a remote displacement, in its coordinate system.
@@ -157,6 +182,16 @@ pub enum Field {
     AxisX,
     AxisY,
     AxisZ,
+    /// The angle of a rotation of mesh parts, in degrees.
+    Angle,
+    /// The normal of the plane a mirror of mesh parts reflects at.
+    NormalX,
+    NormalY,
+    NormalZ,
+    /// The factors of a scaling of mesh parts along X, Y and Z.
+    ScaleX,
+    ScaleY,
+    ScaleZ,
 }
 
 impl Field {
@@ -196,8 +231,13 @@ impl Field {
             Self::I11 => "I11",
             Self::I22 => "I22",
             Self::ShearFactor => "k",
-            Self::TimePeriod => "Time period",
-            Self::InitialIncrement => "Initial increment",
+            Self::Diameter => "d",
+            Self::WireDiameter => "Wire diameter",
+            Self::FillFactor => "Fill factor",
+            Self::RopeBending => "Bending",
+            Self::Duration => "Duration",
+            Self::Frames => "Frames",
+            Self::DampingRatio => "Damping ratio",
             Self::Modes => "Modes",
             Self::LocationX => "Location X",
             Self::LocationY => "Location Y",
@@ -206,6 +246,13 @@ impl Field {
             Self::AxisX => "Axis X",
             Self::AxisY => "Axis Y",
             Self::AxisZ => "Axis Z",
+            Self::Angle => "Angle",
+            Self::NormalX => "Normal X",
+            Self::NormalY => "Normal Y",
+            Self::NormalZ => "Normal Z",
+            Self::ScaleX => "Factor X",
+            Self::ScaleY => "Factor Y",
+            Self::ScaleZ => "Factor Z",
         }
     }
 
@@ -213,7 +260,9 @@ impl Field {
     pub const ROTATION: [Self; 3] = [Self::RotationX, Self::RotationY, Self::RotationZ];
     pub const LOCATION: [Self; 3] = [Self::LocationX, Self::LocationY, Self::LocationZ];
     pub const AXIS: [Self; 3] = [Self::AxisX, Self::AxisY, Self::AxisZ];
-    pub const ALL: [Self; 43] = [
+    pub const NORMAL: [Self; 3] = [Self::NormalX, Self::NormalY, Self::NormalZ];
+    pub const SCALE: [Self; 3] = [Self::ScaleX, Self::ScaleY, Self::ScaleZ];
+    pub const ALL: [Self; 55] = [
         Self::Value,
         Self::X,
         Self::Y,
@@ -247,8 +296,13 @@ impl Field {
         Self::I11,
         Self::I22,
         Self::ShearFactor,
-        Self::TimePeriod,
-        Self::InitialIncrement,
+        Self::Diameter,
+        Self::WireDiameter,
+        Self::FillFactor,
+        Self::RopeBending,
+        Self::Duration,
+        Self::Frames,
+        Self::DampingRatio,
         Self::Modes,
         Self::LocationX,
         Self::LocationY,
@@ -257,6 +311,13 @@ impl Field {
         Self::AxisX,
         Self::AxisY,
         Self::AxisZ,
+        Self::Angle,
+        Self::NormalX,
+        Self::NormalY,
+        Self::NormalZ,
+        Self::ScaleX,
+        Self::ScaleY,
+        Self::ScaleZ,
     ];
 
     /// The component of a vector it names.
@@ -316,9 +377,9 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
         }
         ItemRef::BoundaryCondition { step, name } => {
             // The angle of a location in a cylindrical system is in degrees, no quantity.
-            let cylindrical: Vec<String> = (fe.coordinate_systems.iter())
+            let cylindrical: Vec<Option<crate::Id>> = (fe.coordinate_systems.iter())
                 .filter(|c| c.kind == crate::CoordinateSystemKind::Cylindrical)
-                .map(|c| c.name.clone())
+                .map(|c| Some(c.id))
                 .collect();
             let bc =
                 (step_named(fe, step)?.boundary_conditions.iter_mut()).find(|b| &b.name == name)?;
@@ -409,16 +470,35 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                         field,
                     );
                 }
-                StepKind::Static(s) => s,
+                StepKind::Static(s) | StepKind::Visco(crate::ViscoStep { increments: s, .. }) => s,
                 StepKind::HeatTransfer(h)
                 | StepKind::CoupledTempDisp(h)
                 | StepKind::UncoupledTempDisp(h) => &mut h.increments,
-                StepKind::Dynamic(d) => &mut d.increments,
+                StepKind::Dynamic(d) => {
+                    if matches!(field, Field::Modes) {
+                        return match &mut d.method {
+                            crate::DynamicMethod::Modal { modes, .. } => {
+                                Some((Slot::Count(modes), ValueKind::Count))
+                            }
+                            crate::DynamicMethod::Direct
+                            | crate::DynamicMethod::Explicit
+                            | crate::DynamicMethod::Automatic => None,
+                        };
+                    }
+                    return match (field, &mut d.damping) {
+                        (Field::Duration, _) => real(&mut d.duration, Quantity::Time),
+                        (Field::Frames, _) => Some((Slot::Count(&mut d.frames), ValueKind::Count)),
+                        (Field::DampingRatio, crate::Damping::Ratio { zeta, .. }) => {
+                            Some((Slot::Real(zeta), ValueKind::Factor))
+                        }
+                        _ => None,
+                    };
+                }
                 _ => return None,
             };
             match field {
-                Field::TimePeriod => real(&mut increments.time_period, Quantity::Time),
-                Field::InitialIncrement => real(&mut increments.initial_increment, Quantity::Time),
+                Field::Duration => real(&mut increments.duration, Quantity::Time),
+                Field::Frames => Some((Slot::Count(&mut increments.frames), ValueKind::Count)),
                 _ => None,
             }
         }
@@ -437,6 +517,38 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 _ => None,
             }
         }
+        ItemRef::MeshOperation(name) => {
+            let operation = fe.mesh_operations.iter_mut().find(|o| &o.name == name)?;
+            match &mut operation.kind {
+                MeshOperationKind::Transform(transform) => transform_slot(transform, field),
+            }
+        }
+    }
+}
+
+/// The numbers of a transform of mesh parts. Its angle is in degrees as the dialog shows it,
+/// a number without quantity like the directions and the scale factors.
+fn transform_slot(transform: &mut MeshTransform, field: Field) -> Option<(Slot<'_>, ValueKind)> {
+    let index = |fields: [Field; 3]| fields.iter().position(|f| *f == field);
+    let length = |value| Some((Slot::Real(value), ValueKind::Quantity(Quantity::Length)));
+    let factor = |value| Some((Slot::Real(value), ValueKind::Factor));
+    match transform {
+        MeshTransform::Translate(d) => length(&mut d[index(Field::VECTOR)?]),
+        MeshTransform::Rotate { point, axis, angle } => match field {
+            Field::Angle => factor(angle),
+            _ => match index(Field::LOCATION) {
+                Some(i) => length(&mut point[i]),
+                None => factor(&mut axis[index(Field::AXIS)?]),
+            },
+        },
+        MeshTransform::Mirror { point, normal } => match index(Field::LOCATION) {
+            Some(i) => length(&mut point[i]),
+            None => factor(&mut normal[index(Field::NORMAL)?]),
+        },
+        MeshTransform::Scale { center, factors } => match index(Field::LOCATION) {
+            Some(i) => length(&mut center[i]),
+            None => factor(&mut factors[index(Field::SCALE)?]),
+        },
     }
 }
 
@@ -479,7 +591,10 @@ fn load_slot(kind: &mut LoadKind, field: Field) -> Option<(Slot<'_>, ValueKind)>
     }
     Some(match (kind, field) {
         (LoadKind::Pressure(p), Field::Value) => real(p, Quantity::Pressure),
-        (LoadKind::Force { value, .. }, field) => real(&mut value[field.axis()?], Quantity::Force),
+        (LoadKind::Force { value, .. }, field)
+        | (LoadKind::Excitation(crate::Excitation { value, .. }), field) => {
+            real(&mut value[field.axis()?], Quantity::Force)
+        }
         (LoadKind::Moment(m), field) => real(&mut m[field.axis()?], Quantity::Moment),
         // The force along X, Y and Z, the moment about RX, RY and RZ.
         (LoadKind::RemoteForce(remote), field) => match field.axis() {
@@ -548,12 +663,17 @@ impl FeModel {
             ItemRef::Section(name) => fe
                 .sections
                 .push(self.sections.iter().find(|s| &s.name == name)?.clone()),
-            ItemRef::CrossSection(name) => {
-                fe.cross_sections.push(self.cross_section(name)?.clone())
-            }
+            ItemRef::CrossSection(name) => fe
+                .cross_sections
+                .push(self.cross_section_named(name)?.clone()),
             ItemRef::InitialCondition(name) => fe.initial_conditions.push(
                 (self.initial_conditions.iter())
                     .find(|c| &c.name == name)?
+                    .clone(),
+            ),
+            ItemRef::MeshOperation(name) => fe.mesh_operations.push(
+                (self.mesh_operations.iter())
+                    .find(|o| &o.name == name)?
                     .clone(),
             ),
         }
@@ -576,7 +696,8 @@ impl FeModel {
     }
 
     /// Sets the number at `path`, given in SI units; a count is rounded to a whole number of
-    /// at least one. Returns whether it changed.
+    /// at least one. Returns whether it changed. A number of a mesh operation changes only
+    /// the operation here, not the mesh it was applied to: see [`Self::set_value_meshed`].
     pub fn set_value(&mut self, path: &ValuePath, value: f64) -> bool {
         if !value.is_finite() {
             return false;
@@ -593,6 +714,33 @@ impl FeModel {
             _ => return false,
         }
         true
+    }
+
+    /// Sets the number at `path` like [`Self::set_value`]; a number of a mesh operation
+    /// changes `mesh`, which has the operations applied, along with it: the operations from
+    /// that one on are undone and applied again. A value that makes the operation invalid,
+    /// such as a scale factor of zero, is not taken.
+    pub fn set_value_meshed(&mut self, mesh: &mut FeMesh, path: &ValuePath, value: f64) -> bool {
+        let ItemRef::MeshOperation(name) = &path.item else {
+            return self.set_value(path, value);
+        };
+        let mut copy = FeModel {
+            mesh_operations: self.mesh_operations.clone(),
+            ..Default::default()
+        };
+        if !copy.set_value(path, value) {
+            return false;
+        }
+        let valid =
+            (copy.mesh_operations.iter().find(|o| &o.name == name)).is_some_and(|o| {
+                match &o.kind {
+                    MeshOperationKind::Transform(t) => t.problem().is_none(),
+                }
+            });
+        if valid {
+            self.set_mesh_operations(mesh, copy.mesh_operations);
+        }
+        valid
     }
 
     /// The exposed parameter of `key`.
@@ -653,6 +801,7 @@ mod tests {
     fn model() -> FeModel {
         let mut step = Step::new_static("Step-1");
         step.loads.push(Load {
+            id: crate::Id::new(),
             distribution: None,
             name: "Force-1".into(),
             active: true,
@@ -661,6 +810,9 @@ mod tests {
             kind: LoadKind::force([0.0, -100.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
+            system: None,
+            follower: false,
         });
         FeModel {
             materials: vec![Material {
@@ -747,6 +899,7 @@ mod tests {
         fe.steps[0]
             .boundary_conditions
             .push(crate::BoundaryCondition {
+                id: crate::Id::new(),
                 distribution: None,
                 name: "Remote-1".into(),
                 active: true,
@@ -781,6 +934,74 @@ mod tests {
             fe.value_kind(&path(Field::RotationZ)),
             Some(ValueKind::Quantity(Quantity::Angle))
         );
+    }
+
+    #[test]
+    fn a_transform_exposes_its_numbers_and_moves_the_mesh() {
+        use plx_mesh::{Element, ElementShape, Part};
+        let mut mesh = FeMesh::default();
+        mesh.set_node(1, [0.0; 3]);
+        mesh.set_node(2, [1.0, 0.0, 0.0]);
+        mesh.add_element(Element {
+            id: 1,
+            type_name: "T3D2".into(),
+            shape: ElementShape::Line2,
+            nodes: vec![1, 2],
+        })
+        .unwrap();
+        mesh.parts.push(Part {
+            bodies: Vec::new(),
+            name: "A".into(),
+            elements: vec![1],
+        });
+        let mut fe = FeModel::default();
+        let operation = |transform| crate::MeshOperation {
+            name: "Transform-1".into(),
+            parts: vec!["A".into()],
+            kind: MeshOperationKind::Transform(transform),
+        };
+        let shift = operation(MeshTransform::Translate([0.5, 0.0, 0.0]));
+        fe.set_mesh_operations(&mut mesh, vec![shift]);
+        assert_eq!(mesh.node(2), Some([1.5, 0.0, 0.0]));
+        let item = ItemRef::MeshOperation("Transform-1".into());
+        assert_eq!(fe.exposable(&item), Field::VECTOR);
+        let x = ValuePath::new(item.clone(), Field::X);
+        assert_eq!(fe.value_at(&x), Some(0.5));
+        assert_eq!(fe.value_kind(&x), Some(ValueKind::LENGTH));
+        // The mesh moves by the new distance, not by the sum.
+        assert!(fe.set_value_meshed(&mut mesh, &x, 2.0));
+        assert_eq!(mesh.node(2), Some([3.0, 0.0, 0.0]));
+        assert!(!fe.set_value_meshed(&mut mesh, &x, 2.0));
+
+        // A scaling by zero would lose the mesh: it is not taken.
+        let scale = operation(MeshTransform::Scale {
+            center: [0.0; 3],
+            factors: [2.0, 1.0, 1.0],
+        });
+        fe.set_mesh_operations(&mut mesh, vec![scale]);
+        assert_eq!(mesh.node(2), Some([2.0, 0.0, 0.0]));
+        let factor = ValuePath::new(item.clone(), Field::ScaleX);
+        assert_eq!(fe.value_kind(&factor), Some(ValueKind::Factor));
+        assert!(!fe.set_value_meshed(&mut mesh, &factor, 0.0));
+        assert_eq!(fe.value_at(&factor), Some(2.0));
+        assert!(fe.set_value_meshed(&mut mesh, &factor, 3.0));
+        assert_eq!(mesh.node(2), Some([3.0, 0.0, 0.0]));
+
+        let rotate = operation(MeshTransform::Rotate {
+            point: [0.0; 3],
+            axis: [0.0, 0.0, 1.0],
+            angle: 0.0,
+        });
+        fe.set_mesh_operations(&mut mesh, vec![rotate]);
+        let exposable = fe.exposable(&item);
+        for field in [Field::Angle, Field::LocationX, Field::AxisZ] {
+            assert!(exposable.contains(&field), "{field:?}");
+        }
+        assert!(!exposable.contains(&Field::X));
+        let angle = ValuePath::new(item, Field::Angle);
+        assert!(fe.set_value_meshed(&mut mesh, &angle, 90.0));
+        let [x, y, _] = mesh.node(2).unwrap();
+        assert!(x.abs() < 1e-12 && (y - 1.0).abs() < 1e-12);
     }
 
     #[test]

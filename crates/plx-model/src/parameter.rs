@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::Quantity;
+use crate::units::Dimension;
 
 /// What a number is, so that a value link joins like with like: a force goes to a force, a
 /// count of elements to a count.
@@ -16,6 +17,10 @@ pub enum ValueKind {
     Count,
     /// A factor without unit, such as the refinement of a mesh.
     Factor,
+    /// A number of a unit no quantity has, such as an intermediate result of a Math block:
+    /// a second moment of area times a pressure. Shown in SI base units, it goes only to
+    /// other Math blocks.
+    Derived(Dimension),
 }
 
 impl Default for ValueKind {
@@ -39,6 +44,16 @@ impl ValueKind {
             Self::Quantity(quantity) => quantity.label(),
             Self::Count => "Count",
             Self::Factor => "Factor",
+            Self::Derived(_) => "Derived quantity",
+        }
+    }
+
+    /// What its numbers are, for messages: its label in lower case, with the SI base units
+    /// of a derived quantity.
+    pub fn describe(self) -> String {
+        match self {
+            Self::Derived(dimension) => format!("quantity in {}", dimension.si()),
+            _ => self.label().to_lowercase(),
         }
     }
 
@@ -48,6 +63,26 @@ impl ValueKind {
             Self::Quantity(quantity) => Some(quantity),
             _ => None,
         }
+    }
+
+    /// The powers of the base units its numbers are made of; none for a count or a factor.
+    pub fn dimension(self) -> Dimension {
+        match self {
+            Self::Quantity(quantity) => quantity.dimension(),
+            Self::Derived(dimension) => dimension,
+            Self::Count | Self::Factor => Dimension::default(),
+        }
+    }
+
+    /// The kind of numbers of a dimension: a factor without unit, else its quantity (see
+    /// [`Dimension::quantity`]), else a derived quantity.
+    pub fn of_dimension(dimension: Dimension) -> Self {
+        if dimension.is_none() {
+            return Self::Factor;
+        }
+        dimension
+            .quantity()
+            .map_or(Self::Derived(dimension), Self::Quantity)
     }
 
     /// Whether a value of this kind may go to a number of kind `to`: only like to like, a

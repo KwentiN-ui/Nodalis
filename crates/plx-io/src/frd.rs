@@ -154,6 +154,7 @@ impl<'a> Reader<'a> {
                         name: name.clone(),
                         values,
                         derived: false,
+                        out_of_plane: false,
                     })
                     .collect(),
             );
@@ -171,14 +172,14 @@ impl<'a> Reader<'a> {
                     if target.value == 0.0 {
                         target.value = block.value;
                     }
-                    target.fields.push(field);
+                    target.fields.extend(plx_results::split_rotations(field));
                 }
                 None => self.import.increments.push(Increment {
                     step: block.step,
                     increment: block.increment,
                     kind: block.kind,
                     value: block.value,
-                    fields: vec![field],
+                    fields: plx_results::split_rotations(field),
                     nodal_diameter: block.nodal_diameter,
                 }),
             }
@@ -201,7 +202,11 @@ impl<'a> Reader<'a> {
             let parts = &mut self.import.mesh.parts;
             match parts.iter_mut().find(|p| p.name == name) {
                 Some(part) => part.elements.extend(elements),
-                None => parts.push(Part { name, elements }),
+                None => parts.push(Part {
+                    bodies: Vec::new(),
+                    name,
+                    elements,
+                }),
             }
         }
         Ok(self.import)

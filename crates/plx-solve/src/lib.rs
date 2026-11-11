@@ -17,7 +17,10 @@ use plx_results::SolverResults;
 use plxs_core::{CancelToken, Error, ProgressEvent};
 
 pub use plxs_core::{Diagnostic, DiagnosticCode};
+pub use plxs_procedures::profile::{Phase, Profile};
+pub use plxs_session::JobProfile;
 
+pub mod awake;
 pub mod live;
 pub mod process;
 
@@ -127,6 +130,10 @@ pub struct Run {
     /// A model check computes no results: it is complete without them.
     check: bool,
     diagnostics: Arc<Mutex<Option<Vec<Diagnostic>>>>,
+    /// Where the time of the run went, once results were written.
+    profile: plxs_session::ProfileSink,
+    /// Keeps the computer from going to standby while the run is active.
+    awake: Option<awake::Guard>,
 }
 
 /// An analysis lowered from the model for the solver, which validates it first.
@@ -171,12 +178,18 @@ struct Convergence {
     step: Option<u32>,
     /// A step that finished without converging.
     unconverged: Option<u32>,
+    /// The step running integrates explicitly (automatic switching).
+    explicit: bool,
 }
 
 impl Convergence {
     fn event(&mut self, event: &ProgressEvent) {
         match *event {
-            ProgressEvent::Step { step } => self.step = Some(step),
+            ProgressEvent::Step { step } => {
+                self.step = Some(step);
+                self.explicit = false;
+            }
+            ProgressEvent::Integration { explicit, .. } => self.explicit = explicit,
             ProgressEvent::IncrementDone {
                 step,
                 increment,
@@ -192,6 +205,7 @@ impl Convergence {
                 iterations,
                 step_time,
                 total_time,
+                explicit: self.explicit,
             }),
             ProgressEvent::StepDone {
                 step,
@@ -426,7 +440,9 @@ impl Run {
             "************************************************************".to_owned(),
         ]));
         let cancel = CancelToken::new();
+        let profile = plxs_session::ProfileSink::default();
         let options = plxs_session::JobOptions {
+            profile_sink: (!check).then(|| Arc::clone(&profile)),
             threads: threads as usize,
             pool: Some(pool(threads)?),
             write_files: false,
@@ -586,7 +602,21 @@ impl Run {
             status: JobStatus::Running,
             check,
             diagnostics,
+            profile,
+            awake: Some(awake::Guard::new()),
         })
+    }
+
+    /// Where the time of the run went, once it has finished with results (also of a step
+    /// that did not converge, or of a stopped run).
+    pub fn profile(&self) -> Option<JobProfile> {
+        if self.status == JobStatus::Running {
+            return None;
+        }
+        self.profile
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// What the solver found, typed, once the run has finished: the findings of a model
@@ -637,6 +667,7 @@ impl Run {
             // Detached: the thread holds only shared buffers, which outlive the run.
             self.handle.take();
             self.status = JobStatus::Killed;
+            self.awake = None;
         }
     }
 
@@ -694,6 +725,7 @@ impl Run {
             return;
         };
         let finished = handle.join().unwrap_or(Finished::Error);
+        self.awake = None;
         // A model check computes no results.
         let results = !self.check
             && self
@@ -828,6 +860,13 @@ S
         assert_eq!(read, *solved);
         assert!(run.file("inp").is_file());
         assert!(run.file("sta").is_file());
+        // Every run measures where its time went, with the size of the model.
+        let profile = run.profile().expect("a finished run has a profile");
+        assert_eq!(profile.nodes, 8);
+        assert_eq!(profile.elements, 1);
+        assert_eq!(profile.degrees_of_freedom, 24);
+        assert!(profile.phases.count(Phase::Assembly) > 0);
+        assert!(profile.total >= profile.writing);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -932,6 +971,80 @@ S
         };
         s += &format!("*NSET, NSET=FIX\n{}*NSET, NSET=PULL\n{}", face(0), face(n));
         s + &CUBE[CUBE.find("*MATERIAL").expect("material")..]
+    }
+
+    /// A bar flies to a wall in a step with automatic switching: the increments through
+    /// the impact are recorded as explicit, those of the flight as implicit, and the step of
+    /// the results has an explicit span between them.
+    #[test]
+    fn automatic_switching_is_recorded_per_increment() {
+        let dir = std::env::temp_dir().join(format!("plx-solve-auto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (e, rho, cells, bar, side, v0) = (210000.0e6_f64, 7850.0_f64, 20, 0.1, 0.01, 1.0);
+        let duration = 2.0 * bar / (e / rho).sqrt();
+        let gap = 30.0 * duration * v0;
+        let period = 50.0 * duration;
+        let mut s = String::from("*NODE\n");
+        let corners = [(0.0, 0.0), (side, 0.0), (side, side), (0.0, side)];
+        for i in 0..=cells {
+            for (c, (y, z)) in corners.iter().enumerate() {
+                let x = bar * i as f64 / cells as f64;
+                s.push_str(&format!("{}, {x}, {y}, {z}\n", 1 + 4 * i + c));
+            }
+        }
+        for (k, x) in [bar + gap, bar + gap + 0.01].iter().enumerate() {
+            for (c, (y, z)) in [(-0.01, -0.01), (0.02, -0.01), (0.02, 0.02), (-0.01, 0.02)]
+                .iter()
+                .enumerate()
+            {
+                s.push_str(&format!("{}, {x}, {y}, {z}\n", 1001 + 4 * k + c));
+            }
+        }
+        s.push_str("*ELEMENT, TYPE=C3D8, ELSET=BAR\n");
+        for i in 0..cells {
+            let n: Vec<String> = (0..2)
+                .flat_map(|k| (0..4).map(move |c| (1 + 4 * (i + k) + c).to_string()))
+                .collect();
+            s.push_str(&format!("{}, {}\n", i + 1, n.join(", ")));
+        }
+        s.push_str(&format!(
+            "*ELEMENT, TYPE=C3D8, ELSET=WALL\n1001, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008\n\
+             *ELSET, ELSET=EALL\nBAR, WALL\n*NSET, NSET=WALLN, GENERATE\n1001, 1008, 1\n\
+             *NSET, NSET=BARN, GENERATE\n1, {}, 1\n*ELSET, ELSET=BAREND\n{cells}\n\
+             *SURFACE, NAME=SLAVE, TYPE=ELEMENT\nBAREND, S2\n\
+             *SURFACE, NAME=MASTER, TYPE=ELEMENT\nWALL, S1\n\
+             *MATERIAL, NAME=STEEL\n*ELASTIC\n{e}, 0\n*DENSITY\n{rho}\n\
+             *SOLID SECTION, ELSET=EALL, MATERIAL=STEEL\n\
+             *SURFACE INTERACTION, NAME=SI\n*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=LINEAR\n1e15\n\
+             *CONTACT PAIR, INTERACTION=SI, TYPE=NODE TO SURFACE\nSLAVE, MASTER\n\
+             *INITIAL CONDITIONS, TYPE=VELOCITY\nBARN, 1, {v0}\n\
+             *STEP\n*DYNAMIC, INTEGRATION=AUTOMATIC\n{}, {period}\n\
+             *BOUNDARY\nWALLN, 1, 3, 0\n*NODE FILE\nU\n*END STEP\n",
+            4 * cells + 4,
+            period / 25.0
+        ));
+        let mut run = Run::start(1, &dir, "Auto", &s).unwrap();
+        let status = run.wait();
+        let output = run.new_output();
+        assert_eq!(status, JobStatus::Completed, "{output:#?}");
+        let solved = run.solver_results().unwrap();
+        assert!(solved.convergence.iter().any(|c| c.explicit), "{output:#?}");
+        assert!(solved.convergence.iter().any(|c| !c.explicit));
+        let import = plx_results::from_solver(&solved);
+        let steps = plx_results::steps::ResultSteps::new(
+            &import.increments,
+            &solved.steps,
+            &solved.convergence,
+            None,
+        );
+        let spans = &steps.steps[0].explicit;
+        assert!(!spans.is_empty());
+        assert!(
+            spans
+                .iter()
+                .all(|(a, b)| a < b && *b <= period * (1.0 + 1e-9))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

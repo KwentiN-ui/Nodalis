@@ -16,6 +16,8 @@ pub const ROUND_POINTS: usize = 24;
 /// A named beam profile.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CrossSection {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     pub profile: BeamProfile,
 }
@@ -23,6 +25,14 @@ pub struct CrossSection {
 impl CrossSection {
     /// Prefix of new cross-sections' names, like `Cross_Section-1`.
     pub const PREFIX: &'static str = "Cross_Section";
+
+    pub fn new(name: impl Into<String>, profile: BeamProfile) -> Self {
+        Self {
+            id: crate::Id::new(),
+            name: name.into(),
+            profile,
+        }
+    }
 }
 
 /// Cross-section of a beam, with CalculiX's dimensions: the 1-direction is the normal of
@@ -63,6 +73,45 @@ pub enum BeamProfile {
     },
     /// A profile sketched as polygons, see [`Sketch`].
     Sketch(Sketch),
+    /// A steel wire rope: a beam whose bending stiffness is far below that of a solid bar of
+    /// its diameter, because its wires slide against each other. Written as a general
+    /// profile with the metallic area `fill · π d² / 4` and the second moment of
+    /// [`RopeBending`]; the material's Young's modulus is the rope modulus. Drawn as a
+    /// circle of the rope's diameter, which contact also takes as its radius.
+    Rope {
+        diameter: f64,
+        /// Diameter of the outer wires, which sets the stiffness of sliding wires.
+        wire: f64,
+        /// Metallic area over the area of the circle `π d² / 4`.
+        fill: f64,
+        bending: RopeBending,
+    },
+}
+
+/// How the bending stiffness of a rope is given: between the two limits of the rope
+/// models (Costello, Papailiou) or as the value of a bending test.
+///
+/// - Slip: every wire bends about its own axis, `EI_min = E A_m δ² / 16` (the wires as
+///   round bars of diameter `δ` and metallic area `A_m`).
+/// - Stick: the wires act as one section, `EI_max = E A_m d² / 16` (the metallic area
+///   spread over the circle of the rope).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum RopeBending {
+    /// The share between slip (0) and stick (1).
+    Share(f64),
+    /// The effective second moment of area `EI / E` of a measured bending stiffness.
+    Inertia(f64),
+}
+
+impl RopeBending {
+    pub const DEFAULT: Self = RopeBending::Share(0.1);
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RopeBending::Share(_) => "Between slip and stick",
+            RopeBending::Inertia(_) => "Measured (EI / E)",
+        }
+    }
 }
 
 /// A profile drawn as closed polygons in the 1-2 plane: the outline first, then its holes.
@@ -212,7 +261,7 @@ pub struct Dimension<'a> {
 
 impl BeamProfile {
     /// The profiles with dimensions of a millimetre, in SI units.
-    pub const ALL: [BeamProfile; 10] = [
+    pub const ALL: [BeamProfile; 11] = [
         BeamProfile::Rect { a: 1e-3, b: 1e-3 },
         BeamProfile::Circ { radius: 1e-3 },
         BeamProfile::Pipe {
@@ -254,6 +303,12 @@ impl BeamProfile {
             k: 5.0 / 6.0,
         },
         BeamProfile::Sketch(Sketch { loops: Vec::new() }),
+        BeamProfile::Rope {
+            diameter: 1e-3,
+            wire: 1e-3 / 16.0,
+            fill: 0.55,
+            bending: RopeBending::DEFAULT,
+        },
     ];
 
     /// Whether the solver has the profile as a beam section of its own; the others are written
@@ -291,6 +346,7 @@ impl BeamProfile {
             BeamProfile::L { .. } => "Angle (L)",
             BeamProfile::General { .. } => "General (A, I)",
             BeamProfile::Sketch(_) => "Sketch",
+            BeamProfile::Rope { .. } => "Rope",
         }
     }
 
@@ -358,6 +414,8 @@ impl BeamProfile {
             BeamProfile::T { h, tw, tf, .. } => share((h - tf) * tw),
             BeamProfile::L { h, t, .. } => share(h * t),
             BeamProfile::General { k, .. } => k,
+            // Shear hardly matters for a slender rope; torsion is k G 2 I, small as I.
+            BeamProfile::Rope { .. } => 5.0 / 6.0,
             // A sketch may be anything; that of a solid section.
             BeamProfile::Rect { .. } | BeamProfile::Circ { .. } | BeamProfile::Sketch(_) => {
                 5.0 / 6.0
@@ -393,6 +451,22 @@ impl BeamProfile {
                 [area, i11, i22, k].into_iter().all(positive)
             }
             BeamProfile::Sketch(ref sketch) => sketch.problem().is_none(),
+            BeamProfile::Rope {
+                diameter,
+                wire,
+                fill,
+                bending,
+            } => {
+                positive(diameter)
+                    && positive(wire)
+                    && wire <= diameter
+                    && positive(fill)
+                    && fill <= 1.0
+                    && match bending {
+                        RopeBending::Share(s) => (0.0..=1.0).contains(&s),
+                        RopeBending::Inertia(i) => positive(i),
+                    }
+            }
         }
     }
 
@@ -466,6 +540,38 @@ impl BeamProfile {
             ],
             // Its points are edited in the sketch, not exposed one by one.
             BeamProfile::Sketch(_) => Vec::new(),
+            BeamProfile::Rope {
+                diameter,
+                wire,
+                fill,
+                bending,
+            } => {
+                let mut dims = vec![
+                    length(Field::Diameter, "Rope diameter (d)", diameter),
+                    length(Field::WireDiameter, "Wire diameter", wire),
+                    Dimension {
+                        field: Field::FillFactor,
+                        label: "Fill factor",
+                        quantity: None,
+                        value: fill,
+                    },
+                ];
+                dims.push(match bending {
+                    RopeBending::Share(share) => Dimension {
+                        field: Field::RopeBending,
+                        label: "Slip (0) to stick (1)",
+                        quantity: None,
+                        value: share,
+                    },
+                    RopeBending::Inertia(i) => Dimension {
+                        field: Field::RopeBending,
+                        label: "EI / E",
+                        quantity: Some(Quantity::SecondMomentOfArea),
+                        value: i,
+                    },
+                });
+                dims
+            }
         }
     }
 
@@ -513,6 +619,7 @@ impl BeamProfile {
             | BeamProfile::U { h, b, .. }
             | BeamProfile::L { h, b, .. } => [b, h],
             BeamProfile::General { area, i11, i22, .. } => equivalent_rectangle(area, i11, i22),
+            BeamProfile::Rope { diameter, .. } => [diameter, diameter],
             BeamProfile::Sketch(ref sketch) => {
                 let points: Vec<[f64; 2]> = sketch.loops.first().cloned().unwrap_or_default();
                 let (mut min, mut max) = ([f64::MAX; 2], [f64::MIN; 2]);
@@ -573,6 +680,7 @@ impl BeamProfile {
         match *self {
             BeamProfile::Rect { a, b } => vec![rect([-a / 2.0, -b / 2.0], [a / 2.0, b / 2.0])],
             BeamProfile::Circ { radius } => vec![circle(radius)],
+            BeamProfile::Rope { diameter, .. } => vec![circle(diameter / 2.0)],
             BeamProfile::Pipe { radius, thickness } => {
                 vec![circle(radius), circle(radius - thickness)]
             }
@@ -640,6 +748,46 @@ impl BeamProfile {
         }
     }
 
+    /// The metallic area of a rope.
+    pub fn rope_area(&self) -> Option<f64> {
+        match *self {
+            BeamProfile::Rope { diameter, fill, .. } => {
+                Some(fill * std::f64::consts::PI * diameter * diameter / 4.0)
+            }
+            _ => None,
+        }
+    }
+
+    /// The second moments of area of a rope with sliding wires, with sticking wires and
+    /// the one it is computed with, see [`RopeBending`].
+    pub fn rope_inertias(&self) -> Option<[f64; 3]> {
+        let BeamProfile::Rope {
+            diameter,
+            wire,
+            bending,
+            ..
+        } = *self
+        else {
+            return None;
+        };
+        let area = self.rope_area()?;
+        let slip = area * wire * wire / 16.0;
+        let stick = area * diameter * diameter / 16.0;
+        let used = match bending {
+            RopeBending::Share(s) => slip + s * (stick - slip),
+            RopeBending::Inertia(i) => i,
+        };
+        Some([slip, stick, used])
+    }
+
+    /// The radius contact takes for the beam's axis: that of a rope, none for others.
+    pub fn contact_radius(&self) -> Option<f64> {
+        match *self {
+            BeamProfile::Rope { diameter, .. } => Some(diameter / 2.0),
+            _ => None,
+        }
+    }
+
     /// Area, centroid and second moments of area of the profile, exact for round ones too.
     pub fn properties(&self) -> SectionProperties {
         match *self {
@@ -654,6 +802,16 @@ impl BeamProfile {
                 i22,
                 i12: 0.0,
             },
+            BeamProfile::Rope { .. } => {
+                let [_, _, i] = self.rope_inertias().unwrap_or_default();
+                SectionProperties {
+                    area: self.rope_area().unwrap_or_default(),
+                    centroid: [0.0; 2],
+                    i11: i,
+                    i22: i,
+                    i12: 0.0,
+                }
+            }
             _ => {
                 let loops: Vec<Vec<[f64; 2]>> =
                     self.outlines().into_iter().map(|o| o.points).collect();

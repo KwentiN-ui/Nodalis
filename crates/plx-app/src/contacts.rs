@@ -52,6 +52,47 @@ impl MasterSlave {
         }
     }
 
+    /// For contact pairs: the slave may also be whole parts, so that a rope or beam part
+    /// touches the master with its nodes (node to surface contact).
+    pub fn new_pair(faces: Target) -> Self {
+        Self {
+            slave: RegionDraft::new(PART_SOURCES, faces),
+            ..Self::new(faces)
+        }
+    }
+
+    /// [`Self::from_regions`] for a contact pair, see [`Self::new_pair`].
+    pub fn pair_from_regions(
+        master: &Region,
+        slave: &Region,
+        faces: Target,
+        mesh: &FeMesh,
+    ) -> Self {
+        Self {
+            slave: RegionDraft::from_region(slave, PART_SOURCES, faces, mesh),
+            ..Self::from_regions(master, slave, faces, mesh)
+        }
+    }
+
+    /// For contact regions: either side may also be whole parts, a rope or beam part
+    /// touching the surface of the other side.
+    pub fn new_region(faces: Target) -> Self {
+        Self {
+            master: RegionDraft::new(PART_SOURCES, faces),
+            slave: RegionDraft::new(PART_SOURCES, faces),
+            side: Side::Master,
+        }
+    }
+
+    /// [`Self::from_regions`] for a contact region, see [`Self::new_region`].
+    pub fn region_from_regions(a: &Region, b: &Region, faces: Target, mesh: &FeMesh) -> Self {
+        Self {
+            master: RegionDraft::from_region(a, PART_SOURCES, faces, mesh),
+            slave: RegionDraft::from_region(b, PART_SOURCES, faces, mesh),
+            side: Side::Master,
+        }
+    }
+
     pub fn current(&self) -> &RegionDraft {
         match self.side {
             Side::Master => &self.master,
@@ -107,6 +148,14 @@ impl MasterSlave {
     }
 }
 
+/// Picked faces, a surface or whole parts: the slave side of a contact pair and either side
+/// of a contact region, which may be a rope or beam part.
+const PART_SOURCES: &[crate::setup::Source] = &[
+    crate::setup::Source::Selection,
+    crate::setup::Source::Surface,
+    crate::setup::Source::Parts,
+];
+
 /// Master faces in the primary, slave faces in the secondary highlight colour.
 pub fn master_slave_highlight(model: &Model, master: &Region, slave: &Region) -> Highlight {
     let mut highlight = region_highlight(model, master);
@@ -115,12 +164,6 @@ pub fn master_slave_highlight(model: &Model, master: &Region, slave: &Region) ->
     highlight.secondary_lines = slave.lines;
     highlight.nodes.extend(slave.nodes);
     highlight
-}
-
-fn color_row(ui: &mut Ui, label: &str, color: &mut [u8; 3]) {
-    ui.label(label);
-    ui.color_edit_button_srgb(color);
-    ui.end_row();
 }
 
 const ADJUST_HELP: &str = "Moves slave nodes onto the master surface before the analysis, so \
@@ -168,8 +211,6 @@ pub fn tie_form(
         .on_hover_text(ADJUST_HELP);
     ui.end_row();
     regions.ui(ui, model);
-    color_row(ui, "Master color", &mut tie.master_color);
-    color_row(ui, "Slave color", &mut tie.slave_color);
     if !model.fe.properties.space.is_2d() || tie.cyclic.is_some() {
         cyclic_symmetry_rows(ui, model, &mut tie.cyclic);
         if tie.cyclic.is_some() {
@@ -243,7 +284,7 @@ fn sector_rows(
         return;
     };
     ui.label("Results show");
-    ui.horizontal_wrapped(|ui| {
+    crate::layout::wrapped_row(ui, |ui| {
         ui.radio_value(&mut cyclic.display, SectorDisplay::Single, "Single sector")
             .on_hover_text("Only the modelled sector (NGRAPH=1).");
         ui.radio_value(&mut cyclic.display, SectorDisplay::All, "All sectors")
@@ -310,15 +351,9 @@ pub fn contact_pair_form(
     regions: &mut MasterSlave,
 ) {
     ui.label("Surface Interaction");
-    egui::ComboBox::from_id_salt("contact interaction")
-        .selected_text(pair.interaction.as_str())
-        .width(crate::dock::fit_width(ui, 200.0))
-        .show_ui(ui, |ui| {
-            for interaction in &model.fe.surface_interactions {
-                let name = interaction.name.clone();
-                ui.selectable_value(&mut pair.interaction, name, &interaction.name);
-            }
-        });
+    let interactions = (model.fe.surface_interactions.iter()).map(|i| (i.id, i.name.as_str()));
+    let salt = "contact interaction";
+    crate::pick_item::item_combo(ui, salt, &mut pair.interaction, interactions, None, 200.0);
     ui.end_row();
     ui.label("Method");
     egui::ComboBox::from_id_salt("contact method")
@@ -366,12 +401,14 @@ pub fn contact_pair_form(
         );
     }
     regions.ui(ui, model);
-    color_row(ui, "Master color", &mut pair.master_color);
-    color_row(ui, "Slave color", &mut pair.slave_color);
 }
 
 pub fn validate_contact_pair(pair: &ContactPair, fe: &FeModel) -> Result<(), String> {
-    if !(fe.surface_interactions.iter()).any(|s| s.name == pair.interaction) {
+    if pair
+        .interaction
+        .and_then(|i| fe.surface_interaction(i))
+        .is_none()
+    {
         return Err(
             "Please select a Surface Interaction; create one under Surface Interactions first."
                 .into(),
@@ -782,7 +819,7 @@ impl Rows<'_> {
     fn gap_conductance(&mut self, ui: &mut Ui, conductance: &mut GapConductance) {
         let text = "Constant conductance or table over pressure and temperature.";
         self.row(ui, ("Kind", text), |ui| {
-            ui.horizontal_wrapped(|ui| {
+            crate::layout::wrapped_row(ui, |ui| {
                 let constant = matches!(conductance, GapConductance::Constant(_));
                 let mut response = ui.radio(constant, "Constant");
                 if response.clicked() && !constant {

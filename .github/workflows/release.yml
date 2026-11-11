@@ -36,10 +36,7 @@ jobs:
             target/typst
           key: gmsh-windows-${{ hashFiles('scripts/fetch_gmsh.py', 'scripts/build_user_guide.sh') }}
       - name: MinGW und NSIS
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends gcc-mingw-w64-x86-64 \
-            g++-mingw-w64-x86-64 nsis
+        run: scripts/ci_apt_install.sh gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 nsis
       - run: scripts/build_windows_installer.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -80,9 +77,8 @@ jobs:
           key: appimage-${{ hashFiles('scripts/fetch_gmsh.py', 'scripts/build_appimage.sh', 'scripts/build_user_guide.sh') }}
       - name: Systembibliotheken
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends libasound2-dev libglu1-mesa \
-            libxft2 libxcursor1 libxinerama1 libgomp1 file zsync
+          scripts/ci_apt_install.sh libasound2-dev libglu1-mesa libxft2 libxcursor1 \
+            libxinerama1 libgomp1 file zsync
       - run: scripts/build_appimage.sh
       - uses: actions/upload-artifact@v4
         with:

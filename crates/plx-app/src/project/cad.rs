@@ -1,5 +1,5 @@
-//! The CAD Operation block of the project schematic: a fillet or chamfer of picked edges, or
-//! planar faces moved, of the geometry linked to it, which gives the changed geometry on to analyses or further
+//! The CAD Operation block of the project schematic: a fillet or chamfer of picked edges,
+//! planar faces moved, or parts and faces split, of the geometry linked to it, which gives the changed geometry on to analyses or further
 //! operations, Blender-modifier-like. Its length is a row with a pin, so that a parameter
 //! study varies a radius like any other number; every change makes the geometry again in
 //! Update Project, and the analyses after it mesh it anew.
@@ -49,7 +49,7 @@ impl CadBlock {
     /// Fingerprint of what the result is to be made from now; `None` without input or
     /// before anything is picked.
     fn wanted(&self) -> Option<u64> {
-        if self.operation.entities.is_empty() {
+        if self.operation.needs_picks() && self.operation.entities.is_empty() {
             return None;
         }
         Some(self.operation.fingerprint(self.input.as_ref()?))
@@ -88,8 +88,7 @@ impl CadBlock {
             return Err(problem);
         }
         let entities = operation.resolve(input)?;
-        plx_mesher::apply_cad_operation(input, operation.kind, &entities, operation.value)
-            .map_err(|e| e.to_string())
+        plx_mesher::apply_operation(input, operation, &entities).map_err(|e| e.to_string())
     }
 
     /// Makes its geometry anew; returns a line on what it made, or why it failed, which
@@ -258,11 +257,17 @@ pub(super) fn cad_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<R
             collection: false,
             partial: false,
             widget: None,
-            tip: format!(
-                "What the operation does and to what: double-click the block to pick the {} \
-                 on the geometry and to see the result.",
-                operation.kind.picked_noun()
-            ),
+            tip: if operation.needs_picks() {
+                format!(
+                    "What the operation does and to what: double-click the block to pick the \
+                     {} on the geometry and to see the result.",
+                    operation.kind.picked_noun()
+                )
+            } else {
+                "What the operation does: double-click the block to choose the plane and to \
+                 see the result."
+                    .to_owned()
+            },
             path: vec![CAD_OPERATION_ROW.to_owned()],
         },
         Row {

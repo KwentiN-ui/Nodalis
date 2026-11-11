@@ -217,7 +217,8 @@ pub enum EigenTable {
     /// `(0, [axis x, y, z])` with the reference direction, then rows
     /// `(mode, [nodal diameter, +1 forward / -1 backward])`.
     CyclicTurningDirection,
-    /// Rows `(mode, [+1 forward or −1 backward])` and a row `(0, [axis x, y, z])`.
+    /// Rows `(mode, [+1 forward or −1 backward, nodal diameter or −1])` and a row
+    /// `(0, [axis x, y, z])`; the nodal diameter is Nodalis's own column.
     TurningDirection,
 }
 
@@ -364,7 +365,15 @@ fn write_eigen_table(
             }
             writeln!(out)?;
             writeln!(out)?;
-            writeln!(out, " MODE NO     TURNING DIRECTION (F=FORWARD,B=BACKWARD)")?;
+            let diameters = block.rows.iter().any(|r| r.0 != 0 && r.1.len() > 1);
+            if diameters {
+                writeln!(
+                    out,
+                    " MODE NO     TURNING DIRECTION (F=FORWARD,B=BACKWARD)   NODAL DIAMETER"
+                )?;
+            } else {
+                writeln!(out, " MODE NO     TURNING DIRECTION (F=FORWARD,B=BACKWARD)")?;
+            }
             writeln!(out)?;
             for (id, values) in block.rows.iter().filter(|r| r.0 != 0) {
                 let direction = if values.first().copied().unwrap_or(1.0) >= 0.0 {
@@ -372,7 +381,14 @@ fn write_eigen_table(
                 } else {
                     'B'
                 };
-                writeln!(out, "{id:>7}          {direction}")?;
+                write!(out, "{id:>7}          {direction}")?;
+                if diameters {
+                    match values.get(1) {
+                        Some(d) if *d >= 0.0 => write!(out, "{:>29}", *d as u32)?,
+                        _ => write!(out, "{:>29}", "-")?,
+                    }
+                }
+                writeln!(out)?;
             }
             return Ok(());
         }

@@ -257,8 +257,10 @@ frequency step cannot be linked, as the `.frd` file does not hold them.]
 === CAD Operation <cad-operation-block>
 
 A CAD Operation block changes geometry before it is meshed: it rounds (#ui("Fillet")) or bevels
-(#ui("Chamfer")) picked edges of solids or corners of flat faces, or moves picked planar faces (#ui("Push/Pull")), of the geometry
-linked to it and gives the changed geometry on.
+(#ui("Chamfer")) picked edges of solids or corners of flat faces, moves picked planar faces
+(#ui("Push/Pull")), splits parts and faces along a plane (#ui("Split by Plane"),
+@split-by-plane) or splits the face around a hole into a ring (#ui("Split around Hole"),
+@split-around-hole), of the geometry linked to it and gives the changed geometry on.
 Add it with #menu("Sources", "CAD Operation") or from the picker, drag the
 #ui("Geometry") of a file block, of an analysis with imported geometry or of another CAD
 Operation block to the pin on the left of its #ui("Geometry") row, and drag the pin on the
@@ -276,10 +278,13 @@ radius, distance or offset; #ui("Preview") applies it and shows the result, #ui(
 #fields(
   [Geometry], [Left pin: the geometry to change. Right pin: the changed geometry, with its
     state.],
-  [Fillet / Chamfer / Push/Pull], [What it does and to how many edges, corners or faces.],
-  [Radius / Distance / Offset], [The radius of the fillet, the distance of the chamfer from
-    the edge on both faces, or how far the faces move: outwards when positive, inwards when
-    negative. Zero leaves the geometry as it is, so that a parameter study can
+  [Fillet / Chamfer / Push/Pull / Split], [What it does and to how many edges, corners or
+    faces, or along which plane.],
+  [Radius / Distance / Offset / Width], [The radius of the fillet, the distance of the chamfer
+    from the edge on both faces, how far the faces move (outwards when positive, inwards when
+    negative), where the plane of a split lies, or the width of the ring around a hole. Zero
+    leaves the geometry as it is (except for a split by plane, where it is the plane through
+    the origin or the face), so that a parameter study can
     switch the operation off in some design points. Type or drag it in place, or drop the value of a Parameters block or an
     input of a parameter study on its pin (@parameter-study): every design point then makes the
     geometry again, and the analyses after it mesh and solve it anew.],
@@ -320,6 +325,44 @@ faces move one after the other, so two faces that meet both move as a whole.
 
 #screenshot("cad-push-pull.png", [The top face of a stepped bar picked to make it thicker])
 
+==== Split by Plane <split-by-plane>
+
+#ui("Split by Plane") cuts every part a plane runs through, so that the faces on either side
+can be picked on their own, a symmetry model keeps only one half, or a region gets its own
+mesh size. Choose the #ui("Plane") in the editor:
+
+- #ui("YZ plane"), #ui("XZ plane") or #ui("XY plane"): a plane of the global coordinate system,
+  moved along its axis by the #ui("Offset"); the editor draws its outline over the geometry.
+- #ui("Plane of a face"): click a planar face; the cut lies parallel to it, the #ui("Offset")
+  into the part.
+
+#ui("Keep") chooses what stays: #ui("Both sides"), or only the side along the positive axis
+(#ui("+X side")) or the negative one, or for the plane of a face the part #ui("Beyond the cut") or
+the slice #ui("Between face and cut"). Parts wholly on the side that goes are removed.
+
+A solid cut in two becomes two solids. With #ui("Keep the pieces as one part") on, the default,
+they form a compound part (@compound-parts) named like the solid: the FE model still has one
+part, with its section and material, and the pieces are tied where they were cut. Turned off,
+each piece is a part of its own, named after the solid with -1, -2. Faces of shell parts are
+cut into faces that share the cut edge, so a shell stays one part with a common mesh along the
+cut. When the plane runs through no part and both sides are kept, the block reports so.
+
+#screenshot("cad-split-plane.png", [A plate split by the YZ plane at an offset of 70 mm: the
+  preview shows the two solids, which stay one part of the FE model])
+
+==== Split around Hole <split-around-hole>
+
+#ui("Split around Hole") cuts a ring around a hole into the planar face it goes through, as wide
+as the #ui("Width"): the ring is then a face of its own to pick, for a bearing load, a bolt
+head's contact area or a finer mesh next to the hole. Click the circular edges of the holes on
+the faces to split; a hole whose edge is two half circles needs only one of them, and several
+holes, also on top and bottom, are split in one go. A ring wider than the face is cut off at the
+face's edges. Edges that are no circles, and holes in curved faces, are refused with the reason.
+This works on solids and on shell parts alike; the parts keep their names.
+
+#screenshot("cad-hole-ring.png", [The upper edge of a hole picked and the preview: a ring of
+  8 mm around the hole is a face of its own])
+
 ==== Example: a fillet radius study <cad-fillet-study>
 
 How much does a larger fillet at the shoulder of a stepped bar lower the stress? The project
@@ -330,7 +373,8 @@ for the answer has five blocks:
   the shoulder.
 + The analysis #ui("Tension") takes its geometry from the fillet block, holds the wide end
   and pulls the narrow end by 0.04 mm.
-+ A Measure block (@measure-block) reads the largest von Mises stress of its step.
++ A Measure block (@measure-block) reads the von Mises stresses of its step, and a Math block
+  (@math-switch) takes their maximum.
 + A parameter study takes that value as its output and gives its input to the
   #ui("Radius") of the fillet block: drag the pin of the study's #ui("Inputs") row onto the pin
   of the #ui("Radius") row.
@@ -388,36 +432,64 @@ several numbers by an index, for variants such as three sheet thicknesses. Add t
 #menu("Parameters", "Math") and #menu("Parameters", "Switch"), or
 search them with #key("Shift+A").
 
-#screenshot("schematic-math-switch.png", [A parameter study varies the width and the variant:
-  the Math block Height doubles the width, the Switch block Thickness picks the thickness of
-  the variant, and both results are outputs of the study])
+#screenshot("schematic-math-switch.png", [The Math block Height doubles the width, the Switch
+  block Thickness picks the thickness of the variant, and the Math block Gap subtracts one from
+  the other. Gap takes millimetres from the height, so the thickness is a length too])
 
 Their inputs are rows with a violet pin on the left: type a number, or drag a value pin to it,
 from a Parameters block, from another Math or Switch block, from the #ui("Inputs") of a
-parameter study (@parameter-study) or from the value of a Measure block (@measure-block), such as the largest
-stress, to compute a key figure from results. The #ui("Result") row at the bottom shows the number the
-block gives; drag its pin on the right to any number of the same kind, to another Math or
-Switch block or to the #ui("Outputs") of a study. Blocks that take the result are out of date
-when it changes, as with a parameter.
+parameter study (@parameter-study) or from the value of a Measure block (@measure-block), such as the force
+at a node, to compute a key figure from results. The #ui("Result") row at the bottom shows the number the
+block gives; drag its pin on the right to a number of its kind, to another Math or Switch
+block or to the #ui("Outputs") of a study. Blocks that take the result are out of date when it
+changes, as with a parameter.
 
 #fields(
   [Operation], [Math only: #ui("Add") (A + B), #ui("Subtract") (A - B), #ui("Multiply")
     (A × B), #ui("Divide") (A / B), #ui("Minimum"), #ui("Maximum") or #ui("Clamp"), which
     keeps #ui("Value") between #ui("Min") and #ui("Max"). A product or quotient gives no
-    result when dividing by zero.],
-  [Kind], [What the numbers are, as for a parameter: a length, a force, a count or a factor.
-    #ui("Any") takes the kind of the first number linked to the block. The B of
-    #ui("Multiply") and #ui("Divide") is always a factor, so a length times 2 stays a
-    length.],
+    result when dividing by zero. Under #ui("Of a series"): #ui("Max"), #ui("Min"),
+    #ui("Max Abs") (the value of largest magnitude, with its sign) and #ui("Mean") make one
+    number of the series at their single input #ui("Values") (@series).],
   [Index], [Switch only: which choice the block gives, counted from 1. Out of range, the block
     gives no result.],
-  [Choice 1, 2, ...], [Switch only: the numbers to choose from. #ui("Add") adds one,
-    #ui("Remove") removes the last one with its link; a switch holds up to 20.],
+  [Choice 1, 2, ...], [Switch only: the numbers to choose from. A wire dropped on the empty
+    pin below the last choice adds a choice with that link, as in Blender (@node-groups).
+    #ui("Add") adds one to type, #ui("Remove") removes the last one with its link; a switch
+    holds up to 20.],
 )
 
-A value link joins like with like here too: once a block has a kind, it takes only numbers of
-that kind, and the output pane says why a link was refused. Changing the operation removes
-links to inputs the block no longer has.
+==== Units of the numbers
+
+A Math or Switch block has no unit of its own: its links give it one. A sum, a difference, a
+minimum, a maximum, a clamp and a switch take numbers of one kind, the kind of the first number
+linked to them or of the number their result goes to; a link that brings another kind is
+refused, and the output pane says why. A product and a quotient combine the units of A and B
+instead, so a force over a length is a stiffness, for instance the reaction force over the
+displacement that two Measure blocks read from the results of a step:
+
+#screenshot("schematic-math-units.png", [The stiffness of a spring from a force and the travel
+  it causes: 4912 N over 10 mm gives 491.2 N/mm])
+
+The kind of the result follows from those of A and B: a length times a length is an area, a
+force times a length a moment, a length over a time a velocity and a length over a length a
+factor without unit. It also works the other way round: with a force at A and the result linked
+to a stiffness, B is a length and its field shows millimetres. An input of a product that no
+link gives, and that the other numbers do not make anything else, is a factor, so a length
+times 2 stays a length. A link is refused only when its unit does not fit, such as a length at
+a sum of forces, or a moment from a product whose result goes to a stiffness.
+
+An intermediate result may have any unit. When no quantity has its unit, such as a force times
+a force, the block shows it in SI base units, and it goes on to other Math blocks only. Once a
+later block brings it back to a unit a quantity has, it is that quantity again and goes to any
+number of it. Numbers of the same unit fit together whatever their name: a moment goes to an
+energy and then takes that name.
+
+#screenshot("schematic-math-derived.png", [A force squared has no quantity of its own and is
+  shown in kg² m²/s^4; divided by the force again, it is a force of 4912 N])
+
+Changing the operation removes links to inputs the block no longer has, and links whose kinds
+no longer fit, such as the length at B when a quotient of a force and a length becomes a sum.
 
 Every number field of a block, in a Math, Switch or Parameters block, a mesh block or an
 exposed parameter, works the same way. A number with more digits than the field holds shows
@@ -428,6 +500,23 @@ names the block it comes from.
 
 #screenshot("schematic-number-fields.png", [A of the Math block comes from the parameter
   Length: the field shows 91.000273 mm, the tooltip the whole value 91.0002734375 mm])
+
+==== Series <series>
+
+A value link carries either one number or a *series*: a list of numbers, like an array of
+NumPy. Two Measure blocks give series (@measure-block): the values of a field at the nodes of
+a region, and the whole history of a step. A series goes only to a Math block or to a Plot
+block (@plot-block); a link of a series to a number that takes one, such as a parameter or a
+column of a study, is refused, and the output pane says so.
+
+A Math block computes with series value by value. A single number goes with every value of the
+series, so A × 2 doubles every value, and two series go pairwise, so they must have the same
+number of values; otherwise the block has no result and its tooltip says why. A value without a
+result, such as one divided by zero, is a gap in a plot. The #ui("Result") row then shows the
+number of values and their range, such as "21 values, 0 N to 80000 N", and gives a series.
+#ui("Max"), #ui("Min"), #ui("Max Abs") and #ui("Mean") turn a series back into one number: the
+largest von Mises stress is a Measure block of the field values of STRESS MISES followed by a
+Math block #ui("Max"). Units go with the series as with numbers.
 
 === Exposed parameters <exposed-parameters>
 
@@ -449,8 +538,9 @@ rename it or to remove the parameter, which leaves the number as it is. Type a v
 or drag a value pin of a Parameters block to its pin: the number then follows the parameter,
 and the field in the dialog is read-only while the link is there. Renaming the item keeps the
 parameter. The numbers that can be exposed are those of loads, boundary conditions, defined
-fields and initial conditions, of materials and sections, the time period and first increment
-of steps and the number of modes of a frequency step. A Materials block (@materials-block)
+fields and initial conditions, of materials and sections, the duration and the number of frames
+of static, heat transfer, visco and Dynamic steps, the number of modes of a frequency step and
+the numbers of the transforms under #ui("Mesh Operations") (@mesh-tools). A Materials block (@materials-block)
 exposes the numbers of its own materials in the same way, a Cross-Sections block
 (@cross-sections-block) the dimensions of its cross-sections.
 
@@ -458,11 +548,12 @@ Exposing a number does not change the analysis: only a new value makes it out of
 
 === Measure <measure-block>
 
-A Measure block computes one key figure from the results of a step: the largest von Mises
-stress, the displacement of a node or of any point of the model, a total force or an
-eigenfrequency. It is the number a
-parameter study reads, and a quick way to see the figure that matters without opening the results.
-Add it with #menu("Evaluate", "Measure"); it starts with the largest von Mises stress.
+A Measure block reads from the results of a step: the values of a field at the nodes of a
+region, the displacement of a node or of any point of the model, a history output such as a
+total force, or an eigenfrequency. One number is what a parameter study reads, and a quick way
+to see the figure that matters without opening the results; the values of a field and a whole
+history are series (@series) for Math and Plot blocks. Add it with #menu("Evaluate",
+"Measure"); it starts with the von Mises stresses at all nodes.
 
 #screenshot("measure-blocks.png", [Two Measure blocks: the lowest temperature of the thermal
   step Heat and the largest von Mises stress of the step Load that uses those temperatures])
@@ -479,16 +570,17 @@ last row, the value in its units with the state of the value:
   pane then says why, for example "step 1 has no field STRESS in the results".
 
 The value is computed anew in the background whenever the results or its definition change,
-and the output pane prints it ("Max stress: Maximum of STRESS MISES = 8.6 MPa"). The project
+and the output pane prints it ("Tip load: TOTAL_FORCE RF2 of SUPPORT = -80000 N"). The project
 file keeps the value, so a reopened project shows it at once. The pin on the right of the
-value row gives it to a parameter study (@parameter-study).
+value row gives it to a parameter study (@parameter-study). A series shows how many values it
+has and their range.
 
 #screenshot("measure-editor.png", [The editor of a Measure block])
 
 A double-click on the block opens its editor:
 
 #fields(
-  [Measure], [What it computes: #ui("Field extreme"), #ui("Value at a node"),
+  [Measure], [What it computes: #ui("Field values"), #ui("Value at a node"),
     #ui("Value at a point"), #ui("History output") or #ui("Eigenfrequency").],
   [Shown in], [The unit system of the value; it is stored in SI units.],
   [Field, Component], [The field and its component as the Results workspace names them:
@@ -496,9 +588,11 @@ A double-click on the block opens its editor:
     linked, both are lists of what those results have (a name they lack is shown in the
     warning color); without, they are typed. The value is that of the last increment of the
     step.],
-  [Take], [For a field extreme: #ui("Maximum"), #ui("Minimum") or #ui("Largest magnitude"),
-    which keeps the sign.],
-  [Region], [For a field extreme: all nodes, or a region of the analysis whose results are
+  [Take], [For a history output: #ui("Last value"), the value of the last increment of the
+    step, or #ui("Whole history"), the values of all its increments as a series. A whole
+    history gives a second output #ui("Time") above the values, the time of each value, to
+    plot the values over it.],
+  [Region], [For field values: all nodes, or a region of the analysis whose results are
     linked: a node set of its mesh or model, or the region of a boundary condition or load,
     such as #ui("Displacement_Rotation-1 (boundary condition)"). The region is found on the mesh the results
     were solved on, so a region picked on geometry or on the sides of a mesh block follows
@@ -562,3 +656,53 @@ block's context menu writes the file at once, whatever the state.
 The file holds the mesh only, not the loads or steps of an analysis that takes the same mesh,
 so it reads back as a mesh when an analysis imports it. A path the program cannot write
 shows as an error in the #ui("Mesh") row's tooltip and in the output window.
+
+=== Plot and Preview <plot-block>
+
+The blocks under #ui("Visualize") show results in the schematic itself, without opening an
+analysis. Add them with #menu("Evaluate", "Plot") and #menu("Evaluate", "Preview"), or
+search them with #key("Shift+A").
+
+#screenshot("visualize-blocks.png", [A cantilever bent far by a force at its tip. Force over
+  Deflection plots the reaction force, turned positive by a Math block, over the deflection of
+  the tip, both whole histories of the step; Stress Histogram counts the von Mises stresses of
+  all nodes, whose maximum a Math block Max gives. Beam shows the mesh of the analysis])
+
+A *Plot block* draws the numbers and series (@series) linked to it in the block, and draws
+again whenever they change. Its #ui("Type") row decides what it draws and which inputs it has:
+
+#fields(
+  [Line], [#ui("Y") over #ui("X"), joined by lines. Without a link to #ui("X") the values of
+    #ui("Y") are drawn over their number, 1, 2, 3 and so on. The #ui("Time") of a Measure
+    block of a whole history at #ui("X") draws the history over the time of the step.],
+  [Scatter], [The same as points without lines.],
+  [Histogram], [How many of the #ui("Values") fall into each of #ui("Bins") bins of equal
+    width between the smallest and the largest value, for instance how much of a part sees
+    which stress. #ui("Bins") is a count, typed in the block or linked.],
+)
+
+The axes show the smallest and the largest value and are named after the blocks that give
+them, with their units, which those blocks set. #ui("X") and #ui("Y") of different lengths are
+drawn as far as both go, with a warning in the corner. A single number counts as a series of
+one value.
+
+A *Preview block* shows whatever is linked to its one input, so that a glance at the
+schematic shows it without opening anything. Before a link the row is called #ui("Input");
+it takes the name of what it shows:
+
+#fields(
+  [Mesh], [A small picture of the mesh: drag the #ui("Mesh") of an analysis or of a mesh
+    block there. The parts have the colors of the analysis, seen along the diagonal like the
+    isometric view; a 2D mesh is seen from the front. The picture is drawn anew in the
+    background whenever the mesh changes.],
+  [Value], [A number, drawn large with its unit and the name of the block that gives it.
+    A series (@series) is drawn as a line over its index, with its count, mean, smallest and
+    largest value and standard deviation below.],
+)
+
+A new link replaces the one before, whatever it brought: a Preview block shows one thing.
+Until the analysis is solved, a linked number shows #ui("No value yet").
+
+#screenshot("preview-block.png", [Two Preview blocks: Deflection shows the series of the tip
+  deflection over the step with its statistics, Peak Stress the maximum stress that the Max
+  block gives])

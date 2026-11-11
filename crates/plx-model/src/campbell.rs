@@ -33,6 +33,35 @@ pub struct Mode {
     /// oscillating, as beyond a stability limit.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unstable: bool,
+    /// Number of nodal diameters of the mode about the rotation axis, as the solver finds
+    /// it from the mode shape; `None` where it has no clear one (a rotor that is not
+    /// axisymmetric) or the sweep is older than the column. It tells the frequencies in
+    /// the stationary frame: `f ± n Ω` for `n` nodal diameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodal_diameter: Option<u32>,
+}
+
+/// The frame of reference the diagram shows the frequencies in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Frame {
+    /// The solver's: the frame rotating with the rotor.
+    #[default]
+    Rotating,
+    /// That of an observer at rest, such as a microphone or a sensor on the housing: a mode
+    /// of `n` nodal diameters at `f` in the rotating frame is seen as the forward travelling
+    /// wave `f + n Ω` and the backward travelling wave `|f − n Ω|`.
+    Stationary,
+}
+
+impl Frame {
+    pub const ALL: [Frame; 2] = [Frame::Rotating, Frame::Stationary];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Frame::Rotating => "Rotating (with the rotor)",
+            Frame::Stationary => "Stationary (observer at rest)",
+        }
+    }
 }
 
 /// The modes the solver found at one speed.
@@ -56,6 +85,9 @@ pub struct Setup {
     pub orders: String,
     /// Upper end of the frequency axis in Hz; 0 fits the axis to the modes.
     pub max_frequency: f64,
+    /// The frame of reference of the diagram.
+    #[serde(default)]
+    pub frame: Frame,
 }
 
 impl Default for Setup {
@@ -66,6 +98,7 @@ impl Default for Setup {
             max_runs: 40,
             orders: "1".into(),
             max_frequency: 0.0,
+            frame: Frame::Rotating,
         }
     }
 }

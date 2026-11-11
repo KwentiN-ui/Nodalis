@@ -36,6 +36,17 @@ pub struct Model {
     /// `<job>.eig`).
     #[serde(skip)]
     pub stored_modes_file: Option<std::path::PathBuf>,
+    /// The fibres of expanded shells: the nodes through the thickness of every shell node
+    /// (bottom, middle, top; the ones the elements use), for the selective mass scaling of
+    /// explicit steps. Set by the expansion, empty otherwise.
+    #[serde(default)]
+    pub shell_fibres: Vec<Vec<NodeId>>,
+    /// Whether shells, membranes, beams or trusses were expanded into solids: the
+    /// translations of the expanded model carry bending through thin elements, which the
+    /// multigrid of the iterative solver does not fit (the automatic equation solver stays
+    /// direct while the factor fits). Set by the expansion.
+    #[serde(default)]
+    pub expanded_structure: bool,
     #[serde(skip)]
     element_index: HashMap<ElementId, u32>,
 }
@@ -84,6 +95,60 @@ impl Model {
             NodeRef::Node(id) => vec![*id],
             NodeRef::Set(name) => self.sets.node_sets.get(name).cloned().unwrap_or_default(),
         }
+    }
+
+    /// The body of every node (dense node index to a dense body number): the connected
+    /// components of the mesh over its continuum and structural elements. Springs and gaps
+    /// connect nothing, since they couple bodies only weakly or one-sidedly, and contact
+    /// (no element at all) neither: two bodies that touch stay two bodies. A node of no
+    /// element is a body of its own. The multigrid of the iterative solver never groups
+    /// the nodes of different bodies into one aggregate, so that its coarse spaces hold
+    /// the rigid motion of every body on its own.
+    pub fn node_bodies(&self) -> Vec<u32> {
+        let n = self.nodes.len();
+        let mut parent: Vec<u32> = (0..n as u32).collect();
+        fn root(parent: &mut [u32], mut i: u32) -> u32 {
+            while parent[i as usize] != i {
+                let p = parent[i as usize];
+                parent[i as usize] = parent[p as usize];
+                i = p;
+            }
+            i
+        }
+        for element in &self.elements {
+            if matches!(
+                element.kind.family(),
+                crate::element::ElementFamily::Spring | crate::element::ElementFamily::Gap
+            ) {
+                continue;
+            }
+            let mut first: Option<u32> = None;
+            for &id in &element.nodes {
+                let Some(i) = self.nodes.index(id) else {
+                    continue;
+                };
+                match first {
+                    None => first = Some(i),
+                    Some(f) => {
+                        let (a, b) = (root(&mut parent, f), root(&mut parent, i));
+                        if a != b {
+                            parent[b as usize] = a;
+                        }
+                    }
+                }
+            }
+        }
+        let mut number = vec![u32::MAX; n];
+        let mut count = 0;
+        for i in 0..n as u32 {
+            let r = root(&mut parent, i) as usize;
+            if number[r] == u32::MAX {
+                number[r] = count;
+                count += 1;
+            }
+            number[i as usize] = number[r];
+        }
+        number
     }
 
     /// The element ids a reference stands for.
@@ -157,5 +222,49 @@ impl Analysis {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::element::ElementType;
+
+    #[test]
+    fn bodies_are_the_components_over_the_elements_without_springs() {
+        let mut model = Model::default();
+        for id in 1..=9 {
+            model.nodes.insert(id, [id as f64, 0.0, 0.0]);
+        }
+        // Two tetrahedra that share a node, a third one apart, joined by a spring only,
+        // and a node of no element.
+        for (id, kind, nodes) in [
+            (1, ElementType::C3D4, vec![1, 2, 3, 4]),
+            (2, ElementType::C3D4, vec![4, 5, 6, 7]),
+            (3, ElementType::C3D4, vec![8, 9, 1, 2]),
+        ] {
+            model.insert_element(Element {
+                id,
+                kind,
+                nodes,
+                section: None,
+            });
+        }
+        let mut model2 = model.clone();
+        model2.elements[2].nodes = vec![8, 9, 9, 8];
+        model2.insert_element(Element {
+            id: 4,
+            kind: ElementType::SPRING2,
+            nodes: vec![7, 8],
+            section: None,
+        });
+        let bodies = model.node_bodies();
+        assert!(bodies.iter().all(|&b| b == 0), "{bodies:?}");
+        let bodies = model2.node_bodies();
+        assert_eq!(bodies[..7], [0; 7]);
+        assert_eq!(bodies[7..], [1, 1]);
+        let mut model3 = model2.clone();
+        model3.nodes.insert(10, [0.0; 3]);
+        assert_eq!(model3.node_bodies()[9], 2);
     }
 }

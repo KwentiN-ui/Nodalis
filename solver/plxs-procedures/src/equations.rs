@@ -12,7 +12,10 @@
 //! model, where the multigrid converges in a few dozen iterations and beats the
 //! factorization by far); models with rotations (shells, beams), procedures that solve
 //! many systems with one factorization (the eigenvalue iteration, implicit dynamics) and
-//! small models stay direct while the factor fits into the memory: for a system of at least
+//! small models stay direct while the factor fits into the memory, and so do models of
+//! shells, beams or trusses expanded into solids (translations only, but bending through
+//! elements a fraction of a millimetre thin: the multigrid stalls on them, see
+//! [`Self::for_model`]): for a system of at least
 //! [`AUTOMATIC_FROM`] equations the symbolic analysis tells the size of the factor before
 //! its memory is taken, and beyond [`MEMORY_SHARE`] of the available memory the step solves
 //! iteratively. Each choice falls back to the other once when it fails: a factor that does
@@ -36,6 +39,21 @@ pub const AUTOMATIC_MAX_ITERATIONS: usize = 2000;
 /// work space of the factorization) would take more than this share of the available
 /// memory.
 pub const MEMORY_SHARE: f64 = 0.6;
+
+/// GMRES on the unsymmetric tangent stops at this relative residual.
+pub const UNSYMMETRIC_TOLERANCE: f64 = 1e-10;
+
+/// A GMRES solution with at most this relative residual is good enough for the Newton
+/// iteration; beyond it the equation solver tries harder (see
+/// [`Equations::solve_unsymmetric`]).
+pub const UNSYMMETRIC_ACCEPTED: f64 = 1e-6;
+
+/// The iterative solver as the preconditioner of GMRES: the relative residual it stops
+/// at, and its iterations at most. One digit is enough: the flexible GMRES takes a few
+/// more outer iterations, each far cheaper (a contact gasket sliding with friction solved
+/// 40 % faster than with 1e-4, most of the work went into the inner digits).
+pub const PRECONDITIONER_TOLERANCE: f64 = 1e-1;
+pub const PRECONDITIONER_ITERATIONS: usize = 100;
 
 /// Without a way to ask the platform for its free memory, the automatic choice assumes
 /// this much.
@@ -87,6 +105,19 @@ impl Equations {
     /// eigenvalue iteration, implicit dynamics), where the factorization pays off.
     pub fn preferring_direct(mut self) -> Self {
         self.prefer_direct = true;
+        self
+    }
+
+    /// The automatic choice for a model of `model`: a model whose shells, membranes, beams
+    /// or trusses were expanded into solids is solved directly while its factor fits (its
+    /// unknowns are translations only, yet the multigrid built on them does not fit the
+    /// bending of the thin expanded elements and stalls: a corrugated tube of 0.3 mm
+    /// shells, 367k equations, did not get below its initial residual in 2000 iterations,
+    /// 80 s, while the factorization took 4 s).
+    pub fn for_model(mut self, model: &plxs_core::Model) -> Self {
+        if model.expanded_structure {
+            self.prefer_direct = true;
+        }
         self
     }
 
@@ -204,13 +235,22 @@ impl Equations {
                     return Ok(());
                 }
                 Err(error) if self.may_fall_back(&error) && b.is_some() => {
+                    let (k, coordinates) = self.kept.take().expect("kept for the fall-back");
+                    direct.set_coordinates(Some(coordinates));
+                    if !self.factor_fits(direct, &k, &error, progress)? {
+                        return Err(with_message(error, |m| {
+                            format!(
+                                "{m}; the factor of the direct solver does not fit into \
+                                 the memory either: support the model better (bodies held \
+                                 only by contact or weak springs slow the iteration down)"
+                            )
+                        }));
+                    }
                     progress.event(ProgressEvent::Warning(format!(
                         "iterative solver: {}; solving directly instead",
                         message(&error)
                     )));
-                    let (k, coordinates) = self.kept.take().expect("kept for the fall-back");
                     self.switch(false);
-                    direct.set_coordinates(Some(coordinates));
                     direct.analyze(k.pattern())?;
                     direct.factorize(&k)?;
                     rhs.copy_from_slice(&b.expect("checked"));
@@ -226,11 +266,131 @@ impl Equations {
         Ok(())
     }
 
-    /// `v ← K⁻¹ v` with the last prepared matrix, without the fall-back of
-    /// [`Self::solve`]: the preconditioner of GMRES (sliding friction).
+    /// Solves the unsymmetric system `A x = b` (`apply(v, out) = A v`) whose symmetric
+    /// part is the last prepared matrix `k`: GMRES preconditioned by `k`, for the tangent
+    /// of sliding friction.
+    ///
+    /// Iterative, `k` preconditions by a loose solve with the multigrid
+    /// ([`PRECONDITIONER_TOLERANCE`], at most [`PRECONDITIONER_ITERATIONS`]): one digit
+    /// suffices, GMRES resolves the rest. When GMRES still misses [`UNSYMMETRIC_ACCEPTED`]
+    /// the multigrid is built anew for `k`, then the automatic choice factorizes `k`
+    /// directly, but only when the factor fits into the memory; failing all that, the best
+    /// iterate goes on to the Newton iteration with a warning.
+    pub fn solve_unsymmetric(
+        &mut self,
+        direct: &mut LdltSolver,
+        k: &SparseMatrix,
+        unknowns: impl FnOnce() -> Unknowns,
+        apply: &dyn Fn(&[f64], &mut [f64]),
+        b: &[f64],
+        progress: &mut dyn Progress,
+    ) -> Result<Vec<f64>> {
+        let attempt = |equations: &Self, direct: &LdltSolver| {
+            let precondition = |v: &mut [f64]| equations.apply_inverse(direct, v);
+            plxs_linalg::gmres(apply, &precondition, b, UNSYMMETRIC_TOLERANCE, 60, 300)
+        };
+        let mut result = attempt(self, direct);
+        if !accepted(&result) && self.is_iterative() {
+            if let Some(pcg) = self.pcg.as_mut() {
+                pcg.rebuild_preconditioner()?;
+            }
+            result = attempt(self, direct);
+        }
+        if !accepted(&result) && self.is_iterative() {
+            let error = match &result {
+                Err(error) => error.clone(),
+                Ok((_, residual)) => plxs_core::Error::numerical(
+                    plxs_core::Failure::IterativeSolver,
+                    format!(
+                        "GMRES on the unsymmetric tangent of sliding friction reached only a \
+                         relative residual of {residual:.1e}"
+                    ),
+                ),
+            };
+            if self.fall_back_to_direct(direct, k, unknowns, &error, progress)? {
+                result = attempt(self, direct);
+            }
+        }
+        match result {
+            Ok((x, residual)) => {
+                if residual > UNSYMMETRIC_ACCEPTED {
+                    progress.event(ProgressEvent::Warning(format!(
+                        "GMRES on the unsymmetric tangent of sliding friction reached only a \
+                         relative residual of {residual:.1e}; the Newton iteration goes on \
+                         with it"
+                    )));
+                }
+                Ok(x)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// After the iterative solver failed as the preconditioner of GMRES, factorizes `k`
+    /// directly from now on, as [`Self::solve`] falls back. Returns false (and does
+    /// nothing) unless the automatic choice may still fall back and the factor fits into
+    /// the memory.
+    fn fall_back_to_direct(
+        &mut self,
+        direct: &mut LdltSolver,
+        k: &SparseMatrix,
+        unknowns: impl FnOnce() -> Unknowns,
+        error: &Error,
+        progress: &mut dyn Progress,
+    ) -> Result<bool> {
+        if !self.is_iterative() || !self.may_fall_back(error) {
+            return Ok(false);
+        }
+        direct.set_coordinates(Some(unknowns().coordinates));
+        if !self.factor_fits(direct, k, error, progress)? {
+            return Ok(false);
+        }
+        progress.event(ProgressEvent::Warning(format!(
+            "iterative solver: {}; solving directly instead",
+            message(error)
+        )));
+        self.switch(false);
+        direct.analyze(k.pattern())?;
+        direct.factorize(k)?;
+        Ok(true)
+    }
+
+    /// Whether the factor of `k` fits into the memory, for a fall-back from the iterative
+    /// solver after `error`; tells the monitor when it does not. `direct` has its
+    /// coordinates.
+    fn factor_fits(
+        &mut self,
+        direct: &mut LdltSolver,
+        k: &SparseMatrix,
+        error: &Error,
+        progress: &mut dyn Progress,
+    ) -> Result<bool> {
+        let mut quiet = FirstOrWarnings {
+            inner: progress,
+            all: false,
+        };
+        if !factor_exceeds_memory(direct, k, self.available, &mut quiet)? {
+            return Ok(true);
+        }
+        progress.event(ProgressEvent::Warning(format!(
+            "iterative solver: {}; the direct solver would take over, but its factor does \
+             not fit into the memory",
+            message(error)
+        )));
+        // Once is enough: the next failure does not estimate again.
+        self.fell_back = true;
+        self.kept = None;
+        Ok(false)
+    }
+
+    /// `v ≈ K⁻¹ v` with the last prepared matrix, without the fall-back of
+    /// [`Self::solve`]: the preconditioner of GMRES (sliding friction). Iterative, a loose
+    /// solve that fails only when the matrix is not positive definite.
     pub fn apply_inverse(&self, direct: &LdltSolver, v: &mut [f64]) -> Result<()> {
         match (&self.pcg, self.is_iterative()) {
-            (Some(pcg), true) => pcg.solve(v),
+            (Some(pcg), true) => pcg
+                .solve_loosely(v, PRECONDITIONER_TOLERANCE, PRECONDITIONER_ITERATIONS)
+                .map(|_| ()),
             _ => direct.solve(v),
         }
     }
@@ -278,6 +438,9 @@ impl Equations {
         let pcg = self.pcg.get_or_insert_with(PcgSolver::new);
         if self.mode == SolverMode::Automatic {
             pcg.set_max_iterations(AUTOMATIC_MAX_ITERATIONS);
+            // The direct solver stands by (once): an iteration that stalls hands over
+            // early instead of after the whole limit.
+            pcg.set_give_up_on_stall(!self.fell_back);
         }
         pcg.set_unknowns(Some(unknowns.clone()));
         // Skipped for the pattern (and unknowns) analyzed last.
@@ -320,6 +483,10 @@ fn message(error: &Error) -> String {
     }
 }
 
+fn accepted(result: &Result<(Vec<f64>, f64)>) -> bool {
+    matches!(result, Ok((_, residual)) if *residual <= UNSYMMETRIC_ACCEPTED)
+}
+
 fn with_message(error: Error, f: impl FnOnce(&str) -> String) -> Error {
     error.map_message(|message| f(&message))
 }
@@ -328,6 +495,13 @@ fn with_message(error: Error, f: impl FnOnce(&str) -> String) -> Error {
 /// the symbolic analysis on `direct`, which keeps it) with a quarter more for the work
 /// space exceeds [`MEMORY_SHARE`] of the available memory (`available`, else the
 /// platform's). Tells the monitor what it found.
+/// The unknowns of the free displacement DOFs `free` (three per node) of `model`, with the
+/// nodes' positions and bodies, for the solvers (the ordering of the direct one, the
+/// multigrid of the iterative one; see [`plxs_core::Model::node_bodies`]).
+pub fn displacement_unknowns(model: &plxs_core::Model, free: &[u32]) -> Unknowns {
+    Unknowns::from_free(free, 3, &model.nodes.coordinates).with_bodies(&model.node_bodies())
+}
+
 pub fn factor_exceeds_memory(
     direct: &mut LdltSolver,
     k: &SparseMatrix,
@@ -469,6 +643,28 @@ mod tests {
     }
 
     #[test]
+    fn automatic_is_direct_for_expanded_shells_while_the_factor_fits() {
+        // Translations only, but of shells expanded into solids: the memory decides.
+        let k = chain(200, 1.0);
+        let mut model = plxs_core::Model::default();
+        model.expanded_structure = true;
+        let mut equations = Equations::new(EquationSolver::Default).for_model(&model);
+        equations.set_automatic_limits(10, 1 << 30);
+        solve(&mut equations, &k);
+        assert!(!equations.is_iterative());
+        let mut equations = Equations::new(EquationSolver::Default).for_model(&model);
+        equations.set_automatic_limits(10, 100);
+        solve(&mut equations, &k);
+        assert!(equations.is_iterative());
+        // A solid model goes iterative.
+        let mut equations =
+            Equations::new(EquationSolver::Default).for_model(&plxs_core::Model::default());
+        equations.set_automatic_limits(10, 1 << 30);
+        solve(&mut equations, &k);
+        assert!(equations.is_iterative());
+    }
+
+    #[test]
     fn automatic_is_direct_for_unknowns_with_rotations() {
         // Six unknowns per node (shells, beams): the memory decides, and it fits.
         let n = 198;
@@ -506,9 +702,22 @@ mod tests {
         // Positive diagonal (the preconditioner builds), but indefinite: CG breaks down.
         let k = chain(200, 0.2);
         let mut equations = Equations::new(EquationSolver::Default);
-        equations.set_automatic_limits(10, 100);
+        equations.set_automatic_limits(10, 1 << 30);
         solve(&mut equations, &k);
         assert!(!equations.is_iterative());
+        // Unless the factor does not fit: then the failure says so.
+        let mut equations = Equations::new(EquationSolver::Default);
+        equations.set_automatic_limits(10, 100);
+        let mut direct = LdltSolver::new(1);
+        equations
+            .prepare(&mut direct, &k, coordinates(200), true, &mut NoProgress)
+            .unwrap();
+        let mut x = vec![1.0; 200];
+        let error = equations
+            .solve(&mut direct, &mut x, &mut NoProgress)
+            .unwrap_err();
+        assert!(error.to_string().contains("does not fit"), "{error}");
+        assert!(equations.is_iterative());
         // Asked for explicitly, the iterative solver reports the failure.
         let mut iterative = Equations::new(EquationSolver::IterativeCholesky);
         let mut direct = LdltSolver::new(1);
@@ -521,6 +730,45 @@ mod tests {
                 .solve(&mut direct, &mut x, &mut NoProgress)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn an_unsymmetric_system_is_preconditioned_by_a_loose_iteration() {
+        // GMRES around the multigrid's loose solve (sliding friction on a large solid
+        // model): the inner iteration stops at a few digits, GMRES gets all of them.
+        let n = 400;
+        let k = chain(n, 1.0);
+        let mut equations = Equations::new(EquationSolver::Default);
+        equations.set_automatic_limits(10, 100);
+        let mut direct = LdltSolver::new(1);
+        equations
+            .prepare(&mut direct, &k, coordinates(n), true, &mut NoProgress)
+            .unwrap();
+        assert!(equations.is_iterative());
+        let apply = |v: &[f64], out: &mut [f64]| {
+            k.multiply(v, out);
+            out[3] += 0.5 * v[170];
+            out[250] -= 0.3 * v[20];
+        };
+        let b: Vec<f64> = (0..n).map(|i| 1.0 + (i % 7) as f64).collect();
+        let x = equations
+            .solve_unsymmetric(&mut direct, &k, coordinates(n), &apply, &b, &mut NoProgress)
+            .unwrap();
+        let mut ax = vec![0.0; n];
+        apply(&x, &mut ax);
+        let r = ax
+            .iter()
+            .zip(&b)
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let b_norm = b.iter().map(|b| b * b).sum::<f64>().sqrt();
+        assert!(
+            r <= UNSYMMETRIC_ACCEPTED * b_norm,
+            "relative residual {}",
+            r / b_norm
+        );
+        assert!(equations.is_iterative());
     }
 
     /// The five-point Laplacian of an `m` x `m` grid held at its first node, with the

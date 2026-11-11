@@ -26,8 +26,22 @@ Geometry, FE Model and Results workspaces it has these entries; importing is on 
   [Close Analysis], [Closes the analysis; it stays in the project.],
 )
 
-#note[Nodalis does not ask about unsaved changes. Save regularly. Changes of the model can be
-  undone (@undo).]
+#note[Nodalis does not ask about unsaved changes. Save regularly, or switch on autosave in the
+  settings (@settings-saving). Changes of the model can be undone (@undo).]
+
+=== Saving in the background <save-background>
+
+Saving runs in the background: the windows stay usable while a large project is written, and
+the status bar shows a spinner with the file being saved. Nodalis copies the project when you
+save, which takes a moment only; changes you make while the file is written are not in it and
+are saved the next time. A save asked for while another one runs starts after it. Closing
+Nodalis while it saves waits for the file and then closes; if the file cannot be written,
+Nodalis stays open and says why in the output pane.
+
+#figure(
+  image("../../images/saving-status-bar.png", width: 60%),
+  caption: [The status bar while the project is saved],
+)
 
 === What each file type does
 
@@ -62,5 +76,14 @@ CAD files dropped together are combined into one geometry.
 
 On the command line, `nodalis project.ndl` opens the project. Other files, for example
 `nodalis plate.step`, start a new project with one analysis named after the first file, into
-which the files are imported. Without files, Nodalis reopens the last saved project that was
-open at exit.
+which the files are imported. Without files, Nodalis starts with a new, empty project; the
+projects used last are under #ui("Open Recent") (@recent).
+
+==== Open Recent <recent>
+
+#ui("Open Recent") next to #ui("Open") on the File tab of the Project workspace (and
+#ui("File > Open Recent") in the menu) lists the project files you opened or saved last, the
+latest first, up to ten. Click one to open it. Files that no longer exist are left out of the
+list, so a moved or deleted project does not show up.
+
+#screenshot("open-recent.png", [Open Recent lists the projects used last that still exist])

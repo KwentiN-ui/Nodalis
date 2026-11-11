@@ -28,6 +28,10 @@ pub struct NonlinearInput<'a> {
     /// (membrane index, pressure at the end of the increment). Their nodal forces enter
     /// `f_int` with the opposite sign; their load stiffness is left out of the tangent.
     pub follower: &'a [(u32, f64)],
+    /// Concentrated follower loads (`*CLOAD, FOLLOWER=`): how far they turned from their
+    /// reference directions enters `f_int` with the opposite sign; their load stiffness is
+    /// left out of the tangent.
+    pub turning: Option<&'a crate::Turning<'a>>,
 }
 
 /// What an assembly produced.
@@ -69,30 +73,37 @@ pub fn assemble_nonlinear(
         k.fill_zero();
     }
     let total = table.layout.total();
-    let mut out = NonlinearOutput {
-        f_int: vec![0.0; table.dofs.len()],
-        stresses: table.layout.field(6),
-        strains: table.layout.field(6),
-        material: table.layout.field(STATE_SIZE),
-        flux_sum: 0.0,
-        flux_count: 0,
-        max_creep_rate_change: 0.0,
-    };
+    let mut f_int = vec![0.0; table.dofs.len()];
+    let mut stresses = table.layout.field(6);
+    let mut strains = table.layout.field(6);
+    let mut material = table.layout.field(STATE_SIZE);
+    let mut flux_sum = 0.0;
+    let mut flux_count = 0;
+    let mut max_creep_rate_change = 0.0_f64;
+    // The material state at the start of the increment (zero before the first one).
+    let initial;
     let old_material: &[f64] = if state.material.values.len() == total * STATE_SIZE {
         &state.material.values
     } else {
-        &out.material.values
+        initial = vec![0.0; total * STATE_SIZE];
+        &initial
     };
-    let old_material = old_material.to_vec();
     let want_k = k.is_some();
+    // Every element writes the values of its integration points into its own part of the
+    // fields.
+    let offsets = &table.layout.offsets;
+    let mut stress_parts = split_points(&mut stresses.values, offsets, 6);
+    let mut strain_parts = split_points(&mut strains.values, offsets, 6);
+    let mut material_parts = split_points(&mut material.values, offsets, STATE_SIZE);
 
     struct ElementResult {
         fe: Vec<f64>,
         ke: Vec<f64>,
-        stresses: Vec<f64>,
-        strains: Vec<f64>,
-        material: Vec<f64>,
         creep_change: f64,
+        /// Where the upper triangle of `ke` lands in the matrix, looked up in parallel, and
+        /// the smallest and largest of these positions.
+        positions: Vec<u32>,
+        span: (u32, u32),
     }
 
     let largest = table
@@ -104,10 +115,16 @@ pub fn assemble_nonlinear(
     let batch = (64 * 1024 * 1024 / (8 * largest)).clamp(64, 1 << 16);
     for (chunk_index, entries) in table.entries.chunks(batch).enumerate() {
         let first = chunk_index * batch;
+        let pattern_of_k = k.as_deref();
+        let parts: Vec<_> = (stress_parts.drain(..entries.len()))
+            .zip(strain_parts.drain(..entries.len()))
+            .zip(material_parts.drain(..entries.len()))
+            .collect();
         let results: Vec<ElementResult> = entries
             .par_iter()
+            .zip(parts)
             .enumerate()
-            .map(|(i, entry)| {
+            .map(|(i, (entry, ((stresses, strains), material)))| {
                 let index = first + i;
                 let formulation = table.formulation(entry);
                 let law = table.law(entry, input.nlgeom);
@@ -115,10 +132,9 @@ pub fn assemble_nonlinear(
                 let ue = table.gather(entry, input.u);
                 let start = table.layout.offsets[index] as usize;
                 let points = formulation.integration_points();
-                let mut material =
-                    old_material[start * STATE_SIZE..(start + points) * STATE_SIZE].to_vec();
-                let mut stresses = vec![0.0; 6 * points];
-                let mut strains = vec![0.0; 6 * points];
+                material.copy_from_slice(
+                    &old_material[start * STATE_SIZE..(start + points) * STATE_SIZE],
+                );
                 let mut creep_change = 0.0_f64;
                 let mut fe = vec![0.0; formulation.dof_count()];
                 let mut ke = Vec::new();
@@ -131,7 +147,8 @@ pub fn assemble_nonlinear(
                     |ip, kinematics: &PointKinematics| {
                         let slice = &mut material[ip * STATE_SIZE..(ip + 1) * STATE_SIZE];
                         let old_rate = slice[STATE_SIZE - 1];
-                        let output = law.stress(
+                        // Plane stress laws find the thickness strain themselves.
+                        let (output, e) = law.stress_and_strain(
                             &MaterialInput {
                                 strain: kinematics.strain,
                                 temperature: input.temperature,
@@ -143,12 +160,19 @@ pub fn assemble_nonlinear(
                         );
                         creep_change = creep_change.max((slice[STATE_SIZE - 1] - old_rate).abs());
                         let sigma = if input.nlgeom {
+                            let mut kinematics = *kinematics;
+                            if e[2] != kinematics.strain[2] {
+                                // The thickness stretch of plane stress (`E33 = (λ² - 1) / 2`),
+                                // which the in-plane motion leaves at 1.
+                                kinematics.deformation_gradient[2][2] =
+                                    (1.0 + 2.0 * e[2]).max(0.0).sqrt();
+                            }
                             kinematics.cauchy(&output.stress)
                         } else {
                             output.stress
                         };
                         stresses[ip * 6..(ip + 1) * 6].copy_from_slice(&sigma);
-                        let e = &kinematics.strain;
+                        let e = &e;
                         strains[ip * 6..(ip + 1) * 6].copy_from_slice(&[
                             e[0],
                             e[1],
@@ -162,38 +186,47 @@ pub fn assemble_nonlinear(
                     &mut fe,
                     want_k.then_some(&mut ke),
                 );
+                let mut positions = Vec::new();
+                if let Some(k) = pattern_of_k {
+                    k.block_positions(&entry.dofs, &mut positions);
+                }
+                let span = positions
+                    .iter()
+                    .fold((u32::MAX, 0), |(lo, hi), &p| (lo.min(p), hi.max(p)));
                 ElementResult {
                     fe,
                     ke,
-                    stresses,
-                    strains,
-                    material,
                     creep_change,
+                    positions,
+                    span,
                 }
             })
             .collect();
-        for (i, (entry, result)) in entries.iter().zip(&results).enumerate() {
-            let index = first + i;
-            let start = table.layout.offsets[index] as usize;
+        for (entry, result) in entries.iter().zip(&results) {
             for (&dof, value) in entry.dofs.iter().zip(&result.fe) {
-                out.f_int[dof as usize] += value;
-                out.flux_sum += value.abs();
+                f_int[dof as usize] += value;
+                flux_sum += value.abs();
             }
-            out.flux_count += result.fe.len() as u64;
-            if let Some(k) = k.as_deref_mut() {
-                k.add_block(&entry.dofs, &result.ke);
-            }
-            let points = result.stresses.len() / 6;
-            out.stresses.values[start * 6..(start + points) * 6].copy_from_slice(&result.stresses);
-            out.strains.values[start * 6..(start + points) * 6].copy_from_slice(&result.strains);
-            out.material.values[start * STATE_SIZE..(start + points) * STATE_SIZE]
-                .copy_from_slice(&result.material);
-            out.max_creep_rate_change = out.max_creep_rate_change.max(result.creep_change);
+            flux_count += result.fe.len() as u64;
+            max_creep_rate_change = max_creep_rate_change.max(result.creep_change);
+        }
+        if let Some(k) = k.as_deref_mut() {
+            add_blocks(k, entries, &results, |r| (&r.positions, r.span, &r.ke));
         }
     }
+    let mut out = NonlinearOutput {
+        f_int,
+        stresses,
+        strains,
+        material,
+        flux_sum,
+        flux_count,
+        max_creep_rate_change,
+    };
     // Native membranes (total Lagrangian under NLGEOM) and the other elements of constant
     // stiffness (U1). Membranes have no integration points in the layout.
-    for block in table.linear_blocks.iter().filter(|b| !b.membrane) {
+    // General beams are corotational under NLGEOM, linear otherwise.
+    for block in (table.linear_blocks.iter()).filter(|b| !b.membrane && !(b.beam && input.nlgeom)) {
         let n = block.dofs.len();
         for (i, &dof) in block.dofs.iter().enumerate() {
             let f: f64 = (0..n)
@@ -232,6 +265,29 @@ pub fn assemble_nonlinear(
             k.add_block(&m.dofs, ke);
         }
     }
+    if input.nlgeom {
+        let beams: Vec<([f64; 12], [f64; 144])> = table
+            .beams
+            .par_iter()
+            .map(|b| {
+                let mut fe = [0.0; 12];
+                let mut ke = [0.0; 144];
+                b.formulation
+                    .internal(&b.gather(input.u), &mut fe, want_k.then_some(&mut ke));
+                (fe, ke)
+            })
+            .collect();
+        for (b, (fe, ke)) in table.beams.iter().zip(&beams) {
+            for (&dof, value) in b.dofs.iter().zip(fe) {
+                out.f_int[dof as usize] += value;
+                out.flux_sum += value.abs();
+            }
+            out.flux_count += 12;
+            if let Some(k) = k.as_deref_mut() {
+                k.add_block(&b.dofs, ke);
+            }
+        }
+    }
     for &(index, p) in input.follower {
         let m = &table.membranes[index as usize];
         let mut fe = vec![0.0; m.dofs.len()];
@@ -240,7 +296,60 @@ pub fn assemble_nonlinear(
             out.f_int[dof as usize] -= value;
         }
     }
+    if let Some(turning) = input.turning {
+        turning.add_at(input.u, -1.0, &mut out.f_int);
+    }
     out
+}
+
+/// `values` (`per` values per integration point) split into the parts of the elements, by
+/// the offsets of their points.
+fn split_points<'a>(mut values: &'a mut [f64], offsets: &[u32], per: usize) -> Vec<&'a mut [f64]> {
+    let mut parts = Vec::with_capacity(offsets.len().saturating_sub(1));
+    for pair in offsets.windows(2) {
+        let (part, rest) = values.split_at_mut((pair[1] - pair[0]) as usize * per);
+        parts.push(part);
+        values = rest;
+    }
+    parts
+}
+
+/// Adds the upper triangles of the element matrices of `results` (their positions in the
+/// values of `k`, the span of these and the matrix) to `k`, in parallel over ranges of the
+/// values: every range takes the elements in their order, so every entry gets the sums of
+/// [`SparseMatrix::add_block`] in the same order.
+fn add_blocks<R: Sync>(
+    k: &mut SparseMatrix,
+    entries: &[crate::elements::ElementEntry],
+    results: &[R],
+    block: impl Fn(&R) -> (&Vec<u32>, (u32, u32), &Vec<f64>) + Sync,
+) {
+    let values = k.values_mut();
+    let parts = rayon::current_num_threads().max(1);
+    let size = values.len().div_ceil(parts).max(1 << 12);
+    values
+        .par_chunks_mut(size)
+        .enumerate()
+        .for_each(|(part, chunk)| {
+            let lo = part * size;
+            let hi = lo + chunk.len();
+            for (entry, result) in entries.iter().zip(results) {
+                let (positions, (first, last), ke) = block(result);
+                if positions.is_empty() || (last as usize) < lo || first as usize >= hi {
+                    continue;
+                }
+                let m = entry.dofs.len();
+                let mut at = positions.iter();
+                for a in 0..m {
+                    for &value in &ke[a * m + a..(a + 1) * m] {
+                        let p = *at.next().expect("a position per entry") as usize;
+                        if (lo..hi).contains(&p) {
+                            chunk[p - lo] += value;
+                        }
+                    }
+                }
+            }
+        });
 }
 
 #[cfg(test)]

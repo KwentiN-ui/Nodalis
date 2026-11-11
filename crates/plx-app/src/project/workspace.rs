@@ -26,6 +26,8 @@ impl BlockTile {
             Self::Campbell => BlockKind::Campbell,
             Self::MeshExport => BlockKind::MeshExport,
             Self::Note => BlockKind::Note,
+            Self::Plot => BlockKind::Plot,
+            Self::Preview => BlockKind::Preview,
         }
     }
 }
@@ -301,10 +303,18 @@ impl ProjectApp {
         let any = !self.selected.is_empty();
         match cmd {
             Cmd::OpenProject => self.opening.is_none(),
+            Cmd::OpenRecent => true,
             Cmd::OpenBlock | Cmd::Rename => self.selected.len() == 1,
             Cmd::OpenInNewWindow => self.selected_analysis().is_some(),
             Cmd::SolveBlock => self.selected_analysis().is_some() && !self.busy(),
-            Cmd::Duplicate | Cmd::Delete | Cmd::FrameBlocks | Cmd::Compact => any,
+            Cmd::Duplicate | Cmd::Delete | Cmd::FrameBlocks | Cmd::Compact | Cmd::GroupBlocks => {
+                any
+            }
+            Cmd::Ungroup => (self.selected.iter()).any(|&id| {
+                self.nodes
+                    .iter()
+                    .any(|n| n.id == id && n.kind() == Kind::Group)
+            }),
             Cmd::Unframe => {
                 (self.selected.iter()).any(|&id| frames::frame_of(&self.frames, id).is_some())
             }
@@ -369,6 +379,8 @@ impl ProjectApp {
             Cmd::Duplicate => self.act(ctx, Action::DuplicateAll(selected)),
             Cmd::Delete => self.act(ctx, Action::DeleteAll(selected)),
             Cmd::FrameBlocks => self.act(ctx, Action::Frame(selected)),
+            Cmd::GroupBlocks => self.act(ctx, Action::Group(selected)),
+            Cmd::Ungroup => self.act(ctx, Action::Ungroup(selected)),
             Cmd::Unframe => self.act(ctx, Action::Unframe(selected)),
             Cmd::Compact => self.act(ctx, Action::Compact(selected)),
             Cmd::ShowAll => self.show_all = true,
@@ -489,6 +501,14 @@ impl ribbon::Host for ProjectHost<'_> {
             Cmd::Place(block) => self.0.placing == Some(block),
             Cmd::NewAnalysis => self.0.placing == Some(BlockTile::Analysis),
             _ => false,
+        }
+    }
+
+    fn panel(&mut self, ui: &mut egui::Ui, cmd: Cmd) {
+        if cmd == Cmd::OpenRecent
+            && let Some(path) = self.0.recent_panel(ui)
+        {
+            self.0.open(&ui.ctx().clone(), path);
         }
     }
 }

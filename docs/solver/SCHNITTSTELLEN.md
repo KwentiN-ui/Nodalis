@@ -603,6 +603,13 @@ beobachtet, nicht aus dem Quelltext:
 - **Amplituden**: Wert bei Zeit t = Tabelle(t − SHIFTX) + SHIFTY, linear zwischen den Punkten,
   vor dem ersten und nach dem letzten Punkt konstant; t ist die Step-Zeit oder mit
   `TIME=TOTAL TIME` die Gesamtzeit.
+- **Signal-Amplituden** (Nodalis, `*AMPLITUDE, SHAPE=...`): plxs wertet die Form exakt zu jeder
+  Zeit aus, statt einer Tabelle; außerhalb von Start..Ende ist der Wert 0 (plus SHIFTY).
+  `SHAPE=PULSE` mit `Start, Breite` (Halbsinus, Ersatz für einen Dirac-Stoß), `SHAPE=SINE` mit
+  `Start, Ende, Frequenz, Phase in Grad`, `SHAPE=CHIRP` mit `Start, Ende, Startfrequenz,
+  Endfrequenz` und `SWEEP=LINEAR|LOG`. Wo eine Prozedur zwischen Knickpunkten linear
+  interpoliert (Inkrementgrenzen der nichtlinearen Statik, Abschnitte der expliziten
+  GPU-Integration), liefert `Amplitude::corner_times` 48 Stützstellen je Periode.
 - **Übernahme in den nächsten Step** (`plxs-input/src/carry.rs`, aufgelöst im Leser, die IR
   bleibt unverändert):
   - Ein `*CLOAD` ohne `OP=NEW` ersetzt die übernommene Last an demselben Knoten und DOF;
@@ -768,6 +775,10 @@ Beobachtete ccx-Konventionen (Orakel, kein Quelltext):
   Linienelement Typ 11 im Netz, `SPRING1` nicht.
 - Die Knotenmittelung von S/E zählt `SPRING2`/`GAPUNI` als Elemente mit Spannung null mit
   (an einem Knoten mit 2 Volumen- und 3 Federelementen ist der Wert 2/5 des Volumenmittels).
+  plxs ahmt das seit 2026-11 nicht mehr nach: Federn und Gaps tragen keine Spannung und
+  zählen nicht. Sonst halbiert eine Compression-Only-Stütze die Spannung genau an ihren
+  Knoten (Druckstütze mit 100 MPa Flächenpressung zeigte S33 = 50 MPa, Lasche mit Bolzen
+  als Gaps ein fleckiges Bild und 24.5 statt 31 MPa).
 - `*GAP`: Feld 5 ist unbenutzt, Feld 6 die Steifigkeit (Default ≈ 1e12), Feld 7 σ∞; der
   Parser las vorher Feld 5 als Steifigkeit (= 0).
 - Rigid Bodies verhalten sich in linearer Statik wie die linearisierte Bedingung (Fixtures
@@ -1446,6 +1457,89 @@ Was T15 gebaut hat:
 - Ohne f64, bei zu großer f64-Matrix (Bindungsgrenze, lavapipe 128 MB) oder bei einem
   Fehler bleibt das CG auf der CPU; der Grund steht in der Vorkonditionierer-Zeile.
 
+## Stand nach dem Multigrid für kontaktgehaltene Körper (2026-11-09, Thread "Improve multigrid for contact-held bodies")
+
+Anlass: Quentins Lasche/Seilrolle (Bolzen, Rolle, Laschen aus C3D10, 238k Gleichungen,
+die Körper nur durch Penalty-Kontakt und schwache Federn 1e-6·E·L gehalten): 20 Lösungen
+mit 90 bis 390 CG-Iterationen (Volumenkörper allein: 30 bis 50), über 80 % der Zeit im
+V-Zyklus, behaltene Hierarchie oft zu lange behalten.
+
+- Ursache 1, Aggregate über Kontaktflächen: die Stärke der Kopplung sah den Penalty-Block
+  zwischen Bolzen und Bohrung als starke Nachbarschaft, Aggregate (und damit die
+  Starrkörpermoden des tentativen Prolongators) reichten über zwei Körper hinweg. Jetzt
+  liefert `Model::node_bodies` die Zusammenhangskomponenten des Netzes über seine
+  Kontinuums- und Strukturelemente (Federn, Gaps und Kontakt verbinden nichts, ein Knoten
+  ohne Element ist ein eigener Körper), `Equations::displacement_unknowns` gibt sie als
+  `Unknowns::body` an den Solver, und `amg::aggregate` fasst nie Knoten zweier Körper
+  zusammen (die Körper werden auf die groben Ebenen vererbt). Lasche/Seilrolle: 3325 →
+  1855 Iterationen über die 20 Lösungen.
+- Ursache 2, Eigenwertschätzer: λ_max(D⁻¹A) aus 12 Potenziterationen × 1,1 lag auf der
+  Rolle 4 % zu tief (4,25 statt 4,42), der Chebyshev-Glätter verstärkte die obersten Moden
+  und der Vorkonditionierer war nicht mehr positiv definit (negatives r·z im CG, 84 statt
+  72 Iterationen). Jetzt 30 Lanczos-Schritte auf `D^-1/2 A D^-1/2` (größter Ritz-Wert per
+  Sturm-Bisektion) × 1,02 (`EIGENVALUE_STEPS`, `EIGENVALUE_MARGIN`, zum Messen
+  `PLXS_AMG_MARGIN`).
+- Ursache 3, was bleibt: die Ritz-Werte von M⁻¹A aus den CG-Koeffizienten (Lanczos-
+  Tridiagonalmatrix, `PLXS_PCG_TRACE=1` druckt die kleinsten und größten) zeigen auf der
+  Rolle ein dichtes Bündel bei 0,02 bis 0,05, dessen Vektoren zu 83 % axial sind und an den
+  Stirnflächen der Rolle bei Radius 40 bis 70 mm sitzen: die Biegung der dünnen Flansche
+  der Seilrille, nicht die Starrkörperbewegung (deren Rayleigh-Quotienten liegen bei 0,55
+  bis 1,0). Rolle allein mit festgehaltener Bohrung 84 Iterationen, Bolzen 39, Blöcke
+  25 bis 37 (kleinster Ritz-Wert dort 0,17 bis 0,28).
+- Abhilfe, Lernen aus dem ersten Lösen: das erste Lösen nach einem Aufbau hebt bis zu 96
+  Lanczos-Vektoren (f32) auf; nach der Konvergenz liefern die Ritz-Vektoren mit Werten
+  unter 0,15 × dem größten (höchstens 24, `DEFLATE_*`) zweierlei. (a) Deflation nach Frank
+  und Vuik (projiziertes DPCG: `P A x̃ = P b` mit `P = I − A W E⁻¹ Wᵀ`, `E = WᵀAW`
+  Cholesky; die Richtungskorrektur nach Saad lief in f64 auseinander, weil die Rundung in
+  span(W) wächst) für die weiteren Lösungen mit derselben Hierarchie, `Deflation::refresh`
+  zieht `AW` und `E` bei behaltener Hierarchie nach; nur im CG auf dem Prozessor. (b) Die
+  drei langsamsten werden Kandidaten des Nahnullraums (`PLXS_AMG_CANDIDATES`, 0 schaltet
+  ab): `Amg::build(a, unknowns, candidates, options)` nimmt sie zu den sechs
+  Starrkörpermoden, die nächste Faktorisierung baut die Hierarchie damit neu
+  (`candidates_pending`), grobe Blöcke 9×9 und 3×9 (feste Kernel in `bsr`; 12×12 für sechs
+  Kandidaten). Die Kandidaten gelten für alle weiteren Hierarchien des Musters
+  (`analyze` verwirft sie), jede davon lernt ihre Deflation beim ersten Lösen neu. Auf der Grafikkarte sammelt das CG keine Lanczos-Vektoren, deshalb läuft
+  das lernende Lösen eines Musters auf dem Prozessor, alles Weitere auf der Karte.
+  Seilrolle NLGEOM (4 Lösungen): 76 → 49/46/42 Iterationen (Deflation allein 63, sechs
+  Kandidaten 38, aber ein 12×12-Zyklus kostet das 1,4-Fache; drei sind netto am
+  schnellsten, −34 % Zeit je Lösen). Lasche/Seilrolle (gleiche Binary, 0 gegen 3
+  Kandidaten): 1870 → 1485 Iterationen, Lösen 124 → 105 s, Lauf 3:39 → 3:16 min (sechs
+  Kandidaten: 1622 Iterationen, 3:53 min); mit der Kostenregel unten 1348 Iterationen,
+  Lösen 94 s, Lauf 3:11 min (Ausgangsstand 3325 Iterationen).
+- Behalten oder neu bauen: statt der 1,5-fachen Iterationen wiegt `PcgSolver::factorize`
+  die Kosten: die Hierarchie bleibt, solange die Mehr-Iterationen des letzten Lösens
+  gegenüber dem ersten nach dem Aufbau, über zwei Lösungen (`STALE_HORIZON`) zum
+  gemessenen Tempo je Iteration, weniger kosten als der gemessene Aufbau; die 25 %-Regel
+  für die Diagonale und anstehende Kandidaten bleiben. `PLXS_PCG_TRACE=1` druckt die
+  Entscheidung mit den Zahlen.
+- Probiert und verworfen: ganze Hierarchie in f64 (gleiche Iterationen), Penalty 100-fach
+  weicher (gleich), Stärke 0,001 (schlechter), Chebyshev Grad 4 (70 statt 90, zu teuer),
+  adaptive Smoothed Aggregation (αSA nach Brezina u. a.: 30 Testzyklen auf `A x = 0` je
+  Vektor, Rolle 72 → 63 → 57 → 52 mit 1 bis 3 Vektoren, aber ~4 s je Runde bei 238k;
+  bleibt mit `PLXS_AMG_ADAPTIVE=n` zum Experimentieren, Default 0). Mit Federn 1e4-fach
+  steifer 83 Iterationen, erst elastische Bettung (1e8-fach) bringt 25: die Federn sind
+  nicht das Problem.
+- Block-Jacobi statt skalarer Diagonale (Nachtrag, Lasche an GAPUNI-Federn): Quentins
+  Lasche (C3D20/C3D15, 87k Gleichungen) hängt nur an 814 Druckfedern (`*GAP`, k = 1e12 N/m,
+  etwa 6000-mal steifer als ein Element) in radialer Richtung. Die skalare Diagonale der
+  Bohrungsknoten ist in allen drei Komponenten riesig, obwohl die Feder nur eine Richtung
+  hält: der Chebyshev-Glätter bewegt die tangentialen Komponenten dieser Knoten praktisch
+  nicht (Eigenwerte von D⁻¹A bei 1e-4), die Stärke-Regel hielt alle ihre Kopplungen für
+  schwach (5 Ebenen, 2,08 × Matrix, Aufbau 8,5 s), und das CG brauchte 280 bis 690
+  Iterationen (Ritz-Werte 4e-4). Mit Federn 1e9 statt 1e12 waren es 46: die Anisotropie
+  war die Ursache. Jetzt skaliert das Multigrid überall mit den inversen Diagonalblöcken
+  (`block_diagonal_inverses`: Cholesky `D_b = L_b L_bᵀ` je Knoten bzw. Aggregat, 3×3 fein,
+  6×6/9×9 grob; nicht positiv definite Blöcke fallen auf die Skalare zurück): Stärke
+  `‖L_b⁻¹ A_bc L_c⁻ᵀ‖_F ≥ θ`, Glätter `D_B⁻¹ r` (`block_apply`, auf der Karte dieselbe
+  Operation in `gpu_vector.wgsl` mit `br` in den Parametern), λ_max per Lanczos auf
+  `L⁻¹ A L⁻ᵀ`, Prolongator `(I − ω D_B⁻¹ A) P_t`. Für skalare Systeme (Wärme) ist alles wie
+  vorher. Lasche: 3 Ebenen (87k > 3,5k > 246), Aufbau 0,9 s, 38 bis 76 Iterationen je
+  Lösen, Gesamtlauf 168 s (master) → 58 s (direkter Solver 46 s). Auch sonst etwas besser:
+  Seilrolle 76 → 60, Hex-Block 25 → 23, Tet10-Block 37 → 33 Iterationen.
+- Offen: Lanczos-Vektoren auch im CG auf der Karte sammeln (Deflation dort), ein
+  Kandidatensatz je Körper statt global, und größere Aggregate bei größerem Nahnullraum,
+  damit die groben Ebenen nicht wachsen.
+
 ## Moden als eigener Ergebnistyp (2026-11-05, Thread "Add dedicated mode shape result type")
 
 - Eigenwertschritte (`*FREQUENCY`, `*BUCKLE`, `*COMPLEX FREQUENCY`, auch zyklisch) legen ihre
@@ -1461,3 +1555,38 @@ Was T15 gebaut hat:
 - Nodalis (`plx-solve`) lässt in Eigenwertschritten alle Feldausgaben weg, auch die aus dem
   Schritt davor übernommenen (`keep_modes_as_shapes`). `plx-results::from_solver` zeigt jede
   Mode als Inkrement mit dem Feld `MODE` (komplex zusätzlich `PMODE`, Betrag und Phase).
+
+## Compression Only als Flächenstütze (2026-11-09, Thread "Fix compression-only spring lug results")
+
+- Neues plxs-Keyword `*COMPRESSION ONLY, SURFACE=<Elementfläche>[, CLEARANCE=d][, STIFFNESS=k][, FLIP]`
+  (kein ccx-Keyword). `plxs_core::contact::CompressionOnly`; die Assembly
+  (`plxs_assembly::discrete::surface_gaps`) macht daraus je Gauß-Punkt jeder Fläche ein Gap
+  (3×3 auf quadratischen Vierecken, 2/3 Punkte auf Kanten von 2D-Elementen) mit den
+  Formfunktionen als Knotengewichten, Normale aus der Referenzgeometrie, Steifigkeit
+  `k · J · w`. `DiscreteKind::Gap` trägt dafür `weights` (GAPUNI: `[-1, 1]`); alle
+  Prozeduren, die Gaps kennen, nehmen die Flächengaps ohne Änderung mit.
+- `STIFFNESS` ist Steifigkeit pro Fläche; ohne Wert `10 · E / h` (`E` der Elemente unter der
+  Fläche, `h` mittlere Kantenlänge; mit `1e3` überbestimmen die 9 Gaps je quadratischer
+  Fläche sie, die Spannungen an der Bohrung der Lasche streifen dann entlang der
+  Elementkanten, 3 MPa zwischen Eck- und Mittenknoten bei 12 MPa). Der Writer rechnet die Gesamtsteifigkeit der
+  Oberfläche (`k / A`) bzw. „Apply to all nodes individually“ (`k · Knoten / A`) um.
+  Zugkraft σ∞ und Offset gibt es nur noch bei Schalen, die weiter GAPUNI bekommen.
+- Ergebnisse (2026-11-10): `*CONTACT FILE` mit CDIS/CSTR füllt COPEN und CPRESS auch an den
+  Knoten der Stützflächen (Gauß-Punkt-Werte per Least-Squares wie Face-to-Face-Kontakt auf die
+  Knoten, `plxs_procedures::support`); ohne Kontaktpaare listet das Feld nur die Stützknoten.
+  `*CONTACT PRINT, SLAVE=<Fläche>` ohne `MASTER` druckt `CF` einer Stützfläche als
+  „statistics for slave set <Fläche>, master set GROUND“; ohne SLAVE alle Paare und Stützen.
+  Nodalis: Stützen haben eine `Id` und stehen in `contact_pair_choices`, `plx-io::dat` nennt
+  die Statistik nach der Stütze. Nur Flächenstützen (Volumen, 2D), nicht GAPUNI auf Schalen.
+- Normalen (2026-11-10): die Gaps drücken entlang geglätteter Knotennormalen (flächengewichtetes
+  Mittel der Flächen am Knoten mit weniger als 40° Knick, mit den Formfunktionen auf den
+  Gauß-Punkt interpoliert), nicht entlang der Flächennormalen. Ein Zylinder aus geraden
+  Flächen (gerade Mittenknoten, lineare Elemente) hielt sonst die Knoten auf den Knicken in zwei
+  Richtungen, CPRESS streifte entlang der Elementkanten (Ring C3D20, 24 Elemente: 31/57/41/56
+  statt glatt 51 … 31). Echte Kanten über 40° bleiben getrennt.
+- Grund: starre GAPUNI je Knoten auf C3D20-Flächen lassen die Eckknoten ohne Kraft (ihr
+  konsistenter Anteil eines Drucks ist negativ), das gab ein Schachbrett in den Spannungen.
+  FEAnalyst-Lasche (C3D20, Bohrung r 12, 3000 N): GAPUNI fleckig, Ecken 0 N; Flächenstütze
+  glatt, SXX_max 31.7 MPa (fester Bolzen mit Face-to-Face-Kontakt 32.05 MPa, 2D-Netz 31.9).
+  Nebenbei besser konditioniert: automatischer (iterativer) Löser 142 statt ~360
+  PCG-Iterationen pro Lösung, 64 s statt 168 s (Cloud, 4 Threads).

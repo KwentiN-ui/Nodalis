@@ -3,9 +3,9 @@ use std::path::PathBuf;
 
 use plx_mesh::CadEntity;
 use plx_model::{
-    BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition, CrossSection,
-    DefinedField, DefinedFieldKind, Displacement, DynamicStep, Elastic, Hardening,
-    LinearSolverChoice, Load, Material, ModalDamping, ModalDynamicsStep, NodeTie, Plastic,
+    BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition, CrossSection, Damping,
+    DampingRange, DefinedField, DefinedFieldKind, Displacement, DynamicStep, Elastic, Hardening,
+    LinearSolverChoice, Load, Material, ModalDamping, NodeTie, NumericalDamping, Plastic,
     PlasticPoint, ReferencePoint, RemoteBehavior, RigidBody, Section, SectionKind, StaticStep,
     SteadyStateDynamicsStep, UnitSystem,
 };
@@ -13,6 +13,15 @@ use plx_model::{
 use super::*;
 use crate::frd::{FrdImport, read_frd};
 use crate::inp::{read_inp, read_inp_str};
+
+/// The id of the test items called `name`, the same for all of them: a test refers to an
+/// item by its name, also before the item is made.
+fn named(name: &str) -> plx_model::Id {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    static IDS: LazyLock<Mutex<HashMap<String, plx_model::Id>>> = LazyLock::new(Default::default);
+    *(IDS.lock().unwrap().entry(name.into())).or_default()
+}
 
 /// The analysis the solver takes of the model.
 fn lowered(mesh: &FeMesh, model: &FeModel) -> ir::Analysis {
@@ -46,6 +55,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
     let mesh = read_inp(&testdata(file)).unwrap().mesh;
     let mut step = Step::new_static("Step-1");
     step.boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Fixed-1".into(),
         active: true,
@@ -58,6 +68,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
     let model = FeModel {
         properties: Default::default(),
         materials: vec![Material {
+            id: named("Steel"),
             name: "Steel".into(),
             density: Some(7.85e-9),
             elastic: Some(Elastic {
@@ -68,7 +79,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
         }],
         sections: vec![Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: Some(named("Steel")),
             region: Region::Parts(vec!["EALL".into()]),
             thickness: 1.0,
             kind: SectionKind::Solid,
@@ -81,6 +92,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
 
 fn tip_force() -> Load {
     Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Force-1".into(),
         active: true,
@@ -89,6 +101,9 @@ fn tip_force() -> Load {
         kind: LoadKind::force([0.0, 0.0, -100.0]),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     }
 }
 
@@ -165,21 +180,27 @@ fn the_chosen_solver_is_written_with_the_procedure() {
     let (mesh, mut model) = cantilever(tip_force());
     // Automatic (the default) leaves the choice to the solver.
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("*Static\n"), "{text}");
+    assert!(
+        text.contains("*Static, Frames=1\n1, 1, 0.00001, 1\n"),
+        "{text}"
+    );
     let StepKind::Static(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
     settings.solver = LinearSolverChoice::Direct;
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("*Static, Solver=PaStiX\n"), "{text}");
+    assert!(
+        text.contains("*Static, Solver=PaStiX, Frames=1\n"),
+        "{text}"
+    );
     let StepKind::Static(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
     settings.solver = LinearSolverChoice::Iterative;
-    settings.incrementation = Incrementation::Direct;
+    settings.control.size = plx_model::IncrementSize::Fixed(0.5);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Static, Solver=Iterative Cholesky, Direct\n1, 1\n"),
+        text.contains("*Static, Solver=Iterative Cholesky, Direct, Frames=1\n0.5, 1\n"),
         "{text}"
     );
     // Frequency and buckle steps name it as well.
@@ -203,6 +224,7 @@ fn the_chosen_solver_is_written_with_the_procedure() {
 #[test]
 fn picked_faces_become_one_element_set_per_face_number() {
     let load = Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Pressure 1".into(),
         active: true,
@@ -211,6 +233,9 @@ fn picked_faces_become_one_element_set_per_face_number() {
         kind: LoadKind::Pressure(2.5),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, model) = cantilever(load);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -227,6 +252,7 @@ fn picked_faces_become_one_element_set_per_face_number() {
 #[test]
 fn empty_regions_and_unknown_materials_are_errors() {
     let (mesh, mut model) = cantilever(Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Force-1".into(),
         active: true,
@@ -235,6 +261,9 @@ fn empty_regions_and_unknown_materials_are_errors() {
         kind: LoadKind::force([1.0, 0.0, 0.0]),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     });
     assert_eq!(
         write_inp(&mesh, &model, ""),
@@ -243,7 +272,7 @@ fn empty_regions_and_unknown_materials_are_errors() {
             what: "nodes"
         })
     );
-    model.sections[0].material = "Alu".into();
+    model.sections[0].material = Some(named("Alu"));
     assert!(matches!(
         write_inp(&mesh, &model, ""),
         Err(WriteError::UnknownMaterial { .. })
@@ -434,6 +463,7 @@ fn linear_rectangle(width: f64, height: f64, nx: u32, ny: u32, triangles: bool) 
         }
     }
     let mut part = plx_mesh::Part {
+        bodies: Vec::new(),
         name: "PLATE".into(),
         elements: Vec::new(),
     };
@@ -509,10 +539,11 @@ fn rigid_tip(load: Option<Load>, bc: Option<BoundaryCondition>) -> (FeMesh, FeMo
     model.steps[0].loads.clear();
     model.steps[0].loads.extend(load);
     model.steps[0].boundary_conditions.extend(bc);
-    model
-        .reference_points
-        .push(ReferencePoint::new("RP-1", [100.0, 5.0, 5.0]));
-    let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+    model.reference_points.push(ReferencePoint {
+        id: named("RP-1"),
+        ..ReferencePoint::new("RP-1", [100.0, 5.0, 5.0])
+    });
+    let mut body = RigidBody::new("Rigid_Body-1", named("RP-1"));
     body.region = Region::Surface("TIP".into());
     model.constraints.push(Constraint::RigidBody(body));
     (mesh, model)
@@ -520,25 +551,30 @@ fn rigid_tip(load: Option<Load>, bc: Option<BoundaryCondition>) -> (FeMesh, FeMo
 
 fn moment(moment: [f64; 3]) -> Load {
     Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Moment-1".into(),
         active: true,
         visible: true,
-        region: Region::ReferencePoint("RP-1".into()),
+        region: Region::ReferencePoint(named("RP-1")),
         kind: LoadKind::Moment(moment),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     }
 }
 
 #[test]
 fn a_rigid_body_and_its_reference_point_are_written() {
     let bc = BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Turn-1".into(),
         active: true,
         visible: true,
-        region: Region::ReferencePoint("RP-1".into()),
+        region: Region::ReferencePoint(named("RP-1")),
         kind: BoundaryKind::displacement([Some(0.0), Some(0.0), None, None, None, Some(0.01)]),
         amplitude: None,
     };
@@ -593,7 +629,7 @@ fn a_force_on_points_is_shared_by_the_nodes() {
         "{text}"
     );
     let mut on_point = tip_force();
-    on_point.region = Region::ReferencePoint("RP-1".into());
+    on_point.region = Region::ReferencePoint(named("RP-1"));
     let (mesh, model) = rigid_tip(Some(on_point), None);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
@@ -645,11 +681,12 @@ fn solver_bends_the_cantilever_by_a_moment_on_the_rigid_tip() {
 fn solver_turns_the_rigid_tip_by_the_rotation_of_its_reference_point() {
     let angle = 0.01;
     let bc = BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Turn-1".into(),
         active: true,
         visible: true,
-        region: Region::ReferencePoint("RP-1".into()),
+        region: Region::ReferencePoint(named("RP-1")),
         kind: BoundaryKind::displacement([None, None, None, None, None, Some(angle)]),
         amplitude: None,
     };
@@ -675,6 +712,7 @@ fn each_node(values: [Option<f64>; 6]) -> BoundaryKind {
 
 fn remote(name: &str, values: [Option<f64>; 6]) -> BoundaryCondition {
     BoundaryCondition {
+        id: named(name),
         distribution: None,
         name: name.into(),
         active: true,
@@ -707,7 +745,10 @@ fn remote_cantilever(bc: BoundaryCondition) -> (FeMesh, FeModel) {
 
 /// A system turned by 90 degrees about z: its x axis is the global y axis.
 fn turned_system(model: &mut FeModel) {
-    let mut cs = plx_model::CoordinateSystem::new("Turned");
+    let mut cs = plx_model::CoordinateSystem {
+        id: named("Turned"),
+        ..plx_model::CoordinateSystem::new("Turned")
+    };
     cs.point_x = [0.0, 1.0, 0.0];
     cs.point_xy = [-1.0, 0.0, 0.0];
     model.coordinate_systems.push(cs);
@@ -759,6 +800,106 @@ fn solver_turns_a_deformable_remote_point_with_the_mean_of_its_face() {
     assert!((turned - angle).abs() < 1e-6 * angle, "{turned} != {angle}");
 }
 
+/// The cantilever with its tip force and reference point RP-1 at the centre of the tip
+/// face, the face coupled to it as `behavior` says.
+fn coupled_tip(behavior: RemoteBehavior) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = rigid_tip(Some(tip_force()), None);
+    let Constraint::RigidBody(body) = &mut model.constraints[0] else {
+        unreachable!()
+    };
+    body.behavior = behavior;
+    (mesh, model)
+}
+
+#[test]
+fn a_deformable_coupling_of_a_reference_point_is_written_as_equations() {
+    let (mesh, mut model) = coupled_tip(RemoteBehavior::Deformable);
+    model.put_history_output(
+        0,
+        plx_model::HistoryOutput::node("Tip-1", Region::ReferencePoint(named("RP-1"))),
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Rigid body"), "{text}");
+    // Three translations and three rotations follow the face.
+    assert_eq!(equations(&mesh, &model), 6, "{text}");
+    let analysis = lowered(&mesh, &model);
+    let ids = &analysis.model.nodes.ids;
+    assert_eq!(ids[ids.len() - 2..], [100, 101]);
+    assert_eq!(coordinates(&analysis, 100), [100.0, 5.0, 5.0]);
+    // The point of equations has no reaction force to print.
+    assert!(text.contains("*Node print"), "{text}");
+    assert!(!text.contains(", RF"), "{text}");
+}
+
+/// A deformable coupling tracks the tip face without stiffening it: the beam bends as
+/// without the point, and the point moves with the mean of the face. A rigid one stiffens
+/// the face.
+#[test]
+fn solver_moves_a_deformably_coupled_point_with_the_mean_of_its_face() {
+    let (mesh, plain) = cantilever(tip_force());
+    let Some(free) = run_solver("coupling-none", &write_inp(&mesh, &plain, "").unwrap()) else {
+        return;
+    };
+    let (_, mut model) = coupled_tip(RemoteBehavior::Deformable);
+    let mut output = plx_model::HistoryOutput::node("Tip", Region::ReferencePoint(named("RP-1")));
+    output.variables = vec!["U".into()];
+    model.put_history_output(0, output);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let name = "coupling-deformable";
+    dump_fixture(name, &text);
+    let Some(dir) = run_dir(name) else {
+        return;
+    };
+    let frd = run_in(&dir, name, &text);
+    let dat = std::fs::read_to_string(dir.join(format!("{name}.dat"))).unwrap();
+    remove_run_dir(&dir);
+    let expected = node_value(&free, "DISP", "U3", 99);
+    let ours = node_value(&frd, "DISP", "U3", 99);
+    assert!(
+        (ours - expected).abs() < 1e-9 * expected.abs(),
+        "{ours} != {expected}"
+    );
+    // The point follows the weighted mean of the face, as its equations say.
+    let spec = Displacement {
+        behavior: Behavior::Deformable,
+        location: Some([100.0, 5.0, 5.0]),
+        ..Displacement::new([None; 6])
+    };
+    let point = spec
+        .resolve(
+            &model,
+            &mesh,
+            &Region::Surface("TIP".into()),
+            &Default::default(),
+        )
+        .unwrap();
+    let total: f64 = point.weights.iter().sum();
+    let mean: f64 = (point.nodes.iter().zip(&point.weights))
+        .map(|(&n, w)| w * node_value(&frd, "DISP", "U3", n))
+        .sum::<f64>()
+        / total;
+    // The history output prints the displacements of the point's reference node.
+    let block = &dat[dat.find("displacements").expect(&dat)..];
+    let line = (block.lines())
+        .find(|l| l.split_whitespace().next() == Some("100"))
+        .expect(&dat);
+    let at_point: f64 = line.split_whitespace().nth(3).unwrap().parse().unwrap();
+    assert!(
+        // The .dat file prints seven digits.
+        (at_point - mean).abs() < 1e-6 * mean.abs(),
+        "{at_point} != {mean}"
+    );
+    let (_, rigid) = coupled_tip(RemoteBehavior::Rigid);
+    let Some(stiff) = run_solver("coupling-rigid", &write_inp(&mesh, &rigid, "").unwrap()) else {
+        return;
+    };
+    let stiffened = node_value(&stiff, "DISP", "U3", 99);
+    assert!(
+        stiffened.abs() < (1.0 - 1e-3) * expected.abs(),
+        "{stiffened} vs {expected}"
+    );
+}
+
 /// A solid beam on two end faces held in their translations with free rotations is simply
 /// supported: the faces turn about their centres. Held at each node, the same supports clamp
 /// the ends nearly.
@@ -779,6 +920,7 @@ fn solver_supports_a_solid_beam_on_two_hinged_faces() {
     step.boundary_conditions[0].kind =
         BoundaryKind::displacement([Some(0.0), Some(0.0), Some(0.0), Some(0.0), None, None]);
     step.boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Roller-1".into(),
         active: true,
@@ -815,7 +957,7 @@ fn solver_holds_each_node_in_its_coordinate_system() {
     let values = [Some(shift), Some(0.0), Some(0.0), None, None, None];
     let (mesh, mut model) = remote_cantilever(remote_with(values, |r| {
         r.behavior = Behavior::EachNode;
-        r.system = "Turned".into();
+        r.system = Some(named("Turned"));
     }));
     turned_system(&mut model);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -859,6 +1001,7 @@ fn a_face_free_to_turn_follows_a_rigid_point() {
     model.steps[0].boundary_conditions[1].kind = BoundaryKind::displacement(hinge);
     let node = Region::Surface("TIP".into()).nodes(&mesh)[0];
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Pin-1".into(),
         active: true,
@@ -890,7 +1033,7 @@ fn solver_moves_a_remote_point_in_its_coordinate_system() {
             Some(0.0),
             Some(0.0),
         ],
-        |r| r.system = "Turned".into(),
+        |r| r.system = Some(named("Turned")),
     ));
     turned_system(&mut model);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -1025,6 +1168,7 @@ fn remote_force(edit: impl FnOnce(&mut plx_model::RemoteForce)) -> Load {
     let mut remote = plx_model::RemoteForce::default();
     edit(&mut remote);
     Load {
+        id: named("Remote_Force-1"),
         name: "Remote_Force-1".into(),
         region: Region::Surface("TIP".into()),
         kind: LoadKind::RemoteForce(remote),
@@ -1136,7 +1280,7 @@ fn solver_bends_the_cantilever_by_a_remote_moment_on_its_tip_face() {
 fn solver_pushes_a_remote_force_in_its_coordinate_system() {
     let (mesh, mut model) = cantilever(remote_force(|r| {
         r.force = [100.0, 0.0, 0.0];
-        r.system = "Turned".into();
+        r.system = Some(named("Turned"));
     }));
     turned_system(&mut model);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -1162,7 +1306,7 @@ fn a_remote_force_on_a_reference_point_acts_on_its_nodes() {
         r.force = [0.0, 0.0, -100.0];
         r.moment = [0.0, 0.0, 1000.0];
     });
-    load.region = Region::ReferencePoint("RP-1".into());
+    load.region = Region::ReferencePoint(named("RP-1"));
     let (mesh, model) = rigid_tip(Some(load), None);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert_eq!(text.matches("*Rigid body").count(), 1, "{text}");
@@ -1211,6 +1355,7 @@ fn a_plastic_material_is_written() {
 fn solver_yields_the_bar_pulled_beyond_its_yield_stress() {
     let stress = 300.0;
     let load = Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Pressure-1".into(),
         active: true,
@@ -1219,6 +1364,9 @@ fn solver_yields_the_bar_pulled_beyond_its_yield_stress() {
         kind: LoadKind::Pressure(-stress),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, mut model) = cantilever(load);
     s235(&mut model);
@@ -1235,6 +1383,7 @@ fn solver_yields_the_bar_pulled_beyond_its_yield_stress() {
         let mut dofs = [None; 6];
         dofs[axis] = Some(0.0);
         BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: format!("Symmetry-{}", axis + 1),
             active: true,
@@ -1285,6 +1434,7 @@ fn pre_tension(value: f64, by_displacement: bool) -> (FeMesh, FeModel) {
     let faces = cut_faces(&mesh);
     assert_eq!(faces.len(), 4);
     model.steps[0].loads = vec![Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Pre_Tension-1".into(),
         active: true,
@@ -1298,9 +1448,13 @@ fn pre_tension(value: f64, by_displacement: bool) -> (FeMesh, FeModel) {
         },
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     }];
     // Both ends held: the bolt is clamped between them.
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Fixed-2".into(),
         active: true,
@@ -1628,6 +1782,7 @@ fn tet_bar() -> FeMesh {
     let id = |i: i64, j: i64, k: i64| (((i * (2 * ny + 1) + j) * (2 * ny + 1) + k) + 1) as u32;
     let mut used = std::collections::BTreeSet::new();
     let mut part = plx_mesh::Part {
+        bodies: Vec::new(),
         name: "EALL".into(),
         elements: Vec::new(),
     };
@@ -1856,6 +2011,7 @@ fn solver_shortens_the_bolt_by_the_prescribed_displacement() {
 #[test]
 fn solver_pressure_on_a_surface_balances_the_reactions() {
     let load = Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Pressure-1".into(),
         active: true,
@@ -1864,6 +2020,9 @@ fn solver_pressure_on_a_surface_balances_the_reactions() {
         kind: LoadKind::Pressure(2.0),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, model) = cantilever(load);
     let Some(frd) = run_solver("druck", &write_inp(&mesh, &model, "").unwrap()) else {
@@ -1882,6 +2041,7 @@ fn solver_reads_quadratic_elements_over_two_lines() {
     const NODE: NodeId = 141;
     const FORCE: [f64; 3] = [0.0, -500.0, 0.0];
     let load = Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Force-1".into(),
         active: true,
@@ -1890,6 +2050,9 @@ fn solver_reads_quadratic_elements_over_two_lines() {
         kind: LoadKind::force(FORCE),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, model) = analysis("block_c3d20r.inp", load);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -1953,6 +2116,7 @@ fn surface_traction_spreads_the_total_force_by_area() {
 #[test]
 fn solver_balances_a_surface_traction() {
     let load = Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Surface_Traction-1".into(),
         active: true,
@@ -1961,6 +2125,9 @@ fn solver_balances_a_surface_traction() {
         kind: LoadKind::force([0.0, -80.0, 0.0]),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, model) = cantilever(load);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -2012,7 +2179,7 @@ fn a_frequency_step_is_written() {
     let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
         unreachable!()
     };
-    settings.perturbation = true;
+    settings.base = plx_model::Base::PreviousState;
     settings.storage = true;
     settings.num_frequencies = 4;
     settings.upper_frequency = Some(5000.0);
@@ -2039,7 +2206,7 @@ fn solver_finds_the_bending_frequency_of_the_cantilever() {
     let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
         unreachable!()
     };
-    settings.perturbation = true;
+    settings.base = plx_model::Base::PreviousState;
     let Some(frd) = run_solver("eigenfrequenz", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
@@ -2061,31 +2228,132 @@ fn solver_finds_the_bending_frequency_of_the_cantilever() {
     }
 }
 
-/// The cantilever with a dynamic step of the given duration, increments of `increment`,
-/// the tip force applied at once (a stepped amplitude) and the given damping.
+/// The cantilever with a dynamic step of the given duration, a frame (and time step) every
+/// `increment`, the tip force applied at once and the given Rayleigh damping.
 fn dynamic_cantilever(
     duration: f64,
     increment: f64,
     damping: Option<plx_model::RayleighDamping>,
 ) -> (FeMesh, FeModel) {
     let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
-    model
-        .amplitudes
-        .push(amplitude("Stepped", vec![[0.0, 1.0], [1.0, 1.0]]));
     let step = &mut model.steps[0];
-    step.loads[0].amplitude = Some("Stepped".into());
     step.field_outputs = FieldOutput::dynamic_defaults();
     step.kind = StepKind::Dynamic(DynamicStep {
-        increments: StaticStep {
-            incrementation: Incrementation::Direct,
-            initial_increment: increment,
-            time_period: duration,
-            ..StaticStep::default()
-        },
-        damping,
+        duration,
+        frames: (duration / increment).round() as u32,
+        damping: damping.map_or(Damping::None, Damping::Rayleigh),
         ..DynamicStep::default()
     });
     (mesh, model)
+}
+
+/// Large deformations make the step geometrically nonlinear.
+#[test]
+fn a_dynamic_step_with_large_deformations_is_nonlinear() {
+    let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, None);
+    assert!(!lowered(&mesh, &model).steps[0].nlgeom);
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.large_deformations = true;
+    assert!(model.steps[0].kind.nlgeom());
+    assert!(lowered(&mesh, &model).steps[0].nlgeom);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Step, Nlgeom, Inc=61, Amplitude=Step\n*Dynamic, Direct, Events\n"),
+        "{text}"
+    );
+}
+
+/// The Automatic method: the implicit step with the switch to explicit integration, its
+/// factor and the mass scaling of the explicit parts.
+#[test]
+fn an_automatic_dynamic_step_is_lowered_with_its_switch_factor() {
+    let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, None);
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.method = plx_model::DynamicMethod::Automatic;
+    let lowered = lowered(&mesh, &model);
+    let ir::step::Procedure::Dynamic(d) = &lowered.steps[0].procedure else {
+        panic!("{:?}", lowered.steps[0].procedure)
+    };
+    assert_eq!(
+        d.integration,
+        ir::step::Integration::Automatic {
+            explicit: ir::step::ExplicitControls::default(),
+            switch_factor: 30.0
+        }
+    );
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.switch_factor = Some(50.0);
+    settings.mass_scaling = Some(1e-6);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("Integration=Automatic"), "{text}");
+    assert!(text.contains("Switch=50"), "{text}");
+}
+
+/// Modal superposition: a frequency step that stores the eigenmodes prepares a modal
+/// dynamics step with the Dynamic step's time step, duration and damping.
+#[test]
+fn a_modal_dynamic_step_is_lowered_to_eigenmodes_and_modal_dynamics() {
+    let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, None);
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.method = plx_model::DynamicMethod::Modal {
+        modes: 12,
+        base: plx_model::Base::Unloaded,
+    };
+    settings.damping = Damping::Ratio {
+        zeta: 0.03,
+        range: DampingRange::Automatic,
+    };
+    let lowered = lower_unvalidated(&mesh, &model, "").unwrap();
+    assert_eq!(lowered.analysis.steps.len(), 2);
+    assert_eq!(lowered.preparation_steps, [0]);
+    for step in 0..2 {
+        assert_eq!(
+            lowered.origins.get(&ir::ItemRef::Step(step)),
+            Some(plx_model::ModelItem::Step(0))
+        );
+    }
+    let text = lowered.text();
+    for line in [
+        "*Frequency, Storage=Yes\n12\n",
+        "*Step, Inc=61, Amplitude=Step\n*Modal dynamics\n0.000025, 0.0015\n",
+        "*Modal damping\n1, 1000000, 0.03\n",
+        "*Cload, op=New\n",
+        "*Node file\nRF, U, V, A\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+    // The supports hold in both steps.
+    assert_eq!(text.matches("\n*Boundary").count(), 2, "{text}");
+    assert!(!text.contains("Perturbation"), "{text}");
+    // Preloaded, the eigenmodes are a perturbation of the state before the step.
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.method = plx_model::DynamicMethod::Modal {
+        modes: 12,
+        base: plx_model::Base::PreviousState,
+    };
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "*Step, Perturbation, Inc=100, Amplitude=Ramp\n*Frequency, Storage=Yes\n12\n"
+        ),
+        "{text}"
+    );
+    // Large deformations do not go with the superposition.
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.large_deformations = true;
+    assert!(lower_unvalidated(&mesh, &model, "").is_err());
 }
 
 #[test]
@@ -2097,33 +2365,51 @@ fn a_dynamic_step_is_written() {
     let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, Some(damping));
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
-        "*Step, Inc=100, Amplitude=Step\n*Dynamic, Direct\n0.000025, 0.0015\n\
+        "*Step, Inc=61, Amplitude=Step\n*Dynamic, Direct, Events\n0.000025, 0.0015\n\
          *Damping, Alpha=0, Beta=0.00004\n",
-        "*Cload, op=New, Amplitude=STEPPED\n",
-        "*Node file\nRF, U, V\n",
-        "*El file\nS, E, ENER, NOE\n",
+        "*Cload, op=New\n",
+        "*Node file\nRF, U, V, A\n",
+        "*El file\nS, E, NOE\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in\n{text}");
     }
     let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
-    settings.damping = None;
-    settings.alpha = -0.1;
-    settings.procedure = plx_model::DynamicProcedure::Explicit;
-    settings.increments.nlgeom = true;
-    settings.increments.incrementation = Incrementation::Automatic;
-    settings.increments.solver = LinearSolverChoice::Iterative;
-    let text = write_inp(&mesh, &model, "").unwrap();
+    // A 0.2 ms rise of the force: time steps of 20 us, 5 per frame of 0.1 ms. Strong
+    // numerical damping and a damping ratio of 5 % between 100 Hz and 10 kHz.
+    settings.frames = 15;
+    settings.numerical_damping = NumericalDamping::Strong;
+    settings.damping = Damping::Ratio {
+        zeta: 0.05,
+        range: DampingRange::Between(100.0, 10_000.0),
+    };
+    settings.solver = LinearSolverChoice::Iterative;
+    model
+        .amplitudes
+        .push(amplitude("Rise", vec![[0.0, 0.0], [2e-4, 1.0], [1.0, 1.0]]));
+    model.steps[0].loads[0].amplitude = Some(named("Rise"));
+    let analysis = lowered(&mesh, &model);
+    let step = &analysis.steps[0];
+    assert_eq!(step.max_increments, 76);
+    let ir::step::Procedure::Dynamic(dynamic) = &step.procedure else {
+        panic!("{:?}", step.procedure)
+    };
+    assert!((dynamic.increments.initial() - 2e-5).abs() < 1e-15);
+    assert!(dynamic.increments.direct);
+    assert!((dynamic.alpha.unwrap() + 1.0 / 3.0).abs() < 1e-15);
+    let rayleigh = dynamic.rayleigh.unwrap();
+    let ratio = |f: f64| {
+        let w = 2.0 * std::f64::consts::PI * f;
+        rayleigh.alpha / (2.0 * w) + rayleigh.beta * w / 2.0
+    };
+    assert!((ratio(100.0) - 0.05).abs() < 1e-12 && (ratio(10_000.0) - 0.05).abs() < 1e-12);
+    // Every fifth increment is a frame.
     assert!(
-        text.contains(
-            "*Step, Nlgeom, Inc=100, Amplitude=Step\n\
-             *Dynamic, Solver=Iterative Cholesky, Alpha=-0.1, Explicit\n\
-             0.000025, 0.0015, 0.00001, 1e30\n"
-        ),
-        "{text}"
+        (step.outputs.node_file.iter().chain(&step.outputs.el_file)).all(|o| o.frequency == 5),
+        "{:?}",
+        step.outputs
     );
-    assert!(!text.contains("*Damping"), "{text}");
     model.steps[0].active = false;
     assert!(lowered(&mesh, &model).steps.is_empty());
 }
@@ -2200,26 +2486,22 @@ fn solver_runs_short_dynamic_steps() {
     };
     assert_eq!(tip_history(&frd).len(), 6);
 
-    let (mesh, mut model) = dynamic_cantilever(2e-4, 2.5e-5, None);
+    // Two frames, but time steps of 25 us for vibrations up to 2 kHz: the solver writes
+    // every fourth increment.
+    let (mesh, mut model) = dynamic_cantilever(2e-4, 1e-4, None);
     let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
-    settings.increments.incrementation = Incrementation::Automatic;
-    settings.increments.max_increment = 6e-5;
-    let frd = run_solver(
-        "dynamik-automatisch",
-        &write_inp(&mesh, &model, "").unwrap(),
-    )
-    .unwrap();
+    settings.frequency_limit = Some(2000.0);
+    let frd = run_solver("dynamik-frames", &write_inp(&mesh, &model, "").unwrap()).unwrap();
     let history = tip_history(&frd);
-    assert!(history.len() > 3 && history.len() < 8, "{history:?}");
+    assert_eq!(history.len(), 2, "{history:?}");
     assert!(
-        (history.last().unwrap().0 - 2e-4).abs() < 1e-9,
+        (history[0].0 - 1e-4).abs() < 1e-12 && (history[1].0 - 2e-4).abs() < 1e-12,
         "{history:?}"
     );
 
-    // The preload of a static step, released at the start of the dynamic step. Both steps
-    // ask for ENER, which CalculiX wants in the first step when a later one is dynamic.
+    // The preload of a static step, released at the start of the dynamic step.
     let (mesh, mut model) = dynamic_cantilever(1e-4, 2.5e-5, None);
     let mut release = model.steps[0].clone();
     release.name = "Release".into();
@@ -2243,9 +2525,126 @@ fn solver_runs_short_dynamic_steps() {
     );
 }
 
-/// The cantilever with a frequency step that stores its modes, a modal dynamics step with
-/// the tip force applied at once, and a steady state sweep of the tip force around the
-/// first bending mode; both modal steps damped as given.
+/// The cantilever of [`dynamic_cantilever`] with its tip force turned into an excitation.
+fn excited_cantilever(duration: f64, frames: u32, signal: plx_model::Signal) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = dynamic_cantilever(duration, duration / frames as f64, None);
+    model.steps[0].loads[0].kind = LoadKind::Excitation(plx_model::Excitation {
+        value: [0.0, 0.0, -100.0],
+        each_node: false,
+        signal,
+    });
+    model.steps[0].loads[0].name = "Excitation-1".into();
+    (mesh, model)
+}
+
+/// An excitation is the force of its region times a signal amplitude that the solver
+/// evaluates itself; an open end runs to the end of the step, and the automatic time step
+/// resolves the signal.
+#[test]
+fn an_excitation_writes_its_force_and_signal() {
+    let sine = plx_model::Signal::Sine {
+        frequency: 1000.0,
+        phase: 90.0,
+        start: 0.0,
+        end: None,
+    };
+    let (mesh, model) = excited_cantilever(0.01, 10, sine);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Amplitude, Name=SIGNAL_STEP-1_EXCITATION-1, Shape=Sine\n0, 0.01, 1000, 90\n",
+        "*Cload, op=New, Amplitude=SIGNAL_STEP-1_EXCITATION-1\nINTERNAL_SELECTION-1_EXCITATION-1, 3, -100\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+    // 20 time steps per period of 1 kHz: 50 us.
+    let analysis = lowered(&mesh, &model);
+    let ir::step::Procedure::Dynamic(dynamic) = &analysis.steps[0].procedure else {
+        panic!("{:?}", analysis.steps[0].procedure)
+    };
+    assert!(
+        (dynamic.increments.initial.unwrap() - 5e-5).abs() < 1e-12,
+        "{dynamic:?}"
+    );
+    let amplitude = analysis
+        .model
+        .amplitude("SIGNAL_STEP-1_EXCITATION-1")
+        .unwrap();
+    assert!((amplitude.value(0.0) - 1.0).abs() < 1e-12);
+
+    let chirp = plx_model::Signal::Chirp {
+        from: 10.0,
+        to: 500.0,
+        sweep: plx_model::Sweep::Logarithmic,
+        start: 0.001,
+        end: Some(0.009),
+    };
+    let (mesh, model) = excited_cantilever(0.01, 10, chirp);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("Shape=Chirp, Sweep=Log\n0.001, 0.009, 10, 500\n"),
+        "{text}"
+    );
+    // Outside a dynamic step the excitation is left out.
+    let (mesh, mut model) = excited_cantilever(0.01, 10, plx_model::Signal::default());
+    model.steps[0].kind = StepKind::Static(StaticStep::default());
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("Shape="), "{text}");
+}
+
+/// A short impulse sets the cantilever (first bending mode 810 Hz) swinging freely: its
+/// impulse I = 2 F w / pi gives the tip a swing of I / (m w1), the static deflection under F
+/// times w1 I / F. A slow sine of 50 Hz bends it nearly statically: the peak at a quarter
+/// period is the static deflection times 1 / (1 - (50/810)^2), plus the free swing the
+/// start sets off.
+#[test]
+fn solver_follows_impulse_and_sine_excitations() {
+    let (mesh, reference) = analysis("kragbalken_c3d20r.inp", tip_force());
+    let Some(frd) = run_solver(
+        "anregung_statisch",
+        &write_inp(&mesh, &reference, "").unwrap(),
+    ) else {
+        return;
+    };
+    let static_u3 = node_value(&frd, "DISP", "U3", 99);
+    let width = 5e-5;
+    let impulse = plx_model::Signal::Impulse { time: 0.0, width };
+    let (mesh, model) = excited_cantilever(2.5e-3, 100, impulse);
+    let frd = run_solver("anregung_impuls", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let history = tip_history(&frd);
+    let swing = (history.iter()).fold(0.0_f64, |m, h| m.max(h.1.abs()));
+    let omega = 2.0 * std::f64::consts::PI * 810.0;
+    let expected = static_u3.abs() * omega * 2.0 * width / std::f64::consts::PI;
+    assert!(
+        (swing / expected - 1.0).abs() < 0.2,
+        "swing {swing}, expected {expected}"
+    );
+    // The force is gone after the impulse: the tip swings about zero.
+    let late_min = (history.iter().skip(50)).fold(0.0_f64, |m, h| m.min(h.1));
+    let late_max = (history.iter().skip(50)).fold(0.0_f64, |m, h| m.max(h.1));
+    assert!(
+        late_min < -0.5 * expected && late_max > 0.5 * expected,
+        "{history:?}"
+    );
+
+    let sine = plx_model::Signal::Sine {
+        frequency: 50.0,
+        phase: 0.0,
+        start: 0.0,
+        end: None,
+    };
+    let (mesh, model) = excited_cantilever(5e-3, 20, sine);
+    let frd = run_solver("anregung_sinus", &write_inp(&mesh, &model, "").unwrap()).unwrap();
+    let history = tip_history(&frd);
+    let (time, peak) = *history.last().unwrap();
+    assert!((time - 5e-3).abs() < 1e-9, "{history:?}");
+    let ratio = peak / static_u3 * (1.0 - (50.0_f64 / 810.0).powi(2));
+    assert!((ratio - 1.0).abs() < 0.1, "peak {ratio} x static");
+}
+
+/// The cantilever with a frequency step that stores its modes, a Dynamic step by modal
+/// superposition of as many modes with the tip force applied at once, and a steady state
+/// sweep of the tip force around the first bending mode; both modal steps damped as given
+/// (a constant ratio or Rayleigh).
 fn modal_cantilever(damping: Option<ModalDamping>) -> (FeMesh, FeModel) {
     let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
     model
@@ -2253,7 +2652,7 @@ fn modal_cantilever(damping: Option<ModalDamping>) -> (FeMesh, FeModel) {
         .push(amplitude("Stepped", vec![[0.0, 1.0], [1.0, 1.0]]));
     let supports = model.steps[0].boundary_conditions.clone();
     let mut force = model.steps[0].loads[0].clone();
-    force.amplitude = Some("Stepped".into());
+    force.amplitude = Some(named("Stepped"));
     let mut frequency = Step::new_frequency("Step-1");
     frequency.field_outputs = ccx_eigen_outputs(&frequency.kind);
     frequency.boundary_conditions = supports.clone();
@@ -2262,14 +2661,27 @@ fn modal_cantilever(damping: Option<ModalDamping>) -> (FeMesh, FeModel) {
     };
     settings.storage = true;
     settings.num_frequencies = 6;
-    let mut modal = Step::new_modal_dynamics("Step-2");
+    let mut modal = Step::new_dynamic("Step-2");
+    modal.history_outputs.clear();
     modal.boundary_conditions = supports.clone();
     modal.loads = vec![force];
-    modal.kind = StepKind::ModalDynamics(ModalDynamicsStep {
-        increment: 2.5e-5,
-        time_period: 1.5e-3,
-        damping: damping.clone(),
-        ..ModalDynamicsStep::default()
+    modal.kind = StepKind::Dynamic(DynamicStep {
+        method: plx_model::DynamicMethod::Modal {
+            modes: 6,
+            base: plx_model::Base::Unloaded,
+        },
+        duration: 1.5e-3,
+        frames: 60,
+        damping: match &damping {
+            None => Damping::None,
+            Some(ModalDamping::Constant(zeta)) => Damping::Ratio {
+                zeta: *zeta,
+                range: DampingRange::Automatic,
+            },
+            Some(ModalDamping::Rayleigh(r)) => Damping::Rayleigh(*r),
+            Some(ModalDamping::Direct(_)) => unreachable!(),
+        },
+        ..DynamicStep::default()
     });
     let mut sweep = Step::new_steady_state_dynamics("Step-3");
     sweep.boundary_conditions = supports;
@@ -2280,6 +2692,7 @@ fn modal_cantilever(damping: Option<ModalDamping>) -> (FeMesh, FeModel) {
         data_points: 21,
         bias: 1.0,
         damping,
+        modes: 6,
         ..SteadyStateDynamicsStep::default()
     });
     model.steps = vec![frequency, modal, sweep];
@@ -2292,6 +2705,7 @@ fn buckle_analysis() -> (FeMesh, FeModel) {
     let (mesh, mut model) = analysis(
         "kragbalken_c3d20r.inp",
         Load {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Force-1".into(),
             active: true,
@@ -2300,6 +2714,9 @@ fn buckle_analysis() -> (FeMesh, FeModel) {
             kind: LoadKind::force([-21.0, 0.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
+            system: None,
+            follower: false,
         },
     );
     let mut step = Step::new_buckle("Step-1");
@@ -2316,19 +2733,19 @@ fn modal_steps_are_written() {
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
         "*Frequency, Storage=Yes\n6\n",
-        "*Step, Inc=100, Amplitude=Step\n*Modal dynamics\n0.000025, 0.0015\n\
+        "*Step, Inc=61, Amplitude=Step\n*Modal dynamics\n0.000025, 0.0015\n\
          *Modal damping\n1, 1000000, 0.02\n",
         "*Cload, op=New, Amplitude=STEPPED\n",
         "*Steady state dynamics\n700, 900, 21, 1\n*Modal damping\n1, 1000000, 0.02\n",
-        "*Node file\nRF, U, V\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in\n{text}");
     }
-    let StepKind::ModalDynamics(settings) = &mut model.steps[1].kind else {
+    let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
         unreachable!()
     };
-    settings.time_period = 0.01;
-    settings.steady_state = true;
+    settings.harmonic = false;
+    settings.fourier_terms = 5;
+    settings.time_upper = 0.002;
     settings.damping = Some(ModalDamping::Direct(vec![
         plx_model::ModeDamping {
             lowest: 1,
@@ -2341,40 +2758,34 @@ fn modal_steps_are_written() {
             ratio: 0.1,
         },
     ]));
-    let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
-        unreachable!()
-    };
-    settings.harmonic = false;
-    settings.fourier_terms = 5;
-    settings.time_upper = 0.002;
-    settings.damping = Some(ModalDamping::Rayleigh(plx_model::RayleighDamping {
-        alpha: 10.0,
-        beta: 4e-5,
-    }));
-    let text = write_inp(&mesh, &model, "").unwrap();
-    for line in [
-        "*Step, Inc=100, Amplitude=Step\n*Modal dynamics, Steady state\n0.000025, 0.01\n\
-         *Modal damping\n1, 2, 0.05\n3, 6, 0.1\n",
-        "*Steady state dynamics, Harmonic=No\n700, 900, 21, 1, 5\n\
-         *Modal damping, Rayleigh\n, , 10, 0.00004\n",
-    ] {
-        assert!(text.contains(line), "missing {line:?} in\n{text}");
-    }
-    // The increment count grows with the time period.
-    let StepKind::ModalDynamics(settings) = &mut model.steps[1].kind else {
-        unreachable!()
-    };
-    settings.steady_state = false;
-    settings.time_period = 0.01;
-    assert_eq!(settings.increments(), 401);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Step, Inc=401, Amplitude=Step\n*Modal dynamics"),
+        text.contains(
+            "*Steady state dynamics, Harmonic=No\n700, 900, 21, 1, 5\n\
+             *Modal damping\n1, 2, 0.05\n3, 6, 0.1\n"
+        ),
+        "{text}"
+    );
+    settings_rayleigh(&mut model);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Modal damping, Rayleigh\n, , 10, 0.00004\n"),
         "{text}"
     );
     model.steps[1].active = false;
     model.steps[2].active = false;
     assert_eq!(lowered(&mesh, &model).steps.len(), 1);
+}
+
+/// Rayleigh damping on the sweep of [`modal_cantilever`].
+fn settings_rayleigh(model: &mut FeModel) {
+    let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
+        unreachable!()
+    };
+    settings.damping = Some(ModalDamping::Rayleigh(plx_model::RayleighDamping {
+        alpha: 10.0,
+        beta: 4e-5,
+    }));
 }
 
 #[test]
@@ -2392,7 +2803,7 @@ fn a_buckle_step_is_written() {
     let StepKind::Buckle(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
-    settings.perturbation = true;
+    settings.base = plx_model::Base::PreviousState;
     settings.num_factors = 3;
     settings.accuracy = 0.01;
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -2420,24 +2831,32 @@ fn solver_runs_short_modal_steps() {
     };
     settings.num_frequencies = 4;
     model.steps[0].field_outputs = vec![node(&["U"])];
-    let StepKind::ModalDynamics(settings) = &mut model.steps[1].kind else {
+    let StepKind::Dynamic(settings) = &mut model.steps[1].kind else {
         unreachable!()
     };
-    settings.time_period = 1e-4;
+    settings.duration = 1e-4;
+    settings.frames = 4;
+    settings.method = plx_model::DynamicMethod::Modal {
+        modes: 4,
+        base: plx_model::Base::Unloaded,
+    };
     model.steps[1].field_outputs = vec![node(&["U", "V"]), element(&["S"])];
     let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
         unreachable!()
     };
     settings.data_points = 3;
     settings.bias = 2.0;
+    settings.modes = 4;
     model.steps[2].field_outputs = vec![node(&["U", "PU"]), element(&["S", "PHS"])];
     let Some(frd) = run_solver("modal-kurz", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     let count = |step: u32| frd.increments.iter().filter(|i| i.step == step).count();
-    assert_eq!((count(1), count(2)), (4, 4));
+    // The frequency step, the eigenmodes the Dynamic step computes itself, its frames,
+    // the eigenmodes the Steady State Dynamics step computes itself.
+    assert_eq!((count(1), count(2), count(3), count(4)), (4, 4, 4, 4));
     // 700 Hz, the first bending pair, 900 Hz: two intervals of three points.
-    assert_eq!(count(3), 5);
+    assert_eq!(count(5), 5);
 }
 
 /// The modal superposition swings the tip like the direct integration does, damped by the
@@ -2458,13 +2877,14 @@ fn solver_superposes_the_stored_modes_of_the_cantilever() {
         f64::from(i.field("DISP").unwrap().component("U3").unwrap().values[index])
     };
     let modes: Vec<f64> = (frd.increments.iter())
-        .filter(|i| i.kind == plx_results::AnalysisKind::Frequency)
+        .filter(|i| i.step == 1 && i.kind == plx_results::AnalysisKind::Frequency)
         .map(|i| i.value)
         .collect();
     assert_eq!(modes.len(), 6, "{modes:?}");
     assert!((780.0..835.0).contains(&modes[0]), "{modes:?}");
+    // Step 2 holds the eigenmodes of the Dynamic step, step 3 its frames.
     let history: Vec<f64> = (frd.increments.iter())
-        .filter(|i| i.step == 2)
+        .filter(|i| i.step == 3)
         .map(tip)
         .collect();
     assert_eq!(history.len(), 60, "{history:?}");
@@ -2477,8 +2897,9 @@ fn solver_superposes_the_stored_modes_of_the_cantilever() {
             .and_then(|f| f.component("U3"))
             .map_or(0.0, |c| f64::from(c.values[index]))
     };
+    // Step 4 holds the eigenmodes of the Steady State Dynamics step, step 5 its response.
     let sweep: Vec<(f64, f64)> = (frd.increments.iter())
-        .filter(|i| i.step == 3)
+        .filter(|i| i.step == 5)
         .map(|i| (i.value, tip(i).hypot(imaginary(i))))
         .collect();
     assert!(sweep.len() >= 21, "{}", sweep.len());
@@ -2589,7 +3010,7 @@ fn a_preloaded_buckle_step_counts_its_modes_from_one() {
     let StepKind::Buckle(settings) = &mut model.steps[1].kind else {
         unreachable!()
     };
-    settings.perturbation = true;
+    settings.base = plx_model::Base::PreviousState;
     // The side load splits the degenerate pair of bending modes by 2e-4 only; with the
     // default accuracy CalculiX's Lanczos iteration stops 2e-5 away from the buckling
     // factor, too far for the solver fixture made from this test, and the shape of a
@@ -2648,6 +3069,7 @@ fn a_buckle_step_eliminates_a_rigid_end() {
 fn deactivated_items_are_left_out() {
     let (mesh, mut model) = cantilever(tip_force());
     model.steps[0].loads.push(Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Empty-1".into(),
         active: false,
@@ -2657,6 +3079,9 @@ fn deactivated_items_are_left_out() {
         kind: LoadKind::force([1.0, 0.0, 0.0]),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     });
     model.steps[0].loads[0].active = false;
     model.steps[0].boundary_conditions[0].active = false;
@@ -2710,6 +3135,7 @@ fn rectangle(x0: f64, width: f64, height: f64, nx: u32, ny: u32) -> FeMesh {
         }
     }
     let mut part = plx_mesh::Part {
+        bodies: Vec::new(),
         name: "PLATE".into(),
         elements: Vec::new(),
     };
@@ -2775,6 +3201,7 @@ fn plane_model(
     let mut step = Step::new_static("Step-1");
     for (k, (nodes, values)) in bcs.into_iter().enumerate() {
         step.boundary_conditions.push(BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: format!("Displacement_Rotation-{}", k + 1),
             active: true,
@@ -2785,6 +3212,7 @@ fn plane_model(
         });
     }
     step.loads.push(Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Load-1".into(),
         active: true,
@@ -2793,6 +3221,9 @@ fn plane_model(
         kind: load,
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     });
     FeModel {
         properties: plx_model::ModelProperties {
@@ -2800,6 +3231,7 @@ fn plane_model(
             ..Default::default()
         },
         materials: vec![Material {
+            id: named("Steel"),
             name: "Steel".into(),
             density: None,
             elastic: Some(Elastic {
@@ -2810,7 +3242,7 @@ fn plane_model(
         }],
         sections: vec![Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: Some(named("Steel")),
             region: Region::Parts(vec!["PLATE".into()]),
             thickness,
             kind: SectionKind::Solid,
@@ -2980,6 +3412,7 @@ fn plane_patch(shape: plx_mesh::ElementShape, x0: f64) -> PlanePatch {
         }
     }
     let mut part = plx_mesh::Part {
+        bodies: Vec::new(),
         name: "PLATE".into(),
         elements: Vec::new(),
     };
@@ -3057,6 +3490,7 @@ fn solver_runs_every_plane_element_type() {
                 Region::Faces(top),
             );
             model.steps[0].loads.push(Load {
+                id: plx_model::Id::new(),
                 distribution: None,
                 name: "Load-2".into(),
                 active: true,
@@ -3065,6 +3499,9 @@ fn solver_runs_every_plane_element_type() {
                 kind: LoadKind::force([150.0, -40.0, 0.0]),
                 amplitude: None,
                 factor_amplitude: None,
+                tables: Default::default(),
+                system: None,
+                follower: false,
             });
             assert!(model.set_element_type("PLATE", chosen));
             let written = space.element_type(chosen, shape);
@@ -3186,6 +3623,7 @@ fn two_blocks(gap: f64) -> (FeMesh, Faces, Faces) {
         }
         let name = if block == 0 { "LOWER" } else { "UPPER" };
         mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: name.into(),
             elements,
         });
@@ -3204,6 +3642,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         .collect();
     let mut step = Step::new_static("Step-1");
     step.boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Fixed-1".into(),
         active: true,
@@ -3213,6 +3652,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         amplitude: None,
     });
     step.loads.push(Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Pressure-1".into(),
         active: true,
@@ -3221,8 +3661,12 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         kind: LoadKind::Pressure(10.0),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     });
     model.materials.push(Material {
+        id: named("Steel"),
         name: "Steel".into(),
         density: None,
         elastic: Some(Elastic {
@@ -3233,7 +3677,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
     });
     model.sections.push(Section {
         name: "Section-1".into(),
-        material: "Steel".into(),
+        material: Some(named("Steel")),
         region: Region::Parts(vec!["LOWER".into(), "UPPER".into()]),
         thickness: 1.0,
         kind: SectionKind::Solid,
@@ -3276,6 +3720,7 @@ fn solver_preloads_a_bolt_split_into_two_tied_parts() {
         let step = &mut model.steps[0];
         step.boundary_conditions[0].region = Region::Nodes(ends.clone());
         step.loads = vec![Load {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Pre_Tension-1".into(),
             active: true,
@@ -3289,6 +3734,9 @@ fn solver_preloads_a_bolt_split_into_two_tied_parts() {
             },
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
+            system: None,
+            follower: false,
         }];
         let mut tie = plx_model::Tie::new("Tie-1");
         (tie.master, tie.slave) = if cut_is_master {
@@ -3345,7 +3793,10 @@ fn bolted_blocks(preload: f64) -> (FeMesh, FeModel, Vec<NodeId>) {
     region.side_a = Region::Geometry(vec![CadEntity::Face(2)]);
     region.side_b = Region::Geometry(vec![CadEntity::Face(1)]);
     model.contact_regions.push(region);
-    let mut bolt = plx_model::Bolt::new("Bolt-1");
+    let mut bolt = plx_model::Bolt {
+        id: named("Bolt-1"),
+        ..plx_model::Bolt::new("Bolt-1")
+    };
     bolt.side_a = Region::Geometry(vec![CadEntity::Face(2)]);
     bolt.side_b = Region::Geometry(vec![CadEntity::Face(1)]);
     bolt.preload = plx_model::Preload::Force(preload);
@@ -3393,8 +3844,10 @@ fn a_bolt_replaces_the_contact_region_on_its_cut_and_locks_after_its_preload() {
 fn a_bolt_follows_the_actions_of_its_steps() {
     let (mesh, mut model, _) = bolted_blocks(1000.0);
     model.steps[1].bolt_changes.push(plx_model::BoltChange {
-        bolt: "Bolt-1".into(),
+        bolt: named("Bolt-1"),
         action: plx_model::BoltAction::Open,
+        auto: false,
+        amplitude: None,
     });
     let (lowered, _) = model.lower_bolts(&mesh);
     assert_eq!(lowered.steps[1].loads, []);
@@ -3465,7 +3918,10 @@ fn solver_preloads_a_bolt_cut_inside_its_mesh() {
         unreachable!()
     };
     let faces = model.steps[0].loads.remove(0).region;
-    let mut bolt = plx_model::Bolt::new("Bolt-1");
+    let mut bolt = plx_model::Bolt {
+        id: named("Bolt-1"),
+        ..plx_model::Bolt::new("Bolt-1")
+    };
     bolt.side_a = faces;
     bolt.preload = plx_model::Preload::Force(force);
     model.bolts.push(bolt);
@@ -3536,6 +3992,7 @@ fn surface_interactions_and_contact_pairs_are_written() {
     let (mesh, lower, upper) = two_blocks(0.0);
     let mut model = stacked_blocks(&mesh);
     model.surface_interactions.push(SurfaceInteraction {
+        id: named("Surface_Interaction-1"),
         name: "Surface_Interaction-1".into(),
         properties: vec![
             InteractionProperty::SurfaceBehavior(SurfaceBehavior::Linear {
@@ -3550,7 +4007,10 @@ fn surface_interactions_and_contact_pairs_are_written() {
             InteractionProperty::GapConductance(GapConductance::Constant(3.0)),
         ],
     });
-    let mut pair = ContactPair::new("Contact_Pair-1", "Surface_Interaction-1");
+    let mut pair = ContactPair {
+        id: named("Contact_Pair-1"),
+        ..ContactPair::new("Contact_Pair-1", Some(named("Surface_Interaction-1")))
+    };
     pair.master = Region::Faces(lower);
     pair.slave = Region::Faces(upper);
     pair.method = ContactMethod::NodeToSurface;
@@ -3574,7 +4034,10 @@ fn surface_interactions_and_contact_pairs_are_written() {
     assert!(lowered(&mesh, &model).model.contact.pairs.is_empty());
     assert!(!text.contains("CONTACT_PAIR-1_MASTER"));
     // A pair needs its interaction.
-    model.contact_pairs[0] = ContactPair::new("Contact_Pair-1", "Gone");
+    model.contact_pairs[0] = ContactPair {
+        id: named("Contact_Pair-1"),
+        ..ContactPair::new("Contact_Pair-1", Some(named("Gone")))
+    };
     assert!(matches!(
         write_inp(&mesh, &model, ""),
         Err(WriteError::UnknownInteraction { .. })
@@ -3629,6 +4092,7 @@ fn solver_carries_the_load_across_a_contact() {
         // Held sideways at its top, the upper block rests on the lower one only by contact.
         let top: Vec<NodeId> = (119..=127).collect();
         model.steps[0].boundary_conditions.push(BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Side-1".into(),
             active: true,
@@ -3638,10 +4102,14 @@ fn solver_carries_the_load_across_a_contact() {
             amplitude: None,
         });
         model.surface_interactions.push(SurfaceInteraction {
+            id: named("Surface_Interaction-1"),
             name: "Surface_Interaction-1".into(),
             properties: vec![InteractionProperty::SurfaceBehavior(behavior)],
         });
-        let mut pair = ContactPair::new("Contact_Pair-1", "Surface_Interaction-1");
+        let mut pair = ContactPair {
+            id: named("Contact_Pair-1"),
+            ..ContactPair::new("Contact_Pair-1", Some(named("Surface_Interaction-1")))
+        };
         pair.master = Region::Faces(lower);
         pair.slave = Region::Faces(upper);
         model.contact_pairs.push(pair);
@@ -3665,6 +4133,7 @@ fn solver_carries_shear_across_a_tied_contact_without_stick_slope() {
     // The top of the upper block is pushed sideways.
     let top: Vec<NodeId> = (110..=118).collect();
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Shift-1".into(),
         active: true,
@@ -3674,13 +4143,17 @@ fn solver_carries_shear_across_a_tied_contact_without_stick_slope() {
         amplitude: None,
     });
     model.surface_interactions.push(SurfaceInteraction {
+        id: named("Tied"),
         name: "Tied".into(),
         properties: vec![
             InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tied { k: 1e7 }),
             InteractionProperty::Friction(plx_model::Friction::default()),
         ],
     });
-    let mut pair = ContactPair::new("Contact_Pair-1", "Tied");
+    let mut pair = ContactPair {
+        id: named("Contact_Pair-1"),
+        ..ContactPair::new("Contact_Pair-1", Some(named("Tied")))
+    };
     pair.master = Region::Faces(lower);
     pair.slave = Region::Faces(upper);
     model.contact_pairs.push(pair);
@@ -3708,10 +4181,14 @@ fn blocks_in_contact(
     let (mesh, lower, upper) = two_blocks(0.0);
     let mut model = stacked_blocks(&mesh);
     model.surface_interactions.push(SurfaceInteraction {
+        id: named("Surface_Interaction-1"),
         name: "Surface_Interaction-1".into(),
         properties,
     });
-    let mut pair = ContactPair::new("Contact_Pair-1", "Surface_Interaction-1");
+    let mut pair = ContactPair {
+        id: named("Contact_Pair-1"),
+        ..ContactPair::new("Contact_Pair-1", Some(named("Surface_Interaction-1")))
+    };
     pair.master = Region::Faces(lower);
     pair.slave = Region::Faces(upper);
     pair.method = method;
@@ -3777,6 +4254,7 @@ fn solver_gives_the_same_contact_in_mm_and_in_m() {
         let (mesh, mut model) = blocks_in_contact(properties, ContactMethod::SurfaceToSurface);
         // 100 MPa shear on the top of the upper block, 10 kN on 10 x 10 mm.
         model.steps[0].loads.push(Load {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Shear-1".into(),
             active: true,
@@ -3785,11 +4263,15 @@ fn solver_gives_the_same_contact_in_mm_and_in_m() {
             kind: LoadKind::force([1e4, 0.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
+            system: None,
+            follower: false,
         });
         if name == "hard" {
             // Held sideways at its top, the upper block rests on the lower one by contact.
             model.steps[0].loads.pop();
             model.steps[0].boundary_conditions.push(BoundaryCondition {
+                id: plx_model::Id::new(),
                 distribution: None,
                 name: "Side-1".into(),
                 active: true,
@@ -3839,6 +4321,7 @@ fn solver_carries_the_load_across_a_true_hard_mortar_contact() {
     let hard = vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)];
     let (mesh, mut model) = blocks_in_contact(hard, ContactMethod::Mortar);
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Side-1".into(),
         active: true,
@@ -3874,6 +4357,7 @@ fn solver_carries_the_load_across_a_contact_in_2d() {
         mesh.add_element(element).unwrap();
     }
     mesh.parts.push(plx_mesh::Part {
+        bodies: Vec::new(),
         name: "UPPER".into(),
         elements: (101..=104).collect(),
     });
@@ -3898,10 +4382,14 @@ fn solver_carries_the_load_across_a_contact_in_2d() {
     );
     model.sections[0].region = Region::Parts(vec!["PLATE".into(), "UPPER".into()]);
     model.surface_interactions.push(SurfaceInteraction {
+        id: named("Surface_Interaction-1"),
         name: "Surface_Interaction-1".into(),
         properties: vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)],
     });
-    let mut pair = ContactPair::new("Contact_Pair-1", "Surface_Interaction-1");
+    let mut pair = ContactPair {
+        id: named("Contact_Pair-1"),
+        ..ContactPair::new("Contact_Pair-1", Some(named("Surface_Interaction-1")))
+    };
     pair.master = Region::Faces(lower_top);
     pair.slave = Region::Faces(upper_bottom);
     model.contact_pairs.push(pair);
@@ -3981,6 +4469,7 @@ fn blocks(na: u32, nb: u32) -> Blocks {
             }
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: name.into(),
             elements,
         });
@@ -4013,6 +4502,7 @@ fn blocks_model(
 ) -> FeModel {
     let mut step = Step::new_static("Step-1");
     step.boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Fixed-1".into(),
         active: true,
@@ -4022,6 +4512,7 @@ fn blocks_model(
         amplitude: None,
     });
     step.loads.push(Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Surface_Traction-1".into(),
         active: true,
@@ -4030,9 +4521,13 @@ fn blocks_model(
         kind: LoadKind::force(force),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     });
     FeModel {
         materials: vec![Material {
+            id: named("Steel"),
             name: "Steel".into(),
             density: None,
             elastic: Some(Elastic {
@@ -4043,7 +4538,7 @@ fn blocks_model(
         }],
         sections: vec![Section {
             name: "Section-1".into(),
-            material: "Steel".into(),
+            material: Some(named("Steel")),
             region: Region::Parts(vec!["A".into(), "B".into()]),
             thickness: 1.0,
             kind: SectionKind::Solid,
@@ -4066,25 +4561,21 @@ fn mean_top(blocks: &Blocks, frd: &FrdImport, component: &str) -> f64 {
 
 /// A spring constraint on the region with the stiffness of the whole region.
 fn spring(name: &str, region: Region, stiffness: [f64; 3]) -> plx_model::Spring {
-    plx_model::Spring {
-        region,
-        stiffness,
-        ..plx_model::Spring::new(name)
-    }
+    plx_model::Spring::to_world(name, region, stiffness)
 }
 
 #[test]
 fn solver_carries_a_block_on_springs_between_two_surfaces() {
     // Different meshes on the two sides: the springs end on points between nodes.
     let blocks = blocks(2, 3);
-    let bearing = plx_model::Spring {
-        master: Some(Region::Faces(blocks.a_top.clone())),
+    let mut bearing = plx_model::Spring {
         ..spring(
             "Bearing-1",
             Region::Faces(blocks.b_bottom.clone()),
             [1000.0, 1000.0, 2000.0],
         )
     };
+    bearing.ends[1] = plx_model::SpringEnd::Region(Region::Faces(blocks.a_top.clone()));
     let load = [0.0, 0.0, 100.0];
     let model = blocks_model(&blocks, vec![Constraint::Spring(bearing.clone())], load);
     let text = write_inp(&blocks.mesh, &model, "").unwrap();
@@ -4152,6 +4643,187 @@ fn solver_carries_a_block_on_springs_to_ground() {
     assert!((lift - 0.1).abs() < 0.001, "{lift}");
 }
 
+/// A hinge: the tip face of the cantilever turns freely about z on the point of a
+/// displacement, held only by a rotational spring to ground on that point. A moment on the
+/// same point turns the whole beam rigidly by M / k about the face's centre.
+#[test]
+fn solver_turns_a_hinge_against_a_rotational_spring_on_its_point() {
+    let (m, k) = (1000.0, 1.0e6);
+    let (mesh, mut model) = cantilever(remote_force(|r| r.moment = [0.0, 0.0, m]));
+    model.steps[0].boundary_conditions[0] = remote(
+        "Hinge",
+        [Some(0.0), Some(0.0), Some(0.0), Some(0.0), Some(0.0), None],
+    );
+    let hinge = plx_model::Spring {
+        ends: [
+            plx_model::SpringEnd::Region(Region::RemotePoint(named("Hinge"))),
+            plx_model::SpringEnd::World,
+        ],
+        // Translations of the point are held by the boundary condition already.
+        stiffness: [0.0; 3],
+        rotational: [0.0, 0.0, k],
+        ..plx_model::Spring::new("Torsion")
+    };
+    model.constraints.push(Constraint::Spring(hinge.clone()));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // The spring sits on the rotation node of the point the force shares.
+    assert!(
+        text.contains("*Rigid body, Nset=INTERNAL-1_TIP, Ref node=100, Rot node=101\n"),
+        "{text}"
+    );
+    assert!(text.contains("*Element, Type=SPRING1\n"), "{text}");
+    assert!(
+        text.contains("*Spring, Elset=TORSION_ROTATION_DOF_3\n3\n"),
+        "{text}"
+    );
+    assert!(!text.contains("TORSION_DOF_"), "{text}");
+    // Nodes of a selection have no rotations to hold.
+    let mut on_nodes = hinge.clone();
+    on_nodes.ends[0] = plx_model::SpringEnd::Region(Region::NodeSet("FIX".into()));
+    assert!(!on_nodes.takes_rotations());
+    // The same in metres: the stiffness is a moment per radian.
+    model.properties.units = UnitSystem::MmTonSC;
+    let mut model_m = model.clone();
+    let mut mesh_m = mesh.clone();
+    model_m.convert_units(UnitSystem::MKgSC);
+    mesh_m.scale(1e-3);
+    if let Constraint::Spring(s) = &model_m.constraints[0] {
+        assert_eq!(s.rotational[2], k * 1e-3);
+    }
+    let text_m = write_inp(&mesh_m, &model_m, "").unwrap();
+    let Some(frd_m) = run_solver("drehfeder-gelenk-m", &text_m) else {
+        return;
+    };
+    let u1_m = node_value(&frd_m, "DISP", "U1", 99) * 1e3;
+    let Some(frd) = run_solver("drehfeder-gelenk", &text) else {
+        return;
+    };
+    let u1 = node_value(&frd, "DISP", "U1", 99);
+    assert!((u1_m - u1).abs() < 1e-3 * u1.abs(), "{u1_m} mm != {u1} mm");
+    // The rotation node carries the rotation, no displacement: the results leave it out.
+    assert!(frd.mesh.node(101).is_none());
+    let angle = m / k;
+    let tip: Vec<_> = (1..=99)
+        .filter(|&id| mesh.node(id).is_some_and(|c| c[0] == 100.0))
+        .collect();
+    for id in tip {
+        let y = mesh.node(id).unwrap()[1];
+        let u1 = node_value(&frd, "DISP", "U1", id);
+        let expected = -angle * (y - 5.0);
+        assert!((u1 - expected).abs() < 1e-6, "{u1} != {expected}");
+    }
+    // The other end turns with it, rigidly about the hinge.
+    let x = mesh.node(1).unwrap()[0];
+    let u2 = node_value(&frd, "DISP", "U2", 1);
+    assert!((u2 - angle * (x - 100.0)).abs() < 1e-6, "{u2}");
+}
+
+/// The hinge of a plane stress strip: its left edge turns about z on the point of a
+/// displacement, held by a torsion spring KR3 on the third degree of freedom of the point's
+/// rotation node. Against a practically rigid spring the tip sinks by M / k L more.
+#[test]
+fn solver_turns_a_plane_hinge_against_a_torsion_spring() {
+    let (force, length, k) = (100.0, 10.0, 1.0e6);
+    let mesh = rectangle(0.0, length, 2.0, 5, 2);
+    let tip = Region::Faces(edges_at(&mesh, 0, length));
+    let mut tips = Vec::new();
+    for (name, stiffness) in [("weich", k), ("steif", 1.0e12)] {
+        let load = LoadKind::force([0.0, -force, 0.0]);
+        let mut model = plane_model(ModelSpace::PlaneStress, 1.0, vec![], load, tip.clone());
+        let free_z = [Some(0.0), Some(0.0), None, None, None, None];
+        model.steps[0].boundary_conditions.push(BoundaryCondition {
+            id: named("Hinge"),
+            distribution: None,
+            name: "Hinge".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(edges_at(&mesh, 0, 0.0)),
+            kind: BoundaryKind::Displacement(Displacement::rigid(free_z)),
+            amplitude: None,
+        });
+        model
+            .constraints
+            .push(Constraint::Spring(plx_model::Spring {
+                ends: [
+                    plx_model::SpringEnd::Region(Region::RemotePoint(named("Hinge"))),
+                    plx_model::SpringEnd::World,
+                ],
+                // Only KR3 acts in a plane model.
+                rotational: [5.0, 5.0, stiffness],
+                ..plx_model::Spring::new("Torsion")
+            }));
+        let text = write_inp(&mesh, &model, "").unwrap();
+        assert!(
+            text.contains("*Spring, Elset=TORSION_ROTATION_DOF_3\n3\n"),
+            "{text}"
+        );
+        assert!(!text.contains("TORSION_ROTATION_DOF_1"), "{text}");
+        let Some(frd) = run_solver(&format!("drehfeder-scheibe-{name}"), &text) else {
+            return;
+        };
+        let corner = nodes_at(&mesh, 0, length)[0];
+        tips.push(node_value(&frd, "DISP", "U2", corner));
+    }
+    let extra = tips[1] - tips[0];
+    let expected = force * length / k * length;
+    assert!(
+        (extra - expected).abs() < 0.02 * expected,
+        "{extra} != {expected}"
+    );
+}
+
+/// Springs between two points connect their reference and their rotation nodes; springs
+/// from a selection to a point end on its reference node.
+#[test]
+fn springs_between_points_connect_their_nodes() {
+    let (mesh, mut model) = cantilever(remote_force(|r| r.moment = [0.0, 0.0, 1.0]));
+    // A hinge with a point of its own at the root instead of the clamp.
+    model.steps[0].boundary_conditions[0] = remote(
+        "Hinge",
+        [Some(0.0), Some(0.0), Some(0.0), Some(0.0), Some(0.0), None],
+    );
+    model.steps[0].boundary_conditions[0].region = Region::NodeSet("FIX".into());
+    let point = |name: &str| plx_model::SpringEnd::Region(Region::RemotePoint(named(name)));
+    model
+        .constraints
+        .push(Constraint::Spring(plx_model::Spring {
+            ends: [point("Remote_Force-1"), point("Hinge")],
+            stiffness: [10.0, 0.0, 0.0],
+            rotational: [0.0, 0.0, 5.0],
+            ..plx_model::Spring::new("Coupling")
+        }));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Element, Type=SPRING2\n"), "{text}");
+    assert!(
+        text.contains("*Spring, Elset=COUPLING_DOF_1\n1, 1\n10, 0\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("*Spring, Elset=COUPLING_ROTATION_DOF_3\n3, 3\n5, 0\n"),
+        "{text}"
+    );
+    // The same point on both ends is no spring.
+    if let Constraint::Spring(s) = &mut model.constraints[0] {
+        s.ends[1] = point("Remote_Force-1");
+    }
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidConstraint { .. })
+    ));
+    // Nodes of a selection get springs to the point's reference node, sharing the
+    // stiffness; rotational springs are left out.
+    if let Constraint::Spring(s) = &mut model.constraints[0] {
+        s.ends[1] = plx_model::SpringEnd::Region(Region::Nodes(vec![1, 2]));
+    }
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Element, Type=SPRING2\n"), "{text}");
+    assert!(!text.contains("ROTATION_DOF"), "{text}");
+    for node in [1, 2] {
+        let section = format!("*Spring, Elset=COUPLING_{node}_DOF_1\n1, 1\n5, 0\n");
+        assert!(text.contains(&section), "{text}");
+    }
+}
+
 #[test]
 fn springs_on_edges_are_spread_by_length() {
     let blocks = blocks(2, 2);
@@ -4207,6 +4879,7 @@ fn solver_compression_only_support_takes_only_pressure() {
             [1000.0, 1000.0, 1000.0],
         ));
         let mut gaps = CompressionOnly {
+            id: plx_model::Id::new(),
             name: "Compression_Only-1".into(),
             active: true,
             visible: true,
@@ -4225,12 +4898,19 @@ fn solver_compression_only_support_takes_only_pressure() {
             vec![springs, Constraint::CompressionOnly(gaps)],
             force,
         );
+        // The model the app hands the solver directly checks its surface names.
+        lower(&blocks.mesh, &model, "").unwrap();
         write_inp(&blocks.mesh, &model, "").unwrap()
     };
     let up = [0.0, 0.0, 100.0];
     let down = [0.0, 0.0, -100.0];
     let pulled = support(up, &|_| {});
-    assert!(pulled.contains("*Element, Type=GAPUNI\n"));
+    // A surface of the solver, no gap elements at the nodes.
+    assert!(
+        pulled.contains("*Compression only, Surface=INTERNAL_SELECTION-1_COMPRESSION_ONLY-1_SURFACE, Clearance=0\n"),
+        "{pulled}"
+    );
+    assert!(!pulled.contains("GAPUNI"), "{pulled}");
     assert!(pulled.contains("*Plastic, Hardening=Isotropic\n"));
     let Some(frd) = run_solver("druck-nur-zug", &pulled) else {
         return;
@@ -4253,27 +4933,102 @@ fn solver_compression_only_support_takes_only_pressure() {
     let sink = mean_top(&blocks, &frd, "U3");
     assert!((sink + 0.1).abs() < 0.002, "{sink}");
 
-    // A stiffness given is that of the whole face, spread over its nodes: 1000 of the gaps
-    // and 1000 of the springs.
+    // A stiffness given is that of the whole face, spread over it as a stiffness per area:
+    // 1000 of the support and 1000 of the springs.
     let soft = |c: &mut CompressionOnly| c.spring_stiffness = Some(1000.0);
     let text = support(down, &soft);
     let frd = run_solver("druck-nur-verteilt", &text).unwrap();
     let sink = mean_top(&blocks, &frd, "U3");
     assert!((sink + 0.05).abs() < 0.001, "{sink}");
-    // Applied to the 9 nodes individually, each gap has the whole stiffness. The gaps of
-    // the flat face then share one section, as CalculiX makes a material of each.
+    // Applied to the 9 nodes individually, each node stands for the whole stiffness: 9000
+    // over the face.
     let each = |c: &mut CompressionOnly| {
         c.spring_stiffness = Some(1000.0);
         c.each_node = true;
     };
     let text = support(down, &each);
-    assert_eq!(text.matches(", , 1000\n").count(), 1, "{text}");
-    assert_eq!(text.matches("*Gap, Elset=").count(), 1, "{text}");
-    let gaps = text.split("*Element, Type=GAPUNI\n").nth(1).unwrap();
-    assert_eq!(gaps.lines().take_while(|l| !l.starts_with('*')).count(), 9);
+    let area = 1.0;
+    assert!(
+        text.contains(&format!(", Stiffness={}", super::number(9000.0 / area))),
+        "{text}"
+    );
     let frd = run_solver("druck-nur-einzeln", &text).unwrap();
     let sink = mean_top(&blocks, &frd, "U3");
     assert!((sink + 0.01).abs() < 0.001, "{sink}");
+}
+
+/// A compression only support reports its pressure and opening in the contact field and
+/// the force it carries as contact statistics, chosen like a contact pair.
+#[test]
+fn solver_reports_the_pressure_of_a_compression_only_support() {
+    use plx_model::CompressionOnly;
+    let blocks = blocks(2, 2);
+    let support = CompressionOnly {
+        id: named("Compression_Only-1"),
+        name: "Compression_Only-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Faces(blocks.b_bottom.clone()),
+        clearance: 0.0,
+        spring_stiffness: None,
+        tensile_force: None,
+        each_node: false,
+        flipped: false,
+        offset: 0.0,
+        nonlinear: true,
+    };
+    let springs = Constraint::Spring(spring(
+        "Spring-1",
+        Region::Faces(blocks.b_bottom.clone()),
+        [1000.0, 1000.0, 1000.0],
+    ));
+    let mut model = blocks_model(
+        &blocks,
+        vec![springs, Constraint::CompressionOnly(support)],
+        [0.0, 0.0, -100.0],
+    );
+    assert!(
+        (model.contact_pair_choices().iter()).any(|(id, _)| *id == named("Compression_Only-1"))
+    );
+    let step = &mut model.steps[0];
+    step.field_outputs.push(FieldOutput::new(
+        "CF_Output-1",
+        OutputKind::Contact,
+        &["CDIS", "CSTR"],
+    ));
+    let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Compression_Only-1")));
+    output.variables = vec!["CF".into()];
+    model.put_history_output(0, output);
+    let text = write_inp(&blocks.mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "*Contact print, Slave=INTERNAL_SELECTION-1_COMPRESSION_ONLY-1_SURFACE\nCF\n"
+        ),
+        "{text}"
+    );
+    let Some((frd, dat)) = run_frd_dat("druck-nur-pressung", &text) else {
+        return;
+    };
+    // 100 N on the 1 x 1 face: 100 at every node of the bottom face, closed by a hair.
+    for node in Region::Faces(blocks.b_bottom.clone()).nodes(&blocks.mesh) {
+        let pressure = node_value(&frd, "CONTACT", "CPRESS", node);
+        assert!((pressure - 100.0).abs() < 1.0, "{node}: {pressure}");
+        let opening = node_value(&frd, "CONTACT", "COPEN", node);
+        assert!(opening < 0.0 && opening > -1e-4, "{node}: {opening}");
+    }
+    assert!(dat.warnings.is_empty(), "{:?}", dat.warnings);
+    let set = (dat.sets.iter())
+        .find(|s| s.name == "COMPRESSION_ONLY-1")
+        .unwrap_or_else(|| panic!("{:?}", dat.sets.iter().map(|s| &s.name).collect::<Vec<_>>()));
+    let fz = *(set.field("TOTAL_SURFACE_FORCE").unwrap())
+        .component("FZ")
+        .unwrap()
+        .entries[0]
+        .values
+        .last()
+        .unwrap();
+    // The ground pushes the block up with the load.
+    assert!((fz - 100.0).abs() < 1.0, "{fz}");
 }
 
 /// A straight chain of `n` line elements along `axis` from 0 to `length`, numbered from 1;
@@ -4310,6 +5065,7 @@ fn line_chain(n: u32, axis: usize, length: f64, quadratic: bool) -> FeMesh {
         elements.push(e + 1);
     }
     mesh.parts.push(Part {
+        bodies: Vec::new(),
         name: "BEAM".into(),
         elements,
     });
@@ -4321,6 +5077,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
     let tip = *mesh.node_ids().last().unwrap();
     let mut step = Step::new_static("Step-1");
     step.boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Fixed-1".into(),
         active: true,
@@ -4330,6 +5087,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
         amplitude: None,
     });
     step.loads.push(Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Force-1".into(),
         active: true,
@@ -4338,10 +5096,14 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
         kind: load,
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     });
     FeModel {
         cross_sections: line_cross_sections(),
         materials: vec![Material {
+            id: named("Steel"),
             name: "Steel".into(),
             density: None,
             elastic: Some(Elastic {
@@ -4353,10 +5115,11 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
             expansion: None,
             plastic: None,
             creep: None,
+            hyperelastic: None,
         }],
         sections: vec![Section {
             name: "Beam-1".into(),
-            material: "Steel".into(),
+            material: Some(named("Steel")),
             region: Region::Parts(vec!["BEAM".into()]),
             thickness: 1.0,
             kind,
@@ -4382,6 +5145,7 @@ fn line_cross_sections() -> Vec<CrossSection> {
     ];
     (profiles.into_iter())
         .map(|(name, profile)| CrossSection {
+            id: named(name),
             name: name.into(),
             profile,
         })
@@ -4391,7 +5155,7 @@ fn line_cross_sections() -> Vec<CrossSection> {
 /// A beam section of a cross-section of [`line_cross_sections`].
 fn beam(cross_section: &str) -> BeamSection {
     BeamSection {
-        cross_section: cross_section.into(),
+        cross_section: Some(named(cross_section)),
         ..BeamSection::DEFAULT
     }
 }
@@ -4463,6 +5227,7 @@ fn general_profiles_are_written_for_user_element_u1() {
         LoadKind::force([0.0, 0.0, 100.0]),
     );
     model.cross_sections.push(CrossSection {
+        id: named("I"),
         name: "I".into(),
         profile: i_beam.clone(),
     });
@@ -4480,7 +5245,7 @@ fn general_profiles_are_written_for_user_element_u1() {
     assert_eq!(
         import.sections[0].kind,
         SectionKind::Beam(BeamSection {
-            cross_section: import.cross_sections[0].name.clone(),
+            cross_section: Some(import.cross_sections[0].id),
             orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
             offset: [0.0; 2],
         })
@@ -4540,6 +5305,98 @@ fn general_profiles_are_written_for_user_element_u1() {
     }
 }
 
+/// The rope of a half model lying on its symmetry plane z = 0: a cantilever along x bent
+/// in the plane by a force along y, held on the plane at every node.
+fn rope_on_symmetry_plane(halve_beams: bool, force: f64) -> (FeMesh, FeModel) {
+    let mesh = line_chain(10, 0, 1000.0, false);
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Beam(BeamSection {
+            orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+            ..beam("Rope")
+        }),
+        LoadKind::force([0.0, force, 0.0]),
+    );
+    model.cross_sections.push(CrossSection {
+        id: named("Rope"),
+        name: "Rope".into(),
+        profile: BeamProfile::Rope {
+            diameter: 20.0,
+            wire: 1.5,
+            fill: 0.6,
+            bending: plx_model::RopeBending::Share(1.0),
+        },
+    });
+    model.steps[0]
+        .boundary_conditions
+        .push(BoundaryCondition::new(
+            "Symmetry-1",
+            Region::Parts(vec!["BEAM".into()]),
+            // The nodes are on a line, which leaves the plane open: the normal is entered.
+            BoundaryKind::Symmetry {
+                normal: Some([0.0, 0.0, 1.0]),
+                halve_beams,
+            },
+        ));
+    (mesh, model)
+}
+
+/// A beam on the symmetry plane of a half model has half its section in the model: the
+/// solver gets half the area and second moments, so that half the force bends it as the
+/// full force bends the full beam.
+#[test]
+fn beams_on_a_symmetry_plane_get_half_their_section() {
+    // The full rope under the full force, without the plane.
+    let (mesh, mut full) = rope_on_symmetry_plane(true, 100.0);
+    full.steps[0].boundary_conditions.truncate(1);
+    let (_, half) = rope_on_symmetry_plane(true, 50.0);
+    let (_, kept) = rope_on_symmetry_plane(false, 50.0);
+    assert_eq!(half.halved_beams(&mesh).len(), 10);
+    assert!(kept.halved_beams(&mesh).is_empty());
+    let line = full.cross_sections.last().unwrap().profile.data_line();
+    let general = |share: f64| {
+        format!(
+            "Section=General, Contact radius=10\n{:?}, {:?}, 0, {:?}, ",
+            share * line[0],
+            share * line[1],
+            share * line[3]
+        )
+    };
+    let full_text = write_inp(&mesh, &full, "").unwrap();
+    let half_text = write_inp(&mesh, &half, "").unwrap();
+    let kept_text = write_inp(&mesh, &kept, "").unwrap();
+    assert!(full_text.contains(&general(1.0)), "{full_text}");
+    assert!(half_text.contains(&general(0.5)), "{half_text}");
+    assert!(!half_text.contains(&general(1.0)), "{half_text}");
+    // A halved section is no profile of the model: it has no profile comment.
+    assert!(!half_text.contains("** Profile: Rope"), "{half_text}");
+    assert!(kept_text.contains(&general(1.0)), "{kept_text}");
+    // The plane holds the displacement along z and the rotations about x and y.
+    for dof in [3, 4, 5] {
+        assert!(
+            half_text.contains(&format!("_SYMMETRY-1, {dof}, {dof}, 0\n")),
+            "{half_text}"
+        );
+    }
+    let Some(frd) = run_solver("symmetrie-seil-voll", &full_text) else {
+        return;
+    };
+    let tip = |frd: &FrdImport| node_value(frd, "DISP", "U2", 11);
+    let expected = tip(&frd);
+    let halved = tip(&run_solver("symmetrie-seil-halb", &half_text).unwrap());
+    assert!(
+        (halved - expected).abs() < 1e-6 * expected.abs(),
+        "{halved} != {expected}"
+    );
+    // The full section under half the force bends half as far.
+    let stiff = tip(&run_solver("symmetrie-seil-ganz", &kept_text).unwrap());
+    assert!(
+        (stiff - 0.5 * expected).abs() < 1e-6 * expected.abs(),
+        "{stiff} != {}",
+        0.5 * expected
+    );
+}
+
 /// A sketched profile goes the way of the I-beam: a general section of U1, its polygons in
 /// the comment, which may be longer than a line of CalculiX.
 #[test]
@@ -4561,6 +5418,7 @@ fn sketched_profiles_are_written_for_user_element_u1() {
         LoadKind::force([0.0, 0.0, 100.0]),
     );
     model.cross_sections.push(CrossSection {
+        id: named("Sketch"),
         name: "Sketch".into(),
         profile: sketch.clone(),
     });
@@ -4719,6 +5577,7 @@ fn two_chains(n: u32, quadratic: bool) -> FeMesh {
         elements.push(101 + e);
     }
     mesh.parts.push(Part {
+        bodies: Vec::new(),
         name: "BEAM2".into(),
         elements,
     });
@@ -4746,9 +5605,10 @@ fn a_detection_ties_meeting_line_ends_and_keeps_node_ties_the_user_changed() {
         rect_beam(BeamOrientation::Automatic),
         LoadKind::force([0.0, -100.0, 0.0]),
     );
-    model
-        .contact_detections
-        .push(plx_model::ContactDetection::new("Contacts"));
+    model.contact_detections.push(plx_model::ContactDetection {
+        id: named("Contacts"),
+        ..plx_model::ContactDetection::new("Contacts")
+    });
     let skins: Vec<_> = (mesh.parts.iter())
         .map(|p| plx_mesh::extract_part_skin(&mesh, p, 30.0))
         .collect();
@@ -4771,7 +5631,7 @@ fn a_detection_ties_meeting_line_ends_and_keeps_node_ties_the_user_changed() {
     assert_eq!(tie.name, "Node Tie - BEAM, BEAM2");
     assert_eq!(tie.region, Region::Nodes(vec![3, 101]));
     assert!(tie.rotations);
-    assert_eq!(tie.detected_by.as_deref(), Some("Contacts"));
+    assert_eq!(tie.detected_by, Some(named("Contacts")));
     // Detecting again replaces it.
     model.detect_contacts(0, &mesh, &skins, &[true, true]);
     assert_eq!(model.node_ties.len(), 1);
@@ -4810,6 +5670,7 @@ fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
     // Tied rigidly, the second beam starts at the first one's end node; the node set of a
     // boundary condition on the merged node names the node that stays.
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Held".into(),
         active: true,
@@ -4945,6 +5806,7 @@ fn solver_stretches_two_trusses_tied_at_a_node_like_one() {
         .filter(|&n| n % 2 == 1)
         .collect();
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Sideways".into(),
         active: true,
@@ -5040,10 +5902,11 @@ fn a_rigid_remote_displacement_couples_beam_nodes_by_equations() {
 
     // The same for a rigid body constraint on the tip.
     model.steps[0].boundary_conditions.truncate(1);
-    model
-        .reference_points
-        .push(ReferencePoint::new("RP-1", [100.0, 0.0, 0.0]));
-    let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+    model.reference_points.push(ReferencePoint {
+        id: named("RP-1"),
+        ..ReferencePoint::new("RP-1", [100.0, 0.0, 0.0])
+    });
+    let mut body = RigidBody::new("Rigid_Body-1", named("RP-1"));
     body.region = Region::Nodes(vec![tip]);
     model.constraints.push(Constraint::RigidBody(body));
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -5131,6 +5994,7 @@ fn solver_stretches_a_truss_by_f_l_over_e_a() {
         .filter(|&n| n % 2 == 1)
         .collect();
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Sideways".into(),
         active: true,
@@ -5178,6 +6042,7 @@ const SPECIFIC_HEAT: f64 = 4.6e8;
 
 fn temperature(name: &str, region: Region, value: f64) -> BoundaryCondition {
     BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: name.into(),
         active: true,
@@ -5190,6 +6055,7 @@ fn temperature(name: &str, region: Region, value: f64) -> BoundaryCondition {
 
 fn heat_load(name: &str, region: Region, kind: LoadKind) -> Load {
     Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: name.into(),
         active: true,
@@ -5198,6 +6064,9 @@ fn heat_load(name: &str, region: Region, kind: LoadKind) -> Load {
         kind,
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     }
 }
 
@@ -5235,6 +6104,7 @@ fn writes_heat_transfer_keywords() {
         vec![
             temperature("Temperature-1", Region::NodeSet("FIX".into()), 20.0),
             BoundaryCondition {
+                id: plx_model::Id::new(),
                 distribution: None,
                 name: "Fixed-1".into(),
                 active: true,
@@ -5280,7 +6150,7 @@ fn writes_heat_transfer_keywords() {
         "*Physical constants, Absolute zero=-273.15, Stefan Boltzmann=5.67e-11\n",
         "*Expansion, Zero=20\n0.00001, 0\n*Conductivity\n50, 0\n*Specific heat\n460000000, 0\n",
         "*Initial conditions, Type=Temperature\nINTERNAL_SELECTION-1_INITIAL_TEMPERATURE-1, 20\n",
-        "*Heat transfer, Deltmx=5\n",
+        "*Heat transfer, Deltmx=5, Frames=1\n",
         // Displacements and forces do not act in a heat transfer step.
         "*Boundary\nFIX, 11, 11, 20\n*Cflux",
         "*Cflux, op=New\nINTERNAL_SELECTION-1_FLUX-1, 11, 3\n",
@@ -5396,6 +6266,132 @@ fn a_defined_temperature_is_written() {
     ));
 }
 
+/// What a step shows is what acts: its own temperatures replace those of the step before,
+/// and a static step without temperatures sets those of the step before back to the
+/// initial ones; a frequency step keeps the state's.
+#[test]
+fn a_step_takes_only_its_own_defined_temperatures() {
+    let (mesh, mut model) = thermal_bar(
+        StepKind::Static(StaticStep::default()),
+        Vec::new(),
+        Vec::new(),
+    );
+    let all = Region::Parts(vec!["EALL".into()]);
+    model.steps[0].defined_fields = vec![defined_temperature("Hot", all.clone(), 120.0)];
+    let mut warm = model.steps[0].clone();
+    warm.name = "Warm".into();
+    warm.defined_fields = vec![defined_temperature("Warm", all.clone(), 60.0)];
+    let mut cool = model.steps[0].clone();
+    cool.name = "Cool".into();
+    cool.defined_fields.clear();
+    model.steps.push(warm);
+    model.steps.push(cool);
+    let lowered = lower(&mesh, &model, "").unwrap();
+    let fields = |s: usize| lowered.analysis.steps[s].fields.clone();
+    let values = |s: usize| match &fields(s)[..] {
+        [field] => match &field.kind {
+            ir::step::DefinedFieldKind::Temperature(values) => {
+                values.iter().map(|(_, t)| *t).collect::<Vec<_>>()
+            }
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(values(0), [120.0]);
+    // Replaced, not added to.
+    assert_eq!(values(1), [60.0]);
+    // Back to the initial temperatures: a field without values.
+    assert_eq!(values(2), Vec::<f64>::new());
+    assert_eq!(
+        model.step_handover(2).temperatures.as_deref(),
+        Some("Temperatures of Warm go back to the initial ones")
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("*Temperature, op=New").count(), 3, "{text}");
+}
+
+/// Supports that let the bar of [`thermal_bar`] expand freely: held at x = 0 in x only,
+/// and against rigid motion at two nodes of that face.
+fn free_expansion_supports(mesh: &FeMesh) -> Vec<BoundaryCondition> {
+    // Held at x = 0 in x only, and against rigid motion at two nodes of that face, so the
+    // bar expands freely: the corner holds y and z, the node along y from it holds z.
+    let fix = nodes_at(mesh, 0, 0.0);
+    let at = |n: NodeId| mesh.node(n).unwrap();
+    let corner = (fix.iter().copied())
+        .min_by(|&a, &b| (at(a)[1] + at(a)[2]).total_cmp(&(at(b)[1] + at(b)[2])))
+        .unwrap();
+    let along_y = (fix.iter().copied())
+        .filter(|&n| (at(n)[2] - at(corner)[2]).abs() < 1e-9 && n != corner)
+        .max_by(|&a, &b| at(a)[1].total_cmp(&at(b)[1]))
+        .unwrap();
+    let hold = |name: &str, nodes: Vec<NodeId>, held: [bool; 3]| BoundaryCondition {
+        id: plx_model::Id::new(),
+        distribution: None,
+        name: name.into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(nodes),
+        kind: BoundaryKind::displacement([
+            held[0].then_some(0.0),
+            held[1].then_some(0.0),
+            held[2].then_some(0.0),
+            None,
+            None,
+            None,
+        ]),
+        amplitude: None,
+    };
+    vec![
+        hold("Axial", fix.clone(), [true, false, false]),
+        hold("Corner", vec![corner], [false, true, true]),
+        hold("Edge", vec![along_y], [false, false, true]),
+    ]
+}
+
+/// A bar heated by 100 in the first step grows by alpha 100 L; the second step defines no
+/// temperatures and sets them back to the initial ones, so the bar returns to its length.
+#[test]
+fn solver_sets_temperatures_back_in_a_step_without_them() {
+    let (mesh, mut model) = thermal_bar(
+        StepKind::Static(StaticStep::default()),
+        Vec::new(),
+        Vec::new(),
+    );
+    model.initial_conditions.push(plx_model::InitialCondition {
+        distribution: None,
+        name: "Initial_Temperature-1".into(),
+        active: true,
+        region: Region::Parts(vec!["EALL".into()]),
+        kind: plx_model::InitialConditionKind::Temperature(20.0),
+    });
+    model.steps[0].boundary_conditions = free_expansion_supports(&mesh);
+    model.steps[0].defined_fields = vec![defined_temperature(
+        "Hot",
+        Region::Parts(vec!["EALL".into()]),
+        120.0,
+    )];
+    let tip = nodes_at(&mesh, 0, 100.0);
+    let Some(dir) = run_dir("temperatur-zurueck") else {
+        return;
+    };
+    let frd = run_in(&dir, "hot", &write_inp(&mesh, &model, "").unwrap());
+    let growth: Vec<f64> = (tip.iter())
+        .map(|&n| node_value(&frd, "DISP", "U1", n))
+        .collect();
+    assert_all_close(&growth, 1e-5 * 100.0 * 100.0, 5e-3);
+    let mut cool = model.steps[0].clone();
+    cool.name = "Cool".into();
+    cool.defined_fields.clear();
+    model.steps.push(cool);
+    let frd = run_in(&dir, "cool", &write_inp(&mesh, &model, "").unwrap());
+    remove_run_dir(&dir);
+    assert_all_close(&temperatures_at(&mesh, &frd, 100.0), 20.0, 1e-6);
+    let growth: Vec<f64> = (tip.iter())
+        .map(|&n| node_value(&frd, "DISP", "U1", n))
+        .collect();
+    assert_all_close(&growth, 0.0, 1e-6);
+}
+
 /// A heat transfer run gives the bar a gradient from 20 at x = 0 to 120 at the tip; the
 /// static run reads it from the frd file and the bar grows by alpha times the integral of
 /// T - 20 over its length, 1e-5 * 100^2 / 2.
@@ -5426,38 +6422,7 @@ fn solver_strains_the_bar_by_the_temperatures_of_a_result_file() {
         region: Region::Parts(vec!["EALL".into()]),
         kind: plx_model::InitialConditionKind::Temperature(20.0),
     });
-    // Held at x = 0 in x only, and against rigid motion at two nodes of that face, so the
-    // bar expands freely: the corner holds y and z, the node along y from it holds z.
-    let fix = nodes_at(&mesh, 0, 0.0);
-    let at = |n: NodeId| mesh.node(n).unwrap();
-    let corner = (fix.iter().copied())
-        .min_by(|&a, &b| (at(a)[1] + at(a)[2]).total_cmp(&(at(b)[1] + at(b)[2])))
-        .unwrap();
-    let along_y = (fix.iter().copied())
-        .filter(|&n| (at(n)[2] - at(corner)[2]).abs() < 1e-9 && n != corner)
-        .max_by(|&a, &b| at(a)[1].total_cmp(&at(b)[1]))
-        .unwrap();
-    let hold = |name: &str, nodes: Vec<NodeId>, held: [bool; 3]| BoundaryCondition {
-        distribution: None,
-        name: name.into(),
-        active: true,
-        visible: true,
-        region: Region::Nodes(nodes),
-        kind: BoundaryKind::displacement([
-            held[0].then_some(0.0),
-            held[1].then_some(0.0),
-            held[2].then_some(0.0),
-            None,
-            None,
-            None,
-        ]),
-        amplitude: None,
-    };
-    model.steps[0].boundary_conditions = vec![
-        hold("Axial", fix.clone(), [true, false, false]),
-        hold("Corner", vec![corner], [false, true, true]),
-        hold("Edge", vec![along_y], [false, false, true]),
-    ];
+    model.steps[0].boundary_conditions = free_expansion_supports(&mesh);
     model.steps[0].defined_fields = vec![temperature_from_file(
         "Defined_Temperature-1",
         dir.join("heat.frd").to_str().unwrap(),
@@ -5629,10 +6594,8 @@ fn solver_warms_the_bar_transiently() {
     let a = CONDUCTIVITY / (density * SPECIFIC_HEAT);
     // Half way to the end temperature at the far end.
     let period = 0.4 * length * length / a;
-    settings.increments.incrementation = Incrementation::Direct;
-    settings.increments.time_period = period;
-    settings.increments.initial_increment = period / 200.0;
-    settings.increments.max_increments = 1000;
+    settings.increments.duration = period;
+    settings.increments.control.size = plx_model::IncrementSize::Fixed(period / 200.0);
     let (mesh, mut model) = thermal_bar(
         StepKind::HeatTransfer(settings),
         vec![temperature(
@@ -5683,7 +6646,7 @@ fn solver_expands_the_bar_in_an_uncoupled_step() {
         StepKind::UncoupledTempDisp(HeatTransferStep::default()),
         "waermedehnung-entkoppelt",
     );
-    assert!(inp.contains("*Uncoupled temperature-displacement, Steady state\n"));
+    assert!(inp.contains("*Uncoupled temperature-displacement, Steady state, Frames=1\n"));
 }
 
 /// Writes and runs the heated bar in a step of the given kind; returns the input file.
@@ -5697,6 +6660,7 @@ fn expand_bar(kind: StepKind, name: &str) -> String {
         mesh.node_ids()[index]
     };
     let support = |name: &str, nodes: Vec<NodeId>, values: [Option<f64>; 6]| BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: name.into(),
         active: true,
@@ -5789,6 +6753,7 @@ fn solver_cools_a_plane_strip_by_convection() {
 
 fn amplitude(name: &str, points: Vec<[f64; 2]>) -> plx_model::Amplitude {
     plx_model::Amplitude {
+        id: named(name),
         points,
         ..plx_model::Amplitude::new(name)
     }
@@ -5797,7 +6762,7 @@ fn amplitude(name: &str, points: Vec<[f64; 2]>) -> plx_model::Amplitude {
 #[test]
 fn writes_amplitudes_and_their_references() {
     let mut force = tip_force();
-    force.amplitude = Some("Ramp up".into());
+    force.amplitude = Some(named("Ramp up"));
     let (mesh, mut model) = cantilever(force);
     let mut ramp = amplitude(
         "Ramp up",
@@ -5810,13 +6775,14 @@ fn writes_amplitudes_and_their_references() {
     model.amplitudes.push(amplitude("Half", vec![[0.0, 0.5]]));
     let step = &mut model.steps[0];
     step.boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Displacement-1".into(),
         active: true,
         visible: true,
         region: Region::Nodes(vec![99]),
         kind: BoundaryKind::displacement([None, Some(0.5), None, None, None, None]),
-        amplitude: Some("Half".into()),
+        amplitude: Some(named("Half")),
     });
     let text = write_inp(&mesh, &model, "").unwrap();
     for expected in [
@@ -5832,12 +6798,12 @@ fn writes_amplitudes_and_their_references() {
     // The amplitudes precede the steps, as CalculiX reads them before their references.
     assert!(text.find("*Amplitude,").unwrap() < text.find("*Step").unwrap());
 
-    model.steps[0].loads[0].amplitude = Some("Gone".into());
+    model.steps[0].loads[0].amplitude = Some(named("Gone"));
     assert_eq!(
         write_inp(&mesh, &model, ""),
         Err(WriteError::UnknownAmplitude {
             item: "Force-1".into(),
-            amplitude: "Gone".into(),
+            amplitude: "(missing)".into(),
         })
     );
     model.steps[0].loads[0].amplitude = None;
@@ -5858,8 +6824,8 @@ fn writes_both_amplitudes_of_films_and_radiation() {
             coefficient: 0.01,
         },
     );
-    film.amplitude = Some("Sink".into());
-    film.factor_amplitude = Some("Coefficient".into());
+    film.amplitude = Some(named("Sink"));
+    film.factor_amplitude = Some(named("Coefficient"));
     let mut radiation = heat_load(
         "Radiation-1",
         Region::Surface("TIP".into()),
@@ -5868,21 +6834,21 @@ fn writes_both_amplitudes_of_films_and_radiation() {
             emissivity: 0.8,
         },
     );
-    radiation.factor_amplitude = Some("Coefficient".into());
+    radiation.factor_amplitude = Some(named("Coefficient"));
     let mut flux = heat_load(
         "Flux-1",
         Region::Nodes(vec![99]),
         LoadKind::ConcentratedFlux(3.0),
     );
-    flux.amplitude = Some("Sink".into());
+    flux.amplitude = Some(named("Sink"));
     let mut surface_flux = heat_load(
         "Surface_Flux-1",
         Region::Surface("TIP".into()),
         LoadKind::SurfaceFlux(1.0),
     );
-    surface_flux.amplitude = Some("Sink".into());
+    surface_flux.amplitude = Some(named("Sink"));
     let mut temperature = temperature("Temperature-1", Region::NodeSet("FIX".into()), 20.0);
-    temperature.amplitude = Some("Sink".into());
+    temperature.amplitude = Some(named("Sink"));
     let (mesh, mut model) = thermal_bar(
         steady(),
         vec![temperature],
@@ -5927,14 +6893,13 @@ fn solver_scales_a_load_by_its_amplitude() {
         "Up_and_down",
         vec![[0.0, 0.0], [0.5, 1.0], [1.0, 0.5]],
     ));
-    model.steps[0].loads[0].amplitude = Some("Up_and_down".into());
+    model.steps[0].loads[0].amplitude = Some(named("Up_and_down"));
     let StepKind::Static(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
-    // A linear static step is solved once, at its end; increments need a nonlinear one.
+    // Four frames; the nonlinear procedure ends its increments on them.
     settings.nlgeom = true;
-    settings.incrementation = Incrementation::Direct;
-    settings.initial_increment = 0.25;
+    settings.frames = 4;
     let frd = run_solver("amplitude_force", &write_inp(&mesh, &model, "").unwrap()).unwrap();
     let index = frd.mesh.node_index(99).unwrap();
     let u3: Vec<f64> = (frd.increments.iter())
@@ -5954,7 +6919,7 @@ fn solver_scales_a_load_by_its_amplitude() {
 #[test]
 fn solver_scales_a_temperature_by_its_amplitude() {
     let mut held = temperature("Temperature-1", Region::NodeSet("FIX".into()), 100.0);
-    held.amplitude = Some("Half".into());
+    held.amplitude = Some(named("Half"));
     let (mesh, mut model) = thermal_bar(steady(), vec![held], Vec::new());
     model
         .amplitudes
@@ -5984,7 +6949,7 @@ fn solver_holds_an_amplitude_after_its_last_point() {
     model
         .amplitudes
         .push(amplitude("Early", vec![[0.0, 0.0], [0.5, 1.0]]));
-    model.steps[0].loads[0].amplitude = Some("Early".into());
+    model.steps[0].loads[0].amplitude = Some(named("Early"));
     let frd = run_solver("amplitude_hold", &write_inp(&mesh, &model, "").unwrap()).unwrap();
     let held = node_value(&frd, "DISP", "U3", 99);
     assert!(
@@ -6020,7 +6985,7 @@ fn solver_reads_a_total_time_amplitude_with_shifts_across_steps() {
     total.shift_time = 0.25;
     total.shift_amplitude = 0.1;
     model.amplitudes.push(total.clone());
-    model.steps[0].loads[0].amplitude = Some("Total".into());
+    model.steps[0].loads[0].amplitude = Some(named("Total"));
     let periods = [0.5, 1.5, 2.0];
     let first = model.steps[0].clone();
     model.steps.clear();
@@ -6031,9 +6996,8 @@ fn solver_reads_a_total_time_amplitude_with_shifts_across_steps() {
             unreachable!()
         };
         // The initial increment does not matter: a linear step is solved once.
-        settings.incrementation = Incrementation::Automatic;
-        settings.time_period = period;
-        settings.initial_increment = period / 2.0;
+        settings.duration = period;
+        settings.control.initial = Some(period / 2.0);
         model.steps.push(step);
     }
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -6063,51 +7027,54 @@ fn solver_reads_a_total_time_amplitude_with_shifts_across_steps() {
 #[test]
 fn solver_scales_distributed_loads_and_displacements_by_amplitudes() {
     let pressure = Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Pressure-1".into(),
         active: true,
         visible: true,
         region: Region::Faces(vec![(10, 4), (20, 4), (30, 4), (40, 4)]),
         kind: LoadKind::Pressure(2.0),
-        amplitude: Some("Rise".into()),
+        amplitude: Some(named("Rise")),
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, mut model) = cantilever(pressure);
     let mut gravity = body_load(LoadKind::Gravity([0.0, -9810.0, 0.0]));
     gravity.name = "Gravity-1".into();
-    gravity.amplitude = Some("Rise".into());
+    gravity.amplitude = Some(named("Rise"));
     let mut spin = body_load(LoadKind::Centrifugal {
         point: [0.0, 5.0, 5.0],
         axis: [0.0, 0.0, 1.0],
         speed: 100.0,
     });
     spin.name = "Spin-1".into();
-    spin.amplitude = Some("Fall".into());
+    spin.amplitude = Some(named("Fall"));
     let step = &mut model.steps[0];
     step.loads.push(gravity);
     step.loads.push(spin);
     step.boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Lift-1".into(),
         active: true,
         visible: true,
         region: Region::Nodes(vec![99]),
         kind: BoundaryKind::displacement([None, None, Some(0.01), None, None, None]),
-        amplitude: Some("Fall".into()),
+        amplitude: Some(named("Fall")),
     });
     let StepKind::Static(settings) = &mut step.kind else {
         unreachable!()
     };
-    settings.incrementation = Incrementation::Automatic;
-    settings.time_period = 0.5;
-    settings.initial_increment = 0.5;
+    settings.duration = 0.5;
     let mut second = model.steps[0].clone();
     second.name = "Step-2".into();
     let StepKind::Static(settings) = &mut second.kind else {
         unreachable!()
     };
-    settings.time_period = 2.0;
-    settings.initial_increment = 1.0;
+    settings.duration = 2.0;
+    settings.control.initial = Some(1.0);
     model.steps.push(second);
     model.amplitudes = vec![
         amplitude("Rise", vec![[0.0, 0.0], [1.0, 1.0], [2.0, 3.0]]),
@@ -6150,22 +7117,46 @@ fn solver_weighs_a_quadratic_cantilever() {
     );
 }
 
+/// One history output of the model, listed by two of three steps: the step that does not
+/// list it prints nothing, although the solver would carry the prints of the step before.
+#[test]
+fn a_step_prints_only_the_history_outputs_it_lists() {
+    let (mesh, mut model) = cantilever(tip_force());
+    let second = model.steps[0].clone();
+    model.steps.push(Step {
+        name: "Step-2".into(),
+        ..second.clone()
+    });
+    model.steps.push(Step {
+        name: "Step-3".into(),
+        ..second
+    });
+    let output = HistoryOutput::node("NH_Output-1", Region::Nodes(vec![99]));
+    let id = output.id;
+    model.put_history_output(0, output);
+    model.steps[2].history_outputs.push(id);
+    let analysis = lowered(&mesh, &model);
+    let printed: Vec<usize> = (analysis.steps.iter())
+        .map(|s| s.outputs.node_print.len())
+        .collect();
+    assert_eq!(printed, [1, 0, 1]);
+}
+
 #[test]
 fn history_outputs_become_print_keywords_with_their_sets() {
     let (mesh, mut model) = cantilever(tip_force());
-    let step = &mut model.steps[0];
     let mut nodes = HistoryOutput::node("NH_Output-1", Region::Nodes(vec![99]));
     nodes.totals = Totals::Yes;
-    step.history_outputs.push(nodes);
+    model.put_history_output(0, nodes);
     let mut elements = HistoryOutput::element("EH_Output-1", Region::Parts(vec!["EALL".into()]));
     elements.variables = vec!["S".into(), "EVOL".into()];
-    step.history_outputs.push(elements);
+    model.put_history_output(0, elements);
     let mut off = HistoryOutput::node("NH_Output-2", Region::NodeSet("FIX".into()));
     off.active = false;
-    step.history_outputs.push(off);
+    model.put_history_output(0, off);
     let mut empty = HistoryOutput::node("NH_Output-3", Region::NodeSet("FIX".into()));
     empty.variables.clear();
-    step.history_outputs.push(empty);
+    model.put_history_output(0, empty);
     let text = write_inp(&mesh, &model, "").unwrap();
     for expected in [
         "*Nset, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-1\n99\n",
@@ -6186,18 +7177,18 @@ fn history_outputs_become_print_keywords_with_their_sets() {
 #[test]
 fn contact_forces_need_an_active_contact_pair() {
     let (mesh, mut model) = cantilever(tip_force());
-    let mut output = HistoryOutput::contact("CH_Output-1", "Contact_Pair-1");
-    model.steps[0].history_outputs.push(output.clone());
+    let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Contact_Pair-1")));
+    model.put_history_output(0, output.clone());
     // Without contact forces no surfaces are needed.
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Contact print\nCDIS, CSTR\n"), "{text}");
     output.variables.push("CF".into());
-    model.steps[0].history_outputs[0] = output;
+    model.history_outputs[0] = output;
     assert_eq!(
         write_inp(&mesh, &model, ""),
         Err(WriteError::UnknownContactPair {
             item: "CH_Output-1".into(),
-            pair: "Contact_Pair-1".into(),
+            pair: "(missing)".into(),
         })
     );
 }
@@ -6205,17 +7196,18 @@ fn contact_forces_need_an_active_contact_pair() {
 #[test]
 fn solver_prints_the_history_outputs_into_the_dat_file() {
     let (mesh, mut model) = cantilever(tip_force());
-    let step = &mut model.steps[0];
     let mut reactions = HistoryOutput::node("NH_Output-1", Region::NodeSet("FIX".into()));
     reactions.variables = vec!["RF".into()];
     reactions.totals = Totals::Only;
-    step.history_outputs.push(reactions);
-    step.history_outputs
-        .push(HistoryOutput::node("NH_Output-2", Region::Nodes(vec![99])));
+    model.put_history_output(0, reactions);
+    model.put_history_output(
+        0,
+        HistoryOutput::node("NH_Output-2", Region::Nodes(vec![99])),
+    );
     let mut volume = HistoryOutput::element("EH_Output-1", Region::Parts(vec!["EALL".into()]));
     volume.variables = vec!["S".into(), "EVOL".into()];
     volume.totals = Totals::Yes;
-    step.history_outputs.push(volume);
+    model.put_history_output(0, volume);
     let Some(dat) = run_dat("historie", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
@@ -6252,6 +7244,7 @@ fn solver_prints_the_contact_force_of_a_pair() {
     let mut model = stacked_blocks(&mesh);
     let top: Vec<NodeId> = (119..=127).collect();
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Side-1".into(),
         active: true,
@@ -6261,16 +7254,20 @@ fn solver_prints_the_contact_force_of_a_pair() {
         amplitude: None,
     });
     model.surface_interactions.push(SurfaceInteraction {
+        id: named("Surface_Interaction-1"),
         name: "Surface_Interaction-1".into(),
         properties: vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)],
     });
-    let mut pair = ContactPair::new("Contact_Pair-1", "Surface_Interaction-1");
+    let mut pair = ContactPair {
+        id: named("Contact_Pair-1"),
+        ..ContactPair::new("Contact_Pair-1", Some(named("Surface_Interaction-1")))
+    };
     pair.master = Region::Faces(lower);
     pair.slave = Region::Faces(upper);
     model.contact_pairs.push(pair);
-    let mut output = HistoryOutput::contact("CH_Output-1", "Contact_Pair-1");
+    let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Contact_Pair-1")));
     output.variables = ["CDIS", "CSTR", "CNUM", "CF"].map(String::from).to_vec();
-    model.steps[0].history_outputs.push(output);
+    model.put_history_output(0, output);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains(
         "*Contact print, Slave=INTERNAL_SELECTION-1_CONTACT_PAIR-1_SLAVE, \
@@ -6381,6 +7378,7 @@ fn solver_starts_the_cantilever_from_its_initial_velocity() {
 
 fn body_load(kind: LoadKind) -> Load {
     Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Body-1".into(),
         active: true,
@@ -6389,6 +7387,9 @@ fn body_load(kind: LoadKind) -> Load {
         kind,
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     }
 }
 
@@ -6398,6 +7399,15 @@ fn gravity_and_centrifugal_loads_are_written() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains("*Dload, op=New\nINTERNAL_SELECTION-1_BODY-1, GRAV, 9810, 0, 0, -1\n"),
+        "{text}"
+    );
+    // Standard gravity is lowered to the vector of the standard acceleration.
+    let (mesh, model) = cantilever(body_load(LoadKind::StandardGravity(
+        plx_model::GravityDirection::MinusZ,
+    )));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("INTERNAL_SELECTION-1_BODY-1, GRAV, 9.80665, 0, 0, -1\n"),
         "{text}"
     );
     let (mesh, model) = cantilever(body_load(LoadKind::Centrifugal {
@@ -6481,6 +7491,95 @@ fn rotor_analysis(speed: f64) -> (FeMesh, FeModel) {
     (mesh, model)
 }
 
+/// A complex frequency step between two static steps: the solver gets it as an isolated
+/// group, about the unloaded model (loads of the steps before reset) or about the state
+/// before it, and leaves the state as it found it.
+#[test]
+fn a_complex_frequency_step_leaves_the_state_as_it_found_it() {
+    let (mesh, mut model) = cantilever(tip_force());
+    let load = model.steps[0].clone();
+    let (_, rotor) = rotor_analysis(100.0);
+    let mut spin = rotor.steps[0].clone();
+    spin.boundary_conditions = load.boundary_conditions.clone();
+    let mut again = load.clone();
+    again.name = "Again".into();
+    model.steps = vec![load, spin, again];
+    let lowered = lower(&mesh, &model, "").unwrap();
+    let steps = &lowered.analysis.steps;
+    // Load, the preload, the eigenmodes and the complex modes of Rotor, Again.
+    assert_eq!(steps.len(), 5);
+    let isolation = |s: usize| steps[s].isolation;
+    assert!(isolation(1).opens && isolation(1).unloaded && !isolation(1).closes);
+    assert!(!isolation(2).opens && !isolation(2).closes);
+    assert!(isolation(3).closes);
+    assert_eq!(isolation(4), ir::step::Isolation::default());
+    // About the unloaded model the tip force of Load is not in the preload.
+    assert!(
+        steps[1].loads.concentrated.is_empty(),
+        "{:?}",
+        steps[1].loads
+    );
+    // About the state before it the rotation adds to that force.
+    let StepKind::ComplexFrequency(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
+    settings.base = plx_model::Base::PreviousState;
+    let lowered = lower(&mesh, &model, "").unwrap();
+    let steps = &lowered.analysis.steps;
+    assert!(steps[1].isolation.opens && !steps[1].isolation.unloaded);
+    assert!(!steps[1].loads.concentrated.is_empty());
+    assert!(steps[2].perturbation && steps[3].perturbation);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("** Nodalis: the state before this step returns after the group"));
+    // Again starts at the time Load ended: the preload of the group took no time of it.
+    // (The input file only describes the group in comments; the app solves the analysis.)
+    let Some(dir) = run_dir("rotor-isoliert") else {
+        return;
+    };
+    let options = plxs_session::JobOptions {
+        threads: 1,
+        ..plxs_session::JobOptions::new(&dir, "rotor")
+    };
+    let mut log = Vec::new();
+    let mut progress = |event| log.extend(plxs_session::format_event(&event));
+    let outcome =
+        plxs_session::job::run_analysis(lowered.analysis.clone(), &options, &mut progress);
+    assert_eq!(
+        outcome.ok(),
+        Some(plxs_session::JobOutcome::Finished),
+        "{log:?}"
+    );
+    let frd = read_frd(&dir.join("rotor.frd")).unwrap();
+    remove_run_dir(&dir);
+    let last = frd.increments.last().unwrap();
+    assert_eq!(last.step, 5);
+    assert!((last.value - 2.0).abs() < 1e-9, "{}", last.value);
+}
+
+/// A steady state dynamics step computes its eigenmodes in a step of its own before it,
+/// about the base it is given; the pair leaves the state as it found it.
+#[test]
+fn a_steady_state_dynamics_step_computes_its_own_modes() {
+    let (mesh, mut model) = modal_cantilever(Some(ModalDamping::Constant(0.02)));
+    model.steps.drain(..2);
+    let StepKind::SteadyStateDynamics(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.base = plx_model::Base::PreviousState;
+    let lowered = lower(&mesh, &model, "").unwrap();
+    let steps = &lowered.analysis.steps;
+    assert_eq!(steps.len(), 2);
+    let ir::step::Procedure::Frequency(frequency) = &steps[0].procedure else {
+        panic!("{:?}", steps[0].procedure)
+    };
+    assert_eq!(frequency.count, 6);
+    assert!(frequency.storage && steps[0].perturbation && steps[1].perturbation);
+    assert!(steps[0].isolation.opens && steps[1].isolation.closes);
+    // The supports of the step, given again in the response (accepted, not new).
+    assert!((steps[0].boundaries.iter()).all(|b| steps[1].boundaries.contains(b)));
+    assert_eq!(lowered.preparation_steps, [0]);
+}
+
 /// The half x <= 50 of the cantilever as a submodel: held at x = 0, its cut at x = 50
 /// driven by the global results with `dofs`.
 fn cantilever_submodel(dofs: [bool; 6]) -> (FeMesh, FeModel) {
@@ -6526,6 +7625,7 @@ fn cantilever_submodel(dofs: [bool; 6]) -> (FeMesh, FeModel) {
     let step = &mut model.steps[0];
     step.loads.clear();
     step.boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Submodel-1".into(),
         active: true,
@@ -6558,7 +7658,7 @@ fn a_complex_frequency_step_is_solved_as_preload_eigenmodes_and_complex_modes() 
     for line in [
         // The preload is solved directly: the eigenmodes factorize the stiffness anyway.
         "** Rotor Preload +",
-        "*Step, Inc=100, Amplitude=Ramp\n*Static, Solver=PaStiX\n",
+        "*Step, Inc=4294967295, Amplitude=Ramp\n*Static, Solver=PaStiX, Frames=1\n",
         "** Rotor Eigenmodes +",
         "*Step, Perturbation, Inc=100, Amplitude=Ramp\n*Frequency, Storage=Yes\n4\n",
         "** Rotor +",
@@ -6596,6 +7696,97 @@ fn a_complex_frequency_step_is_solved_as_preload_eigenmodes_and_complex_modes() 
         write_inp(&mesh, &model, ""),
         Err(WriteError::InvalidLoad { item, .. }) if item == "Rotor"
     ));
+}
+
+/// The rotor of [`rotor_analysis`] turning only its outer half x >= 50 (element set
+/// OUTER); the half at the clamp stands still.
+fn outer_half_rotor(speed: f64) -> (FeMesh, FeModel) {
+    let (mut mesh, mut model) = rotor_analysis(speed);
+    let outer: Vec<ElementId> = (mesh.elements().iter())
+        .filter(|e| {
+            e.nodes
+                .iter()
+                .all(|&n| mesh.node(n).unwrap()[0] >= 50.0 - 1e-9)
+        })
+        .map(|e| e.id)
+        .collect();
+    assert!(!outer.is_empty() && outer.len() < mesh.elements().len());
+    mesh.element_sets.insert("OUTER".into(), outer);
+    let StepKind::ComplexFrequency(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.region = Region::ElementSet("OUTER".into());
+    (mesh, model)
+}
+
+#[test]
+fn a_complex_frequency_step_turns_only_its_rotating_parts() {
+    // The whole model turns when no part is picked.
+    let (mesh, model) = rotor_analysis(100.0);
+    let text = lower_unvalidated(&mesh, &model, "").unwrap().text();
+    assert!(text.contains("ROTOR_ROTATION, CENTRIF, 10000"), "{text}");
+    // Picked parts or elements carry the centrifugal load and the Coriolis forces alone.
+    let (mesh, model) = outer_half_rotor(100.0);
+    let text = lower_unvalidated(&mesh, &model, "").unwrap().text();
+    let rotation = "\nOUTER, CENTRIF, 10000, 0, 5, 5, 1, 0, 0\n";
+    assert_eq!(text.matches(rotation).count(), 3, "{text}");
+    assert!(!text.contains("ROTOR_ROTATION"), "{text}");
+}
+
+#[test]
+fn a_coordinate_system_gives_the_rotation_axis() {
+    // The z axis of a coordinate system at the hub: through (0, 5, 5) along x.
+    let (mesh, mut model) = rotor_analysis(100.0);
+    let mut hub = plx_model::CoordinateSystem {
+        id: named("Hub"),
+        ..plx_model::CoordinateSystem::new("Hub")
+    };
+    hub.origin = [0.0, 5.0, 5.0];
+    hub.point_x = [0.0, 6.0, 5.0];
+    hub.point_xy = [0.0, 5.0, 9.0];
+    model.coordinate_systems.push(hub);
+    let StepKind::ComplexFrequency(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    // The typed point and direction no longer count.
+    settings.system = Some(named("Hub"));
+    settings.point = [7.0; 3];
+    settings.axis = [0.0; 3];
+    let text = lower_unvalidated(&mesh, &model, "").unwrap().text();
+    let rotation = "ROTOR_ROTATION, CENTRIF, 10000, 0, 5, 5, 1, 0, 0\n";
+    assert_eq!(text.matches(rotation).count(), 3, "{text}");
+    // A missing coordinate system is an error of the step.
+    let StepKind::ComplexFrequency(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.system = Some(named("Gone"));
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidLoad { item, .. }) if item == "Rotor"
+    ));
+}
+
+#[test]
+fn solver_couples_a_rotating_part_to_standing_ones() {
+    // Only the outer half of the cantilever spins: its Coriolis forces still split the
+    // bending modes, but less than when the whole beam spins.
+    let split = |(mesh, model): (FeMesh, FeModel), name: &str| {
+        let frd = run_solver(name, &write_inp(&mesh, &model, "").unwrap())?;
+        let whirling: Vec<f64> = (frd.increments.iter())
+            .filter(|i| i.kind == plx_results::AnalysisKind::ComplexFrequency)
+            .map(|i| i.value)
+            .collect();
+        assert_eq!(whirling.len(), 4, "{whirling:?}");
+        Some(whirling[1] - whirling[0])
+    };
+    let Some(whole) = split(rotor_analysis(100.0), "rotor-whole") else {
+        return;
+    };
+    let Some(outer) = split(outer_half_rotor(100.0), "rotor-outer-half") else {
+        return;
+    };
+    eprintln!("split whole {whole}, outer half {outer}");
+    assert!(0.0 < outer && outer < whole, "0 < {outer} < {whole}");
 }
 
 #[test]
@@ -6825,12 +8016,16 @@ fn half_shell_plate(angle: f64) -> (FeMesh, FeModel, NodeId) {
         offset: 0.0,
     };
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Symmetry-1".into(),
         active: true,
         visible: true,
         region: Region::Nodes(edge),
-        kind: BoundaryKind::Symmetry { normal: None },
+        kind: BoundaryKind::Symmetry {
+            normal: None,
+            halve_beams: true,
+        },
         amplitude: None,
     });
     (mesh, model, corner)
@@ -6940,12 +8135,16 @@ fn solver_holds_solids_in_a_skewed_symmetry_plane_alike() {
         let side = nodes_at(&mesh, 1, 0.0);
         turn(&mut mesh, angle);
         model.steps[0].boundary_conditions.push(BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Symmetry-1".into(),
             active: true,
             visible: true,
             region: Region::Nodes(side),
-            kind: BoundaryKind::Symmetry { normal: None },
+            kind: BoundaryKind::Symmetry {
+                normal: None,
+                halve_beams: true,
+            },
             amplitude: None,
         });
         let text = write_inp(&mesh, &model, "").unwrap();
@@ -6987,12 +8186,16 @@ fn solver_holds_a_2d_model_in_a_skewed_symmetry_line_alike() {
             Region::Nodes(vec![tip]),
         );
         model.steps[0].boundary_conditions.push(BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Symmetry-1".into(),
             active: true,
             visible: true,
             region: Region::Nodes(bottom),
-            kind: BoundaryKind::Symmetry { normal: None },
+            kind: BoundaryKind::Symmetry {
+                normal: None,
+                halve_beams: true,
+            },
             amplitude: None,
         });
         let text = write_inp(&mesh, &model, "").unwrap();
@@ -7077,6 +8280,7 @@ fn moving_cantilever() -> (FeMesh, FeModel) {
         }
     }
     let load = Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Moving-1".into(),
         active: true,
@@ -7097,6 +8301,9 @@ fn moving_cantilever() -> (FeMesh, FeModel) {
         }),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (_, mut model) = cantilever(load);
     // Another load stays the same in every position.
@@ -7370,7 +8577,8 @@ fn a_visco_step_and_a_creep_law_are_written() {
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
         "*Elastic\n210000, 0.3, 0\n*Creep, Law=Norton\n1e-15, 5, 0, 0\n",
-        "*Step, Inc=1000, Amplitude=Ramp\n*Visco, Cetol=0.0001\n1, 1000, 0.00001, 1e30\n",
+        // Unlimited increments, a first one of 1 s, ten frames over the creep time.
+        "*Step, Inc=4294967295, Amplitude=Ramp\n*Visco, Cetol=0.0001, Frames=10\n1, 1000, 0.01, 1000\n",
         "*El file\nS, E, PEEQ, NOE\n",
     ] {
         assert!(text.contains(line), "{line:?} missing in\n{text}");
@@ -7383,6 +8591,7 @@ fn a_visco_step_and_a_creep_law_are_written() {
 fn solver_creeps_the_bar_by_nortons_law() {
     let stress = 100.0;
     let load = Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Pressure-1".into(),
         active: true,
@@ -7391,6 +8600,9 @@ fn solver_creeps_the_bar_by_nortons_law() {
         kind: LoadKind::Pressure(-stress),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, mut model) = cantilever(load);
     let creep = plx_model::Creep {
@@ -7410,6 +8622,7 @@ fn solver_creeps_the_bar_by_nortons_law() {
         let mut dofs = [None; 6];
         dofs[axis] = Some(0.0);
         BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: format!("Symmetry-{}", axis + 1),
             active: true,
@@ -7752,12 +8965,14 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
         ("PLATE", vec![201, 202, 203, 204]),
     ] {
         mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: name.into(),
             elements,
         });
     }
     let mut step = Step::new_static("Step-1");
     let bc = |name: &str, nodes: Vec<NodeId>, kind| BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: name.into(),
         active: true,
@@ -7776,6 +8991,7 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
     step.boundary_conditions
         .push(bc("Guided-1", (10..=18).collect(), sideways));
     step.loads.push(Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Pressure-1".into(),
         active: true,
@@ -7784,9 +9000,13 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
         kind: LoadKind::Pressure(10.0),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     });
     let mut model = FeModel::default();
     model.materials.push(Material {
+        id: named("Steel"),
         name: "Steel".into(),
         elastic: Some(Elastic {
             young: 210_000.0,
@@ -7811,7 +9031,7 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
     ] {
         model.sections.push(Section {
             name: name.into(),
-            material: "Steel".into(),
+            material: Some(named("Steel")),
             region: Region::Parts(vec![part.into()]),
             thickness: 1.0,
             kind,
@@ -7823,6 +9043,193 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
     model.ties.push(tie);
     model.steps.push(step);
     (mesh, model)
+}
+
+/// A membrane strip 20 x 10 x 1 in z = 0, held at x = 0, with a block 10 x 10 x 5 glued on
+/// its half x > 10, either the block's bottom on the strip's face SPOS (strip master) or the
+/// strip's face SPOS on the block's bottom (strip slave). The block is pulled along x by
+/// 1000 N and held across the strip at its top.
+fn block_on_membrane(strip_is_master: bool) -> (FeMesh, FeModel) {
+    let mut mesh = FeMesh::default();
+    let strip = |i: u32, j: u32| 1 + i + 5 * j;
+    for j in 0..3 {
+        for i in 0..5 {
+            mesh.set_node(strip(i, j), [5.0 * f64::from(i), 5.0 * f64::from(j), 0.0]);
+        }
+    }
+    for j in 0..2 {
+        for i in 0..4 {
+            mesh.add_element(plx_mesh::Element {
+                id: 1 + i + 4 * j,
+                type_name: "M3D4".into(),
+                shape: plx_mesh::ElementShape::Quad4,
+                nodes: vec![
+                    strip(i, j),
+                    strip(i + 1, j),
+                    strip(i + 1, j + 1),
+                    strip(i, j + 1),
+                ],
+            })
+            .unwrap();
+        }
+    }
+    // The block's mesh (3 x 3) does not match the strip's.
+    let block = |i: u32, j: u32, k: u32| 101 + i + 4 * j + 16 * k;
+    for k in 0..2 {
+        for j in 0..4 {
+            for i in 0..4 {
+                let at = [
+                    10.0 + 10.0 * f64::from(i) / 3.0,
+                    10.0 * f64::from(j) / 3.0,
+                    0.5 + 5.0 * f64::from(k),
+                ];
+                mesh.set_node(block(i, j, k), at);
+            }
+        }
+    }
+    for j in 0..3 {
+        for i in 0..3 {
+            let mut nodes = Vec::new();
+            for k in 0..2 {
+                nodes.extend([block(i, j, k), block(i + 1, j, k)]);
+                nodes.extend([block(i + 1, j + 1, k), block(i, j + 1, k)]);
+            }
+            mesh.add_element(plx_mesh::Element {
+                id: 101 + i + 3 * j,
+                type_name: "C3D8".into(),
+                shape: plx_mesh::ElementShape::Hex8,
+                nodes,
+            })
+            .unwrap();
+        }
+    }
+    for (name, elements) in [
+        ("STRIP", (1..=8).collect()),
+        ("BLOCK", (101..=109).collect()),
+    ] {
+        mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
+            name: name.into(),
+            elements,
+        });
+    }
+    let mut step = Step::new_static("Step-1");
+    let bc = |name: &str, nodes: Vec<NodeId>, kind| BoundaryCondition {
+        id: plx_model::Id::new(),
+        distribution: None,
+        name: name.into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(nodes),
+        kind,
+        amplitude: None,
+    };
+    // Each node held for itself, not as a remote point.
+    let each = |values| {
+        let mut d = plx_model::Displacement::new(values);
+        d.behavior = plx_model::Behavior::EachNode;
+        BoundaryKind::Displacement(d)
+    };
+    let held = each([Some(0.0), None, None, None, None, None]);
+    step.boundary_conditions
+        .push(bc("Held-1", vec![1, 6, 11], held));
+    step.boundary_conditions.push(bc(
+        "Held-2",
+        vec![1],
+        each([None, Some(0.0), None, None, None, None]),
+    ));
+    // A membrane holds nothing across its plane: the free half of the strip and the
+    // block's top stay flat.
+    let flat = each([None, None, Some(0.0), None, None, None]);
+    let mut flat_nodes: Vec<NodeId> = (1..=15).filter(|n| (n - 1) % 5 < 2).collect();
+    flat_nodes.extend(117..=132);
+    step.boundary_conditions
+        .push(bc("Flat-1", flat_nodes, flat));
+    step.loads.push(Load {
+        id: plx_model::Id::new(),
+        distribution: None,
+        name: "Pull-1".into(),
+        active: true,
+        visible: true,
+        // The block's side x = 20 (S4), 10 x 5: 20 MPa pull 1000 N.
+        region: Region::Faces((0..3).map(|j| (103 + 3 * j, 4)).collect()),
+        kind: LoadKind::Pressure(-20.0),
+        amplitude: None,
+        factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
+    });
+    let mut model = FeModel::default();
+    model.materials.push(Material {
+        id: named("Steel"),
+        name: "Steel".into(),
+        elastic: Some(Elastic {
+            young: 210_000.0,
+            poisson: 0.3,
+        }),
+        ..Default::default()
+    });
+    for (name, part, kind) in [
+        ("Section-1", "BLOCK", SectionKind::Solid),
+        (
+            "Section-2",
+            "STRIP",
+            SectionKind::Membrane {
+                thickness: 1.0,
+                offset: 0.0,
+            },
+        ),
+    ] {
+        model.sections.push(Section {
+            name: name.into(),
+            material: Some(named("Steel")),
+            region: Region::Parts(vec![part.into()]),
+            thickness: 1.0,
+            kind,
+        });
+    }
+    let mut tie = plx_model::Tie::new("Tie-1");
+    let under = Region::Faces([3, 4, 7, 8].iter().map(|&e| (e, 2)).collect());
+    let bottom = Region::Faces((101..=109).map(|e| (e, 1)).collect());
+    (tie.master, tie.slave) = if strip_is_master {
+        (under, bottom)
+    } else {
+        (bottom, under)
+    };
+    model.ties.push(tie);
+    model.steps.push(step);
+    (mesh, model)
+}
+
+#[test]
+fn a_block_glued_on_the_face_of_a_membrane_pulls_it() {
+    for strip_is_master in [true, false] {
+        let (mesh, model) = block_on_membrane(strip_is_master);
+        let text = write_inp(&mesh, &model, "").unwrap();
+        let name = format!("membrane-face-tie-{strip_is_master}");
+        let Some(frd) = run_solver(&name, &text) else {
+            return;
+        };
+        // The free half of the strip carries the 1000 N alone: it stretches by
+        // F L / (E t w) = 0.00476 (the block holds the strip's contraction at x = 10).
+        let stretched = [3, 8, 13]
+            .iter()
+            .map(|&n| node_value(&frd, "DISP", "U1", n))
+            .sum::<f64>()
+            / 3.0;
+        let expected = 1000.0 * 10.0 / (210_000.0 * 10.0);
+        assert!(
+            (stretched - expected).abs() < 0.03 * expected,
+            "{name}: {stretched} against {expected}"
+        );
+        // The block's corner above the strip's node 3 moves with it.
+        let (strip, block) = (
+            node_value(&frd, "DISP", "U1", 3),
+            node_value(&frd, "DISP", "U1", 101),
+        );
+        assert!((strip - block).abs() < 1e-6, "{name}: {strip} {block}");
+    }
 }
 
 #[test]
@@ -7861,6 +9268,7 @@ fn solver_bends_a_box_of_a_mesh_block_held_and_loaded_on_its_sides() {
     };
     let mesh = primitive.generate(ModelSpace::ThreeD, "BOX");
     let load = Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Pressure-1".into(),
         active: true,
@@ -7869,6 +9277,9 @@ fn solver_bends_a_box_of_a_mesh_block_held_and_loaded_on_its_sides() {
         kind: LoadKind::Pressure(1.0),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (_, mut model) = cantilever(load);
     model.sections[0].region = Region::Parts(vec!["BOX".into()]);
@@ -7910,6 +9321,7 @@ fn solver_bends_a_rectangle_of_a_mesh_block_held_and_loaded_on_its_edges() {
     );
     model.sections[0].region = Region::Parts(vec!["RECTANGLE".into()]);
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Fixed-1".into(),
         active: true,
@@ -7986,18 +9398,20 @@ fn solver_turns_the_reference_point_of_a_plane_model() {
         Region::Nodes(vec![1]),
     );
     model.steps[0].loads.clear();
-    model
-        .reference_points
-        .push(ReferencePoint::new("RP-1", [10.0, 1.0, 0.0]));
-    let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+    model.reference_points.push(ReferencePoint {
+        id: named("RP-1"),
+        ..ReferencePoint::new("RP-1", [10.0, 1.0, 0.0])
+    });
+    let mut body = RigidBody::new("Rigid_Body-1", named("RP-1"));
     body.region = Region::Nodes(nodes_at(&mesh, 0, 10.0));
     model.constraints.push(Constraint::RigidBody(body));
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Turn-1".into(),
         active: true,
         visible: true,
-        region: Region::ReferencePoint("RP-1".into()),
+        region: Region::ReferencePoint(named("RP-1")),
         // U3, UR1 and UR2 do not exist in a plane model and are left out.
         kind: BoundaryKind::displacement([
             Some(0.0),
@@ -8112,14 +9526,14 @@ fn solver_drives_a_quadratic_end_face_with_every_behavior() {
 #[test]
 fn a_point_history_output_prints_its_reference_and_rotation_node() {
     let (mesh, mut model) = rigid_tip(None, None);
-    (model.steps[0].history_outputs).push(HistoryOutput::node(
-        "NH_Output-1",
-        Region::ReferencePoint("RP-1".into()),
-    ));
+    model.put_history_output(
+        0,
+        HistoryOutput::node("NH_Output-1", Region::ReferencePoint(named("RP-1"))),
+    );
     let mut temperatures =
-        HistoryOutput::node("NH_Output-2", Region::ReferencePoint("RP-1".into()));
+        HistoryOutput::node("NH_Output-2", Region::ReferencePoint(named("RP-1")));
     temperatures.variables = vec!["NT".into()];
-    model.steps[0].history_outputs.push(temperatures);
+    model.put_history_output(0, temperatures);
     let text = write_inp(&mesh, &model, "").unwrap();
     for expected in [
         "*Nset, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-1\n100\n",
@@ -8147,10 +9561,10 @@ fn a_remote_point_history_output_prints_the_nodes_of_the_point() {
     let (mesh, mut model) = remote_cantilever(remote_with(values, |r| {
         r.behavior = Behavior::Deformable;
     }));
-    (model.steps[0].history_outputs).push(HistoryOutput::node(
-        "NH_Output-1",
-        Region::RemotePoint("Remote-1".into()),
-    ));
+    model.put_history_output(
+        0,
+        HistoryOutput::node("NH_Output-1", Region::RemotePoint(named("Remote-1"))),
+    );
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains("*Nset, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-1\n100\n"),
@@ -8195,9 +9609,9 @@ fn solver_prints_the_rotation_of_the_point_of_a_remote_force() {
             r.behavior = behavior;
         }));
         let mut output =
-            HistoryOutput::node("NH_Output-1", Region::RemotePoint("Remote_Force-1".into()));
+            HistoryOutput::node("NH_Output-1", Region::RemotePoint(named("Remote_Force-1")));
         output.variables = vec!["U".into()];
-        model.steps[0].history_outputs.push(output);
+        model.put_history_output(0, output);
         let text = write_inp(&mesh, &model, "").unwrap();
         assert!(
             text.contains("*Nset, Nset=INTERNAL_SELECTION-1_NH_OUTPUT-1\n100\n"),
@@ -8226,10 +9640,10 @@ fn solver_prints_the_rotation_of_the_point_of_a_remote_force() {
     // A deactivated remote force has no point.
     let (mesh, mut model) = cantilever(remote_force(|_| {}));
     model.steps[0].loads[0].active = false;
-    (model.steps[0].history_outputs).push(HistoryOutput::node(
-        "NH_Output-1",
-        Region::RemotePoint("Remote_Force-1".into()),
-    ));
+    model.put_history_output(
+        0,
+        HistoryOutput::node("NH_Output-1", Region::RemotePoint(named("Remote_Force-1"))),
+    );
     assert_eq!(
         write_inp(&mesh, &model, ""),
         Err(WriteError::UnknownRemotePoint {
@@ -8247,12 +9661,10 @@ fn point_moment(
     region: Region,
     name: &str,
 ) -> Option<(f64, f64, f64)> {
-    let step = &mut model.steps[0];
-    step.history_outputs
-        .push(HistoryOutput::node("NH_Output-1", region));
+    model.put_history_output(0, HistoryOutput::node("NH_Output-1", region));
     let mut clamp = HistoryOutput::node("NH_Output-2", Region::NodeSet("FIX".into()));
     clamp.variables = vec!["RF".into()];
-    step.history_outputs.push(clamp);
+    model.put_history_output(0, clamp);
     let dat = run_dat(name, &write_inp(mesh, &model, "").unwrap())?;
     let import = crate::dat::parse_dat(&dat);
     assert!(import.warnings.is_empty(), "{:?}", import.warnings);
@@ -8289,16 +9701,17 @@ fn point_moment(
 #[test]
 fn solver_prints_the_moment_and_rotation_of_a_reference_point() {
     let bc = BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Turn-1".into(),
         active: true,
         visible: true,
-        region: Region::ReferencePoint("RP-1".into()),
+        region: Region::ReferencePoint(named("RP-1")),
         kind: BoundaryKind::displacement([None, None, None, None, None, Some(0.01)]),
         amplitude: None,
     };
     let (mesh, model) = rigid_tip(None, Some(bc));
-    let region = Region::ReferencePoint("RP-1".into());
+    let region = Region::ReferencePoint(named("RP-1"));
     let Some((moment, rotation, clamp)) = point_moment(&mesh, model, region, "rp-moment") else {
         return;
     };
@@ -8311,7 +9724,7 @@ fn solver_prints_the_moment_and_rotation_of_a_reference_point() {
 fn solver_prints_the_moment_and_rotation_of_a_remote_point() {
     let values = [None, None, None, None, None, Some(0.01)];
     let (mesh, model) = remote_cantilever(remote("Remote-1", values));
-    let region = Region::RemotePoint("Remote-1".into());
+    let region = Region::RemotePoint(named("Remote-1"));
     let Some((moment, rotation, clamp)) = point_moment(&mesh, model, region, "remote-moment")
     else {
         return;
@@ -8329,10 +9742,10 @@ fn solver_prints_the_rotation_of_a_deformable_remote_point() {
     let (mesh, mut model) = remote_cantilever(remote_with(values, |r| {
         r.behavior = Behavior::Deformable;
     }));
-    (model.steps[0].history_outputs).push(HistoryOutput::node(
-        "NH_Output-1",
-        Region::RemotePoint("Remote-1".into()),
-    ));
+    model.put_history_output(
+        0,
+        HistoryOutput::node("NH_Output-1", Region::RemotePoint(named("Remote-1"))),
+    );
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains(
@@ -8376,7 +9789,10 @@ fn stiffness_is_spread_with_positive_shares_on_quadratic_faces() {
 fn blocks_joined_by_region(gap: f64, behavior: plx_model::ContactBehavior) -> (FeMesh, FeModel) {
     let (mesh, lower, upper) = two_blocks(gap);
     let mut model = stacked_blocks(&mesh);
-    let mut region = plx_model::ContactRegion::new("Region-1", behavior);
+    let mut region = plx_model::ContactRegion {
+        id: named("Region-1"),
+        ..plx_model::ContactRegion::new("Region-1", behavior)
+    };
     region.side_a = Region::Faces(lower);
     region.side_b = Region::Faces(upper);
     model.contact_regions.push(region);
@@ -8387,6 +9803,7 @@ fn blocks_joined_by_region(gap: f64, behavior: plx_model::ContactBehavior) -> (F
 fn push_top(model: &mut FeModel, shift: f64) -> Vec<NodeId> {
     let top: Vec<NodeId> = (110..=118).collect();
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Shift-1".into(),
         active: true,
@@ -8422,10 +9839,13 @@ fn a_bonded_region_is_a_tie_with_a_tolerance_of_the_mesh_size() {
 #[test]
 fn solver_ties_a_detected_gap_wider_than_a_quarter_of_the_mesh_size() {
     let (mesh, mut model) = blocks_joined_by_region(1.5, plx_model::ContactBehavior::Bonded);
-    let mut detection = plx_model::ContactDetection::new("Detection-1");
+    let mut detection = plx_model::ContactDetection {
+        id: named("Detection-1"),
+        ..plx_model::ContactDetection::new("Detection-1")
+    };
     detection.tolerance = Some(2.0);
     model.contact_detections.push(detection);
-    model.contact_regions[0].detected_by = Some("Detection-1".into());
+    model.contact_regions[0].detected_by = Some(named("Detection-1"));
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains("*Tie, Name=REGION-1, Position tolerance=2\n"),
@@ -8442,7 +9862,7 @@ fn solver_ties_a_detected_gap_wider_than_a_quarter_of_the_mesh_size() {
     model.contact_regions[0].detected_by = None;
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("Position tolerance=1.25\n"), "{text}");
-    model.contact_regions[0].detected_by = Some("Detection-1".into());
+    model.contact_regions[0].detected_by = Some(named("Detection-1"));
     let Some(frd) = run_solver(
         "region-detected-gap",
         &write_inp(&mesh, &model, "").unwrap(),
@@ -8518,6 +9938,7 @@ fn solver_carries_the_load_across_a_frictionless_region_in_any_units() {
         model.steps[0].loads[0].kind = LoadKind::Pressure(10.0 * stress);
         // Held sideways at its top, the upper block rests on the lower one only by contact.
         model.steps[0].boundary_conditions.push(BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Side-1".into(),
             active: true,
@@ -8602,6 +10023,7 @@ fn solver_takes_mortar_contact_regions() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Frictionless);
     model.contact_defaults.formulation = Some(ContactMethod::Mortar);
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Side-1".into(),
         active: true,
@@ -8638,9 +10060,13 @@ fn contact_regions_take_the_formulation_of_the_pairs_defined_by_hand() {
     ));
     // A pair defined by hand sets the formulation; a tied contact needs surface to surface,
     // so the region falls back to a tie and says why.
-    let mut pair = ContactPair::new("Manual", "Hard");
+    let mut pair = ContactPair {
+        id: named("Manual"),
+        ..ContactPair::new("Manual", Some(named("Hard")))
+    };
     pair.method = ContactMethod::NodeToSurface;
     model.surface_interactions.push(SurfaceInteraction {
+        id: named("Hard"),
         name: "Hard".into(),
         properties: vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)],
     });
@@ -8695,9 +10121,10 @@ fn findings_on_what_a_region_becomes_belong_to_the_region() {
 fn detected_blocks(gap: f64) -> (FeMesh, FeModel, Vec<plx_mesh::PartSkin>) {
     let (mesh, _, _) = two_blocks(gap);
     let mut model = stacked_blocks(&mesh);
-    model
-        .contact_detections
-        .push(plx_model::ContactDetection::new("Contacts"));
+    model.contact_detections.push(plx_model::ContactDetection {
+        id: named("Contacts"),
+        ..plx_model::ContactDetection::new("Contacts")
+    });
     let skins = (mesh.parts.iter())
         .map(|p| plx_mesh::extract_part_skin(&mesh, p, 30.0))
         .collect();
@@ -8717,16 +10144,18 @@ fn a_detection_finds_the_touching_blocks_and_keeps_regions_the_user_changed() {
     let region = &model.contact_regions[0];
     assert_eq!(region.name, "Bonded - LOWER to UPPER");
     assert_eq!(region.behavior, plx_model::ContactBehavior::Bonded);
-    assert_eq!(region.detected_by.as_deref(), Some("Contacts"));
+    assert_eq!(region.detected_by, Some(named("Contacts")));
     assert_eq!(region.side_a.faces(&mesh).len(), 4);
     assert_eq!(region.side_b.faces(&mesh).len(), 4);
     assert_eq!(region.settings.tolerance, Some(auto));
-    // Detecting again replaces what it found.
+    // Detecting again replaces what it found, keeping its id for what refers to it.
+    let id = model.contact_regions[0].id;
     let report = model
         .detect_contacts(0, &mesh, &skins, &[true, true])
         .unwrap();
     assert_eq!((report.added, report.replaced), (1, 1));
     assert_eq!(model.contact_regions.len(), 1);
+    assert_eq!(model.contact_regions[0].id, id);
     // A region changed by the user stays, and nothing is added for its parts.
     model.contact_regions[0].behavior = plx_model::ContactBehavior::Frictionless;
     model.contact_regions[0].edited = true;
@@ -8750,11 +10179,105 @@ fn a_detection_finds_the_touching_blocks_and_keeps_regions_the_user_changed() {
     // Parts left out of the detection are not searched.
     model.contact_regions.clear();
     model.contact_detections[0].tolerance = None;
-    model.contact_detections[0].parts = vec!["LOWER".into()];
+    model.contact_detections[0].scope = plx_model::PartFilter::parts(["LOWER"]);
     let report = model
         .detect_contacts(0, &mesh, &skins, &[true, true])
         .unwrap();
     assert_eq!(report.added, 0);
+}
+
+#[test]
+fn detection_rules_give_the_pairs_their_type_and_the_lower_detection_wins() {
+    use plx_model::{ContactBehavior, ContactRule, PartFilter, PartGroup, PartTerm, RuleAction};
+    let (mesh, mut model, skins) = detected_blocks(0.01);
+    // A group by name pattern, and a rule on it: the pair takes the rule's type.
+    let mut upper = PartGroup::new("Upper");
+    upper.filter.include.push(PartTerm::Pattern("up*".into()));
+    let group = upper.id;
+    model.part_groups.push(upper);
+    model.contact_detections[0].rules.push(ContactRule {
+        side_a: PartFilter {
+            include: vec![PartTerm::Group(group)],
+            exclude: Vec::new(),
+        },
+        side_b: PartFilter::all(),
+        action: RuleAction::Type(ContactBehavior::Frictional { mu: 0.3 }),
+    });
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.per_rule, [1, 0]);
+    assert_eq!(
+        model.contact_regions[0].behavior,
+        ContactBehavior::Frictional { mu: 0.3 }
+    );
+    let context = model.part_context(&mesh);
+    let counts = model.rule_counts(&model.contact_detections[0], &mesh, &context);
+    assert_eq!(counts, [1, 0]);
+    // A rule matching neither side leaves the pair to the type of all other pairs.
+    model.contact_detections[0].rules[0].side_a = PartFilter::parts(["NOPE"]);
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.per_rule, [0, 1]);
+    assert_eq!(model.contact_regions[0].behavior, ContactBehavior::Bonded);
+    // An excluding rule leaves the pair out.
+    model.contact_detections[0].rules[0] = ContactRule {
+        side_a: PartFilter::parts(["LOWER"]),
+        side_b: PartFilter::parts(["UPPER"]),
+        action: RuleAction::Exclude,
+    };
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!((report.added, report.excluded), (0, 1));
+    assert!(model.contact_regions.is_empty());
+    // A scope excluding the group searches the lower block alone: nothing touches.
+    model.contact_detections[0].rules.clear();
+    model.contact_detections[0]
+        .scope
+        .exclude
+        .push(PartTerm::Group(group));
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.added, 0);
+    model.contact_detections[0].scope = PartFilter::all();
+    // Two detections finding the same pair: the lower one in the tree keeps it.
+    model.detect_contacts(0, &mesh, &skins, &[true, true]);
+    let mut second = plx_model::ContactDetection::new("Friction");
+    second.behavior = ContactBehavior::Frictionless;
+    model.contact_detections.push(second);
+    let report = model
+        .detect_contacts(1, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.taken_from.get("Contacts"), Some(&1));
+    assert_eq!(model.contact_regions.len(), 1);
+    assert_eq!(
+        model.contact_regions[0].behavior,
+        ContactBehavior::Frictionless
+    );
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.left_to.get("Friction"), Some(&1));
+    assert_eq!(report.added, 0);
+    assert_eq!(model.contact_regions.len(), 1);
+    // Deleting the group drops the terms naming it.
+    model.contact_detections[0]
+        .scope
+        .include
+        .push(PartTerm::Group(group));
+    model.part_groups.clear();
+    model.forget_in_filters(group);
+    assert!(model.contact_detections[0].scope.is_all());
+    // Renaming a part follows into the filters.
+    model.contact_detections[0].scope = PartFilter::parts(["LOWER"]);
+    model.rename_part("LOWER", "BASE");
+    assert_eq!(
+        model.contact_detections[0].scope,
+        PartFilter::parts(["BASE"])
+    );
 }
 
 #[test]
@@ -8851,6 +10374,7 @@ fn solver_holds_a_region_of_no_separation_together_and_lets_it_slide() {
     model.contact_regions[0].settings.sides = Some(plx_model::SideRoles::AIsMaster);
     model.steps[0].loads[0].kind = LoadKind::Pressure(-10.0);
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Side-1".into(),
         active: true,
@@ -8889,6 +10413,7 @@ fn solver_solves_no_separation_on_nodes_held_by_a_boundary_condition() {
     model.contact_regions[0].settings.sides = Some(plx_model::SideRoles::AIsMaster);
     let side: Vec<NodeId> = [101, 104, 107, 110, 113, 116].into();
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Side-1".into(),
         active: true,
@@ -8930,10 +10455,11 @@ fn solver_solves_no_separation_on_nodes_held_by_a_boundary_condition() {
 fn solver_solves_a_rigid_body_on_nodes_held_by_a_boundary_condition() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Bonded);
     model.steps[0].loads.clear();
-    model
-        .reference_points
-        .push(ReferencePoint::new("RP-1", [5.0, 5.0, 20.0]));
-    let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+    model.reference_points.push(ReferencePoint {
+        id: named("RP-1"),
+        ..ReferencePoint::new("RP-1", [5.0, 5.0, 20.0])
+    });
+    let mut body = RigidBody::new("Rigid_Body-1", named("RP-1"));
     body.region = Region::Nodes((110..=118).collect());
     model.constraints.push(Constraint::RigidBody(body));
     for (name, region, values) in [
@@ -8944,12 +10470,13 @@ fn solver_solves_a_rigid_body_on_nodes_held_by_a_boundary_condition() {
         ),
         (
             "Lift-1",
-            Region::ReferencePoint("RP-1".into()),
+            Region::ReferencePoint(named("RP-1")),
             [Some(0.0), Some(0.0), Some(-0.001)],
         ),
     ] {
         let [x, y, z] = values;
         model.steps[0].boundary_conditions.push(BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: name.into(),
             active: true,
@@ -8981,6 +10508,7 @@ fn solver_presses_regions_apart_by_a_negative_offset() {
         Some(plx_model::InterfaceTreatment::Offset(-0.01));
     model.steps[0].loads.clear();
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Top-1".into(),
         active: true,
@@ -9044,6 +10572,7 @@ fn solver_conducts_heat_across_contact_regions_in_coupled_steps() {
         temperature("Cold", Region::Nodes((110..=118).collect()), 0.0),
     ]);
     step.boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Side-1".into(),
         active: true,
@@ -9122,6 +10651,7 @@ fn solver_switches_contact_regions_off_and_on_in_steps() {
     use plx_model::{ContactBehavior, ContactState};
     let (mesh, mut model) = blocks_joined_by_region(0.0, ContactBehavior::Frictionless);
     let side = |values| BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Side-1".into(),
         active: true,
@@ -9143,11 +10673,11 @@ fn solver_switches_contact_regions_off_and_on_in_steps() {
     };
     let mut free = next_step(&model, "Step-2", Vec::new());
     free.boundary_conditions[1] = side([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
-    free.set_contact_state("Region-1", on, off);
+    free.set_contact_state(named("Region-1"), on, off);
     assert_eq!(free.contact_changes.len(), 1);
     let mut pressed = model.steps[0].clone();
     pressed.name = "Step-3".into();
-    pressed.set_contact_state("Region-1", off, on);
+    pressed.set_contact_state(named("Region-1"), off, on);
     model.steps.push(free);
     let region = &model.contact_regions[0];
     assert_eq!(region.state_after(&model.steps), off);
@@ -9194,7 +10724,7 @@ fn solver_changes_the_friction_of_a_region_in_a_step() {
     }
     let before = model.contact_regions[0].state_after(&model.steps);
     step.set_contact_state(
-        "Region-1",
+        named("Region-1"),
         before,
         ContactState {
             friction: Some(0.3),
@@ -9204,7 +10734,7 @@ fn solver_changes_the_friction_of_a_region_in_a_step() {
     model.steps.push(step);
     let (lowered, _) = model.lower_contacts(&mesh);
     let interactions: Vec<&str> = (lowered.contact_pairs.iter())
-        .map(|p| p.interaction.as_str())
+        .filter_map(|p| Some(lowered.surface_interaction(p.interaction?)?.name.as_str()))
         .collect();
     assert_eq!(interactions, ["PLX_Frictional", "PLX_Frictional-2"]);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -9233,7 +10763,7 @@ fn switched_bonded_regions_become_tied_contacts() {
         friction: None,
     };
     step.set_contact_state(
-        "Region-1",
+        named("Region-1"),
         on,
         ContactState {
             active: false,
@@ -9274,9 +10804,9 @@ fn long_set_names_are_shortened_and_restored_in_the_history_output() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Frictionless);
     let long = "Bonded - SPUR_GEAR__20_TEETH, SPUR_GEAR__60_TEETH-2 to SPUR_GEAR__20_TEETH-2";
     model.contact_regions[0].name = long.to_string();
-    let mut output = HistoryOutput::contact("CH_Output-1", long);
+    let mut output = HistoryOutput::contact("CH_Output-1", Some(model.contact_regions[0].id));
     output.variables = ["CF".to_string()].to_vec();
-    model.steps[0].history_outputs.push(output);
+    model.put_history_output(0, output);
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in text.lines().filter(|l| !l.starts_with("**")) {
         for part in line.split(',') {
@@ -9334,6 +10864,7 @@ fn a_name_from_the_definition_follows_the_type() {
 
 fn equation(name: &str, text: &str) -> plx_model::Distribution {
     plx_model::Distribution {
+        id: named(name),
         name: name.into(),
         kind: plx_model::DistributionKind::Equation(text.into()),
     }
@@ -9344,7 +10875,8 @@ fn equation(name: &str, text: &str) -> plx_model::Distribution {
 #[test]
 fn solver_pressure_follows_its_distribution() {
     let load = Load {
-        distribution: Some("Rising".into()),
+        id: plx_model::Id::new(),
+        distribution: Some(named("Rising")),
         name: "Pressure-1".into(),
         active: true,
         visible: true,
@@ -9352,6 +10884,9 @@ fn solver_pressure_follows_its_distribution() {
         kind: LoadKind::Pressure(2.0),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, mut model) = cantilever(load);
     model.properties.units = UnitSystem::MKgSC;
@@ -9387,9 +10922,9 @@ fn distributed_temperatures_are_written_per_node() {
     );
     model.properties.units = UnitSystem::MKgSC;
     model.distributions.push(equation("Half", "=0.5"));
-    model.steps[0].boundary_conditions[0].distribution = Some("Half".into());
+    model.steps[0].boundary_conditions[0].distribution = Some(named("Half"));
     model.initial_conditions.push(plx_model::InitialCondition {
-        distribution: Some("Half".into()),
+        distribution: Some(named("Half")),
         name: "Initial_Temperature-1".into(),
         active: true,
         region: Region::Nodes(vec![1, 2]),
@@ -9444,10 +10979,11 @@ fn solver_strains_the_bar_by_a_distributed_temperature() {
         Region::Parts(vec!["EALL".into()]),
         120.0,
     );
-    field.distribution = Some("Gradient".into());
+    field.distribution = Some(named("Gradient"));
     model.steps[0].defined_fields = vec![field];
     // Held at x = 0 in x, and against rigid motion at the corner and an edge node.
     let hold = |name: &str, nodes: Vec<NodeId>, held: [bool; 3]| BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: name.into(),
         active: true,
@@ -9502,7 +11038,8 @@ fn solver_solves_a_part_held_only_by_contact_with_weak_springs() {
         );
         assert!(
             text.contains(
-                "*Spring, Elset=PLX_WEAK_SPRINGS_UPPER_DOF_3\n3\n0.11666666666666667, 0\n"
+                "*Spring, Elset=PLX_WEAK_SPRINGS_UPPER_DOF_3, Stabilize=10\n3\n\
+                 0.11666666666666667, 0\n"
             ),
             "{text}"
         );
@@ -9515,7 +11052,9 @@ fn solver_solves_a_part_held_only_by_contact_with_weak_springs() {
         };
         let bottom: Vec<NodeId> = (1..=9).collect();
         let reaction = node_sum(&frd, "FORC", "F3", &bottom);
-        assert!((reaction - 1000.0).abs() < 0.1, "{name}: {reaction}");
+        // The springs take 1e-6 E L g closing the gap g = 0.01 (0.02 N), their stabilization
+        // ten times that more in the increment the gap closes in, here the only one.
+        assert!((reaction - 1000.0).abs() < 0.3, "{name}: {reaction}");
     }
 }
 
@@ -9524,9 +11063,9 @@ fn solver_solves_a_part_held_only_by_contact_with_weak_springs() {
 #[test]
 fn solver_prints_the_contact_forces_of_a_bonded_region() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Bonded);
-    let mut output = HistoryOutput::contact("CH_Output-1", "Region-1");
+    let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Region-1")));
     output.variables = ["CDIS", "CSTR", "CF"].map(String::from).to_vec();
-    model.steps[0].history_outputs.push(output);
+    model.put_history_output(0, output);
     let resolved = model.resolve_contacts(&mesh);
     assert!(
         matches!(resolved.items[0].kind, plx_model::ResolvedKind::Pair { .. }),
@@ -9578,9 +11117,9 @@ fn contact_outputs_of_regions_without_contact_elements_are_left_out() {
     ] {
         let (mesh, mut model) = blocks_joined_by_region(0.0, behavior);
         model.contact_regions[0].settings.bonded_method = method;
-        let mut output = HistoryOutput::contact("CH_Output-1", "Region-1");
+        let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Region-1")));
         output.variables = ["CF".to_string()].to_vec();
-        model.steps[0].history_outputs.push(output);
+        model.put_history_output(0, output);
         let text = write_inp(&mesh, &model, "").unwrap();
         assert!(!text.contains("*Contact print"), "{behavior:?}");
         assert!(
@@ -9698,7 +11237,10 @@ fn shank_bolt(preload: f64) -> (FeMesh, FeModel) {
     let mut second = model.steps[0].clone();
     second.name = "Step-2".into();
     model.steps.push(second);
-    let mut bolt = plx_model::Bolt::new("Bolt-1");
+    let mut bolt = plx_model::Bolt {
+        id: named("Bolt-1"),
+        ..plx_model::Bolt::new("Bolt-1")
+    };
     bolt.side_a = Region::Faces(shank);
     bolt.preload = plx_model::Preload::Force(preload);
     model.bolts.push(bolt);
@@ -9770,7 +11312,10 @@ fn the_model_check_warns_of_a_shank_bonded_into_its_hole() {
         .collect()
     };
     assert_eq!(problems(&model), []);
-    let mut region = plx_model::ContactRegion::new("Bore", plx_model::ContactBehavior::Bonded);
+    let mut region = plx_model::ContactRegion {
+        id: named("Bore"),
+        ..plx_model::ContactRegion::new("Bore", plx_model::ContactBehavior::Bonded)
+    };
     region.side_a = model.bolts[0].side_a.clone();
     region.side_b = Region::NodeSet("TIP".into());
     model.contact_regions.push(region);
@@ -9787,6 +11332,7 @@ fn the_model_check_warns_of_a_shank_bonded_into_its_hole() {
 /// on three faces, a pressure on the tip face, a plastic material.
 fn uniaxial_bar(hardening: Hardening, stress: f64) -> (FeMesh, FeModel) {
     let load = Load {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Pressure-1".into(),
         active: true,
@@ -9795,6 +11341,9 @@ fn uniaxial_bar(hardening: Hardening, stress: f64) -> (FeMesh, FeModel) {
         kind: LoadKind::Pressure(-stress),
         amplitude: None,
         factor_amplitude: None,
+        tables: Default::default(),
+        system: None,
+        follower: false,
     };
     let (mesh, mut model) = cantilever(load);
     s235(&mut model);
@@ -9809,6 +11358,7 @@ fn uniaxial_bar(hardening: Hardening, stress: f64) -> (FeMesh, FeModel) {
         let mut dofs = [None; 6];
         dofs[axis] = Some(0.0);
         BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: format!("Symmetry-{}", axis + 1),
             active: true,
@@ -9856,10 +11406,10 @@ fn solver_prints_the_plastic_strain_and_energy_of_the_bar() {
     let mut elements =
         HistoryOutput::element("EH_Output-1", Region::ElementSet("TIP_ELEMENTS".into()));
     elements.variables = vec!["S".into(), "PEEQ".into(), "ENER".into()];
-    model.steps[0].history_outputs.push(elements);
+    model.put_history_output(0, elements);
     let mut nodes = HistoryOutput::node("NH_Output-1", Region::NodeSet("FIX".into()));
     nodes.totals = Totals::Yes;
-    model.steps[0].history_outputs.push(nodes);
+    model.put_history_output(0, nodes);
     let Some(frd) = run_solver("plastisch-history", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
@@ -9884,8 +11434,10 @@ fn solver_stretches_the_bar_plastically_with_nlgeom() {
     model.steps[0].field_outputs[1].variables.pop();
     model.steps[0].kind = StepKind::Static(StaticStep {
         nlgeom: true,
-        incrementation: Incrementation::Automatic,
-        initial_increment: 0.2,
+        control: plx_model::IncrementControl {
+            initial: Some(0.2),
+            ..Default::default()
+        },
         ..StaticStep::default()
     });
     let (_, max) = mesh.bounds().unwrap();
@@ -9895,6 +11447,7 @@ fn solver_stretches_the_bar_plastically_with_nlgeom() {
     let mut dofs = [None; 6];
     dofs[0] = Some(2.0);
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Stretch".into(),
         active: true,
@@ -9957,7 +11510,7 @@ fn a_lowering_error_names_its_item() {
     let (mesh, mut model) = cantilever(tip_force());
     let mut second = model.steps[0].clone();
     second.name = "Step-2".into();
-    second.loads[0].amplitude = Some("Gone".into());
+    second.loads[0].amplitude = Some(named("Gone"));
     model.steps.push(second);
     let error = lower_unvalidated(&mesh, &model, "").unwrap_err();
     assert!(
@@ -9967,7 +11520,7 @@ fn a_lowering_error_names_its_item() {
     assert_eq!(error.item, Some(ModelItem::Load(1, 0)));
     // A missing material names the section that refers to it.
     let (mesh, mut model) = cantilever(tip_force());
-    model.sections[0].material = "Unobtainium".into();
+    model.sections[0].material = Some(named("Unobtainium"));
     let error = lower_unvalidated(&mesh, &model, "").unwrap_err();
     assert_eq!(error.item, Some(ModelItem::Section(0)));
 }
@@ -9997,7 +11550,6 @@ fn fingerprints_count_what_the_solver_computes_with() {
     renamed.steps[1].loads[0].visible = false;
     renamed.sections[0].name = "Steel section".into();
     renamed.materials[0].name = "S355".into();
-    renamed.sections[0].material = "S355".into();
     let mut off = tip_force();
     off.name = "Not yet".into();
     off.active = false;
@@ -10122,4 +11674,1129 @@ fn an_error_of_a_point_names_the_boundary_condition_of_its_step() {
         "{error}"
     );
     assert_eq!(error.item, Some(ModelItem::BoundaryCondition(1, 1)));
+}
+
+/// A damping ratio over the automatic range: the solver fits it from the lowest
+/// eigenfrequency (the 810 Hz bending mode) up to the resolved frequency, writes the
+/// accelerations and the energies of the model, which balance the work of the tip force.
+#[test]
+fn solver_fits_a_damping_ratio_and_prints_the_energies() {
+    let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, None);
+    model.put_history_output(0, plx_model::HistoryOutput::energies("Energies"));
+    let step = &mut model.steps[0];
+    let StepKind::Dynamic(settings) = &mut step.kind else {
+        unreachable!()
+    };
+    settings.damping = Damping::Ratio {
+        zeta: 0.05,
+        range: DampingRange::Automatic,
+    };
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Damping, Ratio=0.05, Upper=4000\n",
+        "*El print, Elset=INTERNAL_SELECTION-1_ENERGIES, Totals=Only\nALLIE, ALLKE, ALLWK, ALLVD\n",
+        "*Node file\nRF, U, V, A\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+    let name = "dynamik-daempfungsgrad";
+    dump_fixture(name, &text);
+    let Some(dir) = run_dir(name) else {
+        return;
+    };
+    let (log, finished) = solve_in(&dir, name, &text);
+    assert!(finished, "{}", log.join("\n"));
+    let log = log.join("\n");
+    let lowest = (log.lines())
+        .find_map(|l| l.split("lowest eigenfrequency ").nth(1))
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|f| f.parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("{log}"));
+    assert!((780.0..840.0).contains(&lowest), "{lowest} Hz\n{log}");
+    assert!(log.contains("damping 5 % fitted between"), "{log}");
+    let frd = read_frd(&dir.join(format!("{name}.frd"))).unwrap();
+    let dat = crate::dat::read_dat(&dir.join(format!("{name}.dat"))).unwrap();
+    remove_run_dir(&dir);
+    let last = frd.increments.last().unwrap();
+    assert!(last.field("ACCE").is_some(), "{:?}", last.fields);
+    let set = (dat.sets.iter())
+        .find(|s| s.name.ends_with("ENERGIES"))
+        .unwrap_or_else(|| panic!("{:?}", dat.sets.iter().map(|s| &s.name).collect::<Vec<_>>()));
+    let series = |field: &str| -> Vec<f64> {
+        set.field(field).unwrap().components[0].entries[0]
+            .values
+            .clone()
+    };
+    let (internal, kinetic, work, dissipation) = (
+        series("MODEL_INTERNAL_ENERGY"),
+        series("MODEL_KINETIC_ENERGY"),
+        series("MODEL_EXTERNAL_WORK"),
+        series("MODEL_DAMPING_DISSIPATION"),
+    );
+    assert_eq!(internal.len(), 60);
+    for i in [10, 30, 59] {
+        let stored = internal[i] + kinetic[i] + dissipation[i];
+        assert!(
+            (0.9 * work[i]..1.02 * work[i]).contains(&stored),
+            "increment {i}: {stored} stored and dissipated, work {}",
+            work[i]
+        );
+    }
+    assert!(dissipation[59] > 0.0);
+}
+
+/// A plane stress strip held at its left edge, either by a rigid Displacement/Rotation
+/// or by a joint; `held` adds the hold, the force pulls the tip down.
+fn strip_held(held: impl FnOnce(&FeMesh, &mut FeModel)) -> (FeMesh, FeModel) {
+    let (force, length) = (100.0, 10.0);
+    let mesh = rectangle(0.0, length, 2.0, 5, 2);
+    let tip = Region::Nodes(nodes_at(&mesh, 0, length));
+    let load = LoadKind::force([0.0, -force, 0.0]);
+    let mut model = plane_model(ModelSpace::PlaneStress, 1.0, vec![], load, tip);
+    held(&mesh, &mut model);
+    (mesh, model)
+}
+
+fn clamp(name: &str, region: Region) -> BoundaryCondition {
+    BoundaryCondition {
+        id: named(name),
+        distribution: None,
+        name: name.into(),
+        active: true,
+        visible: true,
+        region,
+        kind: BoundaryKind::Displacement(Displacement::rigid([Some(0.0); 6])),
+        amplitude: None,
+    }
+}
+
+/// A fixed joint from an edge to ground holds the edge like a rigid clamp; the joint is a
+/// `*Joint` between the edge's own point and ground.
+#[test]
+fn solver_holds_an_edge_by_a_fixed_joint_to_ground_like_a_clamp() {
+    let left = |mesh: &FeMesh| Region::Faces(edges_at(mesh, 0, 0.0));
+    let (mesh, clamped) = strip_held(|mesh, model| {
+        model.steps[0]
+            .boundary_conditions
+            .push(clamp("Clamp", left(mesh)));
+    });
+    let (_, jointed) = strip_held(|mesh, model| {
+        let joint = plx_model::Joint {
+            ends: [
+                plx_model::SpringEnd::Region(left(mesh)),
+                plx_model::SpringEnd::World,
+            ],
+            kind: plx_model::JointKind::Fixed,
+            ..plx_model::Joint::new("Joint-1")
+        };
+        model.constraints.push(Constraint::Joint(joint));
+    });
+    let text = write_inp(&mesh, &jointed, "").unwrap();
+    assert!(text.contains("*Joint, Name=JOINT-1\n"), "{text}");
+    // Plane models hold Ux, Uy and URz only.
+    assert!(text.contains("\n1, 2, 6\n"), "{text}");
+    let analysis = lowered(&mesh, &jointed);
+    let joint = &analysis.model.constraints.joints[0];
+    assert!(joint.ends[0].is_some() && joint.ends[1].is_none());
+    assert_eq!(joint.origin, [0.0, 1.0, 0.0]);
+    let (Some(a), Some(b)) = (
+        run_solver("gelenk-fest-welt", &text),
+        run_solver(
+            "gelenk-einspannung",
+            &write_inp(&mesh, &clamped, "").unwrap(),
+        ),
+    ) else {
+        return;
+    };
+    let corner = nodes_at(&mesh, 0, 10.0)[0];
+    let (ua, ub) = (
+        node_value(&a, "DISP", "U2", corner),
+        node_value(&b, "DISP", "U2", corner),
+    );
+    assert!(ub < -1e-4, "{ub}");
+    assert!((ua - ub).abs() < 1e-6 * ub.abs(), "{ua} != {ub}");
+}
+
+/// A fixed joint from the point of a clamp on the left edge to the right edge clamps the
+/// right edge too: its own point sits at the joint, the centre of the left edge, a strip
+/// length away.
+#[test]
+fn solver_clamps_an_edge_by_a_fixed_joint_to_the_point_of_another_clamp() {
+    let left = |mesh: &FeMesh| Region::Faces(edges_at(mesh, 0, 0.0));
+    let right = |mesh: &FeMesh| Region::Faces(edges_at(mesh, 0, 10.0));
+    let middle = |mesh: &FeMesh| Region::Nodes(nodes_at(mesh, 0, 5.0));
+    let both = |mesh: &FeMesh, model: &mut FeModel| {
+        model.steps[0].loads[0].region = middle(mesh);
+        model.steps[0]
+            .boundary_conditions
+            .push(clamp("Clamp", left(mesh)));
+    };
+    let (mesh, clamped) = strip_held(|mesh, model| {
+        both(mesh, model);
+        (model.steps[0].boundary_conditions).push(clamp("Clamp-2", right(mesh)));
+    });
+    let (_, jointed) = strip_held(|mesh, model| {
+        both(mesh, model);
+        let joint = plx_model::Joint {
+            ends: [
+                plx_model::SpringEnd::Region(Region::RemotePoint(named("Clamp"))),
+                plx_model::SpringEnd::Region(right(mesh)),
+            ],
+            kind: plx_model::JointKind::Fixed,
+            ..plx_model::Joint::new("Joint-1")
+        };
+        model.constraints.push(Constraint::Joint(joint));
+    });
+    let analysis = lowered(&mesh, &jointed);
+    let joint = &analysis.model.constraints.joints[0];
+    assert_eq!(joint.origin, [0.0, 1.0, 0.0]);
+    let [Some(first), Some(second)] = joint.ends else {
+        panic!("{joint:?}");
+    };
+    // Both ends have a rigid body; the right edge's point sits at the joint.
+    let bodies = &analysis.model.constraints.rigid_bodies;
+    assert_eq!(bodies.len(), 2);
+    assert!(bodies.iter().any(|b| b.reference_node == first[0]));
+    assert!(bodies.iter().any(|b| b.reference_node == second[0]));
+    assert_eq!(coordinates(&analysis, second[0]), [0.0, 1.0, 0.0]);
+    let text = write_inp(&mesh, &jointed, "").unwrap();
+    let (Some(a), Some(b)) = (
+        run_solver("gelenk-fest-punkt", &text),
+        run_solver(
+            "gelenk-zwei-einspannungen",
+            &write_inp(&mesh, &clamped, "").unwrap(),
+        ),
+    ) else {
+        return;
+    };
+    let node = middle(&mesh).nodes(&mesh)[0];
+    let (ua, ub) = (
+        node_value(&a, "DISP", "U2", node),
+        node_value(&b, "DISP", "U2", node),
+    );
+    assert!(ub < -1e-5, "{ub}");
+    assert!((ua - ub).abs() < 1e-6 * ub.abs(), "{ua} != {ub}");
+}
+
+/// A hyperelastic material is written with its model, constants and the compressibility
+/// from Poisson's ratio, in place of the linear elasticity, and switches NLGEOM on in the
+/// steps that deform it (direct dynamics, not modal superposition).
+#[test]
+fn a_hyperelastic_material_is_written_and_switches_nlgeom_on() {
+    let (mesh, mut model) = dynamic_cantilever(1.5e-3, 2.5e-5, None);
+    model.materials[0].hyperelastic = Some(
+        plx_model::Hyperelastic::neo_hooke(1e6, 0.49)
+            .with_model(plx_model::HyperelasticModel::Yeoh),
+    );
+    let analysis = lowered(&mesh, &model);
+    assert!(analysis.steps[0].nlgeom);
+    let material = &analysis.model.materials[0];
+    assert!(material.elastic.is_none());
+    let hyper = material.hyperelastic.as_ref().unwrap();
+    assert_eq!(hyper.model, ir::material::HyperelasticModel::Yeoh);
+    let bulk = 2.0 * 1e6 * 1.49 / (3.0 * 0.02);
+    assert_eq!(hyper.constants.len(), 6);
+    assert!((hyper.constants[0] - 0.5e6).abs() < 1e-6);
+    assert!((hyper.constants[3] - 2.0 / bulk).abs() < 1e-18);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Hyperelastic, Yeoh\n"), "{text}");
+    let StepKind::Dynamic(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.method = plx_model::DynamicMethod::Modal {
+        modes: 5,
+        base: plx_model::Base::Unloaded,
+    };
+    assert!(!lowered(&mesh, &model).steps.iter().any(|s| s.nlgeom));
+}
+
+/// The tip of the cantilever moved by tables of two directions in one boundary condition:
+/// down by 0.8, then up to 0.8 while it moves 4 to the side, as one motion.
+fn tabled_tip(period: f64) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = cantilever(tip_force());
+    let step = &mut model.steps[0];
+    step.loads.clear();
+    let StepKind::Static(settings) = &mut step.kind else {
+        unreachable!()
+    };
+    settings.duration = period;
+    // One result frame per second; a single increment would be enough for the solver,
+    // which still ends one at the bend of the tables.
+    settings.frames = 2;
+    settings.control.size = plx_model::IncrementSize::Fixed(period);
+    let mut displacement = Displacement::new([None, Some(0.0), Some(0.0), None, None, None]);
+    displacement.behavior = Behavior::EachNode;
+    displacement.tables[1] = Some(plx_model::ValueTable {
+        points: vec![[0.0, 0.0], [1.0, 0.0], [2.0, 4.0]],
+    });
+    displacement.tables[2] = Some(plx_model::ValueTable {
+        points: vec![[0.0, 0.0], [1.0, -0.8], [2.0, 0.8]],
+    });
+    step.boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
+        distribution: None,
+        name: "Move".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(vec![99]),
+        kind: BoundaryKind::Displacement(displacement),
+        amplitude: Some(named("Half")),
+    });
+    model.amplitudes.push(amplitude("Half", vec![[0.0, 0.5]]));
+    (mesh, model)
+}
+
+#[test]
+fn each_degree_of_freedom_follows_its_own_table() {
+    let (mesh, mut model) = tabled_tip(2.0);
+    // A degree of freedom without a table keeps the amplitude of the boundary condition.
+    let BoundaryKind::Displacement(d) = &mut model.steps[0].boundary_conditions[1].kind else {
+        unreachable!()
+    };
+    d.values[0] = Some(0.25);
+    let analysis = lowered(&mesh, &model);
+    let names = ["TABLE_STEP-1_MOVE_U2", "TABLE_STEP-1_MOVE_U3"];
+    for (name, points) in names.iter().zip([
+        vec![(0.0, 0.0), (1.0, 0.0), (2.0, 4.0)],
+        vec![(0.0, 0.0), (1.0, -0.8), (2.0, 0.8)],
+    ]) {
+        let amplitude = analysis.model.amplitude(name).expect(name);
+        assert!(!amplitude.total_time);
+        assert_eq!(amplitude.points, points);
+    }
+    let boundaries = &analysis.steps[0].boundaries;
+    let moved: Vec<_> = (boundaries.iter())
+        .filter(|b| b.region != NodeRef::Set("FIX".into()))
+        .map(|b| (b.first_dof, b.last_dof, b.value, b.amplitude.clone()))
+        .collect();
+    assert_eq!(
+        moved,
+        [
+            (1, 1, Some(0.25), Some("HALF".to_string())),
+            (2, 2, Some(1.0), Some(names[0].to_string())),
+            (3, 3, Some(1.0), Some(names[1].to_string())),
+        ]
+    );
+    // The amplitudes of the tables point back to the boundary condition.
+    let origins = lower_unvalidated(&mesh, &model, "").unwrap().origins;
+    assert_eq!(
+        origins.get(&ir::ItemRef::Amplitude(names[0].into())),
+        Some(ModelItem::BoundaryCondition(0, 1))
+    );
+    // Points that go back in time are refused.
+    let BoundaryKind::Displacement(d) = &mut model.steps[0].boundary_conditions[1].kind else {
+        unreachable!()
+    };
+    d.tables[1].as_mut().unwrap().points.swap(0, 2);
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidAmplitude { .. })
+    ));
+}
+
+#[test]
+fn force_components_follow_their_own_tables() {
+    let mut force = tip_force();
+    force.kind = LoadKind::force([10.0, 0.0, -100.0]);
+    force.tables[2] = Some(plx_model::ValueTable {
+        points: vec![[0.0, 0.0], [0.5, -200.0], [1.0, 50.0]],
+    });
+    let (mesh, model) = cantilever(force);
+    let analysis = lowered(&mesh, &model);
+    let loads: Vec<_> = (analysis.steps[0].loads.concentrated.iter())
+        .map(|l| (l.dof, l.value, l.amplitude.clone()))
+        .collect();
+    assert_eq!(
+        loads,
+        [
+            (1, 10.0, None),
+            (3, 1.0, Some("TABLE_STEP-1_FORCE-1_F3".to_string())),
+        ]
+    );
+    let table = analysis.model.amplitude("TABLE_STEP-1_FORCE-1_F3").unwrap();
+    assert_eq!(table.points[1], (0.5, -200.0));
+}
+
+/// The displacements `(U2, U3)` of the tip node in every increment, with the time.
+fn tip_motion(frd: &FrdImport) -> Vec<(f64, f64, f64)> {
+    let index = frd.mesh.node_index(99).unwrap();
+    (frd.increments.iter())
+        .filter_map(|i| Some((i.value, i.field("DISP")?)))
+        .map(|(t, f)| {
+            let u = |c: &str| f64::from(f.component(c).unwrap().values[index]);
+            (t, u("U2"), u("U3"))
+        })
+        .collect()
+}
+
+/// The tip goes down first and then up and to the side: the results at the frames follow
+/// the tables. A nonlinear step with one increment over the whole step and a single frame
+/// still ends an increment at the bend of the tables, so the path is the one given.
+#[test]
+fn solver_moves_the_tip_along_tables_and_stops_at_their_points() {
+    let (mesh, model) = tabled_tip(2.0);
+    let Some(frd) = run_solver("value_tables", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let motion = tip_motion(&frd);
+    let at = |time: f64| {
+        (motion.iter())
+            .find(|(t, ..)| (t - time).abs() < 1e-9)
+            .unwrap_or_else(|| panic!("no frame at {time}: {motion:?}"))
+    };
+    let (_, u2, u3) = at(1.0);
+    assert!(u2.abs() < 1e-6 && (u3 + 0.8).abs() < 1e-6, "{motion:?}");
+    let (_, u2, u3) = at(2.0);
+    assert!(
+        (u2 - 4.0).abs() < 1e-6 && (u3 - 0.8).abs() < 1e-6,
+        "{motion:?}"
+    );
+
+    let (mesh, mut model) = tabled_tip(2.0);
+    let StepKind::Static(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.nlgeom = true;
+    settings.frames = 1;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let dir = run_dir("value_tables_nlgeom").unwrap();
+    let (log, finished) = solve_in(&dir, "value_tables_nlgeom", &text);
+    let frd = read_frd(&dir.join("value_tables_nlgeom.frd")).unwrap();
+    remove_run_dir(&dir);
+    assert!(finished, "{}", log.join("\n"));
+    let times: Vec<&String> = log
+        .iter()
+        .filter(|l| l.contains("actual step time"))
+        .collect();
+    assert_eq!(times.len(), 2, "{times:?}");
+    assert!(
+        times[0].contains("1e0") && times[1].contains("2e0"),
+        "{times:?}"
+    );
+    let motion = tip_motion(&frd);
+    assert_eq!(motion.len(), 1, "only the frame at the end: {motion:?}");
+    let (t, u2, u3) = motion[0];
+    assert!((t - 2.0).abs() < 1e-9 && (u2 - 4.0).abs() < 1e-6 && (u3 - 0.8).abs() < 1e-6);
+}
+
+/// A rigid remote force in one step and a deformable one on the same face in the next:
+/// the rigid body holds in every step and takes all nodes of the face, so the point of the
+/// deformable force depends on the face instead of the face on it. Its force still bends
+/// the beam, as much as the rigid one would.
+#[test]
+fn solver_bends_the_beam_by_a_deformable_force_on_a_face_rigid_from_another_step() {
+    let force = |behavior| {
+        remote_force(|r| {
+            r.force = [0.0, 0.0, -100.0];
+            r.behavior = behavior;
+        })
+    };
+    let (mesh, mut model) = cantilever(force(RemoteBehavior::Rigid));
+    let mut second = model.steps[0].clone();
+    second.name = "Step-2".into();
+    second.loads[0] = force(RemoteBehavior::Deformable);
+    model.steps.push(second);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("*Rigid body").count(), 1, "{text}");
+    // The deformable point's equations, each depending on the point.
+    assert_eq!(equations(&mesh, &model), 6, "{text}");
+    let Some(frd) = run_solver("rigid-then-deformable", &text) else {
+        return;
+    };
+    let (_, rigid) = cantilever(force(RemoteBehavior::Rigid));
+    let Some(alone) = run_solver("rigid-alone", &write_inp(&mesh, &rigid, "").unwrap()) else {
+        return;
+    };
+    let expected = node_value(&alone, "DISP", "U3", 99);
+    let ours = node_value(&frd, "DISP", "U3", 99);
+    assert!(expected < -0.1, "{expected}");
+    assert!(
+        (ours - expected).abs() < 1e-6 * expected.abs(),
+        "{ours} != {expected}"
+    );
+}
+
+/// A force in a coordinate system of its own is written in global directions: in a
+/// rectangular system once for the set, in a cylindrical one at every node in the radial,
+/// tangential and axial directions there. A follower force names what it turns with.
+#[test]
+fn a_force_in_a_system_of_its_own_is_written_in_global_directions() {
+    let mut system = plx_model::CoordinateSystem::new("Turned");
+    // x along global y, y along global -x.
+    system.point_x = [0.0, 1.0, 0.0];
+    system.point_xy = [-1.0, 0.0, 0.0];
+    let mut load = tip_force();
+    load.region = Region::Nodes(vec![96, 97, 98, 99]);
+    load.kind = LoadKind::force([100.0, 0.0, 0.0]);
+    load.system = Some(system.id);
+    load.follower = true;
+    let (mesh, mut model) = cantilever(load.clone());
+    model.coordinate_systems.push(system.clone());
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Cload, op=New, Follower=INTERNAL_SELECTION-1_FORCE-1\nINTERNAL_SELECTION-1_FORCE-1, 2, 25\n"),
+        "{text}"
+    );
+    // Radial about the beam axis x through the middle of the section.
+    let mut cylinder = plx_model::CoordinateSystem::new("Cylinder");
+    cylinder.kind = plx_model::CoordinateSystemKind::Cylindrical;
+    cylinder.origin = [0.0, 5.0, 5.0];
+    cylinder.point_x = [0.0, 6.0, 5.0];
+    cylinder.point_xy = [0.0, 5.0, 6.0];
+    load.system = Some(cylinder.id);
+    load.follower = false;
+    let (mesh, mut model) = cantilever(load);
+    model.coordinate_systems.push(cylinder);
+    let analysis = lowered(&mesh, &model);
+    let step = &analysis.steps[0];
+    for node in [96, 97, 98, 99] {
+        let x = coordinates(&analysis, node);
+        let radial = [0.0, x[1] - 5.0, x[2] - 5.0];
+        let length = (radial[1] * radial[1] + radial[2] * radial[2]).sqrt();
+        for dof in 1..=3u8 {
+            let value: f64 = (step.loads.concentrated.iter())
+                .filter(|l| l.region == NodeRef::Node(node) && l.dof == dof)
+                .map(|l| l.value)
+                .sum();
+            let expected = 25.0 * radial[dof as usize - 1] / length;
+            assert!(
+                (value - expected).abs() < 1e-9,
+                "node {node}, dof {dof}: {value}"
+            );
+        }
+        assert!(step.loads.concentrated.iter().all(|l| l.follower.is_none()));
+    }
+    // At a reference point the force turns with the rigid body's rotation node.
+    let mut on_point = tip_force();
+    on_point.region = Region::ReferencePoint(named("RP-1"));
+    on_point.follower = true;
+    let (mesh, model) = rigid_tip(Some(on_point), None);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "*Cload, op=New, Follower rotation=101\nINTERNAL_SELECTION-1_RP-1, 3, -100\n"
+        ),
+        "{text}"
+    );
+}
+
+/// A rope is a general section of U1 with its metallic area and the second moment of its
+/// bending stiffness, and comes back from the comment.
+#[test]
+fn rope_profiles_are_written_with_their_metallic_area() {
+    let mesh = line_chain(10, 0, 1000.0, false);
+    let rope = BeamProfile::Rope {
+        diameter: 16.0,
+        wire: 1.0,
+        fill: 0.5,
+        bending: plx_model::RopeBending::Share(0.25),
+    };
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Beam(BeamSection {
+            orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+            ..beam("Rope")
+        }),
+        LoadKind::force([0.0, 0.0, 100.0]),
+    );
+    model.cross_sections.push(CrossSection {
+        id: named("Rope"),
+        name: "Rope".into(),
+        profile: rope.clone(),
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let area = 0.5 * std::f64::consts::PI * 64.0;
+    let inertia = area * (1.0 + 0.25 * (256.0 - 1.0)) / 16.0;
+    // Contact keeps the rope's axis its radius off the master.
+    let at = text
+        .find("Section=General, Contact radius=8\n")
+        .expect(&text);
+    let written: Vec<f64> = (text[at..].lines().nth(1).unwrap().split(','))
+        .map(|v| v.trim().parse().unwrap())
+        .collect();
+    for (w, e) in written.iter().zip([area, inertia, 0.0, inertia, 5.0 / 6.0]) {
+        assert!((w - e).abs() <= 1e-9 * e.abs(), "{written:?}");
+    }
+    let import = read_inp_str(&text, None).unwrap();
+    assert_eq!(import.cross_sections[0].profile, rope);
+    assert_eq!(import.mesh.element(1).unwrap().type_name, "U1");
+}
+
+/// A rope of 16 mm along x on a block under its middle: the block's top 8 mm below the
+/// rope's axis.
+fn rope_over_block() -> (FeMesh, FeModel) {
+    use plx_mesh::{Element, ElementShape, Part};
+    let mut mesh = line_chain(10, 0, 1000.0, false);
+    // A block under the middle of the rope, its top face (S2) the master.
+    let corners = [
+        [450.0, -30.0, -10.0],
+        [550.0, -30.0, -10.0],
+        [550.0, -30.0, 10.0],
+        [450.0, -30.0, 10.0],
+        [450.0, -8.0, -10.0],
+        [550.0, -8.0, -10.0],
+        [550.0, -8.0, 10.0],
+        [450.0, -8.0, 10.0],
+    ];
+    for (i, c) in corners.into_iter().enumerate() {
+        mesh.set_node(101 + i as u32, c);
+    }
+    mesh.add_element(Element {
+        id: 101,
+        type_name: "C3D8".into(),
+        shape: ElementShape::Hex8,
+        nodes: (101..109).collect(),
+    })
+    .unwrap();
+    mesh.parts.push(Part {
+        bodies: Vec::new(),
+        name: "SHEAVE".into(),
+        elements: vec![101],
+    });
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Beam(BeamSection {
+            orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+            ..beam("Rope")
+        }),
+        LoadKind::force([100.0, 0.0, 0.0]),
+    );
+    model.cross_sections.push(CrossSection {
+        id: named("Rope"),
+        name: "Rope".into(),
+        profile: BeamProfile::Rope {
+            diameter: 16.0,
+            wire: 1.0,
+            fill: 0.5,
+            bending: plx_model::RopeBending::Share(0.1),
+        },
+    });
+    (mesh, model)
+}
+
+#[test]
+/// A rope part as the slave of a contact pair touches with its nodes: a node surface of
+/// node-to-surface contact; other methods are refused.
+fn a_rope_slave_is_a_node_surface() {
+    let (mesh, mut model) = rope_over_block();
+    model.surface_interactions.push(SurfaceInteraction {
+        id: named("Surface_Interaction-1"),
+        name: "Surface_Interaction-1".into(),
+        properties: vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)],
+    });
+    let mut pair = ContactPair {
+        id: named("Contact_Pair-1"),
+        ..ContactPair::new("Contact_Pair-1", Some(named("Surface_Interaction-1")))
+    };
+    pair.master = Region::Faces(vec![(101, 2)]);
+    pair.slave = Region::Parts(vec!["BEAM".into()]);
+    pair.method = ContactMethod::NodeToSurface;
+    model.contact_pairs.push(pair);
+    let analysis = lowered(&mesh, &model);
+    let slave = &analysis.model.contact.pairs[0].slave;
+    assert!(
+        matches!(
+            analysis.model.sets.surfaces.get(slave),
+            Some(plxs_core::mesh::Surface::Node(_))
+        ),
+        "{slave}"
+    );
+    model.contact_pairs[0].method = ContactMethod::SurfaceToSurface;
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::Unsupported { .. })
+    ));
+}
+
+#[test]
+fn a_detection_finds_a_rope_lying_on_a_surface() {
+    let (mesh, mut model) = rope_over_block();
+    model
+        .contact_detections
+        .push(plx_model::ContactDetection::new("Contact_Detection-1"));
+    let skins: Vec<_> = (mesh.parts.iter())
+        .map(|p| plx_mesh::extract_part_skin(&mesh, p, 30.0))
+        .collect();
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.added, 1, "{report:?}");
+    let region = &model.contact_regions[0];
+    // A bonded detection finds the rope as frictionless contact: it slides over a sheave.
+    assert_eq!(region.behavior, plx_model::ContactBehavior::Frictionless);
+    assert_eq!(region.side_b, Region::Parts(vec!["BEAM".into()]));
+    assert!(region.side_a.faces(&mesh).contains(&(101, 2)), "{region:?}");
+    let resolved = model.resolve_contact(region, &mesh);
+    assert!(
+        resolved.node_to_surface && resolved.a_is_master,
+        "{resolved:?}"
+    );
+    // The contact check measures from the rope's surface: the nodes above the block touch.
+    let check = model.check_contact(region, &mesh).unwrap();
+    assert!(check.touching > 0, "{check:?}");
+    assert!(check.max_gap.unwrap_or(0.0) < 1e-6, "{check:?}");
+    // Written as node to surface contact with the rope's nodes, beside the surface to
+    // surface contact of the other regions.
+    let analysis = lowered(&mesh, &model);
+    let pair = &analysis.model.contact.pairs[0];
+    assert_eq!(pair.kind, plxs_core::contact::ContactKind::NodeToSurface);
+    assert!(matches!(
+        analysis.model.sets.surfaces.get(&pair.slave),
+        Some(plxs_core::mesh::Surface::Node(_))
+    ));
+    // A rope beside the block is not found.
+    let (mut far, mut model) = rope_over_block();
+    for id in 101..109 {
+        let p = far.node(id).unwrap();
+        far.set_node(id, [p[0], p[1] - 40.0, p[2]]);
+    }
+    model
+        .contact_detections
+        .push(plx_model::ContactDetection::new("Contact_Detection-1"));
+    let skins: Vec<_> = (far.parts.iter())
+        .map(|p| plx_mesh::extract_part_skin(&far, p, 30.0))
+        .collect();
+    let report = model
+        .detect_contacts(0, &far, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.added, 0, "{report:?}");
+}
+
+#[test]
+fn quadratic_lines_of_a_rope_are_written_as_two_u1_each() {
+    // Meshed with second order, as lines from CAD are by default: B32 of 3 nodes.
+    let mesh = line_chain(5, 0, 1000.0, true);
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Beam(BeamSection {
+            orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+            ..beam("Rope")
+        }),
+        LoadKind::force([0.0, 0.0, 100.0]),
+    );
+    model.cross_sections.push(CrossSection {
+        id: named("Rope"),
+        name: "Rope".into(),
+        profile: BeamProfile::Rope {
+            diameter: 16.0,
+            wire: 1.0,
+            fill: 0.5,
+            bending: plx_model::RopeBending::Share(0.1),
+        },
+    });
+    let check = plx_model::MeshCheck::new(&mesh, model.properties.space);
+    assert!(
+        !(model.check(&mesh, &check).iter())
+            .any(|f| f.problem == plx_model::Problem::InvalidSection),
+        "{:?}",
+        model.check(&mesh, &check)
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let import = read_inp_str(&text, None).unwrap();
+    assert_eq!(import.mesh.element_count(), 10);
+    assert!(
+        (import.mesh.elements().iter()).all(|e| e.type_name == "U1" && e.nodes.len() == 2),
+        "{text}"
+    );
+    // The halves follow each other along the rope: the middle node joins them.
+    let first = import.mesh.element(1).unwrap();
+    assert_eq!(first.nodes, [1, 2]);
+    let second = (import.mesh.elements().iter()).find(|e| e.nodes == [2, 3]);
+    assert!(second.is_some(), "{text}");
+}
+
+#[test]
+fn a_rope_of_quadratic_lines_bends_like_one_of_twice_as_many_linear_ones() {
+    let rope = |mesh: &FeMesh| {
+        let mut model = line_model(
+            mesh,
+            SectionKind::Beam(BeamSection {
+                orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+                ..beam("Rope")
+            }),
+            LoadKind::force([0.0, 1.0, 0.0]),
+        );
+        model.cross_sections.push(CrossSection {
+            id: named("Rope"),
+            name: "Rope".into(),
+            profile: BeamProfile::Rope {
+                diameter: 16.0,
+                wire: 1.0,
+                fill: 0.5,
+                bending: plx_model::RopeBending::Share(0.1),
+            },
+        });
+        model
+    };
+    let quadratic = line_chain(5, 0, 1000.0, true);
+    let linear = line_chain(10, 0, 1000.0, false);
+    let tip = |mesh: &FeMesh, name: &str| {
+        let text = write_inp(mesh, &rope(mesh), "").unwrap();
+        let frd = run_solver(name, &text)?;
+        Some(node_value(&frd, "DISP", "U2", 11))
+    };
+    let (Some(q), Some(l)) = (
+        tip(&quadratic, "rope-quadratic"),
+        tip(&linear, "rope-linear"),
+    ) else {
+        return;
+    };
+    assert!(q > 0.0 && (q - l).abs() < 1e-9 * l, "{q} vs {l}");
+}
+
+/// The two stacked blocks as the bodies of one compound part, as a block cut in two for the
+/// mesher: the input file ties them where they touch, and the load goes across as through
+/// one block.
+#[test]
+fn solver_carries_the_load_across_the_bodies_of_a_compound_part() {
+    let (mut mesh, _, _) = two_blocks(0.0);
+    let bodies: Vec<plx_mesh::Body> = (mesh.parts.drain(..))
+        .map(|p| plx_mesh::Body {
+            name: p.name,
+            elements: p.elements,
+        })
+        .collect();
+    let mut part = plx_mesh::Part::new(
+        "BLOCK",
+        bodies.iter().flat_map(|b| b.elements.clone()).collect(),
+    );
+    part.bodies = bodies;
+    mesh.parts.push(part);
+    let mut model = stacked_blocks(&mesh);
+    model.sections[0].region = Region::Parts(vec!["BLOCK".into()]);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("*Tie,").count(), 1, "{text}");
+    let findings = model.check(
+        &mesh,
+        &plx_model::MeshCheck::new(&mesh, model.properties.space),
+    );
+    assert!(findings.is_empty(), "{findings:?}");
+    let Some(frd) = run_solver("compound-part", &text) else {
+        return;
+    };
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!((reaction - 1000.0).abs() < 1.0, "{reaction}");
+    let below = node_value(&frd, "DISP", "U3", 14);
+    let above = node_value(&frd, "DISP", "U3", 105);
+    assert!(
+        (below - above).abs() < 1e-3 * below.abs(),
+        "{below} != {above}"
+    );
+}
+
+/// A square bolt 10 x 10 x 40 along z of 8 hexahedra, part BOLT, cut inside its mesh at
+/// z = 20, held at its foot (node set FOOT); and a plate 30 x 30 x 10 a gap of 2 above its
+/// end, part NUT, held on top (node set TOP). The bolt is screwed into the plate's lower
+/// face, its thread, which the bolt's end does not touch.
+fn bolt_with_thread(shortening: f64) -> (FeMesh, FeModel) {
+    let mut text = String::from("*Node\n");
+    let mut id = 1;
+    let mut bolt_nodes = std::collections::BTreeMap::new();
+    for k in 0..=8 {
+        for (j, y) in [0.0, 10.0].into_iter().enumerate() {
+            for (i, x) in [0.0, 10.0].into_iter().enumerate() {
+                let _ = writeln!(text, "{id}, {x}, {y}, {}", 5.0 * k as f64);
+                bolt_nodes.insert((i, j, k), id);
+                id += 1;
+            }
+        }
+    }
+    let mut nut_nodes = std::collections::BTreeMap::new();
+    for (k, z) in [42.0, 52.0].into_iter().enumerate() {
+        for (j, y) in [-10.0, 20.0].into_iter().enumerate() {
+            for (i, x) in [-10.0, 20.0].into_iter().enumerate() {
+                let _ = writeln!(text, "{id}, {x}, {y}, {z}");
+                nut_nodes.insert((i, j, k), id);
+                id += 1;
+            }
+        }
+    }
+    let hex = |n: &std::collections::BTreeMap<(usize, usize, usize), i32>, k: usize| {
+        [
+            (0, 0, k),
+            (1, 0, k),
+            (1, 1, k),
+            (0, 1, k),
+            (0, 0, k + 1),
+            (1, 0, k + 1),
+            (1, 1, k + 1),
+            (0, 1, k + 1),
+        ]
+        .map(|key| n[&key].to_string())
+        .join(", ")
+    };
+    text.push_str("*Element, Type=C3D8, Elset=BOLT\n");
+    for k in 0..8 {
+        let _ = writeln!(text, "{}, {}", k + 1, hex(&bolt_nodes, k));
+    }
+    text.push_str("*Element, Type=C3D8, Elset=NUT\n");
+    let _ = writeln!(text, "9, {}", hex(&nut_nodes, 0));
+    let foot: Vec<String> = (0..2)
+        .flat_map(|j| (0..2).map(move |i| (i, j)))
+        .map(|(i, j)| bolt_nodes[&(i, j, 0)].to_string())
+        .collect();
+    let top: Vec<String> = (0..2)
+        .flat_map(|j| (0..2).map(move |i| (i, j)))
+        .map(|(i, j)| nut_nodes[&(i, j, 1)].to_string())
+        .collect();
+    let _ = write!(
+        text,
+        "*Nset, Nset=FOOT\n{}\n*Nset, Nset=TOP\n{}\n",
+        foot.join(", "),
+        top.join(", ")
+    );
+    let mesh = crate::inp::read_inp_str(&text, None).unwrap().mesh;
+    let (_, mut model) = cantilever(tip_force());
+    model.sections[0].region = Region::Parts(vec!["BOLT".into(), "NUT".into()]);
+    let step = &mut model.steps[0];
+    step.loads.clear();
+    step.boundary_conditions[0].region = Region::NodeSet("FOOT".into());
+    let mut top = step.boundary_conditions[0].clone();
+    top.name = "Fixed-2".into();
+    top.region = Region::NodeSet("TOP".into());
+    step.boundary_conditions.push(top);
+    // The face of an element whose corners all lie at height z.
+    let face_at = |element: ElementId, z: f64| -> (ElementId, u8) {
+        let e = mesh.element(element).unwrap();
+        let index = (e.faces().iter())
+            .position(|f| {
+                (f.corners.iter()).all(|&c| (mesh.node(e.nodes[c]).unwrap()[2] - z).abs() < 1e-9)
+            })
+            .unwrap();
+        (element, index as u8 + 1)
+    };
+    let mut bolt = plx_model::Bolt {
+        id: named("Bolt-1"),
+        ..plx_model::Bolt::new("Bolt-1")
+    };
+    bolt.side_a = Region::Faces(vec![face_at(4, 20.0)]);
+    bolt.thread = Region::Faces(vec![face_at(9, 42.0)]);
+    bolt.preload = plx_model::Preload::Shortening(shortening);
+    model.bolts.push(bolt);
+    (mesh, model)
+}
+
+/// The thread of a bolt is tied to the faces of the bolt nearest to it where they are,
+/// across the gap, and carries the preload; the preload follows the amplitude of its step.
+#[test]
+fn a_bolt_screwed_into_its_thread_pulls_the_plate() {
+    let shortening = 0.01;
+    let (mesh, mut model) = bolt_with_thread(shortening);
+    let thread = (model.resolve_thread(&model.bolts[0], &mesh).unwrap()).unwrap();
+    assert!((thread.gap - 2.0).abs() < 1e-9, "{thread:?}");
+    // The end face of the bolt and the sides of its last element, not the rest.
+    assert!(thread.bolt_faces.contains(&(8, 2)), "{thread:?}");
+    assert!(thread.bolt_faces.iter().all(|&(e, _)| e == 8), "{thread:?}");
+    assert!(thread.tolerance > 2.0, "{thread:?}");
+    let mut amplitude = plx_model::Amplitude::new("Smooth");
+    amplitude.id = named("Smooth");
+    model.amplitudes.push(amplitude);
+    model.steps[0].bolt_changes.push(plx_model::BoltChange {
+        bolt: named("Bolt-1"),
+        action: plx_model::BoltAction::Lock,
+        auto: true,
+        amplitude: Some(named("Smooth")),
+    });
+    let (lowered, origin) = model.lower_bolts(&mesh);
+    let tie = &lowered.ties[0];
+    assert_eq!(tie.name, "Bolt-1_Thread");
+    assert!(!tie.adjust);
+    assert_eq!(origin.bolt_of(plx_model::ModelItem::Tie(0)), Some(0));
+    let load = &lowered.steps[0].loads[0];
+    assert!(matches!(
+        load.kind,
+        LoadKind::PreTension {
+            by_displacement: true,
+            lock: false,
+            ..
+        }
+    ));
+    assert_eq!(load.amplitude, Some(named("Smooth")));
+    model.steps[0].bolt_changes.clear();
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("Name=BOLT-1_THREAD"), "{text}");
+    let Some((frd, _)) = run_frd_dat("schraube-gewinde", &text) else {
+        return;
+    };
+    // The plate is pulled down towards the foot: the supports pull against each other.
+    let sum = |set: &str| -> f64 {
+        (mesh.node_sets[set].iter())
+            .map(|&node| node_value(&frd, "FORC", "F3", node))
+            .sum()
+    };
+    let (foot, top) = (sum("FOOT"), sum("TOP"));
+    assert!(foot < -1.0, "{foot}");
+    assert!((foot + top).abs() < 1e-6 * foot.abs(), "{foot} {top}");
+}
+
+/// A round bolt of radius 5 along z from 0 to 40 (wedges around the axis and a ring of
+/// hexahedra, 16 around, 8 layers of 5), part SCREW, held at its foot (node set FOOT), screwed
+/// through a threaded ring from z = 25 to 35 around it (part NUT, inner radius 5, outer 10,
+/// held outside: node set RIM). The bolt is picked by its whole cylindrical face, the thread
+/// by the bore of the ring; the bolt sticks out of the ring at the top.
+fn bolt_through_tapped_ring(shortening: f64) -> (FeMesh, FeModel) {
+    let (around, along) = (16usize, 8usize);
+    let per_layer = 1 + 2 * around;
+    let node = |layer: usize, ring: usize, i: usize| -> usize {
+        1 + layer * per_layer
+            + if ring == 0 {
+                0
+            } else {
+                1 + (ring - 1) * around + i % around
+            }
+    };
+    let angle = |i: usize| std::f64::consts::TAU * i as f64 / around as f64;
+    let mut text = String::from("*Node\n");
+    for layer in 0..=along {
+        let z = 5.0 * layer as f64;
+        let _ = writeln!(text, "{}, 0, 0, {z}", node(layer, 0, 0));
+        for ring in 1..=2 {
+            for i in 0..around {
+                let r = 2.5 * ring as f64;
+                let (x, y) = (r * angle(i).cos(), r * angle(i).sin());
+                let _ = writeln!(text, "{}, {x}, {y}, {z}", node(layer, ring, i));
+            }
+        }
+    }
+    let base = node(along + 1, 0, 0);
+    let nut =
+        |k: usize, outer: usize, i: usize| base + k * 2 * around + outer * around + i % around;
+    for k in 0..3 {
+        for outer in 0..2 {
+            for i in 0..around {
+                let r = if outer == 0 { 5.0 } else { 10.0 };
+                let (x, y) = (r * angle(i).cos(), r * angle(i).sin());
+                let _ = writeln!(
+                    text,
+                    "{}, {x}, {y}, {}",
+                    nut(k, outer, i),
+                    25.0 + 5.0 * k as f64
+                );
+            }
+        }
+    }
+    let mut wedges = String::from("*Element, Type=C3D6, Elset=SCREW\n");
+    let mut hexes = String::from("*Element, Type=C3D8, Elset=SCREW\n");
+    let mut shank = Vec::new();
+    let mut id = 1;
+    for layer in 0..along {
+        let (b, t) = (layer, layer + 1);
+        for i in 0..around {
+            let _ = writeln!(
+                wedges,
+                "{id}, {}, {}, {}, {}, {}, {}",
+                node(b, 0, 0),
+                node(b, 1, i),
+                node(b, 1, i + 1),
+                node(t, 0, 0),
+                node(t, 1, i),
+                node(t, 1, i + 1)
+            );
+            id += 1;
+            let _ = writeln!(
+                hexes,
+                "{id}, {}, {}, {}, {}, {}, {}, {}, {}",
+                node(b, 1, i),
+                node(b, 2, i),
+                node(b, 2, i + 1),
+                node(b, 1, i + 1),
+                node(t, 1, i),
+                node(t, 2, i),
+                node(t, 2, i + 1),
+                node(t, 1, i + 1)
+            );
+            // Face 4 lies on the cylinder.
+            shank.push((id as ElementId, 4));
+            id += 1;
+        }
+    }
+    let mut ring = String::from("*Element, Type=C3D8, Elset=NUT\n");
+    let mut bore = Vec::new();
+    for k in 0..2 {
+        for i in 0..around {
+            let _ = writeln!(
+                ring,
+                "{id}, {}, {}, {}, {}, {}, {}, {}, {}",
+                nut(k, 0, i),
+                nut(k, 1, i),
+                nut(k, 1, i + 1),
+                nut(k, 0, i + 1),
+                nut(k + 1, 0, i),
+                nut(k + 1, 1, i),
+                nut(k + 1, 1, i + 1),
+                nut(k + 1, 0, i + 1)
+            );
+            // Face 6 (nodes 4, 8, 5, 1) lies on the bore.
+            bore.push((id as ElementId, 6));
+            id += 1;
+        }
+    }
+    let foot: Vec<String> = (0..per_layer).map(|k| (1 + k).to_string()).collect();
+    let rim: Vec<String> = (0..3)
+        .flat_map(|k| (0..around).map(move |i| (k, i)))
+        .map(|(k, i)| nut(k, 1, i).to_string())
+        .collect();
+    let _ = write!(
+        text,
+        "{wedges}{hexes}{ring}*Nset, Nset=FOOT\n{}\n*Nset, Nset=RIM\n{}\n",
+        foot.join(",\n"),
+        rim.join(",\n")
+    );
+    let mesh = crate::inp::read_inp_str(&text, None).unwrap().mesh;
+    let (_, mut model) = cantilever(tip_force());
+    model.sections[0].region = Region::Parts(vec!["SCREW".into(), "NUT".into()]);
+    let step = &mut model.steps[0];
+    step.loads.clear();
+    step.boundary_conditions[0].region = Region::NodeSet("FOOT".into());
+    let mut rim = step.boundary_conditions[0].clone();
+    rim.name = "Fixed-2".into();
+    rim.region = Region::NodeSet("RIM".into());
+    step.boundary_conditions.push(rim);
+    let mut bolt = plx_model::Bolt {
+        id: named("Bolt-1"),
+        ..plx_model::Bolt::new("Bolt-1")
+    };
+    bolt.side_a = Region::Faces(shank);
+    bolt.thread = Region::Faces(bore);
+    bolt.preload = plx_model::Preload::Shortening(shortening);
+    model.bolts.push(bolt);
+    (mesh, model)
+}
+
+/// With the bore of a through hole picked as the thread, the bolt is cut across the middle
+/// of its free part below the ring, and only the shank inside the ring is tied to the bore.
+#[test]
+fn a_bolt_through_a_tapped_hole_is_tied_in_the_bore_and_cut_below_it() {
+    let (mesh, model) = bolt_through_tapped_ring(0.01);
+    let bolt = &model.bolts[0];
+    let cut = model.resolve_bolt(bolt, &mesh).unwrap();
+    let z = |n: NodeId| mesh.node(n).unwrap()[2];
+    for &(e, f) in &cut.cut_faces {
+        for n in constraints::face_node_ids(&mesh, e, f) {
+            assert!(z(n) < 25.0, "cut at {}", z(n));
+        }
+    }
+    let thread = model.resolve_thread(bolt, &mesh).unwrap().unwrap();
+    assert!(thread.gap < 1e-9, "{thread:?}");
+    // The cylinder faces of the two layers in the ring.
+    assert_eq!(thread.bolt_faces.len(), 32, "{thread:?}");
+    for &(e, f) in &thread.bolt_faces {
+        for n in constraints::face_node_ids(&mesh, e, f) {
+            assert!((25.0..=35.0).contains(&z(n)), "tied at {}", z(n));
+        }
+    }
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let Some((frd, _)) = run_frd_dat("schraube-durchgangsgewinde", &text) else {
+        return;
+    };
+    // The bolt pulls the ring down towards its foot.
+    let sum = |set: &str| -> f64 {
+        (mesh.node_sets[set].iter())
+            .map(|&node| node_value(&frd, "FORC", "F3", node))
+            .sum()
+    };
+    let (foot, rim) = (sum("FOOT"), sum("RIM"));
+    assert!(foot < -1.0, "{foot}");
+    assert!((foot + rim).abs() < 1e-4 * foot.abs(), "{foot} {rim}");
 }

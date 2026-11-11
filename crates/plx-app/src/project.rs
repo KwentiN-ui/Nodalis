@@ -36,17 +36,24 @@ use crate::tree::TreeView;
 use crate::tree_icons::StepGlyph;
 use cad::{CAD_LENGTH, CadBlock};
 use deformed::{DEFORM_FACTOR, DEFORM_INCREMENT, DeformedBlock};
+use visualize::{MeshPicture, PlotBlock, PlotView, PreviewBlock, PreviewView};
 
 mod cad;
 mod deformed;
 mod frames;
+mod groups;
 mod history;
 mod minimap;
 mod numbers;
+mod saving;
+mod series;
+mod visualize;
 mod workspace;
 
 /// Storage key of the project file open at exit, reopened at the next start.
-const LAST_PROJECT_KEY: &str = "last_project";
+const RECENT_KEY: &str = "recent_projects";
+/// How many projects Open Recent lists.
+const RECENT_MAX: usize = 10;
 
 /// What a block of the schematic is, without its data: for menus, texts and decisions that
 /// only depend on the kind.
@@ -68,6 +75,11 @@ enum Kind {
     Note,
     Math,
     Switch,
+    Plot,
+    Preview,
+    Group,
+    GroupInput,
+    GroupOutput,
 }
 
 impl Kind {
@@ -95,6 +107,11 @@ impl Kind {
             Self::Note => "note",
             Self::Math => "math block",
             Self::Switch => "switch block",
+            Self::Plot => "plot block",
+            Self::Preview => "preview block",
+            Self::Group => "group",
+            Self::GroupInput => "group input",
+            Self::GroupOutput => "group output",
         }
     }
 }
@@ -152,6 +169,15 @@ enum Block {
     /// A number computed from others, or picked from several.
     Math(NumberBlock),
     Switch(NumberBlock),
+    /// A plot of the numbers and series linked to it.
+    Plot(PlotBlock),
+    /// What is linked to it: a picture of a mesh, a number or a series.
+    Preview(Box<PreviewBlock>),
+    /// Blocks put together into one, see [`groups`].
+    Group(Box<file::NodeGroup>),
+    /// The blocks inside a group that give its inputs and take its outputs.
+    GroupInput,
+    GroupOutput,
 }
 
 /// A Math or a Switch block: the numbers of its inputs, which value links give or the block
@@ -160,11 +186,22 @@ enum Block {
 #[derive(Clone)]
 struct NumberBlock {
     units: UnitSystem,
-    /// `None` until a link gives it the kind of the other end.
+    /// `None` until a link gives it the kind of the other end. Of a product or quotient,
+    /// the kind of its result.
     kind: Option<ValueKind>,
+    /// Of a product or quotient, the kinds of A and B, which the kind of the result follows
+    /// from (see [`MathOp::settle_kinds`]); `None` while open.
+    operands: [Option<ValueKind>; 2],
     operation: MathOp,
     values: Vec<f64>,
+    /// The series value links give its inputs, by index; `None` for one number. Brought by
+    /// every sync, not kept in the file.
+    series: Vec<Option<Vec<f64>>>,
 }
+
+/// The first element of the path of the rows over the outputs and inputs of a study, which
+/// have no pin: the empty pins below them add columns.
+const STUDY_HEADING: &str = "Heading";
 
 /// The row of the result of a Math or Switch block.
 const RESULT: &str = "Result";
@@ -191,8 +228,8 @@ impl NumberBlock {
         }
         (self.operation.inputs().iter().enumerate())
             .map(|(i, label)| {
-                let kind = if i == 1 && self.operation.scales() {
-                    Some(ValueKind::Factor)
+                let kind = if self.operation.combines() {
+                    self.operands.get(i).copied().flatten()
                 } else {
                     self.kind
                 };
@@ -206,10 +243,58 @@ impl NumberBlock {
             .collect()
     }
 
-    /// The number it gives.
+    /// The kind of the number of the row of `path`: its result or an input; `Some(None)`
+    /// while it has none yet.
+    fn kind_at(&self, switch: bool, path: &[String]) -> Option<Option<ValueKind>> {
+        match path {
+            [cell, name] if cell == links::VALUE && name == RESULT => Some(self.kind),
+            [cell, key] if cell == links::PARAMETERS => (self.inputs(switch).into_iter())
+                .find(|(k, ..)| k == key)
+                .map(|(_, _, kind, _)| kind),
+            _ => None,
+        }
+    }
+
+    /// The kinds of A, B and the result of a product or quotient.
+    fn kinds(&self) -> [Option<ValueKind>; 3] {
+        [self.operands[0], self.operands[1], self.kind]
+    }
+
+    /// The kinds of A, B and the result, with the one missing found from the other two;
+    /// unchanged with an error when they do not fit together.
+    fn settle(&mut self) -> Result<(), String> {
+        let [a, b, result] = self.operation.settle_kinds(self.kinds())?;
+        self.operands = [a, b];
+        self.kind = result;
+        Ok(())
+    }
+
+    /// The block after the number of the row of `path` became of `kind`, with the kinds
+    /// that follow from it; an error says why it cannot.
+    fn with_kind(&self, switch: bool, path: &[String], kind: ValueKind) -> Result<Self, String> {
+        let mut block = self.clone();
+        match path {
+            [cell, key] if cell == links::PARAMETERS && !switch && self.operation.combines() => {
+                let index = ["a", "b"].iter().position(|k| k == key);
+                if let Some(slot) = index.and_then(|i| block.operands.get_mut(i)) {
+                    *slot = Some(kind);
+                }
+            }
+            [cell, key] if cell == links::PARAMETERS && key == INDEX && switch => {}
+            _ => block.kind = Some(kind),
+        }
+        block.settle()?;
+        Ok(block)
+    }
+
+    /// The number it gives; `None` when it gives a series, see [`Self::series_result`].
     fn result(&self, switch: bool) -> Option<f64> {
         let value = if switch {
             plx_model::switch(*self.values.first()?, self.values.get(1..)?)
+        } else if self.operation.reduces() {
+            self.reduced()
+        } else if self.series.iter().any(Option::is_some) {
+            None
         } else {
             self.operation.apply(&self.values)
         }?;
@@ -307,6 +392,7 @@ impl ModelMut<'_> {
             mesh_inputs,
             mesh_sets,
             element_types,
+            mesh_operations,
         } = copy;
         if let Some(tags) = links::geometry_tags(self.geometry.as_ref(), geometry.as_ref()) {
             links::follow_geometry(self.fe, None, &tags);
@@ -316,6 +402,7 @@ impl ModelMut<'_> {
         *self.mesh_inputs = mesh_inputs;
         self.fe.mesh_sets = mesh_sets;
         self.fe.element_types = element_types;
+        self.fe.mesh_operations = mesh_operations;
     }
 }
 
@@ -414,6 +501,7 @@ struct ParametersBlock {
 
 /// What a measure block computes, and the value it last computed with the fingerprint of the
 /// results and the definition it was computed from, see [`ProjectApp::measure_key`].
+#[derive(Default)]
 struct MeasureBlock {
     units: UnitSystem,
     kind: MeasureKind,
@@ -421,6 +509,9 @@ struct MeasureBlock {
     evaluated: Option<u64>,
     /// Why the last evaluation gave no value.
     error: Option<String>,
+    /// Of a measure of a series, its values; of a whole history also their times.
+    series: Vec<f64>,
+    times: Vec<f64>,
 }
 
 /// A parameter study: its table, the fingerprint of the blocks it runs as they are now, see
@@ -723,6 +814,11 @@ impl Node {
             Block::Note(_) => Kind::Note,
             Block::Math(_) => Kind::Math,
             Block::Switch(_) => Kind::Switch,
+            Block::Plot(_) => Kind::Plot,
+            Block::Preview(_) => Kind::Preview,
+            Block::Group(_) => Kind::Group,
+            Block::GroupInput => Kind::GroupInput,
+            Block::GroupOutput => Kind::GroupOutput,
         }
     }
 
@@ -921,17 +1017,32 @@ impl Node {
         }
     }
 
+    fn as_plot(&self) -> Option<&PlotBlock> {
+        match &self.block {
+            Block::Plot(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    fn as_plot_mut(&mut self) -> Option<&mut PlotBlock> {
+        match &mut self.block {
+            Block::Plot(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    fn as_preview(&self) -> Option<&PreviewBlock> {
+        match &self.block {
+            Block::Preview(p) => Some(p),
+            _ => None,
+        }
+    }
+
     /// For a Math or Switch block, the kind of the number of the row of `path`: its result
     /// or an input; `Some(None)` while the block has no kind yet.
     fn number_kind(&self, path: &[String]) -> Option<Option<ValueKind>> {
         let (number, switch) = self.as_number()?;
-        match path {
-            [cell, name] if cell == links::VALUE && name == RESULT => Some(number.kind),
-            [cell, key] if cell == links::PARAMETERS => (number.inputs(switch).into_iter())
-                .find(|(k, ..)| k == key)
-                .map(|(_, _, kind, _)| kind),
-            _ => None,
-        }
+        number.kind_at(switch, path)
     }
 
     fn window(&self) -> Option<&AnalysisWindow> {
@@ -995,12 +1106,17 @@ impl Node {
             Block::Study(s) => s.units,
             Block::File(f) => f.units,
             Block::Math(n) | Block::Switch(n) => n.units,
+            Block::Plot(p) => p.units,
             Block::CadOperation(c) => c.units,
-            Block::MeshExport(_)
+            Block::Preview(_)
+            | Block::MeshExport(_)
             | Block::Campbell(_)
             | Block::RefineMesh(_)
             | Block::DeformedMesh(_)
-            | Block::Note(_) => UnitSystem::default(),
+            | Block::Note(_)
+            | Block::Group(_)
+            | Block::GroupInput
+            | Block::GroupOutput => UnitSystem::default(),
         }
     }
 
@@ -1183,6 +1299,8 @@ impl Node {
                     value: block.value,
                     evaluated: block.evaluated,
                     error: None,
+                    series: block.series,
+                    times: block.times,
                 };
                 Self::new(block.id, block.name, Block::Measure(measure))
             }
@@ -1213,8 +1331,10 @@ impl Node {
                 let block = NumberBlock {
                     units: math.units,
                     kind: math.kind,
+                    operands: math.operands,
                     operation: math.operation,
                     values: math.values,
+                    series: Vec::new(),
                 };
                 Self::new(math.id, math.name, Block::Math(block))
             }
@@ -1224,11 +1344,26 @@ impl Node {
                 let block = NumberBlock {
                     units: switch.units,
                     kind: switch.kind,
+                    operands: [None; 2],
                     operation: MathOp::default(),
                     values,
+                    series: Vec::new(),
                 };
                 Self::new(switch.id, switch.name, Block::Switch(block))
             }
+            ProjectNode::Plot(plot) => Self::new(
+                plot.id,
+                plot.name,
+                Block::Plot(PlotBlock::new(plot.units, plot.kind, plot.bins)),
+            ),
+            ProjectNode::Preview(preview) => {
+                Self::new(preview.id, preview.name, Block::Preview(Box::default()))
+            }
+            ProjectNode::Group(group) => {
+                Self::new(group.id, group.name.clone(), Block::Group(Box::new(group)))
+            }
+            ProjectNode::GroupInput(end) => Self::new(end.id, end.name, Block::GroupInput),
+            ProjectNode::GroupOutput(end) => Self::new(end.id, end.name, Block::GroupOutput),
         }
     }
 
@@ -1316,6 +1451,8 @@ impl Node {
                 kind: m.kind.clone(),
                 value: m.value,
                 evaluated: m.evaluated,
+                series: m.series.clone(),
+                times: m.times.clone(),
             }),
             Block::Study(s) => ProjectNode::Study(file::StudyBlock {
                 id,
@@ -1366,6 +1503,7 @@ impl Node {
                 units: math.units,
                 operation: math.operation,
                 kind: math.kind,
+                operands: math.operands,
                 values: math.values.clone(),
             }),
             Block::Switch(switch) => ProjectNode::Switch(file::SwitchBlock {
@@ -1377,6 +1515,24 @@ impl Node {
                 index: switch.values.first().copied().unwrap_or(1.0),
                 choices: switch.values.get(1..).unwrap_or_default().to_vec(),
             }),
+            Block::Plot(plot) => ProjectNode::Plot(file::PlotBlock {
+                id,
+                name,
+                position,
+                units: plot.units,
+                kind: plot.kind,
+                bins: plot.bins,
+            }),
+            // It keeps no mesh: the link brings it again.
+            Block::Preview(_) => ProjectNode::Preview(file::Preview { id, name, position }),
+            Block::Group(group) => ProjectNode::Group(file::NodeGroup {
+                id,
+                name,
+                position,
+                ..(**group).clone()
+            }),
+            Block::GroupInput => ProjectNode::GroupInput(file::GroupEnd { id, name, position }),
+            Block::GroupOutput => ProjectNode::GroupOutput(file::GroupEnd { id, name, position }),
         })
     }
 
@@ -1448,9 +1604,7 @@ impl Node {
             Block::Measure(m) => Block::Measure(MeasureBlock {
                 units: m.units,
                 kind: m.kind.clone(),
-                value: None,
-                evaluated: None,
-                error: None,
+                ..MeasureBlock::default()
             }),
             Block::Study(s) => {
                 let mut table = s.table.clone();
@@ -1475,8 +1629,22 @@ impl Node {
             Block::Note(text) => Block::Note(text.clone()),
             Block::Math(math) => Block::Math(math.clone()),
             Block::Switch(switch) => Block::Switch(switch.clone()),
+            Block::Plot(plot) => Block::Plot(PlotBlock::new(plot.units, plot.kind, plot.bins)),
+            Block::Preview(_) => Block::Preview(Box::default()),
+            // A group is copied with its blocks, see [`ProjectApp::duplicate_group`].
+            Block::Group(_) | Block::GroupInput | Block::GroupOutput => return None,
         };
         Some(Self::new(id, name, block))
+    }
+
+    /// Brings the state of an analysis up to date after the project changed its model
+    /// through [`Self::exposing_fe_mut`]: an open window counts the change, a closed analysis
+    /// finds its state again.
+    fn model_changed(&mut self) {
+        match self.window_mut() {
+            Some(window) => window.note_change(),
+            None => self.refresh_closed(),
+        }
     }
 
     /// Finds the state of a closed analysis from its data, once after it changed.
@@ -1522,6 +1690,7 @@ impl Node {
             Block::DeformedMesh(d) => d.link_data(),
             Block::CadOperation(c) => c.link_data(),
             Block::MeshExport(e) => Some(e.model.data()),
+            Block::Preview(p) => Some(p.model.data()),
             Block::File(f) => Some(f.model.data()),
             Block::Parameters(_)
             | Block::Measure(_)
@@ -1529,7 +1698,11 @@ impl Node {
             | Block::Campbell(_)
             | Block::Note(_)
             | Block::Math(_)
-            | Block::Switch(_) => None,
+            | Block::Switch(_)
+            | Block::Plot(_)
+            | Block::Group(_)
+            | Block::GroupInput
+            | Block::GroupOutput => None,
         }
     }
 
@@ -1548,6 +1721,7 @@ impl Node {
             Block::Materials(m) | Block::CrossSections(m) => Some(m.model.data_mut()),
             Block::Mesh(m) => Some(m.model.data_mut()),
             Block::MeshExport(e) => Some(e.model.data_mut()),
+            Block::Preview(p) => Some(p.model.data_mut()),
             _ => None,
         }
     }
@@ -1583,9 +1757,19 @@ impl Node {
         let Some(path) = fe.exposed(key).map(|e| e.path.clone()) else {
             return false;
         };
-        let changed = fe.set_value(&path, value);
+        // A number of a mesh operation moves the mesh of the analysis along.
+        let changed = match &mut self.block {
+            Block::Analysis(analysis) => match (&mut analysis.window, &mut analysis.data) {
+                (Some(window), _) => window.set_value(&path, value),
+                (None, Some(data)) => data.model.set_value_meshed(&mut data.mesh, &path, value),
+                _ => false,
+            },
+            _ => self
+                .exposing_fe_mut()
+                .is_some_and(|fe| fe.set_value(&path, value)),
+        };
         if changed {
-            self.refresh_closed();
+            self.model_changed();
         }
         changed
     }
@@ -1846,13 +2030,26 @@ enum Action {
     /// A new Math or Switch block at the position.
     AddMath(egui::Pos2),
     AddSwitch(egui::Pos2),
-    /// The operation of a Math block, the kind of the numbers of a Math or Switch block, the
-    /// value of one of their inputs by key, or the number of choices of a Switch block
-    /// changed in its block.
+    /// The operation of a Math block, the value of one of the inputs of a Math or Switch
+    /// block by key, or the number of choices of a Switch block changed in its block.
     SetOperation(u64, MathOp),
-    SetNumberKind(u64, Option<ValueKind>),
     SetNumberInput(u64, String, f64),
     SetChoices(u64, usize),
+    /// A new Plot or Preview block at the position.
+    AddPlot(egui::Pos2),
+    AddPreview(egui::Pos2),
+    /// The kind of plot of a Plot block, or the bins of its histogram, changed in its block.
+    SetPlotKind(u64, plx_model::PlotKind),
+    SetBins(u64, u32),
+    /// Put the blocks into a new group, or the blocks of the groups back where they are.
+    Group(Vec<u64>),
+    Ungroup(Vec<u64>),
+    /// Show the blocks inside the group, or go out to the level around the group shown.
+    EnterGroup(u64),
+    LeaveGroup,
+    /// Rename the socket of the row of `path` of a group or its Group Input or Group
+    /// Output block.
+    RenameSocket(u64, Vec<String>),
 }
 
 /// A project read from its file, with notes on its conversion, or why it could not be read.
@@ -1892,6 +2089,8 @@ pub struct ProjectApp {
     frame_label: Option<(usize, String)>,
     /// The note whose text takes the keyboard in the next frame.
     focus_note: Option<u64>,
+    /// The pictures of the meshes of the Preview blocks, by block.
+    pictures: HashMap<u64, MeshPicture>,
     /// The positions of the blocks in the last frame, and the blocks moved while a button
     /// is down, to put those dropped onto a frame in it.
     last_positions: Vec<(u64, [f32; 2])>,
@@ -1911,7 +2110,7 @@ pub struct ProjectApp {
     measure_editor: Option<MeasureEditor>,
     /// Measures being computed on worker threads, by block, with the fingerprint they are
     /// computed for.
-    measuring: HashMap<u64, (u64, Receiver<Result<f64, String>>)>,
+    measuring: HashMap<u64, (u64, Receiver<Result<crate::measure::Measured, String>>)>,
     /// The editor of a parameter study.
     study_editor: Option<StudyEditor>,
     /// The study being run, and the studies Update Project runs after it.
@@ -1941,6 +2140,10 @@ pub struct ProjectApp {
     new_analysis: Option<(egui::Pos2, ModelPropertiesDialog)>,
     /// A project file being read on a worker thread, with notes on its conversion.
     opening: Option<(PathBuf, Receiver<Opened>)>,
+    /// The project files opened or saved last, the latest first; see Open Recent.
+    recent: Vec<PathBuf>,
+    /// The save running on a worker thread, and what autosave needs to know.
+    saver: saving::Saver,
     /// Analyses Update Project still has to solve, in order, and those it solves.
     update_queue: VecDeque<u64>,
     updating: Vec<u64>,
@@ -1988,6 +2191,15 @@ pub struct ProjectApp {
     search: Option<NodePicker>,
     /// The kind of block hanging at the pointer until a click places it.
     placing: Option<BlockTile>,
+    /// The groups opened in the schematic, the outermost first; the schematic shows the
+    /// blocks of the last one, or those outside all groups.
+    level: Vec<u64>,
+    /// The blocks there were in the last frame: a new one goes into the group shown.
+    known: BTreeSet<u64>,
+    /// The blocks the schematic shows in this frame: those right in the group shown.
+    shown: BTreeSet<u64>,
+    /// The socket of a group being renamed, with the name typed.
+    rename_socket: Option<(u64, u32, String)>,
 }
 
 impl ProjectApp {
@@ -2039,6 +2251,7 @@ impl ProjectApp {
             selected: Vec::new(),
             frame_label: None,
             focus_note: None,
+            pictures: HashMap::new(),
             last_positions: Vec::new(),
             moving: BTreeSet::new(),
             material_set: None,
@@ -2062,6 +2275,8 @@ impl ProjectApp {
             dragging: None,
             new_analysis: None,
             opening: None,
+            recent: cc.storage.map(stored_recent).unwrap_or_default(),
+            saver: Default::default(),
             update_queue: VecDeque::new(),
             updating: Vec::new(),
             shown_title: String::new(),
@@ -2084,6 +2299,10 @@ impl ProjectApp {
             ribbon: Default::default(),
             search: None,
             placing: None,
+            level: Vec::new(),
+            known: BTreeSet::new(),
+            shown: BTreeSet::new(),
+            rename_socket: None,
         };
         if app.settings.updates.check_at_startup && app.updater.installation().checks_at_startup() {
             app.updater.check(&cc.egui_ctx, false);
@@ -2103,9 +2322,6 @@ impl ProjectApp {
             let id = app.add_analysis(&name, egui::pos2(40.0, 40.0), properties);
             app.startup_import = files;
             app.open_window(&cc.egui_ctx, id, None);
-        } else if let Some(path) = cc.storage.and_then(stored_last_project) {
-            // Without files on the command line, the project open at the last exit opens.
-            app.open(&cc.egui_ctx, path);
         }
         Ok(app)
     }
@@ -2118,18 +2334,6 @@ impl ProjectApp {
         (self.path.as_ref())
             .and_then(|p| p.file_stem())
             .map_or_else(|| "Untitled".into(), |s| s.to_string_lossy().into_owned())
-    }
-
-    /// A name no analysis has: `base`, else `base-2`, `base-3` …
-    fn unique_name(&self, base: &str) -> String {
-        let taken = |name: &str| self.nodes.iter().any(|n| n.name.eq_ignore_ascii_case(name));
-        if !taken(base) {
-            return base.to_owned();
-        }
-        (2..)
-            .map(|i| format!("{base}-{i}"))
-            .find(|name| !taken(name))
-            .unwrap_or_default()
     }
 
     /// An id no block had: those of deleted blocks stay theirs, for undo.
@@ -2146,7 +2350,7 @@ impl ProjectApp {
         properties: ModelProperties,
     ) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name(name);
+        let name = block_name(name);
         let mut data = ProjectAnalysis {
             id,
             name: name.clone(),
@@ -2166,7 +2370,7 @@ impl ProjectApp {
     /// Adds an empty materials or cross-sections block; returns its id.
     fn add_collection(&mut self, position: egui::Pos2, collection: Collection) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name(collection.title());
+        let name = block_name(collection.title());
         let block = Box::new(CollectionBlock {
             model: LinkedModel::default(),
             units: self.settings.new_model.units,
@@ -2187,7 +2391,7 @@ impl ProjectApp {
     /// Adds a mesh block meshing `primitive` and makes its mesh; returns its id.
     fn add_mesh(&mut self, position: egui::Pos2, primitive: MeshPrimitive) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name(primitive.label());
+        let name = block_name(primitive.label());
         let space = match &primitive {
             MeshPrimitive::Box { .. } => ModelSpace::ThreeD,
             MeshPrimitive::Rectangle { .. } => match self.settings.new_model.space {
@@ -2216,7 +2420,7 @@ impl ProjectApp {
     /// Adds a CAD operation block, a fillet of 1 mm; returns its id.
     fn add_cad_operation(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("CAD Operation");
+        let name = block_name("CAD Operation");
         let cad = CadBlock::new(Default::default(), UnitSystem::default(), None, None);
         self.nodes.push(Node::new(
             id,
@@ -2233,7 +2437,7 @@ impl ProjectApp {
 
     fn add_refine_mesh(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Refine Mesh");
+        let name = block_name("Refine Mesh");
         self.nodes.push(Node::refine_block(
             id,
             name.clone(),
@@ -2252,7 +2456,7 @@ impl ProjectApp {
     /// Adds a parameters block with one length; returns its id.
     fn add_parameters(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Parameters");
+        let name = block_name("Parameters");
         let block = ParametersBlock {
             units: self.settings.new_model.units,
             parameters: vec![Parameter::new("Length", ValueKind::LENGTH, 0.1)],
@@ -2271,7 +2475,7 @@ impl ProjectApp {
     /// Adds a note, whose text takes the keyboard at once.
     fn add_note(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Note");
+        let name = block_name("Note");
         self.nodes
             .push(Node::new(id, name, Block::Note(String::new())));
         self.graph.insert_node(position, id);
@@ -2334,16 +2538,13 @@ impl ProjectApp {
         }
     }
 
-    /// Adds a measure block of the largest von Mises stress; returns its id.
+    /// Adds a measure block of the von Mises stress at every node; returns its id.
     fn add_measure(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Measure");
+        let name = block_name("Measure");
         let block = MeasureBlock {
             units: self.settings.new_model.units,
-            kind: MeasureKind::default(),
-            value: None,
-            evaluated: None,
-            error: None,
+            ..MeasureBlock::default()
         };
         self.nodes
             .push(Node::new(id, name.clone(), Block::Measure(block)));
@@ -2395,10 +2596,10 @@ impl ProjectApp {
     ) -> std::path::PathBuf {
         (self.settings.solver.work_dir())
             .join(crate::analysis::job_name(&self.project_name()))
-            .join(crate::analysis::job_name(&self.name_of(id)))
+            .join(crate::analysis::job_dir(id))
             .join(format!(
                 "{}-{:016x}{suffix}",
-                crate::analysis::job_name(&source.name),
+                crate::analysis::job_dir(source.id),
                 bound.input.unwrap_or_default()
             ))
     }
@@ -2419,13 +2620,23 @@ impl ProjectApp {
                     measure.kind = kind;
                     measure.units = units;
                 }
-                // Without a point the block has no coordinate rows to link to.
+                // Without a point the block has no coordinate rows to link to, and without a
+                // whole history no times.
                 if !at_point {
                     self.links.retain(|l| {
                         l.target != id
                             || !matches!(links::slot(l), [cell, _] if cell == links::PARAMETERS)
                     });
                 }
+                let timed = (self.nodes.iter().find(|n| n.id == id))
+                    .and_then(Node::as_measure)
+                    .is_some_and(|m| matches!(m.kind, MeasureKind::History { whole: true, .. }));
+                if !timed {
+                    self.links.retain(|l| {
+                        l.source != id || l.item.get(1).is_none_or(|n| n != series::TIME)
+                    });
+                }
+                self.drop_series_conflicts();
                 self.sync_due = true;
             }
         }
@@ -2490,15 +2701,16 @@ impl ProjectApp {
 
     /// Takes the values the workers of measure blocks computed; returns whether one came.
     fn poll_measures(&mut self) -> bool {
-        let done: Vec<(u64, u64, Result<f64, String>)> = (self.measuring.iter())
-            .filter_map(|(&id, (key, receiver))| match receiver.try_recv() {
-                Ok(result) => Some((id, *key, result)),
-                Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    Some((id, *key, Err("the computation stopped".into())))
-                }
-            })
-            .collect();
+        let done: Vec<(u64, u64, Result<crate::measure::Measured, String>)> =
+            (self.measuring.iter())
+                .filter_map(|(&id, (key, receiver))| match receiver.try_recv() {
+                    Ok(result) => Some((id, *key, result)),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        Some((id, *key, Err("the computation stopped".into())))
+                    }
+                })
+                .collect();
         let came = !done.is_empty();
         for (id, key, result) in done {
             self.measuring.remove(&id);
@@ -2512,17 +2724,22 @@ impl ProjectApp {
             let units = measure.units;
             measure.evaluated = Some(key);
             let line = match result {
-                Ok(value) => {
-                    measure.value = Some(value);
+                Ok(measured) => {
+                    measure.value = Some(measured.value);
                     measure.error = None;
-                    format!(
-                        "{name}: {} = {}",
-                        measure.kind.describe(),
-                        crate::measure::shown(&measure.kind, value, units)
-                    )
+                    let shown = if measure.kind.is_series() {
+                        crate::measure::shown_series(&measure.kind, &measured.series, units)
+                    } else {
+                        crate::measure::shown(&measure.kind, measured.value, units)
+                    };
+                    measure.series = measured.series;
+                    measure.times = measured.times;
+                    format!("{name}: {} = {shown}", measure.kind.describe())
                 }
                 Err(why) => {
                     measure.value = None;
+                    measure.series.clear();
+                    measure.times.clear();
                     let line = format!("{name} has no value: {why}.");
                     measure.error = Some(why);
                     line
@@ -2578,7 +2795,7 @@ impl ProjectApp {
     /// Adds a parameter study without columns; returns its id.
     fn add_study(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Parameter Study");
+        let name = block_name("Parameter Study");
         let block = StudyBlock {
             units: self.settings.new_model.units,
             table: StudyTable::default(),
@@ -2937,7 +3154,13 @@ impl ProjectApp {
                     print.add(format!("{kind:?}").as_bytes());
                 }
                 Block::Math(number) | Block::Switch(number) => {
-                    print.add(format!("{:?}{:?}", number.operation, number.kind).as_bytes());
+                    print.add(
+                        format!(
+                            "{:?}{:?}{:?}",
+                            number.operation, number.kind, number.operands
+                        )
+                        .as_bytes(),
+                    );
                     let switch = node.kind() == Kind::Switch;
                     for (key, _, _, value) in number.inputs(switch) {
                         if !driven(links::PARAMETERS, &key) {
@@ -3039,18 +3262,14 @@ impl ProjectApp {
             tip: tip.to_owned(),
         };
         let current = table.current();
-        let mut rows = vec![Row {
-            input: true,
-            collection: true,
-            ..row(
-                vec![links::OUTPUTS.to_owned()],
-                format!("Outputs ({})", table.outputs.len()),
-                0,
-                NodeIcon::Results,
-                "The numbers it reads once the points are solved: drop the value of a \
-                 Measure block here to add a column.",
-            )
-        }];
+        let mut rows = vec![row(
+            vec![STUDY_HEADING.to_owned(), links::OUTPUTS.to_owned()],
+            format!("Outputs ({})", table.outputs.len()),
+            0,
+            NodeIcon::Results,
+            "The numbers it reads once the points are solved: drop the value of a Measure \
+             block on the empty pin below them to add a column.",
+        )];
         for (i, column) in table.outputs.iter().enumerate() {
             let path = vec![links::OUTPUTS.to_owned(), column.name.clone()];
             let linked_from = (incoming.get(&node.id).into_iter().flatten())
@@ -3072,19 +3291,26 @@ impl ProjectApp {
                 )
             });
         }
+        // An empty pin below the outputs: a wire dropped on it adds a column, as in Blender.
         rows.push(Row {
-            output: true,
-            collection: true,
+            input: true,
             ..row(
-                vec![links::LOOP.to_owned()],
-                format!("Inputs ({})", table.inputs.len()),
-                0,
-                NodeIcon::Setup,
-                "The numbers it varies: drag this pin to an exposed parameter of an analysis, \
-                 a number of a mesh block or the Factor of a Refine Mesh block to add a \
-                 column. The wires are dashed, as they lead back.",
+                vec![links::OUTPUTS.to_owned()],
+                String::new(),
+                1,
+                NodeIcon::Results,
+                "Drop the value of a Measure block here to add an output column.",
             )
         });
+        rows.push(row(
+            vec![STUDY_HEADING.to_owned(), links::LOOP.to_owned()],
+            format!("Inputs ({})", table.inputs.len()),
+            0,
+            NodeIcon::Setup,
+            "The numbers it varies: drag the empty pin below them to an exposed parameter of \
+             an analysis, a number of a mesh block or the Factor of a Refine Mesh block to \
+             add a column. The wires are dashed, as they lead back.",
+        ));
         for (i, column) in table.inputs.iter().enumerate() {
             let value =
                 (current.and_then(|p| p.inputs.get(i).copied())).map_or_else(String::new, |v| {
@@ -3105,6 +3331,16 @@ impl ProjectApp {
                 )
             });
         }
+        rows.push(Row {
+            output: true,
+            ..row(
+                vec![links::LOOP.to_owned()],
+                String::new(),
+                1,
+                NodeIcon::Setup,
+                "Drag this empty pin to a number to add an input column that varies it.",
+            )
+        });
         let (solved, failed, all) = table.summary(study.body);
         let running = (self.looping.as_ref())
             .filter(|run| run.id == node.id)
@@ -3477,6 +3713,7 @@ impl ProjectApp {
                     _ => {}
                 }
             }
+            changed |= self.apply_series();
             if !changed {
                 break;
             }
@@ -3511,8 +3748,9 @@ impl ProjectApp {
                 .flatten();
         }
         if let Some(measure) = node.as_measure() {
+            // A series goes by [`Self::series_of`].
             let fresh = self.measure_state(id) == CellState::UpToDate;
-            return (cell == links::VALUE && name == RESULT && fresh)
+            return (cell == links::VALUE && name == RESULT && fresh && !measure.kind.is_series())
                 .then_some(measure.value)
                 .flatten();
         }
@@ -3535,7 +3773,7 @@ impl ProjectApp {
     /// Adds a mesh export block with no file yet; returns its id.
     fn add_mesh_export(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Mesh Export");
+        let name = block_name("Mesh Export");
         self.nodes
             .push(Node::mesh_export(id, name.clone(), String::new(), None));
         self.graph.insert_node(position, id);
@@ -3549,7 +3787,7 @@ impl ProjectApp {
     /// Adds a file block and asks for its file; returns its id.
     fn add_file(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("File");
+        let name = block_name("File");
         let units = self.settings.new_model.units;
         self.nodes
             .push(Node::file_block(id, name.clone(), String::new(), units));
@@ -3718,7 +3956,7 @@ impl ProjectApp {
     /// Inserts a Campbell block with `window`; returns its id.
     fn insert_campbell(&mut self, position: egui::Pos2, window: CampbellWindow) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Campbell");
+        let name = block_name("Campbell");
         self.nodes.push(Node::campbell_block(id, name, window));
         self.graph.insert_node(position, id);
         id
@@ -3808,7 +4046,7 @@ impl ProjectApp {
         let data = (source.link_data()).ok_or_else(|| format!("{} is loading.", source.name))?;
         let dir = (self.settings.solver.work_dir())
             .join(crate::analysis::job_name(&self.project_name()))
-            .join(crate::analysis::job_name(&self.name_of(id)));
+            .join(crate::analysis::job_dir(id));
         let solver = &self.settings.solver;
         window.start(solver, (data.mesh, data.fe), dir, keep)
     }
@@ -3869,7 +4107,7 @@ impl ProjectApp {
             return format!("Speed not set: {name} has no active Complex Frequency step.");
         }
         crate::campbell::set_speed(fe, speed);
-        node.refresh_closed();
+        node.model_changed();
         self.sync_due = true;
         format!(
             "{name}: Complex Frequency step set to {shown} rpm; solve it for the results there."
@@ -4126,7 +4364,7 @@ impl ProjectApp {
                         // The preview made it for this very input and operation.
                         if let (Some(made), Some(input)) = (made, &cad.input) {
                             let print = cad.operation.fingerprint(input);
-                            cad.take_result(made, print);
+                            cad.take_result(*made, print);
                         }
                     }
                     if node
@@ -4282,7 +4520,9 @@ impl ProjectApp {
                 return;
             }
             // Its numbers are edited in its block.
-            Some(Kind::Math | Kind::Switch) => return,
+            Some(Kind::Math | Kind::Switch | Kind::Plot | Kind::Preview) => return,
+            Some(Kind::Group) => return self.enter_group(id),
+            Some(Kind::GroupInput | Kind::GroupOutput) => return,
             None => return,
         }
         self.open_analysis(ctx, id, view, false);
@@ -4420,6 +4660,7 @@ impl ProjectApp {
         self.links.clear();
         self.frames.clear();
         self.compact.clear();
+        self.level.clear();
         self.frame_label = None;
         self.applied.clear();
         self.restoring.clear();
@@ -4431,6 +4672,7 @@ impl ProjectApp {
         self.history.clear();
         self.in_project = true;
         self.active = None;
+        self.forget_edits();
         self.output.push("New project".into());
     }
 
@@ -4442,6 +4684,31 @@ impl ProjectApp {
         if let Some(path) = picked {
             self.open(ctx, path);
         }
+    }
+
+    /// Puts `path` first in the list of Open Recent.
+    fn remember(&mut self, path: &Path) {
+        self.recent = with_recent(&self.recent, path);
+    }
+
+    /// The panel of Open Recent: the recent projects that still exist, the latest first.
+    /// Returns the one picked.
+    fn recent_panel(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {
+        self.recent.retain(|path| path.is_file());
+        if self.recent.is_empty() {
+            ui.weak("No recent projects");
+            return None;
+        }
+        let mut picked = None;
+        for path in &self.recent {
+            let name = (path.file_name()).map_or_else(String::new, |n| n.to_string_lossy().into());
+            let open = ui.add_enabled(self.opening.is_none(), egui::Button::new(name));
+            if open.on_hover_text(path.display().to_string()).clicked() {
+                picked = Some(path.clone());
+                ui.close();
+            }
+        }
+        picked
     }
 
     /// Reads the project file on a worker thread; it replaces the open project once read.
@@ -4479,8 +4746,12 @@ impl ProjectApp {
                 self.output.extend(notes);
                 self.nodes.clear();
                 self.history.clear();
+                self.level.clear();
+                self.known.clear();
                 self.graph = Snarl::new();
                 self.graph_generation += 1;
+                // The view of the schematic is not saved: it starts out showing all blocks.
+                self.show_all = true;
                 self.links = project.links;
                 self.frames = project.frames;
                 self.compact = project.compact.into_iter().collect();
@@ -4506,8 +4777,10 @@ impl ProjectApp {
                         path.display()
                     )
                 });
+                self.remember(&path);
                 self.path = Some(path);
                 self.forget_solves();
+                self.forget_edits();
             }
             Err(error) => self.output.push(format!("Not opened: {error}")),
         }
@@ -4543,68 +4816,6 @@ impl ProjectApp {
         }
     }
 
-    /// Saves the project to its file, or to one the user picks for a new project or with
-    /// `save_as`.
-    fn save(&mut self, save_as: bool) {
-        if let Some(name) = self
-            .nodes
-            .iter()
-            .find(|n| n.window().is_some_and(|w| w.model().is_none()))
-        {
-            self.output
-                .push(format!("Not saved: {} is still loading.", name.name));
-            return;
-        }
-        let path = match &self.path {
-            Some(path) if !save_as => path.clone(),
-            _ => {
-                let Some(path) = pick_project_file(self.path.as_deref(), "Save Project", "") else {
-                    return;
-                };
-                path
-            }
-        };
-        let project = self.project(true);
-        match plx_io::project::save_project(&path, &project) {
-            Ok(()) => {
-                let line = timestamped(format!("{} saved", path.display()));
-                self.output.push(line.clone());
-                let folder = crate::analysis::job_name(
-                    &path.file_stem().unwrap_or_default().to_string_lossy(),
-                );
-                for node in &mut self.nodes {
-                    if let Some(window) = node.window_mut() {
-                        window.saved(&path);
-                        window.set_project_folder(folder.clone());
-                        window.message(line.clone());
-                    }
-                }
-                self.path = Some(path);
-            }
-            Err(error) => self.output.push(format!("Not saved: {error}")),
-        }
-    }
-
-    /// Saves a copy of the project without the results of its analyses, for example to send
-    /// it; the open project stays on its own file and keeps its results.
-    fn save_without_results(&mut self) {
-        let Some(path) = pick_project_file(
-            self.path.as_deref(),
-            "Save Project Without Results",
-            "-without-results",
-        ) else {
-            return;
-        };
-        let project = self.project(false);
-        match plx_io::project::save_project(&path, &project) {
-            Ok(()) => self.output.push(timestamped(format!(
-                "{} saved without results",
-                path.display()
-            ))),
-            Err(error) => self.output.push(format!("Not saved: {error}")),
-        }
-    }
-
     fn duplicate(&mut self, id: u64) {
         let position = (self.graph_node(id))
             .and_then(|g| self.graph.get_node_info(g))
@@ -4615,7 +4826,7 @@ impl ProjectApp {
             return;
         };
         let new_id = self.next_id();
-        let name = self.unique_name(&name);
+        let name = block_name(&name);
         let Some(copy) = self.node(id).and_then(|n| n.copied(new_id, name.clone())) else {
             return;
         };
@@ -4631,8 +4842,15 @@ impl ProjectApp {
         self.output.push(format!("{name} created"));
     }
 
-    /// Deletes the block; undo brings it back.
+    /// Deletes the block, a group with the blocks in it; undo brings it back.
     fn delete(&mut self, id: u64) {
+        let inner = match self.node(id).map(|n| &n.block) {
+            Some(Block::Group(group)) => group.nodes.clone(),
+            _ => Vec::new(),
+        };
+        for inner in inner {
+            self.delete(inner);
+        }
         if let Some(node) = self.detach(id) {
             self.output.push(format!("{} deleted", node.name));
             self.keep_deleted(node);
@@ -4656,6 +4874,7 @@ impl ProjectApp {
         let node = (self.nodes.iter().position(|n| n.id == id)).map(|i| self.nodes.remove(i));
         self.links.retain(|l| l.source != id && l.target != id);
         self.applied.retain(|(target, _), _| *target != id);
+        self.leave_groups(id);
         self.leave_frames(&[id]);
         self.compact.remove(&id);
         self.selected.retain(|&s| s != id);
@@ -4975,7 +5194,7 @@ impl ProjectApp {
             name: name.clone(),
             ..data
         };
-        work_dir.push(crate::analysis::job_name(&name));
+        work_dir.push(crate::analysis::job_dir(id));
         analysis.solving = true;
         node.refresh_closed();
         let solve = BackgroundSolve::start(
@@ -5142,6 +5361,8 @@ impl ProjectApp {
         let solve = selected.and_then(|id| self.solves.iter().find(|s| s.id == id));
         let output: Vec<&str> = solve.map(|s| s.output()).unwrap_or_default();
         let dropped = solve.map_or(0, |s| s.dropped());
+        let profile = solve.filter(|s| !s.active()).and_then(|s| s.profile());
+        let steps = solve.map(|s| s.step_lines().to_vec()).unwrap_or_default();
         ui.horizontal(|ui| {
             let row = rows.iter().find(|r| Some(r.id) == selected);
             let active = row.is_some_and(|r| r.active);
@@ -5176,6 +5397,16 @@ impl ProjectApp {
                 clear = true;
             }
             ui.separator();
+            if let Some(row) = row {
+                let info = crate::solver_profile::ReportInfo {
+                    name: &row.name,
+                    state: &row.state,
+                    seconds: row.seconds.unwrap_or(0.0),
+                    steps: &steps,
+                };
+                crate::solver_profile::buttons(ui, profile.as_ref(), &info);
+                ui.separator();
+            }
             ui.label("Filter:");
             ui.add(
                 egui::TextEdit::singleline(&mut filter)
@@ -5244,7 +5475,7 @@ impl ProjectApp {
             );
             ui.separator();
             // The lines go one below the other, not in the row of the list.
-            ui.vertical(|ui| {
+            ui.vertical(|ui| crate::solver_profile::with_output(ui, profile.as_ref(), |ui| {
                 let area = egui::ScrollArea::both()
                     .id_salt(("monitor output", selected))
                     .auto_shrink([false, false])
@@ -5258,7 +5489,7 @@ impl ProjectApp {
                         .collect();
                     crate::virtual_table::lines(ui, area, &shown);
                 }
-            });
+            }));
         });
         self.monitor.filter = filter;
         if pick.is_some() {
@@ -5346,6 +5577,17 @@ impl ProjectApp {
                 if ui.add_enabled(self.opening.is_none(), open).clicked() {
                     self.open_dialog(ui.ctx());
                 }
+                let tip = "Opens one of the projects opened last that still exist";
+                let mut picked = None;
+                ui.add_enabled_ui(self.opening.is_none(), |ui| {
+                    ui.menu_button("Open Recent", |ui| picked = self.recent_panel(ui))
+                        .response
+                        .on_hover_text(tip);
+                });
+                if let Some(path) = picked {
+                    self.open(ui.ctx(), path);
+                    ui.close();
+                }
                 let save = egui::Button::new("Save").shortcut_text("Ctrl+S");
                 if ui.add(save).clicked() {
                     self.save(false);
@@ -5418,6 +5660,9 @@ impl ProjectApp {
     }
 
     fn schematic(&mut self, ui: &mut egui::Ui) -> Vec<Action> {
+        self.keep_level();
+        self.prune_sockets();
+        self.shown = self.here();
         let mut incoming: HashMap<u64, Vec<(Vec<String>, String)>> = HashMap::new();
         let mut continuations: HashMap<u64, Continuation> = HashMap::new();
         let mut bundles: HashMap<u64, Vec<Bundle>> = HashMap::new();
@@ -5446,7 +5691,9 @@ impl ProjectApp {
             }
         }
         let base = self.export_base();
+        self.refresh_pictures(ui.ctx());
         let mut blocks: Vec<BlockView> = (self.nodes.iter())
+            .filter(|n| self.shown.contains(&n.id))
             .map(|n| {
                 let fe = n.link_data().map(|d| d.fe);
                 let rows = match (n.kind(), &n.status()) {
@@ -5509,11 +5756,23 @@ impl ProjectApp {
                     (Kind::Math | Kind::Switch, _) => {
                         numbers::number_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
                     }
+                    (Kind::Plot, _) => {
+                        visualize::plot_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
+                    }
+                    (Kind::Preview, _) => visualize::preview_rows(
+                        n,
+                        incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
+                    ),
+                    (Kind::Group | Kind::GroupInput | Kind::GroupOutput, _) => self.group_rows(n),
                     (Kind::Analysis, None) | (Kind::Note, _) => Vec::new(),
                 };
                 let continues = (self.links.iter())
                     .find(|l| l.target == n.id && links::is_state(l))
                     .map(|l| self.name_of(l.source));
+                let chain = match (n.kind(), fe) {
+                    (Kind::Analysis, Some(fe)) => chain_marks(fe, &rows),
+                    _ => HashMap::new(),
+                };
                 BlockView {
                     id: n.id,
                     name: n.name.clone(),
@@ -5547,7 +5806,15 @@ impl ProjectApp {
                     },
                     compact: self.compact.contains(&n.id),
                     number: n.as_number().map(|(b, switch)| (b.clone(), switch)),
+                    plot: self.plot_view(n),
+                    picture: self.picture(n.id),
+                    has_mesh: n
+                        .as_preview()
+                        .is_some_and(|p| p.model.mesh.element_count() > 0),
+                    preview: self.preview_view(n),
                     framed: frames::frame_of(&self.frames, n.id).is_some(),
+                    chain,
+                    sockets: self.socket_kinds(n.id),
                 }
             })
             .collect();
@@ -5596,6 +5863,7 @@ impl ProjectApp {
             drawn: HashMap::new(),
             focus_note: self.focus_note.take(),
             selected: self.selected.clone(),
+            here: self.shown.clone(),
         };
         let snarl_id = egui::Id::new(("project schematic", self.graph_generation));
         // Text on the blocks is not selectable: a drag on it moves the block.
@@ -5606,6 +5874,7 @@ impl ProjectApp {
             .style(schematic_style())
             .show(&mut self.graph, &mut viewer, ui);
         ui.style_mut().interaction.selectable_labels = selectable;
+        self.group_path(ui, ui.max_rect());
         // Blocks not drawn this frame keep their last size.
         self.block_sizes = std::mem::take(&mut viewer.sizes);
         self.block_sizes.extend(viewer.drawn.drain());
@@ -5701,6 +5970,7 @@ impl ProjectApp {
         }
         let at = to_global.inverse() * pos;
         (self.graph.nodes_pos_ids())
+            .filter(|(_, _, id)| self.shown.contains(id))
             .filter(|(_, min, id)| {
                 let size = self
                     .block_sizes
@@ -5754,28 +6024,24 @@ impl ProjectApp {
                     output: !drag.output,
                 };
                 let why = if drag.output {
-                    refusal(
-                        &self.nodes,
-                        &self.links,
-                        drag.id,
-                        &drag.path,
-                        block.id,
-                        &row.path,
-                    )
+                    self.verdict((drag.id, &drag.path), (block.id, &row.path))
                 } else {
-                    refusal(
-                        &self.nodes,
-                        &self.links,
-                        block.id,
-                        &row.path,
-                        drag.id,
-                        &drag.path,
-                    )
+                    self.verdict((block.id, &row.path), (drag.id, &drag.path))
                 };
                 verdicts.insert(key, why);
             }
         }
         verdicts
+    }
+
+    /// Why a wire from the pin `from` cannot end at the pin `to`; `None` if it can.
+    fn verdict(&self, from: (u64, &[String]), to: (u64, &[String])) -> Option<String> {
+        if self.group_pin(from.0, from.1) || self.group_pin(to.0, to.1) {
+            return self.group_refusal(from, to);
+        }
+        let slot = visualize::preview_slot(&self.nodes, to.0, from.1)
+            .unwrap_or_else(|| self.checked_slot(to.0, to.1));
+        refusal(&self.nodes, &self.links, from.0, from.1, to.0, &slot)
     }
 
     /// Says why the wire being dragged cannot end at the pin under the pointer.
@@ -5840,6 +6106,18 @@ impl ProjectApp {
                 }
             }
         }
+        // The wires of the sockets of groups.
+        for (from, to) in self.socket_wires() {
+            let (Some(source), Some(target)) = (block(from.node), block(to.node)) else {
+                continue;
+            };
+            if let (Some(output), Some(input)) = (
+                shown_row(&source.rows, &from.path),
+                shown_row(&target.rows, &to.path),
+            ) {
+                wired.push(((from.node, output), (to.node, input)));
+            }
+        }
         wired
     }
 
@@ -5879,7 +6157,6 @@ impl ProjectApp {
             self.output.push(format!("Not linked: {why}"));
             return;
         }
-        self.adopt_kind(source, &item, target, &slot);
         let (item, slot) = self.study_column(source, item, target, slot);
         let feedback = item.first().is_some_and(|c| c == links::LOOP);
         if slot.first().is_some_and(|c| c == links::MEASURE) {
@@ -6457,6 +6734,8 @@ impl ProjectApp {
             return;
         }
         self.sync_due = false;
+        self.refresh_number_kinds();
+        self.drop_series_conflicts();
         self.apply_values();
         self.evaluate_measures();
         self.evaluate_deformed();
@@ -6569,7 +6848,7 @@ impl ProjectApp {
             if at == target {
                 break;
             }
-            let job = crate::analysis::job_name(&self.name_of(at));
+            let job = crate::analysis::job_dir(at);
             incoming.continuation.upstream.push((dir.join(&job), job));
         }
         // The own steps of those that continue it, and of those that continue them.
@@ -6653,10 +6932,10 @@ impl ProjectApp {
                 let name = original.file_name()?.to_owned();
                 let dir = (self.settings.solver.work_dir())
                     .join(crate::analysis::job_name(&self.project_name()))
-                    .join(crate::analysis::job_name(&target.name))
+                    .join(crate::analysis::job_dir(target.id))
                     .join(format!(
                         "File-{}-{:016x}",
-                        crate::analysis::job_name(&source.name),
+                        crate::analysis::job_dir(source.id),
                         file.read.unwrap_or_default()
                     ));
                 let copy = dir.join(name);
@@ -6710,11 +6989,11 @@ impl ProjectApp {
                     // the source overwrites them. The target takes a copy in a folder named
                     // after the solved model, so that new modes make it out of date.
                     let project = crate::analysis::job_name(&self.project_name());
-                    let job = crate::analysis::job_name(&source.name);
+                    let job = crate::analysis::job_dir(source.id);
                     let solved = (self.settings.solver.work_dir().join(&project).join(&job))
                         .join(format!("{job}.eig"));
                     let dir = (self.settings.solver.work_dir().join(project))
-                        .join(crate::analysis::job_name(&target.name))
+                        .join(crate::analysis::job_dir(target.id))
                         .join(format!(
                             "Modes-{job}-{:016x}",
                             bound.input.unwrap_or_default()
@@ -6741,10 +7020,10 @@ impl ProjectApp {
                 let frd = bound.calculix_results_name()?;
                 let dir = (self.settings.solver.work_dir())
                     .join(crate::analysis::job_name(&self.project_name()))
-                    .join(crate::analysis::job_name(&target.name))
+                    .join(crate::analysis::job_dir(target.id))
                     .join(format!(
                         "Global-{}-{:016x}",
-                        crate::analysis::job_name(&source.name),
+                        crate::analysis::job_dir(source.id),
                         key
                     ));
                 let file = dir.join(&frd);
@@ -7077,9 +7356,15 @@ impl ProjectApp {
             | Action::RunStudy(_)
             | Action::DeleteAll(_)
             | Action::Pick(..)
+            | Action::EnterGroup(_)
+            | Action::LeaveGroup
+            | Action::RenameSocket(..)
             // Blocks moved are noticed on their own.
             | Action::MoveFrame(..) => return None,
-            Action::Link { target, .. } => vec![*target],
+            Action::Link { target, slot, .. } => match self.group_targets(*target, slot) {
+                Some(targets) => targets,
+                None => vec![*target],
+            },
             Action::SetExposed(id, ..)
             | Action::RenameExposed(id, ..)
             | Action::Unexpose(id, _) => {
@@ -7133,9 +7418,14 @@ impl ProjectApp {
             | Action::AddMath(_)
             | Action::AddSwitch(_)
             | Action::SetOperation(..)
-            | Action::SetNumberKind(..)
             | Action::SetNumberInput(..)
-            | Action::SetChoices(..) => Vec::new(),
+            | Action::SetChoices(..)
+            | Action::AddPlot(_)
+            | Action::AddPreview(_)
+            | Action::SetPlotKind(..)
+            | Action::SetBins(..)
+            | Action::Group(_)
+            | Action::Ungroup(_) => Vec::new(),
         })
     }
 
@@ -7286,10 +7576,19 @@ impl ProjectApp {
                     .map(|n| n.name.clone());
                 self.rename = name.map(|name| (id, name));
             }
-            Action::DeleteAll(ids) => self.confirm_delete = ids,
+            Action::DeleteAll(ids) => self.confirm_delete = self.deletable(ids),
             Action::DuplicateAll(ids) => {
                 for id in ids {
-                    self.duplicate(id);
+                    match self.node(id).map(|n| n.kind()) {
+                        Some(Kind::Group) => {
+                            if let Some(copy) = self.duplicate_group(id, egui::vec2(40.0, 260.0)) {
+                                let name = self.name_of(copy);
+                                self.output.push(format!("{name} created"));
+                            }
+                        }
+                        Some(Kind::GroupInput | Kind::GroupOutput) => {}
+                        _ => self.duplicate(id),
+                    }
                 }
             }
             Action::AddNote(pos) => {
@@ -7328,12 +7627,6 @@ impl ProjectApp {
                 self.add_switch(pos);
             }
             Action::SetOperation(id, operation) => self.set_operation(id, operation),
-            Action::SetNumberKind(id, kind) => {
-                if let Some((number, _)) = self.node(id).and_then(Node::as_number_mut) {
-                    number.kind = kind;
-                }
-                self.sync_due = true;
-            }
             Action::SetNumberInput(id, key, value) => {
                 if let Some((number, switch)) = self.node(id).and_then(Node::as_number_mut) {
                     number.set(switch, &key, value);
@@ -7341,6 +7634,14 @@ impl ProjectApp {
                 self.sync_due = true;
             }
             Action::SetChoices(id, count) => self.set_choices(id, count),
+            Action::AddPlot(pos) => {
+                self.add_plot(pos);
+            }
+            Action::AddPreview(pos) => {
+                self.add_preview(pos);
+            }
+            Action::SetPlotKind(id, kind) => self.set_plot_kind(id, kind),
+            Action::SetBins(id, bins) => self.set_bins(id, bins),
             Action::Toggle(id, path) => {
                 if let Some(node) = self.node(id)
                     && !node.expanded.remove(&path)
@@ -7353,7 +7654,28 @@ impl ProjectApp {
                 item,
                 target,
                 slot,
-            } => self.link(source, item, target, slot),
+            } => {
+                if self.group_pin(source, &item) || self.group_pin(target, &slot) {
+                    let pin = |node, path| file::GroupPin { node, path };
+                    self.link_pins(pin(source, item), pin(target, slot));
+                } else if let Some(slot) = self.new_choice(target, &slot) {
+                    self.link(source, item, target, slot);
+                } else if let Some(slot) = visualize::preview_slot(&self.nodes, target, &item) {
+                    self.keep_one_preview_link(target, &slot);
+                    self.link(source, item, target, slot);
+                } else {
+                    self.link(source, item, target, slot);
+                }
+            }
+            Action::Group(ids) => self.group_blocks(&ids),
+            Action::Ungroup(ids) => {
+                for id in ids {
+                    self.ungroup(id);
+                }
+            }
+            Action::EnterGroup(id) => self.enter_group(id),
+            Action::LeaveGroup => self.leave_group(),
+            Action::RenameSocket(id, path) => self.ask_socket_name(id, &path),
             Action::Continue {
                 source,
                 step,
@@ -7364,6 +7686,9 @@ impl ProjectApp {
             Action::Split(id, step) => self.split(id, step),
             Action::Merge(id) => self.merge(id),
             Action::Unlink { source, target } => {
+                if self.unlink_pins(source.as_ref(), target.as_ref()) {
+                    return;
+                }
                 self.exclude(source.as_ref(), target.as_ref());
                 self.unlink(|link| {
                     source.as_ref().is_none_or(|(id, path)| {
@@ -7382,9 +7707,7 @@ impl ProjectApp {
         };
         let mut open = true;
         let (mut done, mut cancelled) = (false, false);
-        let taken =
-            (self.nodes.iter()).any(|n| n.id != id && n.name.eq_ignore_ascii_case(name.trim()));
-        let valid = !name.trim().is_empty() && !taken;
+        let valid = !name.trim().is_empty();
         let noun = (self.nodes.iter().find(|n| n.id == id)).map_or("analysis", |n| n.kind().noun());
         egui::Window::new(format!("Rename {}", title_case(noun)))
             .id(crate::ids::window(ctx, "rename"))
@@ -7410,12 +7733,6 @@ impl ProjectApp {
                         }
                     }
                 });
-                if taken {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        "Another block of the project has this name.",
-                    );
-                }
                 ui.horizontal(|ui| {
                     if ui.add_enabled(valid, egui::Button::new("OK")).clicked() {
                         done = true;
@@ -7617,6 +7934,10 @@ impl ProjectApp {
             // What links take from it follows its changes.
             let revision = window.revision();
             if revision != analysis.seen {
+                // A window that is done loading has not changed the analysis.
+                if analysis.seen.is_some() && revision.is_some() {
+                    self.saver.window_edits += 1;
+                }
                 analysis.seen = revision;
                 changed = true;
             }
@@ -7655,9 +7976,11 @@ impl ProjectApp {
                     self.solve_chain(id);
                 }
                 Request::StopSolve => self.stop_solve(id),
-                Request::OpenAnalysis(name) => {
-                    if let Some(source) = self.nodes.iter().find(|n| n.name == name) {
-                        let source = source.id;
+                Request::OpenAnalysis(path) => {
+                    let source = (self.links.iter())
+                        .find(|l| l.target == id && links::covers(&path, links::slot(l)))
+                        .map(|l| l.source);
+                    if let Some(source) = source {
                         self.open_window(ctx, source, None);
                     }
                 }
@@ -7737,14 +8060,14 @@ fn analysis_viewport(id: u64) -> egui::ViewportId {
 impl eframe::App for ProjectApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, settings::STORAGE_KEY, &self.settings);
-        let last = self.path.clone().filter(|p| p.is_file());
-        eframe::set_value(storage, LAST_PROJECT_KEY, &last);
+        eframe::set_value(storage, RECENT_KEY, &self.recent);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         crate::style::sync(&ctx);
         self.poll_opening();
+        self.poll_saving(&ctx);
         self.check_active();
         if crate::crash_log::take_device_lost() {
             self.output.push(
@@ -7810,6 +8133,7 @@ impl eframe::App for ProjectApp {
             self.project_ui(ui);
         }
         self.rename_window(&ctx);
+        self.socket_name_window(&ctx);
         self.confirm_delete_window(&ctx);
         self.material_set_window(&ctx);
         self.mesh_block_window(&ctx);
@@ -7871,6 +8195,9 @@ impl ProjectApp {
                 if let Some((path, _)) = &self.opening {
                     ui.spinner();
                     ui.label(format!("Opening {} …", path.display()));
+                } else if let Some(status) = crate::save_status::get(&ctx) {
+                    ui.spinner();
+                    ui.label(status);
                 } else {
                     let file = (self.path.as_ref())
                         .map_or_else(|| "not saved yet".into(), |p| p.display().to_string());
@@ -7980,12 +8307,14 @@ enum RowWidget {
     Exposed(u32),
     /// The file a mesh export block writes to.
     ExportPath,
-    /// The operation of a Math block, the kind of the numbers of a Math or Switch block, one
-    /// of their inputs by index, and the number of choices of a Switch block.
+    /// The operation of a Math block, one of the inputs of a Math or Switch block by index,
+    /// and the number of choices of a Switch block.
     Operation,
-    NumberKind,
     Input(usize),
     Choices,
+    /// The kind of plot of a Plot block, and the bins of its histogram.
+    PlotType,
+    Bins,
 }
 
 /// A link of a whole category to a block, for its row: from where, how many items it takes
@@ -8045,6 +8374,137 @@ struct BlockView {
     framed: bool,
     /// A Math or Switch block, and whether it is a switch.
     number: Option<(NumberBlock, bool)>,
+    /// What a Plot block draws.
+    plot: Option<PlotView>,
+    /// Of a Preview block, the picture of its mesh once drawn, whether it has one, and the
+    /// numbers it shows.
+    picture: Option<egui::TextureId>,
+    has_mesh: bool,
+    preview: Option<PreviewView>,
+    /// The mark of the step chain at the rows of steps, by row path.
+    chain: HashMap<Vec<String>, ChainMark>,
+    /// Of a group and its Group Input and Group Output blocks, the type of each row of a
+    /// socket, by row path: the path of the row the socket was made from.
+    sockets: HashMap<Vec<String>, Vec<String>>,
+}
+
+/// Where a row of a step lies on the chain of steps, for the trace at the left of the rows
+/// of an analysis block: a solid line where the state flows, a dot at a step that passes its
+/// state on, a side branch to a ring at a step that only reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ChainMark {
+    /// An active step that passes its state on.
+    continues: bool,
+    /// An active step that leaves the state as it found it.
+    probing: bool,
+    /// The probing step is computed about the state the steps before leave.
+    branch: bool,
+    /// An active step that passes its state on lies above and below the row.
+    above: bool,
+    below: bool,
+}
+
+/// The chain marks of the rows of steps of an analysis: under Setup > Steps (and the inputs
+/// below an open step) and under Results, each list on its own.
+fn chain_marks(fe: &plx_model::FeModel, rows: &[Row]) -> HashMap<Vec<String>, ChainMark> {
+    let mut marks = HashMap::new();
+    let continuing = |s: usize| fe.steps[s].active && fe.steps[s].kind.continues_state();
+    for results in [false, true] {
+        let listed: Vec<(&Vec<String>, usize)> = (rows.iter())
+            .filter_map(|row| {
+                let name = match row.path.as_slice() {
+                    [setup, steps, name] if !results && setup == links::SETUP => {
+                        (steps == links::STEPS).then_some(name)?
+                    }
+                    [group, name] if results && group == links::RESULTS => name,
+                    _ => return None,
+                };
+                let index = fe.steps.iter().position(|s| &s.name == name)?;
+                Some((&row.path, index))
+            })
+            .collect();
+        for (k, &(path, s)) in listed.iter().enumerate() {
+            let step = &fe.steps[s];
+            let probing = step.active && !step.kind.continues_state();
+            let branch = probing
+                && (fe.step_handover(s).base_state()).is_some_and(|base| base != "Unloaded model");
+            marks.insert(
+                path.clone(),
+                ChainMark {
+                    continues: continuing(s),
+                    probing,
+                    branch,
+                    above: listed[..k].iter().any(|&(_, p)| continuing(p)),
+                    below: listed[k + 1..].iter().any(|&(_, p)| continuing(p)),
+                },
+            );
+        }
+    }
+    // The inputs below an open step: the line passes them on to the next step.
+    for row in rows.iter().filter(|r| r.path.len() == 4) {
+        if let Some(mark) = marks.get(&row.path[..3]).copied() {
+            let through = mark.below;
+            marks.insert(
+                row.path.clone(),
+                ChainMark {
+                    above: through,
+                    below: through,
+                    ..ChainMark::default()
+                },
+            );
+        }
+    }
+    marks
+}
+
+/// Where the step `name` starts and what it passes on, for the tooltips of its rows.
+fn chain_tip(fe: Option<&plx_model::FeModel>, name: &str) -> String {
+    let Some(fe) = fe else {
+        return String::new();
+    };
+    let Some(index) = fe.steps.iter().position(|s| s.name == name) else {
+        return String::new();
+    };
+    let handover = fe.step_handover(index);
+    format!(
+        "\n{}. Passes on: {}.",
+        handover.summary(),
+        handover.passes_on
+    )
+}
+
+/// Paints the chain trace of a row of a step in `rect`; `gap` is the space between rows,
+/// which the lines bridge.
+fn paint_chain(painter: &egui::Painter, rect: egui::Rect, depth: usize, mark: ChainMark, gap: f32) {
+    let color = crate::style::adapt(egui::Color32::from_rgb(40, 150, 60));
+    let stroke = egui::Stroke::new(2.0, color);
+    let x = rect.left() + 2.0 + 14.0 * depth as f32 - 10.0;
+    let middle = rect.center().y;
+    let top = rect.top() - gap * 0.5 - 0.5;
+    let bottom = rect.bottom() + gap * 0.5 + 0.5;
+    if mark.continues {
+        if mark.above {
+            painter.line_segment([egui::pos2(x, top), egui::pos2(x, middle)], stroke);
+        }
+        if mark.below {
+            painter.line_segment([egui::pos2(x, middle), egui::pos2(x, bottom)], stroke);
+        }
+        painter.circle_filled(egui::pos2(x, middle), 3.5, color);
+        return;
+    }
+    if mark.above && mark.below {
+        painter.line_segment([egui::pos2(x, top), egui::pos2(x, bottom)], stroke);
+    } else if mark.above && mark.branch {
+        painter.line_segment([egui::pos2(x, top), egui::pos2(x, middle)], stroke);
+    }
+    if mark.probing {
+        let ring = egui::pos2(x + 6.5, middle);
+        if mark.branch && mark.above {
+            let thin = egui::Stroke::new(1.5, color);
+            painter.line_segment([egui::pos2(x, middle), ring - egui::vec2(3.0, 0.0)], thin);
+        }
+        painter.circle_stroke(ring, 2.7, egui::Stroke::new(1.5, color));
+    }
 }
 
 /// An exposed parameter as its row shows it: its value and kind, `None` when its field is
@@ -8315,7 +8775,8 @@ fn block_rows(
                         format!(
                             "{name}: drag to another analysis to link its definition. Open \
                              it for its inputs, or drop the results of a step of another \
-                             analysis here: they go to the input that fits."
+                             analysis here: they go to the input that fits.{}",
+                            chain_tip(fe, &name)
                         )
                     } else {
                         format!("{name}: drag to another analysis to link it")
@@ -8426,8 +8887,9 @@ fn block_rows(
                 "Results of {}, what it produces: drag them to an input of a step under \
                  Setup > Steps of another analysis (its Temperatures, Eigenmodes or Global \
                  results), to the State row of another analysis, which continues from them, \
-                 or to empty space to continue in a new analysis",
-                step.name
+                 or to empty space to continue in a new analysis.{}",
+                step.name,
+                chain_tip(fe, &step.name)
             )
         } else {
             format!("{} is deactivated and has no results", step.name)
@@ -8877,6 +9339,11 @@ fn refusal(
             "{to} comes before {from} already, and a link cannot go back."
         ));
     }
+    if item.first().is_some_and(|c| c == links::VALUE)
+        && let Some(why) = series::series_refusal(nodes, existing, source, item, target, slot)
+    {
+        return Some(why);
+    }
     let first = slot.first().map(String::as_str);
     if first == Some(links::MEASURE) {
         return None;
@@ -8929,6 +9396,11 @@ fn refusal(
             )
         });
     }
+    if item.first().is_some_and(|c| c == links::VALUE)
+        && let Some(why) = numbers::number_refusal(nodes, existing, source, item, target, slot)
+    {
+        return why;
+    }
     if item.first().is_some_and(|c| c == links::VALUE) || feedback {
         let (given, taken) = (
             value_kind(nodes, source, item),
@@ -8938,9 +9410,15 @@ fn refusal(
         // of what it gives to; so does a Math or Switch block without a kind, at either end.
         let open =
             |id: u64, path: &[String]| node(id).is_some_and(|n| numbers::open_number(n, path));
+        // A plot and a preview take numbers of any kind.
+        let plotted = (target_node.as_plot().is_some_and(
+            |p| matches!(slot, [_, key] if p.kind.inputs().iter().any(|(k, _)| k == key)),
+        ) || target_node.as_preview().is_some())
+            && taken.is_none();
         let any = (feedback && given.is_none() && (taken.is_some() || open(target, slot)))
             || (open(source, item) && (taken.is_some() || open(target, slot)))
-            || (open(target, slot) && given.is_some());
+            || (open(target, slot) && given.is_some())
+            || plotted;
         if !any && (given.is_none() || given != taken) {
             let kind = |k: Option<ValueKind>| k.map_or("no number", ValueKind::label);
             return Some(format!(
@@ -9020,9 +9498,24 @@ fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
             [cell, key] if cell == links::PARAMETERS => (measure.kind.point().is_some()
                 && POINT_AXES.contains(&key.as_str()))
             .then_some(ValueKind::LENGTH),
+            [cell, name] if cell == links::VALUE && name == series::TIME => {
+                Some(ValueKind::Quantity(Quantity::Time))
+            }
             _ => (path == [links::VALUE, RESULT])
                 .then(|| crate::measure::value_kind(&measure.kind))
                 .flatten(),
+        };
+    }
+    if let Some(plot) = node.as_plot() {
+        // A plot takes numbers of any kind, and a count of bins.
+        return match path {
+            [cell, key] if cell == links::PARAMETERS && key == visualize::BINS => plot
+                .kind
+                .inputs()
+                .iter()
+                .any(|(k, _)| *k == key)
+                .then_some(ValueKind::Count),
+            _ => None,
         };
     }
     match path {
@@ -9459,8 +9952,29 @@ fn study_analysis_print(data: links::Data, mesh: StudyMesh, driven: impl Fn(u32)
         }
     }
     let empty = plx_mesh::FeMesh::default();
+    // The parts that driven mesh operations move change from point to point: their nodes
+    // count without their coordinates.
+    let moved: Vec<usize> = (data.fe.exposed.iter())
+        .filter(|e| driven(e.key))
+        .filter_map(|e| match &e.path.item {
+            plx_model::ItemRef::MeshOperation(name) => {
+                data.fe.mesh_operations.iter().find(|o| &o.name == name)
+            }
+            _ => None,
+        })
+        .flat_map(|o| o.part_indices(data.mesh))
+        .collect();
+    let still;
     let fe_mesh = match mesh {
-        StudyMesh::Own => data.mesh,
+        StudyMesh::Own if moved.is_empty() => data.mesh,
+        StudyMesh::Own => {
+            let mut copy = data.mesh.clone();
+            for node in data.mesh.part_nodes(&moved) {
+                copy.set_node(node, [0.0; 3]);
+            }
+            still = copy;
+            &still
+        }
         StudyMesh::Remeshed | StudyMesh::None => &empty,
     };
     let mut print = plx_mesh::Fnv::new();
@@ -9561,14 +10075,25 @@ fn measure_rows(
         NodeIcon::Setup,
         "What the block measures; double-click the block to change it.".into(),
     );
+    let series = measure.kind.is_series();
     let text = match (measure.value, busy) {
         (_, true) => "Computing …".to_owned(),
+        (Some(_), false) if series => {
+            crate::measure::shown_series(&measure.kind, &measure.series, units)
+        }
         (Some(value), false) => crate::measure::shown(&measure.kind, value, units),
         (None, false) => "No value".to_owned(),
     };
-    let mut tip = "The value, in the units of the block: drag its pin to the Outputs of a \
-                   parameter study, which reads it. It is computed anew whenever the results or the definition change."
-        .to_owned();
+    let mut tip = if series {
+        "The values, a series in the units of the block: drag its pin to a Math block, which \
+         computes with it value by value or makes one number of it (Max, Min, Mean), or to a \
+         Plot block. It is computed anew whenever the results or the definition change."
+    } else {
+        "The value, in the units of the block: drag its pin to the Outputs of a parameter \
+         study, which reads it. It is computed anew whenever the results or the definition \
+         change."
+    }
+    .to_owned();
     if let Some(why) = &measure.error {
         tip.push_str(&format!("\nNo value: {why}."));
     }
@@ -9601,6 +10126,21 @@ fn measure_rows(
                 )
             });
         }
+    }
+    if matches!(measure.kind, MeasureKind::History { whole: true, .. }) {
+        let time = units.unit(Quantity::Time);
+        rows.push(Row {
+            output: true,
+            state: Some(state),
+            ..row(
+                &[links::VALUE, series::TIME],
+                format!("Time [{time}]"),
+                NodeIcon::Amplitudes,
+                "The time of each value of the history, a series: drag its pin to X of a Plot \
+                 block to plot the values over the time."
+                    .into(),
+            )
+        });
     }
     rows.push(value);
     rows
@@ -9667,22 +10207,28 @@ fn campbell_rows(node: &Node, incoming: &[(Vec<String>, String)], state: CellSta
     const SHOWN: usize = 5;
     let critical = window.critical_speeds();
     for (index, speed) in critical.iter().enumerate().take(SHOWN) {
-        let order = crate::numeric::format_physical(speed.order);
+        let order = speed.order_label();
         rows.push(row(
             &["Campbell", "Critical", &index.to_string()],
             format!(
-                "{order}x: {} rpm",
+                "{order}: {} rpm",
                 crate::numeric::format_physical(crate::campbell::rpm(speed.speed).round())
             ),
             NodeIcon::Results,
-            format!(
-                "Critical speed: mode {}{} crosses the {order}x engine order line here.",
-                speed.mode,
-                match speed.whirl.letter() {
-                    "" => String::new(),
-                    letter => format!(" ({letter})"),
-                }
-            ),
+            if speed.order == 0.0 {
+                format!(
+                    "Critical speed: the backward wave of mode {} ({}) comes to rest here, a \
+                     standing wave in the stationary frame.",
+                    speed.mode,
+                    speed.branch_label()
+                )
+            } else {
+                format!(
+                    "Critical speed: mode {} ({}) crosses the {order} engine order line here.",
+                    speed.mode,
+                    speed.branch_label()
+                )
+            },
         ));
     }
     if critical.len() > SHOWN {
@@ -9715,6 +10261,8 @@ enum BlockKind {
     MeshExport,
     File,
     Note,
+    Plot,
+    Preview,
 }
 
 fn block_kinds() -> Vec<BlockKind> {
@@ -9736,6 +10284,8 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::MeshExport,
         BlockKind::File,
         BlockKind::Note,
+        BlockKind::Plot,
+        BlockKind::Preview,
     ]
 }
 
@@ -9805,12 +10355,13 @@ impl BlockKind {
             Self::Math => (
                 "Parameters",
                 "Math",
-                "add subtract multiply divide minimum maximum clamp number formula derived \
-                 calculate expression",
+                "add subtract multiply divide minimum maximum clamp mean average max min \
+                 number formula derived calculate expression series vector element-wise",
                 "Adds a block that computes a number from two others, like Blender's Math \
-                 node: add, subtract, multiply or divide by a factor, the smaller or the larger, \
-                 or a value kept between two limits. For parameters derived from others, such \
-                 as a length twice another one.",
+                 node: add, subtract, multiply or divide, the smaller or the larger, or a value \
+                 kept between two limits. With a series at an input it computes value by value, \
+                 like NumPy; Max, Min, Max Abs and Mean make one number of a series. For \
+                 parameters derived from others, such as a length twice another one.",
             ),
             Self::Switch => (
                 "Parameters",
@@ -9858,6 +10409,24 @@ impl BlockKind {
                  temperatures, the mesh of an input file (.inp), or geometry (STEP, IGES, \
                  BREP, STL). It reads the file again when it changes.",
             ),
+            Self::Plot => (
+                "Visualize",
+                "Plot",
+                "chart graph diagram curve line scatter histogram series history vector \
+                 visualize",
+                "Adds a block that plots the numbers and series linked to it in the block: a \
+                 line or points of Y over X, such as a whole history over its time, or a \
+                 histogram of the values of a field. Its type of plot decides its inputs.",
+            ),
+            Self::Preview => (
+                "Visualize",
+                "Preview",
+                "preview picture image thumbnail geometry mesh number value series vector \
+                 statistics view visualize",
+                "Adds a block that shows what is linked to it: a small picture of a mesh, so \
+                 that the schematic shows the geometry beside its analysis, a number, or a \
+                 series with its statistics.",
+            ),
             Self::Note => (
                 "Note",
                 "Note",
@@ -9893,6 +10462,8 @@ impl BlockKind {
             Self::Campbell => Action::AddCampbell(pos),
             Self::File => Action::AddFile(pos),
             Self::Note => Action::AddNote(pos),
+            Self::Plot => Action::AddPlot(pos),
+            Self::Preview => Action::AddPreview(pos),
         }
     }
 }
@@ -10021,6 +10592,8 @@ fn header_fill(kind: Kind) -> Option<egui::Color32> {
         Kind::Study | Kind::Campbell => crate::style::study_header(),
         Kind::MeshExport => crate::style::export_header(),
         Kind::Note => crate::style::note_header(),
+        Kind::Plot | Kind::Preview => crate::style::visualize_header(),
+        Kind::Group | Kind::GroupInput | Kind::GroupOutput => crate::style::group_header(),
         _ => return None,
     })
 }
@@ -10056,11 +10629,35 @@ struct Viewer {
     focus_note: Option<u64>,
     /// The blocks selected, which the items of a block's menu work on if it is one of them.
     selected: Vec<u64>,
+    /// The blocks shown: those right in the group open.
+    here: BTreeSet<u64>,
 }
 
 impl Viewer {
     fn block(&self, id: u64) -> Option<&BlockView> {
         self.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// The path that gives the pin of the row its colour: that of the pin a socket was made
+    /// from for the pin of a socket, else that of the row.
+    fn pin_type(&self, id: u64, path: &[String]) -> Vec<String> {
+        (self.block(id))
+            .and_then(|b| b.sockets.get(path))
+            .cloned()
+            .unwrap_or_else(|| path.to_vec())
+    }
+
+    /// Whether the row's pin is an empty one, which makes a new input, choice or column of
+    /// the block once a wire is dropped on it.
+    fn is_open_pin(&self, id: u64, path: &[String]) -> bool {
+        let Some(block) = self.block(id) else {
+            return false;
+        };
+        match block.kind {
+            Kind::GroupInput | Kind::GroupOutput | Kind::Switch => groups::is_open(path),
+            Kind::Study => matches!(path, [cell] if cell == links::OUTPUTS || cell == links::LOOP),
+            _ => false,
+        }
     }
 
     /// `pin` of the row of `path` in the block `id`, marked as fitting the wire being dragged
@@ -10142,10 +10739,8 @@ impl Viewer {
         let link_color = wire_color(&[links::VALUE.to_owned()]);
         // The fields of a Math or Switch block leave room for the label of its operation.
         let width = match widget {
-            RowWidget::Operation
-            | RowWidget::NumberKind
-            | RowWidget::Input(_)
-            | RowWidget::Choices => 112.0,
+            RowWidget::Operation | RowWidget::Input(_) | RowWidget::Choices => 106.0,
+            RowWidget::PlotType | RowWidget::Bins => 130.0,
             _ => 118.0,
         };
         // The label senses the pointer left of the field only, so that the field shows its
@@ -10258,11 +10853,12 @@ impl Viewer {
         );
         ui.spacing_mut().interact_size.y = field.height();
         match widget {
-            RowWidget::Operation
-            | RowWidget::NumberKind
-            | RowWidget::Input(_)
-            | RowWidget::Choices => {
+            RowWidget::Operation | RowWidget::Input(_) | RowWidget::Choices => {
                 self.edit_number_row(&mut ui, id, row, widget, field, &tip);
+                return;
+            }
+            RowWidget::PlotType | RowWidget::Bins => {
+                self.edit_plot_row(&mut ui, id, row, widget, field, &tip);
                 return;
             }
             RowWidget::Exposed(key) => {
@@ -10420,9 +11016,10 @@ impl Viewer {
             | RowWidget::Value(_)
             | RowWidget::Exposed(_)
             | RowWidget::Operation
-            | RowWidget::NumberKind
             | RowWidget::Input(_)
-            | RowWidget::Choices => return,
+            | RowWidget::Choices
+            | RowWidget::PlotType
+            | RowWidget::Bins => return,
         };
         response.on_hover_text(&tip);
         self.set_primitive(id, primitive, before);
@@ -10508,6 +11105,7 @@ impl SnarlViewer<u64> for Viewer {
         } else {
             "Shows only the header and the rows with a wire (H)"
         };
+        let toggle_rect = toggle.rect;
         let toggled = toggle.on_hover_text(toggle_tip).clicked();
         let (rect, icon) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
         match block.kind {
@@ -10592,6 +11190,31 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Switch, ink);
                 icon.on_hover_text("Gives one of several numbers, picked by its index");
             }
+            Kind::Plot => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Plot, ink);
+                icon.on_hover_text("Plots the numbers and series linked to it");
+            }
+            Kind::Preview => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Picture, ink);
+                icon.on_hover_text("Shows the mesh, number or series linked to it");
+            }
+            Kind::Group => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Group, ink);
+                icon.on_hover_text("Blocks put together into one; Tab opens it");
+            }
+            Kind::GroupInput => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::GroupInput, ink);
+                icon.on_hover_text("Gives the inputs of the group to the blocks in it");
+            }
+            Kind::GroupOutput => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::GroupOutput, ink);
+                icon.on_hover_text("Takes what the group gives out");
+            }
         }
         let text = egui::RichText::new(&block.name).strong();
         let label = ui.add(
@@ -10618,7 +11241,29 @@ impl SnarlViewer<u64> for Viewer {
         if toggled {
             self.actions.push(Action::Compact(vec![id]));
         }
-        if label.double_clicked() {
+        // A double-click anywhere on the header bar right of the triangle opens the block,
+        // not only on its name: the bar itself belongs to the schematic, to move the block.
+        let bar = egui::Rect::from_x_y_ranges(
+            toggle_rect.right()..=ui.max_rect().right(),
+            label.rect.y_range().expand(6.0),
+        );
+        // The schematic is zoomed and panned: the pointer is brought into its space first.
+        let layer = ui.layer_id();
+        let ctx = ui.ctx();
+        let bar_double = ctx.input(|i| {
+            i.pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+        }) && ctx.pointer_interact_pos().is_some_and(|screen| {
+            let local = ctx
+                .layer_transform_to_global(layer)
+                .map_or(screen, |t| t.inverse() * screen);
+            // Not through a window or menu over the schematic.
+            ctx.layer_id_at(screen)
+                .is_none_or(|l| l.order == egui::Order::Background)
+                && bar.contains(local)
+                && ui.clip_rect().contains(local)
+        });
+        if label.double_clicked() || bar_double {
             // A compact block opens to show its rows first, as in Blender.
             self.actions.push(if compact {
                 Action::Compact(vec![id])
@@ -10646,6 +11291,20 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Note => "Double-click edits its text.",
             Kind::Math => "Its operation and numbers are edited in the block.",
             Kind::Switch => "Its index and choices are edited in the block.",
+            Kind::Plot => "Its type of plot and its inputs are chosen in the block.",
+            Kind::Preview => "Shows the mesh, number or series linked to its row.",
+            Kind::Group => {
+                "Double-click or Tab opens the group; Ctrl+Tab or the path at the top left \
+                 goes back out."
+            }
+            Kind::GroupInput => {
+                "Drag a wire from its empty pin at the bottom to a block of the group to give \
+                 the group a new input."
+            }
+            Kind::GroupOutput => {
+                "Drag a wire from a block of the group to its empty pin at the bottom to give \
+                 the group a new output."
+            }
         };
         // The name takes the clicks of the header, so it opens the block's menu too.
         label.on_hover_text(tip).context_menu(|ui| {
@@ -10698,6 +11357,11 @@ impl SnarlViewer<u64> for Viewer {
         let painter = ui.painter();
         if response.hovered() {
             painter.rect_filled(rect, 2.0, crate::style::hover_fill());
+        }
+        if let Some(&mark) = self.block(id).and_then(|b| b.chain.get(&row.path)) {
+            // Results rows of steps sit one level up from those under Setup > Steps.
+            let depth = if row.path.len() == 2 { 1 } else { 2 };
+            paint_chain(painter, rect, depth, mark, ui.spacing().item_spacing.y);
         }
         let mut x = rect.left() + 2.0 + 14.0 * row.depth as f32;
         let middle = rect.center().y;
@@ -10805,11 +11469,16 @@ impl SnarlViewer<u64> for Viewer {
         let response = response.on_hover_text(tip);
         if toggled || (row.expander.is_some() && response.double_clicked()) {
             self.actions.push(Action::Toggle(id, row.path.clone()));
+        } else if response.double_clicked() && groups::socket_of(&row.path).is_some() {
+            self.actions
+                .push(Action::RenameSocket(id, row.path.clone()));
         } else if response.double_clicked() {
             self.actions.push(Action::Open(id, workspace_of(&row.path)));
         }
-        let color = wire_color(&row.path);
-        if row.path.first().is_some_and(|c| c == links::STATE) {
+        let color = wire_color(&self.pin_type(id, &row.path));
+        if row.input && self.is_open_pin(id, &row.path) {
+            self.typed(BlockPin::single(open_pin()), id, &row.path, false)
+        } else if row.path.first().is_some_and(|c| c == links::STATE) {
             let pin = BlockPin::single(PinInfo::square().with_fill(color).with_wire_color(color));
             self.typed(pin, id, &row.path, false)
         } else if row.input {
@@ -10848,7 +11517,11 @@ impl SnarlViewer<u64> for Viewer {
     ) -> impl egui_snarl::ui::SnarlPin + 'static {
         ui.allocate_exact_size(egui::vec2(0.0, ROW_HEIGHT), egui::Sense::hover());
         match self.row(snarl, pin.id.node, pin.id.output) {
-            Some((id, row)) if row.output && row.path.first().is_some_and(|c| c == links::LOOP) => {
+            Some((id, row))
+                if row.output
+                    && row.path.first().is_some_and(|c| c == links::LOOP)
+                    && !self.is_open_pin(id, &row.path) =>
+            {
                 let color = wire_color(&row.path);
                 let info = PinInfo::circle().with_fill(color).with_wire_color(color);
                 let shown = if pin.remotes.is_empty() {
@@ -10858,8 +11531,11 @@ impl SnarlViewer<u64> for Viewer {
                 };
                 self.typed(shown, id, &row.path, true)
             }
+            Some((id, row)) if row.output && self.is_open_pin(id, &row.path) => {
+                self.typed(BlockPin::single(open_pin()), id, &row.path, true)
+            }
             Some((id, row)) if row.output => {
-                let color = wire_color(&row.path);
+                let color = wire_color(&self.pin_type(id, &row.path));
                 // A wire takes the mixed colour of its two pins, so the results pin of a step
                 // whose wires all go to a State row gives them the green of a state link.
                 let state = vec![links::STATE.to_owned()];
@@ -10877,10 +11553,46 @@ impl SnarlViewer<u64> for Viewer {
         }
     }
 
+    // Blocks of other groups are not drawn.
+    fn visible(&mut self, node: &u64) -> bool {
+        self.here.contains(node)
+    }
+
     // Only a note has a body: its text.
     fn has_body(&mut self, node: &u64) -> bool {
         self.block(*node)
             .is_some_and(|b| b.kind == Kind::Note && !b.compact)
+    }
+
+    // A Plot and a Preview block show their picture below their rows, also compact.
+    fn has_footer(&mut self, node: &u64) -> bool {
+        self.block(*node)
+            .is_some_and(|b| matches!(b.kind, Kind::Plot | Kind::Preview))
+    }
+
+    fn show_footer(
+        &mut self,
+        node: NodeId,
+        _inputs: &[InPin],
+        _outputs: &[OutPin],
+        ui: &mut egui::Ui,
+        snarl: &mut Snarl<u64>,
+    ) {
+        let id = snarl[node];
+        let Some(block) = self.block(id) else {
+            return;
+        };
+        match block.kind {
+            Kind::Plot => {
+                if let Some(view) = &block.plot {
+                    self.show_plot(ui, view);
+                }
+            }
+            Kind::Preview => {
+                self.show_preview(ui, block.picture, block.has_mesh, block.preview.as_ref())
+            }
+            _ => {}
+        }
     }
 
     fn show_body(
@@ -11026,7 +11738,7 @@ impl SnarlViewer<u64> for Viewer {
             });
             // With the label bands of the frames above them.
             let blocks = (self.frames.iter())
-                .filter_map(|f| frames::frame_rect(f, snarl, &self.sizes))
+                .filter_map(|f| frames::frame_rect(f, snarl, &self.sizes, &self.here))
                 .fold(blocks, egui::Rect::union);
             if blocks.is_finite() {
                 let blocks = blocks.expand(40.0);
@@ -11443,6 +12155,15 @@ fn rounded(corners: &[egui::Pos2], radius: f32) -> Vec<egui::Pos2> {
     points
 }
 
+/// An empty pin, as Blender draws the one that makes a new socket: a ring without fill.
+fn open_pin() -> PinInfo {
+    let gray = egui::Color32::from_gray(150);
+    PinInfo::circle()
+        .with_fill(egui::Color32::TRANSPARENT)
+        .with_stroke(egui::Stroke::new(1.5, gray))
+        .with_wire_color(gray)
+}
+
 /// The pin of a row that takes or gives no link: there, but not to be seen.
 fn hidden_pin() -> PinInfo {
     PinInfo::circle()
@@ -11474,6 +12195,7 @@ fn layout_menu(ui: &mut egui::Ui, layout: &Layout, actions: &mut Vec<Action>) {
         "Compact View"
     };
     entry(ui, compact, "H", Action::Compact(targets.clone()));
+    entry(ui, "Group Blocks", "Ctrl+G", Action::Group(targets.clone()));
     entry(ui, "Frame Blocks", "Ctrl+J", Action::Frame(targets.clone()));
     if layout.framed {
         entry(ui, "Remove from Frame", "Alt+P", Action::Unframe(targets));
@@ -11498,7 +12220,31 @@ fn node_menu(
     };
     if kind.is_source() {
         // Sources have no steps and are not solved.
-        if kind == Kind::MeshExport {
+        if kind == Kind::Group {
+            entry(ui, "Open Group", "Tab", Action::EnterGroup(id));
+            entry(
+                ui,
+                "Ungroup",
+                "Ctrl+Alt+G",
+                Action::Ungroup(targets.clone()),
+            );
+        } else if matches!(kind, Kind::GroupInput | Kind::GroupOutput) {
+            entry(ui, "Leave Group", "Ctrl+Tab", Action::LeaveGroup);
+            ui.separator();
+            layout_menu(ui, layout, actions);
+            ui.separator();
+            let mut rename = |ui: &mut egui::Ui| {
+                if ui
+                    .add(egui::Button::new("Rename …").shortcut_text("F2"))
+                    .clicked()
+                {
+                    actions.push(Action::Rename(id));
+                    ui.close();
+                }
+            };
+            rename(ui);
+            return;
+        } else if kind == Kind::MeshExport {
             entry(ui, "Export Now", "", Action::ExportNow(id));
             entry(ui, "Choose File …", "", Action::Open(id, None));
         } else if kind == Kind::File {
@@ -11506,7 +12252,10 @@ fn node_menu(
             entry(ui, "Read Again", "", Action::ReadFile(id));
         } else if kind == Kind::Campbell {
             entry(ui, "Open Diagram …", "", Action::Open(id, None));
-        } else if !matches!(kind, Kind::RefineMesh | Kind::DeformedMesh) {
+        } else if !matches!(
+            kind,
+            Kind::RefineMesh | Kind::DeformedMesh | Kind::Plot | Kind::Preview
+        ) {
             entry(ui, "Edit …", "", Action::Open(id, None));
         }
         if matches!(kind, Kind::Mesh | Kind::RefineMesh) {
@@ -11705,9 +12454,9 @@ const ANALYSIS_TIP: &str = "Adds an analysis: a model of its own with geometry, 
 const PARAMETERS_TIP: &str = "Adds a block of named numbers: drag the pin of one to a \
                               parameter of another block, such as a length of a mesh block, \
                               which then takes its value.";
-const MEASURE_TIP: &str = "Adds a block that computes a key figure from the results of a \
-                           step linked to it, such as the largest von Mises stress, the \
-                           displacement of a node or an eigenfrequency.";
+const MEASURE_TIP: &str = "Adds a block that reads from the results of a step linked to it: \
+                           the values of a field over a region, the displacement of a node, \
+                           a history output or an eigenfrequency.";
 const STUDY_TIP: &str = "Adds a parameter study: a table of design points, each a set of \
                          values it gives to exposed parameters of analyses or numbers of \
                          other blocks, solved in turn, with the values of Measure blocks it \
@@ -11752,12 +12501,21 @@ struct MonitorRow {
     active: bool,
 }
 
-/// The project file stored at the last exit, if it still exists. It is stored as an
-/// `Option`, so it has to be read back as one.
-fn stored_last_project(storage: &dyn eframe::Storage) -> Option<PathBuf> {
-    eframe::get_value::<Option<PathBuf>>(storage, LAST_PROJECT_KEY)
-        .flatten()
-        .filter(|path| path.is_file())
+/// The recent project files stored at the last exit that still exist.
+fn stored_recent(storage: &dyn eframe::Storage) -> Vec<PathBuf> {
+    let mut recent = eframe::get_value::<Vec<PathBuf>>(storage, RECENT_KEY).unwrap_or_default();
+    recent.retain(|path| path.is_file());
+    recent.truncate(RECENT_MAX);
+    recent
+}
+
+/// `recent` with `path` first, once, and at most [`RECENT_MAX`] entries.
+fn with_recent(recent: &[PathBuf], path: &Path) -> Vec<PathBuf> {
+    let same = |other: &Path| other == path;
+    let mut list = vec![path.to_path_buf()];
+    list.extend(recent.iter().filter(|p| !same(p)).cloned());
+    list.truncate(RECENT_MAX);
+    list
 }
 
 /// Asks for a project file to save to, proposing the open one's name with `suffix`.
@@ -11781,6 +12539,12 @@ fn pick_project_file(current: Option<&Path>, title: &str, suffix: &str) -> Optio
 /// Prefixes an output message with the local time, `HH:MM:SS`.
 fn timestamped(message: String) -> String {
     format!("{} {message}", chrono::Local::now().format("%H:%M:%S"))
+}
+
+/// The name a new block starts with: blocks may share a name, they are told apart by their
+/// ids, so it is always `base`.
+fn block_name(base: &str) -> String {
+    base.to_owned()
 }
 
 #[cfg(test)]
@@ -11946,6 +12710,7 @@ mod tests {
             position: [1.0, 2.0],
             units: plx_model::UnitSystem::MmTonSC,
             cross_sections: vec![CrossSection {
+                id: plx_model::Id::new(),
                 name: "Girder".into(),
                 profile: BeamProfile::Rect { a: 0.02, b: 0.04 },
             }],
@@ -12221,6 +12986,7 @@ mod tests {
     #[test]
     fn a_refine_mesh_block_divides_the_element_sizes_of_geometry() {
         let geometry = plx_model::Geometry {
+            compounds: Vec::new(),
             source: "block.step".into(),
             brep: "shapes".into(),
             meshing: Default::default(),
@@ -12310,6 +13076,7 @@ mod tests {
         let mut fe = plx_model::FeModel::default();
         let mut step = plx_model::Step::new_static("Step-1");
         step.boundary_conditions.push(plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Fixed".into(),
             active: true,
@@ -12414,12 +13181,15 @@ mod tests {
         let mut nodes = vec![parameters, math, switch];
         let value = |name: &str| vec![links::VALUE.to_owned(), name.to_owned()];
         let input = |key: &str| vec![links::PARAMETERS.to_owned(), key.to_owned()];
-        // Without a kind, A takes any number; B of a product is a factor.
+        // Without links, A and B of a product take numbers of any kind.
         assert_eq!(
             refusal(&nodes, &[], 1, &value("Length"), 2, &input("a")),
             None
         );
-        assert!(refusal(&nodes, &[], 1, &value("Length"), 2, &input("b")).is_some());
+        assert_eq!(
+            refusal(&nodes, &[], 1, &value("Length"), 2, &input("b")),
+            None
+        );
         // The index of a switch is a count; its result goes on to a block of any kind.
         assert_eq!(
             refusal(&nodes, &[], 1, &value("Cells"), 3, &input(INDEX)),
@@ -12429,14 +13199,22 @@ mod tests {
             refusal(&nodes, &[], 3, &value(RESULT), 2, &input("a")),
             None
         );
-        // Once it has a kind, it takes only numbers of that kind.
+        // A sum takes only numbers of the kind its links give it.
         if let Some((number, _)) = nodes[1].as_number_mut() {
-            number.kind = Some(ValueKind::Quantity(Quantity::Force));
+            number.operation = MathOp::Add;
         }
-        assert!(refusal(&nodes, &[], 1, &value("Length"), 2, &input("a")).is_some());
+        let mut links = vec![Link {
+            source: 1,
+            target: 2,
+            item: value("Cells"),
+            slot: input("a"),
+            ..Default::default()
+        }];
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        assert!(refusal(&nodes, &links, 1, &value("Length"), 2, &input("b")).is_some());
         assert_eq!(
             value_kind(&nodes, 2, &value(RESULT)),
-            Some(ValueKind::Quantity(Quantity::Force))
+            Some(ValueKind::Count)
         );
         assert_eq!(parameter_label(&nodes, 3, &input("2")), "Choice 2");
         // A count is kept whole.
@@ -12445,6 +13223,183 @@ mod tests {
         assert!(number.set(true, "1", 2.4));
         assert_eq!(number.values[1], 2.0);
         assert!(!number.set(true, "9", 1.0));
+    }
+
+    #[test]
+    fn a_quotient_of_a_force_and_a_length_is_a_stiffness() {
+        let force = ValueKind::Quantity(Quantity::Force);
+        let stiffness = ValueKind::Quantity(Quantity::ForcePerLength);
+        let parameters = Node::read(ProjectNode::Parameters(file::ParameterSet {
+            id: 1,
+            name: "Parameters".into(),
+            parameters: vec![
+                Parameter::new("RF3", force, 4912.0),
+                Parameter::new("U3", ValueKind::LENGTH, 0.01),
+                Parameter::new("Stiffness", stiffness, 1.0),
+                Parameter::new("Area", ValueKind::Quantity(Quantity::Area), 1.0),
+            ],
+            ..Default::default()
+        }));
+        let math = Node::read(ProjectNode::Math(file::MathBlock {
+            id: 2,
+            name: "Math".into(),
+            operation: MathOp::Divide,
+            values: vec![0.0, 0.0],
+            ..Default::default()
+        }));
+        let sum = Node::read(ProjectNode::Math(file::MathBlock {
+            id: 3,
+            name: "Sum".into(),
+            ..Default::default()
+        }));
+        let mut nodes = vec![parameters, math, sum];
+        let value = |name: &str| vec![links::VALUE.to_owned(), name.to_owned()];
+        let input = |key: &str| vec![links::PARAMETERS.to_owned(), key.to_owned()];
+        let link = |item: Vec<String>, slot: Vec<String>, from_math: bool| Link {
+            source: if from_math { 2 } else { 1 },
+            target: if from_math { 3 } else { 2 },
+            item,
+            slot,
+            ..Default::default()
+        };
+        let result = value(RESULT);
+        // The force goes to A, then the length to B: the result is a force per length.
+        assert_eq!(refusal(&nodes, &[], 1, &value("RF3"), 2, &input("a")), None);
+        let mut links = vec![link(value("RF3"), input("a"), false)];
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        assert_eq!(value_kind(&nodes, 2, &input("a")), Some(force));
+        // Unlinked, B is a factor until a length goes to it.
+        assert_eq!(value_kind(&nodes, 2, &input("b")), Some(ValueKind::Factor));
+        assert_eq!(value_kind(&nodes, 2, &result), Some(force));
+        assert_eq!(
+            refusal(&nodes, &links, 1, &value("U3"), 2, &input("b")),
+            None
+        );
+        links.push(link(value("U3"), input("b"), false));
+        let (changed, removed) = numbers::refresh_kinds(&mut nodes, &mut links);
+        assert!(changed && !removed);
+        assert_eq!(value_kind(&nodes, 2, &result), Some(stiffness));
+        // Of a block with a force at A and a stiffness at its result, B is a length.
+        links.pop();
+        links.push(Link {
+            source: 1,
+            target: 3,
+            item: value("Stiffness"),
+            slot: input("a"),
+            ..Default::default()
+        });
+        links.push(link(result.clone(), input("b"), true));
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        assert_eq!(value_kind(&nodes, 2, &input("b")), Some(ValueKind::LENGTH));
+        assert!(refusal(&nodes, &links, 1, &value("Area"), 2, &input("b")).is_some());
+        // With a length at B, the result goes on only to a force per length.
+        links.truncate(1);
+        links.push(link(value("U3"), input("b"), false));
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        let sum_of_areas = Link {
+            source: 1,
+            target: 3,
+            item: value("Area"),
+            slot: input("a"),
+            ..Default::default()
+        };
+        links.push(sum_of_areas);
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        let why = refusal(&nodes, &links, 2, &result, 3, &input("b")).unwrap();
+        assert!(why.contains("force per length"), "{why}");
+        links.pop();
+        // A product of a force and a length is a moment.
+        if let Some((number, _)) = nodes[1].as_number_mut() {
+            number.operation = MathOp::Multiply;
+        }
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        assert_eq!(
+            value_kind(&nodes, 2, &result),
+            Some(ValueKind::Quantity(Quantity::Moment))
+        );
+        // A sum of a force and a length is none: the link of B goes.
+        if let Some((number, _)) = nodes[1].as_number_mut() {
+            number.operation = MathOp::Add;
+        }
+        let (_, removed) = numbers::refresh_kinds(&mut nodes, &mut links);
+        assert!(removed);
+        assert_eq!(links.len(), 1);
+        assert_eq!(value_kind(&nodes, 2, &result), Some(force));
+        // Unlinked, its numbers have no kind again.
+        links.clear();
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        assert_eq!(value_kind(&nodes, 2, &result), None);
+    }
+
+    #[test]
+    fn intermediate_results_have_any_unit_and_convert_back() {
+        let force = ValueKind::Quantity(Quantity::Force);
+        let parameters = Node::read(ProjectNode::Parameters(file::ParameterSet {
+            id: 1,
+            name: "Parameters".into(),
+            parameters: vec![
+                Parameter::new("F", force, 2.0),
+                Parameter::new("L", ValueKind::LENGTH, 3.0),
+                Parameter::new("E", ValueKind::Quantity(Quantity::Energy), 1.0),
+            ],
+            ..Default::default()
+        }));
+        let math = |id, operation| {
+            Node::read(ProjectNode::Math(file::MathBlock {
+                id,
+                name: format!("Math-{id}"),
+                operation,
+                values: vec![0.0, 0.0],
+                ..Default::default()
+            }))
+        };
+        let mut nodes = vec![
+            parameters,
+            math(2, MathOp::Multiply),
+            math(3, MathOp::Add),
+            math(4, MathOp::Multiply),
+            math(5, MathOp::Divide),
+        ];
+        let value = |name: &str| vec![links::VALUE.to_owned(), name.to_owned()];
+        let input = |key: &str| vec![links::PARAMETERS.to_owned(), key.to_owned()];
+        let link = |source, item: Vec<String>, target, key: &str| Link {
+            source,
+            target,
+            item,
+            slot: input(key),
+            ..Default::default()
+        };
+        let result = value(RESULT);
+        let mut links = vec![
+            link(1, value("F"), 2, "a"),
+            link(1, value("L"), 2, "b"),
+            link(1, value("E"), 3, "a"),
+            link(1, value("F"), 4, "a"),
+            link(1, value("F"), 4, "b"),
+        ];
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        // A force times a length, a moment, adds to an energy: the unit is the same.
+        assert_eq!(
+            value_kind(&nodes, 2, &result),
+            Some(ValueKind::Quantity(Quantity::Moment))
+        );
+        assert_eq!(refusal(&nodes, &links, 2, &result, 3, &input("b")), None);
+        // A force times a force has a unit no quantity has, and goes on to Math blocks...
+        let squared = value_kind(&nodes, 4, &result);
+        assert_eq!(
+            squared.map(ValueKind::describe).as_deref(),
+            Some("quantity in kg² m²/s^4")
+        );
+        assert_eq!(refusal(&nodes, &links, 4, &result, 5, &input("a")), None);
+        links.push(link(4, result.clone(), 5, "a"));
+        links.push(link(1, value("F"), 5, "b"));
+        let (_, removed) = numbers::refresh_kinds(&mut nodes, &mut links);
+        assert!(!removed);
+        // ... where over a force it is a force again.
+        assert_eq!(value_kind(&nodes, 5, &result), Some(force));
+        // A sum of an energy takes it no more.
+        let why = refusal(&nodes, &links, 4, &result, 3, &input("b")).unwrap();
+        assert!(why.contains("kg² m²/s^4"), "{why}");
     }
 
     #[test]
@@ -12459,18 +13414,73 @@ mod tests {
             color: frames::FRAME_COLORS[1].1,
             nodes: vec![1, 2],
         };
-        let rect = frames::frame_rect(&frame, &graph, &sizes).unwrap();
+        let shown = BTreeSet::from([1, 2, 3, 5]);
+        let rect = frames::frame_rect(&frame, &graph, &sizes, &shown).unwrap();
         assert!(rect.contains(egui::pos2(10.0, 10.0)));
         assert!(rect.contains(egui::pos2(510.0, 210.0)));
         assert!(!rect.contains(egui::pos2(900.0, 900.0)));
         // The label band lies above the blocks.
         assert!(rect.top() < -30.0);
+        // Blocks of another group do not count.
+        assert!(frames::frame_rect(&frame, &graph, &sizes, &BTreeSet::new()).is_none());
         let empty = file::Frame {
             nodes: vec![5],
             ..frame
         };
-        assert!(frames::frame_rect(&empty, &graph, &sizes).is_none());
+        assert!(frames::frame_rect(&empty, &graph, &sizes, &shown).is_none());
         assert_eq!(frames::frame_of(&[empty], 5), Some(0));
+    }
+
+    #[test]
+    fn an_exposed_transform_moves_the_mesh_of_a_closed_analysis() {
+        let mut mesh = plx_mesh::FeMesh::default();
+        mesh.set_node(1, [0.0; 3]);
+        mesh.set_node(2, [1.0, 0.0, 0.0]);
+        mesh.add_element(plx_mesh::Element {
+            id: 1,
+            type_name: "T3D2".into(),
+            shape: plx_mesh::ElementShape::Line2,
+            nodes: vec![1, 2],
+        })
+        .unwrap();
+        mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
+            name: "A".into(),
+            elements: vec![1],
+        });
+        let mut model = plx_model::FeModel::default();
+        let shift = plx_model::MeshOperation {
+            name: "Transform-1".into(),
+            parts: vec!["A".into()],
+            kind: plx_model::MeshOperationKind::Transform(plx_mesh::MeshTransform::Translate([
+                0.0, 1.0, 0.0,
+            ])),
+        };
+        model.set_mesh_operations(&mut mesh, vec![shift]);
+        let path = plx_model::ValuePath::new(
+            plx_model::ItemRef::MeshOperation("Transform-1".into()),
+            plx_model::Field::Y,
+        );
+        let key = model.expose(path.clone());
+        let data = ProjectAnalysis {
+            mesh,
+            model,
+            ..Default::default()
+        };
+        let mut analysis = Node::analysis(1, "Analysis-1".into(), data);
+        let rows = exposed_rows(analysis.exposing_fe().unwrap(), &BTreeSet::new(), &[]);
+        assert_eq!(rows[1].text, "Transform-1 Y");
+        assert!(analysis.set_exposed(key, 4.0));
+        let data = analysis.link_data().unwrap();
+        assert_eq!(data.fe.value_at(&path), Some(4.0));
+        assert_eq!(data.mesh.node(2), Some([1.0, 4.0, 0.0]));
+        // A study that drives the transform runs the same body at each of its points.
+        let print = |node: &Node| {
+            study_analysis_print(node.link_data().unwrap(), StudyMesh::Own, |k| k == key)
+        };
+        let before = print(&analysis);
+        assert!(analysis.set_exposed(key, 7.0));
+        assert_eq!(print(&analysis), before);
     }
 
     #[test]
@@ -12479,6 +13489,7 @@ mod tests {
         let mut model = plx_model::FeModel::default();
         let mut step = plx_model::Step::new_static("Step-1");
         step.loads.push(plx_model::Load {
+            id: plx_model::Id::new(),
             distribution: None,
             name: "Force-1".into(),
             active: true,
@@ -12487,6 +13498,9 @@ mod tests {
             kind: plx_model::LoadKind::force([0.0, -10.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
+            system: None,
+            follower: false,
         });
         model.steps.push(step);
         let force = plx_model::ValuePath::new(
@@ -12566,6 +13580,7 @@ mod tests {
             kind: MeasureKind::Eigenfrequency { mode: 2 },
             value: Some(12.5),
             evaluated: Some(7),
+            ..Default::default()
         };
         let mut node = Node::read(ProjectNode::Measure(block.clone()));
         assert_eq!(node.kind(), Kind::Measure);
@@ -12673,14 +13688,22 @@ mod tests {
             value_kind(&nodes, 2, &value),
             Some(ValueKind::Quantity(Quantity::Frequency))
         );
-        // A Math block without a kind takes the value, and then only values of its kind.
-        assert_eq!(refusal(&nodes, &[], 1, &value, 3, &input), None);
-        let kind = value_kind(&nodes, 1, &value);
+        // A sum without links takes the value, and then only values of its kind.
         if let Some((number, _)) = nodes[2].as_number_mut() {
-            number.kind = kind;
+            number.operation = MathOp::Add;
         }
         assert_eq!(refusal(&nodes, &[], 1, &value, 3, &input), None);
-        assert!(refusal(&nodes, &[], 2, &value, 3, &input).is_some());
+        let mut links = vec![Link {
+            source: 1,
+            target: 3,
+            item: value.clone(),
+            slot: input.clone(),
+            ..Default::default()
+        }];
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        let b = vec![links::PARAMETERS.to_owned(), "b".to_owned()];
+        assert_eq!(refusal(&nodes, &links, 1, &value, 3, &b), None);
+        assert!(refusal(&nodes, &links, 2, &value, 3, &b).is_some());
     }
 
     #[test]
@@ -13016,8 +14039,56 @@ mod tests {
     }
 
     #[test]
+    fn the_rows_of_steps_trace_the_chain() {
+        let mut model = plx_model::FeModel::default();
+        model.steps.push(plx_model::Step::new_static("Preload"));
+        let mut modes = plx_model::Step::new_frequency("Modes");
+        if let plx_model::StepKind::Frequency(settings) = &mut modes.kind {
+            settings.base = plx_model::Base::PreviousState;
+        }
+        model.steps.push(modes);
+        model.steps.push(plx_model::Step::new_static("Unload"));
+        model.steps.push(plx_model::Step::new_frequency("Free"));
+        let data = ProjectAnalysis {
+            model: model.clone(),
+            ..Default::default()
+        };
+        let node = Node::analysis(1, "Beam".into(), data);
+        let status = node.status().unwrap();
+        let open = [
+            vec!["Setup".to_owned()],
+            vec!["Setup".into(), "Steps".into()],
+        ];
+        let rows = block_rows(status, Some(&model), &open.into(), &[], &[], None);
+        let marks = chain_marks(&model, &rows);
+        for group in [vec!["Setup", "Steps"], vec!["Results"]] {
+            let mark = |step: &str| {
+                let mut path: Vec<String> = group.iter().map(|p| p.to_string()).collect();
+                path.push(step.to_owned());
+                marks[&path]
+            };
+            // The state flows from Preload past Modes to Unload.
+            let preload = mark("Preload");
+            assert!(preload.continues && !preload.above && preload.below);
+            let modes = mark("Modes");
+            assert!(modes.probing && modes.branch && modes.above && modes.below);
+            let unload = mark("Unload");
+            assert!(unload.continues && unload.above && !unload.below);
+            // A frequency step about the unloaded model stands apart.
+            let free = mark("Free");
+            assert!(free.probing && !free.branch && !free.below);
+        }
+        // The tooltip of a step row says where it starts.
+        let row = (rows.iter())
+            .find(|r| r.path == ["Results", "Modes"])
+            .unwrap();
+        assert!(row.tip.contains("Base: End of Preload"), "{}", row.tip);
+    }
+
+    #[test]
     fn a_study_counts_how_its_analyses_mesh() {
         let geometry = |brep: &str, max_size: f64| plx_model::Geometry {
+            compounds: Vec::new(),
             source: "part.step".into(),
             brep: brep.into(),
             meshing: plx_model::MeshingParameters {
@@ -13210,6 +14281,7 @@ mod tests {
                     frequency: 200.0 - 10.0 * i as f64,
                     whirl: Whirl::Backward,
                     unstable: false,
+                    nodal_diameter: None,
                 }],
             })
             .collect();
@@ -13236,20 +14308,30 @@ mod tests {
         // The 1x line f = speed / 2 pi meets the mode at 200 / (1 / 2 pi + 0.05) = 956 rad/s.
         let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(texts[2..], ["1x: 9131 rpm"]);
-        assert!(rows[2].tip.contains("mode 1 (B)"), "{}", rows[2].tip);
+        assert!(rows[2].tip.contains("mode 1 (backward)"), "{}", rows[2].tip);
     }
 
     #[test]
-    fn the_project_stored_at_exit_is_read_back() {
-        let path = std::env::temp_dir().join("nodalis_test_last_project.ndl");
-        std::fs::write(&path, "").unwrap();
+    fn recent_projects_keep_their_order_and_only_existing_files() {
+        let dir = std::env::temp_dir();
+        let (a, b) = (
+            dir.join("nodalis_test_recent_a.ndl"),
+            dir.join("nodalis_test_recent_b.ndl"),
+        );
+        std::fs::write(&a, "").unwrap();
+        std::fs::write(&b, "").unwrap();
+        let gone = dir.join("nodalis_test_recent_gone.ndl");
+        let list = with_recent(&with_recent(&[], &a), &b);
+        assert_eq!(list, [b.clone(), a.clone()]);
+        // Opening one again moves it to the front and does not list it twice.
+        assert_eq!(with_recent(&list, &a), [a.clone(), b.clone()]);
+        let many: Vec<PathBuf> = (0..20).map(|i| dir.join(format!("r{i}.ndl"))).collect();
+        assert_eq!(with_recent(&many, &a).len(), RECENT_MAX);
         let mut storage = MemoryStorage::default();
-        eframe::set_value(&mut storage, LAST_PROJECT_KEY, &Some(path.clone()));
-        assert_eq!(stored_last_project(&storage), Some(path.clone()));
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(stored_last_project(&storage), None);
-        eframe::set_value(&mut storage, LAST_PROJECT_KEY, &None::<PathBuf>);
-        assert_eq!(stored_last_project(&storage), None);
-        assert_eq!(stored_last_project(&MemoryStorage::default()), None);
+        eframe::set_value(&mut storage, RECENT_KEY, &vec![gone, a.clone(), b.clone()]);
+        assert_eq!(stored_recent(&storage), [a.clone(), b.clone()]);
+        assert!(stored_recent(&MemoryStorage::default()).is_empty());
+        std::fs::remove_file(&a).unwrap();
+        std::fs::remove_file(&b).unwrap();
     }
 }

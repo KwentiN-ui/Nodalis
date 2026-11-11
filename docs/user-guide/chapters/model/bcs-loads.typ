@@ -24,7 +24,8 @@ plates (rotations).
     components move the point and so the rigid body.],
   [Temperature], [Prescribed temperature (heat transfer, coupled and uncoupled steps); a
     #ui("Distribution") (@distributions) makes it vary over the region.],
-  [Submodel], [Displacements taken from the global model (static steps of a submodel,
+  [Submodel], [Displacements taken from the global model (static steps; offered only when the model type in the
+    model properties is #ui("Submodel"),
     @submodel). The check boxes select the displacements U1 to U3; the step of the global
     results is the one linked to the #ui("Global results") row. The global results hold no
     rotations.],
@@ -32,7 +33,8 @@ plates (rotations).
 )
 
 The region is a selection of faces, edges or nodes, a node set or a surface. Displacement and
-temperature boundary conditions can follow an #ui("Amplitude") (@amplitudes).
+temperature boundary conditions can follow an #ui("Amplitude") (@amplitudes). Each component of
+a displacement can also follow a table of its own over the step time (@value-tables).
 
 === Behavior: nodes or a point <displacement-behavior>
 
@@ -119,13 +121,14 @@ angle Theta of a cylindrical system is the one number that cannot be exposed.
   (@model-check) reports "Nodes in several rigid bodies or remote points" otherwise.
 - A coordinate system of its own at each node turns everything else on those nodes too, like
   a skewed symmetry plane (@symmetry); keep other supports and point loads off them.
-- Ansys features that CalculiX cannot carry over are left out: the #ui("Beam") behavior, the
-  augmented Lagrange formulation (Nodalis always writes exact constraints) and tabular values
-  per component (one amplitude acts on all components).
+- Ansys features that are left out: the #ui("Beam") behavior and the augmented Lagrange
+  formulation (Nodalis always writes exact constraints). Tabular values per component are
+  available (@value-tables).
 
 === Motion preview <motion-preview>
 
-When a displacement boundary condition follows an amplitude, a play button appears right of the
+When a displacement boundary condition follows an amplitude or a value table (@value-tables), a
+play button appears right of the
 #ui("Amplitude") field. It previews the prescribed motion in the 3D view: the nodes of the region
 move by the prescribed displacements times the amplitude, passing through the amplitude's time
 range in three seconds and starting again after a short rest. The button turns into a stop
@@ -137,7 +140,39 @@ values, the amplitude or the region show while it plays.
 Only the nodes of the region move; the rest of the mesh stays in place, so the elements next to
 the region stretch. The motion is exaggerated so that the largest displacement is a quarter of
 the model size; the dialog shows the current time of the amplitude and this scale. Rotations
-(`UR1` to `UR3`) are not shown.
+(`UR1` to `UR3`) are not shown. Components with a table (@value-tables) move along their table,
+so the preview also shows a motion in several directions at once.
+
+=== Value tables <value-tables>
+
+Instead of a fixed value, every component of a displacement (`U1` to `UR3`) and of a force,
+moment or pressure can follow a table of values over the step time. The small #ui("T") button
+right of the value opens the table in a window of its own. The first click starts a table that
+ramps from zero to the value at the end of the step; edit, add or paste rows there (two columns,
+time and value, for example from a spreadsheet). The value field then shows the number of
+points, and a click on it opens the table again. #ui("Remove Table") goes back to the fixed value.
+
+#screenshot("value-table.png", [`U1` and `U2` of one boundary condition, each with its own table])
+
+This describes a combined motion with one boundary condition: for example the tip of a lever
+pressed down by 0.8 mm in the first second and then moved 4 mm to the side while it rises to
+0.8 mm, with the tables `U1`: (0, 0), (1, 0), (2, 4) and `U2`: (0, 0), (1, -0.8), (2, 0.8). In
+CalculiX a boundary condition has one amplitude for all its components, so such a motion needs a
+boundary condition per direction; the Nodalis solver takes a curve per component.
+
+- The values are the displacements themselves (in the unit of the field), not factors. They are
+  linear between the points and constant before the first and after the last one.
+- A component with a table ignores the #ui("Amplitude") of the boundary condition or load; the
+  other components still follow it.
+- Times count from the start of the step. Set the #ui("Duration") of the step to the last
+  time of the table (a new static step lasts 1), otherwise the model check warns "Table goes
+  beyond the step". Choose the #ui("Frames") so that the results show the points of interest,
+  e.g. 2 frames for the times 1 and 2 above.
+- The increments of a nonlinear static step also end at every point of the tables and
+  amplitudes, between the frames too, so a motion that changes direction is applied along the
+  given path even with large increments. A linear step does not depend on the path and is
+  solved at the frames only. A dynamic step chooses its time step fine enough for the shortest
+  segment of the tables.
 
 == Loads <loads>
 
@@ -152,6 +187,8 @@ step. A frequency step takes no loads.
     to the nodes (`*CLOAD`). With #ui("Apply to all nodes individually") the whole force acts
     at every node of the region instead, as a concentrated force in CalculiX; it is off by
     default.],
+  [Excitation], [A force `F1` to `F3` that follows a signal (impulse, sine, chirp) to shake
+    the structure in a Dynamic step (@excitation).],
   [Remote Force], [Force `F1` to `F3` and moment `M1` to `M3` at a point that the selected
     faces, edges or points follow, rigidly or on average, as Ansys' remote force does
     (@remote-force). The way to put a moment on faces of solids.],
@@ -159,6 +196,12 @@ step. A frequency step takes no loads.
     node of beams and shells, which have rotations. 3D models only.],
   [Pressure], [Pressure on faces; positive values push into the material (`*DLOAD`). A
     #ui("Distribution") (@distributions) makes it vary over the faces, e.g. with depth.],
+  [Gravity], [Body force on the mass of whole parts or element sets (`*DLOAD`, `GRAV`); the materials need
+    a density. #ui("Definition") #ui("Standard Gravity") (default) takes only a
+    #ui("Direction") along an axis (`+X` to `-Z`, in plane models only `X` and `Y`; default
+    `-Z`, or `-Y` in plane models) with the standard acceleration of 9.80665 m/s² in every unit
+    system. #ui("User Defined") takes the acceleration vector `g1` to `g3` (`g1`, `g2` in plane
+    models). Switching keeps the nearest axis or the standard vector.],
   [Moving Load], [Wheel forces that travel over faces, one static step per position
     (@moving-load).],
   [Concentrated Flux], [Heat flow into every node of the region (`*CFLUX`).],
@@ -171,15 +214,20 @@ step. A frequency step takes no loads.
     (@model-properties).],
 )
 
+#screenshot("gravity-dialog.png", [Gravity dialog: standard gravity along `-Z`])
+
 Every load can follow an #ui("Amplitude"). Film and radiation have a second amplitude for the film
-coefficient or the emissivity.
+coefficient or the emissivity. The components of a force or moment and a pressure can also
+follow a table of their own over the step time (#ui("T") button, @value-tables). Forces,
+excitations and moments can be given in a coordinate system of their own and follow the
+deformation (@load-directions).
 
 In 2D models face loads act on element edges. In axisymmetric models forces act on the full
 circumference.
 
 #limitation[Line loads (force per length) are not available in the dialogs; a
-#ui("Force") along edges takes the total force (@force-region). Bolt pre-tension:
-@pre-tension. Defined temperature fields: @defined-fields.]
+#ui("Force") along edges takes the total force (@force-region). Bolt preloads: a
+#ui("Bolt") under #ui("Connections") (@bolts). Defined temperature fields: @defined-fields.]
 
 === What a force acts on <force-region>
 
@@ -206,6 +254,34 @@ selection of faces and edges carry the force.
 #screenshot("surface-traction-edge.png", [Force of 100 N along the free edge of a shell plate])
 
 #screenshot("force-dialog.png", [Force dialog with the Selection window])
+
+=== Coordinate system and follower loads <load-directions>
+
+A #ui("Force"), an #ui("Excitation") and a #ui("Moment") take their components in a
+#ui("Coordinate system") of the features (@features), like a displacement does; the
+default is the global one. In a rectangular system `F1` to `F3` act along its x, y and z axes;
+in a cylindrical one they are radial, tangential and axial at every node, so a force on a ring of
+faces can push outward all around or twist it. The arrows in the 3D view point the way the
+force acts.
+
+#screenshot("load-follower.png", [Force in a cylindrical system that follows the deformation])
+
+#fields(
+  [Coordinate system], [The directions of the components. The time tables of the components
+    (#ui("T")) need the global system.],
+  [Follow the deformation], [A follower load: under large deformations (#ui("Nlgeom") on the
+    step, also in explicit dynamics) its direction turns with the region. The region turns by the
+    rigid rotation that fits the motion of its nodes best; on the reference point of a rigid
+    body the force turns with the body, at a single node of a beam or shell with its
+    rotation. The size of the load stays. A force normal to a lever arm stays normal to it,
+    and a force along a slender beam stays along it however far the beam turns. Without
+    #ui("Nlgeom") it acts like a fixed load.],
+)
+
+The rotation of a region comes from the motion of all its nodes, so a region that deforms a lot
+in itself, such as a long edge that bends, turns by its mean rotation. Nodes on a straight line
+do not show a turn about that line: the load then turns with the line only. A single node of a
+solid has no rotation, so a follower load there keeps its direction.
 
 === Remote force <remote-force>
 
@@ -238,7 +314,11 @@ and the coupling when the input file is written.
 A remote force with the same selection, behavior, coordinate system, location and pinball region
 as another remote force, also of another step, or a displacement on a point shares that point:
 a remote force and a remote displacement on one face act on the same rigid body. Like that of a
-displacement, the coupling belongs to the whole model and stays in steps without the load.
+displacement, the coupling belongs to the whole model and stays in steps without the load. So a
+#ui("Rigid") point keeps its face rigid in every step: a #ui("Deformable") force on the same
+face in another step still loads the face, but as a rigid one, and the model check (@model-check)
+warns "Deformable coupling on a rigid selection". To compare both behaviors, use one analysis for
+each.
 Nodes held directly by a support in a step with the load are left out of the coupling. On the
 reference point of a rigid body the force and moment act on the rigid body itself, without a
 point of their own. The force and moment components have a #ui("P") button for parameter

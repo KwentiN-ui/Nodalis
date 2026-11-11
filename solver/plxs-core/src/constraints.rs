@@ -9,6 +9,9 @@ use crate::mesh::{NodeId, NodeRef};
 pub struct Constraints {
     pub equations: Vec<Equation>,
     pub rigid_bodies: Vec<RigidBody>,
+    /// Joints between two points, Nodalis's own keyword `*JOINT`.
+    #[serde(default)]
+    pub joints: Vec<Joint>,
     pub ties: Vec<Tie>,
     pub cyclic_symmetry: Option<CyclicSymmetryModel>,
     pub transforms: Vec<Transform>,
@@ -44,6 +47,26 @@ pub struct RigidBody {
 pub enum RigidBodyNodes {
     NodeSet(String),
     ElementSet(String),
+}
+
+/// `*JOINT` (no CalculiX keyword): a kinematic joint between two points, each the
+/// reference and rotation node of a rigid body or of a deformable coupling, or ground.
+/// The joint holds the relative motion of the second end against the first in the fixed
+/// directions of its frame: translations of the material points at `origin`, and the
+/// components of the relative rotation. The frame turns with the first end (in large
+/// rotations, NLGEOM); with ground as the first end it stays in place.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Joint {
+    pub name: String,
+    /// Reference and rotation node of each end; `None` for ground.
+    pub ends: [Option<[NodeId; 2]>; 2],
+    /// Where the joint is, undeformed.
+    pub origin: [f64; 3],
+    /// The local x, y and z directions of the joint frame (global components, orthonormal).
+    pub axes: [[f64; 3]; 3],
+    /// Held relative degrees of freedom: translations along x, y, z, then rotations about
+    /// them.
+    pub fixed: [bool; 6],
 }
 
 /// `*TIE`: the slave surface follows the master surface (nodes within the position

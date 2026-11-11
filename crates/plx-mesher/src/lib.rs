@@ -9,9 +9,11 @@ mod ffi;
 pub mod gmsh;
 mod operation;
 mod revolve;
+mod split;
 mod step_names;
+mod thicken;
 
-pub use operation::apply_cad_operation;
+pub use operation::{apply_cad_operation, apply_operation};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -248,6 +250,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         part_names,
         refinement: 1.0,
         signatures,
+        compounds: Vec::new(),
     };
     let display = tessellate(&geometry)?;
     Ok(CadImport {
@@ -705,6 +708,7 @@ pub fn generate_mesh(geometry: &Geometry) -> Result<GeneratedMesh, GmshError> {
         mesh = merge_part(&mesh, part.mesh);
         warnings.extend(part.warnings);
     }
+    mesh.compose_compounds(&geometry.compound_members());
     Ok(GeneratedMesh { mesh, warnings })
 }
 
@@ -735,13 +739,16 @@ fn parts(gmsh: &Gmsh, geometry: &Geometry) -> Result<Vec<(Shape, String)>, GmshE
 fn default_parts(gmsh: &Gmsh) -> Result<Vec<(Shape, String)>, GmshError> {
     let volumes = gmsh.entities(3)?;
     let shells = shells(gmsh, &free_faces(gmsh)?)?;
-    let edges = free_edges(gmsh)?;
+    let wires = wires(gmsh, &free_edges(gmsh)?)?;
     let shapes: Vec<Shape> = (volumes.iter().map(|&v| Shape::one(3, v)))
         .chain(shells.into_iter().map(|faces| Shape {
             dim: 2,
             tags: faces,
         }))
-        .chain(edges.iter().map(|&e| Shape::one(1, e)))
+        .chain(wires.into_iter().map(|edges| Shape {
+            dim: 1,
+            tags: edges,
+        }))
         .collect();
     let entities: Vec<Entity> = shapes.iter().map(Shape::first).collect();
     let names = entity_part_names(gmsh, &entities)?;
@@ -833,6 +840,81 @@ fn free_edges(gmsh: &Gmsh) -> Result<Vec<i32>, GmshError> {
         .collect())
 }
 
+/// The free edges grouped into wires: two edges that meet in a point where no other free edge
+/// ends and continue each other without a kink belong together, as the pieces of a composite
+/// curve that a CAD program exports as one curve (a straight piece and the arc it runs into,
+/// say). Edges that meet at a corner, or where three or more meet, stay apart, as the beams of
+/// a frame do. The wires come in the order of their lowest edge tag, their edges ascending.
+fn wires(gmsh: &Gmsh, edges: &[i32]) -> Result<Vec<Vec<i32>>, GmshError> {
+    /// The angle in which a kink still counts as a continuation: cosine of 5 degrees.
+    const CONTINUES: f64 = 0.9961946980917455;
+    // The end of an edge: where it lies and where it runs from there.
+    struct End {
+        edge: i32,
+        point: [f64; 3],
+        direction: [f64; 3],
+    }
+    let (min, max) = gmsh.bounding_box()?;
+    let extent = (0..3).map(|k| max[k] - min[k]).fold(0.0, f64::max);
+    let tolerance = 1e-6 * extent + 1e-9;
+    let mut ends = Vec::new();
+    for &edge in edges {
+        let (lo, hi) = gmsh.parameter_bounds(1, edge)?;
+        let (Some(&lo), Some(&hi)) = (lo.first(), hi.first()) else {
+            continue;
+        };
+        let h = 1e-3 * (hi - lo);
+        let p = gmsh.values(1, edge, &[lo, lo + h, hi - h, hi])?;
+        let [a, b, c, d] = p[..] else { continue };
+        ends.push(End {
+            edge,
+            point: a,
+            direction: sub(b, a),
+        });
+        ends.push(End {
+            edge,
+            point: d,
+            direction: sub(c, d),
+        });
+    }
+    let mut parent: BTreeMap<i32, i32> = edges.iter().map(|&e| (e, e)).collect();
+    fn root(parent: &BTreeMap<i32, i32>, mut edge: i32) -> i32 {
+        while parent[&edge] != edge {
+            edge = parent[&edge];
+        }
+        edge
+    }
+    for (k, end) in ends.iter().enumerate() {
+        let mut meets = ends
+            .iter()
+            .enumerate()
+            .filter(|(l, other)| *l != k && norm(sub(other.point, end.point)) <= tolerance);
+        let (Some((_, other)), None) = (meets.next(), meets.next()) else {
+            continue;
+        };
+        if other.edge == end.edge {
+            continue;
+        }
+        let (a, b) = (end.direction, other.direction);
+        let lengths = norm(a) * norm(b);
+        if lengths > 0.0 && -(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / lengths >= CONTINUES {
+            let (a, b) = (root(&parent, end.edge), root(&parent, other.edge));
+            if a != b {
+                parent.insert(a.max(b), a.min(b));
+            }
+        }
+    }
+    let mut wires: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
+    for &edge in parent.keys() {
+        wires.entry(root(&parent, edge)).or_default().push(edge);
+    }
+    Ok(wires.into_values().collect())
+}
+
+fn norm(a: [f64; 3]) -> f64 {
+    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+}
+
 /// Deletes a part of the geometry; `None` once no
 /// part is left. The other parts keep their names. Gmsh numbers the faces and edges anew
 /// when it reads the smaller geometry, so the local mesh sizes are renumbered after where
@@ -910,6 +992,7 @@ pub fn delete_parts_renumbered(
         ..geometry.clone()
     };
     smaller.renumber_mesh_items(&renumbered);
+    smaller.remove_from_compounds(deleted);
     Ok((Some(smaller), renumbered))
 }
 
@@ -1102,7 +1185,7 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
         let volume = match shape.dim {
             3 => shape.tags[0],
             2 => return shell_part_mesh(gmsh, geometry, part, &shape.tags),
-            _ => return line_part_mesh(gmsh, geometry, part, shape.tags[0]),
+            _ => return line_part_mesh(gmsh, geometry, part, &shape.tags),
         };
         // The other solids go, so that only this one is meshed.
         let others: Vec<(i32, i32)> = (volumes.iter())
@@ -1195,6 +1278,7 @@ fn shell_part_mesh(
     };
     let mut mesh = FeMesh::default();
     let mut part_elements = Part {
+        bodies: Vec::new(),
         name: part.to_string(),
         elements: Vec::new(),
     };
@@ -1231,6 +1315,10 @@ fn shell_part_mesh(
     }
     mesh.parts.push(part_elements);
     mesh.cad = cad_map(gmsh, &mesh, shell, options.order, true)?;
+    if let Some(thickening) = geometry.thickening(part) {
+        mesh = thicken::thicken(&mesh, part, thickening)
+            .map_err(|reason| GmshError::Other(format!("{part}: {reason}")))?;
+    }
     Ok(GeneratedMesh {
         mesh,
         warnings: gmsh.warnings()?,
@@ -1244,26 +1332,35 @@ fn line_part_mesh(
     gmsh: &Gmsh,
     geometry: &Geometry,
     part: &str,
-    edge: i32,
+    wire: &[i32],
 ) -> Result<GeneratedMesh, GmshError> {
     let edges = free_edges(gmsh)?;
-    // Only the edge stays, so that only it is meshed.
+    // Only the edges of the wire stay, so that only they are meshed.
     let others: Vec<(i32, i32)> = (gmsh.entities(3)?.into_iter().map(|v| (3, v)))
         .chain(free_faces(gmsh)?.into_iter().map(|f| (2, f)))
-        .chain(edges.iter().filter(|&&e| e != edge).map(|&e| (1, e)))
+        .chain(edges.iter().filter(|e| !wire.contains(e)).map(|&e| (1, e)))
         .collect();
     if !others.is_empty() {
         gmsh.remove(&others)?;
     }
+    if wire.len() > 1 {
+        // The pieces of a wire each come with a vertex of their own at the joints from some
+        // CAD programs; one vertex lets them share the node there.
+        gmsh.remove_all_duplicates()?;
+    }
     let options = MeshOptions::of_part(geometry, part);
     options.apply(gmsh)?;
     for (_, local_edges, size) in geometry.local_sizes() {
-        if local_edges.contains(&edge) && size.is_finite() && size > 0.0 {
+        let on_wire: Vec<f64> = (wire.iter())
+            .filter(|e| local_edges.contains(e))
+            .map(|&e| f64::from(e))
+            .collect();
+        if !on_wire.is_empty() && size.is_finite() && size > 0.0 {
             let field = gmsh.add_field("Constant")?;
             gmsh.set_field_number(field, "VIn", size)?;
             gmsh.set_field_number(field, "VOut", 1e22)?;
             gmsh.set_field_number(field, "IncludeBoundary", 1.0)?;
-            gmsh.set_field_numbers(field, "CurvesList", &[f64::from(edge)])?;
+            gmsh.set_field_numbers(field, "CurvesList", &on_wire)?;
             gmsh.set_background_field(field)?;
         }
     }
@@ -1276,68 +1373,80 @@ fn line_part_mesh(
     };
     let mut mesh = FeMesh::default();
     let mut part_elements = Part {
+        bodies: Vec::new(),
         name: part.to_string(),
         elements: Vec::new(),
     };
-    let (_, nodes) = gmsh.elements(gmsh_type, edge)?;
-    for element in nodes.chunks_exact(shape.node_count()) {
-        // Gmsh lists the end nodes first and the midside node last; the solver wants the
-        // midside node in the middle.
-        let order: &[usize] = if shape == ElementShape::Line3 {
-            &[0, 2, 1]
-        } else {
-            &[0, 1]
-        };
-        let mut ids = Vec::with_capacity(element.len());
-        for &k in order {
-            let tag = element[k];
-            let position = coords
-                .get(&tag)
-                .ok_or_else(|| GmshError::Other(format!("Node {tag} is missing")))?;
-            let id = node_id(tag)?;
-            mesh.set_node(id, *position);
-            ids.push(id);
+    let mut edge_elements: Vec<(i32, Vec<ElementId>)> = Vec::new();
+    for &edge in wire {
+        let first = part_elements.elements.len();
+        let (_, nodes) = gmsh.elements(gmsh_type, edge)?;
+        for element in nodes.chunks_exact(shape.node_count()) {
+            // Gmsh lists the end nodes first and the midside node last; the solver wants the
+            // midside node in the middle.
+            let order: &[usize] = if shape == ElementShape::Line3 {
+                &[0, 2, 1]
+            } else {
+                &[0, 1]
+            };
+            let mut ids = Vec::with_capacity(element.len());
+            for &k in order {
+                let tag = element[k];
+                let position = coords
+                    .get(&tag)
+                    .ok_or_else(|| GmshError::Other(format!("Node {tag} is missing")))?;
+                let id = node_id(tag)?;
+                mesh.set_node(id, *position);
+                ids.push(id);
+            }
+            let id = ElementId::try_from(mesh.element_count() + 1)
+                .map_err(|_| GmshError::Other("too many elements".into()))?;
+            mesh.add_element(Element {
+                id,
+                type_name: type_name.into(),
+                shape,
+                nodes: ids,
+            })
+            .map_err(|e| GmshError::Other(e.to_string()))?;
+            part_elements.elements.push(id);
         }
-        let id = ElementId::try_from(mesh.element_count() + 1)
-            .map_err(|_| GmshError::Other("too many elements".into()))?;
-        mesh.add_element(Element {
-            id,
-            type_name: type_name.into(),
-            shape,
-            nodes: ids,
-        })
-        .map_err(|e| GmshError::Other(e.to_string()))?;
-        part_elements.elements.push(id);
+        edge_elements.push((edge, part_elements.elements[first..].to_vec()));
     }
     if part_elements.elements.is_empty() {
         return Err(GmshError::Other("Gmsh created no elements".into()));
     }
     mesh.parts.push(part_elements);
-    mesh.cad = line_cad_map(gmsh, &mesh, edge)?;
+    mesh.cad = line_cad_map(gmsh, &mesh, &edge_elements)?;
     Ok(GeneratedMesh {
         mesh,
         warnings: gmsh.warnings()?,
     })
 }
 
-/// Where a CAD edge meshed as a line part and its vertices lie in the mesh: the edge's nodes
-/// and segments, and the node at each end vertex.
-fn line_cad_map(gmsh: &Gmsh, mesh: &FeMesh, edge: i32) -> Result<CadMap, GmshError> {
+/// Where the CAD edges of a line part and their vertices lie in the mesh: the nodes and
+/// segments of every edge, and the node at each end vertex.
+fn line_cad_map(
+    gmsh: &Gmsh,
+    mesh: &FeMesh,
+    edges: &[(i32, Vec<ElementId>)],
+) -> Result<CadMap, GmshError> {
     let mut map = CadMap::default();
-    let mut nodes = BTreeSet::new();
-    let mut segments = Vec::new();
-    for element in mesh.elements() {
-        nodes.extend(element.nodes.iter().copied());
-        segments.push([element.nodes[0], element.nodes[element.nodes.len() - 1]]);
-    }
-    map.nodes
-        .insert(CadEntity::Edge(edge), nodes.into_iter().collect());
-    map.segments.insert(edge, segments);
-    for vertex in gmsh.adjacencies(1, edge)?.1 {
-        let (_, tags) = gmsh.elements(POINT, vertex)?;
-        let nodes: Vec<NodeId> = tags.iter().map(|&t| node_id(t)).collect::<Result<_, _>>()?;
-        if !nodes.is_empty() {
-            map.nodes.insert(CadEntity::Vertex(vertex), nodes);
+    for (edge, elements) in edges {
+        let mut nodes = BTreeSet::new();
+        let mut segments = Vec::new();
+        for element in elements.iter().filter_map(|&id| mesh.element(id)) {
+            nodes.extend(element.nodes.iter().copied());
+            segments.push([element.nodes[0], element.nodes[element.nodes.len() - 1]]);
+        }
+        map.nodes
+            .insert(CadEntity::Edge(*edge), nodes.into_iter().collect());
+        map.segments.insert(*edge, segments);
+        for vertex in gmsh.adjacencies(1, *edge)?.1 {
+            let (_, tags) = gmsh.elements(POINT, vertex)?;
+            let nodes: Vec<NodeId> = tags.iter().map(|&t| node_id(t)).collect::<Result<_, _>>()?;
+            if !nodes.is_empty() {
+                map.nodes.insert(CadEntity::Vertex(vertex), nodes);
+            }
         }
     }
     Ok(map)
@@ -1640,6 +1749,7 @@ fn solid_mesh(gmsh: &Gmsh, order: i32, volumes: &[(i32, String)]) -> Result<FeMe
     for (volume, name) in volumes {
         let (_, nodes) = gmsh.elements(gmsh_type, *volume)?;
         let mut part = Part {
+            bodies: Vec::new(),
             name: name.clone(),
             elements: Vec::with_capacity(nodes.len() / shape.node_count()),
         };
@@ -1944,6 +2054,7 @@ fn display_mesh(
     };
     for (name, dimension, faces, own_edges) in groups {
         let mut part = Part {
+            bodies: Vec::new(),
             name,
             elements: Vec::new(),
         };

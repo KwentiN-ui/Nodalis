@@ -7,7 +7,9 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use plx_mesher::CadEntity;
-use plx_model::{CadOperation, CadOperationKind, Geometry, Quantity, UnitSystem};
+use plx_model::{
+    CadOperation, CadOperationKind, Geometry, Quantity, SplitKeep, SplitPlane, UnitSystem,
+};
 
 use crate::model::Model;
 use crate::viewport::{Click, ViewCommand, Viewport};
@@ -16,7 +18,7 @@ pub enum CadEditorResult {
     Open,
     /// Closed with OK: the operation, and its result when the preview made it for exactly
     /// this operation.
-    Ok(CadOperation, Option<Geometry>),
+    Ok(CadOperation, Option<Box<Geometry>>),
     Cancel,
 }
 
@@ -41,6 +43,10 @@ pub struct CadOperationEditor {
     shown: Shown,
     kind: CadOperationKind,
     value: f64,
+    /// The plane, the side kept and whether split solids stay one part, for a split.
+    plane: SplitPlane,
+    keep: SplitKeep,
+    compound: bool,
     units: UnitSystem,
     /// A parameter study gives the length.
     length_linked: bool,
@@ -97,6 +103,9 @@ impl CadOperationEditor {
             shown: Shown::Input,
             kind: operation.kind,
             value: operation.value,
+            plane: operation.plane,
+            keep: operation.keep,
+            compound: operation.compound,
             units,
             length_linked,
             picks,
@@ -128,7 +137,15 @@ impl CadOperationEditor {
             kind: self.kind,
             entities,
             value: self.value,
+            plane: self.plane,
+            keep: self.keep,
+            compound: self.compound,
         }
+    }
+
+    /// Whether a click picks something: not for a split along a global plane.
+    fn picking(&self) -> bool {
+        !(self.kind == CadOperationKind::SplitPlane && self.plane != SplitPlane::Face)
     }
 
     fn update_highlight(&mut self) {
@@ -141,11 +158,20 @@ impl CadOperationEditor {
     /// What is picked for the operation, one and many: corners of flat faces for a fillet
     /// or a chamfer of flat geometry.
     fn nouns(&self) -> (&'static str, &'static str) {
-        if self.flat && self.kind != CadOperationKind::PushPull {
+        if self.flat && self.corners() {
             ("corner", "corners")
         } else {
             (self.kind.picked_one(), self.kind.picked_noun())
         }
+    }
+
+    /// Whether it picks corners: a fillet or chamfer of flat geometry.
+    fn corners(&self) -> bool {
+        self.flat
+            && matches!(
+                self.kind,
+                CadOperationKind::Fillet | CadOperationKind::Chamfer
+            )
     }
 
     /// Where a picked vertex is drawn.
@@ -183,7 +209,10 @@ impl CadOperationEditor {
     /// What a click points at for the operation: the CAD edge near it, else the edge of
     /// the face under it nearest to it; or the planar face under it.
     fn entity_at(&self, click: &Click) -> Option<CadEntity> {
-        if self.flat && self.kind != CadOperationKind::PushPull {
+        if !self.picking() {
+            return None;
+        }
+        if self.corners() {
             return self.corner_at(click);
         }
         let view = self.view.as_ref()?;
@@ -194,10 +223,13 @@ impl CadOperationEditor {
                 (self.input.signatures.iter()).any(|s| s.entity == face && s.kind == "Plane");
             return planar.then_some(face);
         }
-        match crate::meshing::cad_pick(view, &hit, click.precision_at(hit.point)) {
+        let edge = match crate::meshing::cad_pick(view, &hit, click.precision_at(hit.point)) {
             Some(edge @ CadEntity::Edge(_)) => Some(edge),
             _ => crate::geometry_selection::edge_at(view, &hit).map(CadEntity::Edge),
-        }
+        }?;
+        // The edges of holes are curved.
+        let straight = (self.input.signatures.iter()).any(|s| s.entity == edge && s.kind == "Line");
+        (self.kind != CadOperationKind::HoleRing || !straight).then_some(edge)
     }
 
     /// Applies the operation to the input and shows the result, or says why it failed.
@@ -208,13 +240,8 @@ impl CadOperationEditor {
             .map_or_else(|| Ok(()), Err)
             .and_then(|()| operation.resolve(&self.input))
             .and_then(|entities| {
-                plx_mesher::apply_cad_operation(
-                    &self.input,
-                    operation.kind,
-                    &entities,
-                    operation.value,
-                )
-                .map_err(|e| e.to_string())
+                plx_mesher::apply_operation(&self.input, &operation, &entities)
+                    .map_err(|e| e.to_string())
             })
             .and_then(|geometry| {
                 let display = plx_mesher::tessellate(&geometry).map_err(|e| e.to_string())?;
@@ -271,7 +298,7 @@ impl CadOperationEditor {
                     if ok.clicked() {
                         let made = (self.result.as_ref())
                             .filter(|(_, _, previewed)| *previewed == operation)
-                            .map(|(_, geometry, _)| geometry.clone());
+                            .map(|(_, geometry, _)| Box::new(geometry.clone()));
                         result = CadEditorResult::Ok(operation, made);
                     }
                     if let Some(problem) = problem {
@@ -303,6 +330,9 @@ impl CadOperationEditor {
                         {
                             // Edges stay picked from fillet to chamfer, not for faces.
                             self.picks.retain(|&e| kind.picks(e));
+                            if kind == CadOperationKind::SplitPlane {
+                                self.picks.clear();
+                            }
                             self.update_highlight();
                         }
                     }
@@ -315,6 +345,10 @@ impl CadOperationEditor {
                         self.units,
                         Quantity::Length,
                     ));
+                    // The outline of the plane moves with its offset.
+                    if response.changed() {
+                        self.scene_due = true;
+                    }
                     if self.length_linked {
                         response.on_disabled_hover_text(
                             "A parameter study gives it through the link of its row.",
@@ -322,6 +356,12 @@ impl CadOperationEditor {
                     }
                 });
                 ui.end_row();
+                if self.kind == CadOperationKind::SplitPlane {
+                    self.split_rows(ui);
+                }
+                if !self.picking() {
+                    return;
+                }
                 let (one, many) = self.nouns();
                 ui.label(capitalised(many));
                 ui.horizontal(|ui| {
@@ -359,7 +399,7 @@ impl CadOperationEditor {
             ui.separator();
             if ui
                 .add_enabled(
-                    self.view.is_some() && !self.picks.is_empty(),
+                    self.view.is_some() && (!self.picks.is_empty() || !self.picking()),
                     egui::Button::new("Preview"),
                 )
                 .on_hover_text("Applies the operation to the geometry and shows the result.")
@@ -381,7 +421,20 @@ impl CadOperationEditor {
                         normal, outwards for a positive offset; a click on a picked face removes \
                         it. Neighbours at right angles follow, sloped ones get a step."
                         .to_owned(),
-                    kind if self.flat => format!(
+                    CadOperationKind::SplitPlane if self.plane == SplitPlane::Face => {
+                        "Click the planar face whose plane to cut along; the offset moves the \
+                         cut into the part. The parts the plane runs through are split."
+                            .to_owned()
+                    }
+                    CadOperationKind::SplitPlane => "The parts the plane runs through are \
+                        split; the outline shows where. The offset moves the plane along its \
+                        axis."
+                        .to_owned(),
+                    CadOperationKind::HoleRing => "Click the circular edges of holes on planar \
+                        faces; each face gets a ring of the width around the hole, a face of \
+                        its own to pick. A click on a picked edge removes it."
+                        .to_owned(),
+                    kind if self.corners() => format!(
                         "Click the corners of the faces to {}; a click on a picked corner \
                          removes it.",
                         kind.label().to_lowercase()
@@ -391,6 +444,9 @@ impl CadOperationEditor {
                         kind.label().to_lowercase()
                     ),
                 });
+            }
+            None if !self.picking() => {
+                ui.weak("The result of the operation.");
             }
             None => {
                 ui.weak(format!(
@@ -418,6 +474,10 @@ impl CadOperationEditor {
                     .collect(),
                 _ => Vec::new(),
             };
+            let mut edges = edges;
+            if self.shown == Shown::Input {
+                edges.extend(self.plane_outline());
+            }
             // The picked corners, drawn as points.
             let nodes = match self.shown {
                 Shown::Input => (self.picks.iter())
@@ -469,6 +529,10 @@ impl CadOperationEditor {
             && let Some(entity) = self.entity_at(&click)
         {
             if !self.picks.remove(&entity) {
+                // A plane is taken from one face.
+                if self.kind == CadOperationKind::SplitPlane {
+                    self.picks.clear();
+                }
                 self.picks.insert(entity);
             }
             self.update_highlight();
@@ -486,6 +550,91 @@ impl CadOperationEditor {
                 .unwrap_or_default();
             ui.ctx().request_repaint();
         }
+    }
+}
+
+impl CadOperationEditor {
+    /// The rows of a split by plane: the plane, the side kept and whether solids cut in two
+    /// stay one part.
+    fn split_rows(&mut self, ui: &mut egui::Ui) {
+        ui.label("Plane");
+        let before = self.plane;
+        egui::ComboBox::from_id_salt("split plane")
+            .selected_text(self.plane.label())
+            .show_ui(ui, |ui| {
+                for plane in SplitPlane::ALL {
+                    ui.selectable_value(&mut self.plane, plane, plane.label());
+                }
+            });
+        if self.plane != before {
+            self.picks.clear();
+            self.update_highlight();
+        }
+        ui.end_row();
+        ui.label("Keep");
+        egui::ComboBox::from_id_salt("split keep")
+            .selected_text(self.keep.label(self.plane))
+            .show_ui(ui, |ui| {
+                for keep in SplitKeep::ALL {
+                    ui.selectable_value(&mut self.keep, keep, keep.label(self.plane));
+                }
+            });
+        ui.end_row();
+        ui.label("Solids");
+        ui.add_enabled_ui(self.keep == SplitKeep::Both, |ui| {
+            ui.checkbox(&mut self.compound, "Keep the pieces as one part")
+                .on_hover_text(
+                    "On: a solid cut in two stays one part of the FE model, a compound part \
+                     of its pieces, which are tied where they were cut. Off: each piece is a \
+                     part of its own.",
+                );
+        });
+        ui.end_row();
+        if self.plane != before {
+            self.scene_due = true;
+        }
+    }
+
+    /// The outline of a global plane over the input, as edges in the view.
+    fn plane_outline(&self) -> Vec<[glam::Vec3; 2]> {
+        if self.kind != CadOperationKind::SplitPlane {
+            return Vec::new();
+        }
+        let (Some(axis), Some(view)) = (self.plane.axis(), self.view.as_ref()) else {
+            return Vec::new();
+        };
+        let Some(k) = axis.iter().position(|&a| a == 1.0) else {
+            return Vec::new();
+        };
+        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for s in &self.input.signatures {
+            for j in 0..3 {
+                lo[j] = lo[j].min(s.min[j]);
+                hi[j] = hi[j].max(s.max[j]);
+            }
+        }
+        if !lo.iter().chain(&hi).all(|x| x.is_finite()) {
+            return Vec::new();
+        }
+        // A little larger than the geometry, at the offset.
+        let (a, b) = ((k + 1) % 3, (k + 2) % 3);
+        let margin = |j: usize| 0.1 * (hi[j] - lo[j]).max(1e-9);
+        let corner = |u: f64, v: f64| {
+            let mut p = [0.0; 3];
+            p[k] = self.value;
+            p[a] = u;
+            p[b] = v;
+            view.to_render(p)
+        };
+        let (u0, u1) = (lo[a] - margin(a), hi[a] + margin(a));
+        let (v0, v1) = (lo[b] - margin(b), hi[b] + margin(b));
+        let c = [
+            corner(u0, v0),
+            corner(u1, v0),
+            corner(u1, v1),
+            corner(u0, v1),
+        ];
+        vec![[c[0], c[1]], [c[1], c[2]], [c[2], c[3]], [c[3], c[0]]]
     }
 }
 

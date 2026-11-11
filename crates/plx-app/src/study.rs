@@ -450,7 +450,7 @@ impl StudyEditor {
                         }
                     });
                 ui.separator();
-                ui.horizontal_wrapped(|ui| {
+                crate::layout::wrapped_row(ui, |ui| {
                     ui.radio_value(&mut fill.mode, FillMode::Grid, "All combinations")
                         .on_hover_text("A point for every combination of the values.");
                     ui.radio_value(&mut fill.mode, FillMode::OneAtATime, "One at a time")
@@ -910,6 +910,13 @@ pub fn shown(kind: ValueKind, value: f64, units: UnitSystem) -> String {
         }
         ValueKind::Count => format!("{value:.0}"),
         ValueKind::Factor => crate::results::format_value(value as f32),
+        ValueKind::Derived(dimension) => {
+            format!(
+                "{} {}",
+                crate::results::format_value(value as f32),
+                dimension.si()
+            )
+        }
     }
 }
 

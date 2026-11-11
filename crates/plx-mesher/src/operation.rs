@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use plx_mesh::CadEntity;
-use plx_model::{CadOperationKind, EntitySignature, Geometry, match_entities};
+use plx_model::{CadOperation, CadOperationKind, EntitySignature, Geometry, match_entities};
 
 use crate::gmsh::{Boolean, Gmsh, GmshError, with_gmsh};
 use crate::{Shape, TempFile, default_parts, parts, signatures};
@@ -21,14 +21,28 @@ pub fn apply_cad_operation(
     entities: &[CadEntity],
     value: f64,
 ) -> Result<Geometry, GmshError> {
-    let fail = |message: String| GmshError::Other(message);
-    let operation = plx_model::CadOperation {
+    let operation = CadOperation {
         kind,
-        entities: Vec::new(),
         value,
+        ..CadOperation::default()
     };
+    apply_operation(input, &operation, entities)
+}
+
+/// [`apply_cad_operation`] with all settings of the operation, those of a split among
+/// them; its own picks are not used but `entities`, which are those of `input`.
+pub fn apply_operation(
+    input: &Geometry,
+    operation: &CadOperation,
+    entities: &[CadEntity],
+) -> Result<Geometry, GmshError> {
+    let fail = |message: String| GmshError::Other(message);
+    let (kind, value) = (operation.kind, operation.value);
     if let Some(problem) = operation.problem() {
         return Err(fail(capitalised(&problem)));
+    }
+    if kind.splits() && !(kind == CadOperationKind::HoleRing && value == 0.0) {
+        return apply_split(input, operation, entities);
     }
     // A radius, distance or offset of zero changes nothing: the input is given on as it is,
     // so that a parameter study can switch the operation off.
@@ -54,6 +68,9 @@ pub fn apply_cad_operation(
                 round_edges(gmsh, kind, entities, value)?
             }
             CadOperationKind::PushPull => push_pull(gmsh, entities, value)?,
+            CadOperationKind::SplitPlane | CadOperationKind::HoleRing => {
+                unreachable!("splits are applied by apply_split")
+            }
         };
         if made.is_empty() {
             return Err(fail(format!(
@@ -106,6 +123,44 @@ pub fn apply_cad_operation(
         brep,
         part_names,
         signatures,
+        ..input.clone()
+    })
+}
+
+/// A split of the geometry, see [`crate::split`]: the parts keep their names, those cut in
+/// pieces numbered after them.
+fn apply_split(
+    input: &Geometry,
+    operation: &CadOperation,
+    entities: &[CadEntity],
+) -> Result<Geometry, GmshError> {
+    let file = TempFile::with_contents("brep", &input.brep)?;
+    let result = TempFile::new("brep");
+    let (part_names, signatures, mut compounds) = with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        let split = match operation.kind {
+            CadOperationKind::SplitPlane => {
+                crate::split::split_by_plane(gmsh, input, operation, entities)?
+            }
+            _ => crate::split::split_around_holes(gmsh, input, operation, entities)?,
+        };
+        gmsh.write(&result.0)?;
+        gmsh.clear()?;
+        gmsh.import_shapes(&result.0)?;
+        let names = crate::split::names_after(gmsh, &split.places)?;
+        Ok((names, signatures(gmsh)?, split.compounds))
+    })?;
+    for compound in &mut compounds {
+        compound.parts.retain(|p| part_names.contains(p));
+    }
+    compounds.retain(|c| !c.parts.is_empty());
+    let brep = std::fs::read_to_string(&result.0)
+        .map_err(|e| GmshError::Other(format!("{}: {e}", result.0.display())))?;
+    Ok(Geometry {
+        brep,
+        part_names,
+        signatures,
+        compounds,
         ..input.clone()
     })
 }
@@ -306,7 +361,7 @@ fn round_corners(
 }
 
 /// The unit normal of a planar face, either way round.
-fn plane_normal(gmsh: &Gmsh, face: i32) -> Result<[f64; 3], GmshError> {
+pub(crate) fn plane_normal(gmsh: &Gmsh, face: i32) -> Result<[f64; 3], GmshError> {
     let (min, max) = gmsh.parameter_bounds(2, face)?;
     let [u0, v0, u1, v1] = [min[0], min[1], max[0], max[1]];
     let corners = gmsh.values(2, face, &[u0, v0, u1, v0, u0, v1])?;
@@ -404,7 +459,7 @@ fn move_face(gmsh: &Gmsh, face: i32, offset: f64) -> Result<Vec<(i32, i32)>, Gms
 }
 
 /// The unit normal of a planar face pointing out of the solid it bounds.
-fn outward_normal(gmsh: &Gmsh, face: i32, volume: i32) -> Result<[f64; 3], GmshError> {
+pub(crate) fn outward_normal(gmsh: &Gmsh, face: i32, volume: i32) -> Result<[f64; 3], GmshError> {
     let n = plane_normal(gmsh, face)?;
     // Which side the solid is on, a little off a point of the face.
     let (lo, hi) = gmsh.entity_bounding_box(2, face)?;
@@ -470,7 +525,7 @@ fn leaving(gmsh: &Gmsh, curve: i32, vertex: i32) -> Result<[f64; 3], GmshError> 
     Ok([0, 1, 2].map(|k| (near[k] - at[k]) / length))
 }
 
-fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+pub(crate) fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     (0..3).map(|k| (a[k] - b[k]).powi(2)).sum::<f64>().sqrt()
 }
 

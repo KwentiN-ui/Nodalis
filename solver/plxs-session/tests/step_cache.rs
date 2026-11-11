@@ -233,3 +233,21 @@ fn sets_and_amplitudes_of_a_later_step_keep_the_steps_before_it() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Springs have no integration points: the state the steps of a model with springs leave
+/// fits the model of the next run (a rope model with weak springs failed on re-solve with
+/// "the restart state does not fit the model").
+#[test]
+fn a_model_with_springs_takes_over_its_steps() {
+    let dir = fresh("springs");
+    let springs = "*ELEMENT, TYPE=SPRING1, ELSET=WEAK\n1001, 64\n*SPRING, ELSET=WEAK\n2\n10\n";
+    run(&dir, &[springs, PULL], true);
+    let (cached, info) = run(&dir, &[springs, PULL, FURTHER], true);
+    assert!(
+        taken_over(&info).is_some_and(|l| l.contains("steps 1 to 1")),
+        "{info:?}"
+    );
+    let (full, _) = run(&fresh("springs-full"), &[springs, PULL, FURTHER], false);
+    assert_eq!(cached, full);
+    let _ = std::fs::remove_dir_all(&dir);
+}

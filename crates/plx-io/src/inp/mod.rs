@@ -362,6 +362,7 @@ impl Reader {
                     match mesh.parts.iter_mut().find(|p| p.name == *set) {
                         Some(part) => part.elements.push(id),
                         None => mesh.parts.push(Part {
+                            bodies: Vec::new(),
                             name: set.clone(),
                             elements: vec![id],
                         }),
@@ -416,17 +417,20 @@ impl Reader {
                 let elements = mesh.element_sets.get(set.as_str()).into_iter().flatten();
                 let lines = (elements.filter_map(|&id| mesh.element(id)))
                     .any(|e| e.shape.family() == ElementFamily::Line);
-                let read = read_section(kind, profile, values, lines, set, comment.as_deref());
-                if let Some((kind, profile)) = read {
+                let read = read_section(kind, profile, values, lines, comment.as_deref());
+                if let Some((mut kind, profile)) = read {
                     if let Some(profile) = profile {
-                        self.import.cross_sections.push(CrossSection {
-                            name: set.clone(),
-                            profile,
-                        });
+                        let cross_section = CrossSection::new(set.clone(), profile);
+                        if let SectionKind::Beam(beam) = &mut kind {
+                            beam.cross_section = Some(cross_section.id);
+                        }
+                        self.import.cross_sections.push(cross_section);
                     }
+                    // The model takes over no materials of the file.
+                    let _ = material;
                     self.import.sections.push(Section {
                         name: set.clone(),
-                        material: material.clone(),
+                        material: None,
                         region: Region::ElementSet(set.clone()),
                         thickness: plx_model::unit_thickness(),
                         kind,
@@ -593,13 +597,12 @@ impl Reader {
 /// The section `kind` stands for with the numbers of its data lines, if they make one;
 /// solid sections count only on `lines`, as trusses.
 /// The section of a section keyword with its data lines, and the profile of a beam section,
-/// whose cross-section is named `set` like the section.
+/// whose cross-section the caller adds.
 fn read_section(
     kind: &SectionKind,
     profile: &str,
     values: &[Vec<f64>],
     lines: bool,
-    set: &str,
     comment: Option<&str>,
 ) -> Option<(SectionKind, Option<BeamProfile>)> {
     let first = |k: usize| values[0].get(k).copied().filter(|v| *v > 0.0);
@@ -645,7 +648,7 @@ fn read_section(
                     // moment of the 1-coordinate squared, see BeamProfile::data_line.
                     if let Some((profile, normal)) = comment.and_then(general_profile) {
                         let beam = SectionKind::Beam(BeamSection {
-                            cross_section: set.to_owned(),
+                            cross_section: None,
                             orientation: BeamOrientation::Direction(normal),
                             offset: beam.offset,
                         });
@@ -662,7 +665,7 @@ fn read_section(
             };
             let normal = values[1].get(..3)?;
             let beam = SectionKind::Beam(BeamSection {
-                cross_section: set.to_owned(),
+                cross_section: None,
                 orientation: BeamOrientation::Direction([normal[0], normal[1], normal[2]]),
                 offset: beam.offset,
             });

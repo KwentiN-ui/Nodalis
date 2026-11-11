@@ -165,6 +165,7 @@ impl AnalysisWindow {
             | Cmd::MeshParameters
             | Cmd::LocalMeshSize
             | Cmd::ExtrudeMesh
+            | Cmd::ThickenShellMesh
             | Cmd::TetrahedralGmsh => has_geometry,
             Cmd::MeshAll => has_geometry && !meshing,
             Cmd::MeshSelected => {
@@ -196,6 +197,8 @@ impl AnalysisWindow {
             | Cmd::CoordinateSystem
             | Cmd::Plane
             | Cmd::DetectContacts
+            | Cmd::PartGroup
+            | Cmd::ContactMatrix
             | Cmd::ContactRegion
             | Cmd::Bolt
             | Cmd::Constraint
@@ -204,6 +207,7 @@ impl AnalysisWindow {
             | Cmd::Tie
             | Cmd::NodeTie
             | Cmd::ContactWorksheet
+            | Cmd::StepOverview
             | Cmd::ConnectionSettings
             | Cmd::Step
             | Cmd::InitialCondition
@@ -303,6 +307,8 @@ impl AnalysisWindow {
             | Cmd::ModeSound => w.results_command_checked(cmd),
             Cmd::Monitor => w.analysis_tab,
             Cmd::ContactWorksheet => w.contact_worksheet,
+            Cmd::ContactMatrix => w.contact_matrix,
+            Cmd::StepOverview => w.step_overview,
             _ => false,
         }
     }
@@ -319,12 +325,17 @@ impl AnalysisWindow {
         match cmd {
             Cmd::Import | Cmd::ImportMesh => self.import(ctx),
             Cmd::DefaultMeshParameters => w.open_mesh_setup(),
-            Cmd::MeshParameters | Cmd::LocalMeshSize | Cmd::TetrahedralGmsh | Cmd::ExtrudeMesh => {
+            Cmd::MeshParameters
+            | Cmd::LocalMeshSize
+            | Cmd::TetrahedralGmsh
+            | Cmd::ExtrudeMesh
+            | Cmd::ThickenShellMesh => {
                 let index = match cmd {
                     Cmd::MeshParameters => 0,
                     Cmd::LocalMeshSize => 1,
                     Cmd::TetrahedralGmsh => 2,
-                    _ => 3,
+                    Cmd::ExtrudeMesh => 3,
+                    _ => 4,
                 };
                 if let Some(model) = &w.model
                     && let Some(geometry) = &model.geometry
@@ -424,6 +435,7 @@ impl AnalysisWindow {
             Cmd::CoordinateSystem => w.create(NewItem::Feature(FeatureKind::CoordinateSystem)),
             Cmd::Plane => w.create(NewItem::Feature(FeatureKind::Plane)),
             Cmd::DetectContacts => w.create(NewItem::ContactDetection),
+            Cmd::PartGroup => w.create(NewItem::PartGroup),
             Cmd::ContactRegion => w.create(NewItem::ContactRegion),
             Cmd::Bolt => w.create(NewItem::Bolt),
             Cmd::Constraint => w.create(NewItem::Constraint),
@@ -432,6 +444,8 @@ impl AnalysisWindow {
             Cmd::Tie => w.create(NewItem::Tie),
             Cmd::NodeTie => w.create(NewItem::NodeTie),
             Cmd::ContactWorksheet => w.contact_worksheet = true,
+            Cmd::ContactMatrix => w.contact_matrix = true,
+            Cmd::StepOverview => w.step_overview = true,
             Cmd::ConnectionSettings => {
                 if let Some(model) = w.setup_model() {
                     w.editor = Editor::edit(&TreeItem::Group("Contacts"), &model.fe, &model.mesh);
