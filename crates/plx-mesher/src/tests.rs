@@ -2720,7 +2720,8 @@ fn faces_too_fine_for_the_quasi_structured_algorithm_are_recombined() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = rectangle([0.0; 3], [200.0, 150.0], 0.0);
+    // About 21 000 quadrilaterals, just above the limit of 20 000.
+    let mut geometry = rectangle([0.0; 3], [300.0, 70.0], 0.0);
     geometry.meshing.second_order = false;
     geometry.meshing.max_size = 1.0;
     geometry.meshing.min_size = 0.0;
@@ -2731,7 +2732,7 @@ fn faces_too_fine_for_the_quasi_structured_algorithm_are_recombined() {
         generated.warnings
     );
     let count = generated.mesh.element_count();
-    assert!((25_000..40_000).contains(&count), "{count} elements");
+    assert!((17_500..28_000).contains(&count), "{count} elements");
 }
 
 #[test]

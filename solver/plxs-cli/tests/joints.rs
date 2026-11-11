@@ -301,7 +301,9 @@ fn a_double_pendulum_with_a_long_time_step_runs_through() {
 
 /// The double pendulum of [`a_double_pendulum_with_a_long_time_step_runs_through`] with
 /// explicit time steps: as the bodies turn, the constraints linearized at their rotations
-/// pivot on other DOFs, and the reduced unknowns follow them.
+/// pivot on other DOFs, and the reduced unknowns follow them. The plates are a hundred
+/// times softer than steel, so that the stable time step is ten times longer; under their
+/// own weight they still swing as nearly rigid bodies.
 #[test]
 fn an_explicit_double_pendulum_runs_through() {
     let dir = work_dir("explicit-double");
@@ -312,7 +314,8 @@ fn an_explicit_double_pendulum_runs_through() {
          *Rigid body, Nset=CLAMP, Ref node=304, Rot node=305\n{}{step}",
         joined("1, 2"),
         h = HEIGHT / 2.0
-    ));
+    ))
+    .replace("*Elastic\n2.1e11, 0.3", "*Elastic\n2.1e9, 0.3");
     let rows = run(&dir, "double", &input);
     let _ = std::fs::remove_dir_all(&dir);
     let end = rows.last().unwrap();
