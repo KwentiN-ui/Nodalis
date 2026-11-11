@@ -402,13 +402,13 @@ impl BackgroundSolve {
         };
         // Solve Again computes every step, also those that did not change.
         if self.force {
-            crate::analysis::forget_steps(&self.work_dir, &self.name);
+            crate::analysis::forget_steps(&self.work_dir, &crate::analysis::job_dir(self.id));
         }
         let started = Analysis::start(
             &self.solver,
             model,
             false,
-            &self.name,
+            &crate::analysis::job_dir(self.id),
             &self.work_dir,
             &self.continuation,
         );

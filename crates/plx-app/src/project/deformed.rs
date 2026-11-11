@@ -313,7 +313,7 @@ impl ProjectApp {
     /// Adds a deformed mesh block with the factor 1 for the first increment; returns its id.
     pub(super) fn add_deformed_mesh(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Deformed Mesh");
+        let name = super::block_name("Deformed Mesh");
         let block = DeformedBlock::new(1.0, 1);
         self.nodes.push(Node::new(
             id,

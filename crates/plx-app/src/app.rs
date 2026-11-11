@@ -72,8 +72,8 @@ pub enum Request {
     SolveChain(bool),
     /// Stop the solve of this analysis.
     StopSolve,
-    /// Open the analysis of this name, which a linked item comes from.
-    OpenAnalysis(String),
+    /// Open the analysis the item at this path comes from.
+    OpenAnalysis(Vec<String>),
     /// Stop taking the item at this path from another analysis; the analysis keeps its
     /// copy.
     Unlink(Vec<String>),
@@ -2371,7 +2371,7 @@ impl Workbench {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.button(format!("Open {source}")).clicked() {
-                        self.requests.push(Request::OpenAnalysis(source.clone()));
+                        self.requests.push(Request::OpenAnalysis(path.clone()));
                         close = true;
                     }
                     if ui.button("Unlink").clicked() {
