@@ -226,8 +226,8 @@ In 2D models face loads act on element edges. In axisymmetric models forces act 
 circumference.
 
 #limitation[Line loads (force per length) are not available in the dialogs; a
-#ui("Force") along edges takes the total force (@force-region). Bolt pre-tension:
-@pre-tension. Defined temperature fields: @defined-fields.]
+#ui("Force") along edges takes the total force (@force-region). Bolt preloads: a
+#ui("Bolt") under #ui("Connections") (@bolts). Defined temperature fields: @defined-fields.]
 
 === What a force acts on <force-region>
 

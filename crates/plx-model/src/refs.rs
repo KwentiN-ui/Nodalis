@@ -236,6 +236,7 @@ impl FeModel {
             }
             for change in &mut step.bolt_changes {
                 visit(&mut change.bolt);
+                optional(&mut change.amplitude, visit);
             }
         }
     }
