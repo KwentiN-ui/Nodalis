@@ -11125,6 +11125,7 @@ impl SnarlViewer<u64> for Viewer {
         } else {
             "Shows only the header and the rows with a wire (H)"
         };
+        let toggle_rect = toggle.rect;
         let toggled = toggle.on_hover_text(toggle_tip).clicked();
         let (rect, icon) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
         match block.kind {
@@ -11260,7 +11261,29 @@ impl SnarlViewer<u64> for Viewer {
         if toggled {
             self.actions.push(Action::Compact(vec![id]));
         }
-        if label.double_clicked() {
+        // A double-click anywhere on the header bar right of the triangle opens the block,
+        // not only on its name: the bar itself belongs to the schematic, to move the block.
+        let bar = egui::Rect::from_x_y_ranges(
+            toggle_rect.right()..=ui.max_rect().right(),
+            label.rect.y_range().expand(6.0),
+        );
+        // The schematic is zoomed and panned: the pointer is brought into its space first.
+        let layer = ui.layer_id();
+        let ctx = ui.ctx();
+        let bar_double = ctx.input(|i| {
+            i.pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+        }) && ctx.pointer_interact_pos().is_some_and(|screen| {
+            let local = ctx
+                .layer_transform_to_global(layer)
+                .map_or(screen, |t| t.inverse() * screen);
+            // Not through a window or menu over the schematic.
+            ctx.layer_id_at(screen)
+                .is_none_or(|l| l.order == egui::Order::Background)
+                && bar.contains(local)
+                && ui.clip_rect().contains(local)
+        });
+        if label.double_clicked() || bar_double {
             // A compact block opens to show its rows first, as in Blender.
             self.actions.push(if compact {
                 Action::Compact(vec![id])
