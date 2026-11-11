@@ -34,6 +34,9 @@ pub struct ReducedPattern {
     /// The structure of `T` the reducer was built for.
     t_ptr: Vec<u32>,
     t_col: Vec<u32>,
+    /// The rows of DOFs no element uses (see [`ConstraintSet`]), whose entries of `K` are
+    /// left out.
+    inert: Vec<bool>,
     /// Per entry of the input: its reduced position when it lands on one reduced entry
     /// with factor 1 (an entry between unconstrained DOFs, the usual case), else
     /// `u32::MAX` and the entry is in `general`.
@@ -57,7 +60,10 @@ impl ReducedPattern {
 
     /// Whether the reducer was built for `pattern` and the structure of `set`'s `T`.
     fn fits_set(&self, pattern: &Arc<Pattern>, set: &ConstraintSet) -> bool {
-        self.fits(pattern) && self.t_ptr == set.t_ptr && self.t_col == set.t_col
+        self.fits(pattern)
+            && self.t_ptr == set.t_ptr
+            && self.t_col == set.t_col
+            && self.inert == set.inert
     }
 
     /// The reduced pattern.
@@ -78,9 +84,13 @@ impl ReducedPattern {
         let input = &*self.input;
         let col_ptr = input.col_ptr();
         let t_range = |row: usize| self.t_ptr[row] as usize..self.t_ptr[row + 1] as usize;
+        let inert = |row: usize| self.inert.get(row).copied().unwrap_or(false);
         for (range, positions) in &self.general {
             let mut positions = positions.iter();
             for j in range.clone() {
+                if inert(j) {
+                    continue;
+                }
                 let start = col_ptr[j] as usize;
                 for (offset, &i) in input.column(j).iter().enumerate() {
                     let entry = start + offset;
@@ -88,6 +98,9 @@ impl ReducedPattern {
                     let pos = self.simple[entry];
                     if pos != u32::MAX {
                         out_values[pos as usize] += v;
+                        continue;
+                    }
+                    if inert(i as usize) {
                         continue;
                     }
                     let diagonal = i as usize == j;
@@ -142,6 +155,10 @@ pub enum Added {
 }
 
 const NONE: u32 = u32::MAX;
+
+/// Smallest coefficient of a loose DOF, relative to the largest of the constraint, that
+/// [`Eliminator::add_preferring`] pivots on.
+const LOOSE_SHARE: f64 = 1e-3;
 
 /// A compressed index structure by rows: the entries of row `r` are
 /// `idx[ptr[r]..ptr[r + 1]]`.
@@ -230,6 +247,25 @@ impl Eliminator {
         preferred: u32,
         policy: Policy,
     ) -> Added {
+        self.add_preferring(terms, consts, preferred, policy, None)
+    }
+
+    /// [`Self::add`], but pivoting on a DOF `loose` marks (one no element uses, such as of
+    /// a reference point) when the preferred one is not such a DOF and a term is, with the
+    /// largest coefficient of those. A distributing coupling, `*EQUATION`s of a region's
+    /// nodes and a reference point with the first term on a node of the region, then
+    /// makes the point dependent instead of the node: eliminating the node would couple
+    /// each of its neighbours to all the region's nodes, a dense block of thousands of
+    /// rows in the reduced matrix, while the point has no stiffness to spread. The
+    /// constraint is the same either way.
+    pub fn add_preferring(
+        &mut self,
+        terms: &[(u32, f64)],
+        consts: &[(u32, f64)],
+        preferred: u32,
+        policy: Policy,
+        loose: Option<&dyn Fn(u32) -> bool>,
+    ) -> Added {
         if policy == Policy::KeepPrevious && self.is_dependent(preferred) {
             return Added::Dropped;
         }
@@ -259,7 +295,14 @@ impl Eliminator {
                 Added::Conflict
             };
         }
-        let pivot = match vars.iter().position(|&(v, _)| v == preferred) {
+        let largest = vars.iter().fold(0.0_f64, |m, &(_, a)| m.max(a.abs()));
+        let loose_pivot = loose.filter(|loose| !loose(preferred)).and_then(|loose| {
+            (vars.iter().enumerate())
+                .filter(|(_, (v, a))| loose(*v) && a.abs() >= LOOSE_SHARE * largest)
+                .max_by(|a, b| a.1.1.abs().total_cmp(&b.1.1.abs()))
+                .map(|(k, _)| k)
+        });
+        let pivot = match loose_pivot.or_else(|| vars.iter().position(|&(v, _)| v == preferred)) {
             Some(k) => k,
             None => {
                 // Re-pivot: the largest coefficient of the same node, else of any node.
@@ -307,7 +350,7 @@ impl Eliminator {
         }
         self.expr_of[p as usize] = self.exprs.len() as u32;
         self.exprs.push(expr);
-        if p == preferred {
+        if p == preferred || loose_pivot.is_some() {
             Added::Pivot(p)
         } else {
             Added::Repivoted {
@@ -332,6 +375,12 @@ pub struct ConstraintSet {
     g_val: Vec<f64>,
     /// The primary DOF behind every reduced unknown.
     pub free: Vec<u32>,
+    /// The rows of DOFs no element uses, of nodes such as reference points, in global
+    /// directions. Their entries of `K` are zero, so the reduction leaves them out: the row
+    /// of `T` of a reference point a distributing coupling makes dependent on thousands of
+    /// nodes would else put a dense block of zeros as large into `Tᵀ K T`, from the
+    /// diagonal every DOF has in the pattern.
+    inert: Vec<bool>,
     /// Constraints left out because they contradict earlier ones.
     pub warnings: Vec<String>,
     /// Constraints re-pivoted because their dependent DOF was held otherwise.
@@ -393,6 +442,15 @@ impl ConstraintSet {
             g_src: Vec::new(),
             g_val: Vec::new(),
             free,
+            // Only when `active` covers all DOFs (a cyclic step's doubled numbering gives
+            // it for one copy).
+            inert: if active.len() == n {
+                (0..n)
+                    .map(|v| (0..3).all(|k| !active[v / 3 * 3 + k]))
+                    .collect()
+            } else {
+                Vec::new()
+            },
             warnings,
             notes,
         };
@@ -463,6 +521,10 @@ impl ConstraintSet {
     /// Whether row `row` of `T` is the identity row of a free DOF: a single entry 1 on the
     /// DOF's own reduced unknown. Relinearizing the rows of rigid body members never
     /// touches these rows.
+    fn is_inert(&self, row: usize) -> bool {
+        self.inert.get(row).copied().unwrap_or(false)
+    }
+
     fn is_identity_row(&self, row: usize) -> bool {
         let range = self.t_ptr[row] as usize..self.t_ptr[row + 1] as usize;
         range.len() == 1
@@ -519,6 +581,7 @@ impl ConstraintSet {
             pattern: reduced_pattern,
             t_ptr: self.t_ptr.clone(),
             t_col: self.t_col.clone(),
+            inert: self.inert.clone(),
             simple,
             general,
         }
@@ -544,7 +607,13 @@ impl ConstraintSet {
                     mark[c] = c as u32;
                     for &q in t_cols.row(c) {
                         let q = q as usize;
+                        if self.is_inert(q) {
+                            continue;
+                        }
                         for &p in pattern.column(q).iter().chain(upper_rows.row(q)) {
+                            if self.is_inert(p as usize) {
+                                continue;
+                            }
                             for &a in &self.t_col[self.t_ptr[p as usize] as usize
                                 ..self.t_ptr[p as usize + 1] as usize]
                             {
@@ -614,13 +683,16 @@ impl ConstraintSet {
                 let base = col_ptr[range.start] as usize;
                 let mut general = Vec::new();
                 for j in range.clone() {
-                    if self.t_ptr[j] == self.t_ptr[j + 1] {
+                    if self.t_ptr[j] == self.t_ptr[j + 1] || self.is_inert(j) {
                         continue;
                     }
                     let start = col_ptr[j] as usize;
                     let identity_j = self.is_identity_row(j);
                     for (offset, &i) in pattern.column(j).iter().enumerate() {
                         let entry = start + offset;
+                        if self.is_inert(i as usize) {
+                            continue;
+                        }
                         let diagonal = i as usize == j;
                         if identity_j && self.is_identity_row(i as usize) {
                             // One target with factor 1, whatever the values of the other
@@ -732,6 +804,46 @@ mod tests {
         assert_eq!(set.reduced_len(), 1);
         let u = set.expand(&[1.0], &[0.0; 3]);
         assert!((u[0] - 4.0).abs() < 1e-14 && (u[1] - 3.0).abs() < 1e-14 && u[2] == 1.0);
+    }
+
+    #[test]
+    fn a_distributing_coupling_depends_on_its_loose_reference_dofs() {
+        // Nodes 0..3 of a region (DOFs 0..3 used by elements), a reference point with two
+        // loose DOFs 4 and 5: x0 = (x1 + x2 + x3) / 3 - x4 and x1 = x5 - x4 + x2.
+        let loose = |v: u32| v >= 4;
+        let mut e = Eliminator::new(6);
+        let first = [
+            (0, 1.0),
+            (1, -1.0 / 3.0),
+            (2, -1.0 / 3.0),
+            (3, -1.0 / 3.0),
+            (4, 1.0),
+        ];
+        assert_eq!(
+            e.add_preferring(&first, &[], 0, Policy::Repivot, Some(&loose)),
+            Added::Pivot(4)
+        );
+        let second = [(1, 1.0), (5, -1.0), (4, 1.0), (2, -1.0)];
+        assert_eq!(
+            e.add_preferring(&second, &[], 1, Policy::Repivot, Some(&loose)),
+            Added::Pivot(5)
+        );
+        let set = ConstraintSet::from_elimination(
+            &e,
+            &[true, true, true, true, false, false],
+            &|_| None,
+            Vec::new(),
+            Vec::new(),
+        );
+        // All four region DOFs stay unknowns: no element row is touched.
+        assert_eq!(set.free, vec![0, 1, 2, 3]);
+        let u = set.expand(&[3.0, 1.0, 2.0, 6.0], &[0.0; 6]);
+        let residual =
+            |terms: &[(u32, f64)]| terms.iter().map(|&(v, a)| a * u[v as usize]).sum::<f64>();
+        assert!(residual(&first).abs() < 1e-12 && residual(&second).abs() < 1e-12);
+        // Without the loose DOFs marked, the preferred one is eliminated as before.
+        let mut e = Eliminator::new(6);
+        assert_eq!(e.add(&first, &[], 0, Policy::Repivot), Added::Pivot(0));
     }
 
     #[test]

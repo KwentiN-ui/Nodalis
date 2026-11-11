@@ -294,6 +294,116 @@ pub fn surface_faces(
     faces
 }
 
+/// An element face: element id and CalculiX face number.
+type ElementFace = (ElementId, u8);
+
+/// How far a face may lie behind a face of the other side, relative to the search
+/// distance, and still face it in [`facing_faces`].
+const PENETRATION: f64 = 0.1;
+
+/// Of two sides of a contact pair found, the element faces (element id, CalculiX face
+/// number) that really lie on a face of the other side: the centre of the face is within
+/// `distance` of a face of the other side, right above or below it, and the two face each
+/// other within `angle_deg`. The search pairs whole surface patches; a patch touching the
+/// other side in one place brings all its faces along, such as both sides of a thin wall
+/// cut in two, of which each faces the other side of the wall in the neighbour across the
+/// cut. Edges (of shells and of 2D elements) are kept as they are.
+pub fn facing_faces(
+    mesh: &FeMesh,
+    skins: &[PartSkin],
+    a: &BTreeSet<SurfaceId>,
+    b: &BTreeSet<SurfaceId>,
+    distance: f64,
+    angle_deg: f64,
+) -> (Vec<ElementFace>, Vec<ElementFace>) {
+    let coords = mesh.coords();
+    let all = patch_faces(mesh, skins);
+    let side = |surfaces: &BTreeSet<SurfaceId>| -> Vec<&PatchFace> {
+        all.iter()
+            .filter(|f| surfaces.contains(&f.surface))
+            .collect()
+    };
+    let (faces_a, faces_b) = (side(a), side(b));
+    let points =
+        |f: &PatchFace| -> Vec<[f64; 3]> { f.corners.iter().map(|&n| coords[n]).collect() };
+    let limit = -angle_deg.to_radians().cos();
+    let kept = |from: &[&PatchFace], onto: &[&PatchFace]| -> Vec<ElementFace> {
+        let onto: Vec<(Vec<[f64; 3]>, [f64; 3], Bounds)> = (onto.iter())
+            .filter(|f| f.corners.len() >= 3)
+            .map(|f| {
+                let p = points(f);
+                let normal = normalize(cross(sub(p[1], p[0]), sub(p[2], p[0])));
+                let mut bounds = Bounds::empty();
+                for &q in &p {
+                    bounds.include(q);
+                }
+                bounds.inflate(distance);
+                (p, normal, bounds)
+            })
+            .collect();
+        // A grid of cells as large as the faces, at least the distance.
+        let size = (onto.iter())
+            .map(|(_, _, b)| (0..3).map(|k| b.max[k] - b.min[k]).fold(0.0, f64::max))
+            .sum::<f64>()
+            / onto.len().max(1) as f64;
+        let cell = size.max(distance).max(f64::MIN_POSITIVE);
+        let key = |p: [f64; 3]| p.map(|c| (c / cell).floor() as i64);
+        let mut grid: HashMap<[i64; 3], Vec<usize>> = HashMap::new();
+        for (i, (_, _, b)) in onto.iter().enumerate() {
+            let (lo, hi) = (key(b.min), key(b.max));
+            for x in lo[0]..=hi[0] {
+                for y in lo[1]..=hi[1] {
+                    for z in lo[2]..=hi[2] {
+                        grid.entry([x, y, z]).or_default().push(i);
+                    }
+                }
+            }
+        }
+        let mut out: Vec<ElementFace> = (from.iter())
+            .filter(|f| {
+                if f.corners.len() < 3 {
+                    return true;
+                }
+                let p = points(f);
+                let normal = normalize(cross(sub(p[1], p[0]), sub(p[2], p[0])));
+                let center = scale(
+                    p.iter().fold([0.0; 3], |s, &q| add(s, q)),
+                    1.0 / p.len() as f64,
+                );
+                let extent = p
+                    .iter()
+                    .map(|&q| length(sub(q, center)))
+                    .fold(0.0, f64::max);
+                let Some(candidates) = grid.get(&key(center)) else {
+                    return false;
+                };
+                candidates.iter().any(|&i| {
+                    let (q, n, _) = &onto[i];
+                    if dot(normal, *n) > limit {
+                        return false;
+                    }
+                    triangles(q).any(|t| {
+                        let foot = point_triangle(center, &t);
+                        let gap = sub(center, foot);
+                        let d = length(gap);
+                        // Right above or below, and not behind it: the back of a wall
+                        // faces away from the face behind it.
+                        d <= distance
+                            && (d <= 1e-9 * extent
+                                || dot(gap, *n).abs() >= 0.999 * d
+                                    && dot(gap, *n) >= -PENETRATION * distance)
+                    })
+                })
+            })
+            .map(|f| (f.element, f.face))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    };
+    (kept(&faces_a, &faces_b), kept(&faces_b, &faces_a))
+}
+
 /// An element face on a contact surface.
 struct PatchFace {
     surface: SurfaceId,
@@ -1264,6 +1374,44 @@ mod tests {
             });
         }
         mesh
+    }
+
+    #[test]
+    fn only_the_faces_lying_on_each_other_face_each_other() {
+        // Two thin slabs side by side along x, 0.02 x 1 x 0.01 each, touching at x = 0.02:
+        // the top of one and the bottom of the other are a wall's thickness apart beside the
+        // cut, the outer ends lie back to back within the distance.
+        let mut mesh = blocks(&[[0.0; 3], [1.0, 0.0, 0.0]]);
+        let ids: Vec<u32> = mesh.node_ids().to_vec();
+        for id in ids {
+            let p = mesh.node(id).unwrap();
+            mesh.set_node(id, [p[0] * 0.02, p[1], p[2] * 0.01]);
+        }
+        let skins: Vec<PartSkin> = (mesh.parts.iter())
+            .map(|p| extract_part_skin(&mesh, p, 30.0))
+            .collect();
+        let side = |part: usize| -> BTreeSet<SurfaceId> {
+            (patch_faces(&mesh, &skins).into_iter())
+                .filter(|f| f.surface.0 == part)
+                .map(|f| f.surface)
+                .collect()
+        };
+        let (a, b) = facing_faces(&mesh, &skins, &side(0), &side(1), 0.05, 35.0);
+        assert_eq!(surface_faces(&mesh, &skins, &side(0)).len(), 6);
+        assert_eq!(a.len(), 1, "{a:?}");
+        assert_eq!(b.len(), 1, "{b:?}");
+        let coords = mesh.coords();
+        for (part, (element, face)) in [(0, a[0]), (1, b[0])] {
+            let skin_face = (patch_faces(&mesh, &skins).into_iter())
+                .find(|f| f.surface.0 == part && f.element == element && f.face == face)
+                .unwrap();
+            assert!(
+                skin_face
+                    .corners
+                    .iter()
+                    .all(|&n| (coords[n][0] - 0.02).abs() < 1e-12)
+            );
+        }
     }
 
     fn search(mesh: &FeMesh, group_by: GroupBy) -> Vec<MasterSlaveItem> {
