@@ -259,6 +259,9 @@ pub struct DetectionGeometry<'a> {
     pub face_edges: &'a BTreeMap<i32, Vec<i32>>,
     /// Of each part, the dimension of its CAD shape: 3 a solid, 2 faces, 1 edges.
     pub part_dimensions: &'a [u8],
+    /// Of each part, the compound part it belongs to, by index; parts left out belong to
+    /// none. Parts of one compound are tied by it and get no regions between them.
+    pub compounds: &'a [Option<usize>],
 }
 
 /// What a detection on the display of CAD geometry knows of its parts.
@@ -269,6 +272,8 @@ struct Display<'a> {
     /// Of each part, whether its faces were turned outwards, see
     /// [`plx_mesh::SearchParameters::one_sided`].
     one_sided: &'a [bool],
+    /// Of each part, its compound part, see [`DetectionGeometry::compounds`].
+    compounds: &'a [Option<usize>],
 }
 
 impl FeModel {
@@ -324,6 +329,7 @@ impl FeModel {
         let display = Display {
             part_dimensions: geometry.part_dimensions,
             one_sided: &one_sided,
+            compounds: geometry.compounds,
         };
         self.detect(index, &mesh, &skins, visible, Some(display))
     }
@@ -388,6 +394,16 @@ impl FeModel {
             }),
         };
         let mut items = find_contact_pairs(mesh, skins, &searched, &parameters);
+        if let Some(compounds) = display.map(|d| d.compounds) {
+            // The parts of a compound part are tied by it.
+            let compound = |surfaces: &BTreeSet<SurfaceId>| {
+                let part = surfaces.first()?.0;
+                compounds.get(part).copied().flatten()
+            };
+            items.retain(|item| {
+                compound(&item.master).is_none() || compound(&item.master) != compound(&item.slave)
+            });
+        }
         if let Some(dimensions) = display.map(|d| d.part_dimensions) {
             // Of solids only their faces count, which the filter asks for as solid faces;
             // the borders of their faces are no edges of shells.

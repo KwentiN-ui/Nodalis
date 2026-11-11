@@ -319,6 +319,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "BAR".into(),
             elements: (1..=n).collect(),
         });

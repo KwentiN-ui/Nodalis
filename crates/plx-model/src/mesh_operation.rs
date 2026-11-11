@@ -144,6 +144,7 @@ mod tests {
             })
             .unwrap();
             mesh.parts.push(Part {
+                bodies: Vec::new(),
                 name: name.into(),
                 elements: vec![id],
             });

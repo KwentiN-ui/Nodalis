@@ -23,7 +23,7 @@ use crate::status::CellState;
 enum Stage {
     /// Building the model on a worker thread, and finding the default equation solver.
     Loading(Receiver<Loaded>),
-    Meshing(MeshingJob),
+    Meshing(Box<MeshingJob>),
     Running,
     /// Keeping the results in the project; compressing them takes a while.
     Keeping(Receiver<Result<BoundResults, String>>),
@@ -384,7 +384,7 @@ impl BackgroundSolve {
                 None => geometry.source.clone(),
             };
             self.before.push(format!("Meshing {what} …"));
-            self.stage = Stage::Meshing(MeshingJob::start(geometry, parts, ctx));
+            self.stage = Stage::Meshing(Box::new(MeshingJob::start(geometry, parts, ctx)));
             return;
         }
         if !status.needs_solve() && !self.force {

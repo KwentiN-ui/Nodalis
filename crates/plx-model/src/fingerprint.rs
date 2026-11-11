@@ -228,6 +228,7 @@ mod tests {
 
     fn geometry() -> Geometry {
         Geometry {
+            compounds: Vec::new(),
             source: "block.step".into(),
             brep: "shapes".into(),
             meshing: MeshingParameters::default(),

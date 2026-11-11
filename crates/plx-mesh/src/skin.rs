@@ -455,6 +455,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "BAR".into(),
             elements: (1..=nx).collect(),
         });
@@ -492,6 +493,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "PYRAMID".into(),
             elements: vec![1, 2],
         });
@@ -546,6 +548,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "PLATE".into(),
             elements: vec![1, 2],
         });
@@ -584,6 +587,7 @@ mod tests {
             }
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "TENT".into(),
             elements: (1..=id).collect(),
         });

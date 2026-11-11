@@ -66,7 +66,9 @@ Select several parts under #ui("Mesh") (#key("Ctrl") adds to the selection) and 
 #ui("Merge") in their context menu. The elements of the other parts join the first selected
 part, which keeps its name; element sets of the same name are joined too, and sections, loads
 and other items that named a merged part now name the kept part. The nodes are not merged:
-use #ui("Merge coincident nodes") afterwards where the parts touch.
+use #ui("Merge coincident nodes") afterwards where the parts touch. To join pieces a CAD model was cut into
+for the mesher, so that they are tied where they touch, use a compound part in the Geometry
+workspace instead (@compound-parts).
 
 === Merge coincident nodes
 

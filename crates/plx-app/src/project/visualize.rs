@@ -405,6 +405,7 @@ pub(super) fn draw_mesh(
     let all_parts;
     let parts: &[plx_mesh::Part] = if mesh.parts.is_empty() {
         all_parts = [plx_mesh::Part {
+            bodies: Vec::new(),
             name: String::new(),
             elements: mesh.elements().iter().map(|e| e.id).collect(),
         }];

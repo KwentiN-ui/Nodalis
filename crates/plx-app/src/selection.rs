@@ -1726,6 +1726,7 @@ mod tests {
             }
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "PLATE".into(),
             elements,
         });
@@ -1764,6 +1765,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "BEAM".into(),
             elements: vec![1, 2],
         });
@@ -1847,6 +1849,7 @@ mod tests {
             }
         }
         let mut part = plx_mesh::Part {
+            bodies: Vec::new(),
             name: "PLATE".into(),
             elements: Vec::new(),
         };

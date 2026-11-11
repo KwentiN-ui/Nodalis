@@ -121,6 +121,7 @@ mod tests {
         .unwrap();
         for (name, elements) in [("LINE-1", 1), ("LINE-2", 2), ("SOLID-1", 3), ("LINE-3", 4)] {
             mesh.parts.push(Part {
+                bodies: Vec::new(),
                 name: name.into(),
                 elements: vec![elements],
             });

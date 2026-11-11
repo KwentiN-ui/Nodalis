@@ -463,6 +463,7 @@ fn linear_rectangle(width: f64, height: f64, nx: u32, ny: u32, triangles: bool) 
         }
     }
     let mut part = plx_mesh::Part {
+        bodies: Vec::new(),
         name: "PLATE".into(),
         elements: Vec::new(),
     };
@@ -1781,6 +1782,7 @@ fn tet_bar() -> FeMesh {
     let id = |i: i64, j: i64, k: i64| (((i * (2 * ny + 1) + j) * (2 * ny + 1) + k) + 1) as u32;
     let mut used = std::collections::BTreeSet::new();
     let mut part = plx_mesh::Part {
+        bodies: Vec::new(),
         name: "EALL".into(),
         elements: Vec::new(),
     };
@@ -3133,6 +3135,7 @@ fn rectangle(x0: f64, width: f64, height: f64, nx: u32, ny: u32) -> FeMesh {
         }
     }
     let mut part = plx_mesh::Part {
+        bodies: Vec::new(),
         name: "PLATE".into(),
         elements: Vec::new(),
     };
@@ -3409,6 +3412,7 @@ fn plane_patch(shape: plx_mesh::ElementShape, x0: f64) -> PlanePatch {
         }
     }
     let mut part = plx_mesh::Part {
+        bodies: Vec::new(),
         name: "PLATE".into(),
         elements: Vec::new(),
     };
@@ -3619,6 +3623,7 @@ fn two_blocks(gap: f64) -> (FeMesh, Faces, Faces) {
         }
         let name = if block == 0 { "LOWER" } else { "UPPER" };
         mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: name.into(),
             elements,
         });
@@ -4350,6 +4355,7 @@ fn solver_carries_the_load_across_a_contact_in_2d() {
         mesh.add_element(element).unwrap();
     }
     mesh.parts.push(plx_mesh::Part {
+        bodies: Vec::new(),
         name: "UPPER".into(),
         elements: (101..=104).collect(),
     });
@@ -4461,6 +4467,7 @@ fn blocks(na: u32, nb: u32) -> Blocks {
             }
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: name.into(),
             elements,
         });
@@ -5056,6 +5063,7 @@ fn line_chain(n: u32, axis: usize, length: f64, quadratic: bool) -> FeMesh {
         elements.push(e + 1);
     }
     mesh.parts.push(Part {
+        bodies: Vec::new(),
         name: "BEAM".into(),
         elements,
     });
@@ -5475,6 +5483,7 @@ fn two_chains(n: u32, quadratic: bool) -> FeMesh {
         elements.push(101 + e);
     }
     mesh.parts.push(Part {
+        bodies: Vec::new(),
         name: "BEAM2".into(),
         elements,
     });
@@ -8853,6 +8862,7 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
         ("PLATE", vec![201, 202, 203, 204]),
     ] {
         mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: name.into(),
             elements,
         });
@@ -8995,6 +9005,7 @@ fn block_on_membrane(strip_is_master: bool) -> (FeMesh, FeModel) {
         ("BLOCK", (101..=109).collect()),
     ] {
         mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: name.into(),
             elements,
         });
@@ -12041,6 +12052,7 @@ fn rope_over_block() -> (FeMesh, FeModel) {
     })
     .unwrap();
     mesh.parts.push(Part {
+        bodies: Vec::new(),
         name: "SHEAVE".into(),
         elements: vec![101],
     });
@@ -12233,4 +12245,45 @@ fn a_rope_of_quadratic_lines_bends_like_one_of_twice_as_many_linear_ones() {
         return;
     };
     assert!(q > 0.0 && (q - l).abs() < 1e-9 * l, "{q} vs {l}");
+}
+
+/// The two stacked blocks as the bodies of one compound part, as a block cut in two for the
+/// mesher: the input file ties them where they touch, and the load goes across as through
+/// one block.
+#[test]
+fn solver_carries_the_load_across_the_bodies_of_a_compound_part() {
+    let (mut mesh, _, _) = two_blocks(0.0);
+    let bodies: Vec<plx_mesh::Body> = (mesh.parts.drain(..))
+        .map(|p| plx_mesh::Body {
+            name: p.name,
+            elements: p.elements,
+        })
+        .collect();
+    let mut part = plx_mesh::Part::new(
+        "BLOCK",
+        bodies.iter().flat_map(|b| b.elements.clone()).collect(),
+    );
+    part.bodies = bodies;
+    mesh.parts.push(part);
+    let mut model = stacked_blocks(&mesh);
+    model.sections[0].region = Region::Parts(vec!["BLOCK".into()]);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("*Tie,").count(), 1, "{text}");
+    let findings = model.check(
+        &mesh,
+        &plx_model::MeshCheck::new(&mesh, model.properties.space),
+    );
+    assert!(findings.is_empty(), "{findings:?}");
+    let Some(frd) = run_solver("compound-part", &text) else {
+        return;
+    };
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!((reaction - 1000.0).abs() < 1.0, "{reaction}");
+    let below = node_value(&frd, "DISP", "U3", 14);
+    let above = node_value(&frd, "DISP", "U3", 105);
+    assert!(
+        (below - above).abs() < 1e-3 * below.abs(),
+        "{below} != {above}"
+    );
 }

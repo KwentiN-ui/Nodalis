@@ -2052,6 +2052,12 @@ impl Model {
         }
         if let Some(old) = self.mesh.rename_part(index, &name) {
             self.fe.rename_part(&old, &name);
+            // A compound part keeps its name when it is meshed anew.
+            if let Some(geometry) = &mut self.geometry
+                && let Some(c) = geometry.compound_named(&old)
+            {
+                geometry.compounds[c].name.clone_from(&name);
+            }
         }
         self.parts[index].name = name;
         Ok(())
@@ -2955,6 +2961,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "BEAM".into(),
             elements: vec![1, 2],
         });
@@ -3175,6 +3182,7 @@ mod tests {
                 .unwrap();
         }
         project.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: "PLATE".into(),
             elements: vec![1, 2],
         });
@@ -3212,6 +3220,7 @@ mod tests {
                 .unwrap();
         }
         solved.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: "PLATE".into(),
             elements: vec![1, 2],
         });
@@ -3262,6 +3271,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: "Plate".into(),
             elements: vec![1],
         });
@@ -3309,6 +3319,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: "Beam".into(),
             elements: vec![1],
         });
@@ -3592,6 +3603,7 @@ S
             }))
             .unwrap();
             mesh.parts.push(plx_mesh::Part {
+                bodies: Vec::new(),
                 name: name.to_string(),
                 elements: vec![id],
             });

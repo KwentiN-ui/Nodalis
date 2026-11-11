@@ -494,10 +494,12 @@ mod tests {
         }
         mesh.parts = vec![
             Part {
+                bodies: Vec::new(),
                 name: "A".into(),
                 elements: vec![1],
             },
             Part {
+                bodies: Vec::new(),
                 name: "B".into(),
                 elements: vec![2],
             },

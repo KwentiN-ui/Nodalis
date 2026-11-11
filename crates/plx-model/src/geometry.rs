@@ -34,6 +34,20 @@ pub struct Geometry {
     /// Gmsh numbers them anew, see [`Geometry::tags_in`]. Empty if not recorded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signatures: Vec<EntitySignature>,
+    /// Parts joined into compound parts: each is meshed part by part and becomes one part
+    /// of the FE model, its bodies tied where they touch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compounds: Vec<CompoundPart>,
+}
+
+/// Parts of the geometry joined into one part of the FE model, as the pieces a CAD model
+/// is cut into for the mesher. Each piece is meshed on its own; where they touch, the
+/// solver input ties them, as a bonded contact would.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompoundPart {
+    pub name: String,
+    /// Names of the parts of the geometry it joins.
+    pub parts: Vec<String>,
 }
 
 fn one() -> f64 {
@@ -45,6 +59,63 @@ fn is_one(value: &f64) -> bool {
 }
 
 impl Geometry {
+    /// The compound part holding the part `part`, by index.
+    pub fn compound_of(&self, part: &str) -> Option<usize> {
+        (self.compounds.iter()).position(|c| names(&c.parts, part))
+    }
+
+    /// The compound part named `name`, by index.
+    pub fn compound_named(&self, name: &str) -> Option<usize> {
+        (self.compounds.iter()).position(|c| c.name.eq_ignore_ascii_case(name))
+    }
+
+    /// The name of the part of the FE model that the part `part` of the geometry becomes:
+    /// its compound's, or its own.
+    pub fn fe_part_name<'a>(&'a self, part: &'a str) -> &'a str {
+        match self.compound_of(part) {
+            Some(c) => &self.compounds[c].name,
+            None => part,
+        }
+    }
+
+    /// The parts of the geometry the part `name` of the FE model is meshed from: the parts
+    /// of a compound, else the part itself.
+    pub fn parts_of_fe_part(&self, name: &str) -> Vec<String> {
+        match self.compound_named(name) {
+            Some(c) => self.compounds[c].parts.clone(),
+            None => vec![name.to_owned()],
+        }
+    }
+
+    /// The compounds as the mesh joins its parts, see [`plx_mesh::FeMesh::compose_compounds`].
+    pub fn compound_members(&self) -> Vec<(String, Vec<String>)> {
+        (self.compounds.iter())
+            .map(|c| (c.name.clone(), c.parts.clone()))
+            .collect()
+    }
+
+    /// Renames a part in the compounds; false if none holds it.
+    pub fn rename_compound_member(&mut self, old: &str, new: &str) -> bool {
+        let mut renamed = false;
+        for compound in &mut self.compounds {
+            for part in &mut compound.parts {
+                if part.eq_ignore_ascii_case(old) {
+                    *part = new.to_owned();
+                    renamed = true;
+                }
+            }
+        }
+        renamed
+    }
+
+    /// Takes parts out of their compounds; compounds left empty go.
+    pub fn remove_from_compounds(&mut self, parts: &[String]) {
+        for compound in &mut self.compounds {
+            compound.parts.retain(|p| !names(parts, p));
+        }
+        self.compounds.retain(|c| !c.parts.is_empty());
+    }
+
     /// The meshing parameters of a part: of the last Meshing Parameters item naming it, else
     /// the defaults; its sizes divided by the refinement.
     pub fn parameters(&self, part: &str) -> MeshingParameters {
@@ -414,6 +485,7 @@ mod tests {
             ..MeshingParameters::default()
         };
         let mut geometry = Geometry {
+            compounds: Vec::new(),
             source: "a.step".into(),
             brep: String::new(),
             meshing: MeshingParameters::for_diagonal(100.0),
@@ -522,6 +594,7 @@ mod tests {
             },
         };
         let mut geometry = Geometry {
+            compounds: Vec::new(),
             source: "a.step".into(),
             brep: String::new(),
             meshing: MeshingParameters::default(),

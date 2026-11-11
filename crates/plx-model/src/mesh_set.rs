@@ -172,6 +172,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "Solid".into(),
             elements: vec![1],
         });

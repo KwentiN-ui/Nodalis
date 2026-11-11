@@ -202,7 +202,11 @@ impl<'a> Reader<'a> {
             let parts = &mut self.import.mesh.parts;
             match parts.iter_mut().find(|p| p.name == name) {
                 Some(part) => part.elements.extend(elements),
-                None => parts.push(Part { name, elements }),
+                None => parts.push(Part {
+                    bodies: Vec::new(),
+                    name,
+                    elements,
+                }),
             }
         }
         Ok(self.import)

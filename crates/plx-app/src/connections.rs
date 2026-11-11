@@ -193,12 +193,16 @@ pub fn detect(
         Some(display) => {
             let visible = detection_visibility(model, display);
             let dimensions = display.part_dimensions();
+            let compounds: Vec<Option<usize>> = (display.mesh.parts.iter())
+                .map(|p| model.geometry.as_ref()?.compound_of(&p.name))
+                .collect();
             let geometry = plx_model::DetectionGeometry {
                 mesh: &display.mesh,
                 skins: display.skins(),
                 entities: display.cad_entities(),
                 face_edges: display.face_edges(),
                 part_dimensions: &dimensions,
+                compounds: &compounds,
             };
             let mut report = (model.fe).detect_contacts_on_geometry(index, &geometry, &visible)?;
             // Line ends are tied by their nodes, which only the mesh has.

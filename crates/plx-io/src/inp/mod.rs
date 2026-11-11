@@ -362,6 +362,7 @@ impl Reader {
                     match mesh.parts.iter_mut().find(|p| p.name == *set) {
                         Some(part) => part.elements.push(id),
                         None => mesh.parts.push(Part {
+                            bodies: Vec::new(),
                             name: set.clone(),
                             elements: vec![id],
                         }),

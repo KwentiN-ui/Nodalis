@@ -118,9 +118,18 @@ pub fn analysis_status(
     let stale_parts: Vec<String> = match geometry {
         Some(geometry) => (mesh.parts.iter())
             .filter_map(|part| {
-                let made_from = mesh_inputs.get(&part.name)?;
-                (fingerprint::mesh_input(geometry, space, &part.name) != *made_from)
-                    .then(|| part.name.clone())
+                // A compound part is out of date with any of its bodies.
+                let bodies: Vec<&str> = if part.bodies.is_empty() {
+                    vec![part.name.as_str()]
+                } else {
+                    part.bodies.iter().map(|b| b.name.as_str()).collect()
+                };
+                let stale = bodies.into_iter().any(|body| {
+                    mesh_inputs.get(body).is_some_and(|made_from| {
+                        fingerprint::mesh_input(geometry, space, body) != *made_from
+                    })
+                });
+                stale.then(|| part.name.clone())
             })
             .collect(),
         None => Vec::new(),
@@ -320,6 +329,7 @@ mod tests {
         let mesh = block();
         let part = mesh.parts[0].name.clone();
         let mut geometry = Geometry {
+            compounds: Vec::new(),
             source: "block.step".into(),
             brep: "shapes".into(),
             meshing: MeshingParameters::default(),

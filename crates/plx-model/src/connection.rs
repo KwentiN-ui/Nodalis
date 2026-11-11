@@ -476,21 +476,46 @@ pub struct Lowered {
     /// The region of each contact region left in the lowered model: those of no separation,
     /// which the writer turns into equations.
     pub equation_regions: Vec<usize>,
+    /// The first of the regions that tie the bodies of compound parts, which come after the
+    /// user's regions; `None` without them.
+    pub first_compound: Option<usize>,
+    /// The compound part, by mesh index, of each region from `first_compound` on.
+    pub compound_parts: Vec<usize>,
 }
 
 impl Lowered {
     /// The contact region a tie or contact pair of the lowered model stands for, `None` for
     /// one the user defined.
     pub fn region_of(&self, item: crate::ModelItem) -> Option<usize> {
+        let user = |r: &usize| self.first_compound.is_none_or(|first| *r < first);
+        self.regions_of(item).into_iter().find(user)
+    }
+
+    /// The compound part, by mesh index, whose bodies a tie or contact pair of the lowered
+    /// model ties; `None` for one of a contact region of the user.
+    pub fn part_of(&self, item: crate::ModelItem) -> Option<usize> {
+        let first = self.first_compound?;
+        if self.region_of(item).is_some() {
+            return None;
+        }
+        let region = self.regions_of(item).into_iter().find(|&r| r >= first)?;
+        self.compound_parts.get(region - first).copied()
+    }
+
+    /// All regions a lowered item stands for: those of a tie that merges several.
+    fn regions_of(&self, item: crate::ModelItem) -> Vec<usize> {
         match item {
-            crate::ModelItem::Tie(i) => i
-                .checked_sub(self.first_tie)
-                .and_then(|i| self.tie_regions.get(i)?.first().copied()),
-            crate::ModelItem::ContactPair(i) => i
-                .checked_sub(self.first_pair)
-                .and_then(|i| self.pair_regions.get(i).copied()),
-            crate::ModelItem::ContactRegion(i) => self.equation_regions.get(i).copied(),
-            _ => None,
+            crate::ModelItem::Tie(i) => (i.checked_sub(self.first_tie))
+                .and_then(|i| self.tie_regions.get(i).cloned())
+                .unwrap_or_default(),
+            crate::ModelItem::ContactPair(i) => (i.checked_sub(self.first_pair))
+                .and_then(|i| self.pair_regions.get(i).copied())
+                .into_iter()
+                .collect(),
+            crate::ModelItem::ContactRegion(i) => {
+                self.equation_regions.get(i).copied().into_iter().collect()
+            }
+            _ => Vec::new(),
         }
     }
 }
@@ -798,7 +823,32 @@ impl FeModel {
     /// added item comes from. Bonded regions whose slave sides share nodes become one tie, as
     /// the solver ties a node to one master only. Active regions of no separation stay, with
     /// their master and tolerance settled, for the writer to turn into equations.
+    ///
+    /// The bodies of compound parts are tied as bonded regions added after the user's, see
+    /// [`FeModel::compound_ties`]; [`Lowered::part_of`] tells the part of their ties.
     pub fn lower_contacts(&self, mesh: &FeMesh) -> (FeModel, Lowered) {
+        let compound = self.compound_ties(mesh);
+        if compound.is_empty() {
+            return self.lower_regions(mesh);
+        }
+        let mut extended = self.clone();
+        let first = extended.contact_regions.len();
+        let parts = compound.iter().map(|t| t.part).collect();
+        extended
+            .contact_regions
+            .extend(compound.into_iter().map(|t| t.region));
+        let (mut lowered, mut origin) = extended.lower_regions(mesh);
+        // The regions written stay the user's.
+        lowered
+            .contact_regions
+            .retain(|r| self.contact_regions.iter().any(|c| c.id == r.id));
+        origin.first_compound = Some(first);
+        origin.compound_parts = parts;
+        (lowered, origin)
+    }
+
+    /// [`Self::lower_contacts`] of the model's contact regions.
+    fn lower_regions(&self, mesh: &FeMesh) -> (FeModel, Lowered) {
         let mut lowered = self.clone();
         let mut origin = Lowered {
             first_tie: self.ties.len(),
