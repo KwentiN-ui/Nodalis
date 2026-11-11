@@ -2322,9 +2322,6 @@ impl ProjectApp {
             let id = app.add_analysis(&name, egui::pos2(40.0, 40.0), properties);
             app.startup_import = files;
             app.open_window(&cc.egui_ctx, id, None);
-        } else {
-            // The last project is not loaded again: Open Recent lists it.
-            app.add_first_analysis();
         }
         Ok(app)
     }
@@ -4675,21 +4672,8 @@ impl ProjectApp {
         self.history.clear();
         self.in_project = true;
         self.active = None;
-        self.add_first_analysis();
         self.forget_edits();
         self.output.push("New project".into());
-    }
-
-    /// A new project starts with an analysis, with the model space and units of the
-    /// settings, so that Geometry, FE Model and Results can be used right away.
-    fn add_first_analysis(&mut self) {
-        let properties = ModelProperties {
-            kind: plx_model::ModelKind::General,
-            global_results: None,
-            ..self.settings.new_model.clone()
-        };
-        let id = self.add_analysis("Analysis-1", egui::pos2(40.0, 40.0), properties);
-        self.active = Some(id);
     }
 
     fn open_dialog(&mut self, ctx: &egui::Context) {
@@ -5955,19 +5939,7 @@ impl ProjectApp {
         }
         self.place_block(ui, viewer.to_global.inverse(), &mut viewer.actions);
         if self.nodes.is_empty() {
-            ui.put(
-                egui::Rect::from_center_size(ui.max_rect().center(), egui::vec2(420.0, 60.0)),
-                egui::Label::new(
-                    egui::RichText::new(
-                        "Place an analysis, materials or a mesh with the tiles of the ribbon,\n\
-                         or double-click here to search the blocks. Double-click an analysis\n\
-                         to open it in Geometry, FE Model and Results.",
-                    )
-                    .weak(),
-                )
-                // Clicks go through to the schematic below.
-                .selectable(false),
-            );
+            empty_hint(ui, layer);
         }
         viewer.actions
     }
@@ -12345,6 +12317,63 @@ fn edit_entries(ui: &mut egui::Ui, id: u64, targets: &[u64], actions: &mut Vec<A
     );
     entry(ui, "Delete", "X", Action::DeleteAll(targets.to_vec()));
 }
+
+/// The hint in the middle of an empty schematic. A new project starts empty, so that the
+/// first analysis gets its model space and units from the user.
+///
+/// It is painted on a layer above the one of the schematic, so that the background dots do
+/// not run through the text, and takes no input: clicks go through to the schematic.
+fn empty_hint(ui: &egui::Ui, schematic: egui::LayerId) {
+    let (ctx, rect, visuals) = (ui.ctx(), ui.max_rect(), &ui.style().visuals);
+    let layer = egui::LayerId::new(schematic.order, egui::Id::new("empty schematic hint"));
+    ctx.set_sublayer(schematic, layer);
+    let painter = ctx.layer_painter(layer).with_clip_rect(rect);
+    let strong = visuals.strong_text_color();
+    let text = visuals.text_color();
+    let title = painter.layout_no_wrap(
+        "This project is empty".into(),
+        egui::FontId::proportional(22.0),
+        strong,
+    );
+    let lines: Vec<_> = EMPTY_HINT
+        .iter()
+        .map(|line| painter.layout_no_wrap((*line).into(), egui::FontId::proportional(15.0), text))
+        .collect();
+    let (gap, spacing) = (12.0, 4.0);
+    let height = title.size().y
+        + gap
+        + lines.iter().map(|g| g.size().y).sum::<f32>()
+        + spacing * (lines.len() - 1) as f32;
+    let width = (lines.iter().map(|g| g.size().x)).fold(title.size().x, f32::max);
+    // A card like a block covers the dots behind the text.
+    let card = egui::Rect::from_center_size(rect.center(), egui::vec2(width + 56.0, height + 40.0));
+    painter.rect(
+        card,
+        8.0,
+        crate::style::window(),
+        egui::Stroke::new(1.0, crate::style::border()),
+        egui::StrokeKind::Inside,
+    );
+    let mut y = rect.center().y - height / 2.0;
+    let x = rect.center().x;
+    let put = |galley: std::sync::Arc<egui::Galley>, y: &mut f32, after: f32| {
+        let size = galley.size();
+        painter.galley(egui::pos2(x - size.x / 2.0, *y), galley, text);
+        *y += size.y + after;
+    };
+    put(title, &mut y, gap);
+    for line in lines {
+        put(line, &mut y, spacing);
+    }
+}
+
+/// The lines of the hint in an empty schematic, see [`empty_hint`].
+const EMPTY_HINT: [&str; 4] = [
+    "Click New Analysis in the ribbon and choose its model space and units.",
+    "Add materials, meshes and other blocks with the tiles of the ribbon,",
+    "or double-click here to search all blocks.",
+    "Double-click an analysis to open it in Geometry, FE Model and Results.",
+];
 
 /// Spacing of the dots of the schematic's background, at true size.
 const DOT_SPACING: f32 = 24.0;

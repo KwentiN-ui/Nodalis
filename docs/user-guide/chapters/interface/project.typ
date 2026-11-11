@@ -6,8 +6,12 @@ A Nodalis project (`.ndl`) holds several analyses, like a project of Ansys Workb
 Project workspace (@workspaces), also called the *project window* in this guide, shows each
 analysis as a block in the project schematic. A double-click on a block opens the analysis in
 the Geometry, FE Model or Results workspace of the same window (@main-window); with
-#ui("Open in New Window") it opens in a window of its own. A new project starts with one empty
-analysis.
+#ui("Open in New Window") it opens in a window of its own. A new project starts empty: add the
+first analysis with #ui("New Analysis"), which asks for its model space and unit system
+(@new-analysis).
+
+#screenshot("project-empty.png", [A new project: the schematic is empty until the first
+  analysis is added])
 
 #screenshot("project-window.png", [Project window with three analyses: #ui("Cantilever
   continued") continues #ui("Cantilever") after its last step (green wire), #ui("Axial-load")
@@ -291,7 +295,7 @@ The menus of the Project workspace hold only what concerns the whole project; th
 placed and worked on with the ribbon (@ribbon) and the keys above.
 
 #fields(
-  [File > New Project], [Closes the project and starts a new one with #ui("Analysis-1").],
+  [File > New Project], [Closes the project and starts a new, empty one.],
   [File > Open ... (#key("Ctrl+O"))], [Opens a project. Its analyses open when you
     double-click them.],
   [File > Open Recent], [Lists the projects opened or saved last that still exist.],
