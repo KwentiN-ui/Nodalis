@@ -181,7 +181,10 @@ use serde::{Deserialize, Serialize};
 /// steps ([`BoltChange::amplitude`]); formats 21 to 25 read as they are. Format 27 lets contact
 /// detections choose their parts by filters and give the pairs they find their type by rules
 /// ([`ContactRule`]), and adds part groups ([`PartGroup`]); formats 21 to 26 read as they are.
-pub const PROJECT_FORMAT: u32 = 27;
+/// Format 28 merges the concentrated, surface and body flux into one total heat flow
+/// ([`LoadKind::Flux`]); formats 21 to 27 read as they are unless a step has one of those
+/// loads.
+pub const PROJECT_FORMAT: u32 = 28;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2284,12 +2287,12 @@ pub enum LoadKind {
         /// Direction of the preload; `None` lets the solver take the surface normal.
         direction: Option<[f64; 3]>,
     },
-    /// Heat flow into every node of the region (`*CFLUX`).
-    ConcentratedFlux(f64),
-    /// Heat flow per area into a surface (`*DFLUX`, `S`).
-    SurfaceFlux(f64),
-    /// Heat generated per volume in the elements of the region (`*DFLUX`, `BF`).
-    BodyFlux(f64),
+    /// Total heat flow into the region, spread over its nodes when the input file is
+    /// written, like a [`LoadKind::Force`]: on faces by area (a surface flux), along edges by
+    /// length, in whole parts or element sets by volume (a body flux) and on nodes in equal
+    /// shares. With `each_node` the whole value flows into every node of the region instead
+    /// (a concentrated flux).
+    Flux { value: f64, each_node: bool },
     /// Convection to the surroundings at the sink temperature (`*FILM`).
     Film { sink: f64, coefficient: f64 },
     /// Radiation to the surroundings at the sink temperature (`*RADIATE`); needs the
@@ -2322,6 +2325,14 @@ impl LoadKind {
     /// A total force, spread over the nodes of the region.
     pub fn force(value: [f64; 3]) -> Self {
         LoadKind::Force {
+            value,
+            each_node: false,
+        }
+    }
+
+    /// A total heat flow, spread over the nodes of the region.
+    pub fn flux(value: f64) -> Self {
+        LoadKind::Flux {
             value,
             each_node: false,
         }

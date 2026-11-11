@@ -204,9 +204,10 @@ step. A frequency step takes no loads.
     models). Switching keeps the nearest axis or the standard vector.],
   [Moving Load], [Wheel forces that travel over faces, one static step per position
     (@moving-load).],
-  [Concentrated Flux], [Heat flow into every node of the region (`*CFLUX`).],
-  [Surface Flux], [Heat flux density into faces (`*DFLUX`).],
-  [Body Flux], [Heat generated per volume in parts or elements (`*DFLUX`, `BF`).],
+  [Flux], [A *total* heat flow into whatever the region holds, faces, edges, points or whole
+    parts (@flux-region); positive flows in. It covers CalculiX' concentrated, surface and
+    body flux. With #ui("Apply to all nodes individually") the whole heat flow enters every
+    node of the region instead (a concentrated flux); it is off by default.],
   [Film (Convection)], [Convection to the surroundings with #ui("Sink temperature") and
     #ui("Film coefficient") (`*FILM`).],
   [Radiation], [Radiation to the surroundings with #ui("Sink temperature") and
@@ -254,6 +255,28 @@ selection of faces and edges carry the force.
 #screenshot("surface-traction-edge.png", [Force of 100 N along the free edge of a shell plate])
 
 #screenshot("force-dialog.png", [Force dialog with the Selection window])
+
+=== What a heat flow acts on <flux-region>
+
+A #ui("Flux") in a heat transfer or coupled step picks its region like a force: faces, edges and
+points in the #ui("Selection") window, or a node set, a surface, whole #ui("Parts") or an element
+set as #ui("Region"). The value is always the total heat flow (power, W in SI) and is distributed
+to the nodes when the input file is written (`*CFLUX`), with the same rules as a force:
+
+#fields(
+  [Faces], [By the face areas: a constant heat flux density, the surface flux. 10 W on faces of
+    0.01 m² are 1000 W/m².],
+  [Edges], [By the edge lengths, e.g. along the edge of a shell.],
+  [Parts, element sets], [By the volume of the elements and their shape functions: a constant
+    heat source per volume, the body flux. In plane models by the area of the elements, in
+    axisymmetric models by the volume of the revolution.],
+  [Points, nodes, node sets], [In equal shares.],
+)
+
+Faces come before edges and edges before points. A flux density or a heat source per volume is
+entered as the total: multiply it by the area or the volume of the region. In axisymmetric models the heat flow is the one through the full circumference.
+
+#screenshot("flux-dialog.png", [Flux of 50 W on the end face of a bar in a heat transfer step])
 
 === Coordinate system and follower loads <load-directions>
 

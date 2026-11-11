@@ -164,6 +164,14 @@ pub(crate) const SUPPORT_SOURCES: &[Source] = &[
     Source::Surface,
     Source::ReferencePoint,
 ];
+/// Faces, edges, points or whole parts: for a heat flow, which spreads over them.
+pub(crate) const FLUX_SOURCES: &[Source] = &[
+    Source::Selection,
+    Source::Parts,
+    Source::NodeSet,
+    Source::ElementSet,
+    Source::Surface,
+];
 /// Nodes, or the point of a rigid body or a remote displacement: for nodal history outputs,
 /// which print the forces and moments of a point too.
 pub(crate) const HISTORY_NODE_SOURCES: &[Source] = &[
@@ -1400,9 +1408,7 @@ const MOMENT: &str = "Moment";
 const REMOTE_FORCE: &str = "Remote_Force";
 const PRESSURE: &str = "Pressure";
 const PRE_TENSION: &str = "Pre-tension";
-const CFLUX: &str = "Concentrated_Flux";
-const SURFACE_FLUX: &str = "Surface_Flux";
-const BODY_FLUX: &str = "Body_Flux";
+const FLUX: &str = "Flux";
 const FILM: &str = "Convective_Film";
 const RADIATION: &str = "Radiation";
 const GRAVITY: &str = "Gravity";
@@ -1862,7 +1868,7 @@ fn nearest_direction(vector: [f64; 3]) -> GravityDirection {
     }
 }
 
-fn load_kinds() -> [(&'static str, &'static str, LoadKind); 13] {
+fn load_kinds() -> [(&'static str, &'static str, LoadKind); 11] {
     [
         ("Force", FORCE, LoadKind::force([0.0; 3])),
         (
@@ -1896,9 +1902,7 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 13] {
             MOVING,
             LoadKind::Moving(MovingLoad::default()),
         ),
-        ("Concentrated Flux", CFLUX, LoadKind::ConcentratedFlux(0.0)),
-        ("Surface Flux", SURFACE_FLUX, LoadKind::SurfaceFlux(0.0)),
-        ("Body Flux", BODY_FLUX, LoadKind::BodyFlux(0.0)),
+        ("Flux", FLUX, LoadKind::flux(0.0)),
         (
             "Film (Convection)",
             FILM,
@@ -1979,9 +1983,7 @@ fn load_kind_name(kind: &LoadKind) -> &'static str {
         LoadKind::Force { .. } => FORCE,
         LoadKind::RemoteForce(_) => REMOTE_FORCE,
         LoadKind::PreTension { .. } => PRE_TENSION,
-        LoadKind::ConcentratedFlux(_) => CFLUX,
-        LoadKind::SurfaceFlux(_) => SURFACE_FLUX,
-        LoadKind::BodyFlux(_) => BODY_FLUX,
+        LoadKind::Flux { .. } => FLUX,
         LoadKind::Film { .. } => FILM,
         LoadKind::Radiation { .. } => RADIATION,
         LoadKind::Gravity(_) | LoadKind::StandardGravity(_) => GRAVITY,
@@ -2005,11 +2007,10 @@ fn load_target(kind: &LoadKind) -> LoadTarget {
         | LoadKind::Excitation(_)
         | LoadKind::RemoteForce(_)
         | LoadKind::Moment(_)
-        | LoadKind::ConcentratedFlux(_) => LoadTarget::Nodes,
-        LoadKind::BodyFlux(_)
-        | LoadKind::Gravity(_)
-        | LoadKind::StandardGravity(_)
-        | LoadKind::Centrifugal { .. } => LoadTarget::Elements,
+        | LoadKind::Flux { .. } => LoadTarget::Nodes,
+        LoadKind::Gravity(_) | LoadKind::StandardGravity(_) | LoadKind::Centrifugal { .. } => {
+            LoadTarget::Elements
+        }
         _ => LoadTarget::Faces,
     }
 }
@@ -2020,7 +2021,8 @@ fn load_picks(kind: &LoadKind, fe: &FeModel) -> (&'static [Source], Target) {
         // A force picks faces, edges or points of the geometry, like a boundary condition.
         // Forces and moments also act on the reference point of a rigid body.
         LoadTarget::Nodes if !kind.is_thermal() => (SUPPORT_SOURCES, Target::Nodes),
-        LoadTarget::Nodes => (NODE_SOURCES, Target::Nodes),
+        // A heat flow picks faces, edges or points too, or whole parts to flow into.
+        LoadTarget::Nodes => (FLUX_SOURCES, Target::Nodes),
         LoadTarget::Faces => (FACE_SOURCES, face_target(fe)),
         // Body loads act on elements: whole parts or element sets. Picked faces or edges
         // hold no elements.
@@ -3336,32 +3338,28 @@ impl Editor {
                         ui.weak("Bolt preloads are made by a Bolt under Connections.");
                         ui.end_row();
                     }
-                    LoadKind::ConcentratedFlux(flux) => {
-                        ui.label("Heat flux");
+                    LoadKind::Flux { value, each_node } => {
+                        ui.label("Heat flow");
                         expose::field(ui, Field::Value, |ui| {
-                            ui.add(numeric::physical(flux, units, Quantity::Power))
+                            ui.add(numeric::physical(value, units, Quantity::Power))
                         });
                         ui.end_row();
                         ui.label("");
-                        ui.weak("The heat flux flows into every node of the region.");
-                        ui.end_row();
-                    }
-                    LoadKind::SurfaceFlux(flux) => {
-                        ui.label("Heat flux density");
-                        expose::field(ui, Field::Value, |ui| {
-                            ui.add(numeric::physical(flux, units, Quantity::HeatFlux))
-                        });
+                        ui.checkbox(each_node, "Apply to all nodes individually");
                         ui.end_row();
                         ui.label("");
-                        ui.weak("Positive: heat flows into the part.");
-                        ui.end_row();
-                    }
-                    LoadKind::BodyFlux(flux) => {
-                        ui.label("Heat source");
-                        expose::field(ui, Field::Value, |ui| {
-                            ui.add(numeric::physical(flux, units, Quantity::PowerPerVolume))
+                        ui.weak(if *each_node {
+                            "The whole heat flow enters every node of the region."
+                        } else {
+                            "Total heat flow: on faces by area, on edges by length, in parts by \
+                             volume, on points in equal shares. Positive flows in."
                         });
                         ui.end_row();
+                        if axisymmetric {
+                            ui.label("");
+                            ui.weak("Axisymmetric: heat flow on the whole circumference (360°).");
+                            ui.end_row();
+                        }
                     }
                     LoadKind::Film { sink, coefficient } => {
                         ui.label("Sink temperature");
@@ -8082,7 +8080,7 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!(load.kind, LoadKind::ConcentratedFlux(0.0));
+        assert_eq!(load.kind, LoadKind::flux(0.0));
         assert_eq!(region.target, Target::Nodes);
         // A static step after it leaves the thermal items behind.
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
