@@ -31,9 +31,9 @@ Solution Monitor and #ui("Stop") in the Project workspace cancel a meshing in th
   inset: (x: 5pt, y: 4pt),
   table.header([*Part*], [*Elements*]),
   [Solid (3D models)], [Tetrahedra `C3D4` (linear) or `C3D10` (quadratic)],
-  [Face (3D models)], [Shells: triangles `S3`, `S6` or quad-dominated with `S4`, `S8`; the
-    thickness comes from a shell section (@shell-section)],
-  [Face (2D models)], [Triangles, or quad-dominated with quadrilaterals; written as `CPS`,
+  [Face (3D models)], [Shells: quadrilaterals `S4`, `S8`, or triangles `S3`, `S6` if the
+    quadrilaterals are switched off; the thickness comes from a shell section (@shell-section)],
+  [Face (2D models)], [Quadrilaterals, or triangles if they are switched off; written as `CPS`,
     `CPE` or `CAX` elements depending on the model space],
   [Line (3D models)], [`B31` or `B32` lines; the section decides whether they are written as
     beams or trusses (@sections)],
@@ -101,17 +101,38 @@ values and meshes at once.
   [Midside nodes on geometry], [Places midside nodes on the curved geometry instead of on the
     straight edge between the corner nodes (only with second order).],
   [Optimize mesh (Netgen)], [Improves the element quality after meshing (default on).],
-  [Quad-dominated surface mesh], [Creates mainly quadrilaterals on faces: plane elements of 2D
-    models and shells of 3D models. Solids are not affected: their tetrahedra need triangles on
-    the faces. The option is greyed out when the parameters reach only solids.],
+  [Quadrilaterals on faces], [Meshes faces with quadrilaterals (default on): plane elements of
+    2D models and shells of 3D models; off gives triangles. Solids are not affected: their
+    tetrahedra need triangles on the faces. The option is greyed out when the parameters reach
+    only solids. See @quad-faces.],
   [Hexahedra where possible], [Meshes every solid that is a straight extrusion of one of its
     faces, as an Extrude Mesh item with its defaults would (@extrude-mesh), or a body of
     revolution with hexahedra (@revolve-mesh); the other solids keep tetrahedra (default
     off).],
 )
 
-#screenshot("quad-dominated-solids.png", [Quad-dominated surface mesh greyed out for a geometry of
+#screenshot("quad-dominated-solids.png", [Quadrilaterals on faces greyed out for a geometry of
   solids only])
+
+=== Quadrilaterals on faces <quad-faces>
+
+Faces are meshed with Gmsh's quasi-structured algorithm. It lays the quadrilaterals in a grid
+that follows the outline and the holes, so that nearly every inner node joins four elements,
+and it leaves no triangles. The element sizes are those of the meshing parameters and the
+local mesh sizes; next to a rounded outline the grid may come out finer than asked for.
+
+#screenshot("quad-faces.png", [A flange meshed with the quasi-structured algorithm])
+
+Nodalis falls back to the Frontal-Delaunay algorithm, whose triangles are joined to
+quadrilaterals, and says so in the output pane:
+
+- if a face would get more than about 20 000 quadrilaterals, where the quasi-structured
+  algorithm takes minutes;
+- if the quasi-structured algorithm fails or leaves a badly distorted quadrilateral and the
+  other algorithm does better.
+
+A #ui("Tetrahedral Gmsh") item that names the part chooses the algorithm instead: its
+triangles are then joined to quadrilaterals, which is faster and less regular.
 
 === Mesh setup items
 
@@ -128,7 +149,8 @@ values and meshes at once.
   cylinder. A box takes the faces inside it. The default size is a quarter of the maximum
   element size.
 / Tetrahedral Gmsh: chooses the Gmsh algorithms for selected parts. #ui("Surface algorithm"):
-  Frontal-Delaunay (default), Delaunay, MeshAdapt or Automatic. #ui("Volume algorithm"):
+  Frontal-Delaunay (default), Delaunay, MeshAdapt or Automatic; on shells and 2D models it
+  replaces the quasi-structured algorithm (@quad-faces). #ui("Volume algorithm"):
   Delaunay (default), Frontal or HXT.
 / Extrude Mesh: hexahedra and wedges for parts that are extrusions of a face (@extrude-mesh).
 / Thicken Shell Mesh: solid elements for shell parts, the face mesh offset through a thickness
@@ -160,9 +182,12 @@ meshing parameters and local mesh sizes, as for tetrahedra.
     dialog shows which parts they belong to. A source may consist of several faces; the
     #ui("Surface angle") mode of the selection window takes the faces that continue the
     clicked one with one click.],
-  [Surface algorithm], [The Gmsh algorithm for the source face. #ui("Frontal-Delaunay for
-    quads") (default) gives triangles that join well to quadrilaterals.],
-  [Recombine algorithm], [How triangles are joined to quadrilaterals: #ui("Blossom") (default)
+  [Surface algorithm], [The Gmsh algorithm for the source face. #ui("Quasi-structured quad")
+    (default) gives a regular grid of quadrilaterals only (@quad-faces), so the part gets
+    hexahedra only. #ui("Frontal-Delaunay for quads") gives triangles that join well to
+    quadrilaterals and is faster on very fine faces.],
+  [Recombine algorithm], [Greyed out for #ui("Quasi-structured quad"), which joins no
+    triangles. How the other algorithms' triangles are joined to quadrilaterals: #ui("Blossom") (default)
     or #ui("Simple") leave a few triangles, which become wedges. #ui("Simple full-quad") and
     #ui("Blossom full-quad") give quadrilaterals only, so the part gets hexahedra only; they
     split the mesh once more, which halves the element size. #ui("None") keeps the triangles.],

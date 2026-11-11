@@ -145,16 +145,19 @@ impl Geometry {
     /// Gmsh's algorithms for a part: of the last Tetrahedral Gmsh item naming it, else the
     /// defaults.
     pub fn algorithms(&self, part: &str) -> (Algorithm2d, Algorithm3d) {
-        (self.mesh_items.iter().rev())
-            .find_map(|item| match &item.kind {
-                MeshSetupKind::TetrahedralGmsh {
-                    parts,
-                    algorithm_2d,
-                    algorithm_3d,
-                } if names(parts, part) => Some((*algorithm_2d, *algorithm_3d)),
-                _ => None,
-            })
-            .unwrap_or_default()
+        self.chosen_algorithms(part).unwrap_or_default()
+    }
+
+    /// Gmsh's algorithms of the last Tetrahedral Gmsh item naming the part, if any does.
+    pub fn chosen_algorithms(&self, part: &str) -> Option<(Algorithm2d, Algorithm3d)> {
+        (self.mesh_items.iter().rev()).find_map(|item| match &item.kind {
+            MeshSetupKind::TetrahedralGmsh {
+                parts,
+                algorithm_2d,
+                algorithm_3d,
+            } if names(parts, part) => Some((*algorithm_2d, *algorithm_3d)),
+            _ => None,
+        })
     }
 
     /// The extrude mesh of a part: the last Extrude Mesh item naming it, unless a later
@@ -256,7 +259,8 @@ pub struct MeshingParameters {
     pub midside_nodes_on_geometry: bool,
     /// Improves element quality after meshing with Netgen's optimiser.
     pub optimize: bool,
-    /// Faces (2D models and shells) are meshed with mostly quadrilaterals instead of triangles.
+    /// Faces (2D models and shells) are meshed with quadrilaterals instead of triangles, with
+    /// Gmsh's quasi-structured algorithm unless a Gmsh item chooses another.
     pub quad_dominated: bool,
     /// Solids that are straight extrusions or bodies of revolution get a swept mesh of
     /// hexahedra, with the defaults of the Extrude Mesh item for extrusions; the others stay
@@ -275,7 +279,7 @@ impl Default for MeshingParameters {
             second_order: true,
             midside_nodes_on_geometry: false,
             optimize: true,
-            quad_dominated: false,
+            quad_dominated: true,
             hexahedra_where_possible: false,
         }
     }
@@ -372,7 +376,7 @@ impl Default for ExtrudeMesh {
         Self {
             parts: Vec::new(),
             faces: Vec::new(),
-            algorithm_2d: Algorithm2d::FrontalQuads,
+            algorithm_2d: Algorithm2d::QuasiStructuredQuad,
             recombination: Recombination::Blossom,
             layers: ExtrudeLayers::ScaleFactor(1.0),
         }

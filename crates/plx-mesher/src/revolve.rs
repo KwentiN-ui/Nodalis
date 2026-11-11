@@ -17,7 +17,7 @@ use crate::extrude::{
     Motion, Point, Topology, add, cross, dot, norm, scale, source_elements, sub, sweep_mesh,
 };
 use crate::gmsh::{Gmsh, GmshError};
-use crate::{GeneratedMesh, MeshOptions, local_sizes, node_coords};
+use crate::{GeneratedMesh, MeshOptions, generate_faces, node_coords};
 
 /// What a curve of the part is in relation to the axis.
 #[derive(Clone, Copy, Debug)]
@@ -314,9 +314,9 @@ pub(crate) fn revolve_part_mesh(
         Err(reason) => return Ok(Err(format!("{part}: no body of revolution: {reason}"))),
     };
     let mut options = MeshOptions::of_part(geometry, part);
-    options.algorithms.0 = plx_model::Algorithm2d::FrontalQuads;
+    options.algorithms.0 = plx_model::Algorithm2d::QuasiStructuredQuad;
     options.quads = true;
-    options.apply(gmsh)?;
+    options.visible_only = true;
     // Only the section is meshed.
     let mut all = Vec::new();
     for dim in 0..=3 {
@@ -325,13 +325,19 @@ pub(crate) fn revolve_part_mesh(
     gmsh.set_visibility(&all, false)?;
     let source: Vec<(i32, i32)> = revolution.source.iter().map(|&f| (2, f)).collect();
     gmsh.set_visibility(&source, true)?;
-    gmsh.set_number("Mesh.MeshOnlyVisible", 1.0)?;
     let own: BTreeSet<i32> = (revolution.source.iter())
         .filter(|f| topology.faces.contains(f))
         .copied()
         .collect();
-    local_sizes(gmsh, geometry, &own)?;
-    gmsh.generate(2)?;
+    let mut notes = Vec::new();
+    generate_faces(
+        gmsh,
+        geometry,
+        &mut options,
+        &revolution.source,
+        &own,
+        &mut notes,
+    )?;
     gmsh.set_number("Mesh.MeshOnlyVisible", 0.0)?;
     let quadratic = options.order == 2;
     let coords = node_coords(gmsh)?;
@@ -366,10 +372,9 @@ pub(crate) fn revolve_part_mesh(
         .collect();
     let (mut mesh, _) = sweep_mesh(part, &coords, &elements, motion, &levels, quadratic)?;
     mesh.cad = classify(gmsh, &mesh, &topology)?;
-    Ok(Ok(GeneratedMesh {
-        mesh,
-        warnings: gmsh.warnings()?,
-    }))
+    let mut warnings = gmsh.warnings()?;
+    warnings.extend(notes.into_iter().map(|note| format!("{part}: {note}")));
+    Ok(Ok(GeneratedMesh { mesh, warnings }))
 }
 
 /// Where the faces, edges and vertices of the part lie in a mesh made without recording

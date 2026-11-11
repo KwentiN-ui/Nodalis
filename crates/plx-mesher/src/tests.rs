@@ -514,6 +514,7 @@ fn faces_outside_solids_are_meshed_as_shell_parts() {
     assert_eq!(display.mesh.parts[0].name, "SHELL-1");
 
     geometry.meshing.max_size = 2.0;
+    geometry.meshing.quad_dominated = false;
     let mesh = generate_mesh(&geometry).unwrap().mesh;
     assert_eq!(mesh.parts.len(), 1);
     assert!(mesh.elements().iter().all(|e| e.type_name == "S6"));
@@ -557,12 +558,9 @@ fn faces_outside_solids_are_meshed_as_shell_parts() {
             .filter(|e| e.type_name == name)
             .count()
     };
-    assert!(
-        count("S4") > 10 * count("S3"),
-        "{} S4, {} S3",
-        count("S4"),
-        count("S3")
-    );
+    // Quadrilaterals only, of the size asked for: about 200 / 2² of them.
+    assert_eq!(count("S3"), 0);
+    assert!((40..=300).contains(&count("S4")), "{} S4", count("S4"));
     geometry.meshing.second_order = true;
     let quadratic = generate_mesh(&geometry).unwrap().mesh;
     assert!(quadratic.elements().iter().any(|e| e.type_name == "S8"));
@@ -2148,6 +2146,7 @@ fn quad_dominated_meshing_leaves_solids_whole() {
     geometry.meshing.second_order = false;
     geometry.meshing.max_size = 2.0;
     let total = |mesh: &FeMesh| -> f64 { mesh.elements().iter().map(|e| volume(mesh, e)).sum() };
+    geometry.meshing.quad_dominated = false;
     let triangles = generate_mesh(&geometry).unwrap().mesh;
     geometry.meshing.quad_dominated = true;
     let quads = generate_mesh(&geometry).unwrap().mesh;
@@ -2633,4 +2632,128 @@ fn every_hole_edge_of_a_step_plate_gives_a_ring_and_the_plate_splits_across() {
     assert_eq!(halves.compounds.len(), 1);
     let mesh = generate_mesh(&halves).unwrap().mesh;
     assert_eq!(mesh.parts.len(), 1);
+}
+
+/// Inner nodes of a quadrilateral mesh that do not join four elements.
+fn irregular_nodes(mesh: &FeMesh) -> usize {
+    let mut elements: HashMap<NodeId, usize> = HashMap::new();
+    let mut edges: HashMap<(NodeId, NodeId), usize> = HashMap::new();
+    for element in mesh.elements() {
+        let corners = &element.nodes[..4];
+        for k in 0..4 {
+            *elements.entry(corners[k]).or_default() += 1;
+            let (a, b) = (corners[k], corners[(k + 1) % 4]);
+            *edges.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    let boundary: BTreeSet<NodeId> = (edges.iter())
+        .filter(|&(_, &n)| n == 1)
+        .flat_map(|(&(a, b), _)| [a, b])
+        .collect();
+    (elements.iter())
+        .filter(|&(node, &n)| !boundary.contains(node) && n != 4)
+        .count()
+}
+
+#[test]
+fn faces_get_quasi_structured_quadrilaterals_unless_an_algorithm_is_chosen() {
+    if !gmsh_available() {
+        return;
+    }
+    // New geometries ask for quadrilaterals.
+    assert!(MeshingParameters::default().quad_dominated);
+    let mut geometry = made_geometry(|gmsh| {
+        let disk = gmsh.add_disk([0.0; 3], 30.0, [0.0, 0.0, 1.0])?;
+        let hole = gmsh.add_disk([12.0, 0.0, 0.0], 5.0, [0.0, 0.0, 1.0])?;
+        gmsh.boolean(crate::gmsh::Boolean::Cut, &[(2, disk)], &[(2, hole)], true)?;
+        Ok(())
+    });
+    geometry.meshing.second_order = false;
+    geometry.meshing.max_size = 3.0;
+    geometry.meshing.min_size = 0.0;
+    let structured = generate_mesh(&geometry).unwrap();
+    assert!(structured.warnings.is_empty(), "{:?}", structured.warnings);
+    let structured = structured.mesh;
+    assert!(structured.elements().iter().all(|e| e.type_name == "S4"));
+
+    geometry.mesh_items.push(MeshSetupItem {
+        name: "Gmsh".into(),
+        kind: MeshSetupKind::TetrahedralGmsh {
+            parts: part_names(&geometry).unwrap(),
+            algorithm_2d: Algorithm2d::FrontalDelaunay,
+            algorithm_3d: Default::default(),
+        },
+    });
+    let recombined = generate_mesh(&geometry).unwrap().mesh;
+    let (few, many) = (irregular_nodes(&structured), irregular_nodes(&recombined));
+    assert!(3 * few < many, "{few} irregular nodes instead of {many}");
+    // The same size along the outline, where both algorithms are bound to it.
+    let outline = |mesh: &FeMesh| mesh.cad.segments.values().map(Vec::len).sum::<usize>();
+    let (a, b) = (outline(&structured), outline(&recombined));
+    assert!(a.abs_diff(b) * 5 <= b, "{a} segments instead of {b}");
+
+    // A local size is met as well: about 2 π 5 / 0.5 segments around the hole.
+    geometry.mesh_items.clear();
+    let hole = (structured.cad.segments.iter())
+        .min_by_key(|(_, segments)| segments.len())
+        .map(|(&edge, _)| edge)
+        .unwrap();
+    geometry.mesh_items.push(MeshSetupItem {
+        name: "Hole".into(),
+        kind: MeshSetupKind::LocalMeshSize {
+            faces: Vec::new(),
+            edges: vec![hole],
+            size: 0.5,
+        },
+    });
+    let refined = generate_mesh(&geometry).unwrap().mesh;
+    let around = refined.cad.segments[&hole].len();
+    assert!((50..=80).contains(&around), "{around} segments");
+}
+
+#[test]
+fn faces_too_fine_for_the_quasi_structured_algorithm_are_recombined() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = rectangle([0.0; 3], [200.0, 150.0], 0.0);
+    geometry.meshing.second_order = false;
+    geometry.meshing.max_size = 1.0;
+    geometry.meshing.min_size = 0.0;
+    let generated = generate_mesh(&geometry).unwrap();
+    assert!(
+        generated.warnings.iter().any(|w| w.contains("too many")),
+        "{:?}",
+        generated.warnings
+    );
+    let count = generated.mesh.element_count();
+    assert!((25_000..40_000).contains(&count), "{count} elements");
+}
+
+#[test]
+fn spheres_are_meshed_whatever_algorithm_is_chosen() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = made_geometry(|gmsh| {
+        let ball = gmsh.add_sphere([0.0; 3], 10.0)?;
+        // Only the skin stays, a shell.
+        gmsh.remove_only(&[(3, ball)])
+    });
+    geometry.meshing.max_size = 3.0;
+    geometry.mesh_items.push(MeshSetupItem {
+        name: "Gmsh".into(),
+        kind: MeshSetupKind::TetrahedralGmsh {
+            parts: part_names(&geometry).unwrap(),
+            algorithm_2d: Algorithm2d::FrontalQuads,
+            algorithm_3d: Default::default(),
+        },
+    });
+    let generated = generate_mesh(&geometry).unwrap();
+    assert!(
+        generated.warnings.iter().any(|w| w.contains("spheres")),
+        "{:?}",
+        generated.warnings
+    );
+    assert!(generated.mesh.element_count() > 50);
 }

@@ -159,6 +159,9 @@ gmsh_api! {
         fn(*const c_char, *mut *mut c_int, *mut usize, c_int, *const c_char, Ierr);
     occ_add_box = "gmshModelOccAddBox":
         fn(c_double, c_double, c_double, c_double, c_double, c_double, c_int, Ierr) -> c_int;
+    occ_add_sphere = "gmshModelOccAddSphere": fn(
+        c_double, c_double, c_double, c_double, c_int, c_double, c_double, c_double, Ierr,
+    ) -> c_int;
     occ_add_disk = "gmshModelOccAddDisk": fn(
         c_double, c_double, c_double, c_double, c_double, c_int,
         *const c_double, usize,
@@ -178,6 +181,8 @@ gmsh_api! {
     field_set_numbers = "gmshModelMeshFieldSetNumbers":
         fn(c_int, *const c_char, *const c_double, usize, Ierr);
     field_set_as_background = "gmshModelMeshFieldSetAsBackgroundMesh": fn(c_int, Ierr);
+    field_remove = "gmshModelMeshFieldRemove": fn(c_int, Ierr);
+    mesh_clear = "gmshModelMeshClear": fn(*const c_int, usize, Ierr);
     mesh_generate = "gmshModelMeshGenerate": fn(c_int, Ierr);
     mesh_set_order = "gmshModelMeshSetOrder": fn(c_int, Ierr);
     mesh_import_stl = "gmshModelMeshImportStl": fn(Ierr);

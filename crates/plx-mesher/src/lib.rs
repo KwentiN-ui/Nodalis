@@ -1206,7 +1206,7 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
         options.quads = false;
         options.apply(gmsh)?;
         let faces: BTreeSet<i32> = gmsh.adjacencies(3, volume)?.1.into_iter().collect();
-        local_sizes(gmsh, geometry, &faces)?;
+        local_sizes(gmsh, geometry, &faces, 1.0)?;
         gmsh.generate(3)?;
         let order = options.order;
         let mesh = solid_mesh(gmsh, order, &[(volume, part.to_string())])?;
@@ -1260,10 +1260,10 @@ fn shell_part_mesh(
     if !others.is_empty() {
         gmsh.remove(&others)?;
     }
-    let options = MeshOptions::of_part(geometry, part);
-    options.apply(gmsh)?;
-    local_sizes(gmsh, geometry, &shell.iter().copied().collect())?;
-    gmsh.generate(2)?;
+    let mut options = MeshOptions::of_faces(geometry, part);
+    let mut notes = Vec::new();
+    let sized = shell.iter().copied().collect();
+    generate_faces(gmsh, geometry, &mut options, shell, &sized, &mut notes)?;
     let coords = node_coords(gmsh)?;
     let types: [(i32, ElementShape, &str); 2] = if options.order == 2 {
         [
@@ -1319,10 +1319,9 @@ fn shell_part_mesh(
         mesh = thicken::thicken(&mesh, part, thickening)
             .map_err(|reason| GmshError::Other(format!("{part}: {reason}")))?;
     }
-    Ok(GeneratedMesh {
-        mesh,
-        warnings: gmsh.warnings()?,
-    })
+    let mut warnings = gmsh.warnings()?;
+    warnings.extend(notes.into_iter().map(|note| format!("{part}: {note}")));
+    Ok(GeneratedMesh { mesh, warnings })
 }
 
 /// Meshes an edge outside the faces with 2- or 3-node lines, typed as beams (`B31`, `B32`);
@@ -1454,7 +1453,14 @@ fn line_cad_map(
 
 /// The local mesh sizes on the given faces and their edges as Gmsh size fields; Gmsh takes
 /// the smallest of them and the other size limits.
-fn local_sizes(gmsh: &Gmsh, geometry: &Geometry, faces: &BTreeSet<i32>) -> Result<(), GmshError> {
+/// The sizes are multiplied by the factor, see [`MeshOptions::size_factor`]. Returns the
+/// fields made, to take them back with.
+fn local_sizes(
+    gmsh: &Gmsh,
+    geometry: &Geometry,
+    faces: &BTreeSet<i32>,
+    factor: f64,
+) -> Result<Vec<i32>, GmshError> {
     let mut edges = BTreeSet::new();
     for &face in faces {
         edges.extend(gmsh.adjacencies(2, face)?.1);
@@ -1479,22 +1485,158 @@ fn local_sizes(gmsh: &Gmsh, geometry: &Geometry, faces: &BTreeSet<i32>) -> Resul
         if !local_edges.is_empty() {
             gmsh.set_field_numbers(field, "CurvesList", &local_edges)?;
         }
-        gmsh.set_field_number(field, "VIn", size)?;
+        gmsh.set_field_number(field, "VIn", size * factor)?;
         gmsh.set_field_number(field, "VOut", 1e22)?;
         gmsh.set_field_number(field, "IncludeBoundary", 1.0)?;
         fields.push(field);
     }
     let background = match fields.as_slice() {
-        [] => return Ok(()),
+        [] => return Ok(fields),
         [field] => *field,
         _ => {
             let min = gmsh.add_field("Min")?;
             let list: Vec<f64> = fields.iter().map(|&f| f64::from(f)).collect();
             gmsh.set_field_numbers(min, "FieldsList", &list)?;
+            fields.push(min);
             min
         }
     };
-    gmsh.set_background_field(background)
+    gmsh.set_background_field(background)?;
+    Ok(fields)
+}
+
+/// Faces the quasi-structured algorithm is expected to give more quadrilaterals than this
+/// are left to the faster Frontal-Delaunay algorithm: its time grows faster than the mesh,
+/// to minutes beyond.
+const QUASI_STRUCTURED_LIMIT: f64 = 20_000.0;
+
+/// A quadrilateral whose scaled Jacobian is below this at a corner is badly distorted; a
+/// square has 1, a quadrilateral folded over 0 or less.
+const DISTORTED_QUAD: f64 = 0.1;
+
+/// The smallest scaled Jacobian at a corner of the quadrilaterals on the faces, `None`
+/// without quadrilaterals.
+fn worst_quad(gmsh: &Gmsh, faces: &[i32], order: i32) -> Result<Option<f64>, GmshError> {
+    use extrude::{cross, dot, norm, sub};
+    let coords = node_coords(gmsh)?;
+    let (gmsh_type, count) = if order == 2 { (QUAD8, 8) } else { (QUAD4, 4) };
+    let mut worst: Option<f64> = None;
+    for &face in faces {
+        let (_, nodes) = gmsh.elements(gmsh_type, face)?;
+        for element in nodes.chunks_exact(count) {
+            let mut p = [[0.0; 3]; 4];
+            for (corner, tag) in p.iter_mut().zip(element) {
+                *corner = *coords
+                    .get(tag)
+                    .ok_or_else(|| GmshError::Other(format!("Node {tag} is missing")))?;
+            }
+            let normal = cross(sub(p[2], p[0]), sub(p[3], p[1]));
+            let length = norm(normal);
+            let mut quality = f64::INFINITY;
+            for i in 0..4 {
+                let (a, b) = (sub(p[(i + 1) % 4], p[i]), sub(p[(i + 3) % 4], p[i]));
+                let scale = norm(a) * norm(b) * length;
+                quality = quality.min(if scale > 0.0 {
+                    dot(cross(a, b), normal) / scale
+                } else {
+                    0.0
+                });
+            }
+            worst = Some(worst.map_or(quality, |w| w.min(quality)));
+        }
+    }
+    Ok(worst)
+}
+
+/// Meshes the faces left in the Gmsh model after the options and the local mesh sizes on
+/// `sized`, the faces of them that belong to the part. The quasi-structured algorithm is
+/// watched: where it is expected to take too long, fails or leaves a badly distorted
+/// quadrilateral, the faces are meshed with Frontal-Delaunay and recombined instead, unless
+/// that comes out worse. The notes say so, for the user.
+fn generate_faces(
+    gmsh: &Gmsh,
+    geometry: &Geometry,
+    options: &mut MeshOptions,
+    faces: &[i32],
+    sized: &BTreeSet<i32>,
+    notes: &mut Vec<String>,
+) -> Result<(), GmshError> {
+    if options.quads || options.algorithms.0 == Algorithm2d::FrontalQuads {
+        // Gmsh 4.15 crashes with its Frontal-Delaunay for quads on faces closed both ways.
+        let mut closed = false;
+        for &face in faces {
+            closed |= matches!(gmsh.entity_type(2, face)?.as_str(), "Sphere" | "Torus");
+        }
+        if closed && options.algorithms.0 == Algorithm2d::FrontalQuads {
+            options.algorithms.0 = Algorithm2d::FrontalDelaunay;
+            notes.push(
+                "Frontal-Delaunay for quads cannot mesh spheres and tori: Frontal-Delaunay \
+                 is used instead."
+                    .into(),
+            );
+        }
+    }
+    if options.quads && options.algorithms.0 == Algorithm2d::QuasiStructuredQuad {
+        let mut largest: f64 = 0.0;
+        for &face in faces {
+            largest = largest.max(gmsh.mass(2, face)? / (options.max_size * options.max_size));
+        }
+        if largest > QUASI_STRUCTURED_LIMIT {
+            options.algorithms.0 = Algorithm2d::FrontalDelaunay;
+            notes.push(format!(
+                "A face would get about {largest:.0} quadrilaterals, too many for the \
+                 quasi-structured algorithm: Frontal-Delaunay is used and recombined instead."
+            ));
+        }
+    }
+    let run = |options: &MeshOptions| -> Result<Result<(), GmshError>, GmshError> {
+        options.apply(gmsh)?;
+        let fields = local_sizes(gmsh, geometry, sized, options.size_factor())?;
+        let result = gmsh.generate(2);
+        for field in fields.into_iter().rev() {
+            gmsh.remove_field(field)?;
+        }
+        Ok(result)
+    };
+    let first = run(options)?;
+    if !(options.quads && options.algorithms.0 == Algorithm2d::QuasiStructuredQuad) {
+        return first;
+    }
+    let quality = match &first {
+        Ok(()) => worst_quad(gmsh, faces, options.order)?,
+        Err(_) => None,
+    };
+    if first.is_ok() && quality.is_some_and(|q| q >= DISTORTED_QUAD) {
+        return Ok(());
+    }
+    let structured = options.algorithms.0;
+    options.algorithms.0 = Algorithm2d::FrontalDelaunay;
+    gmsh.clear_mesh()?;
+    run(options)??;
+    let recombined = worst_quad(gmsh, faces, options.order)?;
+    match (first, quality) {
+        (Ok(()), Some(quality)) if recombined.is_none_or(|r| r < quality) => {
+            // The other algorithm is no better: back to the quasi-structured mesh.
+            options.algorithms.0 = structured;
+            gmsh.clear_mesh()?;
+            run(options)?
+        }
+        (Ok(()), _) => {
+            notes.push(
+                "The quasi-structured algorithm left a badly distorted quadrilateral: the \
+                 faces are meshed with Frontal-Delaunay and recombined instead."
+                    .into(),
+            );
+            Ok(())
+        }
+        (Err(error), _) => {
+            notes.push(format!(
+                "The quasi-structured algorithm failed ({error}): the faces are meshed with \
+                 Frontal-Delaunay and recombined instead."
+            ));
+            Ok(())
+        }
+    }
 }
 
 /// Puts a newly meshed part into a mesh in place of the part of the same name. The other
@@ -1624,6 +1766,8 @@ pub fn self_test() -> Result<(LibraryInfo, usize), GmshError> {
             netgen: false,
             algorithms: Default::default(),
             quads: false,
+            recombination: 1.0,
+            visible_only: false,
         };
         options.apply(gmsh)?;
         gmsh.generate(3)?;
@@ -1647,6 +1791,11 @@ struct MeshOptions {
     /// Recombines triangles into quadrilaterals where Gmsh can; for faces only, never for
     /// the boundary of a solid meshed with tetrahedra.
     quads: bool,
+    /// How triangles are recombined, as Gmsh numbers it; Blossom unless an extrude mesh
+    /// chooses another.
+    recombination: f64,
+    /// Meshes only the entities left visible.
+    visible_only: bool,
 }
 
 impl MeshOptions {
@@ -1667,6 +1816,28 @@ impl MeshOptions {
             netgen: setup.optimize,
             algorithms: geometry.algorithms(part),
             quads: setup.quad_dominated,
+            recombination: 1.0,
+            visible_only: false,
+        }
+    }
+
+    /// The options for the faces of a part meshed on their own (a shell or a 2D model):
+    /// quadrilaterals come from the quasi-structured algorithm unless a Gmsh item chose one.
+    fn of_faces(geometry: &Geometry, part: &str) -> Self {
+        let mut options = Self::of_part(geometry, part);
+        if options.quads && geometry.chosen_algorithms(part).is_none() {
+            options.algorithms.0 = Algorithm2d::QuasiStructuredQuad;
+        }
+        options
+    }
+
+    /// What the sizes handed to Gmsh are multiplied by to get the sizes asked for: the
+    /// quasi-structured algorithm ends by splitting every element in four.
+    fn size_factor(&self) -> f64 {
+        if self.algorithms.0 == Algorithm2d::QuasiStructuredQuad {
+            2.0
+        } else {
+            1.0
         }
     }
 
@@ -1688,10 +1859,18 @@ impl MeshOptions {
             Algorithm3d::Frontal => 4.0,
             Algorithm3d::Hxt => 10.0,
         };
+        let factor = self.size_factor();
+        // Half the elements along a curve for the quasi-structured algorithm, but an even
+        // number on a full circle and none only if none are asked for.
+        let elements_per_2pi = if factor > 1.0 && self.elements_per_2pi > 0.0 {
+            (self.elements_per_2pi / factor).ceil().max(4.0)
+        } else {
+            self.elements_per_2pi
+        };
         for (name, value) in [
-            ("Mesh.MeshSizeMax", self.max_size),
+            ("Mesh.MeshSizeMax", self.max_size * factor),
             ("Mesh.MeshSizeMin", self.min_size),
-            ("Mesh.MeshSizeFromCurvature", self.elements_per_2pi),
+            ("Mesh.MeshSizeFromCurvature", elements_per_2pi),
             // Gmsh gives the points of a shape sizes of its own when it reads it or removes
             // other shapes; the sizes come from the parameters and size fields only.
             ("Mesh.MeshSizeFromPoints", 0.0),
@@ -1707,9 +1886,11 @@ impl MeshOptions {
             ("Mesh.Optimize", 1.0),
             ("Mesh.OptimizeNetgen", f64::from(u8::from(self.netgen))),
             ("Mesh.RecombineAll", f64::from(u8::from(self.quads))),
-            // Blossom, Gmsh's default; an extrude mesh chooses its own.
-            ("Mesh.RecombinationAlgorithm", 1.0),
-            ("Mesh.MeshOnlyVisible", 0.0),
+            ("Mesh.RecombinationAlgorithm", self.recombination),
+            (
+                "Mesh.MeshOnlyVisible",
+                f64::from(u8::from(self.visible_only)),
+            ),
             // Quadratic quadrilaterals with 8 nodes, as CalculiX has them.
             ("Mesh.SecondOrderIncomplete", 1.0),
         ] {
