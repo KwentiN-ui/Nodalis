@@ -1800,6 +1800,7 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<SectionsAndProfiles, Wri
     let mut out = Vec::new();
     let mut comments = Vec::new();
     let mut owners = Vec::new();
+    let halved_beams = model.halved_beams(sets.mesh);
     for (index, section) in model.sections.iter().enumerate() {
         let Some(material) = section.material.and_then(|m| model.material(m)) else {
             return Err(WriteError::UnknownMaterial {
@@ -1859,16 +1860,25 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<SectionsAndProfiles, Wri
                 let profile = profile_of(model, &section.name, beam)?;
                 let ir_profile = beam_profile(&profile);
                 // One section per normal: the solver takes one normal per section, and an
-                // automatic orientation may differ between the beams of the region.
-                for (normal, drawn, set) in beam_groups(sets, section, &profile)? {
-                    if !profile.is_native() {
+                // automatic orientation may differ between the beams of the region. Beams on
+                // a symmetry plane get half the section, in sets of their own.
+                for (normal, drawn, set, half) in
+                    beam_groups(sets, section, &profile, &halved_beams)?
+                {
+                    // A halved section is no profile of the model: read back, it is a
+                    // general one of its values.
+                    if !profile.is_native() && !half {
                         comments.push((ir_name(&set), profile_comment(&profile, drawn)));
                     }
                     out.push(IrSection {
                         elset: ir_name(&set),
                         kind: Kind::Beam {
                             material: material.clone(),
-                            profile: ir_profile.clone(),
+                            profile: if half {
+                                halved_profile(&ir_profile)
+                            } else {
+                                ir_profile.clone()
+                            },
                             normal,
                             offset1: beam.offset[0],
                             offset2: beam.offset[1],
@@ -1928,6 +1938,35 @@ fn beam_profile(profile: &BeamProfile) -> ir::section::BeamProfile {
     }
 }
 
+/// Half a general profile: the beam on a symmetry plane, of which the model holds the half
+/// on one side. Area and second moments (and so the torsion stiffness and the mass) halve;
+/// the contact radius stays the rope's.
+fn halved_profile(profile: &ir::section::BeamProfile) -> ir::section::BeamProfile {
+    use ir::section::BeamProfile as P;
+    match profile.clone() {
+        P::General {
+            area,
+            i11,
+            i12,
+            i22,
+            torsion,
+            shear_area_1,
+            shear_area_2,
+            contact_radius,
+        } => P::General {
+            area: 0.5 * area,
+            i11: 0.5 * i11,
+            i12: 0.5 * i12,
+            i22: 0.5 * i22,
+            torsion,
+            shear_area_1: shear_area_1.map(|a| 0.5 * a),
+            shear_area_2: shear_area_2.map(|a| 0.5 * a),
+            contact_radius,
+        },
+        other => other,
+    }
+}
+
 /// The section of generated spring and gap elements.
 fn generated_section(section: &constraints::GeneratedSection) -> ir::section::Section {
     use ir::section::{Gap, SectionKind as Kind, Spring, SpringStiffness};
@@ -1981,9 +2020,9 @@ fn profile_of(
     })
 }
 
-/// The normal a group of beams is written with, the one its profile is drawn with, and its
-/// element set.
-type BeamGroup = ([f64; 3], [f64; 3], String);
+/// The normal a group of beams is written with, the one its profile is drawn with, its
+/// element set and whether the beams lie on a symmetry plane, which halves their section.
+type BeamGroup = ([f64; 3], [f64; 3], String, bool);
 
 /// The beams of a section grouped by the normal they are written with, each group as an
 /// element set with that normal and the one the profile is drawn with. A region whose beams
@@ -1993,13 +2032,16 @@ fn beam_groups(
     sets: &mut Sets,
     section: &Section,
     profile: &BeamProfile,
+    halved: &BTreeSet<ElementId>,
 ) -> Result<Vec<BeamGroup>, WriteError> {
     let SectionKind::Beam(beam) = &section.kind else {
         return Ok(Vec::new());
     };
     let mesh = sets.mesh;
     let turn = profile.principal_turn();
-    let mut groups: Vec<([f64; 3], [f64; 3], Vec<ElementId>)> = Vec::new();
+    // (normal, drawn normal, halved, elements)
+    type Group = ([f64; 3], [f64; 3], bool, Vec<ElementId>);
+    let mut groups: Vec<Group> = Vec::new();
     for element in (section.region.elements(mesh).into_iter()).filter_map(|id| mesh.element(id)) {
         if element.shape.family() != ElementFamily::Line {
             continue;
@@ -2025,12 +2067,13 @@ fn beam_groups(
             // Rounded so that beams along the same line share a group.
             turned.to_array().map(|c| (c * 1e12).round() / 1e12)
         };
+        let half = halved.contains(&element.id);
         match groups
             .iter_mut()
-            .find(|(n, d, _)| *n == normal && *d == drawn)
+            .find(|(n, d, h, _)| *n == normal && *d == drawn && *h == half)
         {
-            Some((_, _, ids)) => ids.push(element.id),
-            None => groups.push((normal, drawn, vec![element.id])),
+            Some((_, _, _, ids)) => ids.push(element.id),
+            None => groups.push((normal, drawn, half, vec![element.id])),
         }
     }
     if groups.is_empty() {
@@ -2039,19 +2082,19 @@ fn beam_groups(
     // CalculiX 2.21 reads the element set of a pipe, box or general section 20 characters
     // wide and fails on longer names, so those get short sets of their own.
     let short = profile.needs_reduced_integration() || !profile.is_native();
-    if groups.len() == 1 && !short {
+    if groups.len() == 1 && !short && !groups[0].2 {
         let set = sets.element_set(&section.name, &section.region)?;
-        return Ok(vec![(groups[0].0, groups[0].1, set)]);
+        return Ok(vec![(groups[0].0, groups[0].1, set, false)]);
     }
     let mut named = Vec::new();
-    for (normal, drawn, ids) in groups {
+    for (normal, drawn, half, ids) in groups {
         let set = if short {
             sets.unique_numbered("Beam")
         } else {
             sets.free_name("Internal_Selection", &name(&section.name))
         };
         sets.element_sets.push((set.clone(), Members::Ids(ids)));
-        named.push((normal, drawn, set));
+        named.push((normal, drawn, set, half));
     }
     Ok(named)
 }
@@ -3746,7 +3789,7 @@ fn step_block<'f>(
                     sets.submodel_sets.push((set, bc.name.clone()));
                 }
             }
-            BoundaryKind::Symmetry { normal } => {
+            BoundaryKind::Symmetry { normal, .. } => {
                 let plane = symmetry_plane(sets.mesh, &bc.region, space, normal).map_err(|e| {
                     WriteError::NoSymmetryPlane {
                         item: bc.name.clone(),

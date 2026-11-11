@@ -287,7 +287,7 @@ impl FeModel {
                         }
                     }
                     BoundaryKind::Submodel { dofs, .. } => [dofs[0], dofs[1], dofs[2]],
-                    BoundaryKind::Symmetry { normal } => {
+                    BoundaryKind::Symmetry { normal, .. } => {
                         let axis = crate::symmetry_plane(mesh, &bc.region, space, *normal)
                             .ok()
                             .and_then(|plane| plane.axis());

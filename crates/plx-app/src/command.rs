@@ -98,7 +98,7 @@ pub enum BlockTile {
     MeshExport,
     Note,
     Plot,
-    MeshPreview,
+    Preview,
 }
 
 /// A command. The project carries out those of the Project workspace, an analysis the
@@ -126,6 +126,8 @@ pub enum Cmd {
     Place(BlockTile),
     FrameBlocks,
     Unframe,
+    GroupBlocks,
+    Ungroup,
     Compact,
     ShowAll,
     Minimap,
@@ -788,12 +790,12 @@ fn build() -> Vec<Command> {
         "Places a block that plots series in the block: a line, points or a histogram.",
     ));
     add(place(
-        BlockTile::MeshPreview,
-        "Mesh\nPreview",
+        BlockTile::Preview,
+        "Preview",
         "Evaluate",
         "Visualize",
         Node(NodeIcon::Picture),
-        "Places a block that shows a small picture of the mesh linked to it.",
+        "Places a block that shows what is linked to it: a mesh, a number or a series.",
     ));
     add(place(
         BlockTile::Note,
@@ -822,6 +824,26 @@ fn build() -> Vec<Command> {
         Shape(Glyph::Unframe),
         "Alt+P",
         "Takes the selected blocks out of their frame.",
+    ));
+    add(command(
+        C::GroupBlocks,
+        "Group",
+        p,
+        "Annotate",
+        "Groups",
+        Node(NodeIcon::Group),
+        "Ctrl+G",
+        "Puts the selected blocks into a node group, which opens into a schematic of its own.",
+    ));
+    add(command(
+        C::Ungroup,
+        "Ungroup",
+        p,
+        "Annotate",
+        "Groups",
+        Node(NodeIcon::GroupOutput),
+        "Ctrl+Alt+G",
+        "Puts the blocks of the selected groups back where the groups are.",
     ));
     // Commands shown on a second tab; the search lists the first.
     add(command(
@@ -2373,7 +2395,7 @@ mod tests {
             BlockTile::MeshExport,
             BlockTile::Note,
             BlockTile::Plot,
-            BlockTile::MeshPreview,
+            BlockTile::Preview,
         ] {
             assert!(find(Cmd::Place(block)).is_some(), "{block:?}");
         }

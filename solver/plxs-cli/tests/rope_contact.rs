@@ -217,16 +217,18 @@ fn a_rope_sliding_round_a_drum_keeps_the_euler_eytelwein_ratio() {
 
 /// A sheave with a round groove of the rope's own radius about the circle of radius
 /// [`DRUM`] + [`ROPE`] around `centre`, from 70° to 110°: C3D8 4 mm thick behind the groove
-/// over ±80° across it (nodes in DRUMN, the groove the surface DRUMS).
-fn grooved_sheave(centre: [f64; 2]) -> String {
-    let (steps, across) = (80, 16);
+/// over ±80° across it (nodes in DRUMN, the groove the surface DRUMS); `half` keeps only the
+/// side z >= 0, the half of a model cut by its symmetry plane z = 0.
+fn grooved_sheave(centre: [f64; 2], half: bool) -> String {
+    let steps = 80;
+    let (across, from) = if half { (8, 0.0) } else { (16, -80.0) };
     let axis = DRUM + ROPE;
     let id = |j: usize, depth: usize, k: usize| 1001 + 2 * (across + 1) * j + 2 * k + depth;
     let mut s = String::from("*Node, Nset=DRUMN\n");
     for j in 0..=steps {
         let angle = (70.0 + 40.0 * j as f64 / steps as f64).to_radians();
         for k in 0..=across {
-            let phi = (-80.0 + 160.0 * k as f64 / across as f64).to_radians();
+            let phi = (from + 160.0 * k as f64 / 16.0).to_radians();
             // depth 1 is the groove, depth 0 the back of the sheave behind it.
             for (depth, rho) in [ROPE + 4.0, ROPE].into_iter().enumerate() {
                 let radius = axis - rho * phi.cos();
@@ -260,19 +262,20 @@ fn grooved_sheave(centre: [f64; 2]) -> String {
     s
 }
 
-#[test]
-fn a_rope_in_a_groove_of_its_own_radius_is_held_sideways_by_both_flanks() {
-    // As the sheave lifting the rope by 3°, but the sheave has a groove that fits the rope
-    // and nothing else holds the rope out of the plane: only one end against twisting.
-    // The rope touches the groove all across; with only its axis node against the nearest
-    // groove face it was pushed from flank to flank and the solver cut back to nothing.
-    let (a, n, tension) = (150.0, 80, 20000.0);
+/// The rope of [`a_rope_in_a_groove_of_its_own_radius_is_held_sideways_by_both_flanks`]
+/// lifted by the grooved sheave; returns the force on the sheave and the displacement of the
+/// rope's middle. `half` models the half z >= 0 only: half a sheave, a rope of half the
+/// section under half the tension, held on the symmetry plane.
+fn groove(job: &str, half: bool) -> (f64, Vec<f64>) {
+    let (a, n) = (150.0, 80);
+    let share = if half { 0.5 } else { 1.0 };
+    let (area, inertia, tension) = (share * AREA, share * INERTIA, share * 20000.0);
     let mut s = String::from("*Node, Nset=ROPEN\n");
     for i in 0..=n {
         writeln!(s, "{}, {}, 0, 0", i + 1, 2.0 * a * i as f64 / n as f64).unwrap();
     }
     let gap = 0.05;
-    s.push_str(&grooved_sheave([a, -(DRUM + ROPE + gap)]));
+    s.push_str(&grooved_sheave([a, -(DRUM + ROPE + gap)], half));
     s.push_str(
         "*User element, Type=U1, Nodes=2, Integration points=2, Maxdof=6\n\
          *Element, Type=U1, Elset=ROPE\n",
@@ -284,15 +287,22 @@ fn a_rope_in_a_groove_of_its_own_radius_is_held_sideways_by_both_flanks() {
         s,
         "*Material, Name=ROPE\n*Elastic\n{YOUNG}, 0.3\n*Material, Name=STEEL\n*Elastic\n210000, 0.3\n\
          *Beam section, Elset=ROPE, Material=ROPE, Section=GENERAL, Contact radius={ROPE}\n\
-         {AREA}, {INERTIA}, 0, {INERTIA}, 0.8333333\n0, 0, 1\n\
+         {area}, {inertia}, 0, {inertia}, 0.8333333\n0, 0, 1\n\
          *Solid section, Elset=DRUM, Material=STEEL\n\
          *Surface, Name=DRUMS, Type=Element\nDRUM, S4\n*Surface, Name=ROPES, Type=Node\nROPEN\n"
     )
     .unwrap();
     let lift = a * 1.5_f64.to_radians().tan();
     let middle = n / 2 + 1;
+    // The symmetry plane z = 0 holds the rope's out-of-plane displacement and its rotations
+    // about x and y.
+    let held = if half {
+        format!("ROPEN, 3, 5, 0\n1, 1, 2, 0\n{end}, 2, 2, 0\n", end = n + 1)
+    } else {
+        format!("1, 1, 4, 0\n{end}, 2, 3, 0\n", end = n + 1)
+    };
     let input = format!(
-        "{s}{}*Boundary\n1, 1, 4, 0\n{end}, 2, 3, 0\nDRUMN, 1, 3, 0\n\
+        "{s}{}*Boundary\n{held}DRUMN, 1, 3, 0\n\
          *Step, Nlgeom\n*Static\n*Cload\n{end}, 1, {tension}\n*End step\n\
          *Step, Nlgeom\n*Static\n0.1, 1\n*Boundary\nDRUMN, 2, 2, {}\n\
          *Node print, Nset=ROPEN\nRF, U\n*End step\n",
@@ -300,16 +310,49 @@ fn a_rope_in_a_groove_of_its_own_radius_is_held_sideways_by_both_flanks() {
         lift + gap,
         end = n + 1,
     );
-    let dat = run("groove", &input);
+    let dat = run(job, &input);
     let force = -last_row(&dat, "forces", 1)[1] - last_row(&dat, "forces", n + 1)[1];
+    (force, last_row(&dat, "displacements", middle))
+}
+
+/// The force a rope under 20 kN needs to be lifted by the sheave of the groove tests.
+fn groove_force() -> (f64, f64) {
+    let (a, tension) = (150.0, 20000.0);
+    let lift = a * 1.5_f64.to_radians().tan();
     let lambda = (YOUNG * INERTIA / tension).sqrt();
-    let expected = 2.0 * tension * lift / (a - lambda * (a / lambda).tanh());
+    (
+        2.0 * tension * lift / (a - lambda * (a / lambda).tanh()),
+        lift,
+    )
+}
+
+#[test]
+fn a_rope_in_a_groove_of_its_own_radius_is_held_sideways_by_both_flanks() {
+    // As the sheave lifting the rope by 3°, but the sheave has a groove that fits the rope
+    // and nothing else holds the rope out of the plane: only one end against twisting.
+    // The rope touches the groove all across; with only its axis node against the nearest
+    // groove face it was pushed from flank to flank and the solver cut back to nothing.
+    let (force, top) = groove("groove", false);
+    let (expected, lift) = groove_force();
     assert!(
         (force - expected).abs() < 2e-2 * expected,
         "{force} vs {expected}"
     );
-    let top = last_row(&dat, "displacements", middle);
     assert!((top[1] - lift).abs() < 2e-2 * lift, "{top:?} vs {lift}");
     // Held in the middle of the groove.
     assert!(top[2].abs() < 1e-3 * lift, "{top:?}");
+}
+
+#[test]
+fn a_rope_on_the_symmetry_plane_of_a_half_sheave_carries_half_the_force() {
+    // The groove cut along the rope's axis: the rope lies on the cut, half its circumference
+    // against the sheave, the other half off the model, held by the symmetry plane.
+    let (force, top) = groove("half-groove", true);
+    let (expected, lift) = groove_force();
+    let expected = 0.5 * expected;
+    assert!(
+        (force - expected).abs() < 2e-2 * expected,
+        "{force} vs {expected}"
+    );
+    assert!((top[1] - lift).abs() < 2e-2 * lift, "{top:?} vs {lift}");
 }

@@ -132,7 +132,7 @@ pub use section::{
 pub use signature::{EntitySignature, TagMap, match_entities};
 pub use solver_diagnostics::{Origins, diagnose_solver_check};
 pub use study::{DesignPoint, FillMode, FillRule, PointRun, PointState, StudyColumn, StudyTable};
-pub use symmetry::{SymmetryError, SymmetryPlane, symmetry_dofs, symmetry_plane};
+pub use symmetry::{BeamsOnPlane, SymmetryError, SymmetryPlane, symmetry_dofs, symmetry_plane};
 pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, STORED, UnitSystem};
 pub use validity::{Invalid, ModelItem};
 
@@ -168,8 +168,9 @@ use serde::{Deserialize, Serialize};
 /// list those they print by id; older formats are refused. Format 21 replaces the field
 /// extreme of a Measure block by the values of the field over a region, a series that a
 /// Math block reduces, and adds the Plot and Mesh Preview blocks; older formats are refused.
-/// Format 22 adds the Thicken Shell Mesh item of the mesh setup; format 21 reads as it is.
-pub const PROJECT_FORMAT: u32 = 22;
+/// Format 22 adds node groups; format 21 reads as it is. Format 23 adds the Thicken Shell
+/// Mesh item of the mesh setup; formats 21 and 22 read as they are.
+pub const PROJECT_FORMAT: u32 = 23;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2053,6 +2054,11 @@ pub enum BoundaryKind {
     Symmetry {
         /// Normal of the plane as the user entered it; `None` takes it from the region.
         normal: Option<[f64; 3]>,
+        /// Beams lying on the plane are cut in half by it: the solver gets half their
+        /// section (area, second moments, torsion and so mass), see
+        /// [`FeModel::halved_beams`]. Loads on them the user halves.
+        #[serde(default = "crate::active")]
+        halve_beams: bool,
     },
 }
 
