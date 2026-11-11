@@ -263,6 +263,10 @@ pub(super) fn cad_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<R
                      {} on the geometry and to see the result.",
                     operation.kind.picked_noun()
                 )
+            } else if operation.kind == plx_model::CadOperationKind::Defeature {
+                "What the operation does: it removes the fillets and chamfers up to the max \
+                 size. Double-click the block to see them and the result."
+                    .to_owned()
             } else {
                 "What the operation does: double-click the block to choose the plane and to \
                  see the result."

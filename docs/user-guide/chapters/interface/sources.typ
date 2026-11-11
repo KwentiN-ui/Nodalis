@@ -259,8 +259,9 @@ frequency step cannot be linked, as the `.frd` file does not hold them.]
 A CAD Operation block changes geometry before it is meshed: it rounds (#ui("Fillet")) or bevels
 (#ui("Chamfer")) picked edges of solids or corners of flat faces, moves picked planar faces
 (#ui("Push/Pull")), splits parts and faces along a plane (#ui("Split by Plane"),
-@split-by-plane) or splits the face around a hole into a ring (#ui("Split around Hole"),
-@split-around-hole), of the geometry linked to it and gives the changed geometry on.
+@split-by-plane), splits the face around a hole into a ring (#ui("Split around Hole"),
+@split-around-hole) or removes fillets and chamfers (#ui("Defeature"), @defeature), of the
+geometry linked to it and gives the changed geometry on.
 Add it with #menu("Sources", "CAD Operation") or from the picker, drag the
 #ui("Geometry") of a file block, of an analysis with imported geometry or of another CAD
 Operation block to the pin on the left of its #ui("Geometry") row, and drag the pin on the
@@ -280,9 +281,10 @@ radius, distance or offset; #ui("Preview") applies it and shows the result, #ui(
     state.],
   [Fillet / Chamfer / Push/Pull / Split], [What it does and to how many edges, corners or
     faces, or along which plane.],
-  [Radius / Distance / Offset / Width], [The radius of the fillet, the distance of the chamfer
-    from the edge on both faces, how far the faces move (outwards when positive, inwards when
-    negative), where the plane of a split lies, or the width of the ring around a hole. Zero
+  [Radius / Distance / Offset / Width / Max Size], [The radius of the fillet, the distance of
+    the chamfer from the edge on both faces, how far the faces move (outwards when positive,
+    inwards when negative), where the plane of a split lies, the width of the ring around a
+    hole, or up to which size a defeaturing removes fillets and chamfers. Zero
     leaves the geometry as it is (except for a split by plane, where it is the plane through
     the origin or the face), so that a parameter study can
     switch the operation off in some design points. Type or drag it in place, or drop the value of a Parameters block or an
@@ -362,6 +364,36 @@ This works on solids and on shell parts alike; the parts keep their names.
 
 #screenshot("cad-hole-ring.png", [The upper edge of a hole picked and the preview: a ring of
   8 mm around the hole is a face of its own])
+
+==== Defeature <defeature>
+
+#ui("Defeature") removes fillets and chamfers from solids, typically of a STEP file: the faces
+next to each one grow until they meet again in a sharp edge. That serves two ends. A fillet of
+the file can be replaced by a #ui("Fillet") of a second CAD Operation block behind this one,
+whose radius a parameter study varies (@cad-fillet-study). And small cosmetic fillets and
+chamfers no longer force a fine mesh where they do not matter for the result. Choose what to
+#ui("Remove") in the editor:
+
+- #ui("Found by size"), the default: every fillet whose radius is at most the #ui("Max Size")
+  and every chamfer at most that wide. The editor draws the faces found in red and says how many
+  there are; they are found again whenever the input or the size changes, so a study can vary the
+  size too. A fillet is a curved face that ends tangentially on the faces it joins and turns by
+  less than a half circle between them, so holes, pins and the round ends of slots stay, even when
+  they are as small. A chamfer is a narrow planar or conical strip meeting its neighbours at an
+  angle between 10 and 80 degrees, so steps and ribs at right angles stay.
+- #ui("Picked faces"): the faces clicked, for example only the one fillet to replace. Switching
+  to it starts from the faces found by size; a click on a face adds or removes it. A fillet that
+  runs over several faces needs all of them picked.
+
+#ui("Preview") removes the faces and says how many. OpenCASCADE cannot remove every face, for
+example a fillet whose neighbours would not meet again, or one whose hole is a spline surface.
+Faces found by size that it cannot remove stay as they were, group by group of faces next to each
+other, and the editor says how many stayed; picked faces are removed all or the block fails with
+OpenCASCADE's reason. A size of zero leaves the geometry as it is. The parts keep their names.
+Defeaturing needs solids and is not offered for 2D geometry.
+
+#screenshot("cad-defeature.png", [Fillets up to 3.5 mm and the chamfers of the holes found on a
+  bracket (left) and removed (right); the inner fillet of 5 mm stays])
 
 ==== Example: a fillet radius study <cad-fillet-study>
 

@@ -28,15 +28,21 @@ pub enum CadOperationKind {
     /// Splits the planar face around a hole into a ring of a width and the rest, so that the
     /// ring can be picked on its own: for loads and supports next to a hole.
     HoleRing,
+    /// Removes fillets and chamfers: the faces next to them grow until they meet again, so
+    /// that a fillet of a STEP file can be replaced by one of a CAD operation that a study
+    /// varies, or cosmetic ones do not make the mesh fine. The faces are found by their
+    /// shape up to a size, or picked.
+    Defeature,
 }
 
 impl CadOperationKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Fillet,
         Self::Chamfer,
         Self::PushPull,
         Self::SplitPlane,
         Self::HoleRing,
+        Self::Defeature,
     ];
 
     pub fn label(self) -> &'static str {
@@ -46,6 +52,7 @@ impl CadOperationKind {
             Self::PushPull => "Push/Pull",
             Self::SplitPlane => "Split by Plane",
             Self::HoleRing => "Split around Hole",
+            Self::Defeature => "Defeature",
         }
     }
 
@@ -61,6 +68,7 @@ impl CadOperationKind {
             Self::Chamfer => "Distance",
             Self::PushPull | Self::SplitPlane => "Offset",
             Self::HoleRing => "Width",
+            Self::Defeature => "Max Size",
         }
     }
 
@@ -71,6 +79,7 @@ impl CadOperationKind {
             Self::Chamfer => "distance",
             Self::PushPull | Self::SplitPlane => "offset",
             Self::HoleRing => "width",
+            Self::Defeature => "max_size",
         }
     }
 
@@ -81,7 +90,9 @@ impl CadOperationKind {
             Self::Fillet | Self::Chamfer => {
                 matches!(entity, CadEntity::Edge(_) | CadEntity::Vertex(_))
             }
-            Self::PushPull | Self::SplitPlane => matches!(entity, CadEntity::Face(_)),
+            Self::PushPull | Self::SplitPlane | Self::Defeature => {
+                matches!(entity, CadEntity::Face(_))
+            }
             Self::HoleRing => matches!(entity, CadEntity::Edge(_)),
         }
     }
@@ -90,7 +101,7 @@ impl CadOperationKind {
     pub fn picked_noun(self) -> &'static str {
         match self {
             Self::Fillet | Self::Chamfer => "edges",
-            Self::PushPull | Self::SplitPlane => "faces",
+            Self::PushPull | Self::SplitPlane | Self::Defeature => "faces",
             Self::HoleRing => "hole edges",
         }
     }
@@ -99,7 +110,7 @@ impl CadOperationKind {
     pub fn picked_one(self) -> &'static str {
         match self {
             Self::Fillet | Self::Chamfer => "edge",
-            Self::PushPull | Self::SplitPlane => "face",
+            Self::PushPull | Self::SplitPlane | Self::Defeature => "face",
             Self::HoleRing => "hole edge",
         }
     }
@@ -151,6 +162,28 @@ impl SplitPlane {
                 Some(normal)
             }
             Self::Face => None,
+        }
+    }
+}
+
+/// Which faces a [`CadOperationKind::Defeature`] removes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DefeatureFaces {
+    /// The fillets and chamfers found by their shape: fillets of a radius up to the size,
+    /// chamfers up to that width.
+    #[default]
+    Found,
+    /// The picked faces.
+    Picked,
+}
+
+impl DefeatureFaces {
+    pub const ALL: [Self; 2] = [Self::Found, Self::Picked];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Found => "Found by size",
+            Self::Picked => "Picked faces",
         }
     }
 }
@@ -216,6 +249,9 @@ pub struct CadOperation {
     /// which are tied where they were cut; otherwise each piece is a part of its own.
     #[serde(default = "yes")]
     pub compound: bool,
+    /// Which faces a defeaturing removes.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub faces: DefeatureFaces,
 }
 
 impl Default for CadOperation {
@@ -228,6 +264,7 @@ impl Default for CadOperation {
             plane: SplitPlane::default(),
             keep: SplitKeep::default(),
             compound: true,
+            faces: DefeatureFaces::default(),
         }
     }
 }
@@ -240,6 +277,9 @@ impl CadOperation {
                 SplitPlane::Face if self.entities.is_empty() => "no face picked".to_owned(),
                 plane => plane.label().to_owned(),
             };
+        }
+        if self.kind == CadOperationKind::Defeature && self.faces == DefeatureFaces::Found {
+            return "fillets and chamfers by size".to_owned();
         }
         let count = self.entities.len();
         if count == 0 {
@@ -254,9 +294,14 @@ impl CadOperation {
         format!("{count} {}", if count == 1 { one } else { many })
     }
 
-    /// Whether it needs picked entities: all but a split along a global plane do.
+    /// Whether it needs picked entities: all but a split along a global plane and a
+    /// defeaturing of the faces found by size do.
     pub fn needs_picks(&self) -> bool {
-        !(self.kind == CadOperationKind::SplitPlane && self.plane != SplitPlane::Face)
+        match self.kind {
+            CadOperationKind::SplitPlane => self.plane == SplitPlane::Face,
+            CadOperationKind::Defeature => self.faces == DefeatureFaces::Picked,
+            _ => true,
+        }
     }
 
     /// The picked entities in the geometry it is applied to, or why they cannot all be found.
@@ -310,6 +355,9 @@ impl CadOperation {
         hash.add(&self.value.to_le_bytes());
         if self.kind == CadOperationKind::SplitPlane {
             hash.add_debug(&(self.plane, self.keep, self.compound));
+        }
+        if self.kind == CadOperationKind::Defeature {
+            hash.add_debug(&self.faces);
         }
         hash.finish()
     }

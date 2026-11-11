@@ -4,6 +4,7 @@
 //! nodalis starts and works with meshes without it. Releases ship the library next to the
 //! program; `scripts/fetch_gmsh.py` fetches it for development.
 
+mod defeature;
 mod extrude;
 mod ffi;
 pub mod gmsh;
@@ -14,6 +15,7 @@ mod stacked;
 mod step_names;
 mod thicken;
 
+pub use defeature::{Defeatured, defeature, find_blends};
 pub use operation::{apply_cad_operation, apply_operation};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};

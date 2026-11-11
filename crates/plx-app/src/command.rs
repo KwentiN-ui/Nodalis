@@ -717,7 +717,7 @@ fn build() -> Vec<Command> {
         "Sources",
         "Geometry",
         Node(NodeIcon::CadOperation),
-        "Places a block that fillets, chamfers or offsets the geometry linked to it.",
+        "Places a block that fillets, chamfers, offsets, splits or defeatures the geometry linked to it.",
     ));
     add(place(
         BlockTile::File,

@@ -63,7 +63,7 @@ mod validity;
 
 pub use amplitude::{Amplitude, AmplitudeTime, ValueTable, no_tables};
 pub use bolt::{Bolt, BoltAction, BoltChange, LoweredBolts, Preload, ResolvedBolt, ResolvedThread};
-pub use cad_operation::{CadOperation, CadOperationKind, SplitKeep, SplitPlane};
+pub use cad_operation::{CadOperation, CadOperationKind, DefeatureFaces, SplitKeep, SplitPlane};
 pub use checks::{
     Finding, MeshCheck, Problem, Severity, diagnose_solver_output, diagnose_solver_warnings,
 };
@@ -181,7 +181,9 @@ use serde::{Deserialize, Serialize};
 /// steps ([`BoltChange::amplitude`]); formats 21 to 25 read as they are. Format 27 lets contact
 /// detections choose their parts by filters and give the pairs they find their type by rules
 /// ([`ContactRule`]), and adds part groups ([`PartGroup`]); formats 21 to 26 read as they are.
-pub const PROJECT_FORMAT: u32 = 27;
+/// Format 28 adds the defeaturing of the CAD Operation block
+/// ([`CadOperationKind::Defeature`]); formats 21 to 27 read as they are.
+pub const PROJECT_FORMAT: u32 = 28;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

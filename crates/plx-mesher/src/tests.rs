@@ -2965,3 +2965,292 @@ fn solids_that_are_no_sweep_get_tetrahedra_and_say_why() {
         generated.warnings
     );
 }
+
+/// A plate of 40 x 20 x 10 mm with a hole of 1.5 mm radius through it, its four upright
+/// edges rounded by 2 mm and its top edges bevelled by 1 mm: the chamfer of one runs on
+/// around the rounded corners, as planes and cones.
+fn rounded_plate() -> Geometry {
+    use plx_model::CadOperationKind::{Chamfer, Fillet};
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        let plate = gmsh.add_box([0.0; 3], [40.0, 20.0, 10.0])?;
+        let disk = gmsh.add_disk([20.0, 10.0, 0.0], 1.5, [0.0, 0.0, 1.0])?;
+        let pin: Vec<(i32, i32)> = (gmsh.extrude(&[(2, disk)], [0.0, 0.0, 10.0])?.into_iter())
+            .filter(|&(dim, _)| dim == 3)
+            .collect();
+        gmsh.boolean(gmsh::Boolean::Cut, &[(3, plate)], &pin, true)?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    let input = with_signatures(Geometry {
+        compounds: Vec::new(),
+        source: "platte.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters::default(),
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+        signatures: Vec::new(),
+    })
+    .unwrap();
+    let upright: Vec<CadEntity> = (input.signatures.iter())
+        .filter(|s| {
+            s.entity.dim() == 1
+                && s.kind == "Line"
+                && (s.max[2] - s.min[2] - 10.0).abs() < 1e-6
+                && [0.0, 40.0].iter().any(|x| (s.centroid[0] - x).abs() < 1e-6)
+        })
+        .map(|s| s.entity)
+        .collect();
+    assert_eq!(upright.len(), 4);
+    let rounded = apply_cad_operation(&input, Fillet, &upright, 2.0).unwrap();
+    let top = (rounded.signatures.iter())
+        .find(|s| {
+            s.entity.dim() == 1
+                && s.kind == "Line"
+                && s.centroid[1].abs() < 1e-6
+                && (s.centroid[2] - 10.0).abs() < 1e-6
+        })
+        .unwrap()
+        .entity;
+    apply_cad_operation(&rounded, Chamfer, &[top], 1.0).unwrap()
+}
+
+#[test]
+fn defeaturing_removes_fillets_and_chamfers_but_not_holes() {
+    use plx_model::{CadOperation, CadOperationKind::Defeature, DefeatureFaces};
+    if !gmsh_available() {
+        return;
+    }
+    let input = rounded_plate();
+    let hole = std::f64::consts::PI * 1.5 * 1.5 * 10.0;
+    let sharp = 40.0 * 20.0 * 10.0 - hole;
+    assert!(solid_volume(&input) < sharp - 1.0);
+    // Found by size: the four fillets and the chamfer all around; the hole, as small as they
+    // are, stays.
+    let found = find_blends(&input, 2.5).unwrap();
+    let kinds: Vec<&str> = (found.iter())
+        .map(|f| {
+            let s = input.signatures.iter().find(|s| s.entity == *f).unwrap();
+            s.kind.as_str()
+        })
+        .collect();
+    let count = |kind: &str| kinds.iter().filter(|k| **k == kind).count();
+    assert_eq!(
+        (count("Cylinder"), count("Plane"), count("Cone")),
+        (4, 4, 4),
+        "{kinds:?}"
+    );
+    let operation = CadOperation {
+        kind: Defeature,
+        value: 2.5,
+        ..CadOperation::default()
+    };
+    let result = defeature(&input, &operation, &[]).unwrap();
+    assert_eq!((result.removed, result.kept), (12, 0));
+    assert!((solid_volume(&result.geometry) - sharp).abs() < 1e-3);
+    assert_eq!(
+        part_names(&result.geometry).unwrap(),
+        part_names(&input).unwrap()
+    );
+    // The hole, an extruded disk, is a spline surface.
+    let curved = (result.geometry.signatures.iter())
+        .filter(|s| s.entity.dim() == 2 && s.kind != "Plane")
+        .count();
+    assert!(curved >= 1, "the hole is kept");
+    // Smaller than the fillets: only the chamfer goes.
+    let small = defeature(
+        &input,
+        &CadOperation {
+            value: 1.5,
+            ..operation.clone()
+        },
+        &[],
+    )
+    .unwrap();
+    assert_eq!(small.removed, 8);
+    // Zero switches it off.
+    let off = apply_operation(
+        &input,
+        &CadOperation {
+            value: 0.0,
+            ..operation.clone()
+        },
+        &[],
+    )
+    .unwrap();
+    assert_eq!(off.brep, input.brep);
+    // One picked fillet of those left: only it goes.
+    let rounded = small.geometry;
+    let fillet = (rounded.signatures.iter())
+        .find(|s| s.entity.dim() == 2 && s.kind == "Cylinder")
+        .unwrap()
+        .entity;
+    let picked = CadOperation {
+        faces: DefeatureFaces::Picked,
+        ..operation
+    };
+    let one = apply_operation(&rounded, &picked, &[fillet]).unwrap();
+    let corner = (4.0 - std::f64::consts::PI) * 10.0;
+    assert!((solid_volume(&one) - solid_volume(&rounded) - corner).abs() < 1e-3);
+    // A face of no solid, or none at all, is refused.
+    assert!(apply_operation(&rounded, &picked, &[CadEntity::Face(999)]).is_err());
+}
+
+#[test]
+fn defeaturing_keeps_the_round_ends_of_slots_and_removes_pocket_corners() {
+    if !gmsh_available() {
+        return;
+    }
+    // A slot of 4 mm width with round ends and a pocket with corners rounded by 1 mm in a
+    // plate, both through it.
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        let plate = gmsh.add_box([0.0; 3], [40.0, 20.0, 5.0])?;
+        let pocket = gmsh.add_box([22.0, 5.0, 0.0], [10.0, 10.0, 5.0])?;
+        let mut tools = vec![(3, gmsh.add_box([7.0, 8.0, 0.0], [6.0, 4.0, 5.0])?)];
+        for x in [7.0, 13.0] {
+            tools.push((3, gmsh.add_cylinder([x, 10.0, 0.0], [0.0, 0.0, 5.0], 2.0)?));
+        }
+        // The upright edges of the pocket rounded.
+        let upright: Vec<i32> = (gmsh.entities(1)?.into_iter())
+            .filter(|&e| {
+                let (a, b) = gmsh.entity_bounding_box(1, e).unwrap();
+                a[0] >= 21.9 && b[0] <= 32.1 && (b[2] - a[2] - 5.0).abs() < 1e-6
+            })
+            .collect();
+        assert_eq!(upright.len(), 4);
+        tools.extend(gmsh.fillet(&[pocket], &upright, 1.0)?);
+        gmsh.boolean(gmsh::Boolean::Cut, &[(3, plate)], &tools, true)?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    let input = with_signatures(Geometry {
+        compounds: Vec::new(),
+        source: "schlitz.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters::default(),
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+        signatures: Vec::new(),
+    })
+    .unwrap();
+    let found = find_blends(&input, 3.0).unwrap();
+    // The four corners of the pocket; the two ends of the slot stay.
+    assert_eq!(found.len(), 4, "{found:?}");
+    let centres: Vec<[f64; 3]> = (found.iter())
+        .map(|f| {
+            input
+                .signatures
+                .iter()
+                .find(|s| s.entity == *f)
+                .unwrap()
+                .centroid
+        })
+        .collect();
+    assert!(centres.iter().all(|c| c[0] > 20.0), "{centres:?}");
+    let operation = plx_model::CadOperation {
+        kind: plx_model::CadOperationKind::Defeature,
+        value: 3.0,
+        ..plx_model::CadOperation::default()
+    };
+    let sharp = apply_operation(&input, &operation, &[]).unwrap();
+    // The rounded corners of the pocket were material of the plate.
+    let corners = 4.0 * (1.0 - std::f64::consts::PI / 4.0) * 5.0;
+    assert!((solid_volume(&input) - solid_volume(&sharp) - corners).abs() < 1e-3);
+}
+
+/// An angle bracket of a base plate and a wall, the inner corner between them rounded by
+/// 5 mm, the outer corners of the base by 3 mm and the two holes in the base bevelled by 1 mm.
+fn bracket() -> Geometry {
+    let file = TempFile::new("brep");
+    let out = &file.0;
+    let near = |gmsh: &Gmsh, lo: [f64; 3], hi: [f64; 3]| -> Vec<i32> {
+        gmsh.entities(1)
+            .unwrap()
+            .into_iter()
+            .filter(|&e| {
+                let (a, b) = gmsh.entity_bounding_box(1, e).unwrap();
+                (0..3).all(|k| (a[k] - lo[k]).abs() < 1e-3 && (b[k] - hi[k]).abs() < 1e-3)
+            })
+            .collect()
+    };
+    with_gmsh(|gmsh| {
+        let base = gmsh.add_box([0.0; 3], [60.0, 40.0, 8.0])?;
+        let wall = gmsh.add_box([0.0; 3], [8.0, 40.0, 40.0])?;
+        let mut tools = Vec::new();
+        for y in [12.0, 28.0] {
+            tools.push((3, gmsh.add_cylinder([40.0, y, 0.0], [0.0, 0.0, 8.0], 4.0)?));
+        }
+        let fused = gmsh.boolean(gmsh::Boolean::Fuse, &[(3, base)], &[(3, wall)], true)?;
+        let cut = gmsh.boolean(gmsh::Boolean::Cut, &fused, &tools, true)?;
+        let volume = cut[0].1;
+        // The inner corner, 5 mm.
+        let inner = near(gmsh, [8.0, 0.0, 8.0], [8.0, 40.0, 8.0]);
+        let made = gmsh.fillet(&[volume], &inner, 5.0)?;
+        let volume = made[0].1;
+        // The outer corners of the base and the top of the wall, 3 mm.
+        let mut outer = near(gmsh, [60.0, 0.0, 0.0], [60.0, 0.0, 8.0]);
+        outer.extend(near(gmsh, [60.0, 40.0, 0.0], [60.0, 40.0, 8.0]));
+        let made = gmsh.fillet(&[volume], &outer, 3.0)?;
+        let volume = made[0].1;
+        // The top edges of the holes, 1 mm chamfers.
+        let mut circles = Vec::new();
+        let mut planes = Vec::new();
+        for e in gmsh.entities(1)? {
+            let (a, b) = gmsh.entity_bounding_box(1, e)?;
+            if (a[2] - 8.0).abs() < 1e-3
+                && (b[2] - 8.0).abs() < 1e-3
+                && (b[0] - a[0] - 8.0).abs() < 1e-2
+            {
+                circles.push(e);
+                let (faces, _) = gmsh.adjacencies(1, e)?;
+                let top = faces
+                    .into_iter()
+                    .find(|&f| gmsh.entity_type(2, f).unwrap() == "Plane")
+                    .unwrap();
+                planes.push(top);
+            }
+        }
+        assert_eq!(circles.len(), 2);
+        gmsh.chamfer(&[volume], &circles, &planes, 1.0)?;
+        gmsh.write(out)
+    })
+    .unwrap();
+    with_signatures(Geometry {
+        compounds: Vec::new(),
+        source: "winkel.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters::default(),
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+        signatures: Vec::new(),
+    })
+    .unwrap()
+}
+
+#[test]
+fn defeaturing_a_bracket_by_size_removes_what_is_smaller() {
+    use plx_model::{CadOperation, CadOperationKind::Defeature};
+    if !gmsh_available() {
+        return;
+    }
+    let input = bracket();
+    let faces = |g: &Geometry| g.signatures.iter().filter(|s| s.entity.dim() == 2).count();
+    let mut removed = Vec::new();
+    for size in [0.5, 1.5, 3.5, 6.0] {
+        let operation = CadOperation {
+            kind: Defeature,
+            value: size,
+            ..CadOperation::default()
+        };
+        let made = defeature(&input, &operation, &[]).unwrap();
+        assert_eq!(made.kept, 0);
+        assert_eq!(faces(&made.geometry), faces(&input) - made.removed);
+        removed.push(made.removed);
+    }
+    // Nothing; the two chamfers; and the outer fillets; and the inner one.
+    assert_eq!(removed, [0, 2, 4, 5]);
+}

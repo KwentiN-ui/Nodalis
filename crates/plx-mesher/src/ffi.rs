@@ -84,6 +84,22 @@ gmsh_api! {
     );
     get_normal = "gmshModelGetNormal":
         fn(c_int, *const c_double, usize, *mut *mut c_double, *mut usize, Ierr);
+    get_principal_curvatures = "gmshModelGetPrincipalCurvatures": fn(
+        c_int,
+        *const c_double, usize,
+        *mut *mut c_double, *mut usize,
+        *mut *mut c_double, *mut usize,
+        *mut *mut c_double, *mut usize,
+        *mut *mut c_double, *mut usize,
+        Ierr,
+    );
+    occ_defeature = "gmshModelOccDefeature": fn(
+        *const c_int, usize,
+        *const c_int, usize,
+        *mut *mut c_int, *mut usize,
+        c_int,
+        Ierr,
+    );
     occ_copy = "gmshModelOccCopy": fn(*const c_int, usize, *mut *mut c_int, *mut usize, Ierr);
     is_inside = "gmshModelIsInside": fn(c_int, c_int, *const c_double, usize, c_int, Ierr) -> c_int;
     set_visibility = "gmshModelSetVisibility": fn(*const c_int, usize, c_int, c_int, Ierr);
@@ -164,6 +180,10 @@ gmsh_api! {
         fn(*const c_char, *mut *mut c_int, *mut usize, c_int, *const c_char, Ierr);
     occ_add_box = "gmshModelOccAddBox":
         fn(c_double, c_double, c_double, c_double, c_double, c_double, c_int, Ierr) -> c_int;
+    occ_add_cylinder = "gmshModelOccAddCylinder": fn(
+        c_double, c_double, c_double, c_double, c_double, c_double, c_double, c_int, c_double,
+        Ierr,
+    ) -> c_int;
     occ_add_sphere = "gmshModelOccAddSphere": fn(
         c_double, c_double, c_double, c_double, c_int, c_double, c_double, c_double, Ierr,
     ) -> c_int;

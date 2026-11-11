@@ -402,6 +402,35 @@ impl Gmsh {
         Ok(tag)
     }
 
+    /// A solid cylinder from the centre of its base along an axis whose length is its
+    /// height; returns its tag.
+    pub fn add_cylinder(
+        &self,
+        [x, y, z]: [f64; 3],
+        [dx, dy, dz]: [f64; 3],
+        radius: f64,
+    ) -> Result<i32, GmshError> {
+        let mut tag = 0;
+        self.call(|e| {
+            tag = unsafe {
+                (self.api.occ_add_cylinder)(
+                    x,
+                    y,
+                    z,
+                    dx,
+                    dy,
+                    dz,
+                    radius,
+                    -1,
+                    2.0 * std::f64::consts::PI,
+                    e,
+                )
+            };
+        })?;
+        self.synchronize()?;
+        Ok(tag)
+    }
+
     pub fn add_disk(
         &self,
         centre: [f64; 3],
@@ -568,6 +597,79 @@ impl Gmsh {
             );
         })?;
         Ok(self.take_vec(normals, len).as_chunks::<3>().0.to_vec())
+    }
+
+    /// The principal curvatures of a surface at parameters (two values per point),
+    /// unsigned, the larger first, with the direction of the larger.
+    pub fn principal_curvatures(
+        &self,
+        face: i32,
+        parameters: &[f64],
+    ) -> Result<Vec<(f64, f64, [f64; 3])>, GmshError> {
+        let (mut max, mut max_len) = (std::ptr::null_mut(), 0);
+        let (mut min, mut min_len) = (std::ptr::null_mut(), 0);
+        let (mut dmax, mut dmax_len) = (std::ptr::null_mut(), 0);
+        let (mut dmin, mut dmin_len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.get_principal_curvatures)(
+                face,
+                parameters.as_ptr(),
+                parameters.len(),
+                &mut max,
+                &mut max_len,
+                &mut min,
+                &mut min_len,
+                &mut dmax,
+                &mut dmax_len,
+                &mut dmin,
+                &mut dmin_len,
+                e,
+            );
+        })?;
+        let (max, min) = (self.take_vec(max, max_len), self.take_vec(min, min_len));
+        let dmax = self.take_vec(dmax, dmax_len);
+        let dmin = self.take_vec(dmin, dmin_len);
+        let (dmax, dmin) = (dmax.as_chunks::<3>().0, dmin.as_chunks::<3>().0);
+        Ok(
+            (0..max.len().min(min.len()).min(dmax.len()).min(dmin.len()))
+                .map(|k| {
+                    let (a, b) = (max[k].abs(), min[k].abs());
+                    if a >= b {
+                        (a, b, dmax[k])
+                    } else {
+                        (b, a, dmin[k])
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// Removes faces from solids, e.g. fillets and chamfers, the faces next to them grown
+    /// to close the gap (OpenCASCADE's defeaturing); the solids are replaced by the new
+    /// ones, which it returns.
+    /// On failure the solids may be gone from the model, which is then to be read anew.
+    pub fn defeature(&self, volumes: &[i32], faces: &[i32]) -> Result<Vec<(i32, i32)>, GmshError> {
+        let (mut out, mut out_len) = (std::ptr::null_mut(), 0);
+        // Gmsh fixes each solid first by default, which makes a copy whose faces are none of
+        // those to remove.
+        self.set_number("Geometry.OCCAutoFix", 0.0)?;
+        let made = self.call(|e| unsafe {
+            (self.api.occ_defeature)(
+                volumes.as_ptr(),
+                volumes.len(),
+                faces.as_ptr(),
+                faces.len(),
+                &mut out,
+                &mut out_len,
+                1,
+                e,
+            );
+        });
+        self.set_number("Geometry.OCCAutoFix", 1.0)?;
+        made?;
+        let out = self.take_vec(out, out_len);
+        self.synchronize()?;
+        Ok(pairs(&out))
     }
 
     /// Copies of entities, with what bounds them; returns the copies.
