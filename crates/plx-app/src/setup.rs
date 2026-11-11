@@ -5166,10 +5166,13 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
 }
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field
-/// outputs (none for eigenvalue steps, which keep their mode shapes), in order.
-fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 12] {
+/// outputs (none for eigenvalue steps, which keep their mode shapes), in order. The
+/// sensitivity step is left out of 2D model spaces: the solver derives the design nodes from
+/// the external faces of solid elements and skips plane and axisymmetric elements, so it has
+/// nothing to differentiate there.
+fn step_kinds(fe: &FeModel) -> Vec<(&'static str, StepKind, Vec<FieldOutput>)> {
     let heat = HeatTransferStep::default();
-    [
+    let mut kinds = vec![
         (
             STATIC_LABEL,
             StepKind::Static(previous_static(fe)),
@@ -5230,7 +5233,11 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 12] 
             StepKind::Sensitivity(SensitivityStep::default()),
             FieldOutput::sensitivity_defaults(),
         ),
-    ]
+    ];
+    if fe.properties.space.is_2d() {
+        kinds.retain(|(_, kind, _)| !matches!(kind, StepKind::Sensitivity(_)));
+    }
+    kinds
 }
 
 const STATIC_LABEL: &str = "Static";
