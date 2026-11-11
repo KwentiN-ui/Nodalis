@@ -713,21 +713,6 @@ impl MaterialLibrary {
         if self.units != UnitSystem::MmTonSC {
             return;
         }
-        // The category "Structural" below "Steel" is gone: its materials move up.
-        let steel = ensure_category(&mut self.root, &["Elastic_Models", "Steel"]);
-        let structural = steel.items.iter().position(
-            |n| matches!(n, LibraryNode::Category(c) if c.name.eq_ignore_ascii_case("Structural")),
-        );
-        if let Some(index) = structural {
-            let LibraryNode::Category(structural) = steel.items.remove(index) else {
-                unreachable!("index points to a category")
-            };
-            for node in structural.items {
-                if !steel.contains(node.name()) {
-                    steel.items.insert(index.min(steel.items.len()), node);
-                }
-            }
-        }
         let old = old_steel();
         let reference = MaterialLibrary::default();
         merge_defaults(&mut self.root, &reference.root, &old);
@@ -944,7 +929,7 @@ mod tests {
             ..MaterialLibrary::default()
         };
         old.root.items.clear();
-        let steel = ensure_category(&mut old.root, &["Elastic_Models", "Steel", "Structural"]);
+        let steel = ensure_category(&mut old.root, &["Elastic_Models", "Steel"]);
         steel.items.push(LibraryNode::Material(old_steel()));
         let mut mine = old.clone();
         mine.update_defaults();
@@ -958,11 +943,9 @@ mod tests {
 
         // A changed S235 stays; Generic Steel is added next to it.
         let mut changed = old;
-        let LibraryNode::Material(m) = &mut ensure_category(
-            &mut changed.root,
-            &["Elastic_Models", "Steel", "Structural"],
-        )
-        .items[0] else {
+        let LibraryNode::Material(m) =
+            &mut ensure_category(&mut changed.root, &["Elastic_Models", "Steel"]).items[0]
+        else {
             unreachable!()
         };
         m.elastic.as_mut().unwrap().young = 200_000.0;

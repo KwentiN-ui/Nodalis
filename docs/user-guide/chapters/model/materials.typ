@@ -77,8 +77,7 @@ solver keeps the last stress beyond it.
 
 Libraries saved by an older version are updated when they are opened: missing generic
 materials are added, and the former S235 is renamed to Generic Steel if you have not changed
-it. The category #ui("Structural") below #ui("Steel") of earlier versions is dissolved; its
-materials move up into #ui("Steel"). Materials you changed or deleted are not touched afterwards.
+it. Materials you changed or deleted are not touched afterwards.
 
 The library is stored per user in `materials.ron` in the settings folder (@settings). When the
 dialog is closed, Nodalis asks whether to save changes to the library.
