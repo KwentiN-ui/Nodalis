@@ -41,6 +41,9 @@ pub fn apply_operation(
     if let Some(problem) = operation.problem() {
         return Err(fail(capitalised(&problem)));
     }
+    if kind == CadOperationKind::Defeature {
+        return crate::defeature::defeature(input, operation, entities).map(|d| d.geometry);
+    }
     if kind.splits() && !(kind == CadOperationKind::HoleRing && value == 0.0) {
         return apply_split(input, operation, entities);
     }
@@ -68,8 +71,10 @@ pub fn apply_operation(
                 round_edges(gmsh, kind, entities, value)?
             }
             CadOperationKind::PushPull => push_pull(gmsh, entities, value)?,
-            CadOperationKind::SplitPlane | CadOperationKind::HoleRing => {
-                unreachable!("splits are applied by apply_split")
+            CadOperationKind::SplitPlane
+            | CadOperationKind::HoleRing
+            | CadOperationKind::Defeature => {
+                unreachable!("splits and defeaturing are applied on their own")
             }
         };
         if made.is_empty() {
@@ -102,19 +107,7 @@ pub fn apply_operation(
         gmsh.write(&result.0)?;
         gmsh.clear()?;
         gmsh.import_shapes(&result.0)?;
-        // Each part keeps the name of the one it was made from: the nearest of the same
-        // dimension.
-        let after = default_parts(gmsh)?;
-        let mut names = Vec::with_capacity(after.len());
-        for (shape, name) in after {
-            let place = place_of(gmsh, &shape)?;
-            let nearest = (before.iter())
-                .filter(|(d, _, _)| *d == shape.dim)
-                .min_by(|a, b| distance(a.2, place).total_cmp(&distance(b.2, place)))
-                .map(|(_, n, _)| n.clone());
-            names.push(nearest.unwrap_or(name));
-        }
-        Ok((names, signatures(gmsh)?))
+        Ok((names_by_place(gmsh, &before)?, signatures(gmsh)?))
     })?;
     let brep = std::fs::read_to_string(&result.0)
         .map_err(|e| fail(format!("{}: {e}", result.0.display())))?;
@@ -125,6 +118,25 @@ pub fn apply_operation(
         signatures,
         ..input.clone()
     })
+}
+
+/// The names of the parts of the model: each keeps the name of the one of `before` it was
+/// made from, the nearest of the same dimension.
+pub(crate) fn names_by_place(
+    gmsh: &Gmsh,
+    before: &[(i32, String, [f64; 3])],
+) -> Result<Vec<String>, GmshError> {
+    let after = default_parts(gmsh)?;
+    let mut names = Vec::with_capacity(after.len());
+    for (shape, name) in after {
+        let place = place_of(gmsh, &shape)?;
+        let nearest = (before.iter())
+            .filter(|(d, _, _)| *d == shape.dim)
+            .min_by(|a, b| distance(a.2, place).total_cmp(&distance(b.2, place)))
+            .map(|(_, n, _)| n.clone());
+        names.push(nearest.unwrap_or(name));
+    }
+    Ok(names)
 }
 
 /// A split of the geometry, see [`crate::split`]: the parts keep their names, those cut in
@@ -486,7 +498,7 @@ fn capitalised(text: &str) -> String {
 }
 
 /// Each part as (dimension, name, centre).
-fn named_places(
+pub(crate) fn named_places(
     gmsh: &Gmsh,
     parts: &[(Shape, String)],
 ) -> Result<Vec<(i32, String, [f64; 3])>, GmshError> {
@@ -530,7 +542,7 @@ pub(crate) fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 /// The volume of the solids, or the area of the faces for `dim` 2.
-fn total_mass(gmsh: &Gmsh, dim: i32) -> Result<f64, GmshError> {
+pub(crate) fn total_mass(gmsh: &Gmsh, dim: i32) -> Result<f64, GmshError> {
     let mut mass = 0.0;
     for tag in gmsh.entities(dim)? {
         mass += gmsh.mass(dim, tag)?;

@@ -63,7 +63,7 @@ mod validity;
 
 pub use amplitude::{Amplitude, AmplitudeTime, ValueTable, no_tables};
 pub use bolt::{Bolt, BoltAction, BoltChange, LoweredBolts, Preload, ResolvedBolt, ResolvedThread};
-pub use cad_operation::{CadOperation, CadOperationKind, SplitKeep, SplitPlane};
+pub use cad_operation::{CadOperation, CadOperationKind, DefeatureFaces, SplitKeep, SplitPlane};
 pub use checks::{
     Finding, MeshCheck, Problem, Severity, diagnose_solver_output, diagnose_solver_warnings,
 };
@@ -183,8 +183,9 @@ use serde::{Deserialize, Serialize};
 /// ([`ContactRule`]), and adds part groups ([`PartGroup`]); formats 21 to 26 read as they are.
 /// Format 28 merges the concentrated, surface and body flux into one total heat flow
 /// ([`LoadKind::Flux`]); formats 21 to 27 read as they are unless a step has one of those
-/// loads.
-pub const PROJECT_FORMAT: u32 = 28;
+/// loads. Format 29 adds the defeaturing of the CAD Operation block
+/// ([`CadOperationKind::Defeature`]); formats 21 to 28 read as they are.
+pub const PROJECT_FORMAT: u32 = 29;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

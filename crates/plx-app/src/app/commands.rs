@@ -161,6 +161,7 @@ impl AnalysisWindow {
         let kept = w.model.as_ref().is_some_and(|m| m.bound_results.is_some());
         match cmd {
             Cmd::Import | Cmd::ImportMesh => idle,
+            Cmd::CadTool(_) => has_geometry && !meshing && idle,
             Cmd::DefaultMeshParameters
             | Cmd::MeshParameters
             | Cmd::LocalMeshSize
@@ -324,6 +325,7 @@ impl AnalysisWindow {
         let last_step = w.active_step().unwrap_or(0);
         match cmd {
             Cmd::Import | Cmd::ImportMesh => self.import(ctx),
+            Cmd::CadTool(kind) => self.open_cad_tool(kind),
             Cmd::DefaultMeshParameters => w.open_mesh_setup(),
             Cmd::MeshParameters
             | Cmd::LocalMeshSize

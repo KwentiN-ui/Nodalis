@@ -133,6 +133,8 @@ pub enum Cmd {
     Minimap,
     // Geometry workspace.
     Import,
+    /// A CAD operation applied to the geometry of the analysis right away.
+    CadTool(plx_model::CadOperationKind),
     DefaultMeshParameters,
     MeshParameters,
     LocalMeshSize,
@@ -717,7 +719,7 @@ fn build() -> Vec<Command> {
         "Sources",
         "Geometry",
         Node(NodeIcon::CadOperation),
-        "Places a block that fillets, chamfers or offsets the geometry linked to it.",
+        "Places a block that fillets, chamfers, offsets, splits or defeatures the geometry linked to it.",
     ));
     add(place(
         BlockTile::File,
@@ -911,6 +913,35 @@ fn build() -> Vec<Command> {
         "",
         "Imports geometry (STEP, IGES, BREP) or a mesh (INP) into the analysis.",
     ));
+    for (kind, label, tip) in [
+        (
+            plx_model::CadOperationKind::Defeature,
+            "Defeature",
+            "Removes fillets and chamfers from the geometry: those up to a size, or picked faces.",
+        ),
+        (
+            plx_model::CadOperationKind::SplitPlane,
+            "Split by\nPlane",
+            "Splits the parts a plane runs through, so that the faces on either side can be \
+             picked on their own.",
+        ),
+        (
+            plx_model::CadOperationKind::HoleRing,
+            "Split\naround Hole",
+            "Splits the face around a hole into a ring of a width, a face of its own to pick.",
+        ),
+    ] {
+        add(command(
+            C::CadTool(kind),
+            label,
+            g,
+            t,
+            "Modify",
+            Node(NodeIcon::CadOperation),
+            "",
+            tip,
+        ));
+    }
     add(command(
         C::DefaultMeshParameters,
         "Default\nParameters",

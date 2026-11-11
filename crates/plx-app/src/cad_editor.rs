@@ -8,7 +8,8 @@ use std::path::Path;
 
 use plx_mesher::CadEntity;
 use plx_model::{
-    CadOperation, CadOperationKind, Geometry, Quantity, SplitKeep, SplitPlane, UnitSystem,
+    CadOperation, CadOperationKind, DefeatureFaces, Geometry, Quantity, SplitKeep, SplitPlane,
+    UnitSystem,
 };
 
 use crate::model::Model;
@@ -47,6 +48,13 @@ pub struct CadOperationEditor {
     plane: SplitPlane,
     keep: SplitKeep,
     compound: bool,
+    /// Which faces a defeaturing removes.
+    faces: DefeatureFaces,
+    /// The fillets and chamfers found in the input for a defeaturing, with the size they
+    /// were found for, or why they could not be.
+    found: Option<(f64, Result<BTreeSet<CadEntity>, String>)>,
+    /// What the last preview of a defeaturing removed.
+    note: Option<String>,
     units: UnitSystem,
     /// A parameter study gives the length.
     length_linked: bool,
@@ -106,6 +114,9 @@ impl CadOperationEditor {
             plane: operation.plane,
             keep: operation.keep,
             compound: operation.compound,
+            faces: operation.faces,
+            found: None,
+            note: None,
             units,
             length_linked,
             picks,
@@ -115,6 +126,11 @@ impl CadOperationEditor {
         };
         editor.update_highlight();
         editor
+    }
+
+    /// The geometry it acts on, with the signatures of its entities.
+    pub fn input(&self) -> &Geometry {
+        &self.input
     }
 
     pub fn rename(&mut self, name: &str) {
@@ -140,17 +156,47 @@ impl CadOperationEditor {
             plane: self.plane,
             keep: self.keep,
             compound: self.compound,
+            faces: self.faces,
         }
     }
 
-    /// Whether a click picks something: not for a split along a global plane.
+    /// Whether a click picks something: not for a split along a global plane, nor for a
+    /// defeaturing of the faces found by size.
     fn picking(&self) -> bool {
-        !(self.kind == CadOperationKind::SplitPlane && self.plane != SplitPlane::Face)
+        match self.kind {
+            CadOperationKind::SplitPlane => self.plane == SplitPlane::Face,
+            CadOperationKind::Defeature => self.faces == DefeatureFaces::Picked,
+            _ => true,
+        }
+    }
+
+    /// Whether the faces of a defeaturing are found by size.
+    fn finding(&self) -> bool {
+        self.kind == CadOperationKind::Defeature && self.faces == DefeatureFaces::Found
+    }
+
+    /// The fillets and chamfers found for the size, found anew when it changed.
+    fn found_faces(&mut self) -> Result<BTreeSet<CadEntity>, String> {
+        let size = self.value;
+        if self.found.as_ref().is_none_or(|(at, _)| *at != size) {
+            let found = plx_mesher::find_blends(&self.input, size)
+                .map(|faces| faces.into_iter().collect())
+                .map_err(|e| e.to_string());
+            self.found = Some((size, found));
+        }
+        self.found
+            .as_ref()
+            .map_or(Ok(BTreeSet::new()), |(_, found)| found.clone())
     }
 
     fn update_highlight(&mut self) {
+        let shown = if self.finding() {
+            self.found_faces().unwrap_or_default()
+        } else {
+            self.picks.clone()
+        };
         if let Some(view) = &mut self.view {
-            view.highlight = crate::meshing::entities_highlight(view, &self.picks);
+            view.highlight = crate::meshing::entities_highlight(view, &shown);
         }
         self.scene_due = true;
     }
@@ -219,9 +265,10 @@ impl CadOperationEditor {
         let hit = view.pick_click(click)?;
         if self.kind.picks(CadEntity::Face(0)) {
             let face = crate::geometry_selection::face_at(view, &hit).map(CadEntity::Face)?;
+            // Fillets are curved.
             let planar =
                 (self.input.signatures.iter()).any(|s| s.entity == face && s.kind == "Plane");
-            return planar.then_some(face);
+            return (planar || self.kind == CadOperationKind::Defeature).then_some(face);
         }
         let edge = match crate::meshing::cad_pick(view, &hit, click.precision_at(hit.point)) {
             Some(edge @ CadEntity::Edge(_)) => Some(edge),
@@ -235,6 +282,24 @@ impl CadOperationEditor {
     /// Applies the operation to the input and shows the result, or says why it failed.
     fn preview(&mut self) {
         let operation = self.operation();
+        self.note = None;
+        if operation.kind == CadOperationKind::Defeature {
+            let made = operation.resolve(&self.input).and_then(|entities| {
+                plx_mesher::defeature(&self.input, &operation, &entities).map_err(|e| e.to_string())
+            });
+            if let Ok(made) = &made {
+                self.note = Some(match (made.removed, made.kept) {
+                    (0, _) => "No fillets or chamfers found up to the max size.".to_owned(),
+                    (1, 0) => "1 face removed.".to_owned(),
+                    (removed, 0) => format!("{removed} faces removed."),
+                    (removed, kept) => format!(
+                        "{removed} faces removed; {kept} found could not be removed and stay."
+                    ),
+                });
+            }
+            self.show_result(made.map(|d| d.geometry), operation);
+            return;
+        }
         let made = operation
             .problem()
             .map_or_else(|| Ok(()), Err)
@@ -242,14 +307,19 @@ impl CadOperationEditor {
             .and_then(|entities| {
                 plx_mesher::apply_operation(&self.input, &operation, &entities)
                     .map_err(|e| e.to_string())
-            })
-            .and_then(|geometry| {
-                let display = plx_mesher::tessellate(&geometry).map_err(|e| e.to_string())?;
-                Ok((
-                    Model::geometry_view(Path::new(&self.name), display),
-                    geometry,
-                ))
             });
+        self.show_result(made, operation);
+    }
+
+    /// Shows the result of a preview, or why it failed.
+    fn show_result(&mut self, made: Result<Geometry, String>, operation: CadOperation) {
+        let made = made.and_then(|geometry| {
+            let display = plx_mesher::tessellate(&geometry).map_err(|e| e.to_string())?;
+            Ok((
+                Model::geometry_view(Path::new(&self.name), display),
+                geometry,
+            ))
+        });
         match made {
             Ok((model, geometry)) => {
                 self.result = Some((model, geometry, operation));
@@ -320,8 +390,14 @@ impl CadOperationEditor {
                 ui.label("Operation");
                 ui.horizontal(|ui| {
                     for kind in CadOperationKind::ALL {
-                        // Moving a face out of its plane would make a solid of it.
-                        if self.flat && kind == CadOperationKind::PushPull {
+                        // Moving a face out of its plane would make a solid of it; defeaturing
+                        // removes faces of solids.
+                        if self.flat
+                            && matches!(
+                                kind,
+                                CadOperationKind::PushPull | CadOperationKind::Defeature
+                            )
+                        {
                             continue;
                         }
                         if ui
@@ -345,9 +421,13 @@ impl CadOperationEditor {
                         self.units,
                         Quantity::Length,
                     ));
-                    // The outline of the plane moves with its offset.
+                    // The outline of the plane moves with its offset, the faces found with
+                    // the size.
                     if response.changed() {
                         self.scene_due = true;
+                        if self.finding() {
+                            self.update_highlight();
+                        }
                     }
                     if self.length_linked {
                         response.on_disabled_hover_text(
@@ -358,6 +438,9 @@ impl CadOperationEditor {
                 ui.end_row();
                 if self.kind == CadOperationKind::SplitPlane {
                     self.split_rows(ui);
+                }
+                if self.kind == CadOperationKind::Defeature {
+                    self.defeature_rows(ui);
                 }
                 if !self.picking() {
                     return;
@@ -434,6 +517,25 @@ impl CadOperationEditor {
                         faces; each face gets a ring of the width around the hole, a face of \
                         its own to pick. A click on a picked edge removes it."
                         .to_owned(),
+                    CadOperationKind::Defeature if self.finding() => match &self.found {
+                        Some((_, Err(why))) => format!("The faces could not be found: {why}"),
+                        Some((_, Ok(found))) => format!(
+                            "{} found, drawn red: fillets of a radius up to the max size and \
+                             chamfers up to that width. Holes and the round ends of slots \
+                             stay. Preview removes them; the faces next to them grow until \
+                             they meet.",
+                            match found.len() {
+                                0 => "No fillets or chamfers".to_owned(),
+                                1 => "1 face".to_owned(),
+                                n => format!("{n} faces"),
+                            }
+                        ),
+                        None => String::new(),
+                    },
+                    CadOperationKind::Defeature => "Click the fillet and chamfer faces to \
+                        remove; a click on a picked face removes it from the list. A fillet \
+                        that runs over several faces needs all of them."
+                        .to_owned(),
                     kind if self.corners() => format!(
                         "Click the corners of the faces to {}; a click on a picked corner \
                          removes it.",
@@ -444,6 +546,9 @@ impl CadOperationEditor {
                         kind.label().to_lowercase()
                     ),
                 });
+            }
+            None if self.note.is_some() => {
+                ui.weak(self.note.clone().unwrap_or_default());
             }
             None if !self.picking() => {
                 ui.weak("The result of the operation.");
@@ -593,6 +698,35 @@ impl CadOperationEditor {
         if self.plane != before {
             self.scene_due = true;
         }
+    }
+
+    /// The row of a defeaturing: which faces it removes. Going to picked faces starts from
+    /// those found.
+    fn defeature_rows(&mut self, ui: &mut egui::Ui) {
+        ui.label("Remove");
+        ui.horizontal(|ui| {
+            for faces in DefeatureFaces::ALL {
+                if ui
+                    .selectable_value(&mut self.faces, faces, faces.label())
+                    .on_hover_text(match faces {
+                        DefeatureFaces::Found => {
+                            "The fillets and chamfers up to the max size, found again whenever \
+                             the geometry or the size changes."
+                        }
+                        DefeatureFaces::Picked => {
+                            "The faces clicked, starting from those found by size."
+                        }
+                    })
+                    .changed()
+                {
+                    if self.faces == DefeatureFaces::Picked && self.picks.is_empty() {
+                        self.picks = self.found_faces().unwrap_or_default();
+                    }
+                    self.update_highlight();
+                }
+            }
+        });
+        ui.end_row();
     }
 
     /// The outline of a global plane over the input, as edges in the view.
