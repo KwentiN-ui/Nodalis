@@ -146,14 +146,16 @@ pub fn bolt_form(
     sides.ui(ui, model);
     (bolt.side_a, bolt.side_b, bolt.thread) = sides.regions();
     ui.label("");
+    // The width of the second column before the steps' grid widens it, for the texts.
+    let text_width = ui.available_width();
     ui.add(
         egui::Label::new(
             RichText::new(
                 "The faces on the two sides of the cut through the shank, or only the \
                  cylindrical face of the shank as side A: Nodalis then cuts the bolt across \
-                 its middle. The thread is optional: the faces of the internal thread of \
-                 the nut or the tapped part, which Nodalis ties to the nearest faces of the \
-                 bolt, also across a gap.",
+                 its middle. The thread is optional: the bore of the tapped hole or the nut, \
+                 which Nodalis ties to the faces of the bolt in it, on one side of the cut, \
+                 also across a gap.",
             )
             .weak(),
         )
@@ -215,7 +217,10 @@ pub fn bolt_form(
     ui.end_row();
     ui.label("Exported as");
     let text = view.exported(model, bolt).to_owned();
-    ui.add(egui::Label::new(RichText::new(text).weak()).wrap());
+    ui.vertical(|ui| {
+        ui.set_max_width(text_width);
+        ui.add(egui::Label::new(RichText::new(text).weak()).wrap());
+    });
     ui.end_row();
 }
 

@@ -515,18 +515,23 @@ To feed a screw by a given length, as when it is tightened to pull a part, choos
 
 ==== Thread
 
-The thread need not be modelled. Pick the faces of the internal thread as #ui("Thread"): the
-bore of the tapped hole, or, for a screw simplified to a cylinder that stops short of the part
-it is screwed into, the face of that part opposite its end. Nodalis ties to them the outer
-faces of the bolt nearest to them, a band half an element wide: the shank in the bore, or
-the end face and the edge of the last elements. The tie keeps the faces where they are and
-bridges a gap between them, so the force flows from the bolt into the part without contact
-or joint of your own. #ui("Exported as") says how many faces of the bolt are tied and across
-which gap. The thread must belong to another part than the bolt, or another body of a compound
-part (@compound-parts).
+The thread need not be modelled. Pick the faces of the internal thread as #ui("Thread"),
+usually the bore of the tapped hole, blind or through: Nodalis ties to it the faces of the bolt
+inside it, the shank over the length it is screwed in. For a screw simplified to a cylinder
+that stops short of the part it is screwed into, pick the face of that part opposite its end
+instead; the end face of the screw is tied to it. In general Nodalis takes the outer faces of
+the bolt nearest to the thread, a band half an element wide, and only on the thread's side of
+the cut. The tie keeps the faces where they are and bridges a gap between them, so the force
+flows from the bolt into the part without a contact or joint of your own. The thread must belong
+to another part than the bolt, or another body of a compound part (@compound-parts).
 
-#screenshot("bolt-thread.png", [A screw simplified to a cylinder: its end is tied to the face of
-  the part it is screwed into, across the gap, and the screw is fed by a shortening])
+With a thread, a shank picked by its cylindrical face is cut across the middle of its free
+part, the longer piece of the face beside the length in the thread, not across the middle of
+the whole face. #ui("Exported as") says how many faces of the bolt are tied and across which
+gap.
+
+#screenshot("bolt-thread.png", [A screw through a tapped ring: the bore of the ring is the thread
+  (32 faces), the shank in it is tied to it, and the cut lies on the free part of the shank below])
 
 ==== Picking the shank
 

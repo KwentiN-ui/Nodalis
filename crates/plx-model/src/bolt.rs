@@ -246,7 +246,35 @@ impl FeModel {
         if b.is_empty()
             && let Some(shank) = Shank::of(&a, mesh)
         {
-            return shank.cut(&a, mesh);
+            // Across the middle of the free part of the shank: beside the part of it in the
+            // thread, which a cut must not split from the thread.
+            let engaged = match self.thread_faces(bolt, mesh) {
+                Ok(Some(thread)) => (thread.bolt_faces.iter())
+                    .flat_map(|&f| face_nodes(mesh, f))
+                    .filter_map(|n| mesh.node(n))
+                    .map(|p| dot(p, shank.axis))
+                    .fold(None, |range: Option<(f64, f64)>, t| {
+                        Some(range.map_or((t, t), |(lo, hi)| (lo.min(t), hi.max(t))))
+                    }),
+                _ => None,
+            };
+            let middle = match engaged {
+                None => 0.5 * (shank.start + shank.end),
+                Some((lo, hi)) => {
+                    let below = (shank.start, lo.min(shank.end));
+                    let above = (hi.max(shank.start), shank.end);
+                    let (from, to) = if below.1 - below.0 >= above.1 - above.0 {
+                        below
+                    } else {
+                        above
+                    };
+                    if to <= from {
+                        return Err("the thread takes the whole shank: no free part to cut".into());
+                    }
+                    0.5 * (from + to)
+                }
+            };
+            return shank.cut(&a, mesh, middle);
         }
         let nodes = |faces: &[(ElementId, u8)]| -> BTreeSet<NodeId> {
             faces.iter().flat_map(|&f| face_nodes(mesh, f)).collect()
@@ -294,15 +322,56 @@ impl FeModel {
     }
 
     /// How the bolt is joined to its internal thread: the outer faces of the bolt nearest to
-    /// the thread faces, a band half an element wide beyond the nearest, tied to them where
-    /// they are. They are the shank in a tapped hole, or the end face of a bolt simplified to
-    /// a cylinder that stops short of the part it is screwed into. `None` without thread
-    /// faces.
+    /// the thread faces, a band half an element wide beyond the nearest, on the thread's
+    /// side of the cut, tied to them where they are. They are the shank in a tapped hole
+    /// (the bore picked as the thread), or the end face of a bolt simplified to a cylinder
+    /// that stops short of the part it is screwed into. `None` without thread faces.
     pub fn resolve_thread(
         &self,
         bolt: &Bolt,
         mesh: &FeMesh,
     ) -> Result<Option<ResolvedThread>, String> {
+        let Some(mut thread) = self.thread_faces(bolt, mesh)? else {
+            return Ok(None);
+        };
+        let Ok(cut) = self.resolve_bolt(bolt, mesh) else {
+            return Ok(Some(thread));
+        };
+        // The plane of the cut: the centre of its faces, square to the preload.
+        let points: Vec<[f64; 3]> = (cut.cut_faces.iter())
+            .filter_map(|&f| face_centre(mesh, f))
+            .collect();
+        let normal = bolt.axis.or(cut.shank_axis).or_else(|| {
+            let mut sum = [0.0; 3];
+            for n in cut.cut_faces.iter().filter_map(|&f| face_normal(mesh, f)) {
+                (0..3).for_each(|k| sum[k] += n[k]);
+            }
+            (dot(sum, sum) > 0.0).then_some(sum)
+        });
+        let (Some(normal), false) = (normal, points.is_empty()) else {
+            return Ok(Some(thread));
+        };
+        let k = points.len() as f64;
+        let origin = [0, 1, 2].map(|d| points.iter().map(|p| p[d]).sum::<f64>() / k);
+        let side = |p: [f64; 3]| dot([0, 1, 2].map(|d| p[d] - origin[d]), normal);
+        // The side of the thread: where most of the bolt faces tied to it lie.
+        let sides: Vec<f64> = (thread.bolt_faces.iter())
+            .map(|&f| face_centre(mesh, f).map_or(0.0, side))
+            .collect();
+        let thread_side = sides.iter().sum::<f64>().signum();
+        let kept: Vec<(ElementId, u8)> = (thread.bolt_faces.iter().zip(&sides))
+            .filter(|(_, s)| s.signum() == thread_side)
+            .map(|(&f, _)| f)
+            .collect();
+        if kept.is_empty() {
+            return Err("the thread lies on the cut".into());
+        }
+        thread.bolt_faces = kept;
+        Ok(Some(thread))
+    }
+
+    /// [`Self::resolve_thread`] without regard to the cut.
+    fn thread_faces(&self, bolt: &Bolt, mesh: &FeMesh) -> Result<Option<ResolvedThread>, String> {
         let thread = solid_faces(&bolt.thread, mesh);
         if thread.is_empty() {
             return if bolt.thread.is_empty() {
@@ -722,7 +791,12 @@ impl Shank {
     /// The slice across the middle of the shank: the faces between the elements inside the
     /// shank below the middle and those above it, on the elements below. The slice follows
     /// the element faces, so the mesh needs no new nodes.
-    fn cut(&self, faces: &[(ElementId, u8)], mesh: &FeMesh) -> Result<ResolvedBolt, String> {
+    fn cut(
+        &self,
+        faces: &[(ElementId, u8)],
+        mesh: &FeMesh,
+        middle: f64,
+    ) -> Result<ResolvedBolt, String> {
         let elements: BTreeSet<ElementId> = faces.iter().map(|&(e, _)| e).collect();
         let parts: Vec<&plx_mesh::Part> = (mesh.parts.iter())
             .filter(|p| p.elements.iter().any(|e| elements.contains(e)))
@@ -736,7 +810,6 @@ impl Shank {
                 .collect(),
             None => mesh.elements().iter().collect(),
         };
-        let middle = 0.5 * (self.start + self.end);
         let reach = self.radius + 0.25 * mean_size(faces, mesh);
         let mut below = Vec::new();
         let mut above: BTreeMap<Vec<NodeId>, ()> = BTreeMap::new();

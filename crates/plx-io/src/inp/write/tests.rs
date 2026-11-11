@@ -12535,3 +12535,174 @@ fn a_bolt_screwed_into_its_thread_pulls_the_plate() {
     assert!(foot < -1.0, "{foot}");
     assert!((foot + top).abs() < 1e-6 * foot.abs(), "{foot} {top}");
 }
+
+/// A round bolt of radius 5 along z from 0 to 40 (wedges around the axis and a ring of
+/// hexahedra, 16 around, 8 layers of 5), part SCREW, held at its foot (node set FOOT), screwed
+/// through a threaded ring from z = 25 to 35 around it (part NUT, inner radius 5, outer 10,
+/// held outside: node set RIM). The bolt is picked by its whole cylindrical face, the thread
+/// by the bore of the ring; the bolt sticks out of the ring at the top.
+fn bolt_through_tapped_ring(shortening: f64) -> (FeMesh, FeModel) {
+    let (around, along) = (16usize, 8usize);
+    let per_layer = 1 + 2 * around;
+    let node = |layer: usize, ring: usize, i: usize| -> usize {
+        1 + layer * per_layer
+            + if ring == 0 {
+                0
+            } else {
+                1 + (ring - 1) * around + i % around
+            }
+    };
+    let angle = |i: usize| std::f64::consts::TAU * i as f64 / around as f64;
+    let mut text = String::from("*Node\n");
+    for layer in 0..=along {
+        let z = 5.0 * layer as f64;
+        let _ = writeln!(text, "{}, 0, 0, {z}", node(layer, 0, 0));
+        for ring in 1..=2 {
+            for i in 0..around {
+                let r = 2.5 * ring as f64;
+                let (x, y) = (r * angle(i).cos(), r * angle(i).sin());
+                let _ = writeln!(text, "{}, {x}, {y}, {z}", node(layer, ring, i));
+            }
+        }
+    }
+    let base = node(along + 1, 0, 0);
+    let nut =
+        |k: usize, outer: usize, i: usize| base + k * 2 * around + outer * around + i % around;
+    for k in 0..3 {
+        for outer in 0..2 {
+            for i in 0..around {
+                let r = if outer == 0 { 5.0 } else { 10.0 };
+                let (x, y) = (r * angle(i).cos(), r * angle(i).sin());
+                let _ = writeln!(
+                    text,
+                    "{}, {x}, {y}, {}",
+                    nut(k, outer, i),
+                    25.0 + 5.0 * k as f64
+                );
+            }
+        }
+    }
+    let mut wedges = String::from("*Element, Type=C3D6, Elset=SCREW\n");
+    let mut hexes = String::from("*Element, Type=C3D8, Elset=SCREW\n");
+    let mut shank = Vec::new();
+    let mut id = 1;
+    for layer in 0..along {
+        let (b, t) = (layer, layer + 1);
+        for i in 0..around {
+            let _ = writeln!(
+                wedges,
+                "{id}, {}, {}, {}, {}, {}, {}",
+                node(b, 0, 0),
+                node(b, 1, i),
+                node(b, 1, i + 1),
+                node(t, 0, 0),
+                node(t, 1, i),
+                node(t, 1, i + 1)
+            );
+            id += 1;
+            let _ = writeln!(
+                hexes,
+                "{id}, {}, {}, {}, {}, {}, {}, {}, {}",
+                node(b, 1, i),
+                node(b, 2, i),
+                node(b, 2, i + 1),
+                node(b, 1, i + 1),
+                node(t, 1, i),
+                node(t, 2, i),
+                node(t, 2, i + 1),
+                node(t, 1, i + 1)
+            );
+            // Face 4 lies on the cylinder.
+            shank.push((id as ElementId, 4));
+            id += 1;
+        }
+    }
+    let mut ring = String::from("*Element, Type=C3D8, Elset=NUT\n");
+    let mut bore = Vec::new();
+    for k in 0..2 {
+        for i in 0..around {
+            let _ = writeln!(
+                ring,
+                "{id}, {}, {}, {}, {}, {}, {}, {}, {}",
+                nut(k, 0, i),
+                nut(k, 1, i),
+                nut(k, 1, i + 1),
+                nut(k, 0, i + 1),
+                nut(k + 1, 0, i),
+                nut(k + 1, 1, i),
+                nut(k + 1, 1, i + 1),
+                nut(k + 1, 0, i + 1)
+            );
+            // Face 6 (nodes 4, 8, 5, 1) lies on the bore.
+            bore.push((id as ElementId, 6));
+            id += 1;
+        }
+    }
+    let foot: Vec<String> = (0..per_layer).map(|k| (1 + k).to_string()).collect();
+    let rim: Vec<String> = (0..3)
+        .flat_map(|k| (0..around).map(move |i| (k, i)))
+        .map(|(k, i)| nut(k, 1, i).to_string())
+        .collect();
+    let _ = write!(
+        text,
+        "{wedges}{hexes}{ring}*Nset, Nset=FOOT\n{}\n*Nset, Nset=RIM\n{}\n",
+        foot.join(",\n"),
+        rim.join(",\n")
+    );
+    let mesh = crate::inp::read_inp_str(&text, None).unwrap().mesh;
+    let (_, mut model) = cantilever(tip_force());
+    model.sections[0].region = Region::Parts(vec!["SCREW".into(), "NUT".into()]);
+    let step = &mut model.steps[0];
+    step.loads.clear();
+    step.boundary_conditions[0].region = Region::NodeSet("FOOT".into());
+    let mut rim = step.boundary_conditions[0].clone();
+    rim.name = "Fixed-2".into();
+    rim.region = Region::NodeSet("RIM".into());
+    step.boundary_conditions.push(rim);
+    let mut bolt = plx_model::Bolt {
+        id: named("Bolt-1"),
+        ..plx_model::Bolt::new("Bolt-1")
+    };
+    bolt.side_a = Region::Faces(shank);
+    bolt.thread = Region::Faces(bore);
+    bolt.preload = plx_model::Preload::Shortening(shortening);
+    model.bolts.push(bolt);
+    (mesh, model)
+}
+
+/// With the bore of a through hole picked as the thread, the bolt is cut across the middle
+/// of its free part below the ring, and only the shank inside the ring is tied to the bore.
+#[test]
+fn a_bolt_through_a_tapped_hole_is_tied_in_the_bore_and_cut_below_it() {
+    let (mesh, model) = bolt_through_tapped_ring(0.01);
+    let bolt = &model.bolts[0];
+    let cut = model.resolve_bolt(bolt, &mesh).unwrap();
+    let z = |n: NodeId| mesh.node(n).unwrap()[2];
+    for &(e, f) in &cut.cut_faces {
+        for n in constraints::face_node_ids(&mesh, e, f) {
+            assert!(z(n) < 25.0, "cut at {}", z(n));
+        }
+    }
+    let thread = model.resolve_thread(bolt, &mesh).unwrap().unwrap();
+    assert!(thread.gap < 1e-9, "{thread:?}");
+    // The cylinder faces of the two layers in the ring.
+    assert_eq!(thread.bolt_faces.len(), 32, "{thread:?}");
+    for &(e, f) in &thread.bolt_faces {
+        for n in constraints::face_node_ids(&mesh, e, f) {
+            assert!((25.0..=35.0).contains(&z(n)), "tied at {}", z(n));
+        }
+    }
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let Some((frd, _)) = run_frd_dat("schraube-durchgangsgewinde", &text) else {
+        return;
+    };
+    // The bolt pulls the ring down towards its foot.
+    let sum = |set: &str| -> f64 {
+        (mesh.node_sets[set].iter())
+            .map(|&node| node_value(&frd, "FORC", "F3", node))
+            .sum()
+    };
+    let (foot, rim) = (sum("FOOT"), sum("RIM"));
+    assert!(foot < -1.0, "{foot}");
+    assert!((foot + rim).abs() < 1e-4 * foot.abs(), "{foot} {rim}");
+}
