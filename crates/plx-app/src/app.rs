@@ -43,6 +43,7 @@ use crate::tree::{self, TreeItem, TreeResponse, TreeState, TreeView};
 use crate::viewport::{BoxSelect, Click, ViewCommand, Viewport};
 use plx_render::RenderMesh;
 
+mod cad_tool;
 mod commands;
 mod results_ribbon;
 
@@ -190,6 +191,9 @@ struct Workbench {
     step_overview: bool,
     /// Open mesh tool: transform parts, merge nodes or renumber.
     mesh_tool: Option<MeshToolDialog>,
+    /// A CAD operation of the Geometry workspace applied to the geometry right away, in the
+    /// editor of the CAD Operation block with its own view.
+    cad_tool: Option<(crate::cad_editor::CadOperationEditor, Viewport)>,
     /// The Query tool, while its window is open.
     query: Option<QueryWindow>,
     /// Open material library editor.
@@ -349,6 +353,7 @@ impl AnalysisWindow {
                 contact_matrix: false,
                 step_overview: false,
                 mesh_tool: None,
+                cad_tool: None,
                 query: None,
                 material_library: None,
                 field_output_dialog: None,
@@ -1722,6 +1727,7 @@ impl AnalysisWindow {
         self.workbench.contact_matrix_window(&ctx);
         self.workbench.step_overview_window(&ctx);
         self.workbench.mesh_tool_window(&ctx);
+        self.cad_tool_window(&ctx);
         self.workbench.query_window(&ctx);
         self.workbench.section_window(&ctx);
         self.workbench.exploded_window(&ctx);

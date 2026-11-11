@@ -128,6 +128,11 @@ impl CadOperationEditor {
         editor
     }
 
+    /// The geometry it acts on, with the signatures of its entities.
+    pub fn input(&self) -> &Geometry {
+        &self.input
+    }
+
     pub fn rename(&mut self, name: &str) {
         name.clone_into(&mut self.name);
     }

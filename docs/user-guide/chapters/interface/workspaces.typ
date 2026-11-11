@@ -68,7 +68,7 @@ the room is there.
     for the selected block. #ui("Sources"), #ui("Parameters"), #ui("Evaluate") and
     #ui("Annotate") add blocks (@place-block). #ui("Arrange") works on the selected blocks and
     the view of the schematic.],
-  [Geometry], [#ui("Geometry"): import, mesh setup, meshing and the parts. #ui("View"):
+  [Geometry], [#ui("Geometry"): import, modify (@geometry-modify), mesh setup, meshing and the parts. #ui("View"):
     camera, display, section and exploded view, screenshot, query.],
   [FE Model], [#ui("Mesh"), #ui("Material"), #ui("Features"), #ui("Connections"),
     #ui("Steps") and #ui("View").],

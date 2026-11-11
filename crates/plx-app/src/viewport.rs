@@ -229,6 +229,11 @@ impl Axis {
 }
 
 impl Viewport {
+    /// The renderer's state, for another view such as a dialog's own.
+    pub fn render_state(&self) -> RenderState {
+        self.render_state.clone()
+    }
+
     pub fn new(render_state: RenderState) -> Self {
         let renderer = ViewportRenderer::new(&render_state.device);
         let texture = render_state.renderer.write().register_native_texture(

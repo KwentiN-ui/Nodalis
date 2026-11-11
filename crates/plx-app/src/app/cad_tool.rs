@@ -1,0 +1,119 @@
+//! The CAD tools of the Geometry workspace: Defeature, Split by Plane and Split around Hole
+//! applied to the geometry of the analysis right away, in the editor of the CAD Operation
+//! block. Unlike the block they keep no history: the analysis takes the changed geometry as
+//! if it had been imported so, and the selections on it follow the changed shapes.
+
+use super::*;
+use crate::cad_editor::{CadEditorResult, CadOperationEditor};
+use plx_model::{CadOperation, CadOperationKind};
+
+impl AnalysisWindow {
+    /// Opens the editor of a CAD tool on the geometry of the analysis.
+    pub(super) fn open_cad_tool(&mut self, kind: CadOperationKind) {
+        let w = &mut self.workbench;
+        // A link would bring its geometry back over the changed one.
+        let linked = (w.incoming.paths.iter()).find(|(path, _)| {
+            path.first()
+                .is_some_and(|p| p == crate::links::GEOMETRY || p == crate::links::MESH)
+        });
+        if let Some((_, source)) = linked {
+            let line = format!(
+                "The geometry comes from {source}: change it there, or put a CAD Operation \
+                 block between the two in the project."
+            );
+            w.output.push(line);
+            return;
+        }
+        let Some(model) = &w.model else {
+            return;
+        };
+        let Some(geometry) = model.geometry.clone() else {
+            return;
+        };
+        let geometry = if geometry.signatures.is_empty() {
+            plx_mesher::with_signatures(geometry.clone()).unwrap_or(geometry)
+        } else {
+            geometry
+        };
+        // The YZ plane through the middle of the geometry; a width or size of a few
+        // millimetres.
+        let value = if kind == CadOperationKind::SplitPlane {
+            let (lo, hi) = (geometry.signatures.iter())
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), s| {
+                    (lo.min(s.min[0]), hi.max(s.max[0]))
+                });
+            if lo.is_finite() && hi.is_finite() {
+                0.5 * (lo + hi)
+            } else {
+                0.0
+            }
+        } else {
+            3e-3
+        };
+        let operation = CadOperation {
+            kind,
+            value,
+            ..CadOperation::default()
+        };
+        let editor = CadOperationEditor::new(
+            0,
+            kind.label(),
+            geometry,
+            &operation,
+            model.fe.properties.units,
+            false,
+        );
+        let viewport = Viewport::new(w.viewport.render_state());
+        w.cad_tool = Some((editor, viewport));
+    }
+
+    /// Shows the editor of a CAD tool; OK applies the operation to the geometry.
+    pub(super) fn cad_tool_window(&mut self, ctx: &egui::Context) {
+        let Some((editor, viewport)) = &mut self.workbench.cad_tool else {
+            return;
+        };
+        let (operation, made) = match editor.show(ctx, viewport) {
+            CadEditorResult::Open => return,
+            CadEditorResult::Cancel => {
+                self.workbench.cad_tool = None;
+                return;
+            }
+            CadEditorResult::Ok(operation, made) => (operation, made),
+        };
+        let input = editor.input().clone();
+        self.workbench.cad_tool = None;
+        let label = operation.kind.label();
+        let made = match made {
+            Some(made) => Ok(*made),
+            None => (operation.problem().map_or(Ok(()), Err))
+                .and_then(|()| operation.resolve(&input))
+                .and_then(|entities| {
+                    plx_mesher::apply_operation(&input, &operation, &entities)
+                        .map_err(|e| e.to_string())
+                }),
+        };
+        let geometry = match made {
+            Ok(geometry) => geometry,
+            Err(why) => {
+                let line = format!("{label} failed: {why}");
+                self.workbench.output.push(line);
+                return;
+            }
+        };
+        if geometry.brep == input.brep {
+            let line = format!("{label}: nothing to change in the geometry.");
+            self.workbench.output.push(line);
+            return;
+        }
+        // The selections follow the shapes by their signatures, which the input has.
+        if let Some(model) = &mut self.workbench.model {
+            model.geometry = Some(input);
+        }
+        self.take_geometry(Some(geometry), true);
+        let line = format!(
+            "{label} applied to the geometry ({}); mesh it again.",
+            operation.describe_picks()
+        );
+        self.workbench.output.push(line);
+    }
+}

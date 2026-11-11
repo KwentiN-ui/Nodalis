@@ -79,6 +79,27 @@ needed between them, and each face can still be picked on its own.
 
 #screenshot("split-shell.png", [A plate with discs split out of it: one part, one common mesh, one disc picked])
 
+=== Modifying the geometry <geometry-modify>
+
+The #ui("Modify") group of the #ui("Geometry") tab changes the imported geometry of the analysis
+right away: #ui("Defeature") removes fillets and chamfers (@defeature), #ui("Split by Plane")
+splits parts along a plane (@split-by-plane) and #ui("Split around Hole") splits the face around
+a hole into a ring (@split-around-hole). Each opens the editor of the CAD Operation block with
+that operation chosen; the other operations of the block are offered there too. #ui("OK")
+replaces the geometry by the result, as if it had been imported so: the parts keep their names,
+the mesh setup and the picks of the FE model follow the faces and edges by where they lie, and
+the geometry has to be meshed again. A split by plane starts from the YZ plane through the middle
+of the geometry, the other tools from a size of 3 mm.
+
+Unlike the CAD Operation block, the tools keep no history and cannot be undone: change the
+geometry with them once, for example to remove cosmetic fillets before meshing. Use the block in
+the project when the change is to stay editable, to be varied by a parameter study or to follow a
+new version of the CAD file. An analysis whose geometry comes from a link refuses the tools,
+since the link would bring its geometry back; put a CAD Operation block between the two instead.
+
+#screenshot("geometry-defeature-tool.png", [Defeature from the Modify group of the Geometry tab:
+  the fillets and chamfers up to 3 mm are found on the imported bracket])
+
 === Compound parts <compound-parts>
 
 A CAD model is often cut into several solids so that the mesher copes with it, for example a

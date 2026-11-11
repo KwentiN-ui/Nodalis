@@ -367,7 +367,8 @@ This works on solids and on shell parts alike; the parts keep their names.
 
 ==== Defeature <defeature>
 
-#ui("Defeature") removes fillets and chamfers from solids, typically of a STEP file: the faces
+#ui("Defeature") removes fillets and chamfers from solids, typically of a STEP file (also a
+tool in the Geometry workspace, @geometry-modify): the faces
 next to each one grow until they meet again in a sharp edge. That serves two ends. A fillet of
 the file can be replaced by a #ui("Fillet") of a second CAD Operation block behind this one,
 whose radius a parameter study varies (@cad-fillet-study). And small cosmetic fillets and
