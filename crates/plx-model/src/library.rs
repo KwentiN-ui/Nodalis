@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Elastic, Expansion, Material, UnitSystem};
+use crate::{Elastic, Expansion, Material, Plastic, PlasticPoint, UnitSystem};
 
 /// Version of the library file format written by this build.
 pub const LIBRARY_FORMAT: u32 = 1;
@@ -83,7 +83,7 @@ impl Category {
 /// Version of the built-in materials. Raise it when `MaterialLibrary::default` gains or changes
 /// materials; libraries saved with an older version are updated by
 /// [`MaterialLibrary::update_defaults`].
-pub const DEFAULTS_VERSION: u32 = 2;
+pub const DEFAULTS_VERSION: u32 = 3;
 
 /// Generic material in the library's unit system (mm, t, s, degC) from datasheet values.
 struct Generic {
@@ -260,6 +260,233 @@ const PLASTICS: [Generic; 10] = [
     },
 ];
 
+/// Wrought aluminium alloys (EN AW), typical values of the tempers in use (6061-T6, 6082-T6,
+/// 5083-H111, 7075-T6, 2024-T3) from ASM and manufacturer datasheets. The elastic constants
+/// do not depend much on the temper.
+const ALUMINIUM_WROUGHT: [Generic; 8] = [
+    Generic {
+        name: "EN AW-1050A",
+        density: 2710.0,
+        young: 69_000.0,
+        poisson: 0.33,
+        expansion: 23.6e-6,
+        conductivity: 229.0,
+        specific_heat: 900.0,
+    },
+    Generic {
+        name: "EN AW-3003",
+        density: 2730.0,
+        young: 69_000.0,
+        poisson: 0.33,
+        expansion: 23.2e-6,
+        conductivity: 193.0,
+        specific_heat: 893.0,
+    },
+    Generic {
+        name: "EN AW-5083",
+        density: 2660.0,
+        young: 71_000.0,
+        poisson: 0.33,
+        expansion: 23.8e-6,
+        conductivity: 117.0,
+        specific_heat: 900.0,
+    },
+    Generic {
+        name: "EN AW-5754",
+        density: 2670.0,
+        young: 70_000.0,
+        poisson: 0.33,
+        expansion: 23.8e-6,
+        conductivity: 147.0,
+        specific_heat: 900.0,
+    },
+    Generic {
+        name: "EN AW-6061",
+        density: 2700.0,
+        young: 68_900.0,
+        poisson: 0.33,
+        expansion: 23.6e-6,
+        conductivity: 167.0,
+        specific_heat: 896.0,
+    },
+    Generic {
+        name: "EN AW-6082",
+        density: 2700.0,
+        young: 70_000.0,
+        poisson: 0.33,
+        expansion: 23.4e-6,
+        conductivity: 170.0,
+        specific_heat: 900.0,
+    },
+    Generic {
+        name: "EN AW-2024",
+        density: 2780.0,
+        young: 73_100.0,
+        poisson: 0.33,
+        expansion: 23.2e-6,
+        conductivity: 121.0,
+        specific_heat: 875.0,
+    },
+    Generic {
+        name: "EN AW-7075",
+        density: 2810.0,
+        young: 71_700.0,
+        poisson: 0.33,
+        expansion: 23.4e-6,
+        conductivity: 130.0,
+        specific_heat: 960.0,
+    },
+];
+
+/// Cast aluminium alloys (EN AC) as used in sand, die and permanent mould casting. Conductivity
+/// varies with the heat treatment and the casting process, so the mean of the datasheet range
+/// is used.
+const ALUMINIUM_CAST: [Generic; 4] = [
+    Generic {
+        name: "EN AC-AlSi7Mg0.3 (42100)",
+        density: 2680.0,
+        young: 72_500.0,
+        poisson: 0.33,
+        expansion: 21.5e-6,
+        conductivity: 150.0,
+        specific_heat: 880.0,
+    },
+    Generic {
+        name: "EN AC-AlSi10Mg (43000)",
+        density: 2670.0,
+        young: 75_000.0,
+        poisson: 0.33,
+        expansion: 21.0e-6,
+        conductivity: 150.0,
+        specific_heat: 880.0,
+    },
+    Generic {
+        name: "EN AC-AlSi12 (44200)",
+        density: 2650.0,
+        young: 75_000.0,
+        poisson: 0.33,
+        expansion: 20.0e-6,
+        conductivity: 140.0,
+        specific_heat: 880.0,
+    },
+    Generic {
+        name: "EN AC-AlSi9Cu3(Fe) (46000)",
+        density: 2760.0,
+        young: 74_000.0,
+        poisson: 0.33,
+        expansion: 21.0e-6,
+        conductivity: 110.0,
+        specific_heat: 880.0,
+    },
+];
+
+/// A steel with a plastic hardening curve: `curve` holds (true stress in MPa, plastic strain)
+/// from the yield point on, in the order the solver wants them.
+struct PlasticSteel {
+    base: Generic,
+    curve: &'static [(f64, f64)],
+}
+
+impl PlasticSteel {
+    fn material(&self) -> Material {
+        Material {
+            plastic: Some(Plastic {
+                hardening: crate::Hardening::Isotropic,
+                points: (self.curve.iter())
+                    .map(|&(stress, plastic_strain)| PlasticPoint {
+                        stress,
+                        plastic_strain,
+                        temperature: 0.0,
+                    })
+                    .collect(),
+            }),
+            ..self.base.material()
+        }
+    }
+}
+
+/// Hot-rolled structural steels (EN 10025-2) with the nominal yield and tensile strength of the
+/// standard (S235: 235 / 360 MPa, S355: 355 / 470 MPa). The curve follows the strain hardening
+/// model of Yun and Gardner (J. Constr. Steel Res. 133, 2017): a yield plateau up to
+/// `esh = 0.1 fy/fu - 0.055` (limited to 0.015 .. 0.03), then hardening to the tensile
+/// strength at the uniform strain `eu = 0.6 (1 - fy/fu)`, a cubic that ends with zero slope
+/// (maximum load). Engineering values are converted to true stress and plastic strain.
+const PLASTIC_STEELS: [PlasticSteel; 3] = [
+    PlasticSteel {
+        base: Generic {
+            name: "S235",
+            ..STEEL
+        },
+        curve: &[
+            (235.0, 0.0000),
+            (239.0, 0.0138),
+            (267.0, 0.0271),
+            (293.0, 0.0403),
+            (316.0, 0.0534),
+            (337.0, 0.0663),
+            (354.0, 0.0790),
+            (370.0, 0.0916),
+            (383.0, 0.1040),
+            (394.0, 0.1163),
+            (404.0, 0.1285),
+            (412.0, 0.1405),
+            (419.0, 0.1524),
+            (425.0, 0.1641),
+            (430.0, 0.1757),
+            (435.0, 0.1872),
+        ],
+    },
+    PlasticSteel {
+        base: Generic {
+            name: "S355",
+            ..STEEL
+        },
+        curve: &[
+            (356.0, 0.0000),
+            (362.0, 0.0186),
+            (389.0, 0.0273),
+            (413.0, 0.0359),
+            (434.0, 0.0444),
+            (452.0, 0.0529),
+            (468.0, 0.0613),
+            (482.0, 0.0697),
+            (494.0, 0.0780),
+            (504.0, 0.0862),
+            (512.0, 0.0944),
+            (519.0, 0.1025),
+            (525.0, 0.1106),
+            (530.0, 0.1186),
+            (535.0, 0.1265),
+            (539.0, 0.1344),
+        ],
+    },
+    // Quenched (830 degC, oil) and tempered (630 degC) 42CrMo4: yield 850 MPa, tensile
+    // strength 900 MPa. Beyond the yield the true stress follows the power law
+    // 1277.3 MPa * ep^0.0979 that Basan, Kunc and Franulovic fitted (Engineering Review 28,
+    // 2008, Table 2); it holds up to the uniform strain of about 0.1.
+    PlasticSteel {
+        base: Generic {
+            name: "42CrMo4",
+            conductivity: 42.0,
+            specific_heat: 460.0,
+            expansion: 12.3e-6,
+            ..STEEL
+        },
+        curve: &[
+            (850.0, 0.0),
+            (871.0, 0.02),
+            (906.0, 0.03),
+            (932.0, 0.04),
+            (953.0, 0.05),
+            (970.0, 0.06),
+            (985.0, 0.07),
+            (997.0, 0.08),
+            (1009.0, 0.09),
+            (1020.0, 0.10),
+        ],
+    },
+];
+
 /// The S235 of libraries created before the generic materials; renamed only while unchanged.
 fn old_steel() -> Material {
     Material {
@@ -292,22 +519,37 @@ impl Default for MaterialLibrary {
             defaults_version: DEFAULTS_VERSION,
             root: Category::new(
                 ROOT_NAME,
-                vec![category_node(
-                    "Elastic_Models",
-                    vec![
-                        category_node(
+                vec![
+                    category_node(
+                        "Elastic_Models",
+                        vec![
+                            category_node("Steel", materials(&[STEEL])),
+                            category_node(
+                                "Aluminium",
+                                vec![
+                                    category_node("Wrought", materials(&ALUMINIUM_WROUGHT)),
+                                    category_node("Cast", materials(&ALUMINIUM_CAST)),
+                                ],
+                            ),
+                            category_node("Plastics", materials(&PLASTICS)),
+                            category_node(
+                                "Elastomers",
+                                [40.0, 60.0, 70.0]
+                                    .map(|h| LibraryNode::Material(rubber(h)))
+                                    .to_vec(),
+                            ),
+                        ],
+                    ),
+                    category_node(
+                        "Plastic_Models",
+                        vec![category_node(
                             "Steel",
-                            vec![category_node("Structural", materials(&[STEEL]))],
-                        ),
-                        category_node("Plastics", materials(&PLASTICS)),
-                        category_node(
-                            "Elastomers",
-                            [40.0, 60.0, 70.0]
-                                .map(|h| LibraryNode::Material(rubber(h)))
-                                .to_vec(),
-                        ),
-                    ],
-                )],
+                            (PLASTIC_STEELS.iter())
+                                .map(|s| LibraryNode::Material(s.material()))
+                                .collect(),
+                        )],
+                    ),
+                ],
             ),
         }
     }
@@ -471,30 +713,24 @@ impl MaterialLibrary {
         if self.units != UnitSystem::MmTonSC {
             return;
         }
-        let old = old_steel();
-        let reference = MaterialLibrary::default();
-        let Some(LibraryNode::Category(elastic)) = reference.root.items.first() else {
-            return;
-        };
-        for node in &elastic.items {
-            let LibraryNode::Category(group) = node else {
-                continue;
+        // The category "Structural" below "Steel" is gone: its materials move up.
+        let steel = ensure_category(&mut self.root, &["Elastic_Models", "Steel"]);
+        let structural = steel.items.iter().position(
+            |n| matches!(n, LibraryNode::Category(c) if c.name.eq_ignore_ascii_case("Structural")),
+        );
+        if let Some(index) = structural {
+            let LibraryNode::Category(structural) = steel.items.remove(index) else {
+                unreachable!("index points to a category")
             };
-            let target = ensure_category(&mut self.root, &["Elastic_Models", &group.name]);
-            for node in &group.items {
-                match node {
-                    LibraryNode::Material(m) => add_default(target, m, &old),
-                    LibraryNode::Category(sub) => {
-                        let target = ensure_category(target, &[&sub.name]);
-                        for node in &sub.items {
-                            if let LibraryNode::Material(m) = node {
-                                add_default(target, m, &old);
-                            }
-                        }
-                    }
+            for node in structural.items {
+                if !steel.contains(node.name()) {
+                    steel.items.insert(index.min(steel.items.len()), node);
                 }
             }
         }
+        let old = old_steel();
+        let reference = MaterialLibrary::default();
+        merge_defaults(&mut self.root, &reference.root, &old);
     }
 
     /// Path of the first material in tree order, selected on opening.
@@ -513,6 +749,19 @@ impl MaterialLibrary {
         }
         let mut path = Vec::new();
         find(&self.root, &mut path).then_some(path)
+    }
+}
+
+/// Adds the built-in categories and materials of `reference` that `category` lacks, recursively.
+fn merge_defaults(category: &mut Category, reference: &Category, old: &Material) {
+    for node in &reference.items {
+        match node {
+            LibraryNode::Material(m) => add_default(category, m, old),
+            LibraryNode::Category(sub) => {
+                let target = ensure_category(category, &[&sub.name]);
+                merge_defaults(target, sub, old);
+            }
+        }
     }
 }
 
@@ -584,7 +833,7 @@ pub fn name_for_model<'a>(name: &str, existing: impl IntoIterator<Item = &'a str
 mod tests {
     use super::*;
 
-    const S235: [usize; 4] = [0, 0, 0, 0];
+    const S235: [usize; 3] = [0, 0, 0];
 
     #[test]
     fn default_library_holds_s235_in_default_categories() {
@@ -593,18 +842,18 @@ mod tests {
         let s235 = library.material(&S235).unwrap();
         assert_eq!(s235.name, "Generic Steel");
         assert_eq!(s235.density, Some(7.85e-9));
-        let names: Vec<&str> = (1..4)
+        let names: Vec<&str> = (1..3)
             .map(|n| library.node(&S235[..n]).unwrap().name())
             .collect();
-        assert_eq!(names, ["Elastic_Models", "Steel", "Structural"]);
+        assert_eq!(names, ["Elastic_Models", "Steel"]);
     }
 
     #[test]
     fn categories_are_added_with_free_names() {
         let mut library = MaterialLibrary::default();
-        assert_eq!(library.add_category(&[]), Some(vec![1]));
         assert_eq!(library.add_category(&[]), Some(vec![2]));
-        assert_eq!(library.node(&[2]).unwrap().name(), "NewCategory-1");
+        assert_eq!(library.add_category(&[]), Some(vec![3]));
+        assert_eq!(library.node(&[3]).unwrap().name(), "NewCategory-1");
         // Not below a material.
         assert_eq!(library.add_category(&S235), None);
     }
@@ -614,20 +863,20 @@ mod tests {
         let mut library = MaterialLibrary::default();
         let s235 = library.material(&S235).unwrap().clone();
         let path = library.add_material(&S235, &s235).unwrap();
-        assert_eq!(path, [0, 0, 0, 1]);
+        assert_eq!(path, [0, 0, 1]);
         assert_eq!(
             library.material(&path).unwrap().name,
             "Generic Steel_Model-1"
         );
         let path = library.add_material(&[], &s235).unwrap();
-        assert_eq!(path, [1]);
+        assert_eq!(path, [2]);
         assert_eq!(library.material(&path).unwrap().name, "Generic Steel");
     }
 
     #[test]
     fn rename_rejects_names_of_siblings() {
         let mut library = MaterialLibrary::default();
-        let new = library.add_category(&[0, 0, 0]).unwrap();
+        let new = library.add_category(&[0, 0]).unwrap();
         assert!(library.rename(&new, "generic steel").is_err());
         assert!(library.rename(&new, " ").is_err());
         assert!(library.rename(&[], "Root").is_err());
@@ -640,10 +889,10 @@ mod tests {
         let mut library = MaterialLibrary::default();
         let s235 = library.material(&S235).unwrap().clone();
         library.add_material(&S235, &s235);
-        assert_eq!(library.delete(&[0, 0, 0, 1]), Some(vec![0, 0, 0, 0]));
-        assert_eq!(library.delete(&S235), Some(vec![0, 0, 0]));
-        // Only the plastics are left.
-        assert_eq!(library.first_material(), Some(vec![0, 1, 0]));
+        assert_eq!(library.delete(&[0, 0, 1]), Some(vec![0, 0, 0]));
+        assert_eq!(library.delete(&S235), Some(vec![0, 0]));
+        // The aluminium alloys come first now.
+        assert_eq!(library.first_material(), Some(vec![0, 1, 0, 0]));
         assert_eq!(library.delete(&[]), None);
     }
 
@@ -653,12 +902,12 @@ mod tests {
         let s235 = library.material(&S235).unwrap().clone();
         library.add_material(&S235, &s235);
         assert_eq!(library.move_material(&S235, true), None);
-        assert_eq!(library.move_material(&S235, false), Some(vec![0, 0, 0, 1]));
+        assert_eq!(library.move_material(&S235, false), Some(vec![0, 0, 1]));
         assert_eq!(
             library.material(&S235).unwrap().name,
             "Generic Steel_Model-1"
         );
-        assert_eq!(library.move_material(&[0, 0, 0, 1], false), None);
+        assert_eq!(library.move_material(&[0, 0, 1], false), None);
         assert_eq!(library.move_material(&[0], false), None);
     }
 
@@ -674,7 +923,7 @@ mod tests {
     #[test]
     fn default_library_has_generic_plastics() {
         let library = MaterialLibrary::default();
-        let plastics = library.category(&[0, 1]).unwrap();
+        let plastics = library.category(&[0, 2]).unwrap();
         assert_eq!(plastics.name, "Plastics");
         let pla = (plastics.items.iter())
             .find_map(|n| match n {
@@ -700,8 +949,9 @@ mod tests {
         let mut mine = old.clone();
         mine.update_defaults();
         assert_eq!(mine.defaults_version, DEFAULTS_VERSION);
-        assert_eq!(mine.material(&[0, 0, 0, 0]).unwrap().name, "Generic Steel");
-        assert!(mine.category(&[0, 1]).unwrap().items.len() >= 10);
+        assert_eq!(mine.material(&[0, 0, 0]).unwrap().name, "Generic Steel");
+        assert!(mine.category(&[0, 2]).unwrap().items.len() >= 10);
+        assert!(mine.category(&[1, 0]).is_some(), "plastic steels added");
         let again = mine.clone();
         mine.update_defaults();
         assert_eq!(mine, again);
@@ -717,9 +967,34 @@ mod tests {
         };
         m.elastic.as_mut().unwrap().young = 200_000.0;
         changed.update_defaults();
-        let names: Vec<&str> = (changed.category(&[0, 0, 0]).unwrap().items.iter())
+        let names: Vec<&str> = (changed.category(&[0, 0]).unwrap().items.iter())
             .map(LibraryNode::name)
             .collect();
         assert_eq!(names, ["S235", "Generic Steel"]);
+    }
+
+    #[test]
+    fn default_library_has_aluminium_and_plastic_steels() {
+        let library = MaterialLibrary::default();
+        let aluminium = library.category(&[0, 1]).unwrap();
+        assert_eq!(aluminium.name, "Aluminium");
+        let names: Vec<&str> = aluminium.items.iter().map(LibraryNode::name).collect();
+        assert_eq!(names, ["Wrought", "Cast"]);
+        let plastic = library.category(&[1, 0]).unwrap();
+        assert_eq!(plastic.name, "Steel");
+        assert_eq!(plastic.items.len(), 3);
+        for node in &plastic.items {
+            let LibraryNode::Material(m) = node else {
+                panic!("category in the plastic steels")
+            };
+            let curve = m.plastic.as_ref().unwrap();
+            assert_eq!(curve.invalid_row(), None, "{}", m.name);
+            assert!(m.elastic.is_some() && m.density.is_some());
+        }
+        let LibraryNode::Material(s355) = &plastic.items[1] else {
+            unreachable!()
+        };
+        assert_eq!(s355.name, "S355");
+        assert_eq!(s355.plastic.as_ref().unwrap().points[0].stress, 356.0);
     }
 }
