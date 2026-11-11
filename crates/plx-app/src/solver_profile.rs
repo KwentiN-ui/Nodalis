@@ -395,16 +395,14 @@ mod tests {
         }
     }
 
-    /// A profile with time in assembly and factorization; the clock is real, so the times
-    /// are small and only their order is checked.
+    /// A profile with time in assembly and factorization. The clock is real, so each phase
+    /// starts a fixed time in the past rather than sleeping: a sleep on a busy machine can
+    /// overshoot by milliseconds and swap the order. Only the order is checked.
     fn plxs_procedures_profile() -> plx_solve::Profile {
         let mut phases = plx_solve::Profile::default();
-        let started = Instant::now();
-        std::thread::sleep(Duration::from_millis(4));
-        phases.add(Phase::Factorization, started);
-        let started = Instant::now();
-        std::thread::sleep(Duration::from_millis(1));
-        phases.add(Phase::Assembly, started);
+        let ago = |ms| Instant::now() - Duration::from_millis(ms);
+        phases.add(Phase::Factorization, ago(4000));
+        phases.add(Phase::Assembly, ago(1000));
         phases
     }
 
