@@ -77,6 +77,8 @@ pub enum Icon {
     LocalMeshSize,
     /// A face mesh swept upward into layers of hexahedra: the extruded mesh.
     ExtrudeMesh,
+    /// A sheet in the accent colour on a slab of two layers: the thickened shell mesh.
+    ThickenShellMesh,
     /// A tetrahedron with its hidden edge dashed: the tetrahedral mesher.
     TetMesh,
     /// A bent beam over its straight outline: the deformation of the results.
@@ -728,6 +730,67 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
                 );
             }
             // The outline.
+            line(
+                shapes,
+                &[
+                    top[0], base[0], base[1], base[2], top[2], fourth, top[0], top[1], top[2],
+                ],
+                1.0,
+                OUTLINE,
+            );
+            line(shapes, &[base[1], top[1]], 1.0, OUTLINE);
+        }
+        Icon::ThickenShellMesh => {
+            // A wide slab of two layers, its top the shell that is thickened.
+            let (dx, dy) = (5.0, -4.0);
+            let base = [p(1.0, 12.5), p(10.0, 12.5), p(10.0 + dx, 12.5 + dy)];
+            let at = |q: Pos2, h: f32| q + vec2(0.0, -h);
+            let height = 4.5;
+            polygon(
+                shapes,
+                vec![base[0], base[1], at(base[1], height), at(base[0], height)],
+                FACE,
+                Color32::TRANSPARENT,
+            );
+            polygon(
+                shapes,
+                vec![base[1], base[2], at(base[2], height), at(base[1], height)],
+                Color32::from_rgb(205, 205, 205),
+                Color32::TRANSPARENT,
+            );
+            let top = [
+                at(base[0], height),
+                at(base[1], height),
+                at(base[2], height),
+            ];
+            let fourth = top[0] + vec2(dx, dy);
+            polygon(
+                shapes,
+                vec![top[0], top[1], top[2], fourth],
+                ACCENT,
+                Color32::TRANSPARENT,
+            );
+            let mid = |a: Pos2, b: Pos2| a + (b - a) * 0.5;
+            line(
+                shapes,
+                &[mid(top[0], top[1]), mid(fourth, top[2])],
+                1.0,
+                Color32::WHITE,
+            );
+            line(
+                shapes,
+                &[mid(top[0], fourth), mid(top[1], top[2])],
+                1.0,
+                Color32::WHITE,
+            );
+            // The layer between the two of elements.
+            let h = height / 2.0;
+            line(
+                shapes,
+                &[at(base[0], h), at(base[1], h), at(base[2], h)],
+                1.0,
+                OUTLINE,
+            );
             line(
                 shapes,
                 &[

@@ -103,7 +103,7 @@ pub use features::{
 pub use field::{FieldOutput, OutputDimension, OutputKind, output_variable_description};
 pub use geometry::{
     Algorithm2d, Algorithm3d, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem, MeshSetupKind,
-    MeshingParameters, Recombination,
+    MeshingParameters, Recombination, ThickenShellMesh,
 };
 pub use handover::Handover;
 pub use history::{HistoryKind, HistoryOutput, Totals};
@@ -168,7 +168,8 @@ use serde::{Deserialize, Serialize};
 /// list those they print by id; older formats are refused. Format 21 replaces the field
 /// extreme of a Measure block by the values of the field over a region, a series that a
 /// Math block reduces, and adds the Plot and Mesh Preview blocks; older formats are refused.
-pub const PROJECT_FORMAT: u32 = 21;
+/// Format 22 adds the Thicken Shell Mesh item of the mesh setup; format 21 reads as it is.
+pub const PROJECT_FORMAT: u32 = 22;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -10,6 +10,7 @@ pub mod gmsh;
 mod operation;
 mod revolve;
 mod step_names;
+mod thicken;
 
 pub use operation::apply_cad_operation;
 
@@ -1309,6 +1310,10 @@ fn shell_part_mesh(
     }
     mesh.parts.push(part_elements);
     mesh.cad = cad_map(gmsh, &mesh, shell, options.order, true)?;
+    if let Some(thickening) = geometry.thickening(part) {
+        mesh = thicken::thicken(&mesh, part, thickening)
+            .map_err(|reason| GmshError::Other(format!("{part}: {reason}")))?;
+    }
     Ok(GeneratedMesh {
         mesh,
         warnings: gmsh.warnings()?,
