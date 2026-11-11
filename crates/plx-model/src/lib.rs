@@ -11,6 +11,7 @@ mod cad_operation;
 pub mod campbell;
 mod checks;
 pub mod color_scale;
+mod compound;
 mod connection;
 mod constraint;
 mod contact;
@@ -66,6 +67,7 @@ pub use checks::{
     Finding, MeshCheck, Problem, Severity, diagnose_solver_output, diagnose_solver_warnings,
 };
 pub use color_scale::{ColorScale, ColorSpectrum};
+pub use compound::{CompoundTie, has_compound_ties};
 pub use connection::{
     BondedMethod, CONDUCTANCE_FACTOR, ContactBehavior, ContactDefaults, ContactRegion,
     ContactSettings, InterfaceTreatment, Lowered, ROUGH_FRICTION, Resolved, ResolvedContacts,
@@ -102,8 +104,8 @@ pub use features::{
 };
 pub use field::{FieldOutput, OutputDimension, OutputKind, output_variable_description};
 pub use geometry::{
-    Algorithm2d, Algorithm3d, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem, MeshSetupKind,
-    MeshingParameters, Recombination, ThickenShellMesh,
+    Algorithm2d, Algorithm3d, CompoundPart, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem,
+    MeshSetupKind, MeshingParameters, Recombination, ThickenShellMesh,
 };
 pub use handover::Handover;
 pub use history::{HistoryKind, HistoryOutput, Totals};
@@ -169,8 +171,10 @@ use serde::{Deserialize, Serialize};
 /// extreme of a Measure block by the values of the field over a region, a series that a
 /// Math block reduces, and adds the Plot and Mesh Preview blocks; older formats are refused.
 /// Format 22 adds node groups; format 21 reads as it is. Format 23 adds the Thicken Shell
-/// Mesh item of the mesh setup; formats 21 and 22 read as they are.
-pub const PROJECT_FORMAT: u32 = 23;
+/// Mesh item of the mesh setup; formats 21 and 22 read as they are. Format 24 adds the
+/// compound parts of the geometry ([`CompoundPart`]) and the bodies of mesh parts; formats 21
+/// to 23 read as they are.
+pub const PROJECT_FORMAT: u32 = 24;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -461,6 +465,42 @@ impl FeModel {
     pub fn rename_part(&mut self, old: &str, new: &str) {
         self.rename_element_types(old, new);
         self.rename_mesh_operation_parts(old, new);
+        self.replace_part_in_regions(old, &[new.to_owned()]);
+    }
+
+    /// Follows a part split into several, as a dissolved compound part into the parts it
+    /// joined: what was on the part is on each of them.
+    pub fn split_part(&mut self, old: &str, new: &[String]) {
+        let Some((first, rest)) = new.split_first() else {
+            return;
+        };
+        let choices: Vec<PartElementType> = (self.element_types.iter())
+            .filter(|c| c.part == old)
+            .cloned()
+            .collect();
+        for name in rest {
+            for choice in &choices {
+                if !self.element_types.iter().any(|c| c.part == *name) {
+                    self.element_types.push(PartElementType {
+                        part: name.clone(),
+                        ..choice.clone()
+                    });
+                }
+            }
+        }
+        self.rename_element_types(old, first);
+        for operation in &mut self.mesh_operations {
+            if let Some(at) = operation.parts.iter().position(|n| n == old) {
+                operation.parts.splice(at..=at, new.iter().cloned());
+                let mut seen = std::collections::BTreeSet::new();
+                operation.parts.retain(|name| seen.insert(name.clone()));
+            }
+        }
+        self.replace_part_in_regions(old, new);
+    }
+
+    /// Regions on the part `old`, or on the element set of its name, are on the parts `new`.
+    fn replace_part_in_regions(&mut self, old: &str, new: &[String]) {
         let regions = (self.sections.iter_mut().map(|s| &mut s.region))
             .chain(
                 self.constraints
@@ -482,14 +522,16 @@ impl FeModel {
         for region in regions {
             match region {
                 Region::Parts(names) => {
-                    for name in names.iter_mut().filter(|n| n.as_str() == old) {
-                        *name = new.to_string();
+                    if let Some(at) = names.iter().position(|n| n == old) {
+                        names.splice(at..=at, new.iter().cloned());
                     }
                     // Merged parts leave the same name twice.
                     let mut seen = std::collections::BTreeSet::new();
                     names.retain(|name| seen.insert(name.clone()));
                 }
-                Region::ElementSet(name) if name == old => *name = new.to_string(),
+                Region::ElementSet(name) if name == old && new.len() == 1 => {
+                    *name = new[0].clone();
+                }
                 _ => {}
             }
         }

@@ -473,6 +473,7 @@ fn rectangle(origin: [f64; 3], size: [f64; 2], radius: f64) -> Geometry {
     })
     .unwrap();
     Geometry {
+        compounds: Vec::new(),
         source: "rechteck.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
@@ -645,6 +646,7 @@ fn box_and_lines() -> Geometry {
     })
     .unwrap();
     Geometry {
+        compounds: Vec::new(),
         source: "rahmen.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
@@ -679,6 +681,7 @@ fn a_long_thin_round_bar_is_displayed_with_few_triangles() {
     })
     .unwrap();
     let geometry = Geometry {
+        compounds: Vec::new(),
         source: "stab.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::default(),
@@ -1073,6 +1076,7 @@ fn beam_on_block() -> Geometry {
     })
     .unwrap();
     Geometry {
+        compounds: Vec::new(),
         source: "balken.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(40.0),
@@ -1169,6 +1173,7 @@ fn detection_on_geometry_keeps_to_the_faces_that_touch() {
     })
     .unwrap();
     let geometry = Geometry {
+        compounds: Vec::new(),
         source: "bloecke.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(60.0),
@@ -1200,6 +1205,7 @@ fn detection_on_geometry_keeps_to_the_faces_that_touch() {
         entities: &display.entities,
         face_edges: &display.topology.face_edges,
         part_dimensions: &display.part_dimensions,
+        compounds: &[],
     };
     let visible = vec![true; display.mesh.parts.len()];
     let report = model
@@ -1665,6 +1671,7 @@ fn revolved(origin: [f64; 3], size: [f64; 2], radius: f64, angle: f64) -> Geomet
     })
     .unwrap();
     Geometry {
+        compounds: Vec::new(),
         source: "ring.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
@@ -1836,6 +1843,7 @@ fn plate_and_cube(size: [f64; 3], cube_first: bool) -> Geometry {
     })
     .unwrap();
     with_signatures(Geometry {
+        compounds: Vec::new(),
         source: "platte.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
@@ -1918,6 +1926,7 @@ fn cube() -> Geometry {
     })
     .unwrap();
     with_signatures(Geometry {
+        compounds: Vec::new(),
         source: "wuerfel.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
@@ -2062,6 +2071,7 @@ fn corners_of_flat_faces_are_rounded_and_bevelled() {
     })
     .unwrap();
     let input = with_signatures(Geometry {
+        compounds: Vec::new(),
         source: "quadrate.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
@@ -2173,6 +2183,7 @@ fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
     })
     .unwrap();
     let geometry = Geometry {
+        compounds: Vec::new(),
         source: "seilrolle.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(400.0),
@@ -2240,6 +2251,7 @@ fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
         entities: &display.entities,
         face_edges: &display.topology.face_edges,
         part_dimensions: &display.part_dimensions,
+        compounds: &[],
     };
     let visible = vec![true; display.mesh.parts.len()];
     let report = model
@@ -2290,4 +2302,88 @@ fn a_composite_curve_is_one_line_part() {
         .collect();
     assert_eq!(ends, BTreeSet::from([3]));
     assert_eq!(nodes.len(), 2 * line.elements.len() + 1);
+}
+
+/// Two boxes 10 mm wide side by side along x, touching on the face x = 10, as a block cut in
+/// two for the mesher; joined into a compound part.
+fn cut_block() -> Geometry {
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        gmsh.add_box([0.0; 3], [10.0; 3])?;
+        gmsh.add_box([10.0, 0.0, 0.0], [10.0; 3])?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    let mut geometry = with_signatures(Geometry {
+        source: "block.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters {
+            max_size: 4.0,
+            second_order: false,
+            ..MeshingParameters::default()
+        },
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+        signatures: Vec::new(),
+        compounds: Vec::new(),
+    })
+    .unwrap();
+    geometry.compounds.push(plx_model::CompoundPart {
+        name: "COMPOUND-1".into(),
+        parts: vec!["SOLID-1".into(), "SOLID-2".into()],
+    });
+    geometry
+}
+
+#[test]
+fn a_compound_part_is_one_part_of_bodies_tied_where_they_touch() {
+    if !gmsh_available() {
+        return;
+    }
+    let geometry = cut_block();
+    assert_eq!(part_names(&geometry).unwrap(), ["SOLID-1", "SOLID-2"]);
+    let mesh = generate_mesh(&geometry).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 1);
+    let part = &mesh.parts[0];
+    assert_eq!(part.name, "COMPOUND-1");
+    let bodies: Vec<&str> = part.bodies.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(bodies, ["SOLID-1", "SOLID-2"]);
+    let in_bodies: usize = part.bodies.iter().map(|b| b.elements.len()).sum();
+    assert_eq!(in_bodies, part.elements.len());
+    // Each body has its own nodes, also on the face they share.
+    let nodes = |elements: &[ElementId]| -> BTreeSet<NodeId> {
+        (elements.iter())
+            .flat_map(|&id| mesh.element(id).unwrap().nodes.clone())
+            .collect()
+    };
+    let (first, second) = (
+        nodes(&part.bodies[0].elements),
+        nodes(&part.bodies[1].elements),
+    );
+    assert!(first.is_disjoint(&second));
+
+    // The solver input ties them on that face, and only there.
+    let ties = plx_model::FeModel::default().compound_ties(&mesh);
+    assert_eq!(ties.len(), 1);
+    for side in [&ties[0].region.side_a, &ties[0].region.side_b] {
+        let nodes = side.nodes(&mesh);
+        assert!(!nodes.is_empty());
+        for node in nodes {
+            assert!((mesh.node(node).unwrap()[0] - 10.0).abs() < 1e-9);
+        }
+    }
+
+    // Meshed anew, a body replaces its own mesh and the part stays a compound.
+    let mut split = mesh.clone();
+    split.split_compounds();
+    let names: Vec<&str> = split.parts.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["SOLID-1", "SOLID-2"]);
+    let mut finer = geometry.clone();
+    finer.meshing.max_size = 2.0;
+    let mut remeshed = merge_part(&split, generate_part_mesh(&finer, "SOLID-2").unwrap().mesh);
+    remeshed.compose_compounds(&geometry.compound_members());
+    assert_eq!(remeshed.parts.len(), 1);
+    assert_eq!(remeshed.parts[0].bodies[0], part.bodies[0]);
+    assert!(remeshed.parts[0].bodies[1].elements.len() > part.bodies[1].elements.len());
 }

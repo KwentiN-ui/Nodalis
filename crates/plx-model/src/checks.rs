@@ -1457,16 +1457,19 @@ impl FeModel {
 
     /// [`FeModel::check`] of a model without bolts.
     fn check_connections(&self, mesh: &FeMesh, mesh_check: &MeshCheck) -> Vec<Finding> {
-        let mut findings = if self.contact_regions.is_empty() {
+        let mut findings = if self.contact_regions.is_empty() && !crate::has_compound_ties(mesh) {
             self.check_explicit(mesh, mesh_check)
         } else {
             // Contact regions are checked as the ties and contact pairs they become; what is
-            // found on those belongs to the region.
+            // found on those belongs to the region, or to the compound part whose bodies a
+            // tie ties.
             let (lowered, origin) = self.lower_contacts(mesh);
             let mut findings = lowered.check_explicit(mesh, mesh_check);
             for finding in &mut findings {
                 if let Some(region) = origin.region_of(finding.item) {
                     finding.item = ModelItem::ContactRegion(region);
+                } else if let Some(part) = origin.part_of(finding.item) {
+                    finding.item = ModelItem::Part(part);
                 }
             }
             self.check_contact_regions(mesh, &lowered, &mut findings);
@@ -4199,6 +4202,7 @@ mod tests {
             })
             .unwrap();
             mesh.parts.push(Part {
+                bodies: Vec::new(),
                 name: format!("PART-{}", c + 1),
                 elements: vec![c + 1],
             });
@@ -5474,6 +5478,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "PART-1".into(),
             elements: vec![1],
         });
@@ -5512,6 +5517,7 @@ mod tests {
                 .unwrap();
             }
             mesh.parts.push(Part {
+                bodies: Vec::new(),
                 name: "BEAM".into(),
                 elements: vec![1, 2],
             });
@@ -5548,6 +5554,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "BEAM".into(),
             elements: vec![1, 2],
         });
@@ -5619,6 +5626,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "BEAM".into(),
             elements: vec![1, 2],
         });
@@ -5670,6 +5678,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "BEAM".into(),
             elements: vec![1, 2],
         });
@@ -5750,6 +5759,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "BEAM".into(),
             elements: vec![1, 2],
         });
@@ -5851,6 +5861,7 @@ mod tests {
                 id += 1;
             }
             mesh.parts.push(Part {
+                bodies: Vec::new(),
                 name: format!("LINE-{}", b + 1),
                 elements: part,
             });

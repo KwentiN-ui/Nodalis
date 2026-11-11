@@ -16,7 +16,7 @@ pub enum CadEditorResult {
     Open,
     /// Closed with OK: the operation, and its result when the preview made it for exactly
     /// this operation.
-    Ok(CadOperation, Option<Geometry>),
+    Ok(CadOperation, Option<Box<Geometry>>),
     Cancel,
 }
 
@@ -271,7 +271,7 @@ impl CadOperationEditor {
                     if ok.clicked() {
                         let made = (self.result.as_ref())
                             .filter(|(_, _, previewed)| *previewed == operation)
-                            .map(|(_, geometry, _)| geometry.clone());
+                            .map(|(_, geometry, _)| Box::new(geometry.clone()));
                         result = CadEditorResult::Ok(operation, made);
                     }
                     if let Some(problem) = problem {

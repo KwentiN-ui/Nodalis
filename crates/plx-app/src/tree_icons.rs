@@ -47,6 +47,8 @@ pub enum TreeIcon {
     Running,
     Warning,
     Geometry,
+    /// A compound part of the geometry: pieces joined along a seam.
+    Compound,
     MeshSetup,
     /// A mesh operation such as a transform: a part moved along an arrow.
     MeshOperation,
@@ -101,6 +103,7 @@ fn pixmap(icon: TreeIcon) -> &'static Pixmap {
         TreeIcon::Running => &RUNNING,
         TreeIcon::Warning => &WARNING,
         TreeIcon::Geometry => &GEOMETRY,
+        TreeIcon::Compound => &COMPOUND,
         TreeIcon::MeshSetup => &MESH_SETUP,
         TreeIcon::MeshOperation => &MESH_OPERATION,
         TreeIcon::Plane => &PLANE,
@@ -1510,6 +1513,35 @@ const WARNING: Pixmap = Pixmap {
     ],
 };
 
+/// A compound part: one block cut into two pieces, the seam where they are tied.
+const COMPOUND: Pixmap = Pixmap {
+    colors: &[
+        [60, 84, 121, 255],
+        [178, 204, 233, 255],
+        [204, 223, 243, 255],
+        [119, 155, 209, 255],
+        [230, 150, 60, 255],
+    ],
+    rows: [
+        "...AAAAAAAAAAAAA",
+        "..ACCCCCECCCCCAA",
+        ".ACCCCCECCCCCADA",
+        "AAAAAAAAAAAAADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADDA",
+        "ABBBBBEBBBBBADA.",
+        "ABBBBBEBBBBBAA..",
+        "AAAAAAAAAAAAA...",
+    ],
+};
+
 /// Geometry.ico
 const GEOMETRY: Pixmap = Pixmap {
     colors: &[
@@ -1766,6 +1798,7 @@ mod tests {
             TreeIcon::Running,
             TreeIcon::Warning,
             TreeIcon::Geometry,
+            TreeIcon::Compound,
             TreeIcon::MeshSetup,
             TreeIcon::MeshOperation,
             TreeIcon::HotSpot,

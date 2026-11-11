@@ -655,6 +655,7 @@ mod tests {
             }
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "PLATE".into(),
             elements,
         });

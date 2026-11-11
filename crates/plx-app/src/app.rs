@@ -1191,6 +1191,9 @@ pub(crate) fn merge_part_meshes(
     let mut output = Vec::new();
     let had_mesh = model.mesh.element_count() > 0;
     let mut mesh = model.mesh.clone();
+    // Compound parts take their bodies' meshes apart, so that a body meshed anew replaces
+    // its own mesh; joined again after.
+    mesh.split_compounds();
     let space = model.fe.properties.space;
     for mut part in generated.meshes {
         space
@@ -1230,6 +1233,7 @@ pub(crate) fn merge_part_meshes(
         }
         mesh = plx_mesher::merge_part(&mesh, part.mesh);
     }
+    mesh.compose_compounds(&geometry.compound_members());
     model.set_mesh(mesh);
     let applied: Vec<&str> = (model.fe.mesh_operations.iter())
         .filter(|o| !o.part_indices(&model.mesh).is_empty())
@@ -1253,6 +1257,89 @@ pub(crate) fn merge_part_meshes(
         started.map_or(0, |s| s.elapsed().as_millis())
     ));
     Ok(output)
+}
+
+/// Joins the mesh anew after the compound parts of the geometry changed from `before`: the
+/// meshes of the parts become bodies of their compound parts, or parts of their own again.
+/// What the FE model put on a part follows it: on a part of the geometry joined into a
+/// compound to the compound, on a dissolved compound to each of its parts, on a renamed one
+/// to its new name.
+pub(crate) fn apply_compounds(model: &mut Model, before: &[plx_model::CompoundPart]) {
+    let Some(geometry) = &model.geometry else {
+        return;
+    };
+    if model.mesh.element_count() == 0 {
+        return;
+    }
+    let after = geometry.compounds.clone();
+    let members = geometry.compound_members();
+    model.edit_mesh(|mesh, fe| {
+        mesh.split_compounds();
+        for old in before {
+            if after.iter().any(|a| a.name == old.name) {
+                continue;
+            }
+            let renamed = (after.iter()).find(|a| a.parts.iter().any(|p| old.parts.contains(p)));
+            match renamed {
+                Some(new) => fe.rename_part(&old.name, &new.name),
+                None => fe.split_part(&old.name, &old.parts),
+            }
+        }
+        mesh.compose_compounds(&members);
+        for compound in &after {
+            for part in &compound.parts {
+                fe.rename_part(part, &compound.name);
+            }
+        }
+    });
+}
+
+/// A name for a new compound part: `COMPOUND-<n>`, used by no part, set or compound.
+fn free_compound_name(
+    geometry: &plx_model::Geometry,
+    mesh: &plx_mesh::FeMesh,
+    parts: &[String],
+) -> String {
+    (1..)
+        .map(|n| format!("COMPOUND-{n}"))
+        .find(|name| {
+            geometry.compound_named(name).is_none()
+                && !parts.iter().any(|p| p.eq_ignore_ascii_case(name))
+                && !mesh.name_in_use(name)
+        })
+        .expect("unbounded range")
+}
+
+/// The name `typed` for the compound part `old` as the solver needs it: upper case, of
+/// letters, digits, _ and -, used by no other part of the geometry or the mesh, set or
+/// compound. `parts` are the parts of the geometry.
+fn compound_name(
+    geometry: &plx_model::Geometry,
+    mesh: &plx_mesh::FeMesh,
+    parts: &[String],
+    old: &str,
+    typed: &str,
+) -> Result<String, String> {
+    let name = typed.trim().to_ascii_uppercase();
+    if name.is_empty() {
+        return Err("The name must not be empty.".into());
+    }
+    if name.len() > 80 {
+        return Err("The name must be at most 80 characters long.".into());
+    }
+    if !(name.chars()).all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Err("Allowed are letters without accents, digits, _ and -.".into());
+    }
+    if name == old {
+        return Ok(name);
+    }
+    let taken = geometry.compound_named(&name).is_some()
+        || parts.iter().any(|p| p.eq_ignore_ascii_case(&name))
+        || mesh.name_in_use(&name);
+    if taken {
+        return Err(format!("The name {name} is already used."));
+    }
+    Ok(name)
 }
 
 /// How many regions of the FE model consist of node or element numbers that a new mesh no
@@ -2204,6 +2291,7 @@ impl Workbench {
             self.update_acting();
         }
         self.tree.active_step = self.active_step();
+        self.tree.compounds = self.compound_rows();
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),
@@ -2315,6 +2403,9 @@ impl Workbench {
         }
         if check(response.toggle_active.as_ref(), self) {
             response.toggle_active = None;
+        }
+        if response.compound.is_some() && check(Some(&TreeItem::Group("Parts")), self) {
+            response.compound = None;
         }
         if check(response.swap_master_slave.as_ref(), self) {
             response.swap_master_slave = None;
@@ -2572,6 +2663,9 @@ impl Workbench {
             if !names.is_empty() {
                 self.generate_mesh(ctx, Some(names));
             }
+        }
+        if let Some(action) = response.compound {
+            self.compound_action(ctx, action);
         }
         if let Some(index) = response.detect {
             self.detect_contacts(index);
@@ -4383,6 +4477,7 @@ impl Workbench {
         let mut tree_response = TreeResponse::default();
         let mut command = None;
         let selected = self.tree.selected_parts(self.tree_view);
+        let compounds = self.tree.compounds.clone();
         response.context_menu(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             if let Some((index, visible, contours)) = part {
@@ -4394,6 +4489,7 @@ impl Workbench {
                     contours,
                     view,
                     &selected,
+                    &compounds,
                     &mut tree_response,
                 );
                 ui.separator();
@@ -5345,6 +5441,127 @@ impl Workbench {
             .push(format!("{name} deleted and undone on the mesh"));
     }
 
+    /// The compound parts of the geometry with the parts of the geometry display they join,
+    /// by index, for the Geometry tree and the menus of its parts.
+    fn compound_rows(&self) -> Vec<(String, Vec<usize>)> {
+        let (Some(model), Some(view)) = (self.model.as_ref(), self.geometry.as_ref()) else {
+            return Vec::new();
+        };
+        let Some(geometry) = &model.geometry else {
+            return Vec::new();
+        };
+        let index =
+            |name: &String| (view.parts.iter()).position(|p| p.name.eq_ignore_ascii_case(name));
+        (geometry.compounds.iter())
+            .map(|c| (c.name.clone(), c.parts.iter().filter_map(index).collect()))
+            .collect()
+    }
+
+    /// Makes, changes or dissolves a compound part from the menus of the Geometry tree. A
+    /// mesh that exists already is joined anew at once, without meshing again.
+    fn compound_action(&mut self, ctx: &egui::Context, action: tree::CompoundAction) {
+        use tree::CompoundAction;
+        let names = |indices: &[usize]| -> Vec<String> {
+            (self.geometry.as_ref())
+                .map(|g| {
+                    (indices.iter())
+                        .filter_map(|&i| g.parts.get(i))
+                        .map(|p| p.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let all_parts: Vec<String> = (self.geometry.as_ref())
+            .map(|g| g.parts.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default();
+        let action_parts = match &action {
+            CompoundAction::Create(parts)
+            | CompoundAction::Add(_, parts)
+            | CompoundAction::Remove(parts) => names(parts),
+            _ => Vec::new(),
+        };
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let Some(geometry) = model.geometry.as_mut() else {
+            return;
+        };
+        let before = geometry.compounds.clone();
+        let line = match action {
+            CompoundAction::Mesh(c) => {
+                if let Some(compound) = geometry.compounds.get(c) {
+                    let name = compound.name.clone();
+                    self.generate_mesh(ctx, Some(vec![name]));
+                }
+                return;
+            }
+            CompoundAction::Create(_) => {
+                if action_parts.len() < 2 {
+                    return;
+                }
+                geometry.remove_from_compounds(&action_parts);
+                let name = free_compound_name(geometry, &model.mesh, &all_parts);
+                geometry.compounds.push(plx_model::CompoundPart {
+                    name: name.clone(),
+                    parts: action_parts.clone(),
+                });
+                format!("Compound part {name} made of {}", action_parts.join(", "))
+            }
+            CompoundAction::Add(c, _) => {
+                let Some(name) = geometry.compounds.get(c).map(|c| c.name.clone()) else {
+                    return;
+                };
+                geometry.remove_from_compounds(&action_parts);
+                match geometry.compound_named(&name) {
+                    Some(c) => geometry.compounds[c].parts.extend(action_parts.clone()),
+                    None => geometry.compounds.push(plx_model::CompoundPart {
+                        name: name.clone(),
+                        parts: action_parts.clone(),
+                    }),
+                }
+                format!("{} added to {name}", action_parts.join(", "))
+            }
+            CompoundAction::Remove(_) => {
+                geometry.remove_from_compounds(&action_parts);
+                format!(
+                    "{} taken out of their compound parts",
+                    action_parts.join(", ")
+                )
+            }
+            CompoundAction::Rename(c, typed) => {
+                let Some(old) = geometry.compounds.get(c).map(|c| c.name.clone()) else {
+                    return;
+                };
+                match compound_name(geometry, &model.mesh, &all_parts, &old, &typed) {
+                    Ok(name) if name == old => return,
+                    Ok(name) => {
+                        geometry.compounds[c].name = name.clone();
+                        format!("Compound part {old} renamed to {name}")
+                    }
+                    Err(error) => {
+                        self.output
+                            .push(format!("{old} cannot be renamed: {error}"));
+                        return;
+                    }
+                }
+            }
+            CompoundAction::Dissolve(c) => {
+                if c >= geometry.compounds.len() {
+                    return;
+                }
+                let gone = geometry.compounds.remove(c);
+                format!(
+                    "Compound part {} dissolved into {}",
+                    gone.name,
+                    gone.parts.join(", ")
+                )
+            }
+        };
+        apply_compounds(model, &before);
+        self.output.push(line);
+        self.after_parts_changed();
+    }
+
     /// Merging mesh parts: the selected parts become one, named after the
     /// first; the model's regions on the others follow.
     fn merge_mesh_parts(&mut self, parts: &[usize]) {
@@ -5678,6 +5895,10 @@ impl Workbench {
             (Some(editor), _) => editor.highlight(view),
             (None, Some((TreeView::Geometry, TreeItem::Part(_)))) => {
                 Highlight::parts(self.tree.selected_parts(TreeView::Geometry))
+            }
+            (None, Some((TreeView::Geometry, TreeItem::Compound(c)))) => {
+                let members = self.tree.compounds.get(*c).map(|(_, m)| m.clone());
+                Highlight::parts(members.unwrap_or_default())
             }
             (None, Some((TreeView::Geometry, TreeItem::MeshItem(index)))) => items
                 .get(*index)
@@ -7507,5 +7728,108 @@ mod tests {
         take_over_empty_model(&mut imported, &saved);
         assert_eq!(imported.path, std::path::Path::new("/tmp/neu.ndl"));
         assert_eq!(imported.path, saved.path);
+    }
+
+    /// A model of two single tetrahedra, parts SOLID-1 and SOLID-2 of a geometry, with a
+    /// section on both.
+    fn two_part_model() -> Model {
+        let mut mesh = plx_mesh::FeMesh::default();
+        for (part, x) in [(0u32, 0.0), (1, 1.0)] {
+            let corners = [
+                [x, 0.0, 0.0],
+                [x + 1.0, 0.0, 0.0],
+                [x, 1.0, 0.0],
+                [x, 0.0, 1.0],
+            ];
+            for (k, c) in corners.iter().enumerate() {
+                mesh.set_node(4 * part + k as u32 + 1, *c);
+            }
+            mesh.add_element(plx_mesh::Element {
+                id: part + 1,
+                type_name: "C3D4".into(),
+                shape: plx_mesh::ElementShape::Tet4,
+                nodes: (1..=4).map(|n| 4 * part + n).collect(),
+            })
+            .unwrap();
+            let name = format!("SOLID-{}", part + 1);
+            mesh.parts.push(plx_mesh::Part::new(name, vec![part + 1]));
+        }
+        let mut model = Model::new(std::path::Path::new("/tmp/teile.ndl"), mesh);
+        model.geometry = Some(plx_model::Geometry {
+            source: "teile.step".into(),
+            brep: String::new(),
+            meshing: plx_model::MeshingParameters::default(),
+            mesh_items: Vec::new(),
+            part_names: Vec::new(),
+            refinement: 1.0,
+            signatures: Vec::new(),
+            compounds: Vec::new(),
+        });
+        model.fe.sections.push(plx_model::Section {
+            name: "Section-1".into(),
+            material: None,
+            region: plx_model::Region::Parts(vec!["SOLID-1".into(), "SOLID-2".into()]),
+            thickness: 1.0,
+            kind: plx_model::SectionKind::Solid,
+        });
+        model
+    }
+
+    #[test]
+    fn a_compound_part_joins_the_meshed_parts_and_the_model_follows() {
+        let mut model = two_part_model();
+        let parts = vec!["SOLID-1".to_owned(), "SOLID-2".to_owned()];
+        let geometry = model.geometry.as_mut().unwrap();
+        geometry.compounds.push(plx_model::CompoundPart {
+            name: "COMPOUND-1".into(),
+            parts: parts.clone(),
+        });
+        apply_compounds(&mut model, &[]);
+        let names: Vec<&str> = model.parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["COMPOUND-1"]);
+        assert_eq!(model.mesh.parts[0].bodies.len(), 2);
+        let on = |model: &Model| model.fe.sections[0].region.clone();
+        assert_eq!(
+            on(&model),
+            plx_model::Region::Parts(vec!["COMPOUND-1".into()])
+        );
+
+        // Renamed in the FE model, the compound keeps the name when meshed anew.
+        model.rename_part(0, "block").unwrap();
+        assert_eq!(model.geometry.as_ref().unwrap().compounds[0].name, "BLOCK");
+        assert_eq!(on(&model), plx_model::Region::Parts(vec!["BLOCK".into()]));
+
+        // Dissolved, the parts are parts of their own again and keep the section.
+        let before = model.geometry.as_ref().unwrap().compounds.clone();
+        model.geometry.as_mut().unwrap().compounds.clear();
+        apply_compounds(&mut model, &before);
+        let names: Vec<&str> = model.parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["SOLID-1", "SOLID-2"]);
+        assert!(model.mesh.parts.iter().all(|p| p.bodies.is_empty()));
+        assert_eq!(on(&model), plx_model::Region::Parts(parts));
+    }
+
+    #[test]
+    fn compound_names_are_solver_names_used_by_nothing_else() {
+        let model = two_part_model();
+        let geometry = model.geometry.as_ref().unwrap();
+        let parts = vec![
+            "SOLID-1".to_owned(),
+            "SOLID-2".to_owned(),
+            "SOLID-3".to_owned(),
+        ];
+        assert_eq!(
+            free_compound_name(geometry, &model.mesh, &parts),
+            "COMPOUND-1"
+        );
+        let name = |typed: &str| compound_name(geometry, &model.mesh, &parts, "COMPOUND-1", typed);
+        assert_eq!(name(" Rahmen-2 "), Ok("RAHMEN-2".into()));
+        assert!(
+            name("solid-3").is_err(),
+            "a part of the geometry not meshed yet"
+        );
+        assert!(name("SOLID-1").is_err());
+        assert!(name("zwei wörter").is_err());
+        assert!(name("").is_err());
     }
 }

@@ -26,6 +26,7 @@ const MESH_DEPTH: usize = 10;
 struct Meshing {
     parameters: MeshingParameters,
     items: Vec<MeshSetupItem>,
+    compounds: Vec<plx_model::CompoundPart>,
 }
 
 impl Meshing {
@@ -33,6 +34,7 @@ impl Meshing {
         geometry.map(|g| Self {
             parameters: g.meshing,
             items: g.mesh_items.clone(),
+            compounds: g.compounds.clone(),
         })
     }
 }
@@ -193,6 +195,7 @@ fn restore(model: &mut Model, state: State) -> State {
     if let (Some(geometry), Some(restored)) = (&mut model.geometry, state.meshing) {
         geometry.meshing = restored.parameters;
         geometry.mesh_items = restored.items;
+        geometry.compounds = restored.compounds;
     }
     let mesh = match state.mesh {
         Some(mesh) => {
@@ -251,6 +254,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "PART-1".into(),
             elements: vec![1],
         });

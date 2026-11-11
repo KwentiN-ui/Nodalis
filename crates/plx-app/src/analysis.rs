@@ -748,6 +748,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: "Solid-1".into(),
             elements: vec![1, 2, 3],
         });
@@ -888,6 +889,7 @@ mod tests {
         let mut model = pulled_cubes(0.03);
         model.mesh.parts[0].elements = vec![1, 2];
         model.mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: "Solid-2".into(),
             elements: vec![3],
         });

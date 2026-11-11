@@ -532,7 +532,7 @@ fn lower_model_named(
     };
     // Contact regions become the ties and contact pairs they stand for.
     let (lowered, contact_items);
-    let model = if model.contact_regions.is_empty() {
+    let model = if model.contact_regions.is_empty() && !plx_model::has_compound_ties(mesh) {
         contact_items = None;
         model
     } else {
@@ -547,6 +547,9 @@ fn lower_model_named(
         if let Some(items) = &contact_items {
             if let Some(region) = items.region_of(item) {
                 return Some(ModelItem::ContactRegion(region));
+            }
+            if let Some(part) = items.part_of(item) {
+                return Some(ModelItem::Part(part));
             }
             match item {
                 ModelItem::Tie(i) if i >= items.first_tie => return None,

@@ -793,6 +793,7 @@ mod tests {
             }
             let name = ["LOWER", "UPPER"][block as usize];
             mesh.parts.push(Part {
+                bodies: Vec::new(),
                 name: name.into(),
                 elements,
             });

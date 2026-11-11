@@ -89,6 +89,7 @@ pub(crate) fn thicken(
         Ok(new)
     };
     let mut part_elements = Part {
+        bodies: Vec::new(),
         name: part.to_string(),
         elements: Vec::new(),
     };
@@ -531,6 +532,7 @@ mod tests {
         );
         cad.nodes.insert(CadEntity::Vertex(1), vec![id(1, 0, 0)]);
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "SHELL-1".into(),
             elements,
         });

@@ -249,6 +249,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         part_names,
         refinement: 1.0,
         signatures,
+        compounds: Vec::new(),
     };
     let display = tessellate(&geometry)?;
     Ok(CadImport {
@@ -706,6 +707,7 @@ pub fn generate_mesh(geometry: &Geometry) -> Result<GeneratedMesh, GmshError> {
         mesh = merge_part(&mesh, part.mesh);
         warnings.extend(part.warnings);
     }
+    mesh.compose_compounds(&geometry.compound_members());
     Ok(GeneratedMesh { mesh, warnings })
 }
 
@@ -989,6 +991,7 @@ pub fn delete_parts_renumbered(
         ..geometry.clone()
     };
     smaller.renumber_mesh_items(&renumbered);
+    smaller.remove_from_compounds(deleted);
     Ok((Some(smaller), renumbered))
 }
 
@@ -1274,6 +1277,7 @@ fn shell_part_mesh(
     };
     let mut mesh = FeMesh::default();
     let mut part_elements = Part {
+        bodies: Vec::new(),
         name: part.to_string(),
         elements: Vec::new(),
     };
@@ -1368,6 +1372,7 @@ fn line_part_mesh(
     };
     let mut mesh = FeMesh::default();
     let mut part_elements = Part {
+        bodies: Vec::new(),
         name: part.to_string(),
         elements: Vec::new(),
     };
@@ -1743,6 +1748,7 @@ fn solid_mesh(gmsh: &Gmsh, order: i32, volumes: &[(i32, String)]) -> Result<FeMe
     for (volume, name) in volumes {
         let (_, nodes) = gmsh.elements(gmsh_type, *volume)?;
         let mut part = Part {
+            bodies: Vec::new(),
             name: name.clone(),
             elements: Vec::with_capacity(nodes.len() / shape.node_count()),
         };
@@ -2047,6 +2053,7 @@ fn display_mesh(
     };
     for (name, dimension, faces, own_edges) in groups {
         let mut part = Part {
+            bodies: Vec::new(),
             name,
             elements: Vec::new(),
         };

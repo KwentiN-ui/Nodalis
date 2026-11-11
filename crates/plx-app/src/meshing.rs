@@ -1132,7 +1132,16 @@ type WorkerResult = Result<Vec<(FeMesh, Vec<String>)>, String>;
 /// Meshes the named parts, or all with `None`, one after the other.
 fn mesh_parts(geometry: &Geometry, parts: Option<Vec<String>>) -> Result<PartMeshes, String> {
     let parts = match parts {
-        Some(parts) => parts,
+        // A compound part is meshed as the parts of the geometry it joins.
+        Some(parts) => {
+            let mut expanded: Vec<String> = Vec::new();
+            for part in parts.iter().flat_map(|p| geometry.parts_of_fe_part(p)) {
+                if !expanded.iter().any(|e| e.eq_ignore_ascii_case(&part)) {
+                    expanded.push(part);
+                }
+            }
+            expanded
+        }
         None => plx_mesher::part_names(geometry).map_err(|e| e.to_string())?,
     };
     let mut meshes = Vec::with_capacity(parts.len());

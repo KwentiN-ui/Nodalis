@@ -1424,6 +1424,7 @@ mod tests {
     #[test]
     fn a_geometry_link_takes_the_shapes_and_leaves_the_mesh_setup_to_the_target() {
         let shapes = |brep: &str| Geometry {
+            compounds: Vec::new(),
             source: "part.step".into(),
             brep: brep.into(),
             meshing: Default::default(),
@@ -1483,6 +1484,7 @@ mod tests {
             size: 1.0,
         };
         let shapes = |brep: &str, signatures| Geometry {
+            compounds: Vec::new(),
             source: "part.step".into(),
             brep: brep.into(),
             meshing: Default::default(),

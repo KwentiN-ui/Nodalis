@@ -29,6 +29,8 @@ pub enum TreeItem {
     Model,
     Mesh,
     Part(usize),
+    /// A compound part of the geometry, by index, holding the parts it joins.
+    Compound(usize),
     /// An item of the geometry's mesh setup.
     MeshItem(usize),
     /// A mesh operation of the FE model, such as a transform, under Mesh > Mesh Operations.
@@ -169,6 +171,11 @@ pub struct TreeState {
     /// The parts were clicked in the 3D view: open the branches of what acts on them in
     /// the next frame, while the tree stays where it is.
     pub reveal_acting: bool,
+    /// The compound parts of the geometry with the parts they join, by index, for the
+    /// Geometry tree.
+    pub compounds: Vec<(String, Vec<usize>)>,
+    /// The name being typed for a compound part in its menu, by index.
+    compound_name: Option<(usize, String)>,
 }
 
 impl TreeState {
@@ -364,12 +371,30 @@ pub struct TreeResponse {
     pub transform_part: Option<usize>,
     /// Merge the selected mesh parts into one.
     pub merge_parts: bool,
+    /// Make, change or dissolve a compound part of the geometry.
+    pub compound: Option<CompoundAction>,
     /// Run this contact detection again.
     pub detect: Option<usize>,
     /// The warning sign of an item was clicked: explain its findings.
     pub findings: Option<Vec<Finding>>,
     /// Show the results on a plane, by index, or none.
     pub plane_result: Option<Option<usize>>,
+}
+
+/// A change of the compound parts of the geometry, from the menus of its parts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompoundAction {
+    /// Join parts of the geometry, by index, into a new compound part.
+    Create(Vec<usize>),
+    /// Add parts to the compound part, by index.
+    Add(usize, Vec<usize>),
+    /// Take parts out of their compound parts.
+    Remove(Vec<usize>),
+    Rename(usize, String),
+    /// The parts of the compound part become parts of their own again.
+    Dissolve(usize),
+    /// Mesh the parts of the compound part.
+    Mesh(usize),
 }
 
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
@@ -690,6 +715,7 @@ fn has_properties(item: &TreeItem) -> bool {
         item,
         TreeItem::Group(_)
             | TreeItem::Mesh
+            | TreeItem::Compound(_)
             | TreeItem::StepGroup(..)
             | TreeItem::FieldOutputs
             | TreeItem::HistoryField(..)
@@ -786,7 +812,7 @@ fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
     match branch {
         Model => !matches!(item, Model),
         Mesh => matches!(item, Part(_) | MeshOperation(_) | Group(MESH_OPERATIONS)),
-        Group("Parts") => matches!(item, Part(_)),
+        Group("Parts") => matches!(item, Part(_) | Compound(_)),
         Group(MESH_OPERATIONS) => matches!(item, MeshOperation(_)),
         Group("Constraints") => matches!(item, Constraint(_)),
         Group("Sections") => matches!(item, Section(_) | CrossSection(_) | Group(CROSS_SECTIONS)),
@@ -890,6 +916,7 @@ fn part_icon(part: &PartInfo) -> TreeIcon {
 /// Context menu of a part, the same in the tree and in the 3D view. A part of the geometry
 /// is meshed from here. On one of several selected parts, hiding and
 /// deleting take them all.
+#[allow(clippy::too_many_arguments)]
 pub fn part_menu(
     ui: &mut Ui,
     index: usize,
@@ -897,6 +924,7 @@ pub fn part_menu(
     contours: bool,
     view: TreeView,
     selected: &BTreeSet<usize>,
+    compounds: &[(String, Vec<usize>)],
     response: &mut TreeResponse,
 ) {
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -904,6 +932,8 @@ pub fn part_menu(
         if ui.button("Create Mesh").clicked() {
             response.mesh_part = Some(index);
         }
+        ui.separator();
+        compound_menu_items(ui, index, selected, compounds, response);
         ui.separator();
     }
     if ui.button("Properties …").clicked() {
@@ -949,6 +979,60 @@ pub fn part_menu(
         }
     }
 }
+
+/// The entries of a geometry part's menu that join parts into compound parts and take them
+/// out again; on one of several selected parts they act on all of them.
+fn compound_menu_items(
+    ui: &mut Ui,
+    index: usize,
+    selected: &BTreeSet<usize>,
+    compounds: &[(String, Vec<usize>)],
+    response: &mut TreeResponse,
+) {
+    let parts: Vec<usize> = if selected.contains(&index) {
+        selected.iter().copied().collect()
+    } else {
+        vec![index]
+    };
+    let create = egui::Button::new("Create Compound Part");
+    if ui
+        .add_enabled(parts.len() > 1, create)
+        .on_hover_text(COMPOUND_TIP)
+        .on_disabled_hover_text("Select two or more parts with Ctrl or Shift first.")
+        .clicked()
+    {
+        response.compound = Some(CompoundAction::Create(parts.clone()));
+    }
+    let others: Vec<(usize, &str)> = (compounds.iter().enumerate())
+        .filter(|(_, (_, members))| !members.contains(&index))
+        .map(|(c, (name, _))| (c, name.as_str()))
+        .collect();
+    if !others.is_empty() {
+        ui.menu_button("Add to Compound", |ui| {
+            for (c, name) in others {
+                if ui.button(name).clicked() {
+                    response.compound = Some(CompoundAction::Add(c, parts.clone()));
+                }
+            }
+        });
+    }
+    let in_compound = parts
+        .iter()
+        .any(|p| compounds.iter().any(|(_, members)| members.contains(p)));
+    if in_compound
+        && ui
+            .button("Remove from Compound")
+            .on_hover_text("The part becomes a part of its own in the FE model again.")
+            .clicked()
+    {
+        response.compound = Some(CompoundAction::Remove(parts));
+    }
+}
+
+/// What a compound part is, for its tooltips.
+pub const COMPOUND_TIP: &str = "Joins the parts into one part of the FE model. Each is \
+    meshed on its own; where they touch, the solver input ties them, as a bonded contact \
+    does.";
 
 /// A row of a branch: the height of its connector line and the left edge of the row.
 #[derive(Clone, Copy)]
@@ -1179,6 +1263,10 @@ impl Tree<'_> {
                 }
             });
         }
+        if let TreeItem::Compound(c) = item {
+            response = response.on_hover_text(COMPOUND_TIP);
+            response.context_menu(|ui| self.compound_menu(ui, c));
+        }
         if double {
             // Items are created from the ribbon; containers only open or close, see
             // `branch`.
@@ -1408,6 +1496,7 @@ impl Tree<'_> {
         match item {
             TreeItem::Mesh => TreeIcon::Mesh,
             TreeItem::Group("Parts") if self.view == TreeView::Geometry => TreeIcon::Geometry,
+            TreeItem::Compound(_) => TreeIcon::Compound,
             TreeItem::Group("Parts") => TreeIcon::Part,
             TreeItem::Group("Mesh Setup") => TreeIcon::MeshSetup,
             TreeItem::Group(MESH_OPERATIONS) => TreeIcon::MeshOperation,
@@ -1537,6 +1626,9 @@ impl Tree<'_> {
             }
             (TreeItem::Group(CONTACT_REGIONS), TreeItem::ContactRegion(r)) => {
                 !self.detected.contains_key(r)
+            }
+            (TreeItem::Compound(c), TreeItem::Part(p)) => {
+                (self.state.compounds.get(*c)).is_some_and(|(_, members)| members.contains(p))
             }
             _ => contains(branch, item),
         }
@@ -1692,33 +1784,121 @@ impl Tree<'_> {
             self.leaf(ui, TreeItem::Group("Parts"), parts);
             return;
         }
+        let compounds = if self.view == TreeView::Geometry {
+            self.state.compounds.clone()
+        } else {
+            Vec::new()
+        };
         self.branch(ui, TreeItem::Group("Parts"), parts, true, |tree, ui| {
-            for (index, part) in model.parts.iter_mut().enumerate() {
-                if tree.hidden(&TreeItem::Part(index)) {
+            // A compound part stands where its first part would, its parts under it.
+            let mut drawn = vec![false; model.parts.len()];
+            for index in 0..model.parts.len() {
+                if drawn[index] {
                     continue;
                 }
-                let icon = part_icon(part);
-                let item = TreeItem::Part(index);
-                let (_, response, changed) =
-                    tree.row(ui, None, Some(&mut part.visible), icon, item, &part.name);
-                if changed {
-                    tree.response.visibility.push((index, part.visible));
+                let compound = compounds.iter().position(|(_, m)| m.contains(&index));
+                match compound {
+                    Some(c) => {
+                        let (name, members) = &compounds[c];
+                        let label = format!("{name} ({})", members.len());
+                        tree.branch(ui, TreeItem::Compound(c), label, true, |tree, ui| {
+                            for &member in members {
+                                tree.part_row(ui, model, member, &compounds);
+                            }
+                        });
+                        for &member in members {
+                            if let Some(d) = drawn.get_mut(member) {
+                                *d = true;
+                            }
+                        }
+                    }
+                    None => {
+                        tree.part_row(ui, model, index, &compounds);
+                        drawn[index] = true;
+                    }
                 }
-                let view = tree.view;
-                let selected = tree.state.selected_parts(view);
-                response.context_menu(|ui| {
-                    part_menu(
-                        ui,
-                        index,
-                        part.visible,
-                        part.contours,
-                        view,
-                        &selected,
-                        &mut tree.response,
-                    );
-                });
             }
         });
+    }
+
+    /// The row of a part with its visibility box and menu.
+    fn part_row(
+        &mut self,
+        ui: &mut Ui,
+        model: &mut Model,
+        index: usize,
+        compounds: &[(String, Vec<usize>)],
+    ) {
+        if self.hidden(&TreeItem::Part(index)) {
+            return;
+        }
+        let Some(part) = model.parts.get_mut(index) else {
+            return;
+        };
+        let icon = part_icon(part);
+        let item = TreeItem::Part(index);
+        let (_, response, changed) =
+            self.row(ui, None, Some(&mut part.visible), icon, item, &part.name);
+        if changed {
+            self.response.visibility.push((index, part.visible));
+        }
+        let view = self.view;
+        let selected = self.state.selected_parts(view);
+        response.context_menu(|ui| {
+            part_menu(
+                ui,
+                index,
+                part.visible,
+                part.contours,
+                view,
+                &selected,
+                compounds,
+                &mut self.response,
+            );
+        });
+    }
+
+    /// The menu of a compound part of the geometry.
+    fn compound_menu(&mut self, ui: &mut Ui, c: usize) {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        let Some((name, _)) = self.state.compounds.get(c).cloned() else {
+            return;
+        };
+        if ui.button("Create Mesh").clicked() {
+            self.response.compound = Some(CompoundAction::Mesh(c));
+            ui.close();
+        }
+        ui.separator();
+        let typed = match &mut self.state.compound_name {
+            Some((i, typed)) if *i == c => typed,
+            other => &mut other.insert((c, name.clone())).1,
+        };
+        let mut rename = false;
+        ui.horizontal(|ui| {
+            ui.label("Name");
+            let edit = ui.add(egui::TextEdit::singleline(typed).desired_width(140.0));
+            rename = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui.button("Rename").clicked() {
+                rename = true;
+            }
+        });
+        if rename {
+            let typed = typed.clone();
+            self.state.compound_name = None;
+            self.response.compound = Some(CompoundAction::Rename(c, typed));
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .button("Dissolve")
+            .on_hover_text(
+                "The parts become parts of their own again; meshed, they are no longer tied.",
+            )
+            .clicked()
+        {
+            self.response.compound = Some(CompoundAction::Dissolve(c));
+            ui.close();
+        }
     }
 
     /// Mesh with parts and sets; shared by the FE Model and Results trees.

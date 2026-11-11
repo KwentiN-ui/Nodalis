@@ -1149,6 +1149,7 @@ mod tests {
             }
         }
         mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: name.into(),
             elements,
         });
@@ -1897,6 +1898,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("block.ndl");
         let geometry = Geometry {
+            compounds: Vec::new(),
             source: "block.step".into(),
             brep: "DBRep_DrawableShape\n\"quoted\" lines\n".into(),
             meshing: MeshingParameters::for_diagonal(100.0),

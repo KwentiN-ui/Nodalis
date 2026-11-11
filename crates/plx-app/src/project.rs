@@ -4367,7 +4367,7 @@ impl ProjectApp {
                         // The preview made it for this very input and operation.
                         if let (Some(made), Some(input)) = (made, &cad.input) {
                             let print = cad.operation.fingerprint(input);
-                            cad.take_result(made, print);
+                            cad.take_result(*made, print);
                         }
                     }
                     if node
@@ -12957,6 +12957,7 @@ mod tests {
     #[test]
     fn a_refine_mesh_block_divides_the_element_sizes_of_geometry() {
         let geometry = plx_model::Geometry {
+            compounds: Vec::new(),
             source: "block.step".into(),
             brep: "shapes".into(),
             meshing: Default::default(),
@@ -13414,6 +13415,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: "A".into(),
             elements: vec![1],
         });
@@ -14057,6 +14059,7 @@ mod tests {
     #[test]
     fn a_study_counts_how_its_analyses_mesh() {
         let geometry = |brep: &str, max_size: f64| plx_model::Geometry {
+            compounds: Vec::new(),
             source: "part.step".into(),
             brep: brep.into(),
             meshing: plx_model::MeshingParameters {

@@ -323,6 +323,7 @@ pub(crate) fn beam_mesh() -> FeMesh {
         }
     }
     mesh.parts.push(Part {
+        bodies: Vec::new(),
         name: "BEAM".into(),
         elements,
     });
