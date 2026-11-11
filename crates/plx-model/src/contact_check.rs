@@ -411,6 +411,23 @@ fn check(
     Some(check)
 }
 
+/// The distance of each point to the nearest of the faces, infinite where there is none.
+/// Every face is tried: meant for a few faces, such as those of a thread.
+pub(crate) fn distances(mesh: &FeMesh, faces: &[(ElementId, u8)], points: &[Point]) -> Vec<f64> {
+    let master = Master::new(mesh, faces, 0.0);
+    (points.iter())
+        .map(|&p| {
+            let mut best = f64::INFINITY;
+            for piece in &master.pieces {
+                if box_distance(p, piece.min, piece.max) < best {
+                    best = best.min(piece.closest(p).0.abs());
+                }
+            }
+            best
+        })
+        .collect()
+}
+
 /// The elements sound in the mesh that the nodes moved to `moved` turn inside out or fold.
 fn folded(mesh: &FeMesh, moved: &BTreeMap<NodeId, Point>) -> Vec<ElementId> {
     if moved.is_empty() {

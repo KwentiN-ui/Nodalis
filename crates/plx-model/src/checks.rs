@@ -676,7 +676,8 @@ impl Problem {
             Problem::InvalidBolt => {
                 "A bolt is cut between the faces of solid elements: the two faces of a bolt \
                  split into two bodies, or the face inside a bolt meshed in one piece. The \
-                 bolt has no such faces, so it is left out of the input file."
+                 bolt has no such faces, so it is left out of the input file. A thread needs \
+                 faces of solid elements too, on a part other than the bolt."
             }
             Problem::BoltWithoutPreload => {
                 "The bolt is preloaded in the first step that takes forces. Its preload is \
@@ -2154,6 +2155,13 @@ impl FeModel {
                 ));
                 continue;
             }
+            if let Err(reason) = self.resolve_thread(bolt, mesh) {
+                findings.push(Finding::new(
+                    ModelItem::Bolt(b),
+                    Problem::InvalidBolt,
+                    format!("{}: {reason}", bolt.name),
+                ));
+            }
             let preloaded = (0..self.steps.len()).any(|s| match self.bolt_action(bolt, s) {
                 Some(crate::BoltAction::Load(v) | crate::BoltAction::Adjust(v)) => v != 0.0,
                 _ => false,
@@ -2246,7 +2254,8 @@ impl FeModel {
                 let bcs = step.boundary_conditions.iter().map(|b| &b.amplitude);
                 let loads = (step.loads.iter()).flat_map(|l| [&l.amplitude, &l.factor_amplitude]);
                 let fields = step.defined_fields.iter().map(|f| &f.amplitude);
-                bcs.chain(loads).chain(fields)
+                let bolts = step.bolt_changes.iter().map(|c| &c.amplitude);
+                bcs.chain(loads).chain(fields).chain(bolts)
             })
             .filter_map(|id| *id)
             .collect();

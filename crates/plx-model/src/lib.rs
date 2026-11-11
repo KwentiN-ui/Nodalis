@@ -62,7 +62,7 @@ pub use tables::{StepTable, TableOwner};
 mod validity;
 
 pub use amplitude::{Amplitude, AmplitudeTime, ValueTable, no_tables};
-pub use bolt::{Bolt, BoltAction, BoltChange, LoweredBolts, Preload, ResolvedBolt};
+pub use bolt::{Bolt, BoltAction, BoltChange, LoweredBolts, Preload, ResolvedBolt, ResolvedThread};
 pub use cad_operation::{CadOperation, CadOperationKind, SplitKeep, SplitPlane};
 pub use checks::{
     Finding, MeshCheck, Problem, Severity, diagnose_solver_output, diagnose_solver_warnings,
@@ -177,9 +177,10 @@ use serde::{Deserialize, Serialize};
 /// compound parts of the geometry ([`CompoundPart`]) and the bodies of mesh parts; formats 21
 /// to 23 read as they are. Format 25 adds the splits of the CAD Operation block
 /// ([`CadOperationKind::SplitPlane`], [`CadOperationKind::HoleRing`]); formats 21 to 24 read as
-/// they are. Format 27 lets contact detections choose their parts by filters and give the
-/// pairs they find their type by rules ([`ContactRule`]), and adds part groups
-/// ([`PartGroup`]); formats 21 to 26 read as they are.
+/// they are. Format 26 adds the thread of a bolt ([`Bolt::thread`]) and the amplitude of its
+/// steps ([`BoltChange::amplitude`]); formats 21 to 25 read as they are. Format 27 lets contact
+/// detections choose their parts by filters and give the pairs they find their type by rules
+/// ([`ContactRule`]), and adds part groups ([`PartGroup`]); formats 21 to 26 read as they are.
 pub const PROJECT_FORMAT: u32 = 27;
 
 /// Everything besides the mesh that makes up an analysis.

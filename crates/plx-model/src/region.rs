@@ -38,6 +38,20 @@ pub enum Region {
 }
 
 impl Region {
+    /// Whether nothing is picked: no faces, nodes, edges, parts or CAD entities, or a set of
+    /// no name.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Region::Parts(v) => v.is_empty(),
+            Region::Nodes(v) => v.is_empty(),
+            Region::Faces(v) => v.is_empty(),
+            Region::Edges(v) => v.is_empty(),
+            Region::NodeSet(n) | Region::ElementSet(n) | Region::Surface(n) => n.is_empty(),
+            Region::Geometry(v) => v.is_empty(),
+            _ => false,
+        }
+    }
+
     /// Elements of the region, for sections. Node and face selections have none.
     pub fn elements(&self, mesh: &FeMesh) -> Vec<ElementId> {
         let mut ids: BTreeSet<ElementId> = BTreeSet::new();
