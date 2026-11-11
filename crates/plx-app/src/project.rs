@@ -4588,6 +4588,8 @@ impl ProjectApp {
                 self.history.clear();
                 self.graph = Snarl::new();
                 self.graph_generation += 1;
+                // The view of the schematic is not saved: it starts out showing all blocks.
+                self.show_all = true;
                 self.links = project.links;
                 self.frames = project.frames;
                 self.compact = project.compact.into_iter().collect();
