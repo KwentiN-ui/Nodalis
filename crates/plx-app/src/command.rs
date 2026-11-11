@@ -126,6 +126,8 @@ pub enum Cmd {
     Place(BlockTile),
     FrameBlocks,
     Unframe,
+    GroupBlocks,
+    Ungroup,
     Compact,
     ShowAll,
     Minimap,
@@ -821,6 +823,26 @@ fn build() -> Vec<Command> {
         Shape(Glyph::Unframe),
         "Alt+P",
         "Takes the selected blocks out of their frame.",
+    ));
+    add(command(
+        C::GroupBlocks,
+        "Group",
+        p,
+        "Annotate",
+        "Groups",
+        Node(NodeIcon::Group),
+        "Ctrl+G",
+        "Puts the selected blocks into a node group, which opens into a schematic of its own.",
+    ));
+    add(command(
+        C::Ungroup,
+        "Ungroup",
+        p,
+        "Annotate",
+        "Groups",
+        Node(NodeIcon::GroupOutput),
+        "Ctrl+Alt+G",
+        "Puts the blocks of the selected groups back where the groups are.",
     ));
     // Commands shown on a second tab; the search lists the first.
     add(command(

@@ -105,6 +105,13 @@ pub enum ProjectNode {
     Plot(PlotBlock),
     /// A small picture of the mesh linked to it, drawn in the block.
     MeshPreview(MeshPreview),
+    /// Blocks put together into one, which opens into a schematic of its own, like a node
+    /// group of Blender.
+    Group(NodeGroup),
+    /// The block inside a group that gives the group's inputs to the blocks in it.
+    GroupInput(GroupEnd),
+    /// The block inside a group that takes what the group gives out.
+    GroupOutput(GroupEnd),
 }
 
 impl ProjectNode {
@@ -129,6 +136,8 @@ impl ProjectNode {
             Self::Switch(s) => s.id,
             Self::Plot(p) => p.id,
             Self::MeshPreview(m) => m.id,
+            Self::Group(g) => g.id,
+            Self::GroupInput(g) | Self::GroupOutput(g) => g.id,
         }
     }
 
@@ -152,6 +161,8 @@ impl ProjectNode {
             Self::Switch(s) => &s.name,
             Self::Plot(p) => &p.name,
             Self::MeshPreview(m) => &m.name,
+            Self::Group(g) => &g.name,
+            Self::GroupInput(g) | Self::GroupOutput(g) => &g.name,
         }
     }
 
@@ -176,6 +187,8 @@ impl ProjectNode {
             Self::Switch(s) => s.position,
             Self::Plot(p) => p.position,
             Self::MeshPreview(m) => m.position,
+            Self::Group(g) => g.position,
+            Self::GroupInput(g) | Self::GroupOutput(g) => g.position,
         }
     }
 }
@@ -445,6 +458,67 @@ pub struct MeshPreview {
     pub name: String,
     #[serde(default)]
     pub position: [f32; 2],
+}
+
+/// A node group: blocks of the schematic put together into one block, which opens into a
+/// schematic of its own with a Group Input and a Group Output block, like a node group of
+/// Blender. Its links are those of the blocks in it: [`Project::links`] keeps them from block
+/// to block, as Update Project follows them; the sockets keep only how the wires of a link
+/// run through the group, to draw them at each level.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NodeGroup {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The ids of the blocks right inside it: its Group Input and Group Output blocks, and
+    /// groups in it with their own blocks.
+    #[serde(default)]
+    pub nodes: Vec<u64>,
+    /// What it takes, in the order of its pins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<GroupSocket>,
+    /// What it gives.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<GroupSocket>,
+}
+
+/// The Group Input or Group Output block of a group; it cannot be deleted.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GroupEnd {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+}
+
+/// An input or output of a node group: a pin on the group's block, and the same on its Group
+/// Input or Group Output block inside.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GroupSocket {
+    /// Stays the same when the socket is renamed; the pins of the socket are
+    /// `["Socket", id]`.
+    pub id: u32,
+    pub name: String,
+    /// The path of the pin the socket was made from, which gives it its type: its colour and
+    /// what it can be linked to.
+    #[serde(default)]
+    pub kind: Vec<String>,
+    /// Where its wire comes from: of an input, a pin outside the group; of an output, one
+    /// inside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<GroupPin>,
+    /// Where its wires go: of an input, pins inside the group; of an output, outside.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<GroupPin>,
+}
+
+/// A pin of the schematic: the row of `path` of block `node`, or `["Socket", id]` of a
+/// group or its Group Input or Group Output block.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct GroupPin {
+    pub node: u64,
+    pub path: Vec<String>,
 }
 
 /// A frame of the project schematic: a named, tinted rectangle around the blocks it holds,

@@ -410,8 +410,10 @@ changes, as with a parameter.
     number of the series at their single input #ui("Values") (@series).],
   [Index], [Switch only: which choice the block gives, counted from 1. Out of range, the block
     gives no result.],
-  [Choice 1, 2, ...], [Switch only: the numbers to choose from. #ui("Add") adds one,
-    #ui("Remove") removes the last one with its link; a switch holds up to 20.],
+  [Choice 1, 2, ...], [Switch only: the numbers to choose from. A wire dropped on the empty
+    pin below the last choice adds a choice with that link, as in Blender (@node-groups).
+    #ui("Add") adds one to type, #ui("Remove") removes the last one with its link; a switch
+    holds up to 20.],
 )
 
 ==== Units of the numbers

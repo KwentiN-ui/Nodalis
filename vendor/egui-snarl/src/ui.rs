@@ -1792,6 +1792,11 @@ where
         ref value,
     } = snarl.nodes[node.0];
 
+    // Nodalis: nodes of other levels of node groups are not drawn, nor their wires.
+    if !viewer.visible(value) {
+        return None;
+    }
+
     // Collect pins
     let inputs_count = viewer.inputs(value);
     let outputs_count = viewer.outputs(value);
