@@ -125,6 +125,8 @@ pub enum Problem {
     /// Nodes of a symmetry plane that is no coordinate plane, which get a local coordinate
     /// system, also used by another boundary condition or a point load.
     SkewedSymmetryShared,
+    /// Beams with a profile the solver expands into solids on a symmetry plane.
+    SymmetryExpandedBeams,
     IncrementExceedsStep,
     NoLoad,
     /// An amplitude that no boundary condition, load or defined field uses.
@@ -248,6 +250,7 @@ impl Problem {
             | Problem::SymmetryNotPlanar
             | Problem::SymmetryOffAxis
             | Problem::SkewedSymmetryShared
+            | Problem::SymmetryExpandedBeams
             | Problem::VelocityIgnored
             | Problem::FramesTooFew
             | Problem::ModalStepNonlinear
@@ -309,6 +312,7 @@ impl Problem {
             Problem::SymmetryNotPlanar => "Symmetry region not planar",
             Problem::SymmetryOffAxis => "Symmetry plane not perpendicular to the axis",
             Problem::SkewedSymmetryShared => "Nodes of a skewed symmetry plane shared",
+            Problem::SymmetryExpandedBeams => "Expanded beams on a symmetry plane",
             Problem::IncrementExceedsStep => "Increment larger than the step",
             Problem::NoLoad => "No load",
             Problem::UnusedAmplitude => "Amplitude not used",
@@ -592,6 +596,14 @@ impl Problem {
                  axis. A further symmetry can only be a mirror plane perpendicular to the \
                  axis, i.e. a line of constant y in the model. Holding other lines normal \
                  to themselves is a support, not a symmetry."
+            }
+            Problem::SymmetryExpandedBeams => {
+                "The solver expands beams with a rectangular, circular, pipe or box \
+                 profile into solid elements. Holding such a beam on a symmetry plane at \
+                 every node also holds its cross sections against turning, so the beam \
+                 hardly bends, and its section cannot be halved for the half model. Beams \
+                 with a general profile (general, I, T, U, L, sketch or rope) are computed \
+                 as beams and lie on a symmetry plane as they should."
             }
             Problem::SkewedSymmetryShared => {
                 "A symmetry plane that is not a coordinate plane is written with a local \
@@ -1030,6 +1042,10 @@ impl Problem {
             Problem::SymmetryOffAxis => {
                 "Select edges of constant y, or use a Displacement/Rotation boundary \
                  condition for other supports."
+            }
+            Problem::SymmetryExpandedBeams => {
+                "Give the beams on the plane a general profile with the same values, or \
+                 leave them out of the symmetry boundary condition."
             }
             Problem::SkewedSymmetryShared => {
                 "Keep other boundary conditions and point loads off the nodes of the \
@@ -2701,7 +2717,7 @@ impl FeModel {
                     .filter(|&d| held[d])
                     .map(|d| (d, f64::NAN))
                     .collect(),
-                BoundaryKind::Symmetry { normal } => {
+                BoundaryKind::Symmetry { normal, .. } => {
                     match symmetry_plane(mesh, &bc.region, space, *normal) {
                         Err(error) => {
                             findings.push(Finding::new(
@@ -2712,6 +2728,18 @@ impl FeModel {
                             Vec::new()
                         }
                         Ok(plane) => {
+                            let beams = self.beams_on_plane(mesh, &bc.region);
+                            if beams.expanded > 0 && !space.is_2d() {
+                                findings.push(Finding::new(
+                                    ModelItem::BoundaryCondition(s, i),
+                                    Problem::SymmetryExpandedBeams,
+                                    format!(
+                                        "{}: {} beam elements with a rectangular, circular, \
+                                         pipe or box profile on the plane",
+                                        bc.name, beams.expanded
+                                    ),
+                                ));
+                            }
                             if let Some(warning) = plane.warning(space) {
                                 let problem = if plane.is_planar() {
                                     Problem::SymmetryOffAxis
@@ -2800,17 +2828,27 @@ impl FeModel {
             }
         }
         // The rotations given at each beam node, with the first boundary condition giving one.
-        let mut beam_rotations: BTreeMap<NodeId, (usize, [bool; 3])> = BTreeMap::new();
+        // A symmetry plane holds two rotations by design (see `SymmetryExpandedBeams`): its
+        // rotations count towards those given, but a node held only by it is no case.
+        let mut beam_rotations: BTreeMap<NodeId, (Option<usize>, [bool; 3])> = BTreeMap::new();
         for (&(node, dof), &(i, _)) in &fixed {
             if (3..6).contains(&dof) && mesh.node_index(node).is_some_and(|k| trusses.beam[k]) {
-                let entry = beam_rotations.entry(node).or_insert((i, [false; 3]));
-                entry.0 = entry.0.min(i);
+                let symmetry = matches!(
+                    step.boundary_conditions[i].kind,
+                    BoundaryKind::Symmetry { .. }
+                );
+                let entry = beam_rotations.entry(node).or_insert((None, [false; 3]));
+                if !symmetry {
+                    entry.0 = Some(entry.0.map_or(i, |o| o.min(i)));
+                }
                 entry.1[dof - 3] = true;
             }
         }
         let mut partial: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
         for (&node, &(i, given)) in &beam_rotations {
-            if given.iter().any(|&g| !g) {
+            if let Some(i) = i
+                && given.iter().any(|&g| !g)
+            {
                 partial.entry(i).or_default().push(node);
             }
         }
@@ -4605,7 +4643,10 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(nodes),
-            kind: BoundaryKind::Symmetry { normal: None },
+            kind: BoundaryKind::Symmetry {
+                normal: None,
+                halve_beams: true,
+            },
             amplitude: None,
         };
         // The face y = 0.
@@ -5608,6 +5649,87 @@ mod tests {
                     .to_string()
             )]
         );
+    }
+
+    /// A symmetry plane holds two rotations of the beam nodes on it by design. Beams the
+    /// solver expands into solids it holds too stiffly; general profiles lie on it as they
+    /// should, and only they are halved.
+    #[test]
+    fn beams_on_a_symmetry_plane() {
+        let mut mesh = FeMesh::default();
+        for (id, x) in [0.0, 1.0, 2.0].into_iter().enumerate() {
+            mesh.set_node(id as u32 + 1, [x, 0.0, 0.0]);
+        }
+        for (id, nodes) in [(1, vec![1, 2]), (2, vec![2, 3])] {
+            mesh.add_element(Element {
+                id,
+                type_name: "B31".into(),
+                shape: ElementShape::Line2,
+                nodes,
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "BEAM".into(),
+            elements: vec![1, 2],
+        });
+        let mut model = model(&mesh);
+        beam_section(&mut model);
+        model.steps[0].loads[0].region = Region::Nodes(vec![3]);
+        model.steps[0].loads[0].kind = crate::LoadKind::force([0.0, 1.0, 0.0]);
+        model.steps[0].boundary_conditions[0].region = Region::Nodes(vec![1]);
+        model.steps[0]
+            .boundary_conditions
+            .push(BoundaryCondition::new(
+                "Symmetry-1",
+                Region::Nodes(vec![1, 2, 3]),
+                BoundaryKind::Symmetry {
+                    normal: Some([0.0, 0.0, 1.0]),
+                    halve_beams: true,
+                },
+            ));
+        let on_plane = model.beams_on_plane(&mesh, &Region::Nodes(vec![1, 2, 3]));
+        assert_eq!(
+            on_plane,
+            crate::BeamsOnPlane {
+                total: 2,
+                expanded: 2
+            }
+        );
+        assert_eq!(
+            model
+                .beams_on_plane(&mesh, &Region::Nodes(vec![1, 2]))
+                .total,
+            1
+        );
+        // The rectangle is expanded: a warning, and it is not halved.
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(
+                ModelItem::BoundaryCondition(0, 1),
+                Problem::SymmetryExpandedBeams
+            )]
+        );
+        assert!(model.halved_beams(&mesh).is_empty());
+        // A general profile: no warning, not even of rotations partly held, and halved.
+        model.cross_sections[0].profile = crate::BeamProfile::General {
+            area: 10.0,
+            i11: 5.0,
+            i22: 5.0,
+            k: 0.8,
+        };
+        assert_eq!(check(&model, &mesh), []);
+        assert_eq!(
+            model.halved_beams(&mesh).into_iter().collect::<Vec<_>>(),
+            [1, 2]
+        );
+        let BoundaryKind::Symmetry { halve_beams, .. } =
+            &mut model.steps[0].boundary_conditions[1].kind
+        else {
+            unreachable!()
+        };
+        *halve_beams = false;
+        assert!(model.halved_beams(&mesh).is_empty());
     }
 
     /// The solver holds all rotations of a beam node as soon as one is given, so a beam node

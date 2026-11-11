@@ -470,7 +470,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                 }
             }
             // A cone along the normal of the plane and plates about its in-plane axes.
-            Kind::Boundary(BoundaryKind::Symmetry { normal }) => {
+            Kind::Boundary(BoundaryKind::Symmetry { normal, .. }) => {
                 let space = model.fe.properties.space;
                 let plane = symmetry_plane(&model.mesh, &item.region, space, normal);
                 if let (Ok(plane), Some(center)) =
