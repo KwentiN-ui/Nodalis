@@ -215,6 +215,14 @@ pub fn export_header() -> Color32 {
         Color32::from_rgb(214, 222, 238)
     }
 }
+/// Header band of a plot or mesh preview block in the project schematic: a muted teal.
+pub fn visualize_header() -> Color32 {
+    if dark() {
+        Color32::from_rgb(40, 76, 80)
+    } else {
+        Color32::from_rgb(200, 230, 232)
+    }
+}
 /// Header band of a note in the project schematic: a muted yellow.
 pub fn note_header() -> Color32 {
     if dark() {

@@ -36,6 +36,7 @@ use crate::tree::TreeView;
 use crate::tree_icons::StepGlyph;
 use cad::{CAD_LENGTH, CadBlock};
 use deformed::{DEFORM_FACTOR, DEFORM_INCREMENT, DeformedBlock};
+use visualize::{MeshPicture, PlotBlock, PlotView, PreviewBlock};
 
 mod cad;
 mod deformed;
@@ -44,6 +45,8 @@ mod history;
 mod minimap;
 mod numbers;
 mod saving;
+mod series;
+mod visualize;
 mod workspace;
 
 /// Storage key of the project file open at exit, reopened at the next start.
@@ -71,6 +74,8 @@ enum Kind {
     Note,
     Math,
     Switch,
+    Plot,
+    MeshPreview,
 }
 
 impl Kind {
@@ -98,6 +103,8 @@ impl Kind {
             Self::Note => "note",
             Self::Math => "math block",
             Self::Switch => "switch block",
+            Self::Plot => "plot block",
+            Self::MeshPreview => "mesh preview block",
         }
     }
 }
@@ -155,6 +162,10 @@ enum Block {
     /// A number computed from others, or picked from several.
     Math(NumberBlock),
     Switch(NumberBlock),
+    /// A plot of the numbers and series linked to it.
+    Plot(PlotBlock),
+    /// A small picture of the mesh linked to it.
+    MeshPreview(Box<PreviewBlock>),
 }
 
 /// A Math or a Switch block: the numbers of its inputs, which value links give or the block
@@ -171,6 +182,9 @@ struct NumberBlock {
     operands: [Option<ValueKind>; 2],
     operation: MathOp,
     values: Vec<f64>,
+    /// The series value links give its inputs, by index; `None` for one number. Brought by
+    /// every sync, not kept in the file.
+    series: Vec<Option<Vec<f64>>>,
 }
 
 /// The row of the result of a Math or Switch block.
@@ -257,10 +271,14 @@ impl NumberBlock {
         Ok(block)
     }
 
-    /// The number it gives.
+    /// The number it gives; `None` when it gives a series, see [`Self::series_result`].
     fn result(&self, switch: bool) -> Option<f64> {
         let value = if switch {
             plx_model::switch(*self.values.first()?, self.values.get(1..)?)
+        } else if self.operation.reduces() {
+            self.reduced()
+        } else if self.series.iter().any(Option::is_some) {
+            None
         } else {
             self.operation.apply(&self.values)
         }?;
@@ -467,6 +485,7 @@ struct ParametersBlock {
 
 /// What a measure block computes, and the value it last computed with the fingerprint of the
 /// results and the definition it was computed from, see [`ProjectApp::measure_key`].
+#[derive(Default)]
 struct MeasureBlock {
     units: UnitSystem,
     kind: MeasureKind,
@@ -474,6 +493,9 @@ struct MeasureBlock {
     evaluated: Option<u64>,
     /// Why the last evaluation gave no value.
     error: Option<String>,
+    /// Of a measure of a series, its values; of a whole history also their times.
+    series: Vec<f64>,
+    times: Vec<f64>,
 }
 
 /// A parameter study: its table, the fingerprint of the blocks it runs as they are now, see
@@ -776,6 +798,8 @@ impl Node {
             Block::Note(_) => Kind::Note,
             Block::Math(_) => Kind::Math,
             Block::Switch(_) => Kind::Switch,
+            Block::Plot(_) => Kind::Plot,
+            Block::MeshPreview(_) => Kind::MeshPreview,
         }
     }
 
@@ -974,6 +998,27 @@ impl Node {
         }
     }
 
+    fn as_plot(&self) -> Option<&PlotBlock> {
+        match &self.block {
+            Block::Plot(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    fn as_plot_mut(&mut self) -> Option<&mut PlotBlock> {
+        match &mut self.block {
+            Block::Plot(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    fn as_preview(&self) -> Option<&PreviewBlock> {
+        match &self.block {
+            Block::MeshPreview(p) => Some(p),
+            _ => None,
+        }
+    }
+
     /// For a Math or Switch block, the kind of the number of the row of `path`: its result
     /// or an input; `Some(None)` while the block has no kind yet.
     fn number_kind(&self, path: &[String]) -> Option<Option<ValueKind>> {
@@ -1042,8 +1087,10 @@ impl Node {
             Block::Study(s) => s.units,
             Block::File(f) => f.units,
             Block::Math(n) | Block::Switch(n) => n.units,
+            Block::Plot(p) => p.units,
             Block::CadOperation(c) => c.units,
-            Block::MeshExport(_)
+            Block::MeshPreview(_)
+            | Block::MeshExport(_)
             | Block::Campbell(_)
             | Block::RefineMesh(_)
             | Block::DeformedMesh(_)
@@ -1230,6 +1277,8 @@ impl Node {
                     value: block.value,
                     evaluated: block.evaluated,
                     error: None,
+                    series: block.series,
+                    times: block.times,
                 };
                 Self::new(block.id, block.name, Block::Measure(measure))
             }
@@ -1263,6 +1312,7 @@ impl Node {
                     operands: math.operands,
                     operation: math.operation,
                     values: math.values,
+                    series: Vec::new(),
                 };
                 Self::new(math.id, math.name, Block::Math(block))
             }
@@ -1275,8 +1325,17 @@ impl Node {
                     operands: [None; 2],
                     operation: MathOp::default(),
                     values,
+                    series: Vec::new(),
                 };
                 Self::new(switch.id, switch.name, Block::Switch(block))
+            }
+            ProjectNode::Plot(plot) => Self::new(
+                plot.id,
+                plot.name,
+                Block::Plot(PlotBlock::new(plot.units, plot.kind, plot.bins)),
+            ),
+            ProjectNode::MeshPreview(preview) => {
+                Self::new(preview.id, preview.name, Block::MeshPreview(Box::default()))
             }
         }
     }
@@ -1365,6 +1424,8 @@ impl Node {
                 kind: m.kind.clone(),
                 value: m.value,
                 evaluated: m.evaluated,
+                series: m.series.clone(),
+                times: m.times.clone(),
             }),
             Block::Study(s) => ProjectNode::Study(file::StudyBlock {
                 id,
@@ -1427,6 +1488,18 @@ impl Node {
                 index: switch.values.first().copied().unwrap_or(1.0),
                 choices: switch.values.get(1..).unwrap_or_default().to_vec(),
             }),
+            Block::Plot(plot) => ProjectNode::Plot(file::PlotBlock {
+                id,
+                name,
+                position,
+                units: plot.units,
+                kind: plot.kind,
+                bins: plot.bins,
+            }),
+            // It keeps no mesh: the link brings it again.
+            Block::MeshPreview(_) => {
+                ProjectNode::MeshPreview(file::MeshPreview { id, name, position })
+            }
         })
     }
 
@@ -1498,9 +1571,7 @@ impl Node {
             Block::Measure(m) => Block::Measure(MeasureBlock {
                 units: m.units,
                 kind: m.kind.clone(),
-                value: None,
-                evaluated: None,
-                error: None,
+                ..MeasureBlock::default()
             }),
             Block::Study(s) => {
                 let mut table = s.table.clone();
@@ -1525,6 +1596,8 @@ impl Node {
             Block::Note(text) => Block::Note(text.clone()),
             Block::Math(math) => Block::Math(math.clone()),
             Block::Switch(switch) => Block::Switch(switch.clone()),
+            Block::Plot(plot) => Block::Plot(PlotBlock::new(plot.units, plot.kind, plot.bins)),
+            Block::MeshPreview(_) => Block::MeshPreview(Box::default()),
         };
         Some(Self::new(id, name, block))
     }
@@ -1582,6 +1655,7 @@ impl Node {
             Block::DeformedMesh(d) => d.link_data(),
             Block::CadOperation(c) => c.link_data(),
             Block::MeshExport(e) => Some(e.model.data()),
+            Block::MeshPreview(p) => Some(p.model.data()),
             Block::File(f) => Some(f.model.data()),
             Block::Parameters(_)
             | Block::Measure(_)
@@ -1589,7 +1663,8 @@ impl Node {
             | Block::Campbell(_)
             | Block::Note(_)
             | Block::Math(_)
-            | Block::Switch(_) => None,
+            | Block::Switch(_)
+            | Block::Plot(_) => None,
         }
     }
 
@@ -1608,6 +1683,7 @@ impl Node {
             Block::Materials(m) | Block::CrossSections(m) => Some(m.model.data_mut()),
             Block::Mesh(m) => Some(m.model.data_mut()),
             Block::MeshExport(e) => Some(e.model.data_mut()),
+            Block::MeshPreview(p) => Some(p.model.data_mut()),
             _ => None,
         }
     }
@@ -1921,6 +1997,12 @@ enum Action {
     SetOperation(u64, MathOp),
     SetNumberInput(u64, String, f64),
     SetChoices(u64, usize),
+    /// A new Plot or Mesh Preview block at the position.
+    AddPlot(egui::Pos2),
+    AddMeshPreview(egui::Pos2),
+    /// The kind of plot of a Plot block, or the bins of its histogram, changed in its block.
+    SetPlotKind(u64, plx_model::PlotKind),
+    SetBins(u64, u32),
 }
 
 /// A project read from its file, with notes on its conversion, or why it could not be read.
@@ -1960,6 +2042,8 @@ pub struct ProjectApp {
     frame_label: Option<(usize, String)>,
     /// The note whose text takes the keyboard in the next frame.
     focus_note: Option<u64>,
+    /// The pictures of the Mesh Preview blocks, by block.
+    pictures: HashMap<u64, MeshPicture>,
     /// The positions of the blocks in the last frame, and the blocks moved while a button
     /// is down, to put those dropped onto a frame in it.
     last_positions: Vec<(u64, [f32; 2])>,
@@ -1979,7 +2063,7 @@ pub struct ProjectApp {
     measure_editor: Option<MeasureEditor>,
     /// Measures being computed on worker threads, by block, with the fingerprint they are
     /// computed for.
-    measuring: HashMap<u64, (u64, Receiver<Result<f64, String>>)>,
+    measuring: HashMap<u64, (u64, Receiver<Result<crate::measure::Measured, String>>)>,
     /// The editor of a parameter study.
     study_editor: Option<StudyEditor>,
     /// The study being run, and the studies Update Project runs after it.
@@ -2111,6 +2195,7 @@ impl ProjectApp {
             selected: Vec::new(),
             frame_label: None,
             focus_note: None,
+            pictures: HashMap::new(),
             last_positions: Vec::new(),
             moving: BTreeSet::new(),
             material_set: None,
@@ -2396,16 +2481,13 @@ impl ProjectApp {
         }
     }
 
-    /// Adds a measure block of the largest von Mises stress; returns its id.
+    /// Adds a measure block of the von Mises stress at every node; returns its id.
     fn add_measure(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
         let name = block_name("Measure");
         let block = MeasureBlock {
             units: self.settings.new_model.units,
-            kind: MeasureKind::default(),
-            value: None,
-            evaluated: None,
-            error: None,
+            ..MeasureBlock::default()
         };
         self.nodes
             .push(Node::new(id, name.clone(), Block::Measure(block)));
@@ -2481,13 +2563,23 @@ impl ProjectApp {
                     measure.kind = kind;
                     measure.units = units;
                 }
-                // Without a point the block has no coordinate rows to link to.
+                // Without a point the block has no coordinate rows to link to, and without a
+                // whole history no times.
                 if !at_point {
                     self.links.retain(|l| {
                         l.target != id
                             || !matches!(links::slot(l), [cell, _] if cell == links::PARAMETERS)
                     });
                 }
+                let timed = (self.nodes.iter().find(|n| n.id == id))
+                    .and_then(Node::as_measure)
+                    .is_some_and(|m| matches!(m.kind, MeasureKind::History { whole: true, .. }));
+                if !timed {
+                    self.links.retain(|l| {
+                        l.source != id || l.item.get(1).is_none_or(|n| n != series::TIME)
+                    });
+                }
+                self.drop_series_conflicts();
                 self.sync_due = true;
             }
         }
@@ -2552,15 +2644,16 @@ impl ProjectApp {
 
     /// Takes the values the workers of measure blocks computed; returns whether one came.
     fn poll_measures(&mut self) -> bool {
-        let done: Vec<(u64, u64, Result<f64, String>)> = (self.measuring.iter())
-            .filter_map(|(&id, (key, receiver))| match receiver.try_recv() {
-                Ok(result) => Some((id, *key, result)),
-                Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    Some((id, *key, Err("the computation stopped".into())))
-                }
-            })
-            .collect();
+        let done: Vec<(u64, u64, Result<crate::measure::Measured, String>)> =
+            (self.measuring.iter())
+                .filter_map(|(&id, (key, receiver))| match receiver.try_recv() {
+                    Ok(result) => Some((id, *key, result)),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        Some((id, *key, Err("the computation stopped".into())))
+                    }
+                })
+                .collect();
         let came = !done.is_empty();
         for (id, key, result) in done {
             self.measuring.remove(&id);
@@ -2574,17 +2667,22 @@ impl ProjectApp {
             let units = measure.units;
             measure.evaluated = Some(key);
             let line = match result {
-                Ok(value) => {
-                    measure.value = Some(value);
+                Ok(measured) => {
+                    measure.value = Some(measured.value);
                     measure.error = None;
-                    format!(
-                        "{name}: {} = {}",
-                        measure.kind.describe(),
-                        crate::measure::shown(&measure.kind, value, units)
-                    )
+                    let shown = if measure.kind.is_series() {
+                        crate::measure::shown_series(&measure.kind, &measured.series, units)
+                    } else {
+                        crate::measure::shown(&measure.kind, measured.value, units)
+                    };
+                    measure.series = measured.series;
+                    measure.times = measured.times;
+                    format!("{name}: {} = {shown}", measure.kind.describe())
                 }
                 Err(why) => {
                     measure.value = None;
+                    measure.series.clear();
+                    measure.times.clear();
                     let line = format!("{name} has no value: {why}.");
                     measure.error = Some(why);
                     line
@@ -3545,6 +3643,7 @@ impl ProjectApp {
                     _ => {}
                 }
             }
+            changed |= self.apply_series();
             if !changed {
                 break;
             }
@@ -3579,8 +3678,9 @@ impl ProjectApp {
                 .flatten();
         }
         if let Some(measure) = node.as_measure() {
+            // A series goes by [`Self::series_of`].
             let fresh = self.measure_state(id) == CellState::UpToDate;
-            return (cell == links::VALUE && name == RESULT && fresh)
+            return (cell == links::VALUE && name == RESULT && fresh && !measure.kind.is_series())
                 .then_some(measure.value)
                 .flatten();
         }
@@ -4350,7 +4450,7 @@ impl ProjectApp {
                 return;
             }
             // Its numbers are edited in its block.
-            Some(Kind::Math | Kind::Switch) => return,
+            Some(Kind::Math | Kind::Switch | Kind::Plot | Kind::MeshPreview) => return,
             None => return,
         }
         self.open_analysis(ctx, id, view, false);
@@ -5518,6 +5618,7 @@ impl ProjectApp {
             }
         }
         let base = self.export_base();
+        self.refresh_pictures(ui.ctx());
         let mut blocks: Vec<BlockView> = (self.nodes.iter())
             .map(|n| {
                 let fe = n.link_data().map(|d| d.fe);
@@ -5581,6 +5682,13 @@ impl ProjectApp {
                     (Kind::Math | Kind::Switch, _) => {
                         numbers::number_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
                     }
+                    (Kind::Plot, _) => {
+                        visualize::plot_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
+                    }
+                    (Kind::MeshPreview, _) => visualize::preview_rows(
+                        n,
+                        incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
+                    ),
                     (Kind::Analysis, None) | (Kind::Note, _) => Vec::new(),
                 };
                 let continues = (self.links.iter())
@@ -5623,6 +5731,11 @@ impl ProjectApp {
                     },
                     compact: self.compact.contains(&n.id),
                     number: n.as_number().map(|(b, switch)| (b.clone(), switch)),
+                    plot: self.plot_view(n),
+                    picture: self.picture(n.id),
+                    has_mesh: n
+                        .as_preview()
+                        .is_some_and(|p| p.model.mesh.element_count() > 0),
                     framed: frames::frame_of(&self.frames, n.id).is_some(),
                     chain,
                 }
@@ -6546,6 +6659,7 @@ impl ProjectApp {
         }
         self.sync_due = false;
         self.refresh_number_kinds();
+        self.drop_series_conflicts();
         self.apply_values();
         self.evaluate_measures();
         self.evaluate_deformed();
@@ -7223,7 +7337,11 @@ impl ProjectApp {
             | Action::AddSwitch(_)
             | Action::SetOperation(..)
             | Action::SetNumberInput(..)
-            | Action::SetChoices(..) => Vec::new(),
+            | Action::SetChoices(..)
+            | Action::AddPlot(_)
+            | Action::AddMeshPreview(_)
+            | Action::SetPlotKind(..)
+            | Action::SetBins(..) => Vec::new(),
         })
     }
 
@@ -7423,6 +7541,14 @@ impl ProjectApp {
                 self.sync_due = true;
             }
             Action::SetChoices(id, count) => self.set_choices(id, count),
+            Action::AddPlot(pos) => {
+                self.add_plot(pos);
+            }
+            Action::AddMeshPreview(pos) => {
+                self.add_mesh_preview(pos);
+            }
+            Action::SetPlotKind(id, kind) => self.set_plot_kind(id, kind),
+            Action::SetBins(id, bins) => self.set_bins(id, bins),
             Action::Toggle(id, path) => {
                 if let Some(node) = self.node(id)
                     && !node.expanded.remove(&path)
@@ -8068,6 +8194,9 @@ enum RowWidget {
     Operation,
     Input(usize),
     Choices,
+    /// The kind of plot of a Plot block, and the bins of its histogram.
+    PlotType,
+    Bins,
 }
 
 /// A link of a whole category to a block, for its row: from where, how many items it takes
@@ -8127,6 +8256,11 @@ struct BlockView {
     framed: bool,
     /// A Math or Switch block, and whether it is a switch.
     number: Option<(NumberBlock, bool)>,
+    /// What a Plot block draws.
+    plot: Option<PlotView>,
+    /// Of a Mesh Preview block, the picture of its mesh once drawn, and whether it has one.
+    picture: Option<egui::TextureId>,
+    has_mesh: bool,
     /// The mark of the step chain at the rows of steps, by row path.
     chain: HashMap<Vec<String>, ChainMark>,
 }
@@ -9082,6 +9216,11 @@ fn refusal(
             "{to} comes before {from} already, and a link cannot go back."
         ));
     }
+    if item.first().is_some_and(|c| c == links::VALUE)
+        && let Some(why) = series::series_refusal(nodes, existing, source, item, target, slot)
+    {
+        return Some(why);
+    }
     let first = slot.first().map(String::as_str);
     if first == Some(links::MEASURE) {
         return None;
@@ -9148,9 +9287,14 @@ fn refusal(
         // of what it gives to; so does a Math or Switch block without a kind, at either end.
         let open =
             |id: u64, path: &[String]| node(id).is_some_and(|n| numbers::open_number(n, path));
+        // A plot takes numbers of any kind.
+        let plotted = target_node.as_plot().is_some_and(
+            |p| matches!(slot, [_, key] if p.kind.inputs().iter().any(|(k, _)| k == key)),
+        ) && taken.is_none();
         let any = (feedback && given.is_none() && (taken.is_some() || open(target, slot)))
             || (open(source, item) && (taken.is_some() || open(target, slot)))
-            || (open(target, slot) && given.is_some());
+            || (open(target, slot) && given.is_some())
+            || plotted;
         if !any && (given.is_none() || given != taken) {
             let kind = |k: Option<ValueKind>| k.map_or("no number", ValueKind::label);
             return Some(format!(
@@ -9230,9 +9374,24 @@ fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
             [cell, key] if cell == links::PARAMETERS => (measure.kind.point().is_some()
                 && POINT_AXES.contains(&key.as_str()))
             .then_some(ValueKind::LENGTH),
+            [cell, name] if cell == links::VALUE && name == series::TIME => {
+                Some(ValueKind::Quantity(Quantity::Time))
+            }
             _ => (path == [links::VALUE, RESULT])
                 .then(|| crate::measure::value_kind(&measure.kind))
                 .flatten(),
+        };
+    }
+    if let Some(plot) = node.as_plot() {
+        // A plot takes numbers of any kind, and a count of bins.
+        return match path {
+            [cell, key] if cell == links::PARAMETERS && key == visualize::BINS => plot
+                .kind
+                .inputs()
+                .iter()
+                .any(|(k, _)| *k == key)
+                .then_some(ValueKind::Count),
+            _ => None,
         };
     }
     match path {
@@ -9792,14 +9951,25 @@ fn measure_rows(
         NodeIcon::Setup,
         "What the block measures; double-click the block to change it.".into(),
     );
+    let series = measure.kind.is_series();
     let text = match (measure.value, busy) {
         (_, true) => "Computing …".to_owned(),
+        (Some(_), false) if series => {
+            crate::measure::shown_series(&measure.kind, &measure.series, units)
+        }
         (Some(value), false) => crate::measure::shown(&measure.kind, value, units),
         (None, false) => "No value".to_owned(),
     };
-    let mut tip = "The value, in the units of the block: drag its pin to the Outputs of a \
-                   parameter study, which reads it. It is computed anew whenever the results or the definition change."
-        .to_owned();
+    let mut tip = if series {
+        "The values, a series in the units of the block: drag its pin to a Math block, which \
+         computes with it value by value or makes one number of it (Max, Min, Mean), or to a \
+         Plot block. It is computed anew whenever the results or the definition change."
+    } else {
+        "The value, in the units of the block: drag its pin to the Outputs of a parameter \
+         study, which reads it. It is computed anew whenever the results or the definition \
+         change."
+    }
+    .to_owned();
     if let Some(why) = &measure.error {
         tip.push_str(&format!("\nNo value: {why}."));
     }
@@ -9832,6 +10002,21 @@ fn measure_rows(
                 )
             });
         }
+    }
+    if matches!(measure.kind, MeasureKind::History { whole: true, .. }) {
+        let time = units.unit(Quantity::Time);
+        rows.push(Row {
+            output: true,
+            state: Some(state),
+            ..row(
+                &[links::VALUE, series::TIME],
+                format!("Time [{time}]"),
+                NodeIcon::Amplitudes,
+                "The time of each value of the history, a series: drag its pin to X of a Plot \
+                 block to plot the values over the time."
+                    .into(),
+            )
+        });
     }
     rows.push(value);
     rows
@@ -9952,6 +10137,8 @@ enum BlockKind {
     MeshExport,
     File,
     Note,
+    Plot,
+    MeshPreview,
 }
 
 fn block_kinds() -> Vec<BlockKind> {
@@ -9973,6 +10160,8 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::MeshExport,
         BlockKind::File,
         BlockKind::Note,
+        BlockKind::Plot,
+        BlockKind::MeshPreview,
     ]
 }
 
@@ -10042,12 +10231,13 @@ impl BlockKind {
             Self::Math => (
                 "Parameters",
                 "Math",
-                "add subtract multiply divide minimum maximum clamp number formula derived \
-                 calculate expression",
+                "add subtract multiply divide minimum maximum clamp mean average max min \
+                 number formula derived calculate expression series vector element-wise",
                 "Adds a block that computes a number from two others, like Blender's Math \
-                 node: add, subtract, multiply or divide by a factor, the smaller or the larger, \
-                 or a value kept between two limits. For parameters derived from others, such \
-                 as a length twice another one.",
+                 node: add, subtract, multiply or divide, the smaller or the larger, or a value \
+                 kept between two limits. With a series at an input it computes value by value, \
+                 like NumPy; Max, Min, Max Abs and Mean make one number of a series. For \
+                 parameters derived from others, such as a length twice another one.",
             ),
             Self::Switch => (
                 "Parameters",
@@ -10095,6 +10285,22 @@ impl BlockKind {
                  temperatures, the mesh of an input file (.inp), or geometry (STEP, IGES, \
                  BREP, STL). It reads the file again when it changes.",
             ),
+            Self::Plot => (
+                "Visualize",
+                "Plot",
+                "chart graph diagram curve line scatter histogram series history vector \
+                 visualize",
+                "Adds a block that plots the numbers and series linked to it in the block: a \
+                 line or points of Y over X, such as a whole history over its time, or a \
+                 histogram of the values of a field. Its type of plot decides its inputs.",
+            ),
+            Self::MeshPreview => (
+                "Visualize",
+                "Mesh Preview",
+                "picture image thumbnail geometry mesh view visualize",
+                "Adds a block that shows a small picture of the mesh linked to it, so that the \
+                 schematic shows the geometry beside its analysis without opening it.",
+            ),
             Self::Note => (
                 "Note",
                 "Note",
@@ -10130,6 +10336,8 @@ impl BlockKind {
             Self::Campbell => Action::AddCampbell(pos),
             Self::File => Action::AddFile(pos),
             Self::Note => Action::AddNote(pos),
+            Self::Plot => Action::AddPlot(pos),
+            Self::MeshPreview => Action::AddMeshPreview(pos),
         }
     }
 }
@@ -10258,6 +10466,7 @@ fn header_fill(kind: Kind) -> Option<egui::Color32> {
         Kind::Study | Kind::Campbell => crate::style::study_header(),
         Kind::MeshExport => crate::style::export_header(),
         Kind::Note => crate::style::note_header(),
+        Kind::Plot | Kind::MeshPreview => crate::style::visualize_header(),
         _ => return None,
     })
 }
@@ -10380,6 +10589,7 @@ impl Viewer {
         // The fields of a Math or Switch block leave room for the label of its operation.
         let width = match widget {
             RowWidget::Operation | RowWidget::Input(_) | RowWidget::Choices => 106.0,
+            RowWidget::PlotType | RowWidget::Bins => 130.0,
             _ => 118.0,
         };
         // The label senses the pointer left of the field only, so that the field shows its
@@ -10494,6 +10704,10 @@ impl Viewer {
         match widget {
             RowWidget::Operation | RowWidget::Input(_) | RowWidget::Choices => {
                 self.edit_number_row(&mut ui, id, row, widget, field, &tip);
+                return;
+            }
+            RowWidget::PlotType | RowWidget::Bins => {
+                self.edit_plot_row(&mut ui, id, row, widget, field, &tip);
                 return;
             }
             RowWidget::Exposed(key) => {
@@ -10652,7 +10866,9 @@ impl Viewer {
             | RowWidget::Exposed(_)
             | RowWidget::Operation
             | RowWidget::Input(_)
-            | RowWidget::Choices => return,
+            | RowWidget::Choices
+            | RowWidget::PlotType
+            | RowWidget::Bins => return,
         };
         response.on_hover_text(&tip);
         self.set_primitive(id, primitive, before);
@@ -10822,6 +11038,16 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Switch, ink);
                 icon.on_hover_text("Gives one of several numbers, picked by its index");
             }
+            Kind::Plot => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Plot, ink);
+                icon.on_hover_text("Plots the numbers and series linked to it");
+            }
+            Kind::MeshPreview => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Picture, ink);
+                icon.on_hover_text("Shows a small picture of the mesh linked to it");
+            }
         }
         let text = egui::RichText::new(&block.name).strong();
         let label = ui.add(
@@ -10876,6 +11102,8 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Note => "Double-click edits its text.",
             Kind::Math => "Its operation and numbers are edited in the block.",
             Kind::Switch => "Its index and choices are edited in the block.",
+            Kind::Plot => "Its type of plot and its inputs are chosen in the block.",
+            Kind::MeshPreview => "Shows the mesh linked to its Mesh row.",
         };
         // The name takes the clicks of the header, so it opens the block's menu too.
         label.on_hover_text(tip).context_menu(|ui| {
@@ -11116,6 +11344,35 @@ impl SnarlViewer<u64> for Viewer {
     fn has_body(&mut self, node: &u64) -> bool {
         self.block(*node)
             .is_some_and(|b| b.kind == Kind::Note && !b.compact)
+    }
+
+    // A Plot and a Mesh Preview block show their picture below their rows, also compact.
+    fn has_footer(&mut self, node: &u64) -> bool {
+        self.block(*node)
+            .is_some_and(|b| matches!(b.kind, Kind::Plot | Kind::MeshPreview))
+    }
+
+    fn show_footer(
+        &mut self,
+        node: NodeId,
+        _inputs: &[InPin],
+        _outputs: &[OutPin],
+        ui: &mut egui::Ui,
+        snarl: &mut Snarl<u64>,
+    ) {
+        let id = snarl[node];
+        let Some(block) = self.block(id) else {
+            return;
+        };
+        match block.kind {
+            Kind::Plot => {
+                if let Some(view) = &block.plot {
+                    self.show_plot(ui, view);
+                }
+            }
+            Kind::MeshPreview => self.show_picture(ui, block.picture, block.has_mesh),
+            _ => {}
+        }
     }
 
     fn show_body(
@@ -11741,7 +11998,10 @@ fn node_menu(
             entry(ui, "Read Again", "", Action::ReadFile(id));
         } else if kind == Kind::Campbell {
             entry(ui, "Open Diagram …", "", Action::Open(id, None));
-        } else if !matches!(kind, Kind::RefineMesh | Kind::DeformedMesh) {
+        } else if !matches!(
+            kind,
+            Kind::RefineMesh | Kind::DeformedMesh | Kind::Plot | Kind::MeshPreview
+        ) {
             entry(ui, "Edit …", "", Action::Open(id, None));
         }
         if matches!(kind, Kind::Mesh | Kind::RefineMesh) {
@@ -11883,9 +12143,9 @@ const ANALYSIS_TIP: &str = "Adds an analysis: a model of its own with geometry, 
 const PARAMETERS_TIP: &str = "Adds a block of named numbers: drag the pin of one to a \
                               parameter of another block, such as a length of a mesh block, \
                               which then takes its value.";
-const MEASURE_TIP: &str = "Adds a block that computes a key figure from the results of a \
-                           step linked to it, such as the largest von Mises stress, the \
-                           displacement of a node or an eigenfrequency.";
+const MEASURE_TIP: &str = "Adds a block that reads from the results of a step linked to it: \
+                           the values of a field over a region, the displacement of a node, \
+                           a history output or an eigenfrequency.";
 const STUDY_TIP: &str = "Adds a parameter study: a table of design points, each a set of \
                          values it gives to exposed parameters of analyses or numbers of \
                          other blocks, solved in turn, with the values of Measure blocks it \
@@ -13004,6 +13264,7 @@ mod tests {
             kind: MeasureKind::Eigenfrequency { mode: 2 },
             value: Some(12.5),
             evaluated: Some(7),
+            ..Default::default()
         };
         let mut node = Node::read(ProjectNode::Measure(block.clone()));
         assert_eq!(node.kind(), Kind::Measure);

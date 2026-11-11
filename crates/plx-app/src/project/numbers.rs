@@ -114,21 +114,33 @@ pub(super) fn number_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Ve
             )
         });
     }
-    let text = match number.result(switch) {
-        Some(value) => format!("Result: {}", shown_number(value, number.kind, number.units)),
-        None if switch => "Result: no choice".into(),
-        None => "Result: none".into(),
+    let mut tip = "The number the block gives: drag its pin to a parameter of the same kind, to \
+                   another Math or Switch block, or to the Outputs of a parameter study."
+        .to_owned();
+    let text = match (number.series_result(switch), number.result(switch)) {
+        (Some(Ok(series)), _) => {
+            tip = "The series the block gives, computed value by value: drag its pin to \
+                   another Math block or to a Plot block."
+                .into();
+            format!(
+                "Result: {}",
+                super::series::shown_series(&series, number.kind, number.units)
+            )
+        }
+        (Some(Err(why)), _) => {
+            tip.push_str(&format!("\nNo result: {why}."));
+            "Result: none".into()
+        }
+        (None, Some(value)) => {
+            format!("Result: {}", shown_number(value, number.kind, number.units))
+        }
+        (None, None) if switch => "Result: no choice".into(),
+        (None, None) => "Result: none".into(),
     };
     rows.push(Row {
         output: true,
         icon: NodeIcon::Results,
-        ..row(
-            vec![links::VALUE.to_owned(), RESULT.to_owned()],
-            text,
-            "The number the block gives: drag its pin to a parameter of the same kind, to \
-             another Math or Switch block, or to the Outputs of a parameter study."
-                .into(),
-        )
+        ..row(vec![links::VALUE.to_owned(), RESULT.to_owned()], text, tip)
     });
     rows
 }
@@ -156,6 +168,7 @@ impl ProjectApp {
             } else {
                 vec![0.0, 0.0]
             },
+            series: Vec::new(),
         };
         let (name, block) = if switch {
             (super::block_name("Switch"), Block::Switch(number))
@@ -188,6 +201,8 @@ impl ProjectApp {
                 || !matches!(links::slot(l), [c, k] if c == links::PARAMETERS && !keys.contains(k))
         });
         self.refresh_number_kinds();
+        // Max, Min and Mean give one number; the others a series of one at an input.
+        self.drop_series_conflicts();
         self.sync_due = true;
     }
 
@@ -515,6 +530,10 @@ impl Viewer {
                     .width(field.width())
                     .show_ui(ui, |ui| {
                         for choice in MathOp::ALL {
+                            if choice == MathOp::SeriesMax {
+                                ui.separator();
+                                ui.weak("Of a series");
+                            }
                             ui.selectable_value(&mut operation, choice, choice.label())
                                 .on_hover_text(choice.formula());
                         }
@@ -530,6 +549,18 @@ impl Viewer {
                 else {
                     return;
                 };
+                // A series a link gives shows how many values it has.
+                if let Some(series) = block.series.get(index).cloned().flatten() {
+                    ui.add_enabled_ui(false, |ui| {
+                        ui.add_sized(
+                            field.size(),
+                            egui::Button::new(format!("{} values", series.len())),
+                        )
+                    })
+                    .response
+                    .on_disabled_hover_text(tip);
+                    return;
+                }
                 let before = value;
                 let kind = kind.unwrap_or(ValueKind::Factor);
                 let drag = crate::parameter_set::field(&mut value, kind, block.units);

@@ -101,6 +101,10 @@ pub enum ProjectNode {
     Math(MathBlock),
     /// One of several numbers, picked by its index.
     Switch(SwitchBlock),
+    /// A plot of the numbers linked to it, drawn in the block.
+    Plot(PlotBlock),
+    /// A small picture of the mesh linked to it, drawn in the block.
+    MeshPreview(MeshPreview),
 }
 
 impl ProjectNode {
@@ -123,6 +127,8 @@ impl ProjectNode {
             Self::Note(n) => n.id,
             Self::Math(m) => m.id,
             Self::Switch(s) => s.id,
+            Self::Plot(p) => p.id,
+            Self::MeshPreview(m) => m.id,
         }
     }
 
@@ -144,6 +150,8 @@ impl ProjectNode {
             Self::Note(n) => &n.name,
             Self::Math(m) => &m.name,
             Self::Switch(s) => &s.name,
+            Self::Plot(p) => &p.name,
+            Self::MeshPreview(m) => &m.name,
         }
     }
 
@@ -166,6 +174,8 @@ impl ProjectNode {
             Self::Note(n) => n.position,
             Self::Math(m) => m.position,
             Self::Switch(s) => s.position,
+            Self::Plot(p) => p.position,
+            Self::MeshPreview(m) => m.position,
         }
     }
 }
@@ -296,6 +306,12 @@ pub struct MeasureBlock {
     pub value: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evaluated: Option<u64>,
+    /// Of a measure of a series, the values as last computed, in SI units.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub series: Vec<f64>,
+    /// Of the whole history of a step, the time (or frequency) of each of its values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub times: Vec<f64>,
 }
 
 /// A parameter study: the numbers it gives to other blocks and reads back, as columns of a
@@ -398,6 +414,37 @@ pub struct SwitchBlock {
     /// The choices, in SI units.
     #[serde(default)]
     pub choices: Vec<f64>,
+}
+
+/// A Plot block: draws the numbers and series linked to it in the block, as a line, points
+/// or a histogram.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PlotBlock {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    #[serde(default)]
+    pub kind: plx_model::PlotKind,
+    /// The bins of a histogram.
+    #[serde(default = "default_bins")]
+    pub bins: u32,
+}
+
+fn default_bins() -> u32 {
+    10
+}
+
+/// A Mesh Preview block: a small picture of the mesh linked to it, beside the analysis it
+/// belongs to, without opening it. The mesh comes by its link on every load.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MeshPreview {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
 }
 
 /// A frame of the project schematic: a named, tinted rectangle around the blocks it holds,
@@ -723,7 +770,7 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
 
 /// The oldest format that can still be opened. While Nodalis is being designed, a new
 /// format is not converted: older projects are refused.
-pub const FIRST_PROJECT_FORMAT: u32 = 20;
+pub const FIRST_PROJECT_FORMAT: u32 = 21;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
@@ -1315,6 +1362,177 @@ mod tests {
         save_project(std::path::Path::new(&path), &project).unwrap();
     }
 
+    /// Writes a project of a cantilever bent far by a force at its tip, with Measure blocks
+    /// of whole histories and field values, Math, Plot and Mesh Preview blocks, for the user
+    /// guide's screenshots of the Visualize blocks:
+    /// `PLX_VISUALIZE_DEMO=path cargo test visualize_demo -- --ignored`.
+    #[test]
+    #[ignore]
+    fn visualize_demo_project() {
+        use plx_model::{MathOp, MeasureKind, MeasureRegion, PlotKind};
+        let Some(path) = std::env::var_os("PLX_VISUALIZE_DEMO") else {
+            return;
+        };
+        let mut mesh = FeMesh::default();
+        let [bottom, top] = add_block(
+            &mut mesh,
+            "Beam",
+            1,
+            [0.0, 0.0, 0.0],
+            [0.02, 0.02, 0.2],
+            [2, 2, 12],
+        );
+        let mut model = FeModel::default();
+        model.materials.push(Material {
+            name: "Steel".into(),
+            density: Some(7850.0),
+            elastic: Some(plx_model::Elastic {
+                young: 2.1e11,
+                poisson: 0.3,
+            }),
+            ..Default::default()
+        });
+        model.sections.push(plx_model::Section {
+            name: "Solid_Section-1".into(),
+            material: model.materials.last().map(|m| m.id),
+            region: Region::Parts(vec!["Beam".into()]),
+            thickness: 1.0,
+            kind: plx_model::SectionKind::Solid,
+        });
+        let mut step = plx_model::Step::new_static("Load");
+        if let plx_model::StepKind::Static(stat) = &mut step.kind {
+            stat.frames = 20;
+            stat.nlgeom = true;
+        }
+        step.boundary_conditions.push(plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
+            distribution: None,
+            name: "Fixed-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(bottom.clone()),
+            kind: plx_model::BoundaryKind::displacement([Some(0.0); 6]),
+            amplitude: None,
+        });
+        step.loads.push(plx_model::Load::new(
+            "Force-1",
+            Region::Faces(top.clone()),
+            plx_model::LoadKind::Force {
+                value: [0.0, 80_000.0, 0.0],
+                each_node: false,
+            },
+        ));
+        model.steps = vec![step];
+        let tip = plx_model::HistoryOutput::node("Tip", Region::Faces(top));
+        let mut support = plx_model::HistoryOutput::node("Support", Region::Faces(bottom));
+        support.variables = vec!["RF".into()];
+        support.totals = plx_model::Totals::Only;
+        model.put_history_output(0, tip);
+        model.put_history_output(0, support);
+        let mut project = single(None, &mesh, &model, None);
+        if let Some(ProjectNode::Analysis(analysis)) = project.nodes.first_mut() {
+            analysis.name = "Cantilever".into();
+            analysis.position = [0.0, 0.0];
+        }
+        let history = |set: &str, field: &str, component: &str| MeasureKind::History {
+            set: set.into(),
+            field: field.into(),
+            component: component.into(),
+            whole: true,
+        };
+        let measure = |id, name: &str, position, kind| {
+            ProjectNode::Measure(MeasureBlock {
+                id,
+                name: name.into(),
+                position,
+                units: plx_model::UnitSystem::MmTonSC,
+                kind,
+                ..Default::default()
+            })
+        };
+        let math = |id, name: &str, position, operation, values: Vec<f64>| {
+            ProjectNode::Math(MathBlock {
+                id,
+                name: name.into(),
+                position,
+                units: plx_model::UnitSystem::MmTonSC,
+                operation,
+                values,
+                ..Default::default()
+            })
+        };
+        let plot = |id, name: &str, position, kind| {
+            ProjectNode::Plot(PlotBlock {
+                id,
+                name: name.into(),
+                position,
+                units: plx_model::UnitSystem::MmTonSC,
+                kind,
+                bins: 12,
+            })
+        };
+        project.nodes.extend([
+            ProjectNode::MeshPreview(MeshPreview {
+                id: 2,
+                name: "Beam".into(),
+                position: [0.0, 250.0],
+            }),
+            measure(
+                3,
+                "Tip",
+                [260.0, -60.0],
+                history("TIP", "DISPLACEMENTS", "U2"),
+            ),
+            measure(
+                4,
+                "Support",
+                [260.0, 90.0],
+                history("SUPPORT", "TOTAL_FORCE", "RF2"),
+            ),
+            math(5, "Force", [500.0, 90.0], MathOp::Multiply, vec![0.0, -1.0]),
+            plot(6, "Force over Deflection", [740.0, -60.0], PlotKind::Line),
+            measure(
+                7,
+                "Stresses",
+                [260.0, 240.0],
+                MeasureKind::FieldValues {
+                    field: "STRESS".into(),
+                    component: "MISES".into(),
+                    region: MeasureRegion::All,
+                },
+            ),
+            math(
+                8,
+                "Max Stress",
+                [500.0, 240.0],
+                MathOp::SeriesMax,
+                vec![0.0],
+            ),
+            plot(9, "Stress Histogram", [740.0, 200.0], PlotKind::Histogram),
+        ]);
+        let link = |source, item: &[&str], target, slot: &[&str]| Link {
+            source,
+            target,
+            item: item.iter().map(|s| s.to_string()).collect(),
+            slot: slot.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let results = ["Results", "Load"];
+        let value = ["Value", "Result"];
+        project.links = vec![
+            link(1, &["Mesh"], 2, &[]),
+            link(1, &results, 3, &["Measure"]),
+            link(1, &results, 4, &["Measure"]),
+            link(1, &results, 7, &["Measure"]),
+            link(4, &value, 5, &["Parameters", "a"]),
+            link(3, &value, 6, &["Parameters", "x"]),
+            link(5, &value, 6, &["Parameters", "y"]),
+            link(7, &value, 8, &["Parameters", "a"]),
+            link(7, &value, 9, &["Parameters", "values"]),
+        ];
+        save_project(std::path::Path::new(&path), &project).unwrap();
+    }
+
     /// Writes a project of a rubber pad (Yeoh) on a fixed base, compressed by 30 % from
     /// the top, for the user guide's screenshots of hyperelastic materials:
     /// `PLX_RUBBER_DEMO=path cargo test rubber_demo -- --ignored`.
@@ -1798,7 +2016,7 @@ mod tests {
         let parameters = ParameterSet {
             id: 6,
             name: "Parameters".into(),
-            position: [0.0, 300.0],
+            position: [0.0, 250.0],
             units: plx_model::UnitSystem::MmTonSC,
             parameters: vec![plx_model::Parameter::new(
                 "length",

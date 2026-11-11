@@ -42,6 +42,7 @@ mod moving_load;
 mod number;
 pub mod overview;
 mod parameter;
+mod plot;
 mod primitive;
 mod properties;
 mod refs;
@@ -109,13 +110,14 @@ pub use history::{HistoryKind, HistoryOutput, Totals};
 pub use hyperelastic::{Hyperelastic, HyperelasticModel, TestMode};
 pub use id::Id;
 pub use library::MaterialLibrary;
-pub use measure::{Extreme, MeasureKind, MeasureRegion, POINT_AXES};
+pub use measure::{MeasureKind, MeasureRegion, POINT_AXES};
 pub use mesh_operation::{MeshOperation, MeshOperationKind};
 pub use mesh_set::{MeshSet, SetKind};
 pub use moving_load::{AXIS_LABELS, LoadStations, MovingFrame, MovingLoad, Wheel, load_stations};
-pub use number::{MathOp, switch};
+pub use number::{MathOp, apply_series, switch};
 pub use overview::{Cell, OverviewGroup, OverviewRow, StepItemKey, StepOverview};
 pub use parameter::{Parameter, ValueKind};
+pub use plot::{PlotKind, histogram};
 pub use primitive::{MAX_PRIMITIVE_ELEMENTS, MeshPrimitive, Param, ParamSlot, ParamValue};
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
@@ -163,8 +165,10 @@ use serde::{Deserialize, Serialize};
 /// Format 19 replaces the perturbation switches of the frequency, buckle and modal dynamic
 /// steps by the [`Base`] they are computed about; older formats are refused. Format 20 keeps
 /// the history outputs once in the model ([`FeModel::history_outputs`]) and lets the steps
-/// list those they print by id; older formats are refused.
-pub const PROJECT_FORMAT: u32 = 20;
+/// list those they print by id; older formats are refused. Format 21 replaces the field
+/// extreme of a Measure block by the values of the field over a region, a series that a
+/// Math block reduces, and adds the Plot and Mesh Preview blocks; older formats are refused.
+pub const PROJECT_FORMAT: u32 = 21;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

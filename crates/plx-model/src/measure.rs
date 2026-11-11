@@ -1,47 +1,8 @@
 //! A key figure taken from the results of a step, as a Measure block of the project schematic
-//! computes it: the largest von Mises stress in a region, the displacement of a node, a total
+//! computes it: the von Mises stresses of a region, the displacement of a node, a total
 //! force, an eigenfrequency. A parameter study reads it.
 
 use serde::{Deserialize, Serialize};
-
-/// Which extreme of a field a measure takes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Extreme {
-    #[default]
-    Max,
-    Min,
-    /// The value of largest magnitude, with its sign.
-    MaxAbs,
-}
-
-impl Extreme {
-    pub const ALL: [Self; 3] = [Self::Max, Self::Min, Self::MaxAbs];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Max => "Maximum",
-            Self::Min => "Minimum",
-            Self::MaxAbs => "Largest magnitude",
-        }
-    }
-
-    /// The extreme of `values`, NaN left out.
-    pub fn of(self, values: impl IntoIterator<Item = f64>) -> Option<f64> {
-        let mut best: Option<f64> = None;
-        for value in values.into_iter().filter(|v| v.is_finite()) {
-            let better = match (self, best) {
-                (_, None) => true,
-                (Self::Max, Some(b)) => value > b,
-                (Self::Min, Some(b)) => value < b,
-                (Self::MaxAbs, Some(b)) => value.abs() > b.abs(),
-            };
-            if better {
-                best = Some(value);
-            }
-        }
-        best
-    }
-}
 
 /// The nodes a field measure looks at.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,11 +19,11 @@ pub enum MeasureRegion {
 /// (`STRESS` / `MISES`, `DISP` / `ALL`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MeasureKind {
-    /// An extreme of a field component over a region.
-    FieldExtreme {
+    /// The values of a field component at the nodes of a region, a series: a Math block
+    /// takes its largest, smallest or mean value, a Plot block its histogram.
+    FieldValues {
         field: String,
         component: String,
-        extreme: Extreme,
         region: MeasureRegion,
     },
     /// A field component at one node.
@@ -79,12 +40,15 @@ pub enum MeasureKind {
         component: String,
         point: [f64; 3],
     },
-    /// The first value of a history output (`.dat`), such as the total force of a set
-    /// (`TOTAL_FORCE` / `RF3`).
+    /// A value of a history output (`.dat`), such as the total force of a set
+    /// (`TOTAL_FORCE` / `RF3`): of the last increment of the step, or with `whole` the
+    /// values of all its increments, a series that goes to Math and Plot blocks.
     History {
         set: String,
         field: String,
         component: String,
+        #[serde(default)]
+        whole: bool,
     },
     /// The eigenfrequency of mode `mode`, counted from 1, of a frequency step.
     Eigenfrequency { mode: u32 },
@@ -96,10 +60,9 @@ pub const POINT_AXES: [&str; 3] = ["x", "y", "z"];
 
 impl Default for MeasureKind {
     fn default() -> Self {
-        Self::FieldExtreme {
+        Self::FieldValues {
             field: "STRESS".into(),
             component: "MISES".into(),
-            extreme: Extreme::Max,
             region: MeasureRegion::All,
         }
     }
@@ -124,6 +87,7 @@ impl MeasureKind {
                 set: String::new(),
                 field: "TOTAL_FORCE".into(),
                 component: "RF3".into(),
+                whole: false,
             },
             Self::Eigenfrequency { mode: 1 },
         ]
@@ -131,7 +95,7 @@ impl MeasureKind {
 
     pub fn label(&self) -> &'static str {
         match self {
-            Self::FieldExtreme { .. } => "Field extreme",
+            Self::FieldValues { .. } => "Field values",
             Self::NodeValue { .. } => "Value at a node",
             Self::PointValue { .. } => "Value at a point",
             Self::History { .. } => "History output",
@@ -142,7 +106,7 @@ impl MeasureKind {
     /// The field and component its value has, for its unit; an eigenfrequency is `FREQ`.
     pub fn field(&self) -> (&str, &str) {
         match self {
-            Self::FieldExtreme {
+            Self::FieldValues {
                 field, component, ..
             }
             | Self::NodeValue {
@@ -156,6 +120,14 @@ impl MeasureKind {
             } => (field, component),
             Self::Eigenfrequency { .. } => ("FREQ", ""),
         }
+    }
+
+    /// Whether it gives a series of values, one per increment, and not a single number.
+    pub fn is_series(&self) -> bool {
+        matches!(
+            self,
+            Self::FieldValues { .. } | Self::History { whole: true, .. }
+        )
     }
 
     /// The point of a measure at a point.
@@ -185,17 +157,16 @@ impl MeasureKind {
     /// A short text of what it measures: "Maximum of STRESS MISES in TIP".
     pub fn describe(&self) -> String {
         match self {
-            Self::FieldExtreme {
+            Self::FieldValues {
                 field,
                 component,
-                extreme,
                 region,
             } => {
                 let region = match region {
                     MeasureRegion::All => String::new(),
                     MeasureRegion::NodeSet(set) => format!(" in {set}"),
                 };
-                format!("{} of {field} {component}{region}", extreme.label())
+                format!("{field} {component}{region}")
             }
             Self::NodeValue {
                 field,
@@ -209,7 +180,11 @@ impl MeasureKind {
                 set,
                 field,
                 component,
-            } => format!("{field} {component} of {set}"),
+                whole,
+            } => {
+                let take = if *whole { "History of " } else { "" };
+                format!("{take}{field} {component} of {set}")
+            }
             Self::Eigenfrequency { mode } => format!("Eigenfrequency of mode {mode}"),
         }
     }
@@ -220,11 +195,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extremes_leave_out_nan_and_keep_the_sign() {
-        let values = [1.0, -3.0, f64::NAN, 2.0];
-        assert_eq!(Extreme::Max.of(values), Some(2.0));
-        assert_eq!(Extreme::Min.of(values), Some(-3.0));
-        assert_eq!(Extreme::MaxAbs.of(values), Some(-3.0));
-        assert_eq!(Extreme::Max.of([f64::NAN]), None);
+    fn field_values_and_whole_histories_are_series() {
+        assert!(MeasureKind::default().is_series());
+        let mut history = MeasureKind::choices()[3].clone();
+        assert!(!history.is_series());
+        if let MeasureKind::History { whole, .. } = &mut history {
+            *whole = true;
+        }
+        assert!(history.is_series());
+        assert!(!MeasureKind::Eigenfrequency { mode: 1 }.is_series());
     }
 }
