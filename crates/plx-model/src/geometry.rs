@@ -280,7 +280,7 @@ impl Default for MeshingParameters {
             midside_nodes_on_geometry: false,
             optimize: true,
             quad_dominated: true,
-            hexahedra_where_possible: false,
+            hexahedra_where_possible: true,
         }
     }
 }

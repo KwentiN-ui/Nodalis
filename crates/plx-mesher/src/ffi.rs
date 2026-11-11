@@ -82,8 +82,13 @@ gmsh_api! {
         *mut *mut c_double, *mut usize,
         Ierr,
     );
+    get_normal = "gmshModelGetNormal":
+        fn(c_int, *const c_double, usize, *mut *mut c_double, *mut usize, Ierr);
+    occ_copy = "gmshModelOccCopy": fn(*const c_int, usize, *mut *mut c_int, *mut usize, Ierr);
     is_inside = "gmshModelIsInside": fn(c_int, c_int, *const c_double, usize, c_int, Ierr) -> c_int;
     set_visibility = "gmshModelSetVisibility": fn(*const c_int, usize, c_int, c_int, Ierr);
+    occ_translate = "gmshModelOccTranslate":
+        fn(*const c_int, usize, c_double, c_double, c_double, Ierr);
     occ_affine_transform = "gmshModelOccAffineTransform":
         fn(*const c_int, usize, *const c_double, usize, Ierr);
     occ_intersect = "gmshModelOccIntersect": fn(

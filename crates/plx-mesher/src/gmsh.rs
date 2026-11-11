@@ -554,6 +554,34 @@ impl Gmsh {
         Ok(self.take_vec(coords, len).as_chunks::<3>().0.to_vec())
     }
 
+    /// Unit normals of a surface at parameters, flat (two values per point).
+    pub fn normals(&self, face: i32, parameters: &[f64]) -> Result<Vec<[f64; 3]>, GmshError> {
+        let (mut normals, mut len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.get_normal)(
+                face,
+                parameters.as_ptr(),
+                parameters.len(),
+                &mut normals,
+                &mut len,
+                e,
+            );
+        })?;
+        Ok(self.take_vec(normals, len).as_chunks::<3>().0.to_vec())
+    }
+
+    /// Copies of entities, with what bounds them; returns the copies.
+    pub fn copy(&self, entities: &[(i32, i32)]) -> Result<Vec<(i32, i32)>, GmshError> {
+        let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
+        let (mut out, mut len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.occ_copy)(flat.as_ptr(), flat.len(), &mut out, &mut len, e);
+        })?;
+        let out = self.take_vec(out, len);
+        self.synchronize()?;
+        Ok(pairs(&out))
+    }
+
     /// The point of a curve or surface closest to a point.
     pub fn closest_point(
         &self,
@@ -620,7 +648,17 @@ impl Gmsh {
         })
     }
 
-    /// Moves entities by an affine transformation, the rows of a 3 x 4 matrix.
+    /// Moves entities of the OpenCASCADE model; their shapes stay what they are.
+    pub fn translate(&self, entities: &[(i32, i32)], by: [f64; 3]) -> Result<(), GmshError> {
+        let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
+        self.call(|e| unsafe {
+            (self.api.occ_translate)(flat.as_ptr(), flat.len(), by[0], by[1], by[2], e);
+        })?;
+        self.synchronize()
+    }
+
+    /// Applies an affine map to entities of the OpenCASCADE model. Curved shapes become
+    /// splines by it, which are close to them only.
     pub fn affine_transform(
         &self,
         entities: &[(i32, i32)],

@@ -13,7 +13,7 @@ use plx_model::{ExtrudeMesh, Geometry, Recombination};
 use crate::gmsh::{Gmsh, GmshError};
 use crate::{
     GeneratedMesh, LINE2, LINE3, MeshOptions, POINT, QUAD4, QUAD8, TRI3, TRI6, generate_faces,
-    node_coords,
+    local_sizes, node_coords,
 };
 
 pub(crate) type Point = [f64; 3];
@@ -320,6 +320,16 @@ fn find_sweep(topology: &Topology, extrude: &ExtrudeMesh, part: &str) -> Result<
         })
 }
 
+/// Gmsh's number of the way triangles are joined to quadrilaterals.
+pub(crate) fn recombination_number(recombination: Recombination) -> f64 {
+    match recombination {
+        Recombination::None | Recombination::Simple => 0.0,
+        Recombination::Blossom => 1.0,
+        Recombination::SimpleFullQuad => 2.0,
+        Recombination::BlossomFullQuad => 3.0,
+    }
+}
+
 /// One element of the source mesh: its corner and midside nodes as Gmsh tags, turned so
 /// that its normal points along the extrusion.
 pub(crate) struct SourceElement {
@@ -440,7 +450,7 @@ pub(crate) fn source_elements(
 }
 
 /// Sweeps the source elements through the levels: hexahedra from quadrilaterals, wedges
-/// from triangles, one part.
+/// from triangles, one part. Only the elements present in a layer are swept through it.
 pub(crate) fn sweep_mesh<'a>(
     part: &str,
     coords: &'a HashMap<usize, Point>,
@@ -448,6 +458,7 @@ pub(crate) fn sweep_mesh<'a>(
     motion: Motion,
     levels: &[f64],
     quadratic: bool,
+    present: &dyn Fn(usize, &SourceElement) -> bool,
 ) -> Result<(FeMesh, Builder<'a>), GmshError> {
     let mut builder = Builder::new(coords, motion, levels, quadratic);
     let mut mesh = FeMesh::default();
@@ -457,7 +468,7 @@ pub(crate) fn sweep_mesh<'a>(
         elements: Vec::new(),
     };
     for layer in 0..levels.len() {
-        for element in elements {
+        for element in elements.iter().filter(|e| present(layer, e)) {
             let (shape, type_name) = match (element.corners.len(), quadratic) {
                 (3, false) => (ElementShape::Wedge6, "C3D6"),
                 (3, true) => (ElementShape::Wedge15, "C3D15"),
@@ -531,22 +542,10 @@ pub(crate) fn extrude_part_mesh(
     let mut options = MeshOptions::of_part(geometry, part);
     options.algorithms.0 = extrude.algorithm_2d;
     options.quads = extrude.recombination != Recombination::None;
-    options.recombination = match extrude.recombination {
-        Recombination::None | Recombination::Simple => 0.0,
-        Recombination::Blossom => 1.0,
-        Recombination::SimpleFullQuad => 2.0,
-        Recombination::BlossomFullQuad => 3.0,
-    };
+    options.recombination = recombination_number(extrude.recombination);
     let mut notes = Vec::new();
-    let sized = sweep.source.iter().copied().collect();
-    generate_faces(
-        gmsh,
-        geometry,
-        &mut options,
-        &sweep.source,
-        &sized,
-        &mut notes,
-    )?;
+    let sizes = local_sizes(gmsh, geometry, &sweep.source.iter().copied().collect())?;
+    generate_faces(gmsh, &mut options, &sweep.source, &sizes, &mut notes)?;
     let quadratic = options.order == 2;
     let coords = node_coords(gmsh)?;
     let motion = Motion::Translate(sweep.vector);
@@ -571,7 +570,15 @@ pub(crate) fn extrude_part_mesh(
     let max_size = geometry.parameters(part).max_size;
     let levels = (extrude.layers.levels(max_size, norm(sweep.vector)))
         .map_err(|reason| GmshError::Other(format!("{part}: {reason}")))?;
-    let (mut mesh, builder) = sweep_mesh(part, &coords, &elements, motion, &levels, quadratic)?;
+    let (mut mesh, builder) = sweep_mesh(
+        part,
+        &coords,
+        &elements,
+        motion,
+        &levels,
+        quadratic,
+        &|_, _| true,
+    )?;
     mesh.cad = builder.cad_map(gmsh, &mesh, &elements, &sweep)?;
     let mut warnings = gmsh.warnings()?;
     warnings.extend(notes.into_iter().map(|note| format!("{part}: {note}")));
