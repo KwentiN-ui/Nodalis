@@ -173,6 +173,7 @@ pub enum Cmd {
     CoordinateSystem,
     Plane,
     DetectContacts,
+    PartGroup,
     ContactRegion,
     Bolt,
     Constraint,
@@ -181,6 +182,7 @@ pub enum Cmd {
     Tie,
     NodeTie,
     ContactWorksheet,
+    ContactMatrix,
     ConnectionSettings,
     StepOverview,
     Step,
@@ -1305,6 +1307,17 @@ fn build() -> Vec<Command> {
         "Finds the faces of parts that touch and makes contact regions.",
     ));
     add(command(
+        C::PartGroup,
+        "Part\nGroup",
+        f,
+        t,
+        "Detect",
+        Tree(TreeIcon::Part),
+        "",
+        "A named set of parts chosen by name, pattern or material, for the rules of contact \
+         detections.",
+    ));
+    add(command(
         C::ContactRegion,
         "Contact\nRegion",
         f,
@@ -1383,6 +1396,16 @@ fn build() -> Vec<Command> {
         Shape(Glyph::Worksheet),
         "",
         "The table of all contact regions.",
+    ));
+    add(command(
+        C::ContactMatrix,
+        "Contact\nMatrix",
+        f,
+        t,
+        "Review",
+        Shape(Glyph::Worksheet),
+        "",
+        "The contact regions between part groups, by type.",
     ));
     add(command(
         C::ConnectionSettings,

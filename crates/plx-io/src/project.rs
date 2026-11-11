@@ -1156,6 +1156,119 @@ mod tests {
         [bottom, top]
     }
 
+    /// Writes a project of an assembly of a base, plates, bolts and rubber pads with part
+    /// groups and a contact detection whose rules give each kind of pair its type, for the
+    /// user guide's screenshots: `PLX_RULES_DEMO=path cargo test rules_demo -- --ignored`.
+    #[test]
+    #[ignore]
+    fn contact_rules_demo_project() {
+        use plx_model::{
+            ContactBehavior, ContactDetection, ContactRule, PartFilter, PartGroup, PartTerm,
+            RuleAction,
+        };
+        let Some(path) = std::env::var_os("PLX_RULES_DEMO") else {
+            return;
+        };
+        let mut mesh = FeMesh::default();
+        let mm = 1e-3;
+        let mut first = 1;
+        let mut block = |mesh: &mut FeMesh, name: &str, origin: [f64; 3], size: [f64; 3]| {
+            let n = size.map(|s| ((s / 5.0).round() as u32).max(1));
+            add_block(
+                mesh,
+                name,
+                first,
+                origin.map(|v| v * mm),
+                size.map(|v| v * mm),
+                n,
+            );
+            first += 10_000;
+        };
+        block(&mut mesh, "Base", [0.0, 0.0, 0.0], [160.0, 40.0, 10.0]);
+        for i in 0..4 {
+            let x = 40.0 * f64::from(i);
+            block(&mut mesh, &format!("Plate_{}", i + 1), [x, 0.0, 10.0], [40.0, 40.0, 5.0]);
+            for (k, dx) in [5.0, 25.0].into_iter().enumerate() {
+                let name = format!("Bolt_M10_{}", 2 * i + k as u32 + 1);
+                block(&mut mesh, &name, [x + dx, 15.0, 15.0], [10.0, 10.0, 10.0]);
+            }
+        }
+        block(&mut mesh, "Pad_left", [0.0, 0.0, -5.0], [20.0, 40.0, 5.0]);
+        block(&mut mesh, "Pad_right", [140.0, 0.0, -5.0], [20.0, 40.0, 5.0]);
+        let mut model = FeModel::default();
+        let (steel, rubber) = (plx_model::Id::new(), plx_model::Id::new());
+        for (id, name, young) in [(steel, "Steel", 210e9), (rubber, "Rubber", 10e6)] {
+            model.materials.push(Material {
+                id,
+                name: name.into(),
+                density: Some(7850.0),
+                elastic: Some(plx_model::Elastic {
+                    young,
+                    poisson: 0.3,
+                }),
+                ..Default::default()
+            });
+        }
+        let names: Vec<String> = mesh.parts.iter().map(|p| p.name.clone()).collect();
+        let (pads, metal): (Vec<String>, Vec<String>) =
+            names.into_iter().partition(|n| n.starts_with("Pad"));
+        for (name, material, parts) in [("Steel", steel, metal), ("Rubber", rubber, pads)] {
+            model.sections.push(plx_model::Section {
+                name: name.into(),
+                material: Some(material),
+                region: Region::Parts(parts),
+                thickness: 1.0,
+                kind: plx_model::SectionKind::Solid,
+            });
+        }
+        let group = |name: &str, term: PartTerm| PartGroup {
+            filter: PartFilter {
+                include: vec![term],
+                exclude: Vec::new(),
+            },
+            ..PartGroup::new(name)
+        };
+        let groups = [
+            group("Housing", PartTerm::Part("Base".into())),
+            group("Plates", PartTerm::Pattern("Plate*".into())),
+            group("Bolts", PartTerm::Pattern("Bolt*".into())),
+            group("Pads", PartTerm::Material(rubber)),
+        ];
+        let of = |g: &PartGroup| PartFilter {
+            include: vec![PartTerm::Group(g.id)],
+            exclude: Vec::new(),
+        };
+        let mut detection = ContactDetection::new("Assembly");
+        detection.rules = vec![
+            ContactRule {
+                side_a: of(&groups[2]),
+                side_b: PartFilter::all(),
+                action: RuleAction::Type(ContactBehavior::Frictional { mu: 0.12 }),
+            },
+            ContactRule {
+                side_a: of(&groups[1]),
+                side_b: of(&groups[1]),
+                action: RuleAction::Exclude,
+            },
+            ContactRule {
+                side_a: of(&groups[3]),
+                side_b: PartFilter::all(),
+                action: RuleAction::Type(ContactBehavior::Frictionless),
+            },
+        ];
+        model.part_groups = groups.to_vec();
+        model.contact_detections.push(detection);
+        let skins: Vec<_> = (mesh.parts.iter())
+            .map(|p| plx_mesh::extract_part_skin(&mesh, p, 30.0))
+            .collect();
+        let visible = vec![true; mesh.parts.len()];
+        let report = model.detect_contacts(0, &mesh, &skins, &visible).unwrap();
+        println!("{}", report.summary("Assembly"));
+        model.steps.push(plx_model::Step::new_static("Step-1"));
+        let project = single(None, &mesh, &model, None);
+        save_project(std::path::Path::new(&path), &project).unwrap();
+    }
+
     /// Writes a project of a base plate, a block bonded onto it and a cap resting on the
     /// block with friction, for the user guide's screenshots of contact regions:
     /// `PLX_CONTACT_DEMO=path cargo test contact_demo -- --ignored`.
@@ -1868,8 +1981,20 @@ mod tests {
                     plx_model::ContactBehavior::Frictional { mu: 0.2 },
                 )
             }],
+            part_groups: vec![plx_model::PartGroup {
+                filter: plx_model::PartFilter {
+                    include: vec![plx_model::PartTerm::Pattern("A*".into())],
+                    exclude: vec![plx_model::PartTerm::Part("B".into())],
+                },
+                ..plx_model::PartGroup::new("Group A")
+            }],
             contact_detections: vec![plx_model::ContactDetection {
-                parts: vec!["A".into()],
+                scope: plx_model::PartFilter::parts(["A"]),
+                rules: vec![plx_model::ContactRule {
+                    side_a: plx_model::PartFilter::parts(["A"]),
+                    side_b: plx_model::PartFilter::all(),
+                    action: plx_model::RuleAction::Exclude,
+                }],
                 tolerance: Some(2e-4),
                 grouping: plx_model::DetectionGrouping::Graph,
                 behavior: plx_model::ContactBehavior::Rough,

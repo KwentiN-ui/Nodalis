@@ -147,6 +147,19 @@ impl FeModel {
         for r in self.regions_mut() {
             region(r, visit);
         }
+        let filters = (self.contact_detections.iter_mut())
+            .flat_map(|d| {
+                std::iter::once(&mut d.scope)
+                    .chain((d.rules.iter_mut()).flat_map(|r| [&mut r.side_a, &mut r.side_b]))
+            })
+            .chain(self.part_groups.iter_mut().map(|g| &mut g.filter));
+        for filter in filters {
+            for term in filter.include.iter_mut().chain(&mut filter.exclude) {
+                if let crate::PartTerm::Material(id) | crate::PartTerm::Group(id) = term {
+                    visit(id);
+                }
+            }
+        }
         for condition in &mut self.initial_conditions {
             region(&mut condition.region, visit);
             optional(&mut condition.distribution, visit);
@@ -272,6 +285,9 @@ impl FeModel {
         }
         for d in &self.contact_detections {
             add("Detection", &d.name, d.id);
+        }
+        for g in &self.part_groups {
+            add("PartGroup", &g.name, g.id);
         }
         for b in &self.bolts {
             add("Bolt", &b.name, b.id);

@@ -262,12 +262,14 @@ Instead of picking every pair of sides by hand, let Nodalis find them:
 touch and adds a contact region for every pair it finds, listed under the detection in the tree.
 Ropes lying on a surface are found too, see @rope-contact.
 
-#screenshot("contact-detection-dialog.png", [A contact detection of all visible parts with the
-  derived tolerance])
+#screenshot("contact-detection-dialog.png", [A contact detection of an assembly with its rules:
+  bolts frictional, plates against plates left out, rubber pads frictionless, all other pairs
+  bonded; rule 1 is open below the table])
 
 #fields(
-  [Parts], [#ui("All visible parts"), or untick it and choose the parts to search, e.g. only the
-    bolts and the plates they hold.],
+  [Search in], [The parts searched, as a part filter (@part-filters). Without parts to include
+    it searches #ui("All visible parts"), less those after #ui("except"), e.g. all visible parts
+    except the group of the screws.],
   [Tolerance], [Surfaces closer than this touch. Auto is 0.5 % of the size of the parts
     searched, but at least half their element size, so that two meshes on a curved face still
     meet (on the geometry, see @contact-detection-geometry, just the 0.5 %). The regions found get it as their tolerance, so that a tie catches every node the
@@ -280,8 +282,62 @@ Ropes lying on a surface are found too, see @rope-contact.
   [Group by], [#ui("Parts") (default): one region per pair of touching parts. #ui("Faces"): one
     per pair of touching faces. #ui("Graph"): touching faces sharing nodes are merged, so that
     every node is on the slave side of one region only.],
-  [Type], [The type of the regions found, #ui("Bonded") by default.],
+  [Rules], [The type each pair found gets, see below. The last row, #ui("Any") to #ui("Any"),
+    is the type of all other pairs, #ui("Bonded") by default.],
 )
+
+===== Rules <contact-rules>
+
+A large assembly has different contacts: bolts sit on plates with friction, housings are
+glued, rubber pads slide. One detection handles them all: it searches once and gives each pair
+found the type of the first rule whose sides match the parts of the pair, as Abaqus' contact
+property assignments do. #ui("Add Rule") adds a rule above the last row; #ui("Up") and
+#ui("Down") change the order, which matters where rules overlap: put the specific ones first.
+Clicking a rule opens its two sides below the table, each a part filter (@part-filters). A pair
+matches when the parts of one of its sides all pass #ui("Side A") and those of the other all
+pass #ui("Side B"), whichever way round.
+
+#fields(
+  [Side A, Side B], [The parts of the two sides, e.g. #ui("Group: Bolts") and #ui("Any").],
+  [Type], [The type the pairs get. #ui("Exclude") makes no region for them, e.g. for plates that
+    touch side by side but carry nothing between them.],
+  [Regions], [How many of the regions the detection found take their type from the rule, of
+    the last run; #ui("-") before the first.],
+)
+
+A rule names groups, patterns or materials rather than single parts, so it keeps working when
+parts are added, renamed or meshed again: #ui("Detect Again") applies the rules as they are
+now. Regions you changed by hand stay as they are, as before.
+
+A pair found by two detections belongs to the one lower in the tree: running a detection takes
+over the regions of the detections above it for the same parts and leaves those of detections
+below alone; the output window says how many it took over or left. So a detection for all
+parts can sit at the top and a narrower one with other settings, say a larger tolerance for
+the bolts, below it.
+
+===== Part filters and part groups <part-filters>
+
+Wherever a detection asks for parts, a part filter chooses them. Its terms are small buttons; a
+click on one removes it. #ui("+") adds a term:
+
+#fields(
+  [Name pattern], [Parts whose name matches, case ignored: #ui("*") stands for any text,
+    #ui("?") for one character, and a pattern without them matches names containing it, e.g.
+    #ui("Bolt*") or #ui("M10"). #ui("Add Pattern") adds the pattern; the list below it adds one
+    of the matching parts by name instead.],
+  [Selected Parts], [The parts selected in the 3D view or the FE Model tree;
+    #key("Ctrl")+click parts there to select several while the dialog is open.],
+  [Material], [Parts with a section of this material.],
+  [Part Group], [The parts of a part group.],
+)
+
+Terms before #ui("except") include parts, those after it exclude them. #ui("Matches 8 of 19
+parts") below says how many parts the filter takes; hover it for their names.
+
+A part group is a named filter: #menu("Connections", "Part Group") creates one, listed under
+#ui("Part Groups") in #ui("Connections"). A group follows its filter, so a part added later joins
+it when it matches. Deleting a group or a material removes it from the filters that named it;
+renaming a part renames it there too.
 
 The regions found are named from their definition, e.g. #ui("Bonded - Base to Block"), and work
 like regions made by hand. #ui("Detect Again") in the context menu of the detection searches
@@ -388,6 +444,22 @@ definition, or delete them.
 
 #screenshot("contact-worksheet.png", [The contact worksheet after a run: the bonded region
   is closed, the frictional one partly closed, and after solving it sticks and slides])
+
+#ui("Filter") above the table keeps the rows whose name, detection or sides contain the text
+or match it as a pattern, e.g. #ui("Bolt*"); #ui("Select Shown") selects all of them, so
+that the buttons change them at once.
+
+==== Contact matrix <contact-matrix>
+
+#menu("Connections", "Contact Matrix") shows the contact regions between part groups
+(@part-filters): a cell per pair of groups with the number of regions and their type, or
+#ui("Mixed") with the types on hover. Each part counts in the first group it matches; parts in
+no group are under #ui("Other"). A click on a cell selects its regions and opens the worksheet;
+its context menu sets their type, activates or deactivates them. Without part groups the rows
+are the parts.
+
+#screenshot("contact-matrix.png", [The contact matrix of the assembly: bolts on plates
+  frictional, plates on the housing bonded, pads frictionless])
 
 ==== Contact check <contact-check>
 

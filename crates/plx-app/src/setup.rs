@@ -75,6 +75,8 @@ pub enum NewItem {
     ContactRegion,
     /// A search for contact regions, kept to run it again.
     ContactDetection,
+    /// A named set of parts chosen by a filter.
+    PartGroup,
     /// A bolt preloaded across a cut through its shank.
     Bolt,
     ContactPair,
@@ -1292,6 +1294,7 @@ enum Draft {
     /// A contact region with side A as master and side B as slave of the drafts.
     ContactRegion(plx_model::ContactRegion, MasterSlave, RegionView),
     ContactDetection(plx_model::ContactDetection),
+    PartGroup(plx_model::PartGroup),
     /// A bolt with side A as master and side B as slave of the drafts, and its action in
     /// each step (`None` automatic).
     Bolt(
@@ -2253,6 +2256,15 @@ impl Editor {
                 };
                 Draft::ContactDetection(plx_model::ContactDetection::new(name))
             }
+            NewItem::PartGroup => {
+                let existing = names(&fe.part_groups, |g| &g.name);
+                let name = if existing.is_empty() {
+                    "Group".to_owned()
+                } else {
+                    next_name("Group", existing)
+                };
+                Draft::PartGroup(plx_model::PartGroup::new(name))
+            }
             NewItem::ContactPair => {
                 let existing = names(&fe.contact_pairs, |c| &c.name);
                 let interaction = fe.surface_interactions.first().map(|s| s.id);
@@ -2464,6 +2476,7 @@ impl Editor {
                 Draft::ContactDetection(fe.contact_detections.get(i)?.clone()),
                 i,
             ),
+            TreeItem::PartGroup(i) => (Draft::PartGroup(fe.part_groups.get(i)?.clone()), i),
             TreeItem::Bolt(i) => {
                 let bolt = fe.bolts.get(i)?.clone();
                 let sides =
@@ -2548,6 +2561,7 @@ impl Editor {
             Draft::ContactPair(c, _) => ("Contact Pair", &c.name),
             Draft::ContactRegion(r, ..) => ("Contact Region", &r.name),
             Draft::ContactDetection(d) => ("Contact Detection", &d.name),
+            Draft::PartGroup(g) => ("Part Group", &g.name),
             Draft::Bolt(b, ..) => ("Bolt", &b.name),
             Draft::Connections(_) => return "Connections".into(),
             Draft::Tie(t, _) => ("Tie", &t.name),
@@ -2659,10 +2673,11 @@ impl Editor {
 
     /// Tells the dialog which exposed parameters of the model value links give, by key, and
     /// from which block.
-    /// The parts a contact detection being edited searches; empty for all visible ones.
-    pub fn detection_parts(&self) -> Option<&[String]> {
+    /// The parts a contact detection being edited searches.
+    pub fn detection_filter(&self) -> Option<&plx_model::PartFilter> {
         match &self.draft {
-            Draft::ContactDetection(detection) => Some(&detection.parts),
+            Draft::ContactDetection(detection) => Some(&detection.scope),
+            Draft::PartGroup(group) => Some(&group.filter),
             _ => None,
         }
     }
@@ -3860,6 +3875,36 @@ impl Editor {
                 name_row(ui, &mut detection.name);
                 connections::detection_form(ui, model, detection, self.detection_scope.as_ref());
             }
+            Draft::PartGroup(group) => {
+                name_row(ui, &mut group.name);
+                let context = match &self.detection_scope {
+                    Some(scope) => scope.context.clone(),
+                    None => crate::part_filter_ui::cached_context(ui.ctx(), &model.fe, &model.mesh),
+                };
+                ui.label("Parts");
+                crate::part_filter_ui::filter_editor(
+                    ui,
+                    "part group",
+                    &model.fe,
+                    &mut group.filter,
+                    &context,
+                    "All parts",
+                );
+                ui.end_row();
+                ui.label("");
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(
+                            "The group follows its filter: parts added or renamed later join \
+                             it when they match. Contact detections use groups in their \
+                             scope and rules.",
+                        )
+                        .weak(),
+                    )
+                    .wrap(),
+                );
+                ui.end_row();
+            }
             Draft::Connections(defaults) => connections::connections_form(ui, &model.fe, defaults),
             Draft::Tie(tie, regions) => {
                 name_row(ui, &mut tie.name);
@@ -3898,6 +3943,7 @@ impl Editor {
             Draft::ContactPair(..) => names(&fe.contact_pairs, |c| &c.name),
             Draft::ContactRegion(..) => names(&fe.contact_regions, |r| &r.name),
             Draft::ContactDetection(..) => names(&fe.contact_detections, |d| &d.name),
+            Draft::PartGroup(..) => names(&fe.part_groups, |g| &g.name),
             Draft::Bolt(..) => names(&fe.bolts, |b| &b.name),
             Draft::Connections(_) => Vec::new(),
             Draft::Tie(..) => names(&fe.ties, |t| &t.name),
@@ -3936,6 +3982,7 @@ impl Editor {
             Draft::ContactPair(c, _) => &c.name,
             Draft::ContactRegion(r, ..) => &r.name,
             Draft::ContactDetection(d) => &d.name,
+            Draft::PartGroup(g) => &g.name,
             Draft::Bolt(b, ..) => &b.name,
             Draft::Connections(_) => return Ok(()),
             Draft::Tie(t, _) => &t.name,
@@ -4209,6 +4256,7 @@ impl Editor {
             Draft::ContactDetection(..) => {
                 Some(TreeItem::ContactDetection(fe.contact_detections.len()))
             }
+            Draft::PartGroup(..) => Some(TreeItem::PartGroup(fe.part_groups.len())),
             Draft::Bolt(..) => Some(TreeItem::Bolt(fe.bolts.len())),
             Draft::Tie(..) => Some(TreeItem::Tie(fe.ties.len())),
             Draft::NodeTie(..) => Some(TreeItem::NodeTie(fe.node_ties.len())),
@@ -4361,6 +4409,7 @@ impl Editor {
                 put(&mut fe.contact_regions, index, region);
             }
             Draft::ContactDetection(detection) => put(&mut fe.contact_detections, index, detection),
+            Draft::PartGroup(group) => put(&mut fe.part_groups, index, group),
             Draft::Bolt(mut bolt, sides, actions, _) => {
                 (bolt.side_a, bolt.side_b) = sides.regions();
                 if let Some(existing) = index.and_then(|i| fe.bolts.get(i)) {
@@ -4467,7 +4516,12 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
         (index < items.len()).then(|| items.remove(index)).is_some()
     }
     match *item {
-        TreeItem::Material(i) => remove(&mut fe.materials, i),
+        TreeItem::Material(i) => {
+            if let Some(id) = fe.materials.get(i).map(|m| m.id) {
+                fe.forget_in_filters(id);
+            }
+            remove(&mut fe.materials, i)
+        }
         TreeItem::Section(i) => remove(&mut fe.sections, i),
         TreeItem::CrossSection(i) => remove(&mut fe.cross_sections, i),
         TreeItem::Step(i) => {
@@ -4523,6 +4577,14 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
             };
             fe.remove_bolt_changes(id);
             remove(&mut fe.bolts, i)
+        }
+        TreeItem::PartGroup(i) => {
+            let Some(id) = fe.part_groups.get(i).map(|g| g.id) else {
+                return false;
+            };
+            fe.part_groups.remove(i);
+            fe.forget_in_filters(id);
+            true
         }
         TreeItem::ContactDetection(i) => {
             let Some(id) = fe.contact_detections.get(i).map(|d| d.id) else {

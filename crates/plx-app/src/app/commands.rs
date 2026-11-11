@@ -197,6 +197,8 @@ impl AnalysisWindow {
             | Cmd::CoordinateSystem
             | Cmd::Plane
             | Cmd::DetectContacts
+            | Cmd::PartGroup
+            | Cmd::ContactMatrix
             | Cmd::ContactRegion
             | Cmd::Bolt
             | Cmd::Constraint
@@ -305,6 +307,7 @@ impl AnalysisWindow {
             | Cmd::ModeSound => w.results_command_checked(cmd),
             Cmd::Monitor => w.analysis_tab,
             Cmd::ContactWorksheet => w.contact_worksheet,
+            Cmd::ContactMatrix => w.contact_matrix,
             Cmd::StepOverview => w.step_overview,
             _ => false,
         }
@@ -432,6 +435,7 @@ impl AnalysisWindow {
             Cmd::CoordinateSystem => w.create(NewItem::Feature(FeatureKind::CoordinateSystem)),
             Cmd::Plane => w.create(NewItem::Feature(FeatureKind::Plane)),
             Cmd::DetectContacts => w.create(NewItem::ContactDetection),
+            Cmd::PartGroup => w.create(NewItem::PartGroup),
             Cmd::ContactRegion => w.create(NewItem::ContactRegion),
             Cmd::Bolt => w.create(NewItem::Bolt),
             Cmd::Constraint => w.create(NewItem::Constraint),
@@ -440,6 +444,7 @@ impl AnalysisWindow {
             Cmd::Tie => w.create(NewItem::Tie),
             Cmd::NodeTie => w.create(NewItem::NodeTie),
             Cmd::ContactWorksheet => w.contact_worksheet = true,
+            Cmd::ContactMatrix => w.contact_matrix = true,
             Cmd::StepOverview => w.step_overview = true,
             Cmd::ConnectionSettings => {
                 if let Some(model) = w.setup_model() {
