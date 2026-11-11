@@ -12,12 +12,11 @@ mirrors=(azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org us.
 opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
     -o Acquire::ForceIPv4=true)
 
-# Prints the first mirror host that resolves and answers on HTTP.
+# Prints the first mirror host that resolves.
 pick_mirror() {
     local host
     for host in "${mirrors[@]}"; do
-        if timeout 10 getent hosts "$host" >/dev/null 2>&1 \
-            && curl -fsS -o /dev/null --max-time 15 "http://$host/ubuntu/dists/" 2>/dev/null; then
+        if timeout 10 getent hosts "$host" >/dev/null 2>&1; then
             echo "$host"
             return 0
         fi
