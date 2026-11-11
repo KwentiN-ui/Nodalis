@@ -46,7 +46,6 @@ use plxs_core::state::{IntegrationPointField, NodalField};
 use plxs_core::step::{Dynamic, Procedure as ProcedureKind};
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
 use plxs_linalg::SparseMatrix;
-use plxs_linalg::Unknowns;
 use plxs_output::StaRow;
 use rayon::prelude::*;
 
@@ -777,8 +776,6 @@ pub(crate) fn fit_damping(
             let started = std::time::Instant::now();
             let k_free = set.reduce(k);
             let m_free = set.reduce(m);
-            let coordinates =
-                Unknowns::from_free(&set.free, 3, &ctx.model.nodes.coordinates).coordinates;
             // Rigid body modes of a free structure come first; the damping is fitted at the
             // first elastic one.
             let pairs = crate::eigen::lanczos_modes(
@@ -788,7 +785,7 @@ pub(crate) fn fit_damping(
                 7,
                 None,
                 solver,
-                coordinates,
+                crate::equations::displacement_unknowns(ctx.model, &set.free),
                 progress,
             )?;
             let frequencies: Vec<f64> = (pairs.values.iter())

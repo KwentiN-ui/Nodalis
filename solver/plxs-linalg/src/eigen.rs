@@ -29,7 +29,7 @@
 use plxs_core::{Error, Result};
 use rayon::prelude::*;
 
-use crate::{LdltSolver, LinearSolver, PcgSolver, SparseMatrix};
+use crate::{LdltSolver, LinearSolver, PcgSolver, SparseMatrix, Unknowns};
 
 /// Eigenpairs, sorted by eigenvalue (frequencies ascending; buckling factors ascending
 /// among the positive ones).
@@ -93,6 +93,9 @@ pub struct ShiftInvertLanczos {
     /// The inner solver when the shifted systems are solved by conjugate gradients
     /// ([`Self::set_iterative`]) instead of the factorization.
     iterative: Option<PcgSolver>,
+    /// What the unknowns are, for the multigrid of the conjugate gradients (see
+    /// [`Self::set_unknowns`]).
+    unknowns: Option<Unknowns>,
     pub options: LanczosOptions,
     /// The direct solver holds the factor of the stiffness of the next [`Self::buckling`].
     stiffness_factorized: bool,
@@ -105,6 +108,7 @@ impl ShiftInvertLanczos {
         Self {
             solver,
             iterative: None,
+            unknowns: None,
             options,
             stiffness_factorized: false,
         }
@@ -119,7 +123,20 @@ impl ShiftInvertLanczos {
     /// no new eigenvalue among the wanted ones (the missing copies of a multiple eigenvalue
     /// show up there); [`EigenPairs::sturm_confirmed`] stays false.
     pub fn set_iterative(&mut self, iterative: bool) {
-        self.iterative = iterative.then(PcgSolver::new);
+        self.iterative = iterative.then(|| {
+            let mut pcg = PcgSolver::new();
+            pcg.set_unknowns(self.unknowns.clone());
+            pcg
+        });
+    }
+
+    /// Tells the conjugate gradients of [`Self::set_iterative`] what the unknowns are (see
+    /// [`PcgSolver::set_unknowns`]), before `set_iterative`. With the nodes and positions
+    /// of the displacements the multigrid takes the rigid body motions as its nullspace;
+    /// without, every unknown is its own block with the constant as nullspace, which on an
+    /// elastic solid takes about ten times the iterations per Lanczos step.
+    pub fn set_unknowns(&mut self, unknowns: Option<Unknowns>) {
+        self.unknowns = unknowns;
     }
 
     pub fn is_iterative(&self) -> bool {

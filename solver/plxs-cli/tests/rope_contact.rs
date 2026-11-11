@@ -201,10 +201,14 @@ fn wrapped(job: &str, mu: f64) -> (f64, f64) {
 }
 
 #[test]
-fn a_rope_sliding_round_a_drum_keeps_the_euler_eytelwein_ratio() {
+fn a_rope_sliding_round_a_frictionless_drum_keeps_its_tension() {
     let (held, pulled) = wrapped("drum-frictionless", 0.0);
     assert!(pulled > 1e4, "{pulled}");
     assert!((held / pulled - 1.0).abs() < 1e-2, "{held} vs {pulled}");
+}
+
+#[test]
+fn a_rope_sliding_round_a_drum_keeps_the_euler_eytelwein_ratio() {
     let mu = 0.2;
     let (held, pulled) = wrapped("drum-friction", mu);
     let expected = (-mu * std::f64::consts::FRAC_PI_2).exp();
