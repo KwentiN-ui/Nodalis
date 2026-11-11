@@ -105,6 +105,13 @@ impl<T: Scalar> Bsr<T> {
             (3, 6) => self.product_fixed::<3, 6>(x, y, accumulate),
             (6, 3) => self.product_fixed::<6, 3>(x, y, accumulate),
             (6, 6) => self.product_fixed::<6, 6>(x, y, accumulate),
+            // Coarse levels with near-nullspace candidates (6 + 3 or 6 + 6 per aggregate).
+            (3, 9) => self.product_fixed::<3, 9>(x, y, accumulate),
+            (9, 3) => self.product_fixed::<9, 3>(x, y, accumulate),
+            (9, 9) => self.product_fixed::<9, 9>(x, y, accumulate),
+            (3, 12) => self.product_fixed::<3, 12>(x, y, accumulate),
+            (12, 3) => self.product_fixed::<12, 3>(x, y, accumulate),
+            (12, 12) => self.product_fixed::<12, 12>(x, y, accumulate),
             _ => self.product_generic(x, y, accumulate),
         }
     }

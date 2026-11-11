@@ -75,6 +75,36 @@ pub enum Boolean {
     Cut,
 }
 
+/// What a boolean operation made, and for each input what it became.
+pub type Fragments = (Vec<(i32, i32)>, Vec<Vec<(i32, i32)>>);
+
+/// The C function of a boolean operation of OpenCASCADE.
+type BooleanFn = unsafe extern "C" fn(
+    *const c_int,
+    usize,
+    *const c_int,
+    usize,
+    *mut *mut c_int,
+    *mut usize,
+    *mut *mut *mut c_int,
+    *mut *mut usize,
+    *mut usize,
+    c_int,
+    c_int,
+    c_int,
+    *mut c_int,
+);
+
+impl Boolean {
+    fn function(self, api: &crate::ffi::Api) -> BooleanFn {
+        match self {
+            Self::Intersect => api.occ_intersect,
+            Self::Fuse => api.occ_fuse,
+            Self::Cut => api.occ_cut,
+        }
+    }
+}
+
 /// Sets where the library is loaded from. Gmsh cannot be unloaded, so a change takes effect
 /// only if the library has not been loaded yet; returns whether that is the case.
 pub fn set_library_path(path: Option<PathBuf>) -> bool {
@@ -349,10 +379,56 @@ impl Gmsh {
         Ok(pairs(&tags))
     }
 
-    pub fn add_box(&self, origin: [f64; 3], size: [f64; 3]) -> Result<(), GmshError> {
+    /// Adds an axis-parallel box from a corner by its size; returns its tag.
+    pub fn add_box(&self, origin: [f64; 3], size: [f64; 3]) -> Result<i32, GmshError> {
         let ([x, y, z], [dx, dy, dz]) = (origin, size);
-        self.call(|e| unsafe { (self.api.occ_add_box)(x, y, z, dx, dy, dz, -1, e) })?;
-        self.synchronize()
+        let mut tag = 0;
+        self.call(|e| tag = unsafe { (self.api.occ_add_box)(x, y, z, dx, dy, dz, -1, e) })?;
+        self.synchronize()?;
+        Ok(tag)
+    }
+
+    /// Adds a flat disk of a radius about a centre, normal to `axis`; returns its tag.
+    /// A ball as a solid; returns its tag.
+    pub fn add_sphere(&self, [x, y, z]: [f64; 3], radius: f64) -> Result<i32, GmshError> {
+        use std::f64::consts::{FRAC_PI_2, TAU};
+        let mut tag = 0;
+        self.call(|e| {
+            tag = unsafe {
+                (self.api.occ_add_sphere)(x, y, z, radius, -1, -FRAC_PI_2, FRAC_PI_2, TAU, e)
+            };
+        })?;
+        self.synchronize()?;
+        Ok(tag)
+    }
+
+    pub fn add_disk(
+        &self,
+        centre: [f64; 3],
+        radius: f64,
+        axis: [f64; 3],
+    ) -> Result<i32, GmshError> {
+        let [x, y, z] = centre;
+        let mut tag = 0;
+        self.call(|e| {
+            tag = unsafe {
+                (self.api.occ_add_disk)(
+                    x,
+                    y,
+                    z,
+                    radius,
+                    radius,
+                    -1,
+                    axis.as_ptr(),
+                    3,
+                    std::ptr::null(),
+                    0,
+                    e,
+                )
+            };
+        })?;
+        self.synchronize()?;
+        Ok(tag)
     }
 
     /// A rectangle in a plane z = const, with corners rounded by `radius` if it is positive.
@@ -478,6 +554,34 @@ impl Gmsh {
         Ok(self.take_vec(coords, len).as_chunks::<3>().0.to_vec())
     }
 
+    /// Unit normals of a surface at parameters, flat (two values per point).
+    pub fn normals(&self, face: i32, parameters: &[f64]) -> Result<Vec<[f64; 3]>, GmshError> {
+        let (mut normals, mut len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.get_normal)(
+                face,
+                parameters.as_ptr(),
+                parameters.len(),
+                &mut normals,
+                &mut len,
+                e,
+            );
+        })?;
+        Ok(self.take_vec(normals, len).as_chunks::<3>().0.to_vec())
+    }
+
+    /// Copies of entities, with what bounds them; returns the copies.
+    pub fn copy(&self, entities: &[(i32, i32)]) -> Result<Vec<(i32, i32)>, GmshError> {
+        let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
+        let (mut out, mut len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.occ_copy)(flat.as_ptr(), flat.len(), &mut out, &mut len, e);
+        })?;
+        let out = self.take_vec(out, len);
+        self.synchronize()?;
+        Ok(pairs(&out))
+    }
+
     /// The point of a curve or surface closest to a point.
     pub fn closest_point(
         &self,
@@ -544,7 +648,17 @@ impl Gmsh {
         })
     }
 
-    /// Moves entities by an affine transformation, the rows of a 3 x 4 matrix.
+    /// Moves entities of the OpenCASCADE model; their shapes stay what they are.
+    pub fn translate(&self, entities: &[(i32, i32)], by: [f64; 3]) -> Result<(), GmshError> {
+        let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
+        self.call(|e| unsafe {
+            (self.api.occ_translate)(flat.as_ptr(), flat.len(), by[0], by[1], by[2], e);
+        })?;
+        self.synchronize()
+    }
+
+    /// Applies an affine map to entities of the OpenCASCADE model. Curved shapes become
+    /// splines by it, which are close to them only.
     pub fn affine_transform(
         &self,
         entities: &[(i32, i32)],
@@ -611,6 +725,76 @@ impl Gmsh {
         let out = self.take_vec(out, out_len);
         self.synchronize()?;
         Ok(pairs(&out))
+    }
+
+    /// A boolean operation as [`Self::boolean`] that may keep the objects.
+    pub fn boolean_keeping(
+        &self,
+        operation: Boolean,
+        objects: &[(i32, i32)],
+        tools: &[(i32, i32)],
+        remove_object: bool,
+        remove_tool: bool,
+    ) -> Result<Vec<(i32, i32)>, GmshError> {
+        self.boolean_with_map(
+            operation.function(&self.api),
+            objects,
+            tools,
+            remove_object,
+            remove_tool,
+        )
+        .map(|(out, _)| out)
+    }
+
+    /// Cuts objects and tools at each other where they meet, so that they share what lies
+    /// on both, objects and tools removed; returns the new entities and, for each object and
+    /// then each tool, the entities it became.
+    pub fn fragment(
+        &self,
+        objects: &[(i32, i32)],
+        tools: &[(i32, i32)],
+    ) -> Result<Fragments, GmshError> {
+        self.boolean_with_map(self.api.occ_fragment, objects, tools, true, true)
+    }
+
+    fn boolean_with_map(
+        &self,
+        function: BooleanFn,
+        objects: &[(i32, i32)],
+        tools: &[(i32, i32)],
+        remove_object: bool,
+        remove_tool: bool,
+    ) -> Result<Fragments, GmshError> {
+        let objects: Vec<c_int> = objects.iter().flat_map(|&(d, t)| [d, t]).collect();
+        let tools: Vec<c_int> = tools.iter().flat_map(|&(d, t)| [d, t]).collect();
+        let (mut out, mut out_len) = (std::ptr::null_mut(), 0);
+        let (mut map, mut map_lens, mut map_len) =
+            (std::ptr::null_mut(), std::ptr::null_mut(), 0usize);
+        self.call(|e| unsafe {
+            function(
+                objects.as_ptr(),
+                objects.len(),
+                tools.as_ptr(),
+                tools.len(),
+                &mut out,
+                &mut out_len,
+                &mut map,
+                &mut map_lens,
+                &mut map_len,
+                -1,
+                c_int::from(remove_object),
+                c_int::from(remove_tool),
+                e,
+            );
+        })?;
+        let lens: Vec<usize> = self.take_vec(map_lens, map_len);
+        let maps: Vec<*mut c_int> = self.take_vec(map, map_len);
+        let maps = (maps.into_iter().zip(lens))
+            .map(|(pointer, len)| pairs(&self.take_vec(pointer, len)))
+            .collect();
+        let out = self.take_vec(out, out_len);
+        self.synchronize()?;
+        Ok((pairs(&out), maps))
     }
 
     /// Rounds edges of solids with a radius, the solids replaced by the rounded ones; returns
@@ -771,6 +955,15 @@ impl Gmsh {
     /// Makes the field the element size everywhere, combined with the other size limits.
     pub fn set_background_field(&self, field: i32) -> Result<(), GmshError> {
         self.call(|e| unsafe { (self.api.field_set_as_background)(field, e) })
+    }
+
+    pub fn remove_field(&self, field: i32) -> Result<(), GmshError> {
+        self.call(|e| unsafe { (self.api.field_remove)(field, e) })
+    }
+
+    /// Discards the whole mesh; the geometry stays.
+    pub fn clear_mesh(&self) -> Result<(), GmshError> {
+        self.call(|e| unsafe { (self.api.mesh_clear)(std::ptr::null(), 0, e) })
     }
 
     fn synchronize(&self) -> Result<(), GmshError> {

@@ -65,7 +65,7 @@ pub enum PlaneDefinition {
     /// A plane of the model's features, shifted along its normal; it follows the feature
     /// when that changes.
     Feature {
-        plane: String,
+        plane: plx_model::Id,
         offset: f64,
         /// A point on the feature's plane and its unit normal, as last resolved; `None` while
         /// the feature is missing or degenerate.
@@ -83,6 +83,9 @@ pub struct SectionView {
     pub flipped: bool,
     /// The "lighten section colors".
     pub lighten: bool,
+    /// Parts, by name, that the plane does not cut: they show whole, e.g. a rope running
+    /// through cut sheaves.
+    pub uncut: BTreeSet<String>,
 }
 
 impl SectionView {
@@ -103,6 +106,7 @@ impl SectionView {
             },
             flipped: view_direction[axis] < 0.0,
             lighten: true,
+            uncut: BTreeSet::new(),
         }
     }
 
@@ -112,7 +116,7 @@ impl SectionView {
         let PlaneDefinition::Feature { plane, frame, .. } = &mut self.definition else {
             return false;
         };
-        let resolved = (fe.plane(plane))
+        let resolved = (fe.plane(*plane))
             .and_then(|p| p.resolve(fe).ok())
             .map(|(point, normal)| (DVec3::from(point), DVec3::from(normal)));
         let moved = *frame != resolved;
@@ -203,6 +207,8 @@ enum Picking {
     Point,
     /// The first point of the normal, then the second one.
     Normal(Option<DVec3>),
+    /// Parts to keep whole, or to cut again.
+    Parts,
 }
 
 /// How the dialog was closed.
@@ -248,7 +254,7 @@ impl SectionDialog {
         }
     }
 
-    /// Whether a click in the 3D view picks a point.
+    /// Whether a click in the 3D view picks a point or a part.
     pub fn picks(&self) -> bool {
         self.picking.is_some()
     }
@@ -286,6 +292,12 @@ impl SectionDialog {
         let Some((hit, precision)) = pick else {
             return;
         };
+        if self.picking == Some(Picking::Parts) {
+            if let Some(part) = model.parts.get(hit.part) {
+                toggle(&mut self.draft.uncut, &part.name);
+            }
+            return;
+        }
         let picked = self.picker.pick(model, hit, Target::Nodes, precision);
         if let Items::Nodes(nodes) = picked.resolved(&model.mesh, Target::Nodes) {
             self.take(model, nodes);
@@ -293,6 +305,9 @@ impl SectionDialog {
     }
 
     pub fn preview(&self, model: &Model, hit: &Hit, precision: f32) -> Preview {
+        if self.picking == Some(Picking::Parts) {
+            return crate::selection::PartPicks::preview(model, hit);
+        }
         let items = self.picker.pick(model, hit, Target::Nodes, precision);
         crate::selection::preview(model, &items)
     }
@@ -331,7 +346,7 @@ impl SectionDialog {
                     self.marked.clear();
                 }
             }
-            None => {}
+            Some(Picking::Parts) | None => {}
         }
     }
 
@@ -374,7 +389,7 @@ impl SectionDialog {
                 }
             });
         if let Some(window) = window
-            && self.picking.is_some()
+            && self.picking.is_some_and(|p| p != Picking::Parts)
         {
             let can_undo = !self.marked.is_empty();
             if let Some(action) =
@@ -402,7 +417,7 @@ impl SectionDialog {
             PlaneDefinition::Feature { .. } => 1,
             PlaneDefinition::PointNormal { .. } => 2,
         };
-        ui.horizontal_wrapped(|ui| {
+        crate::layout::wrapped_row(ui, |ui| {
             ui.label("Plane:");
             if ui.radio(kind == 0, "Base plane").clicked() && kind != 0 {
                 let visible = self.draft.normal();
@@ -420,7 +435,7 @@ impl SectionDialog {
                 .on_disabled_hover_text("Create a Plane under Features first.");
             if radio.clicked() && kind != 1 {
                 self.draft.definition = PlaneDefinition::Feature {
-                    plane: fe.planes[0].name.clone(),
+                    plane: fe.planes[0].id,
                     offset: 0.0,
                     frame: None,
                 };
@@ -431,6 +446,9 @@ impl SectionDialog {
             if ui.radio(kind == 2, "Point and normal").clicked() && kind != 2 {
                 let (point, normal) = self.draft.as_point_normal(self.center);
                 self.draft.set_point_normal(point, normal);
+                if self.picking == Some(Picking::Parts) {
+                    self.picking = None;
+                }
             }
         });
         ui.add_space(4.0);
@@ -465,10 +483,10 @@ impl SectionDialog {
                 } => {
                     ui.label("Plane");
                     egui::ComboBox::from_id_salt("section plane")
-                        .selected_text(plane.as_str())
+                        .selected_text(fe.name_or_missing(Some(*plane)))
                         .show_ui(ui, |ui| {
                             for candidate in &fe.planes {
-                                ui.selectable_value(plane, candidate.name.clone(), &candidate.name);
+                                ui.selectable_value(plane, candidate.id, &candidate.name);
                             }
                         });
                     ui.end_row();
@@ -557,9 +575,61 @@ impl SectionDialog {
             }
             ui.checkbox(&mut self.draft.lighten, "Lighten cut surfaces");
         });
+        self.uncut_row(ui, model);
         // A changed plane takes effect at once.
         self.draft.resolve(fe);
         ui.weak("Drag arrow: move, drag arcs: tilt");
+    }
+}
+
+impl SectionDialog {
+    /// The parts the plane leaves whole: picked in the 3D view, or ticked in a list of all
+    /// parts, for one hidden behind others.
+    fn uncut_row(&mut self, ui: &mut Ui, model: &Model) {
+        let picking = self.picking == Some(Picking::Parts);
+        ui.horizontal(|ui| {
+            ui.label("Uncut parts");
+            if crate::setup::pick_button(ui, picking) {
+                self.picking = if picking { None } else { Some(Picking::Parts) };
+                self.marked.clear();
+            }
+            let uncut = &mut self.draft.uncut;
+            let label = match uncut.len() {
+                0 => "None".to_string(),
+                1..=2 => uncut.iter().cloned().collect::<Vec<_>>().join(", "),
+                n => format!("{n} Parts"),
+            };
+            ui.menu_button(label, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        for part in &model.parts {
+                            let mut kept = uncut.contains(&part.name);
+                            if ui.checkbox(&mut kept, &part.name).changed() {
+                                toggle(uncut, &part.name);
+                            }
+                        }
+                    });
+            })
+            .response
+            .on_hover_text("Parts the section does not cut");
+            if ui
+                .add_enabled(!uncut.is_empty(), egui::Button::new("Clear"))
+                .clicked()
+            {
+                uncut.clear();
+            }
+        });
+        if picking {
+            ui.weak("Click parts to keep them whole or to cut them again.");
+        }
+    }
+}
+
+/// Adds a name to the set, or removes it when it is there.
+fn toggle(set: &mut BTreeSet<String>, name: &str) {
+    if !set.remove(name) {
+        set.insert(name.to_string());
     }
 }
 
@@ -625,6 +695,7 @@ mod tests {
             },
             flipped: false,
             lighten: true,
+            uncut: BTreeSet::new(),
         };
         tilted.translate(5.0);
         assert!((tilted.anchor(DVec3::ZERO) - DVec3::new(0.0, 3.0, 4.0)).length() < EPS);
@@ -649,27 +720,32 @@ mod tests {
     #[test]
     fn feature_planes_follow_their_feature() {
         let mut fe = FeModel::default();
-        let mut system = plx_model::CoordinateSystem::new("CS");
+        let mut system = plx_model::CoordinateSystem {
+            id: crate::test_ids::named("CS"),
+            ..plx_model::CoordinateSystem::new("CS")
+        };
         system.origin = [0.0, 0.0, 5.0];
         system.point_x = [1.0, 0.0, 5.0];
         system.point_xy = [0.0, 1.0, 5.0];
         fe.coordinate_systems.push(system);
         fe.planes.push(plx_model::Plane {
             source: plx_model::PlaneSource::CoordinateSystem {
-                system: "CS".into(),
+                system: Some(crate::test_ids::named("CS")),
                 plane: plx_model::CoordinatePlane::Xy,
                 offset: 0.0,
             },
+            id: crate::test_ids::named("Plane-1"),
             ..plx_model::Plane::new("Plane-1")
         });
         let mut section = SectionView {
             definition: PlaneDefinition::Feature {
-                plane: "Plane-1".into(),
+                plane: crate::test_ids::named("Plane-1"),
                 offset: 1.0,
                 frame: None,
             },
             flipped: false,
             lighten: true,
+            uncut: BTreeSet::new(),
         };
         assert!(section.resolve(&fe));
         assert!(!section.resolve(&fe));

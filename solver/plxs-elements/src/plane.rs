@@ -1,26 +1,28 @@
-//! Plane stress (CPS), plane strain (CPE) and axisymmetric (CAX) elements, computed the way
+//! Plane stress (CPS), plane strain (CPE) and axisymmetric (CAX) elements, expanded the way
 //! the CalculiX manual describes them (sections "Eight-node plane stress element",
 //! "Eight-node plane strain element", "Eight-node axisymmetric element"): every 2D element
 //! is expanded into one layer of a 3D element (CPS8 -> C3D20, CPS8R -> C3D20R, CPS4 ->
 //! C3D8, CPS4R -> C3D8R, CPS6 -> C3D15, CPS3 -> C3D6; the same for CPE and CAX), and the
 //! expanded nodes are tied to the 2D node:
 //!
-//! * plane stress: the expanded nodes lie at `z = ±t/2` (`t` the section thickness, 1 by
-//!   default) and, for quadratic elements, at `z = 0` on the vertical edges; their in-plane
-//!   displacements equal the 2D node's, the midplane does not move out of plane, the
-//!   out-of-plane displacements off the midplane are free;
-//! * plane strain: as plane stress, but no node moves out of plane;
+//! * plane stress and plane strain: the expanded nodes lie at `z = ±t/2` (`t` the section
+//!   thickness, 1 by default) and, for quadratic elements, at `z = 0` on the vertical edges;
+//!   their in-plane displacements equal the 2D node's, no node moves out of plane;
 //! * axisymmetric: the 2D coordinates are radius and axial position; the expansion rotates
 //!   the section by ±1° about the y axis (a 2° segment), the expanded nodes move with the
 //!   2D node in cylindrical coordinates (radial and axial displacement equal, no
 //!   circumferential displacement). Loads and nodal forces count for the full
 //!   circumference, so the segment's stiffness is scaled by 360°/2°.
 //!
-//! The structure is symmetric about the midplane, so the free out-of-plane displacements of
-//! the plane stress expansion are antisymmetric: `w(+t/2) = -w(-t/2)`. That single unknown
-//! per node is carried in the 2D node's third DOF, which therefore is internal and must not
-//! be reported as a displacement. Plane strain and
-//! axisymmetric elements leave the third DOF unused ([`SolidElement::uses_out_of_plane`]).
+//! The strains of plane stress and plane strain elements therefore have no thickness and no
+//! transverse shear part. Plane stress differs from plane strain in the material only: the
+//! thickness strain is a local unknown of every integration point that makes the thickness
+//! stress zero there (`plxs_materials::plane_stress`), so `σzz`, `σyz` and `σzx` are zero
+//! at every point and the element is the exact 2D plane stress element. (The CalculiX manual's
+//! plane stress expansion instead lets the expanded nodes off the midplane move out of plane, which makes the thickness
+//! stress zero only on average; its integration points then carry thickness stresses of
+//! some percent of the in-plane ones.) The third DOF of plane stress, plane strain and
+//! axisymmetric nodes is unused ([`SolidElement::uses_out_of_plane`]).
 //!
 //! Stresses and strains are those of the expanded element at its integration points. The
 //! 2D node gets the thickness average of the values extrapolated to its expanded nodes,
@@ -51,7 +53,21 @@ enum Layer {
     Top,
 }
 
+/// `cos` and `sin` of the angle of the bottom, middle and top layer of an axisymmetric
+/// segment, computed once (the assembly asks for them at every node in every iteration).
+static LAYER_ROTATIONS: std::sync::LazyLock<[(f64, f64); 3]> = std::sync::LazyLock::new(|| {
+    [Layer::Bottom, Layer::Middle, Layer::Top].map(|layer| {
+        let phi = layer.sign() * HALF_ANGLE;
+        (phi.cos(), phi.sin())
+    })
+});
+
 impl Layer {
+    /// `(cos φ, sin φ)` of the layer's angle `φ` in an axisymmetric segment.
+    fn rotation(self) -> (f64, f64) {
+        LAYER_ROTATIONS[self as usize]
+    }
+
     fn sign(self) -> f64 {
         match self {
             Layer::Bottom => -1.0,
@@ -72,6 +88,9 @@ pub struct Expansion {
     pub nodes: usize,
     /// For every node of the 3D element: the 2D node it belongs to and its layer.
     map: Vec<(usize, Layer)>,
+    /// For every DOF of the 3D element (3 per node): the 2D DOF it follows and the factor,
+    /// `None` when it is held at zero.
+    dofs: Vec<Option<(usize, f64)>>,
     /// Factor on stiffness, forces and volume: 1 for plane elements, 180 for the 2°
     /// segment of axisymmetric ones.
     pub scale: f64,
@@ -109,17 +128,19 @@ pub fn plane(kind: ElementType, thickness: Option<f64>) -> Option<SolidElement> 
     let map = node_map(family);
     debug_assert_eq!(map.len(), family.node_count());
     let thickness = thickness.filter(|t| *t > 0.0).unwrap_or(1.0);
-    let expansion = Expansion {
+    let mut expansion = Expansion {
         kind: plane_kind,
         thickness,
         nodes,
         map,
+        dofs: Vec::new(),
         scale: if plane_kind == PlaneKind::Axisymmetric {
             std::f64::consts::PI / HALF_ANGLE
         } else {
             1.0
         },
     };
+    expansion.dofs = expansion.build_dof_map();
     let extrapolation = expansion.extrapolation(element.extrapolation(), element.rule.len());
     element.kind = kind;
     element.set_expansion(expansion, extrapolation);
@@ -176,8 +197,8 @@ impl Expansion {
                         [c[0], c[1], c[2] + 0.5 * s * self.thickness]
                     }
                     PlaneKind::Axisymmetric => {
-                        let phi = s * HALF_ANGLE;
-                        [c[0] * phi.cos(), c[1], c[0] * phi.sin()]
+                        let (cos, sin) = layer.rotation();
+                        [c[0] * cos, c[1], c[0] * sin]
                     }
                 }
             })
@@ -186,17 +207,16 @@ impl Expansion {
 
     /// For every DOF of the 3D element (3 per node): the 2D DOF it follows and the factor,
     /// `None` when it is held at zero.
-    fn dof_map(&self) -> Vec<Option<(usize, f64)>> {
+    pub(crate) fn dof_map(&self) -> &[Option<(usize, f64)>] {
+        &self.dofs
+    }
+
+    fn build_dof_map(&self) -> Vec<Option<(usize, f64)>> {
         let mut out = Vec::with_capacity(3 * self.map.len());
         for &(a, layer) in &self.map {
             let s = layer.sign();
             match self.kind {
-                PlaneKind::Stress => {
-                    out.push(Some((3 * a, 1.0)));
-                    out.push(Some((3 * a + 1, 1.0)));
-                    out.push((s != 0.0).then_some((3 * a + 2, s)));
-                }
-                PlaneKind::Strain => {
+                PlaneKind::Stress | PlaneKind::Strain => {
                     out.push(Some((3 * a, 1.0)));
                     out.push(Some((3 * a + 1, 1.0)));
                     out.push(None);

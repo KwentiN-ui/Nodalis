@@ -14,6 +14,7 @@
 pub mod discrete;
 pub mod dofs;
 pub mod elements;
+pub mod follower;
 pub mod heat;
 pub mod loads;
 pub mod local_loads;
@@ -22,7 +23,8 @@ pub mod nonlinear;
 pub mod stiffness;
 
 pub use dofs::{DofMap, Reduction, Spc};
-pub use elements::{ElementTable, IntegrationPointLayout, LinearBlock};
+pub use elements::{Beam, ElementTable, IntegrationPointLayout, LinearBlock};
+pub use follower::{FollowerLoads, Turning};
 
 pub use heat::{HeatTable, assemble_heat, heat_loads, temperature_spc};
 pub use loads::{add_membrane_pressures, load_vector, membrane_pressures};

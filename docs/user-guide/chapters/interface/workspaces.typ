@@ -58,7 +58,9 @@ The group on the right edge stays the same on every tab of a workspace: #ui("Upd
 #ui("Stop") and #ui("Monitor") in the Project workspace, #ui("Solve"), #ui("Stop") and
 #ui("Monitor") in Geometry and FE Model, where #ui("Check Model") joins them. A double-click on a tab folds the
 ribbon to its tab row and back; so does #ui("Fold Ribbon") in its context menu. When a tab does
-not fit into the window, its groups fold into a menu tile named after them, from the right.
+not fit into the window, its groups fold into a menu tile named after them, from the right; the
+#ui("Step and Increment") group of the results folds last, and a folded group opens again as soon as
+the room is there.
 
 #fields(
   [Project], [#ui("File"): file commands, #ui("New Analysis"), and #ui("Open"),
@@ -82,7 +84,8 @@ not fit into the window, its groups fold into a menu tile named after them, from
 Nodalis fits its layout to the size of the window:
 
 - *Narrower than 1500 points*: groups of the ribbon that do not fit fold into one menu tile
-  each, from the right; the pinned group stays.
+  each, from the right; the pinned group stays, and so does #ui("Step and Increment") in the
+  Results workspace until the other groups are folded.
 - *Narrower than 1200 points*: the properties panel no longer narrows the 3D view but lies
   over its right edge, above the output pane. The checklist (@checklist) then waits until
   #ui("Checklist") on the #ui("View") tab asks for it. The search field of the app bar

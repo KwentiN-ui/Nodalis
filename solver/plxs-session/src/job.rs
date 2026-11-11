@@ -33,6 +33,9 @@ pub struct JobOptions {
     pub frd_format: plxs_output::FrdFormat,
     /// Reports the time per phase at the end of the job, as `Info` events.
     pub profile: bool,
+    /// Receives the time per phase whenever the results are written: at the end, and after
+    /// a step that did not converge or was cancelled. Nodalis shows it in its monitor.
+    pub profile_sink: Option<ProfileSink>,
     pub cancel: CancelToken,
     /// Keeps the state and results after each step, and takes over the steps a run before
     /// computed already ([`crate::cache`]); `None`: every step is computed.
@@ -51,6 +54,7 @@ impl JobOptions {
             write_files: true,
             frd_format: plxs_output::FrdFormat::Ascii,
             profile: false,
+            profile_sink: None,
             cancel: CancelToken::new(),
             step_cache: None,
         }
@@ -60,6 +64,27 @@ impl JobOptions {
         self.work_dir.join(format!("{}.{ext}", self.name))
     }
 }
+
+/// Where the time of a job went, with the size of the model it solved.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct JobProfile {
+    /// Time per phase, summed over the steps.
+    pub phases: plxs_procedures::profile::Profile,
+    /// Wall-clock time of the job from the expansion of the model on, writing included.
+    pub total: std::time::Duration,
+    /// Of which writing the results.
+    pub writing: std::time::Duration,
+    /// Nodes and elements of the model as solved (shells and beams expanded).
+    pub nodes: usize,
+    pub elements: usize,
+    /// Degrees of freedom before constraints are eliminated.
+    pub degrees_of_freedom: usize,
+    /// Threads the solver computed on.
+    pub threads: usize,
+}
+
+/// Where a job leaves its [`JobProfile`], see [`JobOptions::profile_sink`].
+pub type ProfileSink = std::sync::Arc<std::sync::Mutex<Option<JobProfile>>>;
 
 /// How a job ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -266,6 +291,7 @@ fn run_continuing(
     let mut keeping = cache.is_some();
     let output = |ext: &str| options.output(ext);
     let mut write = |session: &Session| -> Result<()> {
+        let writing = std::time::Instant::now();
         let (model, results) = output_map.apply(session.model(), session.results());
         plxs_output::write_sta(&output("sta"), session.sta_rows())?;
         plxs_output::write_cvg(&output("cvg"), session.cvg_rows())?;
@@ -295,6 +321,18 @@ fn run_continuing(
             std::fs::write(&path, bytes).map_err(|e| io(e.to_string()))?;
         }
         *kept = Some((model, results));
+        if let Some(sink) = &options.profile_sink {
+            let model = session.model();
+            *sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(JobProfile {
+                phases: session.profile(),
+                total: started.elapsed(),
+                writing: writing.elapsed(),
+                nodes: model.nodes.len(),
+                elements: model.elements.len(),
+                degrees_of_freedom: session.degrees_of_freedom(),
+                threads: session.threads(),
+            });
+        }
         Ok(())
     };
     for (index, step) in analysis.steps.iter().enumerate().skip(first) {
@@ -314,7 +352,7 @@ fn run_continuing(
                         keys[index],
                         session.state().steps_done,
                         &session.snapshot(),
-                        session.results(),
+                        session.results_mut(),
                     );
                 }
             }
@@ -399,7 +437,9 @@ pub fn format_event(event: &ProgressEvent) -> Vec<String> {
         }
         ProgressEvent::Warning(text) => vec![format!("*WARNING: {text}")],
         ProgressEvent::Info(text) => vec![format!(" *INFO: {text}")],
-        ProgressEvent::IncrementDone { .. } | ProgressEvent::StepDone { .. } => Vec::new(),
+        ProgressEvent::IncrementDone { .. }
+        | ProgressEvent::StepDone { .. }
+        | ProgressEvent::Integration { .. } => Vec::new(),
         ProgressEvent::JobDone => vec![" Job finished".into()],
     }
 }

@@ -9,7 +9,7 @@
 //! detection on the geometry: the regions take the whole CAD faces that touch, so they exist
 //! before the parts are meshed and stay the same when they are meshed again.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use std::collections::BTreeMap;
 
@@ -20,7 +20,7 @@ use plx_mesh::{
 use serde::{Deserialize, Serialize};
 
 use crate::connection::parts_of;
-use crate::{ContactBehavior, ContactRegion, FeModel, NodeTie, Region};
+use crate::{ContactBehavior, ContactRegion, FeModel, NodeTie, PartContext, PartFilter, Region};
 
 /// The parts of the two sides of a region, the smaller set first.
 type PartPair = (BTreeSet<usize>, BTreeSet<usize>);
@@ -28,10 +28,13 @@ type PartPair = (BTreeSet<usize>, BTreeSet<usize>);
 /// A search for contact regions and the parameters it runs with.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContactDetection {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
-    /// Names of the parts searched; empty searches all visible parts.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parts: Vec<String>,
+    /// The parts searched. A filter naming no parts to include searches the visible parts,
+    /// less those it excludes.
+    #[serde(default, skip_serializing_if = "PartFilter::is_all")]
+    pub scope: PartFilter,
     /// Largest gap between surfaces that touch; `None` derives it from the model size.
     #[serde(default)]
     pub tolerance: Option<f64>,
@@ -39,17 +42,71 @@ pub struct ContactDetection {
     pub angle_deg: f64,
     pub filter: DetectionFilter,
     pub grouping: DetectionGrouping,
-    /// The type of the regions found.
+    /// Rules giving the pairs found their type: the first whose sides match the parts of a
+    /// pair applies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<ContactRule>,
+    /// The type of the pairs no rule matches.
     pub behavior: ContactBehavior,
+}
+
+/// What a detection does with the pairs between the parts of two filters, Abaqus' contact
+/// property assignments.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ContactRule {
+    pub side_a: PartFilter,
+    pub side_b: PartFilter,
+    pub action: RuleAction,
+}
+
+impl ContactRule {
+    pub fn new(behavior: ContactBehavior) -> Self {
+        Self {
+            side_a: PartFilter::all(),
+            side_b: PartFilter::all(),
+            action: RuleAction::Type(behavior),
+        }
+    }
+
+    /// Whether the rule applies to a pair between the parts `a` and the parts `b`, either
+    /// way round: every part of one side passes one filter, every part of the other the
+    /// other filter.
+    pub fn matches(&self, a: &BTreeSet<usize>, b: &BTreeSet<usize>, context: &PartContext) -> bool {
+        let all = |parts: &BTreeSet<usize>, filter: &PartFilter| {
+            !parts.is_empty() && parts.iter().all(|&p| filter.matches(p, context))
+        };
+        (all(a, &self.side_a) && all(b, &self.side_b))
+            || (all(a, &self.side_b) && all(b, &self.side_a))
+    }
+}
+
+/// The type a rule gives the pairs it matches, or that it leaves them out.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum RuleAction {
+    Type(ContactBehavior),
+    /// No region for the pairs.
+    Exclude,
+}
+
+impl RuleAction {
+    pub fn name(self) -> String {
+        match self {
+            RuleAction::Type(ContactBehavior::Frictional { mu }) => format!("Frictional {mu}"),
+            RuleAction::Type(behavior) => behavior.name().to_string(),
+            RuleAction::Exclude => "Exclude".into(),
+        }
+    }
 }
 
 impl ContactDetection {
     /// The diagonal of the box around the parts the detection searches, all parts if it
     /// names none. An automatic tolerance is 0.5 % of it.
-    pub fn searched_diagonal(&self, mesh: &FeMesh) -> f64 {
+    pub fn searched_diagonal(&self, fe: &FeModel, mesh: &FeMesh) -> f64 {
         let (mut min, mut max) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
-        let searched =
-            (mesh.parts.iter()).filter(|p| self.parts.is_empty() || self.parts.contains(&p.name));
+        let context = fe.part_context(mesh);
+        let searched = (mesh.parts.iter().enumerate())
+            .filter(|(i, _)| self.scope.matches(*i, &context))
+            .map(|(_, p)| p);
         for element in searched.flat_map(|p| &p.elements) {
             let Some(element) = mesh.element(*element) else {
                 continue;
@@ -72,13 +129,63 @@ impl ContactDetection {
 
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
-            parts: Vec::new(),
+            scope: PartFilter::all(),
             tolerance: None,
             angle_deg: 35.0,
             filter: DetectionFilter::default(),
             grouping: DetectionGrouping::default(),
+            rules: Vec::new(),
             behavior: ContactBehavior::Bonded,
+        }
+    }
+
+    /// Which parts of the context the detection searches: those its scope takes, of the
+    /// visible ones if it names none to include.
+    pub fn searched(&self, context: &PartContext, visible: &[bool]) -> Vec<bool> {
+        self.scope.searched(context, visible)
+    }
+
+    /// The rule that applies to a pair between the parts `a` and `b`, by index, `None` for
+    /// the type of all other pairs.
+    pub fn rule_for(
+        &self,
+        a: &BTreeSet<usize>,
+        b: &BTreeSet<usize>,
+        context: &PartContext,
+    ) -> Option<usize> {
+        self.rules.iter().position(|r| r.matches(a, b, context))
+    }
+
+    /// The action for a pair between the parts `a` and `b`.
+    pub fn action_for(
+        &self,
+        a: &BTreeSet<usize>,
+        b: &BTreeSet<usize>,
+        context: &PartContext,
+    ) -> RuleAction {
+        match self.rule_for(a, b, context) {
+            Some(rule) => self.rules[rule].action,
+            None => RuleAction::Type(self.behavior),
+        }
+    }
+
+    /// Drops the filter terms naming the material or part group `id`, which was deleted.
+    pub fn forget(&mut self, id: crate::Id) {
+        self.scope.forget(id);
+        for rule in &mut self.rules {
+            rule.side_a.forget(id);
+            rule.side_b.forget(id);
+        }
+    }
+
+    /// Renames the part `old` to `new` in its filters.
+    pub fn rename_part(&mut self, old: &str, new: &str) {
+        self.scope.rename_part(old, new);
+        for rule in &mut self.rules {
+            rule.side_a.rename_part(old, new);
+            rule.side_b.rename_part(old, new);
         }
     }
 }
@@ -147,6 +254,14 @@ pub struct DetectionReport {
     pub lost: Vec<String>,
     /// Node ties found at line ends, those the user changed and kept included.
     pub node_ties: usize,
+    /// Of each rule, then of the type of all other pairs, the regions found and added.
+    pub per_rule: Vec<usize>,
+    /// Pairs a rule excluded.
+    pub excluded: usize,
+    /// Pairs left to a detection further down that finds them too, by its name.
+    pub left_to: BTreeMap<String, usize>,
+    /// Regions of a detection further up taken over, by its name.
+    pub taken_from: BTreeMap<String, usize>,
 }
 
 impl DetectionReport {
@@ -170,6 +285,15 @@ impl DetectionReport {
         }
         if !self.kept.is_empty() {
             text += &format!(", {} changed by you kept", self.kept.len());
+        }
+        if self.excluded > 0 {
+            text += &format!(", {} excluded by rules", self.excluded);
+        }
+        for (other, n) in &self.taken_from {
+            text += &format!("; {n} found by {other} too, taken over (the lower detection wins)");
+        }
+        for (other, n) in &self.left_to {
+            text += &format!("; {n} found by {other} too, left to it (the lower detection wins)");
         }
         if !self.lost.is_empty() {
             text += &format!(
@@ -256,6 +380,21 @@ pub struct DetectionGeometry<'a> {
     pub face_edges: &'a BTreeMap<i32, Vec<i32>>,
     /// Of each part, the dimension of its CAD shape: 3 a solid, 2 faces, 1 edges.
     pub part_dimensions: &'a [u8],
+    /// Of each part, the compound part it belongs to, by index; parts left out belong to
+    /// none. Parts of one compound are tied by it and get no regions between them.
+    pub compounds: &'a [Option<usize>],
+}
+
+/// What a detection on the display of CAD geometry knows of its parts.
+#[derive(Clone, Copy)]
+struct Display<'a> {
+    /// Of each part, the dimension of its CAD shape.
+    part_dimensions: &'a [u8],
+    /// Of each part, whether its faces were turned outwards, see
+    /// [`plx_mesh::SearchParameters::one_sided`].
+    one_sided: &'a [bool],
+    /// Of each part, its compound part, see [`DetectionGeometry::compounds`].
+    compounds: &'a [Option<usize>],
 }
 
 impl FeModel {
@@ -284,8 +423,36 @@ impl FeModel {
     ) -> Option<DetectionReport> {
         let mut mesh = geometry.mesh.clone();
         mesh.cad = display_cad_map(&mesh, geometry.entities, geometry.face_edges);
-        let skins = geometry.skins;
-        self.detect(index, &mesh, skins, visible, Some(geometry.part_dimensions))
+        // The display does not tell which side of the faces of a solid is outside: turned
+        // outwards, only that side touches. Else two faces of neighbouring solids in one
+        // plane, e.g. on a plane of symmetry, would touch each other's back.
+        let one_sided: Vec<bool> = (0..mesh.parts.len())
+            .map(|part| {
+                geometry.part_dimensions.get(part) == Some(&3)
+                    && plx_mesh::orient_outward(&mut mesh, part)
+            })
+            .collect();
+        let skins: Vec<PartSkin> = if one_sided.contains(&true) {
+            (mesh.parts.iter())
+                .zip(geometry.skins)
+                .zip(&one_sided)
+                .map(|((part, skin), &turned)| {
+                    if turned {
+                        plx_mesh::extract_part_skin(&mesh, part, 180.0)
+                    } else {
+                        skin.clone()
+                    }
+                })
+                .collect()
+        } else {
+            geometry.skins.to_vec()
+        };
+        let display = Display {
+            part_dimensions: geometry.part_dimensions,
+            one_sided: &one_sided,
+            compounds: geometry.compounds,
+        };
+        self.detect(index, &mesh, &skins, visible, Some(display))
     }
 
     /// The detection on a mesh, or on a display of CAD geometry with the dimensions of its
@@ -296,10 +463,11 @@ impl FeModel {
         mesh: &FeMesh,
         skins: &[PartSkin],
         visible: &[bool],
-        display: Option<&[u8]>,
+        display: Option<Display>,
     ) -> Option<DetectionReport> {
         let detection = self.contact_detections.get(index)?.clone();
-        let searched = searched_parts(&detection, mesh, visible);
+        let context = self.part_context(mesh);
+        let searched = detection.searched(&context, visible);
         let tolerance = (detection.tolerance)
             .unwrap_or_else(|| tolerance_of(mesh, skins, &searched, display.is_none()));
         let young_of = self.young_of_elements(mesh);
@@ -340,9 +508,25 @@ impl FeModel {
             },
             stiffness,
             filter,
+            one_sided: display.map_or(Vec::new(), |d| d.one_sided.to_vec()),
+            // The triangles of a solid's faces end at the borders of its CAD faces, which are
+            // no edges of shells; searched as edges they would join faces that do not touch.
+            solid_skins: display.map_or(Vec::new(), |d| {
+                (d.part_dimensions.iter()).map(|&d| d == 3).collect()
+            }),
         };
         let mut items = find_contact_pairs(mesh, skins, &searched, &parameters);
-        if let Some(dimensions) = display {
+        if let Some(compounds) = display.map(|d| d.compounds) {
+            // The parts of a compound part are tied by it.
+            let compound = |surfaces: &BTreeSet<SurfaceId>| {
+                let part = surfaces.first()?.0;
+                compounds.get(part).copied().flatten()
+            };
+            items.retain(|item| {
+                compound(&item.master).is_none() || compound(&item.master) != compound(&item.slave)
+            });
+        }
+        if let Some(dimensions) = display.map(|d| d.part_dimensions) {
             // Of solids only their faces count, which the filter asks for as solid faces;
             // the borders of their faces are no edges of shells.
             let wanted = |id: &SurfaceId| match (dimensions.get(id.0), id.1) {
@@ -377,8 +561,14 @@ impl FeModel {
             tolerance,
             ..DetectionReport::default()
         };
-        let ours = |r: &ContactRegion| r.detected_by.as_deref() == Some(detection.name.as_str());
+        let ours = |r: &ContactRegion| r.detected_by == Some(detection.id);
         let before = self.contact_regions.len();
+        // A region found again keeps the id of the one it replaces, so that what refers to
+        // it (a contact history output, a contact change of a step) stays on it.
+        let replaced: Vec<(String, crate::Id)> = (self.contact_regions.iter())
+            .filter(|r| ours(r) && !r.edited)
+            .map(|r| (r.name.clone(), r.id))
+            .collect();
         self.contact_regions.retain(|r| !ours(r) || r.edited);
         report.replaced = before - self.contact_regions.len();
         // The parts each kept region connects, to recognise it among the regions found.
@@ -389,12 +579,97 @@ impl FeModel {
         let edited: Vec<(String, PartPair)> = (self.contact_regions.iter().filter(|r| ours(r)))
             .map(|r| (r.name.clone(), key(&r.side_a, &r.side_b)))
             .collect();
+        // Touching surfaces, then ropes lying on a surface: a rope slides over a sheave, so
+        // a bonded or no separation rule makes it frictionless contact.
+        let mut candidates: Vec<(Region, Region, bool)> = (items.iter())
+            .map(|item| (region(&item.master), region(&item.slave), false))
+            .collect();
+        for (faces, rope) in self.ropes_on_surfaces(mesh, skins, &searched, tolerance) {
+            let faces = if display.is_some() {
+                Region::Geometry(mesh.cad_entities_touched(&faces))
+            } else {
+                match mesh.whole_cad_faces(&faces) {
+                    Some(entities) => Region::Geometry(entities),
+                    None => Region::Faces(faces),
+                }
+            };
+            let rope = Region::Parts(vec![mesh.parts[rope].name.clone()]);
+            candidates.push((faces, rope, true));
+        }
+        report.per_rule = vec![0; detection.rules.len() + 1];
+        // A pair found by several detections belongs to the lowest of them in the tree:
+        // the regions of detections above are taken over, those of detections below kept.
+        let position =
+            |id: Option<crate::Id>| (self.contact_detections.iter()).position(|d| Some(d.id) == id);
+        let mut below: HashMap<PartPair, String> = HashMap::new();
+        let mut above: HashSet<PartPair> = HashSet::new();
+        for r in &self.contact_regions {
+            let Some(other) = position(r.detected_by).filter(|&o| o != index) else {
+                continue;
+            };
+            let pair = key(&r.side_a, &r.side_b);
+            if other > index || r.edited {
+                below.insert(pair, self.contact_detections[other].name.clone());
+            } else {
+                above.insert(pair);
+            }
+        }
+        let mut take_over: HashSet<PartPair> = HashSet::new();
+        let mut kept_candidates = Vec::new();
+        for (side_a, side_b, rope) in candidates {
+            let pair = key(&side_a, &side_b);
+            let action = detection.action_for(&pair.0, &pair.1, &context);
+            let rule = detection.rule_for(&pair.0, &pair.1, &context);
+            let behavior = match action {
+                RuleAction::Exclude => {
+                    report.excluded += 1;
+                    continue;
+                }
+                RuleAction::Type(ContactBehavior::Bonded | ContactBehavior::NoSeparation)
+                    if rope =>
+                {
+                    ContactBehavior::Frictionless
+                }
+                RuleAction::Type(behavior) => behavior,
+            };
+            if let Some(other) = below.get(&pair) {
+                *report.left_to.entry(other.clone()).or_default() += 1;
+                continue;
+            }
+            if above.contains(&pair) {
+                take_over.insert(pair.clone());
+            }
+            kept_candidates.push((side_a, side_b, behavior, rule));
+        }
+        if !take_over.is_empty() {
+            let names: Vec<String> = self
+                .contact_detections
+                .iter()
+                .map(|d| d.name.clone())
+                .collect();
+            let mut taken = BTreeMap::<String, usize>::new();
+            self.contact_regions.retain(|r| {
+                let Some(other) = position(r.detected_by).filter(|&o| o < index) else {
+                    return true;
+                };
+                if r.edited || !take_over.contains(&key(&r.side_a, &r.side_b)) {
+                    return true;
+                }
+                *taken.entry(names[other].clone()).or_default() += 1;
+                false
+            });
+            report.taken_from = taken;
+        }
         let mut found_again = HashSet::new();
-        for item in &items {
-            let mut found = ContactRegion::new("", detection.behavior);
-            found.side_a = region(&item.master);
-            found.side_b = region(&item.slave);
-            let empty = |r: &Region| matches!(r, Region::Faces(f) if f.is_empty());
+        for (side_a, side_b, behavior, rule) in kept_candidates {
+            let mut found = ContactRegion::new("", behavior);
+            found.side_a = side_a;
+            found.side_b = side_b;
+            let empty = |r: &Region| match r {
+                Region::Faces(f) => f.is_empty(),
+                Region::Geometry(g) => g.is_empty(),
+                _ => false,
+            };
             if empty(&found.side_a) || empty(&found.side_b) {
                 continue;
             }
@@ -410,7 +685,7 @@ impl FeModel {
                 Some(_) => detection.tolerance,
                 None => Some(tolerance),
             };
-            found.detected_by = Some(detection.name.clone());
+            found.detected_by = Some(detection.id);
             let name = found.name_from_definition(mesh);
             let taken = self.contact_pair_names();
             found.name = if taken.iter().any(|t| t.eq_ignore_ascii_case(&name)) {
@@ -418,8 +693,12 @@ impl FeModel {
             } else {
                 name
             };
+            if let Some((_, id)) = replaced.iter().find(|(n, _)| *n == found.name) {
+                found.id = *id;
+            }
             self.contact_regions.push(found);
             report.added += 1;
+            report.per_rule[rule.unwrap_or(detection.rules.len())] += 1;
         }
         for (name, _) in edited {
             if found_again.contains(&name) {
@@ -436,6 +715,121 @@ impl FeModel {
         Some(report)
     }
 
+    /// Of each rule of `detection`, then of its type of all other pairs, how many of the
+    /// regions it found, unchanged since, take their type from it. Regions whose sides have
+    /// no parts in `mesh`, found on the geometry before meshing, are not counted.
+    pub fn rule_counts(
+        &self,
+        detection: &ContactDetection,
+        mesh: &FeMesh,
+        context: &PartContext,
+    ) -> Vec<usize> {
+        let mut counts = vec![0; detection.rules.len() + 1];
+        for region in &self.contact_regions {
+            if region.detected_by != Some(detection.id) || region.edited {
+                continue;
+            }
+            let (a, b) = (
+                parts_of(&region.side_a, mesh),
+                parts_of(&region.side_b, mesh),
+            );
+            if a.is_empty() || b.is_empty() {
+                continue;
+            }
+            let rule = detection.rule_for(&a, &b, context);
+            counts[rule.unwrap_or(detection.rules.len())] += 1;
+        }
+        counts
+    }
+
+    /// Ropes lying on surfaces: of each searched part of line elements whose beam section
+    /// has a contact radius (a rope profile), the faces of other searched parts its axis
+    /// passes within the radius plus `tolerance`, widened to the whole surface patches they
+    /// lie on, so that the rope can run along them. One entry per rope and touched part:
+    /// the faces and the rope's part index.
+    fn ropes_on_surfaces(
+        &self,
+        mesh: &FeMesh,
+        skins: &[PartSkin],
+        searched: &[bool],
+        tolerance: f64,
+    ) -> Vec<(Vec<(plx_mesh::ElementId, u8)>, usize)> {
+        let coords = mesh.coords();
+        let elements = mesh.elements();
+        let mut found = Vec::new();
+        for (rope, skin) in skins.iter().enumerate() {
+            if !searched.get(rope).copied().unwrap_or(false) || skin.lines.is_empty() {
+                continue;
+            }
+            let part = Region::Parts(vec![mesh.parts[rope].name.clone()]);
+            let Some(radius) = self.contact_radius(&part, mesh) else {
+                continue;
+            };
+            let reach = radius + tolerance;
+            // Points along the axis, no further apart than the radius.
+            let mut points = Vec::new();
+            for &[i, j] in &skin.lines {
+                let (a, b) = (coords[i], coords[j]);
+                let length = distance(a, b);
+                let n = ((length / radius).ceil() as usize).max(1);
+                points.extend((0..=n).map(|k| {
+                    let t = k as f64 / n as f64;
+                    [0, 1, 2].map(|d| a[d] + t * (b[d] - a[d]))
+                }));
+            }
+            let (mut low, mut high) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+            for p in &points {
+                for d in 0..3 {
+                    low[d] = low[d].min(p[d] - reach);
+                    high[d] = high[d].max(p[d] + reach);
+                }
+            }
+            for (other, other_skin) in skins.iter().enumerate() {
+                if other == rope || !searched.get(other).copied().unwrap_or(false) {
+                    continue;
+                }
+                let mut patches = BTreeSet::new();
+                for face in &other_skin.faces {
+                    let corners: Vec<[f64; 3]> = face.corners.iter().map(|&c| coords[c]).collect();
+                    let outside = (0..3).any(|d| {
+                        corners.iter().all(|c| c[d] < low[d])
+                            || corners.iter().all(|c| c[d] > high[d])
+                    });
+                    if outside || patches.contains(&face.region) {
+                        continue;
+                    }
+                    let near = points.iter().any(|&p| {
+                        (1..corners.len() - 1).any(|k| {
+                            distance(
+                                p,
+                                crate::contact_check::closest_on_triangle(
+                                    p,
+                                    corners[0],
+                                    corners[k],
+                                    corners[k + 1],
+                                ),
+                            ) <= reach
+                        })
+                    });
+                    if near {
+                        patches.insert(face.region);
+                    }
+                }
+                if patches.is_empty() {
+                    continue;
+                }
+                let mut faces: Vec<(plx_mesh::ElementId, u8)> = (other_skin.faces.iter())
+                    .filter(|f| patches.contains(&f.region))
+                    .map(|f| (elements[f.element].id, (f.face + 1) as u8))
+                    .collect();
+                faces.sort_unstable();
+                faces.dedup();
+                found.push((faces, rope));
+            }
+        }
+        found
+    }
+
     /// The node ties of the detection `index`: ends of beams and trusses of different parts
     /// within the report's tolerance of each other are tied, rigidly. They replace the node
     /// ties the detection found before, except those the user changed since, and are counted
@@ -450,7 +844,7 @@ impl FeModel {
         let Some(detection) = self.contact_detections.get(index).cloned() else {
             return;
         };
-        let ours = |t: &NodeTie| t.detected_by.as_deref() == Some(detection.name.as_str());
+        let ours = |t: &NodeTie| t.detected_by == Some(detection.id);
         self.node_ties.retain(|t| !ours(t) || t.edited);
         if !detection.filter.line_end {
             return;
@@ -459,7 +853,7 @@ impl FeModel {
             .map(|t| node_parts(&t.region, mesh))
             .collect();
         report.node_ties += edited.len();
-        let searched = searched_parts(&detection, mesh, visible);
+        let searched = detection.searched(&self.part_context(mesh), visible);
         for joint in find_line_joints(mesh, &searched, report.tolerance) {
             if edited.contains(&joint.parts) {
                 continue;
@@ -477,25 +871,12 @@ impl FeModel {
             };
             self.node_ties.push(NodeTie {
                 region: joint_region(mesh, &joint),
-                detected_by: Some(detection.name.clone()),
+                detected_by: Some(detection.id),
                 ..NodeTie::new(name)
             });
             report.node_ties += 1;
         }
     }
-}
-
-/// Which parts of `mesh` the detection searches: the parts it names, or the visible ones.
-fn searched_parts(detection: &ContactDetection, mesh: &FeMesh, visible: &[bool]) -> Vec<bool> {
-    (mesh.parts.iter().enumerate())
-        .map(|(i, part)| {
-            if detection.parts.is_empty() {
-                visible.get(i).copied().unwrap_or(true)
-            } else {
-                detection.parts.contains(&part.name)
-            }
-        })
-        .collect()
 }
 
 /// The parts with elements on the nodes of `region`, to recognise a node tie by.
@@ -527,4 +908,8 @@ fn joint_region(mesh: &FeMesh, joint: &LineJoint) -> Region {
     } else {
         Region::Nodes(joint.nodes.clone())
     }
+}
+
+fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+    (0..3).map(|d| (b[d] - a[d]).powi(2)).sum::<f64>().sqrt()
 }

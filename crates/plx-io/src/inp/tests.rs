@@ -228,7 +228,7 @@ fn reads_the_thickness_of_shells_and_the_area_of_trusses() {
             (
                 "BEAM",
                 &SectionKind::Beam(BeamSection {
-                    cross_section: "BEAM".into(),
+                    cross_section: Some(import.cross_sections[0].id),
                     orientation: BeamOrientation::Direction([0.0, 1.0, 0.0]),
                     offset: [0.0, 0.5],
                 })

@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::mesh::NodeId;
 
+pub mod plane;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Results {
     /// One entry per written increment (or mode).

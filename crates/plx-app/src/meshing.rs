@@ -12,7 +12,7 @@ use plx_mesh::{ElementShape, FeMesh, NodeId};
 use plx_mesher::{CadEntity, GeneratedMesh};
 use plx_model::{
     Algorithm2d, Algorithm3d, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem, MeshSetupKind,
-    MeshingParameters, Quantity, Recombination, UnitSystem, next_name,
+    MeshingParameters, Quantity, Recombination, ThickenShellMesh, UnitSystem, next_name,
 };
 use serde::{Deserialize, Serialize};
 
@@ -60,11 +60,13 @@ fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem
         ui.checkbox(&mut d.optimize, "Optimize mesh (Netgen)");
         ui.add_enabled(
             faces,
-            egui::Checkbox::new(&mut d.quad_dominated, "Quad-dominated surface mesh"),
+            egui::Checkbox::new(&mut d.quad_dominated, "Quadrilaterals on faces"),
         )
         .on_hover_text(
-            "Mesh faces (2D models and shells) mostly with quadrilaterals. Solids keep \
-             triangles on their faces, as tetrahedra need them.",
+            "Mesh faces (2D models and shells) with quadrilaterals in a mostly regular grid, \
+             by Gmsh's quasi-structured algorithm; off for triangles. A Tetrahedral Gmsh item \
+             chooses another algorithm, whose triangles are joined to quadrilaterals. Solids \
+             keep triangles on their faces, as tetrahedra need them.",
         )
         .on_disabled_hover_text(
             "Only for faces (2D models and shells): the parts are solids, meshed with \
@@ -72,8 +74,10 @@ fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem
         );
         ui.checkbox(&mut d.hexahedra_where_possible, "Hexahedra where possible")
             .on_hover_text(
-                "Parts that are straight extrusions of a face or bodies of revolution get a \
-                 swept mesh of hexahedra; the others stay tetrahedra.",
+                "Parts that can be swept get hexahedra: stacks of extrusions along one \
+                 direction (stepped shafts, plates with bosses, pockets and counterbores), \
+                 straight extrusions of a face and bodies of revolution. The others get \
+                 tetrahedra, with a warning that says why.",
             );
     });
     ui.end_row();
@@ -158,11 +162,12 @@ impl MeshSetupWindow {
 }
 
 /// The item types of "Create Mesh Setup Item" that Nodalis supports.
-const TYPES: [&str; 4] = [
+const TYPES: [&str; 5] = [
     "Meshing Parameters",
     "Local Mesh Size",
     "Tetrahedral Gmsh",
     "Extrude Mesh",
+    "Thicken Shell Mesh",
 ];
 
 fn type_index(kind: &MeshSetupKind) -> usize {
@@ -171,6 +176,7 @@ fn type_index(kind: &MeshSetupKind) -> usize {
         MeshSetupKind::LocalMeshSize { .. } => 1,
         MeshSetupKind::TetrahedralGmsh { .. } => 2,
         MeshSetupKind::ExtrudeMesh(_) => 3,
+        MeshSetupKind::ThickenShellMesh(_) => 4,
     }
 }
 
@@ -191,8 +197,22 @@ fn new_kind(index: usize, geometry: &Geometry) -> MeshSetupKind {
             algorithm_2d: Algorithm2d::default(),
             algorithm_3d: Algorithm3d::default(),
         },
-        _ => MeshSetupKind::ExtrudeMesh(ExtrudeMesh::default()),
+        3 => MeshSetupKind::ExtrudeMesh(ExtrudeMesh::default()),
+        _ => MeshSetupKind::ThickenShellMesh(ThickenShellMesh {
+            // A tenth of the element size: about as thin as a sheet next to its mesh.
+            thickness: round_thickness(geometry.meshing.max_size / 10.0),
+            ..ThickenShellMesh::default()
+        }),
     }
+}
+
+/// Rounds to one significant digit, so that a proposed thickness reads well.
+fn round_thickness(size: f64) -> f64 {
+    if !(size.is_finite() && size > 0.0) {
+        return ThickenShellMesh::default().thickness;
+    }
+    let scale = 10f64.powf(size.log10().floor());
+    (size / scale).round() * scale
 }
 
 const ALGORITHMS_2D: [(Algorithm2d, &str); 4] = [
@@ -204,12 +224,12 @@ const ALGORITHMS_2D: [(Algorithm2d, &str); 4] = [
 
 /// The surface algorithms for an extrude mesh, those for quadrilaterals first.
 const EXTRUDE_ALGORITHMS_2D: [(Algorithm2d, &str); 7] = [
+    (Algorithm2d::QuasiStructuredQuad, "Quasi-structured quad"),
     (Algorithm2d::FrontalQuads, "Frontal-Delaunay for quads"),
     (
         Algorithm2d::PackingOfParallelograms,
         "Packing of parallelograms",
     ),
-    (Algorithm2d::QuasiStructuredQuad, "Quasi-structured quad"),
     (Algorithm2d::FrontalDelaunay, "Frontal-Delaunay"),
     (Algorithm2d::Delaunay, "Delaunay"),
     (Algorithm2d::MeshAdapt, "MeshAdapt"),
@@ -279,6 +299,8 @@ pub struct MeshItemEditor {
     layer_text: [String; 2],
     /// The parts of the picked source faces, for the faces they were found for.
     face_parts: (BTreeSet<CadEntity>, Vec<String>),
+    /// Names of the geometry's shell parts, the parts a thicken shell mesh takes.
+    shells: BTreeSet<String>,
 }
 
 pub enum MeshItemResult {
@@ -307,11 +329,12 @@ impl MeshItemEditor {
             source_faces: false,
             layer_text: ["0.2; 0.6; 0.2;".into(), "2; 4; 2;".into()],
             face_parts: Default::default(),
+            shells: BTreeSet::new(),
         }
     }
 
     /// A new item of the kind at `index` of the dialog's list: meshing parameters of parts,
-    /// local mesh size, tetrahedral Gmsh or extrude mesh.
+    /// local mesh size, tetrahedral Gmsh, extrude mesh or thicken shell mesh.
     pub fn create_kind(geometry: &Geometry, units: UnitSystem, index: usize) -> Self {
         let mut editor = Self::create(geometry, units);
         let kind = new_kind(index, geometry);
@@ -362,6 +385,7 @@ impl MeshItemEditor {
             source_faces,
             layer_text,
             face_parts: Default::default(),
+            shells: BTreeSet::new(),
         })
     }
 
@@ -387,6 +411,7 @@ impl MeshItemEditor {
         let mut open = true;
         if let Some(view) = view {
             self.update_face_parts(view);
+            self.shells = shell_parts(view);
         }
         let title = self.title();
         let builder = egui::Window::new(title.clone())
@@ -532,6 +557,9 @@ impl MeshItemEditor {
             | MeshSetupKind::TetrahedralGmsh { parts, .. } => {
                 *parts = self.parts.names().into_iter().collect();
             }
+            MeshSetupKind::ThickenShellMesh(thicken) => {
+                thicken.parts = self.parts.names().into_iter().collect();
+            }
             MeshSetupKind::ExtrudeMesh(extrude) if source_faces => {
                 extrude.parts = self.face_parts.1.clone();
             }
@@ -604,17 +632,47 @@ impl MeshItemEditor {
                 ..
             } => {
                 parts_ui(ui, &mut self.parts);
-                ui.label("Surface algorithm");
+                ui.label("Surface algorithm").on_hover_text(
+                    "For the faces of solids and for shells and 2D models. Quadrilaterals on \
+                     faces are then joined from this algorithm's triangles instead of made \
+                     by the quasi-structured algorithm.",
+                );
                 algorithm_combo(ui, "algorithm 2d", algorithm_2d, &ALGORITHMS_2D);
                 ui.end_row();
                 ui.label("Volume algorithm");
                 algorithm_combo(ui, "algorithm 3d", algorithm_3d, &ALGORITHMS_3D);
                 ui.end_row();
             }
+            MeshSetupKind::ThickenShellMesh(thicken) => {
+                parts_ui(ui, &mut self.parts);
+                ui.label("Thickness");
+                ui.add(
+                    numeric::quantity(&mut thicken.thickness, self.units, Quantity::Length)
+                        .range(0.0..=f64::MAX),
+                );
+                ui.end_row();
+                ui.label("Number of layers")
+                    .on_hover_text("Layers of solid elements through the thickness.");
+                ui.add(crate::numeric::count(&mut thicken.layers).range(1..=1000));
+                ui.end_row();
+                ui.label("Offset").on_hover_text(
+                    "Shift of the solid's middle from the shell along the face normals: 0 \
+                     centres it on the shell, half the thickness puts the shell on one side \
+                     and minus half the thickness on the other.",
+                );
+                ui.add(numeric::quantity(
+                    &mut thicken.offset,
+                    self.units,
+                    Quantity::Length,
+                ));
+                ui.end_row();
+            }
             MeshSetupKind::ExtrudeMesh(extrude) => {
                 ui.label("Source faces").on_hover_text(
-                    "Automatic finds for each part a face it is a straight extrusion of. \
-                     Selected: click the faces at one end of the parts.",
+                    "Automatic finds how each part is swept: as a stack of extrusions along \
+                     one direction, with steps, pockets and holes of any depth, or as the \
+                     straight extrusion of a face. Selected: click the faces at one end of \
+                     the parts.",
                 );
                 let mut selected = self.source_faces;
                 egui::ComboBox::from_id_salt("extrude source")
@@ -670,15 +728,27 @@ impl MeshItemEditor {
                     "How triangles are joined to quadrilaterals, which become hexahedra; \
                      triangles become wedges. Full-quad gives quadrilaterals only.",
                 );
-                algorithm_combo(
-                    ui,
-                    "extrude recombination",
-                    &mut extrude.recombination,
-                    &RECOMBINATIONS,
+                // The quasi-structured algorithm makes its quadrilaterals itself.
+                let recombines = extrude.algorithm_2d != Algorithm2d::QuasiStructuredQuad;
+                ui.add_enabled_ui(recombines, |ui| {
+                    algorithm_combo(
+                        ui,
+                        "extrude recombination",
+                        &mut extrude.recombination,
+                        &RECOMBINATIONS,
+                    );
+                })
+                .response
+                .on_disabled_hover_text(
+                    "The quasi-structured algorithm gives quadrilaterals only, without \
+                     joining triangles.",
                 );
                 ui.end_row();
-                ui.label("Layers defined by")
-                    .on_hover_text("The element size in the extrude direction.");
+                ui.label("Layers defined by").on_hover_text(
+                    "The element size in the extrude direction. In a stack of \
+                         extrusions the layers are counted over the whole height; every \
+                         step gets a layer boundary and at least one layer.",
+                );
                 let mut kind = layer_type(&extrude.layers);
                 egui::ComboBox::from_id_salt("extrude layers")
                     .selected_text(LAYER_TYPES[kind])
@@ -757,6 +827,17 @@ impl MeshItemEditor {
                     return Err("No part selected.".into());
                 }
             }
+            MeshSetupKind::ThickenShellMesh(thicken) => {
+                if thicken.parts.is_empty() {
+                    return Err("No shell part selected.".into());
+                }
+                if let Some(solid) = (thicken.parts.iter()).find(|p| !self.shells.contains(*p)) {
+                    return Err(format!(
+                        "{solid} is no shell: only shells can be thickened."
+                    ));
+                }
+                thicken.check().map_err(|e| format!("{e}."))?;
+            }
             MeshSetupKind::ExtrudeMesh(extrude) => {
                 extrude.faces = if self.source_faces {
                     (self.picks.items().iter())
@@ -815,6 +896,7 @@ impl MeshItemEditor {
     /// A click on the geometry: picks the clicked part, the face or edge for a local mesh
     /// size, or the source face of an extrude mesh.
     pub fn click(&mut self, view: &Model, pick: Option<(&Hit, f32)>, operation: Operation) {
+        self.shells = shell_parts(view);
         if self.has_parts() {
             self.parts.click(view, pick.map(|(hit, _)| hit), operation);
             self.sync_parts();
@@ -892,6 +974,14 @@ fn algorithm_combo<T: Copy + PartialEq>(
                 ui.selectable_value(value, choice, label);
             }
         });
+}
+
+/// Names of the parts of faces outside the solids.
+fn shell_parts(view: &Model) -> BTreeSet<String> {
+    (view.parts.iter())
+        .filter(|p| p.dimension == Some(2))
+        .map(|p| p.name.clone())
+        .collect()
 }
 
 /// Names of the parts the CAD faces lie on.
@@ -1003,7 +1093,8 @@ pub fn entities_highlight(view: &Model, entities: &BTreeSet<CadEntity>) -> Highl
 pub fn item_highlight(view: &Model, kind: &MeshSetupKind) -> Highlight {
     match kind {
         MeshSetupKind::MeshingParameters { parts, .. }
-        | MeshSetupKind::TetrahedralGmsh { parts, .. } => Highlight {
+        | MeshSetupKind::TetrahedralGmsh { parts, .. }
+        | MeshSetupKind::ThickenShellMesh(ThickenShellMesh { parts, .. }) => Highlight {
             parts: (view.parts.iter().enumerate())
                 .filter(|(_, p)| parts.contains(&p.name))
                 .map(|(i, _)| i)
@@ -1063,7 +1154,16 @@ type WorkerResult = Result<Vec<(FeMesh, Vec<String>)>, String>;
 /// Meshes the named parts, or all with `None`, one after the other.
 fn mesh_parts(geometry: &Geometry, parts: Option<Vec<String>>) -> Result<PartMeshes, String> {
     let parts = match parts {
-        Some(parts) => parts,
+        // A compound part is meshed as the parts of the geometry it joins.
+        Some(parts) => {
+            let mut expanded: Vec<String> = Vec::new();
+            for part in parts.iter().flat_map(|p| geometry.parts_of_fe_part(p)) {
+                if !expanded.iter().any(|e| e.eq_ignore_ascii_case(&part)) {
+                    expanded.push(part);
+                }
+            }
+            expanded
+        }
         None => plx_mesher::part_names(geometry).map_err(|e| e.to_string())?,
     };
     let mut meshes = Vec::with_capacity(parts.len());
@@ -1410,6 +1510,35 @@ mod tests {
         let edited = MeshItemEditor::edit(&with_item, 0, UnitSystem::MmTonSC).unwrap();
         assert!(edited.source_faces);
         assert_eq!(edited.layer_text[0], "0.2; 0.8;");
+    }
+
+    #[test]
+    fn only_shells_can_be_thickened() {
+        let Some((geometry, view)) = geometry_view() else {
+            return;
+        };
+        let mut editor = MeshItemEditor::create_kind(&geometry, UnitSystem::MmTonSC, 4);
+        assert_eq!(editor.draft.name, "Thicken_Shell_Mesh-1");
+        let MeshSetupKind::ThickenShellMesh(thicken) = &editor.draft.kind else {
+            panic!("{:?}", editor.draft.kind);
+        };
+        assert!(thicken.thickness > 0.0 && thicken.layers == 2 && thicken.offset == 0.0);
+        assert!(editor.finish().is_err(), "no part yet");
+        // The plate is a solid.
+        editor.click(
+            &view,
+            Some((&hit(&view, -30.0, 0.0), 0.5)),
+            Operation::Replace,
+        );
+        let error = editor.finish().unwrap_err();
+        assert!(error.contains("no shell"), "{error}");
+        editor.shells.insert("SOLID-1".into());
+        let item = editor.finish().unwrap();
+        assert_eq!(item.kind.parts().unwrap(), ["SOLID-1"]);
+        if let MeshSetupKind::ThickenShellMesh(thicken) = &mut editor.draft.kind {
+            thicken.layers = 0;
+        }
+        assert!(editor.finish().is_err());
     }
 
     #[test]

@@ -123,6 +123,9 @@ pub fn layout(view: &ResultsView, width: f32) -> Layout {
     layout
 }
 
+/// The colour of the parts of a step integrated explicitly.
+const EXPLICIT: Color32 = Color32::from_rgb(206, 120, 52);
+
 /// The colour of a step's segment.
 fn family_color(family: StepFamily) -> Color32 {
     match family {
@@ -186,14 +189,53 @@ pub fn show(ui: &mut Ui, view: &ResultsView, hide: &mut bool) -> Option<usize> {
                 hatch(&painter, bar);
             }
         }
+        // The parts the solver integrated explicitly (automatic switching), with their
+        // name where it fits.
+        let span = step.end_time - step.start_time;
+        if span > 0.0 && step.is_timed() && !step.has_positions() {
+            let at = |t: f64| {
+                let fraction = ((t - step.start_time) / span).clamp(0.0, 1.0) as f32;
+                x(segment.left + fraction * (segment.right - segment.left))
+            };
+            let color = if shown {
+                EXPLICIT
+            } else {
+                EXPLICIT.gamma_multiply(0.6)
+            };
+            for &(from, to) in &step.explicit {
+                let part = Rect::from_min_max(
+                    pos2(at(from), bar.top()),
+                    pos2(at(to).max(at(from) + 2.0), bar.bottom()),
+                );
+                painter.rect_filled(part, 1.0, color);
+                if part.width() > 46.0 {
+                    painter.text(
+                        part.center(),
+                        Align2::CENTER_CENTER,
+                        "explicit",
+                        small.clone(),
+                        Color32::WHITE,
+                    );
+                }
+            }
+        }
         // The name above the segment, cut to its width.
         let mut name = format!("{} {}", segment.step + 1, step.name);
         if let Some(source) = &step.inherited_from {
             name.push_str(&format!(" (from {source})"));
         }
         let color = if shown { text } else { weak };
-        let galley = fit(ui, &name, font.clone(), color, bar.width());
-        painter.galley(pos2(bar.left() + 2.0, rect.top() + 3.0), galley, color);
+        // A step that leaves the state as it found it branches off the chain: the arrow of
+        // the model tree before its name.
+        let mut name_left = bar.left() + 2.0;
+        if step.base.is_some() {
+            let arrow = Rect::from_min_size(pos2(bar.left(), rect.top() + 2.0), vec2(14.0, 14.0));
+            crate::tree::paint_handover_arrow(&painter, arrow);
+            name_left += 13.0;
+        }
+        let room = bar.right() - name_left + 2.0;
+        let galley = fit(ui, &name, font.clone(), color, room);
+        painter.galley(pos2(name_left, rect.top() + 3.0), galley, color);
         if segment.reached.is_some() {
             let galley = ui.painter().layout_no_wrap(
                 "not converged".into(),
@@ -340,6 +382,9 @@ pub fn tooltip(view: &ResultsView, index: usize) -> String {
     let mut lines = Vec::new();
     if let Some(step) = view.steps.place(index).map(|p| p.step) {
         lines.push(view.step_title(step));
+        if let Some(base) = &view.steps.steps[step].base {
+            lines.push(format!("Base: {base}; leaves the state as it found it"));
+        }
     }
     let count = (view.steps.place(index))
         .and_then(|p| view.entry_count(p.step))
@@ -365,6 +410,9 @@ pub fn tooltip(view: &ResultsView, index: usize) -> String {
             ));
         }
         match (place.attempts, place.iterations) {
+            (_, Some(steps)) if place.explicit => {
+                lines.push(format!("Explicit: {steps} time steps"))
+            }
             (Some(attempts), Some(iterations)) if attempts > 1 => lines.push(format!(
                 "Cut back: {attempts} attempts, {iterations} iterations"
             )),
@@ -448,6 +496,7 @@ mod tests {
             time_period: period,
             solver_steps: steps.to_vec(),
             inherited_from: None,
+            base: None,
         }
     }
 
@@ -551,5 +600,25 @@ mod tests {
             "2 Load\nIncrement 1 of 2\nStep time 1.5 s, total time 2.5 s"
         );
         assert_eq!(tooltip(&view, 8), "3 Modes\nMode 3 of 3: 300 Hz");
+    }
+
+    #[test]
+    fn the_tooltip_of_a_probing_step_names_its_base() {
+        let mut view = view();
+        let mut modes = record("Modes", StepCategory::Frequency, None, &[3]);
+        modes.base = Some("End of Load".into());
+        view.set_step_records(
+            &[
+                record("Preload", StepCategory::Static, Some(1.0), &[1]),
+                record("Load", StepCategory::Static, Some(3.0), &[2]),
+                modes,
+            ],
+            &[],
+            None,
+        );
+        assert_eq!(
+            tooltip(&view, 8),
+            "3 Modes\nBase: End of Load; leaves the state as it found it\nMode 3 of 3: 300 Hz"
+        );
     }
 }

@@ -1,12 +1,13 @@
-//! CAD operations on geometry: a fillet or a chamfer of picked edges or a planar face moved
-//! along its normal, which a block of the
+//! CAD operations on geometry: a fillet or a chamfer of picked edges, a planar face moved
+//! along its normal, parts and faces split along a plane or faces split around holes, which
+//! a block of the
 //! project schematic applies to the geometry linked to it, so that a parameter study can
 //! vary a radius like any other number.
 
 use plx_mesh::{CadEntity, Fnv};
 use serde::{Deserialize, Serialize};
 
-use crate::{EntitySignature, Geometry, match_entities};
+use crate::{CoordinatePlane, EntitySignature, Geometry, match_entities};
 
 /// What a CAD operation does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,17 +21,37 @@ pub enum CadOperationKind {
     /// a prism on the face is added to the solid or cut from it, so that perpendicular
     /// neighbours grow or shrink with it and sloped ones get a step.
     PushPull,
+    /// Splits the parts a plane runs through: solids into one solid on each side, faces into
+    /// faces that share the cut edge; one side may be dropped. The plane is a plane of the
+    /// global coordinate system or one of a picked planar face, shifted by an offset.
+    SplitPlane,
+    /// Splits the planar face around a hole into a ring of a width and the rest, so that the
+    /// ring can be picked on its own: for loads and supports next to a hole.
+    HoleRing,
 }
 
 impl CadOperationKind {
-    pub const ALL: [Self; 3] = [Self::Fillet, Self::Chamfer, Self::PushPull];
+    pub const ALL: [Self; 5] = [
+        Self::Fillet,
+        Self::Chamfer,
+        Self::PushPull,
+        Self::SplitPlane,
+        Self::HoleRing,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Fillet => "Fillet",
             Self::Chamfer => "Chamfer",
             Self::PushPull => "Push/Pull",
+            Self::SplitPlane => "Split by Plane",
+            Self::HoleRing => "Split around Hole",
         }
+    }
+
+    /// Whether it splits the geometry rather than changing its shape.
+    pub fn splits(self) -> bool {
+        matches!(self, Self::SplitPlane | Self::HoleRing)
     }
 
     /// The name of its length, a row of the block.
@@ -38,7 +59,8 @@ impl CadOperationKind {
         match self {
             Self::Fillet => "Radius",
             Self::Chamfer => "Distance",
-            Self::PushPull => "Offset",
+            Self::PushPull | Self::SplitPlane => "Offset",
+            Self::HoleRing => "Width",
         }
     }
 
@@ -47,7 +69,8 @@ impl CadOperationKind {
         match self {
             Self::Fillet => "radius",
             Self::Chamfer => "distance",
-            Self::PushPull => "offset",
+            Self::PushPull | Self::SplitPlane => "offset",
+            Self::HoleRing => "width",
         }
     }
 
@@ -58,7 +81,8 @@ impl CadOperationKind {
             Self::Fillet | Self::Chamfer => {
                 matches!(entity, CadEntity::Edge(_) | CadEntity::Vertex(_))
             }
-            Self::PushPull => matches!(entity, CadEntity::Face(_)),
+            Self::PushPull | Self::SplitPlane => matches!(entity, CadEntity::Face(_)),
+            Self::HoleRing => matches!(entity, CadEntity::Edge(_)),
         }
     }
 
@@ -66,7 +90,8 @@ impl CadOperationKind {
     pub fn picked_noun(self) -> &'static str {
         match self {
             Self::Fillet | Self::Chamfer => "edges",
-            Self::PushPull => "faces",
+            Self::PushPull | Self::SplitPlane => "faces",
+            Self::HoleRing => "hole edges",
         }
     }
 
@@ -74,14 +99,102 @@ impl CadOperationKind {
     pub fn picked_one(self) -> &'static str {
         match self {
             Self::Fillet | Self::Chamfer => "edge",
-            Self::PushPull => "face",
+            Self::PushPull | Self::SplitPlane => "face",
+            Self::HoleRing => "hole edge",
         }
     }
 
     /// Whether its length may be negative: an offset inwards.
     pub fn signed(self) -> bool {
-        self == Self::PushPull
+        matches!(self, Self::PushPull | Self::SplitPlane)
     }
+}
+
+/// The plane a [`CadOperationKind::SplitPlane`] cuts along, before its offset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitPlane {
+    /// A plane of the global coordinate system through the origin, shifted along its axis.
+    Global(CoordinatePlane),
+    /// The plane of the picked planar face, shifted into the part it bounds.
+    Face,
+}
+
+impl Default for SplitPlane {
+    fn default() -> Self {
+        Self::Global(CoordinatePlane::Yz)
+    }
+}
+
+impl SplitPlane {
+    pub const ALL: [Self; 4] = [
+        Self::Global(CoordinatePlane::Yz),
+        Self::Global(CoordinatePlane::Xz),
+        Self::Global(CoordinatePlane::Xy),
+        Self::Face,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Global(CoordinatePlane::Yz) => "YZ plane",
+            Self::Global(CoordinatePlane::Xz) => "XZ plane",
+            Self::Global(CoordinatePlane::Xy) => "XY plane",
+            Self::Face => "Plane of a face",
+        }
+    }
+
+    /// The unit normal of a global plane, the direction its offset goes.
+    pub fn axis(self) -> Option<[f64; 3]> {
+        match self {
+            Self::Global(plane) => {
+                let mut normal = [0.0; 3];
+                normal[plane.normal_axis()] = 1.0;
+                Some(normal)
+            }
+            Self::Face => None,
+        }
+    }
+}
+
+/// Which pieces a [`CadOperationKind::SplitPlane`] keeps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitKeep {
+    /// Both sides.
+    #[default]
+    Both,
+    /// The side the normal of the plane points to: the positive axis of a global plane, or
+    /// for the plane of a face the side away from the face.
+    Positive,
+    /// The other side: the negative axis, or the slice between the face and the cut.
+    Negative,
+}
+
+impl SplitKeep {
+    pub const ALL: [Self; 3] = [Self::Both, Self::Positive, Self::Negative];
+
+    /// Its label for the plane cut along.
+    pub fn label(self, plane: SplitPlane) -> String {
+        let axis = |sign: &str| match plane {
+            SplitPlane::Global(plane) => {
+                format!("{sign}{} side", ["X", "Y", "Z"][plane.normal_axis()])
+            }
+            SplitPlane::Face => String::new(),
+        };
+        match (self, plane) {
+            (Self::Both, _) => "Both sides".to_owned(),
+            (Self::Positive, SplitPlane::Face) => "Beyond the cut".to_owned(),
+            (Self::Negative, SplitPlane::Face) => "Between face and cut".to_owned(),
+            (Self::Positive, _) => axis("+"),
+            (Self::Negative, _) => axis("-"),
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 /// A CAD operation with what it acts on and its length.
@@ -91,8 +204,18 @@ pub struct CadOperation {
     /// The picked entities of the input geometry with what they looked like, so that they
     /// are found again when the input changes.
     pub entities: Vec<EntitySignature>,
-    /// The radius or distance in metres.
+    /// The radius, distance, offset or width in metres.
     pub value: f64,
+    /// The plane a split cuts along.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub plane: SplitPlane,
+    /// The pieces a split keeps.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub keep: SplitKeep,
+    /// Solids split in two stay one part of the FE model, a compound part of their pieces,
+    /// which are tied where they were cut; otherwise each piece is a part of its own.
+    #[serde(default = "yes")]
+    pub compound: bool,
 }
 
 impl Default for CadOperation {
@@ -102,6 +225,9 @@ impl Default for CadOperation {
             entities: Vec::new(),
             // One millimetre.
             value: 1e-3,
+            plane: SplitPlane::default(),
+            keep: SplitKeep::default(),
+            compound: true,
         }
     }
 }
@@ -109,6 +235,12 @@ impl Default for CadOperation {
 impl CadOperation {
     /// What it acts on, for texts, e.g. "2 edges" or "1 corner".
     pub fn describe_picks(&self) -> String {
+        if self.kind == CadOperationKind::SplitPlane {
+            return match self.plane {
+                SplitPlane::Face if self.entities.is_empty() => "no face picked".to_owned(),
+                plane => plane.label().to_owned(),
+            };
+        }
         let count = self.entities.len();
         if count == 0 {
             return "nothing picked".to_owned();
@@ -122,8 +254,16 @@ impl CadOperation {
         format!("{count} {}", if count == 1 { one } else { many })
     }
 
+    /// Whether it needs picked entities: all but a split along a global plane do.
+    pub fn needs_picks(&self) -> bool {
+        !(self.kind == CadOperationKind::SplitPlane && self.plane != SplitPlane::Face)
+    }
+
     /// The picked entities in the geometry it is applied to, or why they cannot all be found.
     pub fn resolve(&self, input: &Geometry) -> Result<Vec<CadEntity>, String> {
+        if !self.needs_picks() {
+            return Ok(Vec::new());
+        }
         if self.entities.is_empty() {
             return Err(format!("no {} picked", self.kind.picked_noun()));
         }
@@ -168,6 +308,9 @@ impl CadOperation {
         hash.add_debug(&self.kind);
         hash.add_debug(&self.resolve(input));
         hash.add(&self.value.to_le_bytes());
+        if self.kind == CadOperationKind::SplitPlane {
+            hash.add_debug(&(self.plane, self.keep, self.compound));
+        }
         hash.finish()
     }
 
@@ -207,6 +350,7 @@ mod tests {
 
     fn geometry(signatures: Vec<EntitySignature>) -> Geometry {
         Geometry {
+            compounds: Vec::new(),
             source: "block.step".into(),
             brep: format!("{signatures:?}"),
             meshing: MeshingParameters::default(),

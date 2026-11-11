@@ -4,9 +4,9 @@
 //! region that ties nothing, or a frictional one that starts open and lets a part fly
 //! away, before the solver runs.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use plx_mesh::{ElementId, FeMesh};
+use plx_mesh::{ElementId, FeMesh, NodeId};
 
 use crate::{ContactRegion, FeModel, Region, Resolved};
 
@@ -49,6 +49,9 @@ pub struct ContactCheck {
     /// The largest gap of the nodes that touch, and the deepest overlap.
     pub max_gap: Option<f64>,
     pub max_penetration: Option<f64>,
+    /// The elements that moving the slave nodes on to the master side at the start (the
+    /// adjustment of a bonded region or contact) turns inside out, as the solver finds them.
+    pub folded: Vec<ElementId>,
 }
 
 impl ContactCheck {
@@ -87,7 +90,7 @@ struct Piece {
 
 /// The closest point to `p` on the triangle `a b c` (Ericson, Real-Time Collision
 /// Detection, 5.1.5).
-fn closest_on_triangle(p: Point, a: Point, b: Point, c: Point) -> Point {
+pub(crate) fn closest_on_triangle(p: Point, a: Point, b: Point, c: Point) -> Point {
     let (ab, ac, ap) = (sub(b, a), sub(c, a), sub(p, a));
     let (d1, d2) = (dot(ab, ap), dot(ac, ap));
     if d1 <= 0.0 && d2 <= 0.0 {
@@ -137,17 +140,18 @@ fn closest_on_segment(p: Point, a: Point, b: Point) -> Point {
 impl Piece {
     /// Signed distance of `p`: positive outside the material (a gap), negative inside (an
     /// overlap); without a known normal the distance.
-    fn distance(&self, p: Point) -> f64 {
+    /// With the closest point of the piece.
+    fn closest(&self, p: Point) -> (f64, Point) {
         let q = match self.points[..] {
             [a, b] => closest_on_segment(p, a, b),
             [a, b, c] => closest_on_triangle(p, a, b, c),
-            _ => return f64::INFINITY,
+            _ => return (f64::INFINITY, p),
         };
         let d = sub(p, q);
         let distance = length(d);
         match self.normal {
-            Some(n) if dot(d, n) < 0.0 => -distance,
-            _ => distance,
+            Some(n) if dot(d, n) < 0.0 => (-distance, q),
+            _ => (distance, q),
         }
     }
 }
@@ -268,8 +272,9 @@ impl Master {
         p.map(|v| (v / self.cell).floor() as i64)
     }
 
-    /// The signed distance of `p` to the nearest piece within `radius`, if any.
-    fn distance(&self, p: Point, radius: f64) -> Option<f64> {
+    /// The signed distance of `p` to the nearest piece within `radius`, if any, and the
+    /// closest point of that piece.
+    fn closest(&self, p: Point, radius: f64) -> Option<(f64, Point)> {
         if box_distance(p, self.min, self.max) > radius {
             return None;
         }
@@ -277,20 +282,20 @@ impl Master {
             self.key(p.map(|v| v - radius)),
             self.key(p.map(|v| v + radius)),
         );
-        let mut best: Option<f64> = None;
+        let mut best: Option<(f64, Point)> = None;
         for x in lo[0]..=hi[0] {
             for y in lo[1]..=hi[1] {
                 for z in lo[2]..=hi[2] {
                     // A piece in several cells is met again, but its box is no nearer then.
                     for &i in self.grid.get(&[x, y, z]).into_iter().flatten() {
                         let piece = &self.pieces[i];
-                        let bound = best.map_or(radius, |b| b.abs());
+                        let bound = best.map_or(radius, |(b, _)| b.abs());
                         if box_distance(p, piece.min, piece.max) > bound {
                             continue;
                         }
-                        let d = piece.distance(p);
-                        if d.abs() <= radius && best.is_none_or(|b| d.abs() < b.abs()) {
-                            best = Some(d);
+                        let (d, q) = piece.closest(p);
+                        if d.abs() <= radius && best.is_none_or(|(b, _)| d.abs() < b.abs()) {
+                            best = Some((d, q));
                         }
                     }
                 }
@@ -309,38 +314,58 @@ impl FeModel {
     pub fn check_contacts(&self, mesh: &FeMesh) -> Vec<Option<ContactCheck>> {
         let resolved = self.resolve_contacts(mesh);
         (self.contact_regions.iter().zip(&resolved.items))
-            .map(|(region, resolved)| check_resolved(mesh, region, resolved))
+            .map(|(region, resolved)| self.check_resolved(mesh, region, resolved))
             .collect()
     }
 
     /// The contact check of `region`, also one not in the model yet.
     pub fn check_contact(&self, region: &ContactRegion, mesh: &FeMesh) -> Option<ContactCheck> {
-        check_resolved(mesh, region, &self.resolve_contact(region, mesh))
+        self.check_resolved(mesh, region, &self.resolve_contact(region, mesh))
+    }
+
+    fn check_resolved(
+        &self,
+        mesh: &FeMesh,
+        region: &ContactRegion,
+        resolved: &Resolved,
+    ) -> Option<ContactCheck> {
+        let (master, slave) = if resolved.a_is_master {
+            (&region.side_a, &region.side_b)
+        } else {
+            (&region.side_b, &region.side_a)
+        };
+        let tolerance =
+            (resolved.tolerance()).or(resolved.mesh_size.map(|h| crate::TOLERANCE_FACTOR * h))?;
+        // A rope touches with its surface, the contact radius off its axis.
+        let offset = if resolved.node_to_surface {
+            self.contact_radius(slave, mesh).unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        // Rope nodes stay on their axis, the radius off the master.
+        let adjust = resolved.adjusts() && offset == 0.0;
+        check(mesh, master, slave, tolerance, offset, adjust)
     }
 }
 
-fn check_resolved(
+/// The check of the slave nodes against the master faces; `offset` is subtracted from each
+/// distance, the radius of a rope whose axis the nodes are on. With `adjust` the slave nodes
+/// within the tolerance are moved on to the master as the solver moves them, to find the
+/// elements that turns inside out.
+fn check(
     mesh: &FeMesh,
-    region: &ContactRegion,
-    resolved: &Resolved,
+    master: &Region,
+    slave: &Region,
+    tolerance: f64,
+    offset: f64,
+    adjust: bool,
 ) -> Option<ContactCheck> {
-    let (master, slave) = if resolved.a_is_master {
-        (&region.side_a, &region.side_b)
-    } else {
-        (&region.side_b, &region.side_a)
-    };
-    let tolerance =
-        (resolved.tolerance()).or(resolved.mesh_size.map(|h| crate::TOLERANCE_FACTOR * h))?;
-    check(mesh, master, slave, tolerance)
-}
-
-fn check(mesh: &FeMesh, master: &Region, slave: &Region, tolerance: f64) -> Option<ContactCheck> {
     let faces = master.faces(mesh);
     let nodes = slave.nodes(mesh);
     if faces.is_empty() || nodes.is_empty() || tolerance <= 0.0 {
         return None;
     }
-    let radius = NEAR * tolerance;
+    let radius = NEAR * tolerance + offset;
     let master = Master::new(mesh, &faces, radius);
     let mut check = ContactCheck {
         status: ContactStatus::FarOpen,
@@ -350,14 +375,19 @@ fn check(mesh: &FeMesh, master: &Region, slave: &Region, tolerance: f64) -> Opti
         min_gap: None,
         max_gap: None,
         max_penetration: None,
+        folded: Vec::new(),
     };
     let mut near = false;
-    for p in nodes.iter().filter_map(|&n| mesh.node(n)) {
-        let Some(d) = master.distance(p, radius) else {
+    let mut moved: BTreeMap<NodeId, Point> = BTreeMap::new();
+    for (n, p) in nodes.iter().filter_map(|&n| Some((n, mesh.node(n)?))) {
+        let Some((d, q)) = master.closest(p, radius).map(|(d, q)| (d - offset, q)) else {
             continue;
         };
         if d <= tolerance {
             check.touching += 1;
+            if adjust {
+                moved.insert(n, q);
+            }
             if d < 0.0 {
                 check.max_penetration = Some(check.max_penetration.map_or(-d, |m| m.max(-d)));
             } else {
@@ -368,6 +398,7 @@ fn check(mesh: &FeMesh, master: &Region, slave: &Region, tolerance: f64) -> Opti
             check.min_gap = Some(check.min_gap.map_or(d, |m| m.min(d)));
         }
     }
+    check.folded = folded(mesh, &moved);
     check.status = if check.touching == check.slave_nodes {
         ContactStatus::Closed
     } else if check.touching > 0 {
@@ -378,4 +409,123 @@ fn check(mesh: &FeMesh, master: &Region, slave: &Region, tolerance: f64) -> Opti
         ContactStatus::FarOpen
     };
     Some(check)
+}
+
+/// The distance of each point to the nearest of the faces, infinite where there is none.
+/// Every face is tried: meant for a few faces, such as those of a thread.
+pub(crate) fn distances(mesh: &FeMesh, faces: &[(ElementId, u8)], points: &[Point]) -> Vec<f64> {
+    let master = Master::new(mesh, faces, 0.0);
+    (points.iter())
+        .map(|&p| {
+            let mut best = f64::INFINITY;
+            for piece in &master.pieces {
+                if box_distance(p, piece.min, piece.max) < best {
+                    best = best.min(piece.closest(p).0.abs());
+                }
+            }
+            best
+        })
+        .collect()
+}
+
+/// The elements sound in the mesh that the nodes moved to `moved` turn inside out or fold.
+fn folded(mesh: &FeMesh, moved: &BTreeMap<NodeId, Point>) -> Vec<ElementId> {
+    if moved.is_empty() {
+        return Vec::new();
+    }
+    (mesh.elements().iter())
+        .filter(|e| e.nodes.iter().any(|n| moved.contains_key(n)))
+        .filter(|e| e.min_jacobian(mesh).is_some_and(|j| j > 0.0))
+        .filter(|e| {
+            let at = |n: NodeId| moved.get(&n).copied().or_else(|| mesh.node(n));
+            e.min_jacobian_at(at).is_some_and(|j| j <= 0.0)
+        })
+        .map(|e| e.id)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use plx_mesh::{Element, ElementShape, Part};
+
+    use super::*;
+    use crate::{ContactBehavior, InterfaceTreatment};
+
+    /// Two unit cubes of C3D8 along x, the second starting `overlap` before the first ends,
+    /// and a bonded region between the face x = 1 of the first and the near face of the
+    /// second.
+    fn overlapping_cubes(overlap: f64) -> (FeMesh, ContactRegion) {
+        let mut mesh = FeMesh::default();
+        let corners = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ];
+        for cube in 0..2u32 {
+            let shift = cube as f64 * (1.0 - overlap);
+            for (k, c) in corners.iter().enumerate() {
+                mesh.set_node(cube * 8 + k as u32 + 1, [c[0] + shift, c[1], c[2]]);
+            }
+            mesh.add_element(Element {
+                id: cube + 1,
+                type_name: "C3D8".into(),
+                shape: ElementShape::Hex8,
+                nodes: (1..=8).map(|n| cube * 8 + n).collect(),
+            })
+            .unwrap();
+            mesh.parts
+                .push(Part::new(format!("CUBE-{}", cube + 1), vec![cube + 1]));
+        }
+        // The face of each cube whose corners all lie at x.
+        let face = |element: u32, x: f64| -> (ElementId, u8) {
+            let e = mesh.element(element).unwrap();
+            let index = (e.faces().iter())
+                .position(|f| {
+                    (f.corners.iter())
+                        .all(|&c| (mesh.node(e.nodes[c]).unwrap()[0] - x).abs() < 1e-9)
+                })
+                .unwrap();
+            (element, index as u8 + 1)
+        };
+        let mut region = ContactRegion::new("BONDED", ContactBehavior::Bonded);
+        region.side_a = Region::Faces(vec![face(1, 1.0)]);
+        region.side_b = Region::Faces(vec![face(2, 1.0 - overlap)]);
+        region.settings.tolerance = Some(1.5);
+        (mesh, region)
+    }
+
+    #[test]
+    fn an_adjustment_across_more_than_the_elements_folds_them() {
+        let (mesh, region) = overlapping_cubes(1.2);
+        let model = FeModel::default();
+        let check = model.check_contact(&region, &mesh).unwrap();
+        assert_eq!(check.folded.len(), 1);
+    }
+
+    #[test]
+    fn a_small_adjustment_or_none_folds_nothing() {
+        let model = FeModel::default();
+        let (mesh, region) = overlapping_cubes(0.1);
+        assert!(
+            model
+                .check_contact(&region, &mesh)
+                .unwrap()
+                .folded
+                .is_empty()
+        );
+        let (mesh, mut region) = overlapping_cubes(1.2);
+        region.settings.interface = Some(InterfaceTreatment::AsIs);
+        assert!(
+            model
+                .check_contact(&region, &mesh)
+                .unwrap()
+                .folded
+                .is_empty()
+        );
+    }
 }

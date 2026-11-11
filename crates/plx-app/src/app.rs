@@ -8,7 +8,7 @@ use plx_render::StandardView;
 use plx_results::hot_spot::{HotSpot, HotSpotPath};
 
 use crate::analysis::{Analysis, MonitorEvent, RunView};
-use crate::animation::{AnimationKind, ColorLimits, Playback};
+use crate::animation::{AnimationKind, ColorLimits, Pace, Playback};
 use crate::animation_export::{self, Format};
 use crate::exploded::{ExplodedDialog, ExplodedResult};
 use crate::features::{FeatureDialog, FeatureKind, FeatureResult};
@@ -30,7 +30,7 @@ use crate::overlay::{Marker, Overlay};
 use crate::path_plot::{self, PathPlot, PlotEvent};
 use crate::properties;
 use crate::query::{QueryAction, QueryWindow};
-use crate::results::{Deformation, ResultsView, format_legend_value};
+use crate::results::{Deformation, ResultsView, format_legend_value, format_value};
 use crate::screenshot::{self, Screenshot};
 use crate::section::{PlaneDefinition, SectionDialog, SectionResult, SectionView};
 use crate::selection::Operation;
@@ -72,8 +72,8 @@ pub enum Request {
     SolveChain(bool),
     /// Stop the solve of this analysis.
     StopSolve,
-    /// Open the analysis of this name, which a linked item comes from.
-    OpenAnalysis(String),
+    /// Open the analysis the item at this path comes from.
+    OpenAnalysis(Vec<String>),
     /// Stop taking the item at this path from another analysis; the analysis keeps its
     /// copy.
     Unlink(Vec<String>),
@@ -184,6 +184,10 @@ struct Workbench {
     problems_tab_before: bool,
     /// The table of all contact regions is open.
     contact_worksheet: bool,
+    /// The contact regions between part groups, by type, is open.
+    contact_matrix: bool,
+    /// The step overview, items against steps, is open.
+    step_overview: bool,
     /// Open mesh tool: transform parts, merge nodes or renumber.
     mesh_tool: Option<MeshToolDialog>,
     /// The Query tool, while its window is open.
@@ -194,8 +198,9 @@ struct Workbench {
     field_output_dialog: Option<FieldOutputDialog>,
     /// Open dialog creating or editing a history output of the shown results.
     history_dialog: Option<HistoryOutputDialog>,
-    /// Open table of a history output component.
-    history_table: Option<HistoryTable>,
+    /// Open tables of history output components, a window each; a plot takes the columns
+    /// chosen in all of them.
+    history_tables: Vec<HistoryTable>,
     /// Diagram of a table selection.
     history_plot: Option<crate::xy_plot::XyData>,
     /// The tree selection whose region is highlighted.
@@ -341,12 +346,14 @@ impl AnalysisWindow {
                 analysis_tab_before: false,
                 problems_tab_before: false,
                 contact_worksheet: false,
+                contact_matrix: false,
+                step_overview: false,
                 mesh_tool: None,
                 query: None,
                 material_library: None,
                 field_output_dialog: None,
                 history_dialog: None,
-                history_table: None,
+                history_tables: Vec::new(),
                 history_plot: None,
                 highlighted: None,
                 analysis: None,
@@ -524,6 +531,7 @@ impl AnalysisWindow {
             mesh_inputs,
             mesh_sets,
             element_types,
+            mesh_operations,
         } = mesh;
         let Some(model) = &mut self.workbench.model else {
             return;
@@ -535,6 +543,7 @@ impl AnalysisWindow {
         }
         model.fe.mesh_sets = mesh_sets;
         model.fe.element_types = element_types;
+        model.fe.mesh_operations = mesh_operations;
         model.set_mesh(mesh);
         model.mesh_inputs = mesh_inputs;
         self.take_geometry(geometry, false);
@@ -570,6 +579,10 @@ impl AnalysisWindow {
         run.seconds = solve.seconds();
         run.progress = solve.progress();
         run.copy(&solve.output(), solve.output_total());
+        if run.profile.is_none() && !solve.active() {
+            run.profile = solve.profile();
+            run.steps = solve.step_lines().to_vec();
+        }
     }
 
     /// The project's solve is done: the analysis takes the mesh it made and the results it
@@ -654,6 +667,42 @@ impl AnalysisWindow {
         workbench.results_changed = true;
         workbench.symbols_shown = None;
         Some(&mut model.fe)
+    }
+
+    /// Sets the number at `path` of the FE model, for the project window to set an exposed
+    /// parameter; a number of a mesh operation moves the mesh along. Returns whether it
+    /// changed.
+    pub fn set_value(&mut self, path: &plx_model::ValuePath, value: f64) -> bool {
+        let workbench = &mut self.workbench;
+        let Some(model) = workbench.model.as_mut() else {
+            return false;
+        };
+        let changed = match path.item {
+            plx_model::ItemRef::MeshOperation(_) => {
+                if model.fe.value_at(path) == Some(value) {
+                    return false;
+                }
+                let mut changed = false;
+                model.edit_mesh(|mesh, fe| changed = fe.set_value_meshed(mesh, path, value));
+                changed
+            }
+            _ => model.fe.set_value(path, value),
+        };
+        if changed {
+            workbench.results_changed = true;
+            workbench.symbols_shown = None;
+            workbench.highlighted = None;
+        }
+        changed
+    }
+
+    /// Counts a change the project made through [`Self::fe_mut`] at once, as one the user can
+    /// undo, so that the state of the analysis follows it also while its window is not shown
+    /// (the window records changes only at the end of its own frames).
+    pub fn note_change(&mut self) {
+        if let Some(model) = &mut self.workbench.model {
+            crate::undo::record(model);
+        }
     }
 
     /// Whether a Check Model run of the window runs.
@@ -902,7 +951,8 @@ impl AnalysisWindow {
     fn status_bar(&mut self, ui: &mut egui::Ui) -> bool {
         let mut cancel = false;
         ui.horizontal(|ui| {
-            self.workbench.output_tabs(ui);
+            let idle = self.workbench.recording.is_none();
+            ui.add_enabled_ui(idle, |ui| self.workbench.output_tabs(ui));
             ui.separator();
             // Nodalis shows the unit system of the model at the right.
             if let Some(model) = &self.workbench.model {
@@ -927,6 +977,12 @@ impl AnalysisWindow {
     /// What the program does or shows; returns whether the meshing was cancelled.
     fn status_text(&self, ui: &mut egui::Ui) -> bool {
         let mut cancel = false;
+        // The project being saved, in the background.
+        if let Some(status) = crate::save_status::get(ui.ctx()) {
+            ui.spinner();
+            ui.label(status);
+            ui.separator();
+        }
         ui.horizontal(|ui| match (&self.loading, self.workbench.shown()) {
             (Some(path), _) => {
                 ui.spinner();
@@ -937,10 +993,23 @@ impl AnalysisWindow {
                     let (done, all) = recording.progress();
                     ui.spinner();
                     ui.label(format!(
-                        "Recording {}: frame {} of {all} (Esc cancels)",
+                        "Recording {}: frame {} of {all}",
                         recording.file,
                         (done + 1).min(all)
                     ));
+                    let fraction = if all == 0 {
+                        0.0
+                    } else {
+                        done as f32 / all as f32
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(fraction)
+                            .desired_width(180.0)
+                            .show_percentage(),
+                    );
+                    cancel = (ui.small_button("Stop"))
+                        .on_hover_text("Stop the export and discard the file (Esc).")
+                        .clicked();
                 }
             }
             (None, _) if self.workbench.animation_encoding.is_some() => {
@@ -1125,11 +1194,17 @@ pub(crate) fn merge_part_meshes(
     let mut output = Vec::new();
     let had_mesh = model.mesh.element_count() > 0;
     let mut mesh = model.mesh.clone();
+    // Compound parts take their bodies' meshes apart, so that a body meshed anew replaces
+    // its own mesh; joined again after.
+    mesh.split_compounds();
     let space = model.fe.properties.space;
     for mut part in generated.meshes {
         space
             .prepare_generated_mesh(&mut part.mesh)
             .map_err(|error| format!("Meshing failed: {error}"))?;
+        // The mesh operations are part of making the mesh: a part meshed anew gets them
+        // again rather than losing them.
+        model.fe.apply_mesh_operations(&mut part.mesh);
         // What each part is meshed from, to tell when its mesh is out of date.
         for p in &part.mesh.parts {
             let input = plx_model::fingerprint::mesh_input(geometry, space, &p.name);
@@ -1161,7 +1236,15 @@ pub(crate) fn merge_part_meshes(
         }
         mesh = plx_mesher::merge_part(&mesh, part.mesh);
     }
+    mesh.compose_compounds(&geometry.compound_members());
     model.set_mesh(mesh);
+    let applied: Vec<&str> = (model.fe.mesh_operations.iter())
+        .filter(|o| !o.part_indices(&model.mesh).is_empty())
+        .map(|o| o.name.as_str())
+        .collect();
+    if !applied.is_empty() {
+        output.push(format!("Mesh operations applied: {}", applied.join(", ")));
+    }
     let lost = lost_selections(&model.fe, &model.mesh);
     if had_mesh && lost > 0 {
         output.push(format!(
@@ -1177,6 +1260,89 @@ pub(crate) fn merge_part_meshes(
         started.map_or(0, |s| s.elapsed().as_millis())
     ));
     Ok(output)
+}
+
+/// Joins the mesh anew after the compound parts of the geometry changed from `before`: the
+/// meshes of the parts become bodies of their compound parts, or parts of their own again.
+/// What the FE model put on a part follows it: on a part of the geometry joined into a
+/// compound to the compound, on a dissolved compound to each of its parts, on a renamed one
+/// to its new name.
+pub(crate) fn apply_compounds(model: &mut Model, before: &[plx_model::CompoundPart]) {
+    let Some(geometry) = &model.geometry else {
+        return;
+    };
+    if model.mesh.element_count() == 0 {
+        return;
+    }
+    let after = geometry.compounds.clone();
+    let members = geometry.compound_members();
+    model.edit_mesh(|mesh, fe| {
+        mesh.split_compounds();
+        for old in before {
+            if after.iter().any(|a| a.name == old.name) {
+                continue;
+            }
+            let renamed = (after.iter()).find(|a| a.parts.iter().any(|p| old.parts.contains(p)));
+            match renamed {
+                Some(new) => fe.rename_part(&old.name, &new.name),
+                None => fe.split_part(&old.name, &old.parts),
+            }
+        }
+        mesh.compose_compounds(&members);
+        for compound in &after {
+            for part in &compound.parts {
+                fe.rename_part(part, &compound.name);
+            }
+        }
+    });
+}
+
+/// A name for a new compound part: `COMPOUND-<n>`, used by no part, set or compound.
+fn free_compound_name(
+    geometry: &plx_model::Geometry,
+    mesh: &plx_mesh::FeMesh,
+    parts: &[String],
+) -> String {
+    (1..)
+        .map(|n| format!("COMPOUND-{n}"))
+        .find(|name| {
+            geometry.compound_named(name).is_none()
+                && !parts.iter().any(|p| p.eq_ignore_ascii_case(name))
+                && !mesh.name_in_use(name)
+        })
+        .expect("unbounded range")
+}
+
+/// The name `typed` for the compound part `old` as the solver needs it: upper case, of
+/// letters, digits, _ and -, used by no other part of the geometry or the mesh, set or
+/// compound. `parts` are the parts of the geometry.
+fn compound_name(
+    geometry: &plx_model::Geometry,
+    mesh: &plx_mesh::FeMesh,
+    parts: &[String],
+    old: &str,
+    typed: &str,
+) -> Result<String, String> {
+    let name = typed.trim().to_ascii_uppercase();
+    if name.is_empty() {
+        return Err("The name must not be empty.".into());
+    }
+    if name.len() > 80 {
+        return Err("The name must be at most 80 characters long.".into());
+    }
+    if !(name.chars()).all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Err("Allowed are letters without accents, digits, _ and -.".into());
+    }
+    if name == old {
+        return Ok(name);
+    }
+    let taken = geometry.compound_named(&name).is_some()
+        || parts.iter().any(|p| p.eq_ignore_ascii_case(&name))
+        || mesh.name_in_use(&name);
+    if taken {
+        return Err(format!("The name {name} is already used."));
+    }
+    Ok(name)
 }
 
 /// How many regions of the FE model consist of node or element numbers that a new mesh no
@@ -1346,15 +1512,19 @@ impl AnalysisWindow {
         // Under the System theme, the operating system may switch between light and dark.
         crate::style::sync(&ctx);
         let shift_command = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
-        if ctx.input_mut(|i| i.consume_key(shift_command, egui::Key::S)) {
+        // While frames of an animation are recorded, the progress window takes all input.
+        let recording = self.workbench.recording.is_some();
+        if !recording && ctx.input_mut(|i| i.consume_key(shift_command, egui::Key::S)) {
             self.workbench.requests.push(Request::Save(true));
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
+        if !recording && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
             self.workbench.requests.push(Request::Save(false));
         }
-        self.workbench.results_keys(&ctx);
+        if !recording {
+            self.workbench.results_keys(&ctx);
+        }
         // A focused text field undoes its own typing.
-        if !ctx.egui_wants_keyboard_input() {
+        if !recording && !ctx.egui_wants_keyboard_input() {
             // Ctrl+Z matches with Shift held too, so Redo is checked first.
             if ctx.input_mut(|i| i.consume_key(shift_command, egui::Key::Z)) {
                 self.workbench.redo();
@@ -1365,6 +1535,7 @@ impl AnalysisWindow {
         }
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             (i.raw.dropped_files.iter())
+                .filter(|_| !recording)
                 .map(|f| f.path().to_path_buf())
                 .filter(|p| !p.as_os_str().is_empty())
                 .collect()
@@ -1412,8 +1583,13 @@ impl AnalysisWindow {
         self.workbench.play_sound(&ctx);
         let cancel = egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         if cancel.inner {
-            self.workbench.cancel_meshing();
+            match &mut self.workbench.recording {
+                Some(recording) => recording.cancel(),
+                None => self.workbench.cancel_meshing(),
+            }
         }
+        self.workbench
+            .recording_blocker(&ctx, cancel.response.rect.top());
         // The fixed layout: tree on the left over the full height, 3D view with the
         // output below it; only the separators move.
         let pane = egui::Frame::new()
@@ -1515,8 +1691,11 @@ impl AnalysisWindow {
         });
         let view = self.workbench.viewport.rect;
         // The floating bar, at the bottom of what the properties panel leaves of the view;
-        // not in a screenshot.
-        if self.workbench.shown().is_some() && !self.workbench.screenshot.capturing(&ctx) {
+        // not in a screenshot or in the frames of a recorded animation.
+        if self.workbench.shown().is_some()
+            && !self.workbench.screenshot.capturing(&ctx)
+            && self.workbench.recording.is_none()
+        {
             let mut free = view;
             if let Some(panel) = crate::dock::over_view(&ctx) {
                 free.max.x = free.max.x.min(panel.left());
@@ -1540,6 +1719,8 @@ impl AnalysisWindow {
         self.workbench.confirm_remove_results(&ctx);
         self.workbench.toast(&ctx);
         self.workbench.contact_worksheet_window(&ctx);
+        self.workbench.contact_matrix_window(&ctx);
+        self.workbench.step_overview_window(&ctx);
         self.workbench.mesh_tool_window(&ctx);
         self.workbench.query_window(&ctx);
         self.workbench.section_window(&ctx);
@@ -1603,26 +1784,6 @@ struct BoundWork(String, PathBuf, Result<PathBuf, String>);
 /// The global results of a submodel, read on a worker thread.
 type GlobalWork = Result<Box<model::GlobalModel>, String>;
 
-/// Drops the features of saved results settings that came from the FE model and are gone
-/// from `current`.
-fn drop_removed_features(
-    settings: &mut plx_results::ResultsSettings,
-    current: &plx_model::FeModel,
-) {
-    let mut fe = plx_model::FeModel {
-        reference_points: std::mem::take(&mut settings.reference_points),
-        coordinate_systems: std::mem::take(&mut settings.coordinate_systems),
-        planes: std::mem::take(&mut settings.planes),
-        ..plx_model::FeModel::default()
-    };
-    fe.drop_removed_features(&settings.inherited_features, current);
-    let kept = fe.feature_keys();
-    settings.inherited_features.retain(|key| kept.contains(key));
-    settings.reference_points = fe.reference_points;
-    settings.coordinate_systems = fe.coordinate_systems;
-    settings.planes = fe.planes;
-}
-
 fn saved_camera(saved: plx_results::saved_view::SavedCamera) -> plx_render::Camera {
     plx_render::Camera {
         target: glam::Vec3::from_array(saved.target),
@@ -1663,9 +1824,20 @@ impl Workbench {
             Ok(loaded) => {
                 let LoadedModel {
                     mut model,
-                    render_meshes,
+                    mut render_meshes,
                     geometry_view,
                 } = *loaded;
+                // Solver results know nothing of the mesh the analysis was solved on; the
+                // shells outline as in the FE Model view when the project's mesh tells.
+                let mut cad_adopted = false;
+                if model.results.is_some()
+                    && let Some(project) = &self.model
+                {
+                    cad_adopted = model.adopt_project_surface(&project.mesh);
+                    if cad_adopted {
+                        render_meshes = model.render_meshes();
+                    }
+                }
                 if model.results.is_some()
                     && !is_latest_results(self.results_asked.as_deref(), &path)
                 {
@@ -1694,7 +1866,7 @@ impl Workbench {
                     }
                 }
                 // The scene built on the worker thread is reused unless the settings change it.
-                let mut rebuild = false;
+                let mut rebuild = cad_adopted;
                 // The camera of bound results as saved, replacing the fit to the model.
                 let mut camera = None;
                 // Results opened while another workspace stays shown, e.g. an analysis opened
@@ -1812,33 +1984,12 @@ impl Workbench {
                             .apply(ViewCommand::View(StandardView::Front), None);
                     }
                     let mut model = model;
-                    // Results get the features of the FE model; reloaded ones keep their own
-                    // and their paths.
                     // The Results tab shows the results of the analysis: new results, e.g.
-                    // of another run, replace those shown.
+                    // of another run, replace those shown and keep their features and paths.
                     let previous = (!self.results.is_empty()).then_some(0);
-                    // Features taken over from the FE model are not kept when it lost them.
-                    let features = self.model.as_ref().map(|project| {
-                        let mut features = project.fe.clone();
-                        features.convert_features(&plx_model::convert::Conversion::new(
-                            plx_model::STORED,
-                            model.units(),
-                        ));
-                        features
-                    });
-                    let current = features.clone().unwrap_or_default();
                     if let Some(index) = previous {
-                        let (old, inherited) = (&self.results[index].fe, &self.results[index]);
-                        let mut old = old.clone();
-                        if features.is_some() {
-                            old.drop_removed_features(&inherited.inherited_features, &current);
-                        }
-                        let kept = old.feature_keys();
-                        model.inherited_features = (inherited.inherited_features.iter())
-                            .filter(|key| kept.contains(key))
-                            .cloned()
-                            .collect();
-                        model.fe.add_missing_features(&old);
+                        let old = &self.results[index].fe;
+                        model.fe.set_shared_features(old);
                         model.fe.result_paths = old.result_paths.clone();
                         model.fe.result_planes = old.result_planes.clone();
                     }
@@ -1847,9 +1998,6 @@ impl Workbench {
                     let carried = (self.carried_settings.take())
                         .filter(|(path, _)| *path == model.path)
                         .map(|(_, mut settings)| {
-                            if features.is_some() {
-                                drop_removed_features(&mut settings, &current);
-                            }
                             if settings.mesh != Some(model.mesh.fingerprint()) {
                                 let changes = settings.without_mesh_references();
                                 (self.output).extend(changes.into_iter().map(|change| {
@@ -1882,14 +2030,10 @@ impl Workbench {
                         }
                         rebuild = true;
                     }
-                    if let Some(features) = &features {
-                        // Results are stored in the units they show; the FE model in SI ones.
-                        let added = model.fe.add_missing_features(features);
-                        for key in added {
-                            if !model.inherited_features.contains(&key) {
-                                model.inherited_features.push(key);
-                            }
-                        }
+                    // Results share the reference points, coordinate systems and planes of the
+                    // FE model: they show the same ones and edits on them go back.
+                    if let Some(project) = &self.model {
+                        model.follow_shared_features(&project.fe);
                     }
                     // Results read again, e.g. after the analysis ran once more, keep their
                     // colour scale.
@@ -2151,6 +2295,7 @@ impl Workbench {
             self.update_acting();
         }
         self.tree.active_step = self.active_step();
+        self.tree.compounds = self.compound_rows();
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),
@@ -2197,6 +2342,10 @@ impl Workbench {
                 TreeView::FeModel if path[0] == crate::links::MESH => {
                     let mut items = vec![TreeItem::Mesh, TreeItem::Group("Parts")];
                     items.extend((0..model.parts.len()).map(TreeItem::Part));
+                    // The mesh operations come with the mesh they were applied to.
+                    items.push(TreeItem::Group(tree::MESH_OPERATIONS));
+                    let operations = model.fe.mesh_operations.len();
+                    items.extend((0..operations).map(TreeItem::MeshOperation));
                     items
                 }
                 TreeView::FeModel => crate::links::tree_items(&model.fe, path),
@@ -2259,6 +2408,9 @@ impl Workbench {
         if check(response.toggle_active.as_ref(), self) {
             response.toggle_active = None;
         }
+        if response.compound.is_some() && check(Some(&TreeItem::Group("Parts")), self) {
+            response.compound = None;
+        }
         if check(response.swap_master_slave.as_ref(), self) {
             response.swap_master_slave = None;
         }
@@ -2314,7 +2466,7 @@ impl Workbench {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.button(format!("Open {source}")).clicked() {
-                        self.requests.push(Request::OpenAnalysis(source.clone()));
+                        self.requests.push(Request::OpenAnalysis(path.clone()));
                         close = true;
                     }
                     if ui.button("Unlink").clicked() {
@@ -2334,11 +2486,18 @@ impl Workbench {
     /// Acts on what the user picked in the tree or in a part's context menu in the 3D view.
     fn tree_response(&mut self, ctx: &egui::Context, view: TreeView, mut response: TreeResponse) {
         self.guard_linked(view, &mut response);
-        for (index, visible) in response.visibility {
-            if let Some(part) = self.shown_mut().and_then(|m| m.parts.get_mut(index)) {
-                part.visible = visible;
+        if !response.visibility.is_empty() {
+            for (index, visible) in response.visibility {
+                if let Some(part) = self.shown_mut().and_then(|m| m.parts.get_mut(index)) {
+                    part.visible = visible;
+                }
+                self.viewport.set_part_visible(index, visible);
             }
-            self.viewport.set_part_visible(index, visible);
+            // Hidden parts leave the legend range.
+            if let Some(model) = self.shown_mut() {
+                model.update_plain_nodes();
+            }
+            self.results_changed = true;
         }
         if !response.contours.is_empty() {
             for (index, contours) in response.contours {
@@ -2373,13 +2532,19 @@ impl Workbench {
         } else if let Some(TreeItem::HotSpot(index)) = response.open {
             self.edit_hot_spot(index);
         } else if let Some(TreeItem::HistoryComponent(set, field, component)) = response.open {
-            let same = (self.history_table.as_ref())
-                .is_some_and(|t| (t.set, t.field, t.component) == (set, field, component));
-            if !same {
-                self.history_table = Some(HistoryTable::new(set, field, component));
+            // A component already open comes to the front; another opens beside it.
+            match (self.history_tables.iter_mut())
+                .find(|t| (t.set, t.field, t.component) == (set, field, component))
+            {
+                Some(table) => table.raise = true,
+                None => (self.history_tables).push(HistoryTable::new(set, field, component)),
             }
         } else if let (Some(TreeItem::Model), TreeView::FeModel) = (&response.open, view) {
             self.edit_model_properties();
+        } else if let (Some(TreeItem::MeshOperation(index)), TreeView::FeModel) =
+            (&response.open, view)
+        {
+            self.open_mesh_tool(MeshTool::Operation(*index));
         } else if let Some(TreeItem::MeshItem(index)) = response.open {
             self.mesh_item_editor = self.model.as_ref().and_then(|m| {
                 MeshItemEditor::edit(m.geometry.as_ref()?, index, m.fe.properties.units)
@@ -2398,6 +2563,9 @@ impl Workbench {
         }
         if let Some(kind) = response.create {
             self.create(kind);
+        }
+        if response.step_overview {
+            self.step_overview = true;
         }
         if let Some(item) = response.delete {
             // A part or item among several selected ones deletes them all.
@@ -2418,6 +2586,32 @@ impl Workbench {
             // The moved step stays selected.
             if let Some((_, item @ TreeItem::Step(_))) = &mut self.tree.selected {
                 *item = TreeItem::Step(to);
+            }
+        }
+        if let (Some((item, copy)), Some(model)) = (response.propagate, self.model.as_mut())
+            && let Some((s, key)) = crate::step_overview::step_item_key(&model.fe, &item)
+        {
+            let (count, action) = if copy {
+                let count = model.fe.copy_to_following_steps(s, &key);
+                (count, crate::step_overview::Action::Copy(s, key))
+            } else {
+                let count = model.fe.remove_from_following_steps(s, &key);
+                (count, crate::step_overview::Action::Remove(s, key))
+            };
+            let text = crate::step_overview::done(&model.fe, &action, count);
+            self.toast = Some(crate::toast::Toast::new(text, count > 0));
+        }
+        if let (Some(TreeItem::HistoryOutput(s, i)), Some(model)) =
+            (response.remove_from_step, self.model.as_mut())
+            && let Some(step) = model.fe.steps.get_mut(s)
+            && i < step.history_outputs.len()
+        {
+            step.history_outputs.remove(i);
+            // An output no step prints any more is gone.
+            model.fe.drop_unused_history_outputs();
+            if matches!(&self.tree.selected, Some((_, item)) if *item == TreeItem::HistoryOutput(s, i))
+            {
+                self.tree.selected = None;
             }
         }
         if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
@@ -2473,6 +2667,9 @@ impl Workbench {
             if !names.is_empty() {
                 self.generate_mesh(ctx, Some(names));
             }
+        }
+        if let Some(action) = response.compound {
+            self.compound_action(ctx, action);
         }
         if let Some(index) = response.detect {
             self.detect_contacts(index);
@@ -2582,7 +2779,7 @@ impl Workbench {
             && let Some(warnings) = view.set_history_sources(reports, moving_loads, &results.mesh)
         {
             (self.output).extend(warnings.into_iter().map(|w| format!("Warning: {w}")));
-            self.history_table = None;
+            self.history_tables.clear();
         }
         self.update_contour();
     }
@@ -2598,7 +2795,7 @@ impl Workbench {
             let reports = view.hot_spot_reports.clone();
             if let Some(warnings) = view.set_history_sources(reports, moving_loads, &results.mesh) {
                 (self.output).extend(warnings.into_iter().map(|w| format!("Warning: {w}")));
-                self.history_table = None;
+                self.history_tables.clear();
             }
         }
     }
@@ -2978,7 +3175,7 @@ impl Workbench {
     fn close_history_windows(&mut self) {
         self.history_dialog = None;
         self.hot_spot_dialog = None;
-        self.history_table = None;
+        self.history_tables.clear();
     }
 
     /// Switches the tree tab. The Results tab is a workspace of its own: the
@@ -3019,7 +3216,11 @@ impl Workbench {
         if let Some(model) = self.results.get(index)
             && let Some(view) = &model.results
         {
-            let dialog = TransformationDialog::new(index, &view.transformations, model);
+            // The results file has no model properties of its own: the model space is the
+            // analysis's.
+            let space = (self.model.as_ref())
+                .map_or(plx_model::ModelSpace::ThreeD, |m| m.fe.properties.space);
+            let dialog = TransformationDialog::new(index, &view.transformations, model, space);
             self.transformation_dialog = Some(dialog);
             self.update_contour();
         }
@@ -3174,6 +3375,7 @@ impl Workbench {
         let (Some(dialog), Some(model)) = (&mut self.mesh_tool, &mut self.model) else {
             return;
         };
+        dialog.set_linked(crate::links::linked_parameters(&self.incoming.paths));
         match dialog.show(ctx, model) {
             MeshToolResult::Open => {}
             // On an error the dialog shows it and stays open.
@@ -3429,6 +3631,25 @@ impl Workbench {
             }
             LibraryResult::Cancel => self.material_library = None,
         }
+    }
+
+    /// While an animation is recorded, an invisible layer over everything above the status
+    /// bar takes all input, so nothing in or around the recorded view can change; the status
+    /// bar holds the progress and the Stop button. Nothing is drawn, so nothing of it can end
+    /// up in the frames.
+    fn recording_blocker(&mut self, ctx: &egui::Context, bottom: f32) {
+        if self.recording.is_none() {
+            return;
+        }
+        let screen = ctx.content_rect();
+        let rect = egui::Rect::from_min_max(screen.min, egui::pos2(screen.max.x, bottom));
+        egui::Area::new(crate::ids::window(ctx, "recording blocker"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.allocate_rect(rect, egui::Sense::click_and_drag());
+            });
     }
 
     /// Asks before Remove Results, which Undo cannot take back.
@@ -4208,6 +4429,21 @@ impl Workbench {
     /// Finds what acts on the parts selected in the FE Model tree, once for each selection
     /// and change of the model.
     fn update_acting(&mut self) {
+        // A selected material marks the sections that use it.
+        if let (Some((TreeView::FeModel, TreeItem::Material(i))), Some(model)) =
+            (self.tree.selected.clone(), self.model.as_ref())
+        {
+            let key = (BTreeSet::from([usize::MAX - i]), model.revision);
+            if self.tree.acting_for.as_ref() != Some(&key) {
+                self.tree.acting = crate::setup::sections_using_material(&model.fe, i)
+                    .into_iter()
+                    .map(TreeItem::Section)
+                    .collect();
+                self.tree.acting_for = Some(key);
+                self.tree.reveal_acting = true;
+            }
+            return;
+        }
         let parts = self.tree.selected_parts(TreeView::FeModel);
         let Some(model) = self.model.as_ref().filter(|_| !parts.is_empty()) else {
             self.tree.acting.clear();
@@ -4245,6 +4481,7 @@ impl Workbench {
         let mut tree_response = TreeResponse::default();
         let mut command = None;
         let selected = self.tree.selected_parts(self.tree_view);
+        let compounds = self.tree.compounds.clone();
         response.context_menu(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             if let Some((index, visible, contours)) = part {
@@ -4256,6 +4493,7 @@ impl Workbench {
                     contours,
                     view,
                     &selected,
+                    &compounds,
                     &mut tree_response,
                 );
                 ui.separator();
@@ -4561,7 +4799,7 @@ impl Workbench {
                     self.output.push(format!("Warning: {warning}"));
                 }
                 // The table may show another component now.
-                self.history_table = None;
+                self.history_tables.clear();
                 if next {
                     dialog.next(&output, view);
                 } else {
@@ -4636,28 +4874,54 @@ impl Workbench {
                 self.history_plot = None;
             }
         }
-        let Some(mut table) = self.history_table.take() else {
+        if self.history_tables.is_empty() {
             return;
-        };
+        }
+        let mut tables = std::mem::take(&mut self.history_tables);
         let Some(view) = self.shown_results_view() else {
+            self.history_tables = tables;
             return;
         };
         let kind = view
             .current_increment()
             .map_or(plx_results::AnalysisKind::Static, |i| i.kind);
-        let unit = (view.history_output_index(table.set))
-            .and_then(|i| view.history_outputs.get(i))
-            .and_then(|o| o.unit());
         let places = crate::history_table::Places {
             steps: &view.steps,
             increments: &view.increments,
         };
-        match table.show(ctx, &view.history, kind, places, unit) {
-            crate::history_table::TableAction::Close => return,
-            crate::history_table::TableAction::Plot(data) => self.history_plot = Some(*data),
-            crate::history_table::TableAction::None => {}
+        let shared = crate::history_table::shared(&tables.iter().collect::<Vec<_>>());
+        let mut closed = Vec::new();
+        let mut plot_from = None;
+        for (index, table) in tables.iter_mut().enumerate() {
+            let unit = (view.history_output_index(table.set))
+                .and_then(|i| view.history_outputs.get(i))
+                .and_then(|o| o.unit());
+            match table.show(ctx, &view.history, kind, places, unit, shared[index]) {
+                crate::history_table::TableAction::Close => closed.push(index),
+                crate::history_table::TableAction::Plot => plot_from = Some(index),
+                crate::history_table::TableAction::None => {}
+            }
         }
-        self.history_table = Some(table);
+        // A plain click in one table begins a new selection: the others let theirs go.
+        if let Some(index) = tables.iter().position(|t| t.took_over) {
+            for (other, table) in tables.iter_mut().enumerate() {
+                table.took_over = false;
+                if other != index {
+                    table.clear_selection();
+                }
+            }
+        }
+        if let Some(index) = plot_from {
+            let all: Vec<&HistoryTable> = tables.iter().collect();
+            match crate::history_table::plot(&all, &view.history, kind, places) {
+                Ok(data) => self.history_plot = Some(data),
+                Err(message) => tables[index].message = Some(message),
+            }
+        }
+        for index in closed.into_iter().rev() {
+            tables.remove(index);
+        }
+        self.history_tables = tables;
     }
 
     /// Runs the contact detection `index` on the parts of the model and reports what it
@@ -4697,6 +4961,60 @@ impl Workbench {
         let results = self.results.get(self.current_result);
         crate::connections::worksheet(ctx, &mut open, model, results, &mut self.tree);
         self.contact_worksheet = open;
+    }
+
+    /// The contact regions between part groups by type: a cell selects its regions in the
+    /// tree and the worksheet, its menu sets their type.
+    fn contact_matrix_window(&mut self, ctx: &egui::Context) {
+        if !self.contact_matrix {
+            return;
+        }
+        let Some(model) = &mut self.model else {
+            self.contact_matrix = false;
+            return;
+        };
+        let mut open = true;
+        let worksheet = crate::contact_matrix::window(ctx, &mut open, model, &mut self.tree);
+        if worksheet {
+            self.contact_worksheet = true;
+        }
+        self.contact_matrix = open;
+    }
+
+    /// The step overview: a click opens an item in its step, its menu copies the item to
+    /// the following steps or removes it from them.
+    fn step_overview_window(&mut self, ctx: &egui::Context) {
+        if !self.step_overview {
+            return;
+        }
+        let Some(model) = &mut self.model else {
+            self.step_overview = false;
+            return;
+        };
+        let mut open = true;
+        let action = crate::step_overview::window(ctx, &mut open, &model.fe);
+        self.step_overview = open;
+        match action {
+            Some(crate::step_overview::Action::Open(item)) => {
+                self.tree.selected = Some((TreeView::FeModel, item.clone()));
+                self.tree.reveal = true;
+                self.editor = Editor::edit(&item, &model.fe, &model.mesh);
+            }
+            Some(action) => {
+                let count = match &action {
+                    crate::step_overview::Action::Copy(s, key) => {
+                        model.fe.copy_to_following_steps(*s, key)
+                    }
+                    crate::step_overview::Action::Remove(s, key) => {
+                        model.fe.remove_from_following_steps(*s, key)
+                    }
+                    crate::step_overview::Action::Open(_) => 0,
+                };
+                let text = crate::step_overview::done(&model.fe, &action, count);
+                self.toast = Some(crate::toast::Toast::new(text, count > 0));
+            }
+            None => {}
+        }
     }
 
     /// Deleting, for the context menu and the Delete key alike: in the FE model at once with
@@ -4782,6 +5100,9 @@ impl Workbench {
     /// The name of an item of the FE model, as its dialog shows it.
     fn item_name(&self, item: &TreeItem) -> Option<String> {
         let model = self.model.as_ref()?;
+        if let TreeItem::MeshOperation(index) = item {
+            return (model.fe.mesh_operations.get(*index)).map(|o| o.name.clone());
+        }
         let editor = Editor::edit(item, &model.fe, &model.mesh)?;
         Some(editor.name())
     }
@@ -4827,6 +5148,8 @@ impl Workbench {
             self.delete_history_output(set);
         } else if let TreeItem::HotSpot(index) = item {
             self.delete_hot_spot(index);
+        } else if let TreeItem::MeshOperation(index) = item {
+            self.delete_mesh_operation(index);
         } else if let TreeItem::MeshItem(index) = item {
             if let Some(geometry) = self.model.as_mut().and_then(|m| m.geometry.as_mut())
                 && index < geometry.mesh_items.len()
@@ -4840,9 +5163,20 @@ impl Workbench {
                 TreeView::Results => self.results.get_mut(self.current_result),
                 _ => self.model.as_mut(),
             };
+            let before = model.as_ref().map(|m| m.fe.shared_features());
             if let Some(model) = model
                 && crate::features::delete(&mut model.fe, feature)
             {
+                if let (TreeView::Results, Some(before)) = (view, &before) {
+                    self.share_feature_edit(self.current_result, before);
+                }
+                let model = match view {
+                    TreeView::Results => self.results.get_mut(self.current_result),
+                    _ => self.model.as_mut(),
+                };
+                let Some(model) = model else {
+                    return;
+                };
                 self.tree.selected = None;
                 self.feature_dialog = None;
                 if let Some(view) = &mut model.results
@@ -5108,6 +5442,148 @@ impl Workbench {
         self.after_parts_changed();
     }
 
+    /// Deleting a mesh operation: it is undone on the mesh, and the parts are no longer
+    /// changed by it when they are meshed again.
+    fn delete_mesh_operation(&mut self, index: usize) {
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let Some(name) = (model.fe.mesh_operations.get(index)).map(|o| o.name.clone()) else {
+            return;
+        };
+        let mut operations = model.fe.mesh_operations.clone();
+        operations.remove(index);
+        model.edit_mesh(|mesh, fe| fe.set_mesh_operations(mesh, operations));
+        self.tree.selected = None;
+        self.mesh_tool = None;
+        self.highlighted = None;
+        self.symbols_shown = None;
+        self.results_changed = true;
+        self.output
+            .push(format!("{name} deleted and undone on the mesh"));
+    }
+
+    /// The compound parts of the geometry with the parts of the geometry display they join,
+    /// by index, for the Geometry tree and the menus of its parts.
+    fn compound_rows(&self) -> Vec<(String, Vec<usize>)> {
+        let (Some(model), Some(view)) = (self.model.as_ref(), self.geometry.as_ref()) else {
+            return Vec::new();
+        };
+        let Some(geometry) = &model.geometry else {
+            return Vec::new();
+        };
+        let index =
+            |name: &String| (view.parts.iter()).position(|p| p.name.eq_ignore_ascii_case(name));
+        (geometry.compounds.iter())
+            .map(|c| (c.name.clone(), c.parts.iter().filter_map(index).collect()))
+            .collect()
+    }
+
+    /// Makes, changes or dissolves a compound part from the menus of the Geometry tree. A
+    /// mesh that exists already is joined anew at once, without meshing again.
+    fn compound_action(&mut self, ctx: &egui::Context, action: tree::CompoundAction) {
+        use tree::CompoundAction;
+        let names = |indices: &[usize]| -> Vec<String> {
+            (self.geometry.as_ref())
+                .map(|g| {
+                    (indices.iter())
+                        .filter_map(|&i| g.parts.get(i))
+                        .map(|p| p.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let all_parts: Vec<String> = (self.geometry.as_ref())
+            .map(|g| g.parts.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default();
+        let action_parts = match &action {
+            CompoundAction::Create(parts)
+            | CompoundAction::Add(_, parts)
+            | CompoundAction::Remove(parts) => names(parts),
+            _ => Vec::new(),
+        };
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let Some(geometry) = model.geometry.as_mut() else {
+            return;
+        };
+        let before = geometry.compounds.clone();
+        let line = match action {
+            CompoundAction::Mesh(c) => {
+                if let Some(compound) = geometry.compounds.get(c) {
+                    let name = compound.name.clone();
+                    self.generate_mesh(ctx, Some(vec![name]));
+                }
+                return;
+            }
+            CompoundAction::Create(_) => {
+                if action_parts.len() < 2 {
+                    return;
+                }
+                geometry.remove_from_compounds(&action_parts);
+                let name = free_compound_name(geometry, &model.mesh, &all_parts);
+                geometry.compounds.push(plx_model::CompoundPart {
+                    name: name.clone(),
+                    parts: action_parts.clone(),
+                });
+                format!("Compound part {name} made of {}", action_parts.join(", "))
+            }
+            CompoundAction::Add(c, _) => {
+                let Some(name) = geometry.compounds.get(c).map(|c| c.name.clone()) else {
+                    return;
+                };
+                geometry.remove_from_compounds(&action_parts);
+                match geometry.compound_named(&name) {
+                    Some(c) => geometry.compounds[c].parts.extend(action_parts.clone()),
+                    None => geometry.compounds.push(plx_model::CompoundPart {
+                        name: name.clone(),
+                        parts: action_parts.clone(),
+                    }),
+                }
+                format!("{} added to {name}", action_parts.join(", "))
+            }
+            CompoundAction::Remove(_) => {
+                geometry.remove_from_compounds(&action_parts);
+                format!(
+                    "{} taken out of their compound parts",
+                    action_parts.join(", ")
+                )
+            }
+            CompoundAction::Rename(c, typed) => {
+                let Some(old) = geometry.compounds.get(c).map(|c| c.name.clone()) else {
+                    return;
+                };
+                match compound_name(geometry, &model.mesh, &all_parts, &old, &typed) {
+                    Ok(name) if name == old => return,
+                    Ok(name) => {
+                        geometry.compounds[c].name = name.clone();
+                        format!("Compound part {old} renamed to {name}")
+                    }
+                    Err(error) => {
+                        self.output
+                            .push(format!("{old} cannot be renamed: {error}"));
+                        return;
+                    }
+                }
+            }
+            CompoundAction::Dissolve(c) => {
+                if c >= geometry.compounds.len() {
+                    return;
+                }
+                let gone = geometry.compounds.remove(c);
+                format!(
+                    "Compound part {} dissolved into {}",
+                    gone.name,
+                    gone.parts.join(", ")
+                )
+            }
+        };
+        apply_compounds(model, &before);
+        self.output.push(line);
+        self.after_parts_changed();
+    }
+
     /// Merging mesh parts: the selected parts become one, named after the
     /// first; the model's regions on the others follow.
     fn merge_mesh_parts(&mut self, parts: &[usize]) {
@@ -5211,6 +5687,9 @@ impl Workbench {
         if self.tree_view == TreeView::Results {
             return Some("Undo and Redo work on the Geometry and FE Model tabs.");
         }
+        if self.recording.is_some() {
+            return Some("Wait until the animation is recorded.");
+        }
         if self.meshing.is_some() {
             return Some("Wait until meshing has finished.");
         }
@@ -5271,13 +5750,19 @@ impl Workbench {
         editor.set_linked(crate::links::linked_parameters(&self.incoming.paths));
         // A contact detection searches the geometry, if there is one to search; its derived
         // tolerance is worked out again only when the parts searched change.
-        let scope = (editor.detection_parts()).and_then(|parts| {
+        let picked: Vec<String> = (self.tree.selected_parts(TreeView::FeModel).into_iter())
+            .filter_map(|p| model.mesh.parts.get(p).map(|p| p.name.clone()))
+            .collect();
+        crate::part_filter_ui::set_selected_part_names(ctx, picked);
+        let scope = (editor.detection_filter()).and_then(|filter| {
             let display = crate::connections::detection_display(model, self.geometry.as_ref())?;
-            let current = editor.detection_scope();
-            Some(match current {
-                Some(scope) if scope.auto.0 == parts => scope.clone(),
-                _ => crate::connections::DetectionScope::new(model, display, parts),
-            })
+            Some(crate::connections::DetectionScope::new(
+                ctx,
+                model,
+                display,
+                filter,
+                editor.detection_scope(),
+            ))
         });
         editor.set_detection_scope(scope);
         match editor.show(ctx, model) {
@@ -5439,6 +5924,10 @@ impl Workbench {
             (None, Some((TreeView::Geometry, TreeItem::Part(_)))) => {
                 Highlight::parts(self.tree.selected_parts(TreeView::Geometry))
             }
+            (None, Some((TreeView::Geometry, TreeItem::Compound(c)))) => {
+                let members = self.tree.compounds.get(*c).map(|(_, m)| m.clone());
+                Highlight::parts(members.unwrap_or_default())
+            }
             (None, Some((TreeView::Geometry, TreeItem::MeshItem(index)))) => items
                 .get(*index)
                 .map(|item| crate::meshing::item_highlight(view, &item.kind))
@@ -5515,6 +6004,7 @@ impl Workbench {
                 items.push(symbols::Item {
                     kind,
                     region,
+                    system: None,
                     selected: is_selected,
                 });
             }
@@ -5541,6 +6031,7 @@ impl Workbench {
                 items.push(symbols::Item {
                     kind: symbols::Kind::Boundary(bc.kind.clone()),
                     region: bc.region.clone(),
+                    system: None,
                     selected,
                 });
             }
@@ -5551,6 +6042,7 @@ impl Workbench {
                 items.push(symbols::Item {
                     kind: symbols::Kind::Load(load.kind.clone()),
                     region: load.region.clone(),
+                    system: load.system,
                     selected,
                 });
             }
@@ -5805,8 +6297,13 @@ impl Workbench {
                         plot.path = path.name.clone();
                     }
                 }
+                let results = dialog.results;
+                let before = model.fe.shared_features();
                 dialog.apply(&mut model.fe, &model.mesh);
                 self.viewport.preview = Default::default();
+                if let Some(index) = results {
+                    self.share_feature_edit(index, &before);
+                }
             }
             FeatureResult::Cancel => {
                 // The plot of a path that was not created goes with it.
@@ -5818,9 +6315,31 @@ impl Workbench {
         }
     }
 
+    /// Carries an edit of the reference points, coordinate systems or planes of results over
+    /// to the FE model, which shares them; `before` are the features of the results before.
+    fn share_feature_edit(&mut self, results: usize, before: &plx_model::FeModel) {
+        let (Some(model), Some(project)) = (self.results.get_mut(results), self.model.as_mut())
+        else {
+            return;
+        };
+        if model.fe.same_shared_features(before) {
+            return;
+        }
+        let units = model.stored_units();
+        project.fe.take_feature_edit(before, &model.fe, units);
+        let errors = project.fe.update_reference_points(&project.mesh);
+        self.output.extend(errors);
+        // The results took the edit already; they need not take it back.
+        model.shared_from = Some(project.fe.shared_features());
+    }
+
     /// Results take the coordinate systems of their features, for transformed field outputs.
+    /// They also follow the reference points, coordinate systems and planes of the FE model.
     fn sync_result_features(&mut self) {
         for model in &mut self.results {
+            if let Some(project) = &self.model {
+                model.follow_shared_features(&project.fe);
+            }
             let Some(view) = &mut model.results else {
                 continue;
             };
@@ -6039,11 +6558,11 @@ impl Workbench {
         let edited = (self.feature_dialog.as_ref())
             .filter(|d| d.results == Some(self.current_result))
             .and_then(FeatureDialog::result_plane);
-        let name = match edited {
-            Some(name) => name,
-            None => &model.fe.result_planes.get(view.plane_result?)?.plane,
+        let plane = match edited {
+            Some(plane) => plane,
+            None => model.fe.result_planes.get(view.plane_result?)?.plane,
         };
-        let (point, normal) = model.fe.plane(name)?.resolve(&model.fe).ok()?;
+        let (point, normal) = model.fe.plane(plane)?.resolve(&model.fe).ok()?;
         Some((point.into(), normal.into()))
     }
 
@@ -6069,6 +6588,7 @@ impl Workbench {
                 definition,
                 flipped: false,
                 lighten: false,
+                uncut: Default::default(),
             };
             (cut, true)
         });
@@ -6090,6 +6610,7 @@ impl Workbench {
         let models = self.model.iter_mut().chain(&mut self.geometry);
         for model in models.chain(&mut self.results) {
             model.clip = None;
+            model.uncut.clear();
         }
         let shown = match self.tree_view {
             TreeView::Results => self.results.get_mut(self.current_result),
@@ -6104,9 +6625,18 @@ impl Workbench {
                 let anchor = section.anchor(model.origin());
                 let normal = section.normal();
                 let clip = plx_render::clip_plane(anchor, normal, model.origin());
+                // Parts kept whole by name, so the choice holds for every model shown.
+                let uncut: Vec<bool> = (model.parts.iter())
+                    .map(|p| section.uncut.contains(&p.name))
+                    .collect();
+                model.uncut = (uncut.iter().enumerate())
+                    .filter(|(_, u)| **u)
+                    .map(|(i, _)| i)
+                    .collect();
                 let faces = model.section_meshes(anchor, normal, section.lighten);
                 model.clip = Some(clip);
                 self.viewport.set_section(Some((clip, &faces)));
+                self.viewport.set_uncut_parts(&uncut);
                 let alone = *alone && model.results.is_some();
                 self.viewport.set_sections_only(alone);
                 if alone {
@@ -6117,6 +6647,7 @@ impl Workbench {
             _ => {
                 self.viewport.set_section(None);
                 self.viewport.set_sections_only(false);
+                self.viewport.set_uncut_parts(&[]);
             }
         }
         // The legend of the shown results takes the range on the plane; the others their own.
@@ -6835,6 +7366,7 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
     let positions = (view.animation.as_ref())
         .and_then(|a| view.steps.step_of(a.start_increment))
         .is_some_and(|s| s.has_positions());
+    let time_unit = view.units.unit(plx_model::Quantity::Time);
     egui::Window::new("Animation")
         .id(crate::ids::window(ctx, "animation"))
         .open(&mut open)
@@ -6882,8 +7414,67 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
                         }
                         ui.end_row();
                     }
+                    if animation.can_play_by_time() {
+                        ui.label("Timing");
+                        ui.horizontal(|ui| {
+                            for (pace, label, tip) in [
+                                (
+                                    Pace::Frames,
+                                    "By frame",
+                                    "One increment per frame, however far apart in time they lie",
+                                ),
+                                (
+                                    Pace::Time,
+                                    "By time",
+                                    "The frames follow the simulation time evenly over the \
+                                     duration, interpolated between the increments; the extra \
+                                     frames at an impact do not slow the playback down",
+                                ),
+                            ] {
+                                if ui
+                                    .radio(animation.pace == pace, label)
+                                    .on_hover_text(tip)
+                                    .clicked()
+                                    && animation.pace != pace
+                                {
+                                    animation.retime(|a| a.pace = pace);
+                                    event = WindowEvent::Settings;
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    }
+                    if animation.by_time() {
+                        ui.label("Duration");
+                        let mut duration = animation.duration;
+                        let seconds = numeric::drag_value(&mut duration)
+                            .range(0.5..=120.0)
+                            .speed(0.1)
+                            .suffix(" s");
+                        if ui
+                            .add(seconds)
+                            .on_hover_text(
+                                "Seconds the playback takes from the first to the last increment",
+                            )
+                            .changed()
+                        {
+                            animation.retime(|a| a.duration = duration);
+                            event = WindowEvent::Settings;
+                        }
+                        ui.end_row();
+                    }
                     ui.label("Frames per second");
-                    ui.add(numeric::drag_value(&mut animation.fps).range(1.0..=60.0));
+                    let mut fps = animation.fps;
+                    if ui
+                        .add(numeric::drag_value(&mut fps).range(1.0..=60.0))
+                        .changed()
+                    {
+                        // By time, the frame rate also sets the number of frames.
+                        animation.retime(|a| a.fps = fps);
+                        if animation.by_time() {
+                            event = WindowEvent::Settings;
+                        }
+                    }
                     ui.end_row();
                     ui.label("Playback");
                     ui.horizontal(|ui| {
@@ -6949,7 +7540,10 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
                     target = Some(slider);
                 }
                 ui.add_space(8.0);
-                ui.label(format!("Frame {} of {}", frame + 1, last + 1));
+                ui.label(match animation.time() {
+                    Some(time) => format!("{} {time_unit}", format_value(time as f32)),
+                    None => format!("Frame {} of {}", frame + 1, last + 1),
+                });
                 ui.add_space(8.0);
                 let tip = if exporting {
                     "Export Animation (the last export is still being written)"
@@ -7078,6 +7672,7 @@ fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
         NewItem::SurfaceInteraction
         | NewItem::ContactRegion
         | NewItem::Bolt
+        | NewItem::PartGroup
         | NewItem::ContactPair
         | NewItem::Tie
         | NewItem::NodeTie => TreeItem::Group("Contacts"),
@@ -7132,22 +7727,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn carried_settings_lose_reference_points_deleted_from_the_fe_model() {
-        let mut settings = plx_results::ResultsSettings {
-            reference_points: vec![
-                plx_model::ReferencePoint::new("RP-1", [0.0; 3]),
-                plx_model::ReferencePoint::new("Mine", [1.0; 3]),
-            ],
-            inherited_features: vec!["RP:RP-1".into()],
-            ..Default::default()
-        };
-        drop_removed_features(&mut settings, &plx_model::FeModel::default());
-        let names: Vec<_> = settings.reference_points.iter().map(|r| &r.name).collect();
-        assert_eq!(names, ["Mine"]);
-        assert!(settings.inherited_features.is_empty());
-    }
-
-    #[test]
     fn bound_results_keep_the_workspace_the_project_window_asked_for() {
         let mut pinned = Some(TreeView::Geometry);
         assert_eq!(results_workspace(&mut pinned), TreeView::Geometry);
@@ -7178,5 +7757,108 @@ mod tests {
         take_over_empty_model(&mut imported, &saved);
         assert_eq!(imported.path, std::path::Path::new("/tmp/neu.ndl"));
         assert_eq!(imported.path, saved.path);
+    }
+
+    /// A model of two single tetrahedra, parts SOLID-1 and SOLID-2 of a geometry, with a
+    /// section on both.
+    fn two_part_model() -> Model {
+        let mut mesh = plx_mesh::FeMesh::default();
+        for (part, x) in [(0u32, 0.0), (1, 1.0)] {
+            let corners = [
+                [x, 0.0, 0.0],
+                [x + 1.0, 0.0, 0.0],
+                [x, 1.0, 0.0],
+                [x, 0.0, 1.0],
+            ];
+            for (k, c) in corners.iter().enumerate() {
+                mesh.set_node(4 * part + k as u32 + 1, *c);
+            }
+            mesh.add_element(plx_mesh::Element {
+                id: part + 1,
+                type_name: "C3D4".into(),
+                shape: plx_mesh::ElementShape::Tet4,
+                nodes: (1..=4).map(|n| 4 * part + n).collect(),
+            })
+            .unwrap();
+            let name = format!("SOLID-{}", part + 1);
+            mesh.parts.push(plx_mesh::Part::new(name, vec![part + 1]));
+        }
+        let mut model = Model::new(std::path::Path::new("/tmp/teile.ndl"), mesh);
+        model.geometry = Some(plx_model::Geometry {
+            source: "teile.step".into(),
+            brep: String::new(),
+            meshing: plx_model::MeshingParameters::default(),
+            mesh_items: Vec::new(),
+            part_names: Vec::new(),
+            refinement: 1.0,
+            signatures: Vec::new(),
+            compounds: Vec::new(),
+        });
+        model.fe.sections.push(plx_model::Section {
+            name: "Section-1".into(),
+            material: None,
+            region: plx_model::Region::Parts(vec!["SOLID-1".into(), "SOLID-2".into()]),
+            thickness: 1.0,
+            kind: plx_model::SectionKind::Solid,
+        });
+        model
+    }
+
+    #[test]
+    fn a_compound_part_joins_the_meshed_parts_and_the_model_follows() {
+        let mut model = two_part_model();
+        let parts = vec!["SOLID-1".to_owned(), "SOLID-2".to_owned()];
+        let geometry = model.geometry.as_mut().unwrap();
+        geometry.compounds.push(plx_model::CompoundPart {
+            name: "COMPOUND-1".into(),
+            parts: parts.clone(),
+        });
+        apply_compounds(&mut model, &[]);
+        let names: Vec<&str> = model.parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["COMPOUND-1"]);
+        assert_eq!(model.mesh.parts[0].bodies.len(), 2);
+        let on = |model: &Model| model.fe.sections[0].region.clone();
+        assert_eq!(
+            on(&model),
+            plx_model::Region::Parts(vec!["COMPOUND-1".into()])
+        );
+
+        // Renamed in the FE model, the compound keeps the name when meshed anew.
+        model.rename_part(0, "block").unwrap();
+        assert_eq!(model.geometry.as_ref().unwrap().compounds[0].name, "BLOCK");
+        assert_eq!(on(&model), plx_model::Region::Parts(vec!["BLOCK".into()]));
+
+        // Dissolved, the parts are parts of their own again and keep the section.
+        let before = model.geometry.as_ref().unwrap().compounds.clone();
+        model.geometry.as_mut().unwrap().compounds.clear();
+        apply_compounds(&mut model, &before);
+        let names: Vec<&str> = model.parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["SOLID-1", "SOLID-2"]);
+        assert!(model.mesh.parts.iter().all(|p| p.bodies.is_empty()));
+        assert_eq!(on(&model), plx_model::Region::Parts(parts));
+    }
+
+    #[test]
+    fn compound_names_are_solver_names_used_by_nothing_else() {
+        let model = two_part_model();
+        let geometry = model.geometry.as_ref().unwrap();
+        let parts = vec![
+            "SOLID-1".to_owned(),
+            "SOLID-2".to_owned(),
+            "SOLID-3".to_owned(),
+        ];
+        assert_eq!(
+            free_compound_name(geometry, &model.mesh, &parts),
+            "COMPOUND-1"
+        );
+        let name = |typed: &str| compound_name(geometry, &model.mesh, &parts, "COMPOUND-1", typed);
+        assert_eq!(name(" Rahmen-2 "), Ok("RAHMEN-2".into()));
+        assert!(
+            name("solid-3").is_err(),
+            "a part of the geometry not meshed yet"
+        );
+        assert!(name("SOLID-1").is_err());
+        assert!(name("zwei wörter").is_err());
+        assert!(name("").is_err());
     }
 }

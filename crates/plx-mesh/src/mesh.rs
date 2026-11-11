@@ -70,8 +70,35 @@ pub enum SurfaceDefinition {
 }
 
 /// A named group of elements shown and hidden together.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Part {
+    pub name: String,
+    pub elements: Vec<ElementId>,
+    /// The bodies of a compound part: the meshes of the parts of the geometry it joins,
+    /// each with its own nodes. The solver input ties them where they touch. Empty for a
+    /// part of one body.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bodies: Vec<Body>,
+}
+
+impl Part {
+    pub fn new(name: impl Into<String>, elements: Vec<ElementId>) -> Self {
+        Self {
+            name: name.into(),
+            elements,
+            bodies: Vec::new(),
+        }
+    }
+
+    /// Whether this is a compound part of several bodies.
+    pub fn is_compound(&self) -> bool {
+        !self.bodies.is_empty()
+    }
+}
+
+/// A body of a compound part: the mesh of one part of the geometry, named after it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Body {
     pub name: String,
     pub elements: Vec<ElementId>,
 }
@@ -141,6 +168,70 @@ impl FeMesh {
         self.element_lookup.insert(element.id, self.elements.len());
         self.elements.push(element);
         Ok(())
+    }
+
+    /// Splits each of the given 3-node lines `[a, m, b]` into two 2-node lines at its
+    /// middle node: `[a, m]` keeps the id, `[m, b]` gets the next free id and follows it in
+    /// its part and element sets. The segments along CAD edges are split alike. Returns the
+    /// pairs (kept id, new id).
+    pub fn split_quadratic_lines(
+        &mut self,
+        ids: &BTreeSet<ElementId>,
+        type_name: &str,
+    ) -> Vec<(ElementId, ElementId)> {
+        let mut next = self.elements.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+        let mut halves = Vec::new();
+        let mut split_segments = Vec::new();
+        for index in 0..self.elements.len() {
+            let element = &mut self.elements[index];
+            if element.shape != ElementShape::Line3 || !ids.contains(&element.id) {
+                continue;
+            }
+            let [a, m, b] = [element.nodes[0], element.nodes[1], element.nodes[2]];
+            element.shape = ElementShape::Line2;
+            element.type_name = type_name.into();
+            element.nodes = vec![a, m];
+            let kept = element.id;
+            self.element_lookup.insert(next, self.elements.len());
+            self.elements.push(Element {
+                id: next,
+                type_name: type_name.into(),
+                shape: ElementShape::Line2,
+                nodes: vec![m, b],
+            });
+            halves.push((kept, next));
+            split_segments.push(([a, b], m));
+            next += 1;
+        }
+        let second: BTreeMap<ElementId, ElementId> = halves.iter().copied().collect();
+        let follow = |list: &mut Vec<ElementId>| {
+            let mut out = Vec::with_capacity(list.len());
+            for &id in list.iter() {
+                out.push(id);
+                out.extend(second.get(&id));
+            }
+            *list = out;
+        };
+        for part in &mut self.parts {
+            follow(&mut part.elements);
+        }
+        for set in self.element_sets.values_mut() {
+            follow(set);
+        }
+        let middles: BTreeMap<[NodeId; 2], NodeId> = (split_segments.into_iter())
+            .map(|([a, b], m)| ([a.min(b), a.max(b)], m))
+            .collect();
+        for segments in self.cad.segments.values_mut() {
+            let mut out = Vec::with_capacity(segments.len());
+            for &[a, b] in segments.iter() {
+                match middles.get(&[a.min(b), a.max(b)]) {
+                    Some(&m) => out.extend([[a, m], [m, b]]),
+                    None => out.push([a, b]),
+                }
+            }
+            *segments = out;
+        }
+        halves
     }
 
     /// Separates the mesh along a cut: the given elements get copies of the given nodes, at
@@ -430,6 +521,7 @@ impl FeMesh {
             renamed.insert(part.name.clone(), name.clone());
             added.push(name.clone());
             self.parts.push(Part {
+                bodies: Vec::new(),
                 name,
                 elements: shifted(&part.elements),
             });
@@ -498,6 +590,10 @@ impl FeMesh {
         }
         for part in &mut self.parts {
             part.elements.retain(|id| !ids.contains(id));
+            for body in &mut part.bodies {
+                body.elements.retain(|id| !ids.contains(id));
+            }
+            part.bodies.retain(|b| !b.elements.is_empty());
         }
         self.parts.retain(|p| !p.elements.is_empty());
         self.remove_flagged(&removed, false);
@@ -595,6 +691,8 @@ impl FeMesh {
         for &index in others.iter().rev() {
             let part = self.parts.remove(index);
             self.parts[target].elements.extend(part.elements);
+            // The bodies of compound parts stay tied to each other.
+            self.parts[target].bodies.extend(part.bodies);
             if let Some(elements) = self.element_sets.remove(&part.name) {
                 self.element_sets
                     .entry(kept.clone())
@@ -605,6 +703,77 @@ impl FeMesh {
         }
         gone.reverse();
         Some((kept, gone))
+    }
+
+    /// Splits the compound parts into their bodies, each a part of its own named after it,
+    /// in the compound's place. Elements of a compound in none of its bodies stay in a part
+    /// of the compound's name.
+    pub fn split_compounds(&mut self) {
+        if !self.parts.iter().any(Part::is_compound) {
+            return;
+        }
+        let mut parts = Vec::with_capacity(self.parts.len());
+        for part in std::mem::take(&mut self.parts) {
+            if !part.is_compound() {
+                parts.push(part);
+                continue;
+            }
+            let in_body: BTreeSet<ElementId> = (part.bodies.iter())
+                .flat_map(|b| b.elements.iter().copied())
+                .collect();
+            let rest: Vec<ElementId> = (part.elements.iter().copied())
+                .filter(|e| !in_body.contains(e))
+                .collect();
+            for body in part.bodies {
+                parts.push(Part::new(body.name, body.elements));
+            }
+            if !rest.is_empty() {
+                parts.push(Part::new(part.name, rest));
+            }
+        }
+        self.parts = parts;
+    }
+
+    /// Joins parts into compound parts: of each `(name, members)`, the parts named by the
+    /// members become the bodies of one part `name`, in the place of the first of them.
+    /// Members without a part are left out; a compound with none is not made.
+    pub fn compose_compounds(&mut self, compounds: &[(String, Vec<String>)]) {
+        for (name, members) in compounds {
+            let is_member = |p: &Part| members.iter().any(|m| m.eq_ignore_ascii_case(&p.name));
+            let Some(first) = self
+                .parts
+                .iter()
+                .position(|p| !p.is_compound() && is_member(p))
+            else {
+                continue;
+            };
+            let mut compound = Part::new(name.clone(), Vec::new());
+            // The bodies in the order of the members.
+            for member in members {
+                let Some(index) = (self.parts.iter())
+                    .position(|p| !p.is_compound() && p.name.eq_ignore_ascii_case(member))
+                else {
+                    continue;
+                };
+                let part = &self.parts[index];
+                compound.elements.extend(&part.elements);
+                compound.bodies.push(Body {
+                    name: part.name.clone(),
+                    elements: part.elements.clone(),
+                });
+            }
+            let mut index = 0;
+            let mut place = 0;
+            self.parts.retain(|p| {
+                let keep = p.is_compound() || !is_member(p);
+                if index < first && keep {
+                    place += 1;
+                }
+                index += 1;
+                keep
+            });
+            self.parts.insert(place, compound);
+        }
     }
 
     /// Renames a part together with the element set of the same name that an input file
@@ -633,10 +802,9 @@ impl FeMesh {
                 })
                 .collect();
             if !elements.is_empty() {
-                adopted.push(Part {
-                    name: part.name.clone(),
-                    elements,
-                });
+                let mut adopted_part = Part::new(part.name.clone(), elements);
+                adopted_part.bodies = part.bodies.clone();
+                adopted.push(adopted_part);
             }
         }
         if adopted.is_empty() {
@@ -658,7 +826,7 @@ impl FeMesh {
                 }
                 name = format!("{base}-{number}");
             }
-            adopted.push(Part { name, elements });
+            adopted.push(Part::new(name, elements));
         }
         self.parts = adopted;
         true
@@ -735,6 +903,33 @@ impl TryFrom<MeshFile> for FeMesh {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn compounds_join_parts_into_bodies_in_place_and_split_back() {
+        let mut mesh = FeMesh::default();
+        for (name, id) in [("A", 1), ("B", 2), ("C", 3), ("D", 4)] {
+            mesh.parts.push(Part::new(name, vec![id]));
+        }
+        let compounds = [(
+            "AC".to_owned(),
+            vec!["C".to_owned(), "a".to_owned(), "X".to_owned()],
+        )];
+        mesh.compose_compounds(&compounds);
+        let names: Vec<&str> = mesh.parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["AC", "B", "D"], "in the place of the first part");
+        let compound = &mesh.parts[0];
+        assert_eq!(compound.elements, [3, 1]);
+        let bodies: Vec<&str> = compound.bodies.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(
+            bodies,
+            ["C", "A"],
+            "in the order of the members, the missing left out"
+        );
+        mesh.split_compounds();
+        let names: Vec<&str> = mesh.parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["C", "A", "B", "D"]);
+        assert!(mesh.parts.iter().all(|p| !p.is_compound()));
+    }
+
+    #[test]
     fn edge_lines_find_element_edges_with_their_midside_nodes() {
         use crate::{Element, ElementShape};
         let mut mesh = super::FeMesh::default();
@@ -769,6 +964,7 @@ mod tests {
         let mut mesh = super::FeMesh::default();
         for (name, elements) in [("A", vec![1, 2]), ("B", vec![3]), ("C", vec![4, 5])] {
             mesh.parts.push(super::Part {
+                bodies: Vec::new(),
                 name: name.into(),
                 elements: elements.clone(),
             });
@@ -802,10 +998,12 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "A".into(),
             elements: vec![1, 2],
         });
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "GAP".into(),
             elements: vec![3],
         });
@@ -836,6 +1034,7 @@ mod tests {
             .unwrap();
         }
         let part = |name: &str, elements: Vec<ElementId>| Part {
+            bodies: Vec::new(),
             name: name.into(),
             elements,
         };
@@ -874,6 +1073,7 @@ mod tests {
             })
             .unwrap();
             mesh.parts.push(Part {
+                bodies: Vec::new(),
                 name: part.into(),
                 elements: vec![id],
             });
@@ -951,6 +1151,7 @@ mod tests {
         }
         mesh.add_element(tet(7, vec![1, 2, 3, 4])).unwrap();
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "SOLID".into(),
             elements: vec![7],
         });
@@ -985,6 +1186,7 @@ mod tests {
     fn renamed_parts_take_their_element_set_along() {
         let mut mesh = FeMesh::default();
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "SOLID".into(),
             elements: vec![7],
         });

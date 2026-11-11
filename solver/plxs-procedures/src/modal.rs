@@ -27,8 +27,11 @@ use plxs_core::step::{ModalDamping, Procedure as ProcedureKind};
 use plxs_core::{Error, Progress, ProgressEvent, Result, Step};
 use plxs_linalg::SparseMatrix;
 
-use crate::dynamic::{Motion, multiply, write_increment};
+use crate::dynamic::{
+    Energies, Motion, energy_requests, initial_values, multiply, write_energies, write_increment,
+};
 use crate::fields::build_fields;
+use crate::profile::Phase;
 use crate::static_linear::{integration_point_results, writes_increment};
 use crate::{Procedure, ProcedureContext, StepOutcome};
 
@@ -277,23 +280,34 @@ impl Procedure for ModalDynamicsProcedure {
             modes.modes.len()
         )));
 
-        // Modal coordinates of the motion the step starts from: q = Φᵀ M u.
+        // Modal coordinates of the motion the step starts from: q = Φᵀ M u (the modes are
+        // mass-normalised). A first dynamic step starts from the initial velocities.
         let u0 = &ctx.state.displacements.values;
-        let v0 = ctx.state.velocities.as_ref().map(|v| v.values.clone());
-        let starts_at_rest =
-            u0.iter().all(|x| *x == 0.0) && v0.as_ref().is_none_or(|v| v.iter().all(|x| *x == 0.0));
-        let (mut q, mut qd) = if starts_at_rest || u0.len() != n {
+        let v0 = match &ctx.state.velocities {
+            Some(v) => v.values.clone(),
+            None => initial_values(ctx.model, ctx.table, &ctx.model.initial.velocities),
+        };
+        let starts_at_rest = u0.iter().all(|x| *x == 0.0) && v0.iter().all(|x| *x == 0.0);
+        let (mut q, mut qd) = if starts_at_rest || u0.len() != n || v0.len() != n {
             (vec![0.0; modes.modes.len()], vec![0.0; modes.modes.len()])
         } else {
             let mut m = SparseMatrix::zeros(ctx.pattern.clone());
             assemble_mass_with(ctx.table, ctx.model, MassRule::Element, &mut m)?;
             let mu = multiply(&m, u0);
-            let mv = v0.map(|v| multiply(&m, &v)).unwrap_or(vec![0.0; n]);
+            let mv = multiply(&m, &v0);
             (
                 modes.modes.iter().map(|p| dot(&p.values, &mu)).collect(),
                 modes.modes.iter().map(|p| dot(&p.values, &mv)).collect(),
             )
         };
+        let omega2: Vec<f64> = modes.eigenvalues.iter().map(|l| l.max(0.0)).collect();
+        if let Some(highest) = omega2.last() {
+            progress.event(ProgressEvent::Info(format!(
+                "the highest mode lies at {} Hz; loads that excite higher frequencies are \
+                 not followed",
+                crate::dynamic::short(highest.sqrt() / std::f64::consts::TAU)
+            )));
+        }
 
         let k = ensure_stiffness(ctx)?;
         let (f0, warnings) = load_at(ctx, step, 0.0, start_total, period)?;
@@ -303,10 +317,24 @@ impl Procedure for ModalDynamicsProcedure {
         let modal_force =
             |f: &[f64]| -> Vec<f64> { modes.modes.iter().map(|p| dot(&p.values, f)).collect() };
         let mut p_prev = modal_force(&f0);
+        let mut f_prev = f0;
         let count = ((period / dt) * (1.0 - 1e-9)).ceil().max(1.0) as u32;
         let mut stresses = ctx.table.layout.field(6);
         let mut strains = ctx.table.layout.field(6);
         let mut reactions = vec![0.0; n];
+        // Energies of the whole model, when a history output asks for them; stresses for
+        // the increments whose fields are written, or every one when a history output
+        // prints them.
+        let energy_requests = energy_requests(step);
+        let (mut external_work, mut dissipation) = (0.0, 0.0);
+        let history_stresses = step.outputs.el_print.iter().any(|request| {
+            request.set.is_some()
+                && request
+                    .variables
+                    .iter()
+                    .any(|v| matches!(v.trim().to_ascii_uppercase().as_str(), "S" | "E" | "ENER"))
+        });
+        let mut qdd = vec![0.0; q.len()];
         let mut steps: Vec<ModeStep> = Vec::new();
         let mut stepped_dt = f64::NAN;
         let mut time = 0.0;
@@ -340,19 +368,59 @@ impl Procedure for ModalDynamicsProcedure {
                     .collect();
                 stepped_dt = h;
             }
+            let started = std::time::Instant::now();
             let (f1, _) = load_at(ctx, step, t1, start_total, period)?;
+            ctx.profile.add(Phase::Loads, started);
+            let started = std::time::Instant::now();
             let p1 = modal_force(&f1);
+            // The damping dissipates 2ζω q̇² per mode (trapezoidal rule over the increment).
+            let mut damped = 0.0;
             for j in 0..q.len() {
                 let (qj, vj) = steps[j].advance(q[j], qd[j], p_prev[j], p1[j]);
+                let rate = 2.0 * zeta[j] * omega2[j].sqrt();
+                damped += 0.5 * h * rate * (qd[j] * qd[j] + vj * vj);
                 q[j] = qj;
                 qd[j] = vj;
+                qdd[j] = p1[j] - rate * vj - omega2[j] * qj;
             }
             p_prev = p1;
             time = t1;
-            motion.u = superpose(&modes.modes, &q, n);
+            let u_prev = std::mem::replace(&mut motion.u, superpose(&modes.modes, &q, n));
             motion.v = superpose(&modes.modes, &qd, n);
+            motion.a = superpose(&modes.modes, &qdd, n);
             k.multiply(&motion.u, &mut reactions);
-            integration_point_results(ctx.table, ctx.model, &motion.u, &mut strains, &mut stresses);
+            if !energy_requests.is_empty() {
+                // Mass-normalised modes: ½ vᵀ M v = ½ Σ q̇ⱼ².
+                let du: Vec<f64> = motion.u.iter().zip(&u_prev).map(|(a, b)| a - b).collect();
+                let f_mean: Vec<f64> = f1.iter().zip(&f_prev).map(|(a, b)| 0.5 * (a + b)).collect();
+                external_work += dot(&f_mean, &du);
+                dissipation += damped;
+                let energies = Energies {
+                    internal: 0.5 * dot(&motion.u, &reactions),
+                    kinetic: 0.5 * qd.iter().map(|v| v * v).sum::<f64>(),
+                    external_work,
+                    dissipation,
+                };
+                write_energies(
+                    ctx.results,
+                    &energy_requests,
+                    &energies,
+                    (ctx.step_number, increment, total),
+                );
+            }
+            f_prev = f1;
+            ctx.profile.add(Phase::Vectors, started);
+            let started = std::time::Instant::now();
+            let writes = writes_increment(step, increment, count);
+            if writes || increment == count || history_stresses {
+                integration_point_results(
+                    ctx.table,
+                    ctx.model,
+                    &motion.u,
+                    &mut strains,
+                    &mut stresses,
+                );
+            }
             progress.event(ProgressEvent::Iteration {
                 step: ctx.step_number,
                 increment,
@@ -361,7 +429,7 @@ impl Procedure for ModalDynamicsProcedure {
                 correction: 0.0,
                 converged: true,
             });
-            if writes_increment(step, increment, count) {
+            if writes {
                 write_increment(
                     ctx,
                     step,
@@ -370,6 +438,7 @@ impl Procedure for ModalDynamicsProcedure {
                     &motion,
                     &reactions,
                     (&stresses, &strains),
+                    None,
                     None,
                 );
             }
@@ -385,6 +454,7 @@ impl Procedure for ModalDynamicsProcedure {
                 &strains,
                 None,
             );
+            ctx.profile.add(Phase::Results, started);
             progress.event(ProgressEvent::IncrementDone {
                 step: ctx.step_number,
                 increment,
@@ -403,6 +473,10 @@ impl Procedure for ModalDynamicsProcedure {
         ctx.state.velocities = Some(NodalField {
             per_node: 3,
             values: motion.v,
+        });
+        ctx.state.accelerations = Some(NodalField {
+            per_node: 3,
+            values: motion.a,
         });
         ctx.state.stresses = stresses;
         ctx.state.strains = strains;
@@ -628,9 +702,8 @@ impl Procedure for SteadyStateProcedure {
             if variables.iter().any(|v| v == "PU") {
                 let u_re = superpose(&modes.modes, &re, n);
                 let u_im = superpose(&modes.modes, &im, n);
-                let zero = vec![0.0; n];
-                let (a, _) = ctx.table.reported(ctx.model, &u_re, &zero);
-                let (b, _) = ctx.table.reported(ctx.model, &u_im, &zero);
+                let a = ctx.table.reported_displacements(&u_re);
+                let b = ctx.table.reported_displacements(&u_im);
                 let order = crate::fields::node_order(ctx.model);
                 fields.push(magnitude_phase(
                     "PDISP",

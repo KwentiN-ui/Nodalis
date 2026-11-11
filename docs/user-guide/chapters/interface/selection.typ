@@ -29,16 +29,21 @@ selects. Drag it by its title bar to another place; it opens there from then on.
 
 / Geometry based: #ui("Faces, edges and points") selects the CAD face under the cursor, split
   faces included (@geometry-import), or on a mesh without geometry the smooth patch of faces;
-  near a feature edge or corner, within a few pixels, it selects that. #ui("Part") selects whole parts.
+  near a feature edge or corner, within a few pixels, it selects that. #ui("Part") selects whole parts;
+  for a region of nodes (an initial velocity or temperature, a node set) these are all nodes of the
+  part, those inside a solid too.
   #ui("Edge angle") and #ui("Surface angle") grow the selection across edges or faces as long as
   the angle between neighbours stays below the given value (default 30°). On a mesh generated
-  from geometry, #ui("Surface angle") selects and highlights whole CAD faces, like
-  #ui("Faces, edges and points"), so the selection survives remeshing.
+  from geometry, #ui("Edge angle") and #ui("Surface angle") select and highlight whole CAD edges
+  and faces, like #ui("Faces, edges and points"), so the selection survives remeshing. The
+  mesh based modes of the same names select the nodes or element faces they grow over.
 / Mesh based (#ui("More")): #ui("Node"), #ui("Element"), #ui("Edge"), #ui("Surface"),
   #ui("Part"), #ui("Edge angle"), #ui("Surface angle") and #ui("ID"). #ui("ID") takes a list such
   as `1, 5, 10-20` with #ui("Add") and #ui("Remove"); for face and edge regions the numbers are
   element numbers.
 
+
+#screenshot("edge-angle.png", [Edge angle on the rim of a hole selects the CAD edge, shown as "1 edge", not its nodes])
 #screenshot("surface-angle.png", [Surface angle on a shaft selects the three cylindrical faces])
 
 Modes that do not fit the region are disabled, for example #ui("Node") for a pressure load.

@@ -7,7 +7,8 @@ use plxs_core::section::SectionKind;
 use plxs_core::state::IntegrationPointField;
 use plxs_core::{Element, ElementFamily, ElementType, Error, Model, Result};
 use plxs_elements::{SolidElement, plane, solid};
-use plxs_materials::{LinearElastic, MaterialLaw, law_of};
+use plxs_materials::plane_stress::condense;
+use plxs_materials::{LinearElastic, MaterialLaw, PlaneStress, law_of};
 
 use rayon::prelude::*;
 
@@ -60,8 +61,12 @@ pub struct ElementTable {
     /// Springs and gaps.
     pub discrete: Vec<crate::discrete::DiscreteElement>,
     pub formulations: Vec<SolidElement>,
-    /// Elastic constants and matrix per (section, temperature) combination.
+    /// Elastic constants and matrix per (section, plane stress) combination; the matrix of
+    /// plane stress elements is condensed to zero thickness stress
+    /// ([`plxs_materials::plane_stress::condense`]).
     pub materials: Vec<(LinearElastic, [[f64; 6]; 6])>,
+    /// For every entry of `materials`: whether it belongs to plane stress elements.
+    pub plane_stress: Vec<bool>,
     /// The material law of every entry of `materials` (elastic, plastic, creeping), for
     /// small strains and for NLGEOM steps (finite strains).
     pub laws: Vec<Box<dyn MaterialLaw>>,
@@ -76,9 +81,15 @@ pub struct ElementTable {
     pub membranes: Vec<Membrane>,
     /// For every model element (dense index) its membrane, `u32::MAX` for the others.
     pub membrane_of: Vec<u32>,
+    /// The general beams (U1) as corotational beams: under NLGEOM they replace their
+    /// linear stiffness among `linear_blocks`.
+    pub beams: Vec<Beam>,
     /// A material without `*ELASTIC`: allowed for pure heat transfer, where it gets zero
     /// elastic constants; [`Self::require_elastic`] refuses it for mechanical steps.
     pub missing_elastic: Option<String>,
+    /// Whether a continuum element has a hyperelastic material: steps that deform the
+    /// model then work with NLGEOM.
+    pub hyperelastic: bool,
 }
 
 /// A native membrane (`M3D3`, `M3D4`; `plxs_elements::membrane`).
@@ -113,12 +124,48 @@ impl Membrane {
     }
 }
 
+/// A general beam (U1) computed as a corotational beam
+/// (`plxs_elements::corotational`) in steps with large deformations.
+#[derive(Clone, Debug)]
+pub struct Beam {
+    /// Dense index of the element in the model.
+    pub element: u32,
+    /// Global DOFs: the translations and the rotation vector of the first node, then those
+    /// of the second.
+    pub dofs: [u32; 12],
+    pub formulation: plxs_elements::corotational::CorotationalBeam,
+    /// Density, when the material has one.
+    pub density: Option<f64>,
+    /// Area and second moments of area (CalculiX's `I11`, `I22`), for the mass.
+    pub area: f64,
+    pub i11: f64,
+    pub i22: f64,
+    /// Its linear stiffness among [`ElementTable::linear_blocks`].
+    pub block: usize,
+}
+
+impl Beam {
+    /// The element's DOF values out of the global ones.
+    pub fn gather(&self, u: &[f64]) -> [f64; 12] {
+        self.dofs.map(|d| u.get(d as usize).copied().unwrap_or(0.0))
+    }
+
+    /// The mass matrix (row-major 12 × 12), `None` without a density.
+    pub fn mass(&self) -> Option<[f64; 144]> {
+        let rho = self.density?;
+        Some(self.formulation.mass(rho, self.area, self.i11, self.i22))
+    }
+}
+
 /// A constant element stiffness on global DOFs.
 #[derive(Clone, Debug)]
 pub struct LinearBlock {
     pub dofs: Vec<u32>,
     /// Whether the block is the linear stiffness of a native membrane.
     pub membrane: bool,
+    /// Whether the block is the linear stiffness of a general beam, which steps with large
+    /// deformations compute as a corotational beam ([`ElementTable::beams`]).
+    pub beam: bool,
     /// Row-major, `dofs.len()` squared.
     pub stiffness: Vec<f64>,
 }
@@ -138,6 +185,17 @@ impl ElementTable {
     /// Resolves the elements of a model at a uniform reference temperature. Elements the
     /// solver cannot compute yet are an error naming the type.
     pub fn new(model: &Model, temperature: f64) -> Result<Self> {
+        Self::new_after_ties(model, temperature, &[])
+    }
+
+    /// [`Self::new`] on a model whose ties moved slave nodes on to their master surfaces
+    /// (`moved`: each tie's name with the dense indices of the nodes it moved): elements
+    /// turned inside out by the move name the ties in the error.
+    pub fn new_after_ties(
+        model: &Model,
+        temperature: f64,
+        moved: &[(String, Vec<u32>)],
+    ) -> Result<Self> {
         let mut dofs = DofMap::new(model.nodes.len(), 3);
         // Formulations per type and, for plane elements, thickness.
         let mut formulation_index: HashMap<(ElementType, u64), u32> = HashMap::new();
@@ -146,19 +204,33 @@ impl ElementTable {
         let mut connected = vec![false; model.nodes.len()];
 
         let mut formulations = Vec::new();
-        let mut material_index: HashMap<u32, u32> = HashMap::new();
+        let mut material_index: HashMap<(u32, bool), u32> = HashMap::new();
         let mut materials = Vec::new();
+        let mut plane_stress = Vec::new();
         let mut laws: Vec<Box<dyn MaterialLaw>> = Vec::new();
         let mut laws_finite: Vec<Box<dyn MaterialLaw>> = Vec::new();
         let mut missing_elastic: Option<String> = None;
+        let mut hyperelastic = false;
         let mut entries = Vec::with_capacity(model.elements.len());
         let mut offsets = Vec::with_capacity(model.elements.len() + 1);
         offsets.push(0u32);
         let mut linear_blocks = Vec::new();
+        let mut beams = Vec::new();
         let mut membranes = Vec::new();
         let mut membrane_of = vec![u32::MAX; model.elements.len()];
         let mut entry_of = Vec::with_capacity(model.elements.len());
         let mut discrete = Vec::new();
+        let mut inverted: Vec<u32> = Vec::new();
+        // The ties that moved nodes of the elements turned inside out, by their index.
+        let mut moved_by = vec![u32::MAX; model.nodes.len()];
+        for (tie, (_, nodes)) in moved.iter().enumerate() {
+            for &n in nodes {
+                if let Some(slot) = moved_by.get_mut(n as usize) {
+                    *slot = tie as u32;
+                }
+            }
+        }
+        let mut inverting_ties = std::collections::BTreeSet::new();
         for (index, element) in model.elements.iter().enumerate() {
             let family = element.kind.family();
             if matches!(family, ElementFamily::Spring | ElementFamily::Gap) {
@@ -179,11 +251,13 @@ impl ElementTable {
                 continue;
             }
             if element.kind == ElementType::U1 {
-                let block = Self::u1_block(model, element, temperature)?;
+                let (block, mut beam) = Self::u1_block(model, element, index as u32, temperature)?;
                 for &d in &block.dofs {
                     connected[d as usize / 3] = true;
                     uses_z[d as usize / 3] = true;
                 }
+                beam.block = linear_blocks.len();
+                beams.push(beam);
                 linear_blocks.push(block);
                 entry_of.push(u32::MAX);
                 continue;
@@ -198,6 +272,7 @@ impl ElementTable {
                 linear_blocks.push(LinearBlock {
                     dofs: membrane.dofs.clone(),
                     membrane: true,
+                    beam: false,
                     stiffness: membrane.formulation.stiffness(),
                 });
                 membrane.block = linear_blocks.len() - 1;
@@ -269,7 +344,9 @@ impl ElementTable {
             let section_index = element.section.ok_or_else(|| {
                 Error::input("*ELEMENT", format!("element {} has no section", element.id))
             })?;
-            let (material, density) = match material_index.get(&section_index) {
+            let is_plane_stress = formulations[formulation as usize].is_plane_stress();
+            let material_key = (section_index, is_plane_stress);
+            let (material, density) = match material_index.get(&material_key) {
                 Some(&i) => (i, section_density(model, section_index)),
                 None => {
                     let section = &model.sections[section_index as usize];
@@ -288,7 +365,8 @@ impl ElementTable {
                     let mat = model
                         .material(name)
                         .ok_or_else(|| Error::undefined("*SOLID SECTION", "material", name))?;
-                    let elastic = if mat.elastic.is_none() {
+                    let no_elasticity = mat.elastic.is_none() && mat.hyperelastic.is_none();
+                    let elastic = if no_elasticity {
                         missing_elastic.get_or_insert_with(|| mat.name.clone());
                         LinearElastic {
                             young: 0.0,
@@ -297,21 +375,47 @@ impl ElementTable {
                     } else {
                         LinearElastic::of(mat, temperature)?
                     };
-                    materials.push((elastic, elastic.matrix()));
-                    if mat.elastic.is_none() {
-                        laws.push(Box::new(elastic));
-                        laws_finite.push(Box::new(elastic));
+                    hyperelastic |= mat.hyperelastic.is_some();
+                    let (law, law_finite): (Box<dyn MaterialLaw>, Box<dyn MaterialLaw>) =
+                        if no_elasticity {
+                            (Box::new(elastic), Box::new(elastic))
+                        } else {
+                            (
+                                law_of(mat, temperature, false)?,
+                                law_of(mat, temperature, true)?,
+                            )
+                        };
+                    // Plane stress: the thickness stress is zero at every integration
+                    // point, through the material (see `plxs_elements::plane`).
+                    if is_plane_stress {
+                        materials.push((elastic, condense(&elastic.matrix())));
+                        laws.push(Box::new(PlaneStress::new(law)));
+                        laws_finite.push(Box::new(PlaneStress::new(law_finite)));
                     } else {
-                        laws.push(law_of(mat, temperature, false)?);
-                        laws_finite.push(law_of(mat, temperature, true)?);
+                        materials.push((elastic, elastic.matrix()));
+                        laws.push(law);
+                        laws_finite.push(law_finite);
                     }
+                    plane_stress.push(is_plane_stress);
                     let i = materials.len() as u32 - 1;
-                    material_index.insert(section_index, i);
+                    material_index.insert(material_key, i);
                     (i, plxs_materials::density(mat, temperature))
                 }
             };
             let nodes = Self::node_indices(model, element)?;
             let f = &formulations[formulation as usize];
+            let coords: Vec<[f64; 3]> = nodes
+                .iter()
+                .map(|&n| model.nodes.coordinates[n as usize])
+                .collect();
+            if f.inverted(&coords) {
+                inverted.push(element.id);
+                inverting_ties.extend(
+                    (nodes.iter())
+                        .map(|&n| moved_by[n as usize])
+                        .filter(|&t| t != u32::MAX),
+                );
+            }
             for &n in &nodes {
                 connected[n as usize] = true;
                 uses_z[n as usize] |= f.uses_out_of_plane();
@@ -331,14 +435,55 @@ impl ElementTable {
                 density,
             });
         }
+        if !inverted.is_empty() {
+            const SHOWN: usize = 10;
+            let mut list = inverted
+                .iter()
+                .take(SHOWN)
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            if inverted.len() > SHOWN {
+                list.push_str(&format!(" and {} more", inverted.len() - SHOWN));
+            }
+            let hint = if inverting_ties.is_empty() {
+                "for shells and beams this is the solid they are expanded to, check the \
+                 element shape at sharp bends and curved faces against the thickness and the \
+                 offset"
+                    .to_owned()
+            } else {
+                let names: Vec<&str> = (inverting_ties.iter())
+                    .map(|&t| moved[t as usize].0.as_str())
+                    .collect();
+                format!(
+                    "the *TIE {} moved their nodes on to the master surface (ADJUST): the \
+                     slave surface takes in faces that do not lie against the master, e.g. a \
+                     face meeting it at an edge or one on a plane of symmetry, whose nodes \
+                     within the position tolerance are pulled across their elements; leave \
+                     those faces out of the tie or make its position tolerance smaller than \
+                     the elements there",
+                    names.join(", ")
+                )
+            };
+            return Err(Error::input(
+                "*ELEMENT",
+                format!(
+                    "{} element(s) turned inside out or folded (negative Jacobian at an \
+                     integration point): {list}; {hint}",
+                    inverted.len()
+                ),
+            ));
+        }
         // Nodes that multi-point constraints tie in (the original nodes and helper nodes of
-        // expanded shells and beams, reference nodes) work through those constraints.
+        // expanded shells and beams, reference nodes) work through those constraints; their
+        // third DOF where an equation names it (the in-plane nodes of a 2D remote point
+        // keep their unused out-of-plane DOF).
         for equation in &model.constraints.equations {
             for term in &equation.terms {
                 for id in model.nodes_of(&term.node) {
                     if let Some(n) = model.nodes.index(id) {
                         connected[n as usize] = true;
-                        uses_z[n as usize] = true;
+                        uses_z[n as usize] |= term.dof == 3;
                     }
                 }
             }
@@ -351,8 +496,16 @@ impl ElementTable {
                 }
             }
         }
+        for support in &model.contact.compression_only {
+            for gap in crate::discrete::surface_gaps(model, support)? {
+                for &d in &gap.dofs {
+                    connected[(d / 3) as usize] = true;
+                }
+                discrete.push(gap);
+            }
+        }
         // DOFs no element works on are held at zero: nodes outside every element, and the
-        // out-of-plane DOF of nodes that only plane strain or axisymmetric elements use.
+        // out-of-plane DOF of nodes that only plane or axisymmetric elements use.
         for n in 0..model.nodes.len() {
             let base = n as u32 * 3;
             if !connected[n] {
@@ -367,6 +520,7 @@ impl ElementTable {
             discrete,
             formulations,
             materials,
+            plane_stress,
             laws,
             laws_finite,
             dofs,
@@ -374,13 +528,20 @@ impl ElementTable {
             linear_blocks,
             membranes,
             membrane_of,
+            beams,
             missing_elastic,
+            hyperelastic,
         })
     }
 
     /// The stiffness of a U1 beam. After the expansion its nodes are the first node, the
     /// helper node carrying its rotations, the second node and its rotation helper.
-    fn u1_block(model: &Model, element: &Element, temperature: f64) -> Result<LinearBlock> {
+    fn u1_block(
+        model: &Model,
+        element: &Element,
+        index: u32,
+        temperature: f64,
+    ) -> Result<(LinearBlock, Beam)> {
         use plxs_core::section::BeamProfile;
         let bad =
             |what: &str| Error::input("*ELEMENT", format!("U1 element {}: {what}", element.id));
@@ -423,17 +584,35 @@ impl ElementTable {
             young: elastic.young,
             poisson: elastic.poisson,
         };
-        let stiffness = plxs_elements::u1::stiffness(x(0), x(2), *normal, &u1)
-            .ok_or_else(|| bad("no length, or the section vector is parallel to the axis"))?;
-        let dofs = nodes
+        let degenerate = || bad("no length, or the section vector is parallel to the axis");
+        let stiffness =
+            plxs_elements::u1::stiffness(x(0), x(2), *normal, &u1).ok_or_else(degenerate)?;
+        let formulation =
+            plxs_elements::corotational::CorotationalBeam::new(x(0), x(2), *normal, &u1)
+                .ok_or_else(degenerate)?;
+        let dofs: Vec<u32> = nodes
             .iter()
             .flat_map(|&n| (0..3).map(move |d| n * 3 + d))
             .collect();
-        Ok(LinearBlock {
-            dofs,
-            membrane: false,
-            stiffness,
-        })
+        let beam = Beam {
+            element: index,
+            dofs: std::array::from_fn(|i| dofs[i]),
+            formulation,
+            density: plxs_materials::density(mat, temperature),
+            area: *area,
+            i11: *i11,
+            i22: *i22,
+            block: 0,
+        };
+        Ok((
+            LinearBlock {
+                dofs,
+                membrane: false,
+                beam: true,
+                stiffness,
+            },
+            beam,
+        ))
     }
 
     /// A native M3D3 membrane and its stiffness.
@@ -537,6 +716,25 @@ impl ElementTable {
         &self.materials[entry.material as usize].1
     }
 
+    /// For a plane stress element: the thickness strain at a point with the in-plane strains
+    /// of `strain` (engineering) and the isotropic thermal strain `thermal`, that makes the
+    /// thickness stress zero. `None` for other elements.
+    pub fn thickness_strain(
+        &self,
+        entry: &ElementEntry,
+        strain: &[f64; 6],
+        thermal: f64,
+    ) -> Option<f64> {
+        let m = entry.material as usize;
+        self.plane_stress[m].then(|| {
+            plxs_materials::plane_stress::thickness_strain(
+                &self.materials[m].0.matrix(),
+                strain,
+                thermal,
+            )
+        })
+    }
+
     /// The material law of an element, in its finite-strain form for NLGEOM steps.
     pub fn law(&self, entry: &ElementEntry, finite_strain: bool) -> &dyn MaterialLaw {
         if finite_strain {
@@ -570,11 +768,31 @@ impl ElementTable {
         self.entries.len()
     }
 
+    /// The displacements of [`Self::reported`] alone, without the element stiffness the
+    /// reported forces need.
+    pub fn reported_displacements(&self, u: &[f64]) -> Vec<f64> {
+        let mut u_out = u.to_vec();
+        if self.formulations.iter().all(|f| f.expansion().is_none()) {
+            return u_out;
+        }
+        for entry in &self.entries {
+            let Some(x) = self.formulation(entry).expansion() else {
+                continue;
+            };
+            let reported = x.reported_displacements(&self.gather(entry, u));
+            for (a, value) in reported.iter().enumerate() {
+                for k in 0..3 {
+                    u_out[entry.dofs[3 * a + k] as usize] = value[k];
+                }
+            }
+        }
+        u_out
+    }
+
     /// Displacements and nodal forces as they are reported (`.frd`, `.dat`): what the
     /// solver computes, except at the nodes of plane and axisymmetric elements, which report
     /// the thickness average of their expanded nodes' displacements and the sum of their
-    /// forces, as CalculiX does (see `plxs_elements::plane`). The internal out-of-plane
-    /// unknown of plane stress nodes is no displacement and reported as zero.
+    /// forces, as CalculiX does (see `plxs_elements::plane`).
     pub fn reported(&self, model: &Model, u: &[f64], forces: &[f64]) -> (Vec<f64>, Vec<f64>) {
         let mut u_out = u.to_vec();
         let mut f_out = forces.to_vec();

@@ -15,8 +15,9 @@ use egui::{Color32, Pos2, Rect, RichText, Stroke, Ui, pos2, vec2};
 use glam::Vec3;
 use plx_mesh::NodeId;
 use plx_model::{
-    CoordinatePlane, CoordinateSystem, CoordinateSystemKind, FeModel, GLOBAL, Plane, PlaneSource,
-    PointDefinition, PointRef, ReferencePoint, ResultPath, ResultPlane, next_name,
+    Constraint, CoordinatePlane, CoordinateSystem, CoordinateSystemKind, FeModel, Plane,
+    PlaneSource, PointDefinition, PointRef, ReferencePoint, Region, RemoteBehavior, ResultPath,
+    ResultPlane, RigidBody, next_name,
 };
 use plx_render::SectionValues;
 use plx_results::path::{self, PathPoint};
@@ -107,6 +108,13 @@ pub struct FeatureDialog {
     rows_height: Option<f32>,
     /// The path plot was drawn in the last frame.
     plotted: bool,
+    /// How the faces of a reference point at their centre are coupled to it, by a rigid
+    /// body constraint on the same faces; `None` adds none or removes the linked one.
+    coupling: Option<RemoteBehavior>,
+    /// The rigid body constraint the edited point already drives, with the faces of the
+    /// point when the dialog opened: the constraint follows a changed selection if it had
+    /// the same faces.
+    linked: Option<(usize, Region)>,
 }
 
 /// Height of the path plot until the dialog is resized, and the least it shrinks to.
@@ -148,7 +156,7 @@ impl FeatureDialog {
                 let mut plane = Plane::new(next_name("Plane", fe.planes.iter().map(|p| &*p.name)));
                 // The global XY plane through the middle of the model.
                 plane.source = PlaneSource::CoordinateSystem {
-                    system: GLOBAL.into(),
+                    system: None,
                     plane: CoordinatePlane::Xy,
                     offset: center[2],
                 };
@@ -158,11 +166,7 @@ impl FeatureDialog {
                 let names = fe.result_planes.iter().map(|p| p.name.as_str());
                 Draft::ResultPlane(ResultPlane {
                     name: next_name("Plane_Result", names),
-                    plane: fe
-                        .planes
-                        .first()
-                        .map(|p| p.name.clone())
-                        .unwrap_or_default(),
+                    plane: fe.planes.first().map(|p| p.id).unwrap_or_default(),
                 })
             }
         };
@@ -201,6 +205,22 @@ impl FeatureDialog {
             }) => RegionDraft::from_region(region, FACE_SOURCES, target, &model.mesh),
             _ => RegionDraft::new(FACE_SOURCES, target),
         };
+        // Only the FE model has constraints. A new point couples its faces deformably by
+        // default: it then tracks them without stiffening them.
+        let (coupling, linked) = match (&draft, results) {
+            (Draft::ReferencePoint(point), None) => {
+                let linked = coupling_of(&model.fe, point.id).filter(|_| index.is_some());
+                match linked {
+                    Some((i, body)) => (
+                        Some(body.behavior),
+                        point.definition.region().map(|r| (i, r.clone())),
+                    ),
+                    None if index.is_none() => (Some(RemoteBehavior::Deformable), None),
+                    None => (None, None),
+                }
+            }
+            _ => (None, None),
+        };
         Self {
             results,
             draft,
@@ -216,6 +236,8 @@ impl FeatureDialog {
             plot_key: None,
             rows_height: None,
             plotted: false,
+            coupling,
+            linked,
         }
     }
 
@@ -287,9 +309,9 @@ impl FeatureDialog {
     }
 
     /// The plane whose cut the edited plane result shows.
-    pub fn result_plane(&self) -> Option<&str> {
+    pub fn result_plane(&self) -> Option<plx_model::Id> {
         match &self.draft {
-            Draft::ResultPlane(result) => Some(&result.plane),
+            Draft::ResultPlane(result) => Some(result.plane),
             _ => None,
         }
     }
@@ -361,7 +383,7 @@ impl FeatureDialog {
                     system,
                     coordinates,
                 } => {
-                    let local = (model.fe.coordinate_system_or_global(system))
+                    let local = (model.fe.coordinate_system_or_global(*system))
                         .and_then(|c| Some((c.kind, c.local(picked).ok()?)));
                     if let Some((kind, mut local)) = local {
                         if kind == CoordinateSystemKind::Cylindrical {
@@ -509,11 +531,14 @@ impl FeatureDialog {
             Draft::ReferencePoint(point) => {
                 name_row(ui, &mut point.name);
                 reference_point_rows(ui, point, model, &mut self.region, picking, speed);
+                if self.results.is_none() && point.definition.region().is_some() {
+                    coupling_rows(ui, &mut self.coupling);
+                }
             }
             Draft::CoordinateSystem(system) => {
                 name_row(ui, &mut system.name);
                 ui.label("Type");
-                ui.horizontal_wrapped(|ui| {
+                crate::layout::wrapped_row(ui, |ui| {
                     for kind in CoordinateSystemKind::ALL {
                         ui.radio_value(&mut system.kind, kind, kind.label());
                     }
@@ -579,15 +604,11 @@ impl FeatureDialog {
                     );
                 } else {
                     egui::ComboBox::from_id_salt("result plane")
-                        .selected_text(result.plane.as_str())
+                        .selected_text(fe.name_or_missing(Some(result.plane)))
                         .width(crate::dock::fit_width(ui, 200.0))
                         .show_ui(ui, |ui| {
                             for plane in &fe.planes {
-                                ui.selectable_value(
-                                    &mut result.plane,
-                                    plane.name.clone(),
-                                    &plane.name,
-                                );
+                                ui.selectable_value(&mut result.plane, plane.id, &plane.name);
                             }
                         });
                 }
@@ -609,7 +630,7 @@ impl FeatureDialog {
             ui.weak("Select a component in the Results tree.");
             return;
         };
-        let plane = model.fe.plane(&result.plane);
+        let plane = model.fe.plane(result.plane);
         if let Some(Err(error)) = plane.map(|p| p.resolve(&model.fe)) {
             ui.colored_label(crate::style::error(), error);
             return;
@@ -833,7 +854,7 @@ impl FeatureDialog {
             Draft::CoordinateSystem(c) => c.axes().map(|_| ()),
             Draft::Path(p) => p.samples(fe).map(|_| ()),
             Draft::Plane(p) => p.resolve(fe).map(|_| ()),
-            Draft::ResultPlane(p) => match fe.plane(&p.plane) {
+            Draft::ResultPlane(p) => match fe.plane(p.plane) {
                 Some(plane) => plane.resolve(fe).map(|_| ()),
                 None => Err("Please select a Plane.".into()),
             },
@@ -841,11 +862,57 @@ impl FeatureDialog {
         }
     }
 
-    /// Copies the draft into the model; references follow a renamed item, and reference
+    /// Copies the draft into the model, where items refer to it by its id, so that they
+    /// follow a renamed one; reference
     /// points are placed anew on `mesh`, e.g. after their coordinate system changed.
     pub fn apply(self, fe: &mut FeModel, mesh: &plx_mesh::FeMesh) {
-        self.apply_draft(fe);
+        self.apply_draft_and_coupling(fe);
         fe.update_reference_points(mesh);
+    }
+
+    fn apply_draft_and_coupling(self, fe: &mut FeModel) {
+        self.apply_coupling(fe);
+        self.apply_draft(fe);
+    }
+
+    /// Adds, updates or removes the rigid body constraint that couples the faces of a
+    /// reference point at their centre to it. The constraint refers to the point by its id,
+    /// which a rename keeps.
+    fn apply_coupling(&self, fe: &mut FeModel) {
+        let Draft::ReferencePoint(point) = &self.draft else {
+            return;
+        };
+        if self.results.is_some() {
+            return;
+        }
+        let stored = point.id;
+        let faces = point.definition.region();
+        match (&self.linked, self.coupling, faces) {
+            (Some((i, before)), Some(behavior), Some(faces)) => {
+                if let Some(Constraint::RigidBody(body)) = fe.constraints.get_mut(*i) {
+                    body.behavior = behavior;
+                    if body.region == *before {
+                        body.region = faces.clone();
+                    }
+                }
+            }
+            // No coupling chosen while the point sits at the centre of faces; a point moved
+            // to coordinates leaves its constraint as it is.
+            (Some((i, _)), None, Some(_)) => {
+                if matches!(fe.constraints.get(*i), Some(Constraint::RigidBody(b)) if b.reference_point == stored)
+                {
+                    fe.constraints.remove(*i);
+                }
+            }
+            (None, Some(behavior), Some(faces)) => {
+                let names = fe.constraints.iter().map(|c| c.name());
+                let mut body = RigidBody::new(next_name("Rigid_Body", names), stored);
+                body.region = faces.clone();
+                body.behavior = behavior;
+                fe.constraints.push(Constraint::RigidBody(body));
+            }
+            (Some(_), _, None) | (None, _, _) => {}
+        }
     }
 
     fn apply_draft(self, fe: &mut FeModel) {
@@ -856,27 +923,9 @@ impl FeatureDialog {
             }
         }
         match self.draft {
-            Draft::ReferencePoint(point) => {
-                if let Some(old) = self.index.and_then(|i| fe.reference_points.get(i)) {
-                    let old = old.name.clone();
-                    fe.rename_reference_point(&old, &point.name);
-                }
-                put(&mut fe.reference_points, self.index, point);
-            }
-            Draft::CoordinateSystem(system) => {
-                if let Some(old) = self.index.and_then(|i| fe.coordinate_systems.get(i)) {
-                    let old = old.name.clone();
-                    fe.rename_coordinate_system(&old, &system.name);
-                }
-                put(&mut fe.coordinate_systems, self.index, system);
-            }
-            Draft::Plane(plane) => {
-                if let Some(old) = self.index.and_then(|i| fe.planes.get(i)) {
-                    let old = old.name.clone();
-                    fe.rename_plane(&old, &plane.name);
-                }
-                put(&mut fe.planes, self.index, plane);
-            }
+            Draft::ReferencePoint(point) => put(&mut fe.reference_points, self.index, point),
+            Draft::CoordinateSystem(system) => put(&mut fe.coordinate_systems, self.index, system),
+            Draft::Plane(plane) => put(&mut fe.planes, self.index, plane),
             Draft::Path(path) => put(&mut fe.result_paths, self.index, path),
             Draft::ResultPlane(result) => put(&mut fe.result_planes, self.index, result),
         }
@@ -1060,7 +1109,7 @@ fn plane_rows(
     };
     ui.label("Type");
     let mut chosen = kind;
-    ui.horizontal_wrapped(|ui| {
+    crate::layout::wrapped_row(ui, |ui| {
         ui.radio_value(&mut chosen, 0, "Coordinate system");
         ui.radio_value(&mut chosen, 1, "Three points");
         ui.radio_value(&mut chosen, 2, "Point and normal");
@@ -1072,7 +1121,7 @@ fn plane_rows(
         let at = PointRef::Coordinates;
         plane.source = match chosen {
             0 => PlaneSource::CoordinateSystem {
-                system: GLOBAL.into(),
+                system: None,
                 plane: CoordinatePlane::Xy,
                 offset: point[2],
             },
@@ -1098,16 +1147,7 @@ fn plane_rows(
             offset,
         } => {
             ui.label("Coordinate system");
-            egui::ComboBox::from_id_salt("plane system")
-                .selected_text(system.as_str())
-                .width(crate::dock::fit_width(ui, 200.0))
-                .show_ui(ui, |ui| {
-                    let names = std::iter::once(GLOBAL)
-                        .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()));
-                    for name in names {
-                        ui.selectable_value(system, name.to_string(), name);
-                    }
-                });
+            crate::pick_item::system_combo(ui, "plane system", system, fe, 200.0);
             ui.end_row();
             ui.label("Plane");
             ui.horizontal(|ui| {
@@ -1231,28 +1271,19 @@ fn reference_point_rows(
     }
     // Coordinates in the global system or one of the features.
     let system = match &point.definition {
-        PointDefinition::Local { system, .. } => system.clone(),
-        _ => GLOBAL.to_string(),
+        PointDefinition::Local { system, .. } => *system,
+        _ => None,
     };
-    let mut chosen_system = system.clone();
+    let mut chosen_system = system;
     ui.label("Coordinate system");
-    egui::ComboBox::from_id_salt("point system")
-        .selected_text(chosen_system.as_str())
-        .width(crate::dock::fit_width(ui, 200.0))
-        .show_ui(ui, |ui| {
-            let names = std::iter::once(GLOBAL)
-                .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()));
-            for name in names {
-                ui.selectable_value(&mut chosen_system, name.to_string(), name);
-            }
-        });
+    crate::pick_item::system_combo(ui, "point system", &mut chosen_system, fe, 200.0);
     ui.end_row();
     if chosen_system != system {
         // The point keeps its place; its coordinates change to the new system.
         let at = point.resolve(fe, &model.mesh).unwrap_or(point.position);
         point.position = at;
-        point.definition = match fe.coordinate_system(&chosen_system) {
-            Some(cs) if chosen_system != GLOBAL => {
+        point.definition = match chosen_system.and_then(|c| fe.coordinate_system(c)) {
+            Some(cs) => {
                 let mut local = cs.local(at).unwrap_or([0.0; 3]);
                 if cs.kind == CoordinateSystemKind::Cylindrical {
                     local[1] = local[1].to_degrees();
@@ -1270,8 +1301,7 @@ fn reference_point_rows(
             system,
             coordinates,
         } => {
-            let cylindrical = fe
-                .coordinate_system(system)
+            let cylindrical = (system.and_then(|c| fe.coordinate_system(c)))
                 .is_some_and(|c| c.kind == CoordinateSystemKind::Cylindrical);
             ui.label(RichText::new("Point").strong());
             pick_button(ui, Slot::Position, picking);
@@ -1302,6 +1332,53 @@ fn reference_point_rows(
             speed,
         ),
     }
+}
+
+/// The first rigid body constraint a reference point drives.
+fn coupling_of(fe: &FeModel, point: plx_model::Id) -> Option<(usize, &RigidBody)> {
+    (fe.constraints.iter().enumerate()).find_map(|(i, c)| match c {
+        Constraint::RigidBody(body) if body.reference_point == point => Some((i, body)),
+        _ => None,
+    })
+}
+
+/// Whether and how the faces of a reference point at their centre are coupled to it.
+fn coupling_rows(ui: &mut Ui, coupling: &mut Option<RemoteBehavior>) {
+    let label = |c: Option<RemoteBehavior>| match c {
+        None => "None",
+        Some(RemoteBehavior::Deformable) => "Deformable",
+        Some(RemoteBehavior::Rigid) => "Rigid",
+    };
+    ui.label("Couple faces");
+    egui::ComboBox::from_id_salt("point coupling")
+        .selected_text(label(*coupling))
+        .width(crate::dock::fit_width(ui, 200.0))
+        .show_ui(ui, |ui| {
+            for c in [
+                Some(RemoteBehavior::Deformable),
+                Some(RemoteBehavior::Rigid),
+                None,
+            ] {
+                ui.selectable_value(coupling, c, label(c));
+            }
+        });
+    ui.end_row();
+    ui.label("");
+    ui.weak(match coupling {
+        Some(RemoteBehavior::Deformable) => {
+            "The point follows the mean motion of the faces without stiffening them: \
+             history outputs on it track where the faces go."
+        }
+        Some(RemoteBehavior::Rigid) => {
+            "The faces keep their shape and move with the point, e.g. to apply a load or \
+             a displacement to them through the point."
+        }
+        None => {
+            "Loads, boundary conditions and history outputs on the point need a rigid \
+                 body constraint that couples it to the model."
+        }
+    });
+    ui.end_row();
 }
 
 /// The global position a reference point resolves to, or why it has none.
@@ -1371,7 +1448,9 @@ fn point_ref_rows(
     ui.label(RichText::new(label).strong());
     let shown = match point {
         PointRef::Coordinates(_) => "Coordinates".to_string(),
-        PointRef::ReferencePoint(name) => name.clone(),
+        PointRef::ReferencePoint(id) => {
+            (fe.reference_point(*id)).map_or_else(|| "(missing)".to_string(), |r| r.name.clone())
+        }
     };
     egui::ComboBox::from_id_salt(("point source", label))
         .selected_text(shown)
@@ -1383,9 +1462,9 @@ fn point_ref_rows(
                 *point = PointRef::Coordinates(at);
             }
             for reference in &fe.reference_points {
-                let chosen = matches!(point, PointRef::ReferencePoint(n) if *n == reference.name);
+                let chosen = matches!(point, PointRef::ReferencePoint(id) if *id == reference.id);
                 if ui.selectable_label(chosen, &reference.name).clicked() {
-                    *point = PointRef::ReferencePoint(reference.name.clone());
+                    *point = PointRef::ReferencePoint(reference.id);
                 }
             }
         });
@@ -1397,9 +1476,9 @@ fn point_ref_rows(
             ui.end_row();
             coordinate_rows(ui, p, speed);
         }
-        PointRef::ReferencePoint(name) => {
+        PointRef::ReferencePoint(id) => {
             ui.label("");
-            match fe.reference_point(name) {
+            match fe.reference_point(*id) {
                 Some(r) => {
                     let [x, y, z] = r.position.map(|v| {
                         let v = speed
@@ -1632,4 +1711,112 @@ pub(crate) fn draw_plot(
         egui::FontId::proportional(12.0),
         text,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use plx_mesh::FeMesh;
+
+    use super::*;
+
+    fn faces(face: u8) -> Region {
+        Region::Faces(vec![(1, face)])
+    }
+
+    /// The dialog of a new reference point at the centre of `region`.
+    fn new_point(model: &Model, region: Region) -> FeatureDialog {
+        let mut dialog = FeatureDialog::create(FeatureKind::ReferencePoint, None, model);
+        let Draft::ReferencePoint(point) = &mut dialog.draft else {
+            unreachable!()
+        };
+        point.definition = PointDefinition::CenterOfGravity(region);
+        dialog
+    }
+
+    fn bodies(fe: &FeModel) -> Vec<&RigidBody> {
+        (fe.constraints.iter())
+            .filter_map(|c| match c {
+                Constraint::RigidBody(body) => Some(body),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_new_point_at_the_centre_of_faces_couples_them_deformably() {
+        let mut model = Model::new(std::path::Path::new("test.inp"), FeMesh::default());
+        let dialog = new_point(&model, faces(2));
+        assert_eq!(dialog.coupling, Some(RemoteBehavior::Deformable));
+        dialog.apply_draft_and_coupling(&mut model.fe);
+        let point = model.fe.reference_points[0].id;
+        let body = bodies(&model.fe)[0];
+        assert_eq!(body.reference_point, point);
+        assert_eq!(body.region, faces(2));
+        assert_eq!(body.behavior, RemoteBehavior::Deformable);
+    }
+
+    #[test]
+    fn a_point_at_coordinates_or_without_coupling_adds_no_constraint() {
+        let mut model = Model::new(std::path::Path::new("test.inp"), FeMesh::default());
+        let mut dialog = new_point(&model, faces(2));
+        dialog.coupling = None;
+        dialog.apply_draft_and_coupling(&mut model.fe);
+        let dialog = FeatureDialog::create(FeatureKind::ReferencePoint, None, &model);
+        dialog.apply_draft_and_coupling(&mut model.fe);
+        assert_eq!(model.fe.reference_points.len(), 2);
+        assert!(model.fe.constraints.is_empty());
+    }
+
+    #[test]
+    fn editing_the_point_updates_or_removes_its_coupling() {
+        let mut model = Model::new(std::path::Path::new("test.inp"), FeMesh::default());
+        new_point(&model, faces(2)).apply_draft_and_coupling(&mut model.fe);
+        let item = FeatureItem {
+            kind: FeatureKind::ReferencePoint,
+            index: 0,
+        };
+        // Renamed, other faces and rigid: the constraint follows.
+        let mut dialog = FeatureDialog::edit(item, None, &model).unwrap();
+        assert_eq!(dialog.coupling, Some(RemoteBehavior::Deformable));
+        if let Draft::ReferencePoint(point) = &mut dialog.draft {
+            point.name = "Tip".into();
+            point.definition = PointDefinition::CenterOfGravity(faces(4));
+        }
+        dialog.coupling = Some(RemoteBehavior::Rigid);
+        dialog.apply_draft_and_coupling(&mut model.fe);
+        let body = bodies(&model.fe)[0];
+        assert_eq!(body.reference_point, model.fe.reference_points[0].id);
+        assert_eq!(model.fe.reference_points[0].name, "Tip");
+        assert_eq!(body.region, faces(4));
+        assert_eq!(body.behavior, RemoteBehavior::Rigid);
+        // A constraint given faces of its own keeps them.
+        if let Constraint::RigidBody(body) = &mut model.fe.constraints[0] {
+            body.region = faces(5);
+        }
+        let mut dialog = FeatureDialog::edit(item, None, &model).unwrap();
+        if let Draft::ReferencePoint(point) = &mut dialog.draft {
+            point.definition = PointDefinition::CenterOfGravity(faces(6));
+        }
+        dialog.apply_draft_and_coupling(&mut model.fe);
+        assert_eq!(bodies(&model.fe)[0].region, faces(5));
+        // None removes it.
+        let mut dialog = FeatureDialog::edit(item, None, &model).unwrap();
+        dialog.coupling = None;
+        dialog.apply_draft_and_coupling(&mut model.fe);
+        assert!(model.fe.constraints.is_empty());
+        assert_eq!(model.fe.reference_points[0].name, "Tip");
+    }
+
+    #[test]
+    fn a_point_of_a_results_file_couples_nothing() {
+        let mut model = Model::new(std::path::Path::new("test.inp"), FeMesh::default());
+        let dialog = FeatureDialog::create(FeatureKind::ReferencePoint, Some(0), &model);
+        assert_eq!(dialog.coupling, None);
+        let mut dialog = dialog;
+        if let Draft::ReferencePoint(point) = &mut dialog.draft {
+            point.definition = PointDefinition::CenterOfGravity(faces(2));
+        }
+        dialog.apply_draft_and_coupling(&mut model.fe);
+        assert!(model.fe.constraints.is_empty());
+    }
 }

@@ -261,11 +261,13 @@ impl ResultsView {
         view
     }
 
-    /// The automatic scale, except for contact: exaggerated, the touching parts appear to
-    /// penetrate each other, which confuses new users. Mode shapes have a deformation of
-    /// their own, [`ResultsView::mode_deformation`].
+    /// The automatic scale, except for contact and for steps with large deformations:
+    /// exaggerated, the touching parts appear to penetrate each other and a large motion looks
+    /// wrong, which confuses new users. Mode shapes have a deformation of their own,
+    /// [`ResultsView::mode_deformation`].
     pub fn default_deformation(&self) -> Deformation {
-        if self.contact {
+        let large = self.current_step().is_some_and(|s| s.nlgeom);
+        if self.contact || large {
             Deformation::TrueScale
         } else {
             Deformation::Automatic(1.0)
@@ -1053,6 +1055,7 @@ impl ResultsView {
             convergence,
             unconverged,
         );
+        self.follow_default_deformation();
     }
 
     /// Shows another increment, also while the animation window is open: the animation then
@@ -1065,7 +1068,8 @@ impl ResultsView {
         self.select_increment(target);
         let modal = self.current_increment().is_some_and(|i| i.kind.is_modal());
         let increments = self.animated_increments(animation.kind);
-        animation.retarget(increments, target, modal);
+        let times = self.increment_times(&increments);
+        animation.retarget(increments, times, target, modal);
         self.animation = Some(animation);
         self.show_animation_frame();
     }
@@ -1079,7 +1083,8 @@ impl ResultsView {
         self.select_increment(start);
         let modal = self.current_increment().is_some_and(|i| i.kind.is_modal());
         let increments = self.animated_increments(kind);
-        self.animation = Some(Animation::new(kind, increments, start, modal));
+        let times = self.increment_times(&increments);
+        self.animation = Some(Animation::new(kind, increments, times, start, modal));
         self.show_animation_frame();
     }
 
@@ -1137,7 +1142,33 @@ impl ResultsView {
         }
     }
 
-    /// Displacements as shown: those of the overlaid modes, or of the current increment.
+    /// The total time of each of `increments`, for an animation that plays them by time;
+    /// empty when one of them has no time.
+    fn increment_times(&self, increments: &[usize]) -> Vec<f64> {
+        (increments.iter())
+            .map(|&i| self.steps.place(i).and_then(|p| p.total_time))
+            .collect::<Option<Vec<f64>>>()
+            .unwrap_or_default()
+    }
+
+    /// The increment the shown animation frame is interpolated towards, with the fraction of
+    /// the way to it, while an animation plays by time between two increments.
+    fn interpolation(&self) -> Option<(&Increment, f32)> {
+        let (next, fraction) = self.animation.as_ref()?.interpolation()?;
+        Some((self.increments.get(next)?, fraction))
+    }
+
+    /// The shown component in the increment an animation by time interpolates towards, with the
+    /// fraction of the way to it, when that increment has it with as many values.
+    fn interpolated_component(&self) -> Option<(&Component, f32)> {
+        let (field, component) = self.current()?;
+        let (next, fraction) = self.interpolation()?;
+        let towards = next.field(&field.name)?.component(&component.name)?;
+        (towards.values.len() == component.values.len()).then_some((towards, fraction))
+    }
+
+    /// Displacements as shown: those of the overlaid modes, or of the current increment,
+    /// interpolated towards the next one while an animation plays by time.
     pub fn shown_displacements(&self) -> Option<std::borrow::Cow<'_, [[f32; 3]]>> {
         if let Some((phase, field)) = self.whirl() {
             return Some(std::borrow::Cow::Owned(Self::whirl_displacements(
@@ -1146,10 +1177,20 @@ impl ResultsView {
         }
         match &self.superposition {
             Some(superposition) => Some(std::borrow::Cow::Borrowed(&superposition.displacements)),
-            None => self
-                .current_increment()?
-                .displacements()
-                .map(std::borrow::Cow::Owned),
+            None => {
+                let mut displacements = self.current_increment()?.displacements()?;
+                if let Some((next, fraction)) = self.interpolation()
+                    && let Some(towards) = next.displacements()
+                    && towards.len() == displacements.len()
+                {
+                    for (u, v) in displacements.iter_mut().zip(&towards) {
+                        for (u, v) in u.iter_mut().zip(v) {
+                            *u += fraction * (v - *u);
+                        }
+                    }
+                }
+                Some(std::borrow::Cow::Owned(displacements))
+            }
         }
     }
 
@@ -1162,8 +1203,25 @@ impl ResultsView {
         if let Some(superposition) = &self.superposition {
             return superposition.displacements.get(node).copied();
         }
-        let field = self.current_increment()?.deformation_field()?;
-        Some(["U1", "U2", "U3"].map(|n| field.component(n).map_or(0.0, |c| c.values[node])))
+        let displacement = |increment: &Increment| {
+            let field = increment.deformation_field()?;
+            Some(["U1", "U2", "U3"].map(|n| {
+                field
+                    .component(n)
+                    .and_then(|c| c.values.get(node).copied())
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(0.0)
+            }))
+        };
+        let mut shown = displacement(self.current_increment()?)?;
+        if let Some((next, fraction)) = self.interpolation()
+            && let Some(towards) = displacement(next)
+        {
+            for (u, v) in shown.iter_mut().zip(towards) {
+                *u += fraction * (v - *u);
+            }
+        }
+        Some(shown)
     }
 
     /// Values of the shown component as drawn: overlaid, or scaled by the animation frame.
@@ -1183,6 +1241,18 @@ impl ResultsView {
             && let Some(values) = self.whirl_values(phase, field)
         {
             return Some(std::borrow::Cow::Owned(values));
+        }
+        if let Some((towards, fraction)) = self.interpolated_component() {
+            let blended = (component.values.iter().zip(&towards.values))
+                .map(|(&a, &b)| {
+                    if a.is_finite() && b.is_finite() {
+                        a + fraction * (b - a)
+                    } else {
+                        a
+                    }
+                })
+                .collect();
+            return Some(std::borrow::Cow::Owned(blended));
         }
         let amplitude = self.value_amplitude();
         Some(std::borrow::Cow::Owned(
@@ -1327,7 +1397,22 @@ impl ResultsView {
             (
                 AnimationKind::Step | AnimationKind::AllSteps | AnimationKind::Positions,
                 ColorLimits::CurrentFrame,
-            ) => Some((min, max)),
+            ) => {
+                // Between two increments the values lie within the ranges of both.
+                let towards = self.interpolated_component().and_then(|(towards, _)| {
+                    let (next, _) = self.interpolation()?;
+                    let field = next.field(&field.name)?;
+                    let index = field
+                        .components
+                        .iter()
+                        .position(|c| c.name == towards.name)?;
+                    self.component_range(field, index)
+                });
+                Some(match towards {
+                    Some((a, b)) => (min.min(a), max.max(b)),
+                    None => (min, max),
+                })
+            }
             (
                 AnimationKind::Step | AnimationKind::AllSteps | AnimationKind::Positions,
                 ColorLimits::AllFrames,
@@ -1454,22 +1539,33 @@ fn field_measure(field: &str, component: &str) -> Option<Measure> {
         "DISP" | "DISPR" | "DISPI" | "DISPLACEMENTS" | "RELATIVE_CONTACT_DISPLACEMENT" => {
             Some(Of(Length))
         }
+        // Section forces of general beams and ropes: normal force, bending moment, torque.
+        "SECFORC" => match component.as_str() {
+            "N" => Some(Of(Force)),
+            "M" | "MT" => Some(Of(Moment)),
+            _ => None,
+        },
         "STRESS" | "STRESSR" | "STRESSI" | "ZZSTR" | "ZZSTRR" | "ZZSTRI" | "STRESSES"
         | "CONTACT_STRESS" => Some(Of(Pressure)),
         // Magnitudes and phase angles of complex results.
         "PDISP" => (component.starts_with("MAG")).then_some(Of(Length)),
         "PSTRESS" => (component.starts_with("MAG")).then_some(Of(Pressure)),
         "FORC" | "FORCR" | "FORCI" | "FORCES" | "TOTAL_FORCE" => Some(Of(Force)),
-        "ROTATIONS" => Some(Of(Angle)),
-        "MOMENTS" | "TOTAL_MOMENT" => Some(Of(Moment)),
+        "ROTATIONS" | "ROTATION" => Some(Of(Angle)),
+        "MOMENTS" | "MOMENT" | "TOTAL_MOMENT" => Some(Of(Moment)),
         "ANGULAR_VELOCITIES" => Some(Of(RotationalSpeed)),
         "VELO" | "VELOCITIES" => Some(Of(Velocity)),
+        "ACCE" => Some(Of(Acceleration)),
         "ENER" | "INTERNAL_ENERGY_DENSITY" => Some(Per(Energy, Volume)),
         "CELS"
         | "INTERNAL_ENERGY"
         | "TOTAL_INTERNAL_ENERGY"
         | "KINETIC_ENERGY"
         | "TOTAL_KINETIC_ENERGY"
+        | "MODEL_INTERNAL_ENERGY"
+        | "MODEL_KINETIC_ENERGY"
+        | "MODEL_EXTERNAL_WORK"
+        | "MODEL_DAMPING_DISSIPATION"
         | "CONTACT_PRINT_ENERGY"
         | "CONTACT_SPRING_ENERGY"
         | "TOTAL_CONTACT_SPRING_ENERGY" => Some(Of(Energy)),
@@ -1704,6 +1800,7 @@ mod tests {
             name: name.into(),
             values: disp.iter().map(|d| d[k]).collect(),
             derived: false,
+            out_of_plane: false,
         };
         let mut field = Field::new(
             "DISP",
@@ -1731,6 +1828,7 @@ mod tests {
                 name: "SXX".into(),
                 values: vec![2.5e8],
                 derived: false,
+                out_of_plane: false,
             }],
         ));
         convert_results(&mut mesh, &mut increments, UnitSystem::MmTonSC);
@@ -1820,6 +1918,39 @@ mod tests {
     }
 
     #[test]
+    fn large_deformations_open_in_true_scale() {
+        use plx_results::steps::{StepCategory, StepRecord};
+        let disp = [[0.0, 0.0, 1.0]];
+        let record = |nlgeom: bool, step: u32| StepRecord {
+            name: format!("S{step}"),
+            category: StepCategory::Static,
+            nlgeom,
+            perturbation: false,
+            time_period: None,
+            solver_steps: vec![step],
+            inherited_from: None,
+            base: None,
+        };
+        let mut view = ResultsView::new(
+            vec![
+                increment(1, 1, AnalysisKind::Static, &disp),
+                increment(2, 1, AnalysisKind::Static, &disp),
+            ],
+            Some(([0.0; 3], [10.0; 3])),
+        );
+        assert_eq!(view.deformation, Deformation::Automatic(1.0));
+        view.set_step_records(&[record(false, 1), record(true, 2)], &[], None);
+        // The last step is shown.
+        assert_eq!(view.deformation, Deformation::TrueScale);
+        view.select_increment(0);
+        assert_eq!(view.deformation, Deformation::Automatic(1.0));
+        // A scale the user picked stays.
+        (view.deformation, view.deformation_chosen) = (Deformation::UserDefined, true);
+        view.select_increment(1);
+        assert_eq!(view.deformation, Deformation::UserDefined);
+    }
+
+    #[test]
     fn the_mode_deformation_is_saved_with_the_results() {
         let disp = [[0.0, 0.0, 1.0]];
         let mut view = ResultsView::new(
@@ -1883,6 +2014,7 @@ mod tests {
             time_period: None,
             solver_steps: steps.to_vec(),
             inherited_from: None,
+            base: None,
         };
         view.set_step_records(
             &[
@@ -1977,6 +2109,7 @@ mod tests {
             name: name.into(),
             values: vec![value],
             derived: false,
+            out_of_plane: false,
         };
         increment.fields.push(Field::new(
             "PDISP",
@@ -2077,6 +2210,48 @@ mod tests {
     }
 
     #[test]
+    fn a_playback_by_time_interpolates_displacements_and_values() {
+        let mut view = ResultsView::new(
+            vec![
+                increment(1, 1, AnalysisKind::Static, &[[0.0, 0.0, 0.0]]),
+                increment(1, 2, AnalysisKind::Static, &[[1.0, 0.0, 2.0]]),
+            ],
+            Some(([0.0; 3], [10.0; 3])),
+        );
+        view.select_increment(0);
+        let u1 = (view.current().unwrap().0.components.iter()).position(|c| c.name == "U1");
+        view.component = u1.unwrap();
+        view.start_animation(AnimationKind::Step);
+        let animation = view.animation.as_mut().unwrap();
+        assert!(animation.by_time());
+        animation.retime(|a| {
+            a.duration = 1.0;
+            a.fps = 5.0;
+        });
+        // Frames at 1, 1.25, 1.5, 1.75 and 2 s.
+        assert_eq!(animation.frame_count(), 5);
+        animation.go_to(2);
+        view.show_animation_frame();
+        assert_eq!(view.increment, 0);
+        assert_eq!(view.shown_displacements().unwrap()[0], [0.5, 0.0, 1.0]);
+        assert_eq!(view.shown_displacement(0), Some([0.5, 0.0, 1.0]));
+        assert_eq!(view.shown_values().unwrap()[0], 0.5);
+        // The legend of the frame covers both increments.
+        assert_eq!(view.value_range(), Some((0.0, 1.0)));
+        view.animation.as_mut().unwrap().go_to(4);
+        view.show_animation_frame();
+        assert_eq!(view.increment, 1);
+        assert_eq!(view.shown_values().unwrap()[0], 1.0);
+        view.animation
+            .as_mut()
+            .unwrap()
+            .retime(|a| a.pace = crate::animation::Pace::Frames);
+        view.show_animation_frame();
+        assert_eq!(view.animation.as_ref().unwrap().frame_count(), 2);
+        assert_eq!(view.increment, 1);
+    }
+
+    #[test]
     fn animations_play_a_step_all_steps_or_the_positions_of_a_moving_load() {
         let still = [[0.0; 3]];
         let mut view = ResultsView::new(
@@ -2094,7 +2269,10 @@ mod tests {
         view.start_animation(AnimationKind::AllSteps);
         let animation = view.animation.as_ref().unwrap();
         assert_eq!(animation.increments, [0, 1, 3, 4]);
-        assert_eq!(animation.frame, 2);
+        // The increments have the times 1 to 4: played by time, from the shown one.
+        assert_eq!(animation.times, [1.0, 2.0, 3.0, 4.0]);
+        assert!(animation.by_time());
+        assert_eq!(animation.increment(), Some(3));
         view.start_animation(AnimationKind::Step);
         assert_eq!(view.animation.as_ref().unwrap().increments, [3]);
         // A moving load: one step of three solver steps, one position each.
@@ -2107,6 +2285,7 @@ mod tests {
             time_period: None,
             solver_steps: steps.to_vec(),
             inherited_from: None,
+            base: None,
         };
         view.set_step_records(
             &[

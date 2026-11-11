@@ -277,7 +277,7 @@ impl Items {
 pub struct Picker {
     pub select_by: SelectBy,
     /// Angles in degrees for the angle modes, the default 30°.
-    angle: f64,
+    pub(crate) angle: f64,
     ids: String,
     /// Shows the mesh based modes next to the geometry based ones.
     expanded: bool,
@@ -490,7 +490,7 @@ impl Picker {
     fn part_mode_row(&self, ui: &mut egui::Ui, mode: SelectBy) {
         let part = mode == SelectBy::GeometryPart;
         ui.add_enabled_ui(part, |ui| {
-            ui.horizontal_wrapped(|ui| {
+            crate::layout::wrapped_row(ui, |ui| {
                 let _ = ui.radio(part, mode.label(Target::Faces));
                 if mode.angle_mode() {
                     let mut angle = self.angle;
@@ -516,7 +516,7 @@ impl Picker {
 
     fn labelled_mode_row(&mut self, ui: &mut egui::Ui, mode: SelectBy, label: &str, enabled: bool) {
         ui.add_enabled_ui(enabled, |ui| {
-            ui.horizontal_wrapped(|ui| {
+            crate::layout::wrapped_row(ui, |ui| {
                 if ui.radio(self.select_by == mode, label).clicked() {
                     self.select_by = mode;
                 }
@@ -546,6 +546,15 @@ impl Picker {
             && let Some(entity) = crate::cad_selection::pick(model, hit, target, precision)
         {
             return Items::Geometry(BTreeSet::from([entity]));
+        }
+        // Likewise the edge angle mode: the CAD edges along the clicked one.
+        if self.select_by == SelectBy::GeometryEdgeAngle
+            && model.has_cad()
+            && target != Target::Faces
+            && let Some(entities) =
+                crate::cad_selection::pick_edge_angle(model, hit, target, self.angle)
+        {
+            return Items::Geometry(entities);
         }
         if target == Target::Lines {
             return self.pick_edges(model, hit);
@@ -606,6 +615,18 @@ impl Picker {
                     }
                 }
                 picker.patch(face)
+            }
+            SelectBy::GeometryPart | SelectBy::Part if target == Target::Nodes => {
+                // The nodes of the whole part, inside a solid too: an initial velocity or
+                // temperature of the part on its skin alone left the inside at rest (a
+                // projectile struck from within at the first increment).
+                let elements = model.mesh.elements();
+                return Items::Nodes(
+                    (model.mesh.parts[hit.part].elements.iter())
+                        .filter_map(|&id| model.mesh.element_index(id))
+                        .flat_map(|e| elements[e].nodes.iter().copied())
+                        .collect(),
+                );
             }
             SelectBy::GeometryPart | SelectBy::Part => (0..picker.faces().len()).collect(),
             SelectBy::GeometryEdgeAngle | SelectBy::EdgeAngle | SelectBy::Edge => {
@@ -1590,6 +1611,18 @@ mod tests {
         assert_eq!(parts.names(), BTreeSet::from([name]));
     }
 
+    /// The part mode picks every node of a solid part, the inside too: an initial velocity
+    /// picked this way moved only the skin of a projectile.
+    #[test]
+    fn the_part_mode_picks_the_nodes_inside_a_solid_too() {
+        let (model, hit) = beam_hit(95.0, 5.0);
+        let picked = nodes(picker(SelectBy::Part).pick(&model, &hit, Target::Nodes, 0.5));
+        let all: BTreeSet<NodeId> = model.mesh.node_ids().iter().copied().collect();
+        // 11 x 3 x 3 nodes, 11 of them inside the 2 x 2 elements across.
+        assert_eq!(all.len(), 99);
+        assert_eq!(picked, all);
+    }
+
     #[test]
     fn modes_pick_faces_of_the_beam() {
         let (model, hit) = beam_hit(95.0, 5.0);
@@ -1693,6 +1726,7 @@ mod tests {
             }
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "PLATE".into(),
             elements,
         });
@@ -1731,6 +1765,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "BEAM".into(),
             elements: vec![1, 2],
         });
@@ -1814,6 +1849,7 @@ mod tests {
             }
         }
         let mut part = plx_mesh::Part {
+            bodies: Vec::new(),
             name: "PLATE".into(),
             elements: Vec::new(),
         };

@@ -83,7 +83,7 @@ impl Category {
 /// Version of the built-in materials. Raise it when `MaterialLibrary::default` gains or changes
 /// materials; libraries saved with an older version are updated by
 /// [`MaterialLibrary::update_defaults`].
-pub const DEFAULTS_VERSION: u32 = 1;
+pub const DEFAULTS_VERSION: u32 = 2;
 
 /// Generic material in the library's unit system (mm, t, s, degC) from datasheet values.
 struct Generic {
@@ -121,6 +121,32 @@ impl Generic {
             }),
             ..Material::default()
         }
+    }
+}
+
+/// A generic rubber of a Shore A hardness: Neo-Hooke with Young's modulus after Gent and
+/// Poisson's ratio 0.49, in the library's unit system.
+fn rubber(hardness: f64) -> Material {
+    let young = crate::Hyperelastic::shore_a_young_mpa(hardness);
+    // Two significant digits: datasheet precision.
+    let digits = 1 - young.log10().floor() as i32;
+    let scale = 10f64.powi(digits);
+    let young = (young * scale).round() / scale;
+    let poisson = 0.49;
+    Material {
+        name: format!("Generic Rubber {hardness} Shore A"),
+        density: Some(1100.0 / 1e12),
+        hyperelastic: Some(crate::Hyperelastic::neo_hooke(
+            young / (2.0 * (1.0 + poisson)),
+            poisson,
+        )),
+        conductivity: Some(0.15),
+        specific_heat: Some(1900.0 * 1e6),
+        expansion: Some(Expansion {
+            coefficient: 200e-6,
+            ..Expansion::default()
+        }),
+        ..Material::default()
     }
 }
 
@@ -274,6 +300,12 @@ impl Default for MaterialLibrary {
                             vec![category_node("Structural", materials(&[STEEL]))],
                         ),
                         category_node("Plastics", materials(&PLASTICS)),
+                        category_node(
+                            "Elastomers",
+                            [40.0, 60.0, 70.0]
+                                .map(|h| LibraryNode::Material(rubber(h)))
+                                .to_vec(),
+                        ),
                     ],
                 )],
             ),
@@ -510,7 +542,8 @@ fn add_default(category: &mut Category, material: &Material, old: &Material) {
         let unchanged = category
             .items
             .iter_mut()
-            .find(|n| matches!(n, LibraryNode::Material(m) if m == old));
+            // The same material by its values: ids are made anew with each library.
+            .find(|n| matches!(n, LibraryNode::Material(m) if Material { id: old.id, ..m.clone() } == *old));
         if let Some(node) = unchanged {
             *node = LibraryNode::Material(material.clone());
             return;

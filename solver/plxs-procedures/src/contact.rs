@@ -1,6 +1,7 @@
 //! Contact in the procedures: the matrix pattern with the possible contact springs, and the
 //! contact fields of an increment (`*CONTACT FILE`).
 
+use rayon::prelude::*;
 use std::sync::Arc;
 
 use plxs_assembly::ElementTable;
@@ -38,7 +39,7 @@ pub fn cached_pattern(
 ) -> Arc<Pattern> {
     if let Some(current) = cached.as_ref()
         && current.dimension() == table.dofs.len()
-        && extra.iter().all(|block| covers(current, block))
+        && extra.par_iter().all(|block| covers(current, block))
     {
         return current.clone();
     }
@@ -56,12 +57,15 @@ pub(crate) fn covers(pattern: &Pattern, block: &[u32]) -> bool {
     })
 }
 
-/// The `CONTACT` (CDIS, CSTR) and `CELS` fields a step asks for, over all nodes in `order`.
+/// The `CONTACT` (CDIS, CSTR) and `CELS` fields a step asks for, over all nodes in `order`:
+/// those of the contact pairs (with their `evaluation`) and of the compression only
+/// surfaces (COPEN and CPRESS at the displacements `u`).
 pub fn contact_fields(
     model: &Model,
     step: &Step,
     contact: &ContactModel,
-    evaluation: &Evaluation,
+    evaluation: Option<&Evaluation>,
+    u: &[f64],
     order: &[(u32, u32)],
 ) -> Vec<ResultField> {
     let variables: Vec<String> = step
@@ -75,7 +79,27 @@ pub fn contact_fields(
     if !has("CDIS") && !has("CSTR") && !has("CELS") {
         return out;
     }
-    let nodal = plxs_contact::output::nodal_values(contact, evaluation, model.nodes.len());
+    let supports = crate::support::nodal_values(model, u);
+    let mut nodal = match evaluation {
+        Some(evaluation) => {
+            plxs_contact::output::nodal_values(contact, evaluation, model.nodes.len())
+        }
+        None if supports.is_some() => plxs_contact::output::NodalValues {
+            values: vec![[0.0; 6]; model.nodes.len()],
+            energy: vec![0.0; model.nodes.len()],
+            listed: Some(vec![false; model.nodes.len()]),
+        },
+        None => return out,
+    };
+    for (i, value) in supports.iter().flatten().enumerate() {
+        if let Some([opening, pressure]) = *value {
+            nodal.values[i][0] = opening;
+            nodal.values[i][3] += pressure;
+            if let Some(listed) = nodal.listed.as_mut() {
+                listed[i] = true;
+            }
+        }
+    }
     let (values, energy) = (&nodal.values, &nodal.energy);
     let order: Vec<(u32, u32)> = order
         .iter()

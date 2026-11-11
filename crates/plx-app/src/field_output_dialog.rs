@@ -201,7 +201,10 @@ impl FieldOutputDialog {
                 (inc.fields.iter())
                     .filter(|f| Some(&f.name) != own.as_ref() && !f.components.is_empty())
                     .map(|f| {
-                        let components = f.components.iter().map(|c| c.name.clone()).collect();
+                        let components = (f.components.iter())
+                            .filter(|c| !c.out_of_plane)
+                            .map(|c| c.name.clone())
+                            .collect();
                         (f.name.clone(), components)
                     })
                     .collect()

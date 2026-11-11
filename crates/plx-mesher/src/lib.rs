@@ -9,9 +9,12 @@ mod ffi;
 pub mod gmsh;
 mod operation;
 mod revolve;
+mod split;
+mod stacked;
 mod step_names;
+mod thicken;
 
-pub use operation::apply_cad_operation;
+pub use operation::{apply_cad_operation, apply_operation};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -248,6 +251,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         part_names,
         refinement: 1.0,
         signatures,
+        compounds: Vec::new(),
     };
     let display = tessellate(&geometry)?;
     Ok(CadImport {
@@ -705,6 +709,7 @@ pub fn generate_mesh(geometry: &Geometry) -> Result<GeneratedMesh, GmshError> {
         mesh = merge_part(&mesh, part.mesh);
         warnings.extend(part.warnings);
     }
+    mesh.compose_compounds(&geometry.compound_members());
     Ok(GeneratedMesh { mesh, warnings })
 }
 
@@ -735,13 +740,16 @@ fn parts(gmsh: &Gmsh, geometry: &Geometry) -> Result<Vec<(Shape, String)>, GmshE
 fn default_parts(gmsh: &Gmsh) -> Result<Vec<(Shape, String)>, GmshError> {
     let volumes = gmsh.entities(3)?;
     let shells = shells(gmsh, &free_faces(gmsh)?)?;
-    let edges = free_edges(gmsh)?;
+    let wires = wires(gmsh, &free_edges(gmsh)?)?;
     let shapes: Vec<Shape> = (volumes.iter().map(|&v| Shape::one(3, v)))
         .chain(shells.into_iter().map(|faces| Shape {
             dim: 2,
             tags: faces,
         }))
-        .chain(edges.iter().map(|&e| Shape::one(1, e)))
+        .chain(wires.into_iter().map(|edges| Shape {
+            dim: 1,
+            tags: edges,
+        }))
         .collect();
     let entities: Vec<Entity> = shapes.iter().map(Shape::first).collect();
     let names = entity_part_names(gmsh, &entities)?;
@@ -833,6 +841,81 @@ fn free_edges(gmsh: &Gmsh) -> Result<Vec<i32>, GmshError> {
         .collect())
 }
 
+/// The free edges grouped into wires: two edges that meet in a point where no other free edge
+/// ends and continue each other without a kink belong together, as the pieces of a composite
+/// curve that a CAD program exports as one curve (a straight piece and the arc it runs into,
+/// say). Edges that meet at a corner, or where three or more meet, stay apart, as the beams of
+/// a frame do. The wires come in the order of their lowest edge tag, their edges ascending.
+fn wires(gmsh: &Gmsh, edges: &[i32]) -> Result<Vec<Vec<i32>>, GmshError> {
+    /// The angle in which a kink still counts as a continuation: cosine of 5 degrees.
+    const CONTINUES: f64 = 0.9961946980917455;
+    // The end of an edge: where it lies and where it runs from there.
+    struct End {
+        edge: i32,
+        point: [f64; 3],
+        direction: [f64; 3],
+    }
+    let (min, max) = gmsh.bounding_box()?;
+    let extent = (0..3).map(|k| max[k] - min[k]).fold(0.0, f64::max);
+    let tolerance = 1e-6 * extent + 1e-9;
+    let mut ends = Vec::new();
+    for &edge in edges {
+        let (lo, hi) = gmsh.parameter_bounds(1, edge)?;
+        let (Some(&lo), Some(&hi)) = (lo.first(), hi.first()) else {
+            continue;
+        };
+        let h = 1e-3 * (hi - lo);
+        let p = gmsh.values(1, edge, &[lo, lo + h, hi - h, hi])?;
+        let [a, b, c, d] = p[..] else { continue };
+        ends.push(End {
+            edge,
+            point: a,
+            direction: sub(b, a),
+        });
+        ends.push(End {
+            edge,
+            point: d,
+            direction: sub(c, d),
+        });
+    }
+    let mut parent: BTreeMap<i32, i32> = edges.iter().map(|&e| (e, e)).collect();
+    fn root(parent: &BTreeMap<i32, i32>, mut edge: i32) -> i32 {
+        while parent[&edge] != edge {
+            edge = parent[&edge];
+        }
+        edge
+    }
+    for (k, end) in ends.iter().enumerate() {
+        let mut meets = ends
+            .iter()
+            .enumerate()
+            .filter(|(l, other)| *l != k && norm(sub(other.point, end.point)) <= tolerance);
+        let (Some((_, other)), None) = (meets.next(), meets.next()) else {
+            continue;
+        };
+        if other.edge == end.edge {
+            continue;
+        }
+        let (a, b) = (end.direction, other.direction);
+        let lengths = norm(a) * norm(b);
+        if lengths > 0.0 && -(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / lengths >= CONTINUES {
+            let (a, b) = (root(&parent, end.edge), root(&parent, other.edge));
+            if a != b {
+                parent.insert(a.max(b), a.min(b));
+            }
+        }
+    }
+    let mut wires: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
+    for &edge in parent.keys() {
+        wires.entry(root(&parent, edge)).or_default().push(edge);
+    }
+    Ok(wires.into_values().collect())
+}
+
+fn norm(a: [f64; 3]) -> f64 {
+    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+}
+
 /// Deletes a part of the geometry; `None` once no
 /// part is left. The other parts keep their names. Gmsh numbers the faces and edges anew
 /// when it reads the smaller geometry, so the local mesh sizes are renumbered after where
@@ -910,6 +993,7 @@ pub fn delete_parts_renumbered(
         ..geometry.clone()
     };
     smaller.renumber_mesh_items(&renumbered);
+    smaller.remove_from_compounds(deleted);
     Ok((Some(smaller), renumbered))
 }
 
@@ -1067,28 +1151,50 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
     }
     let file = TempFile::with_contents("brep", &geometry.brep)?;
     with_gmsh(|gmsh| {
-        // With the extrusions found automatically, a part that is none is read again for
-        // the tetrahedra, as the attempt took the solid out of the model.
-        if geometry.extrusion(part).is_none() && geometry.finds_hexahedra(part) {
-            let extrude = plx_model::ExtrudeMesh {
-                parts: vec![part.to_string()],
-                ..Default::default()
-            };
-            if let Some(volume) = solid_alone(gmsh, geometry, &file.0, part)? {
-                match extrude::extrude_part_mesh(gmsh, geometry, part, volume, &extrude)? {
-                    Ok(mesh) => return Ok(mesh),
-                    Err(_) => gmsh.clear()?,
+        // The sweeps tried in turn, for a part whose meshing parameters ask for hexahedra
+        // or whose extrude mesh names no source faces. Each attempt may take the solid out
+        // of the model, so each reads the geometry anew.
+        let chosen = geometry.extrusion(part);
+        let automatic = chosen.is_none() && geometry.finds_hexahedra(part);
+        let found = plx_model::ExtrudeMesh {
+            parts: vec![part.to_string()],
+            ..Default::default()
+        };
+        let unsourced = chosen.filter(|extrude| extrude.faces.is_empty());
+        let mut refused = Vec::new();
+        if let Some(extrude) = unsourced.or(automatic.then_some(&found)) {
+            for way in [Sweep::Stacked, Sweep::Extruded, Sweep::Revolved] {
+                if way == Sweep::Revolved && !automatic {
+                    continue;
                 }
-                if let Some(volume) = solid_alone(gmsh, geometry, &file.0, part)? {
-                    match revolve::revolve_part_mesh(gmsh, geometry, part, volume)? {
-                        Ok(mesh) => return Ok(mesh),
-                        Err(_) => gmsh.clear()?,
-                    }
-                } else {
+                let Some(volume) = solid_alone(gmsh, geometry, &file.0, part)? else {
                     gmsh.clear()?;
+                    break;
+                };
+                let result = match way {
+                    Sweep::Stacked => {
+                        stacked::stacked_part_mesh(gmsh, geometry, part, volume, extrude)?
+                    }
+                    Sweep::Extruded => {
+                        extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude)?
+                    }
+                    Sweep::Revolved => revolve::revolve_part_mesh(gmsh, geometry, part, volume)?,
+                };
+                match result {
+                    Ok(mesh) => return Ok(mesh),
+                    Err(reason) => {
+                        // An extrude mesh is refused by what it was last tried as.
+                        if unsourced.is_some() && way == Sweep::Extruded {
+                            return Err(GmshError::Other(reason));
+                        }
+                        // The stack and the body of revolution say what stands against
+                        // them; the plain extrusion is a stack of one.
+                        if way != Sweep::Extruded {
+                            refused.push(reason);
+                        }
+                        gmsh.clear()?;
+                    }
                 }
-            } else {
-                gmsh.clear()?;
             }
         }
         gmsh.import_shapes(&file.0)?;
@@ -1102,7 +1208,7 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
         let volume = match shape.dim {
             3 => shape.tags[0],
             2 => return shell_part_mesh(gmsh, geometry, part, &shape.tags),
-            _ => return line_part_mesh(gmsh, geometry, part, shape.tags[0]),
+            _ => return line_part_mesh(gmsh, geometry, part, &shape.tags),
         };
         // The other solids go, so that only this one is meshed.
         let others: Vec<(i32, i32)> = (volumes.iter())
@@ -1112,7 +1218,7 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
         if !others.is_empty() {
             gmsh.remove(&others)?;
         }
-        if let Some(extrude) = geometry.extrusion(part) {
+        if let Some(extrude) = chosen {
             return extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude)?
                 .map_err(GmshError::Other);
         }
@@ -1123,15 +1229,35 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
         options.quads = false;
         options.apply(gmsh)?;
         let faces: BTreeSet<i32> = gmsh.adjacencies(3, volume)?.1.into_iter().collect();
-        local_sizes(gmsh, geometry, &faces)?;
+        size_fields(gmsh, &local_sizes(gmsh, geometry, &faces)?, 1.0)?;
         gmsh.generate(3)?;
         let order = options.order;
         let mesh = solid_mesh(gmsh, order, &[(volume, part.to_string())])?;
-        Ok(GeneratedMesh {
-            mesh,
-            warnings: gmsh.warnings()?,
-        })
+        let mut warnings = gmsh.warnings()?;
+        // Why the part got tetrahedra although hexahedra were asked for.
+        if !refused.is_empty() {
+            let prefix = format!("{part}: ");
+            let reasons: Vec<&str> = (refused.iter())
+                .map(|reason| reason.strip_prefix(&prefix).unwrap_or(reason))
+                .collect();
+            warnings.push(format!(
+                "{part}: meshed with tetrahedra ({})",
+                reasons.join("; ")
+            ));
+        }
+        Ok(GeneratedMesh { mesh, warnings })
     })
+}
+
+/// The ways a solid is swept into hexahedra, in the order they are tried.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sweep {
+    /// A stack of extrusions along one direction, see [`stacked`].
+    Stacked,
+    /// A straight extrusion of faces that need not be planar, see [`extrude`].
+    Extruded,
+    /// A body of revolution, see [`revolve`].
+    Revolved,
 }
 
 /// Reads the geometry and leaves only the part's solid; `None` if the part is no solid.
@@ -1177,10 +1303,10 @@ fn shell_part_mesh(
     if !others.is_empty() {
         gmsh.remove(&others)?;
     }
-    let options = MeshOptions::of_part(geometry, part);
-    options.apply(gmsh)?;
-    local_sizes(gmsh, geometry, &shell.iter().copied().collect())?;
-    gmsh.generate(2)?;
+    let mut options = MeshOptions::of_faces(geometry, part);
+    let mut notes = Vec::new();
+    let sizes = local_sizes(gmsh, geometry, &shell.iter().copied().collect())?;
+    generate_faces(gmsh, &mut options, shell, &sizes, &mut notes)?;
     let coords = node_coords(gmsh)?;
     let types: [(i32, ElementShape, &str); 2] = if options.order == 2 {
         [
@@ -1195,6 +1321,7 @@ fn shell_part_mesh(
     };
     let mut mesh = FeMesh::default();
     let mut part_elements = Part {
+        bodies: Vec::new(),
         name: part.to_string(),
         elements: Vec::new(),
     };
@@ -1231,10 +1358,13 @@ fn shell_part_mesh(
     }
     mesh.parts.push(part_elements);
     mesh.cad = cad_map(gmsh, &mesh, shell, options.order, true)?;
-    Ok(GeneratedMesh {
-        mesh,
-        warnings: gmsh.warnings()?,
-    })
+    if let Some(thickening) = geometry.thickening(part) {
+        mesh = thicken::thicken(&mesh, part, thickening)
+            .map_err(|reason| GmshError::Other(format!("{part}: {reason}")))?;
+    }
+    let mut warnings = gmsh.warnings()?;
+    warnings.extend(notes.into_iter().map(|note| format!("{part}: {note}")));
+    Ok(GeneratedMesh { mesh, warnings })
 }
 
 /// Meshes an edge outside the faces with 2- or 3-node lines, typed as beams (`B31`, `B32`);
@@ -1244,26 +1374,35 @@ fn line_part_mesh(
     gmsh: &Gmsh,
     geometry: &Geometry,
     part: &str,
-    edge: i32,
+    wire: &[i32],
 ) -> Result<GeneratedMesh, GmshError> {
     let edges = free_edges(gmsh)?;
-    // Only the edge stays, so that only it is meshed.
+    // Only the edges of the wire stay, so that only they are meshed.
     let others: Vec<(i32, i32)> = (gmsh.entities(3)?.into_iter().map(|v| (3, v)))
         .chain(free_faces(gmsh)?.into_iter().map(|f| (2, f)))
-        .chain(edges.iter().filter(|&&e| e != edge).map(|&e| (1, e)))
+        .chain(edges.iter().filter(|e| !wire.contains(e)).map(|&e| (1, e)))
         .collect();
     if !others.is_empty() {
         gmsh.remove(&others)?;
     }
+    if wire.len() > 1 {
+        // The pieces of a wire each come with a vertex of their own at the joints from some
+        // CAD programs; one vertex lets them share the node there.
+        gmsh.remove_all_duplicates()?;
+    }
     let options = MeshOptions::of_part(geometry, part);
     options.apply(gmsh)?;
     for (_, local_edges, size) in geometry.local_sizes() {
-        if local_edges.contains(&edge) && size.is_finite() && size > 0.0 {
+        let on_wire: Vec<f64> = (wire.iter())
+            .filter(|e| local_edges.contains(e))
+            .map(|&e| f64::from(e))
+            .collect();
+        if !on_wire.is_empty() && size.is_finite() && size > 0.0 {
             let field = gmsh.add_field("Constant")?;
             gmsh.set_field_number(field, "VIn", size)?;
             gmsh.set_field_number(field, "VOut", 1e22)?;
             gmsh.set_field_number(field, "IncludeBoundary", 1.0)?;
-            gmsh.set_field_numbers(field, "CurvesList", &[f64::from(edge)])?;
+            gmsh.set_field_numbers(field, "CurvesList", &on_wire)?;
             gmsh.set_background_field(field)?;
         }
     }
@@ -1276,116 +1415,287 @@ fn line_part_mesh(
     };
     let mut mesh = FeMesh::default();
     let mut part_elements = Part {
+        bodies: Vec::new(),
         name: part.to_string(),
         elements: Vec::new(),
     };
-    let (_, nodes) = gmsh.elements(gmsh_type, edge)?;
-    for element in nodes.chunks_exact(shape.node_count()) {
-        // Gmsh lists the end nodes first and the midside node last; the solver wants the
-        // midside node in the middle.
-        let order: &[usize] = if shape == ElementShape::Line3 {
-            &[0, 2, 1]
-        } else {
-            &[0, 1]
-        };
-        let mut ids = Vec::with_capacity(element.len());
-        for &k in order {
-            let tag = element[k];
-            let position = coords
-                .get(&tag)
-                .ok_or_else(|| GmshError::Other(format!("Node {tag} is missing")))?;
-            let id = node_id(tag)?;
-            mesh.set_node(id, *position);
-            ids.push(id);
+    let mut edge_elements: Vec<(i32, Vec<ElementId>)> = Vec::new();
+    for &edge in wire {
+        let first = part_elements.elements.len();
+        let (_, nodes) = gmsh.elements(gmsh_type, edge)?;
+        for element in nodes.chunks_exact(shape.node_count()) {
+            // Gmsh lists the end nodes first and the midside node last; the solver wants the
+            // midside node in the middle.
+            let order: &[usize] = if shape == ElementShape::Line3 {
+                &[0, 2, 1]
+            } else {
+                &[0, 1]
+            };
+            let mut ids = Vec::with_capacity(element.len());
+            for &k in order {
+                let tag = element[k];
+                let position = coords
+                    .get(&tag)
+                    .ok_or_else(|| GmshError::Other(format!("Node {tag} is missing")))?;
+                let id = node_id(tag)?;
+                mesh.set_node(id, *position);
+                ids.push(id);
+            }
+            let id = ElementId::try_from(mesh.element_count() + 1)
+                .map_err(|_| GmshError::Other("too many elements".into()))?;
+            mesh.add_element(Element {
+                id,
+                type_name: type_name.into(),
+                shape,
+                nodes: ids,
+            })
+            .map_err(|e| GmshError::Other(e.to_string()))?;
+            part_elements.elements.push(id);
         }
-        let id = ElementId::try_from(mesh.element_count() + 1)
-            .map_err(|_| GmshError::Other("too many elements".into()))?;
-        mesh.add_element(Element {
-            id,
-            type_name: type_name.into(),
-            shape,
-            nodes: ids,
-        })
-        .map_err(|e| GmshError::Other(e.to_string()))?;
-        part_elements.elements.push(id);
+        edge_elements.push((edge, part_elements.elements[first..].to_vec()));
     }
     if part_elements.elements.is_empty() {
         return Err(GmshError::Other("Gmsh created no elements".into()));
     }
     mesh.parts.push(part_elements);
-    mesh.cad = line_cad_map(gmsh, &mesh, edge)?;
+    mesh.cad = line_cad_map(gmsh, &mesh, &edge_elements)?;
     Ok(GeneratedMesh {
         mesh,
         warnings: gmsh.warnings()?,
     })
 }
 
-/// Where a CAD edge meshed as a line part and its vertices lie in the mesh: the edge's nodes
-/// and segments, and the node at each end vertex.
-fn line_cad_map(gmsh: &Gmsh, mesh: &FeMesh, edge: i32) -> Result<CadMap, GmshError> {
+/// Where the CAD edges of a line part and their vertices lie in the mesh: the nodes and
+/// segments of every edge, and the node at each end vertex.
+fn line_cad_map(
+    gmsh: &Gmsh,
+    mesh: &FeMesh,
+    edges: &[(i32, Vec<ElementId>)],
+) -> Result<CadMap, GmshError> {
     let mut map = CadMap::default();
-    let mut nodes = BTreeSet::new();
-    let mut segments = Vec::new();
-    for element in mesh.elements() {
-        nodes.extend(element.nodes.iter().copied());
-        segments.push([element.nodes[0], element.nodes[element.nodes.len() - 1]]);
-    }
-    map.nodes
-        .insert(CadEntity::Edge(edge), nodes.into_iter().collect());
-    map.segments.insert(edge, segments);
-    for vertex in gmsh.adjacencies(1, edge)?.1 {
-        let (_, tags) = gmsh.elements(POINT, vertex)?;
-        let nodes: Vec<NodeId> = tags.iter().map(|&t| node_id(t)).collect::<Result<_, _>>()?;
-        if !nodes.is_empty() {
-            map.nodes.insert(CadEntity::Vertex(vertex), nodes);
+    for (edge, elements) in edges {
+        let mut nodes = BTreeSet::new();
+        let mut segments = Vec::new();
+        for element in elements.iter().filter_map(|&id| mesh.element(id)) {
+            nodes.extend(element.nodes.iter().copied());
+            segments.push([element.nodes[0], element.nodes[element.nodes.len() - 1]]);
+        }
+        map.nodes
+            .insert(CadEntity::Edge(*edge), nodes.into_iter().collect());
+        map.segments.insert(*edge, segments);
+        for vertex in gmsh.adjacencies(1, *edge)?.1 {
+            let (_, tags) = gmsh.elements(POINT, vertex)?;
+            let nodes: Vec<NodeId> = tags.iter().map(|&t| node_id(t)).collect::<Result<_, _>>()?;
+            if !nodes.is_empty() {
+                map.nodes.insert(CadEntity::Vertex(vertex), nodes);
+            }
         }
     }
     Ok(map)
 }
 
-/// The local mesh sizes on the given faces and their edges as Gmsh size fields; Gmsh takes
-/// the smallest of them and the other size limits.
-fn local_sizes(gmsh: &Gmsh, geometry: &Geometry, faces: &BTreeSet<i32>) -> Result<(), GmshError> {
+/// A local mesh size on entities of the Gmsh model: their tags, as Gmsh's fields take them.
+pub(crate) struct LocalSize {
+    pub faces: Vec<f64>,
+    pub edges: Vec<f64>,
+    pub size: f64,
+}
+
+/// The local mesh sizes of the mesh setup on the given faces and their edges.
+fn local_sizes(
+    gmsh: &Gmsh,
+    geometry: &Geometry,
+    faces: &BTreeSet<i32>,
+) -> Result<Vec<LocalSize>, GmshError> {
     let mut edges = BTreeSet::new();
     for &face in faces {
         edges.extend(gmsh.adjacencies(2, face)?.1);
     }
+    let own = |tags: &[i32], own: &BTreeSet<i32>| -> Vec<f64> {
+        (tags.iter())
+            .filter(|t| own.contains(t))
+            .map(|&t| f64::from(t))
+            .collect()
+    };
+    Ok(geometry
+        .local_sizes()
+        .map(|(local_faces, local_edges, size)| LocalSize {
+            faces: own(local_faces, faces),
+            edges: own(local_edges, &edges),
+            size,
+        })
+        .collect())
+}
+
+/// Makes the local mesh sizes Gmsh size fields; Gmsh takes the smallest of them and the
+/// other size limits. The sizes are multiplied by the factor, see
+/// [`MeshOptions::size_factor`]. Returns the fields made, to take them back with.
+fn size_fields(gmsh: &Gmsh, sizes: &[LocalSize], factor: f64) -> Result<Vec<i32>, GmshError> {
     let mut fields = Vec::new();
-    for (local_faces, local_edges, size) in geometry.local_sizes() {
-        let of_solid = |tags: &[i32], own: &BTreeSet<i32>| -> Vec<f64> {
-            (tags.iter())
-                .filter(|t| own.contains(t))
-                .map(|&t| f64::from(t))
-                .collect()
-        };
-        let (local_faces, local_edges) =
-            (of_solid(local_faces, faces), of_solid(local_edges, &edges));
-        if size.is_nan() || size <= 0.0 || (local_faces.is_empty() && local_edges.is_empty()) {
+    for local in sizes {
+        if local.size.is_nan()
+            || local.size <= 0.0
+            || (local.faces.is_empty() && local.edges.is_empty())
+        {
             continue;
         }
         let field = gmsh.add_field("Constant")?;
-        if !local_faces.is_empty() {
-            gmsh.set_field_numbers(field, "SurfacesList", &local_faces)?;
+        if !local.faces.is_empty() {
+            gmsh.set_field_numbers(field, "SurfacesList", &local.faces)?;
         }
-        if !local_edges.is_empty() {
-            gmsh.set_field_numbers(field, "CurvesList", &local_edges)?;
+        if !local.edges.is_empty() {
+            gmsh.set_field_numbers(field, "CurvesList", &local.edges)?;
         }
-        gmsh.set_field_number(field, "VIn", size)?;
+        gmsh.set_field_number(field, "VIn", local.size * factor)?;
         gmsh.set_field_number(field, "VOut", 1e22)?;
         gmsh.set_field_number(field, "IncludeBoundary", 1.0)?;
         fields.push(field);
     }
     let background = match fields.as_slice() {
-        [] => return Ok(()),
+        [] => return Ok(fields),
         [field] => *field,
         _ => {
             let min = gmsh.add_field("Min")?;
             let list: Vec<f64> = fields.iter().map(|&f| f64::from(f)).collect();
             gmsh.set_field_numbers(min, "FieldsList", &list)?;
+            fields.push(min);
             min
         }
     };
-    gmsh.set_background_field(background)
+    gmsh.set_background_field(background)?;
+    Ok(fields)
+}
+
+/// Faces the quasi-structured algorithm is expected to give more quadrilaterals than this
+/// are left to the faster Frontal-Delaunay algorithm: its time grows faster than the mesh,
+/// to minutes beyond.
+const QUASI_STRUCTURED_LIMIT: f64 = 20_000.0;
+
+/// A quadrilateral whose scaled Jacobian is below this at a corner is badly distorted; a
+/// square has 1, a quadrilateral folded over 0 or less.
+const DISTORTED_QUAD: f64 = 0.1;
+
+/// The smallest scaled Jacobian at a corner of the quadrilaterals on the faces, `None`
+/// without quadrilaterals.
+fn worst_quad(gmsh: &Gmsh, faces: &[i32], order: i32) -> Result<Option<f64>, GmshError> {
+    use extrude::{cross, dot, norm, sub};
+    let coords = node_coords(gmsh)?;
+    let (gmsh_type, count) = if order == 2 { (QUAD8, 8) } else { (QUAD4, 4) };
+    let mut worst: Option<f64> = None;
+    for &face in faces {
+        let (_, nodes) = gmsh.elements(gmsh_type, face)?;
+        for element in nodes.chunks_exact(count) {
+            let mut p = [[0.0; 3]; 4];
+            for (corner, tag) in p.iter_mut().zip(element) {
+                *corner = *coords
+                    .get(tag)
+                    .ok_or_else(|| GmshError::Other(format!("Node {tag} is missing")))?;
+            }
+            let normal = cross(sub(p[2], p[0]), sub(p[3], p[1]));
+            let length = norm(normal);
+            let mut quality = f64::INFINITY;
+            for i in 0..4 {
+                let (a, b) = (sub(p[(i + 1) % 4], p[i]), sub(p[(i + 3) % 4], p[i]));
+                let scale = norm(a) * norm(b) * length;
+                quality = quality.min(if scale > 0.0 {
+                    dot(cross(a, b), normal) / scale
+                } else {
+                    0.0
+                });
+            }
+            worst = Some(worst.map_or(quality, |w| w.min(quality)));
+        }
+    }
+    Ok(worst)
+}
+
+/// Meshes the faces left in the Gmsh model after the options and the local mesh sizes. The quasi-structured algorithm is
+/// watched: where it is expected to take too long, fails or leaves a badly distorted
+/// quadrilateral, the faces are meshed with Frontal-Delaunay and recombined instead, unless
+/// that comes out worse. The notes say so, for the user.
+fn generate_faces(
+    gmsh: &Gmsh,
+    options: &mut MeshOptions,
+    faces: &[i32],
+    sizes: &[LocalSize],
+    notes: &mut Vec<String>,
+) -> Result<(), GmshError> {
+    if options.quads || options.algorithms.0 == Algorithm2d::FrontalQuads {
+        // Gmsh 4.15 crashes with its Frontal-Delaunay for quads on faces closed both ways.
+        let mut closed = false;
+        for &face in faces {
+            closed |= matches!(gmsh.entity_type(2, face)?.as_str(), "Sphere" | "Torus");
+        }
+        if closed && options.algorithms.0 == Algorithm2d::FrontalQuads {
+            options.algorithms.0 = Algorithm2d::FrontalDelaunay;
+            notes.push(
+                "Frontal-Delaunay for quads cannot mesh spheres and tori: Frontal-Delaunay \
+                 is used instead."
+                    .into(),
+            );
+        }
+    }
+    if options.quads && options.algorithms.0 == Algorithm2d::QuasiStructuredQuad {
+        let mut largest: f64 = 0.0;
+        for &face in faces {
+            largest = largest.max(gmsh.mass(2, face)? / (options.max_size * options.max_size));
+        }
+        if largest > QUASI_STRUCTURED_LIMIT {
+            options.algorithms.0 = Algorithm2d::FrontalDelaunay;
+            notes.push(format!(
+                "A face would get about {largest:.0} quadrilaterals, too many for the \
+                 quasi-structured algorithm: Frontal-Delaunay is used and recombined instead."
+            ));
+        }
+    }
+    let run = |options: &MeshOptions| -> Result<Result<(), GmshError>, GmshError> {
+        options.apply(gmsh)?;
+        let fields = size_fields(gmsh, sizes, options.size_factor())?;
+        let result = gmsh.generate(2);
+        for field in fields.into_iter().rev() {
+            gmsh.remove_field(field)?;
+        }
+        Ok(result)
+    };
+    let first = run(options)?;
+    if !(options.quads && options.algorithms.0 == Algorithm2d::QuasiStructuredQuad) {
+        return first;
+    }
+    let quality = match &first {
+        Ok(()) => worst_quad(gmsh, faces, options.order)?,
+        Err(_) => None,
+    };
+    if first.is_ok() && quality.is_some_and(|q| q >= DISTORTED_QUAD) {
+        return Ok(());
+    }
+    let structured = options.algorithms.0;
+    options.algorithms.0 = Algorithm2d::FrontalDelaunay;
+    gmsh.clear_mesh()?;
+    run(options)??;
+    let recombined = worst_quad(gmsh, faces, options.order)?;
+    match (first, quality) {
+        (Ok(()), Some(quality)) if recombined.is_none_or(|r| r < quality) => {
+            // The other algorithm is no better: back to the quasi-structured mesh.
+            options.algorithms.0 = structured;
+            gmsh.clear_mesh()?;
+            run(options)?
+        }
+        (Ok(()), _) => {
+            notes.push(
+                "The quasi-structured algorithm left a badly distorted quadrilateral: the \
+                 faces are meshed with Frontal-Delaunay and recombined instead."
+                    .into(),
+            );
+            Ok(())
+        }
+        (Err(error), _) => {
+            notes.push(format!(
+                "The quasi-structured algorithm failed ({error}): the faces are meshed with \
+                 Frontal-Delaunay and recombined instead."
+            ));
+            Ok(())
+        }
+    }
 }
 
 /// Puts a newly meshed part into a mesh in place of the part of the same name. The other
@@ -1515,6 +1825,8 @@ pub fn self_test() -> Result<(LibraryInfo, usize), GmshError> {
             netgen: false,
             algorithms: Default::default(),
             quads: false,
+            recombination: 1.0,
+            visible_only: false,
         };
         options.apply(gmsh)?;
         gmsh.generate(3)?;
@@ -1538,6 +1850,11 @@ struct MeshOptions {
     /// Recombines triangles into quadrilaterals where Gmsh can; for faces only, never for
     /// the boundary of a solid meshed with tetrahedra.
     quads: bool,
+    /// How triangles are recombined, as Gmsh numbers it; Blossom unless an extrude mesh
+    /// chooses another.
+    recombination: f64,
+    /// Meshes only the entities left visible.
+    visible_only: bool,
 }
 
 impl MeshOptions {
@@ -1558,6 +1875,28 @@ impl MeshOptions {
             netgen: setup.optimize,
             algorithms: geometry.algorithms(part),
             quads: setup.quad_dominated,
+            recombination: 1.0,
+            visible_only: false,
+        }
+    }
+
+    /// The options for the faces of a part meshed on their own (a shell or a 2D model):
+    /// quadrilaterals come from the quasi-structured algorithm unless a Gmsh item chose one.
+    fn of_faces(geometry: &Geometry, part: &str) -> Self {
+        let mut options = Self::of_part(geometry, part);
+        if options.quads && geometry.chosen_algorithms(part).is_none() {
+            options.algorithms.0 = Algorithm2d::QuasiStructuredQuad;
+        }
+        options
+    }
+
+    /// What the sizes handed to Gmsh are multiplied by to get the sizes asked for: the
+    /// quasi-structured algorithm ends by splitting every element in four.
+    fn size_factor(&self) -> f64 {
+        if self.algorithms.0 == Algorithm2d::QuasiStructuredQuad {
+            2.0
+        } else {
+            1.0
         }
     }
 
@@ -1579,10 +1918,18 @@ impl MeshOptions {
             Algorithm3d::Frontal => 4.0,
             Algorithm3d::Hxt => 10.0,
         };
+        let factor = self.size_factor();
+        // Half the elements along a curve for the quasi-structured algorithm, but an even
+        // number on a full circle and none only if none are asked for.
+        let elements_per_2pi = if factor > 1.0 && self.elements_per_2pi > 0.0 {
+            (self.elements_per_2pi / factor).ceil().max(4.0)
+        } else {
+            self.elements_per_2pi
+        };
         for (name, value) in [
-            ("Mesh.MeshSizeMax", self.max_size),
+            ("Mesh.MeshSizeMax", self.max_size * factor),
             ("Mesh.MeshSizeMin", self.min_size),
-            ("Mesh.MeshSizeFromCurvature", self.elements_per_2pi),
+            ("Mesh.MeshSizeFromCurvature", elements_per_2pi),
             // Gmsh gives the points of a shape sizes of its own when it reads it or removes
             // other shapes; the sizes come from the parameters and size fields only.
             ("Mesh.MeshSizeFromPoints", 0.0),
@@ -1598,9 +1945,11 @@ impl MeshOptions {
             ("Mesh.Optimize", 1.0),
             ("Mesh.OptimizeNetgen", f64::from(u8::from(self.netgen))),
             ("Mesh.RecombineAll", f64::from(u8::from(self.quads))),
-            // Blossom, Gmsh's default; an extrude mesh chooses its own.
-            ("Mesh.RecombinationAlgorithm", 1.0),
-            ("Mesh.MeshOnlyVisible", 0.0),
+            ("Mesh.RecombinationAlgorithm", self.recombination),
+            (
+                "Mesh.MeshOnlyVisible",
+                f64::from(u8::from(self.visible_only)),
+            ),
             // Quadratic quadrilaterals with 8 nodes, as CalculiX has them.
             ("Mesh.SecondOrderIncomplete", 1.0),
         ] {
@@ -1640,6 +1989,7 @@ fn solid_mesh(gmsh: &Gmsh, order: i32, volumes: &[(i32, String)]) -> Result<FeMe
     for (volume, name) in volumes {
         let (_, nodes) = gmsh.elements(gmsh_type, *volume)?;
         let mut part = Part {
+            bodies: Vec::new(),
             name: name.clone(),
             elements: Vec::with_capacity(nodes.len() / shape.node_count()),
         };
@@ -1944,6 +2294,7 @@ fn display_mesh(
     };
     for (name, dimension, faces, own_edges) in groups {
         let mut part = Part {
+            bodies: Vec::new(),
             name,
             elements: Vec::new(),
         };

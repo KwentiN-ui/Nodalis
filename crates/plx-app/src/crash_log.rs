@@ -54,8 +54,11 @@ pub fn open_log_dir() -> String {
 pub fn install() {
     let dir = log_dir();
     let file = dir.as_deref().and_then(|dir| open_session_log(dir).ok());
-    let mut builder =
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"));
+    // calloop (the Wayland event loop under winit) warns "event for non-existence source"
+    // when a native file dialog closes; it is harmless, so only its errors are shown.
+    let mut builder = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,calloop=error"),
+    );
     if let Some(file) = file {
         builder.target(env_logger::Target::Pipe(Box::new(Tee(Mutex::new(file)))));
     }

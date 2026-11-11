@@ -8,24 +8,41 @@ Create them with #ui("Constraint") on the #ui("Connections") tab of the ribbon.
 #screenshot("constraint.png", [Spring dialog: springs from a surface to ground])
 
 #fields(
-  [Spring], [Springs in the global directions on the nodes of the region. #ui("K1"),
-    #ui("K2"), #ui("K3") are the stiffnesses; 0 means no spring in that direction. Like a
-    force, the stiffness is that of the whole region and is spread over its nodes: on faces
-    by area, on edges by length, on points in equal shares. #ui("Per area") gives a
-    stiffness per area of the faces instead (force per volume, a bedding modulus). With
-    #ui("Apply to all nodes individually") every node gets the whole stiffness. A single
-    node or point is a point spring. In a 2D model (plane stress, plane strain,
-    axisymmetric) there is no #ui("K3"): the dialog offers the first two directions only
-    (@spring-2d).],
+  [Spring], [Springs in the global directions between #ui("End 1") and #ui("End 2"). Each end
+    is #ui("World") (fixed ground), a #ui("Selection in the 3D view"), a #ui("Node Set") or
+    #ui("Surface"), or a #ui("Reference Point"): a reference point of a rigid body, or the
+    point that a Displacement/Rotation condition or a Remote Force creates on faces.
+    #ui("K1"), #ui("K2"), #ui("K3") are the stiffnesses; 0 means no spring
+    in that direction. Like a force, the stiffness is that of the whole selection and is
+    spread over its nodes: on faces by area, on edges by length, on points in equal shares.
+    #ui("Per area") gives a stiffness per area of the faces instead (force per volume, a
+    bedding modulus). With #ui("Apply to all nodes individually") every node gets the whole
+    stiffness. A single node or point is a point spring. In a 2D model (plane stress, plane
+    strain, axisymmetric) there is no #ui("K3"): the dialog offers the first two directions
+    only (@spring-2d).],
+  [Joint], [A kinematic joint between #ui("End 1") and #ui("End 2"), such as a hinge or a
+    slider: like a Displacement/Rotation condition, but relative to another body instead of
+    to ground (@joints).],
   [Compression Only], [A support that only takes pressure, like a part resting on a rigid floor.
     By default it pushes onto the surface from outside; #ui("Flip") under #ui("Direction")
     makes it push the surface outward from inside the material. #ui("Clearance") is the
-    initial gap. #ui("Spring stiffness") and #ui("Tensile force") are optional and belong to
-    the whole surface, spread over its nodes by area; with
-    #ui("Apply to all nodes individually") every node gets the whole value. Without a value
-    every gap gets CalculiX's default, practically rigid. With #ui("Nonlinear") the contact
-    is solved nonlinearly, otherwise it is linearised in a linear step. Written as `GAPUNI`
-    elements to fixed ground nodes, one per node.],
+    initial gap. #ui("Spring stiffness") is optional and belongs to the whole surface, spread
+    over it by area; with #ui("Apply to all nodes individually") every node stands for the
+    whole value. Without a value the support is practically rigid (ten times the
+    stiffness of the element layer under it). On solids and 2D models the support acts at the
+    integration points of the faces, like a pressure spread over them, so that the contact
+    pressure and the stresses under it stay smooth on quadratic elements too. On a curved
+    surface meshed with flat faces (linear elements, straight midside nodes) it pushes along
+    the normal of the smooth surface, not along the kinked normals of the faces; edges sharper
+    than 40° stay sharp. On shells it is
+    written as `GAPUNI` elements to fixed ground nodes, one per node; only there do
+    #ui("Tensile force") and #ui("Offset") matter. With #ui("Nonlinear") the contact is solved
+    nonlinearly, otherwise it is linearised in a linear step. On solids and 2D models the
+    support reports like a contact: a #ui("Contact Output") field output with `CSTR` and `CDIS`
+    shows its pressure (`CPRESS`, e.g. the bearing pressure in a bolt hole modelled without
+    the bolt) and its opening (`COPEN`, negative where it is closed), and a
+    #ui("Contact Output") history output with the support as its pair prints the force it
+    carries (`CF`).],
 )
 
 Changing the #ui("Type") while creating a constraint keeps the picks the new type can use. A
@@ -35,15 +52,36 @@ outputs behave the same when you change their type.
 
 #screenshot("constraint-type-switch.png", [The faces picked for a spring are still selected after switching to Compression Only])
 
-#ui("Connection") at the bottom of the spring dialog decides where the springs end.
-#ui("Surface to World") connects them to ground (`SPRING1` elements). #ui("Surface to Surface")
-adds a #ui("Target surface"): every node of the region is connected to the closest point of
-the target surface (`SPRING2` elements and `*EQUATION`s), for example an elastic bearing
-between two parts. The region is the slave and the target surface the master side: choose the
-finer mesh as region. #ui("Swap Master/Slave") in the context menu exchanges the two.
+The two ends decide what the springs connect; the order does not matter, except with a
+selection on both ends.
 
-#screenshot("constraint-spring-surface.png", [Spring between two surfaces: the target surface
-  in red, the region in purple])
+- *Selection and World*: every node of the selection gets springs to ground (`SPRING1`
+  elements).
+- *Selection and selection*: every node of #ui("End 1") is connected to the closest point of
+  the faces of #ui("End 2") (`SPRING2` elements and `*EQUATION`s), for example an elastic
+  bearing between two parts. #ui("End 1") is the slave and #ui("End 2") the master side:
+  choose the finer mesh for #ui("End 1"). #ui("Swap Master/Slave") in the context menu
+  exchanges the two.
+- *Selection and point*: every node of the selection gets springs to the point.
+- *Point and World* or *point and point*: springs on the translations of the point and, with
+  #ui("KR1"), #ui("KR2"), #ui("KR3"), rotational springs about the global axes in moment per
+  radian. Nodes of a selection have no rotations, so only these two combinations offer
+  rotational stiffness. A plane model turns about z only and offers #ui("KR3") alone; an
+  axisymmetric model has no rotational springs.
+
+A hinge with a torsion spring, for example in a Dynamic step: hold the faces of the bore with
+a Displacement/Rotation condition that fixes the translations and leaves the rotation about
+the hinge axis free. Its point then appears under #ui("Reference Point") of the spring dialog
+(listed under "Displacements on a point"); choose it as #ui("End 1"), #ui("World") as
+#ui("End 2") and give #ui("KR3") (for a hinge about z). Between two such points the spring
+couples two parts instead. A reference point needs a rigid body that it drives, as for
+boundary conditions on it.
+
+#screenshot("constraint-spring-hinge.png", [Torsion spring on the point of a Displacement/Rotation
+  condition with the rotation about z free])
+
+#screenshot("constraint-spring-surface.png", [Spring between two surfaces: #ui("End 2") in red,
+  #ui("End 1") in purple])
 
 #screenshot("constraint-spring-2d.png", [Spring in a plane stress model: only #ui("K1") and
   #ui("K2")]) <spring-2d>
@@ -51,7 +89,8 @@ finer mesh as region. #ui("Swap Master/Slave") in the context menu exchanges the
 The 3D view of the FE model shows active constraints in yellow, together with
 the symbols of any step: a coil spring for each direction with stiffness, at the centre of
 the faces of a spring to ground or at each of its nodes (at their centre for ten nodes or
-more), and at points spread over the region of a spring to a surface; cones with a ground plate
+more), at points spread over the selection of a spring to a surface, and at the point of a
+spring between points and ground; cones with a ground plate
 on the side a compression only support pushes from (@compression-only); and lines to the
 reference point of a rigid body (@rigid-body). The selected or edited constraint is red. Ties
 have no symbol.
@@ -76,6 +115,63 @@ constraint out of the input file.
 #screenshot("constraint-hide.png", [Hidden spring and the context menu of Constraints])
 
 #limitation[User-defined equations are not available yet.]
+
+=== Joints <joints>
+
+A joint holds the motion of #ui("End 2") relative to #ui("End 1") in some directions and
+leaves the others free, like a Displacement/Rotation condition that holds a part against
+another part instead of against ground. The ends are the same as for a spring: #ui("World"),
+a selection, a node set or surface, or a point (a reference point of a rigid body, or the
+point of a Displacement/Rotation condition or Remote Force). A selection follows a point of
+its own at the joint, rigidly (#ui("Rigid"), the selection keeps its shape) or on average
+(#ui("Deformable")), chosen under #ui("Behavior").
+
+#screenshot("constraint-joint.png", [A revolute joint from the side face of a cantilever to ground
+  about the face normal: the ball marks the joint at the centre of the face, the double arrow
+  its free rotation about the axis])
+
+#ui("Joint type") chooses the free relative degrees of freedom in the joint frame:
+
+#fields(
+  [Fixed], [Nothing is free: the two ends move as one, a rigid connection.],
+  [Revolute], [A hinge: the ends turn against each other about z.],
+  [Cylindrical], [Turning about and sliding along z.],
+  [Slider], [Sliding along z without turning.],
+  [Spherical], [A ball joint: all rotations free, no sliding.],
+  [Planar], [Sliding in the x-y plane and turning about z.],
+  [General], [Each of #ui("Ux"), #ui("Uy"), #ui("Uz"), #ui("URx"), #ui("URy"), #ui("URz")
+    #ui("Fixed") or #ui("Free").],
+)
+
+The joint sits at its #ui("Location"): by default the centre of #ui("End 1") (of #ui("End 2")
+when #ui("End 1") is #ui("World")), or coordinates in the #ui("Coordinate system"). The
+#ui("Axis") is the axis of a revolute, cylindrical or slider joint and the normal of a planar
+joint, the z axis of the joint frame:
+
+#fields(
+  [Face normal], [The mean outward normal of the faces of #ui("End 1") (of #ui("End 2") when
+    #ui("End 1") has no faces), e.g. the face where a hub sits on its shaft. The faces must be
+    (nearly) flat; nodes instead of faces give the normal of the plane they lie in. The
+    default of a new joint.],
+  [Cylinder axis], [The axis of the cylindrical faces of #ui("End 1"), e.g. a bore or a pin.],
+  [Z of the coordinate system], [The z axis of the #ui("Coordinate system").],
+  [Direction], [A direction in the #ui("Coordinate system").],
+)
+
+The dialog shows the global #ui("Axis direction") it finds. The x axis of the frame is the x
+direction of the coordinate system turned normal to the axis. The axis is taken in the
+starting position and then turns with #ui("End 1"): with #ui("Large deformations") in a
+Static or Dynamic step a hinge stays a hinge however far its parts turn or bend, as in a
+mechanism. In a plane model a joint holds #ui("Ux"), #ui("Uy") and #ui("URz") only, so a
+revolute joint is a hinge normal to the model plane.
+
+The 3D view draws a joint as lines from both ends to a ball at the joint, with an arrow for
+each free translation and a double arrow for each free rotation along the axes of the joint
+frame.
+
+A joint fixes the relative motion only; a revolute joint between two parts and nothing else
+leaves the second part free to turn, which a static step rejects as a mechanism. Hold it with
+a boundary condition, a load in a Dynamic step or a rotational spring on a point.
 
 == Contacts <contacts>
 
@@ -129,7 +225,10 @@ shows the derived value in brackets; choosing something else overrides it for th
     so that small gaps from meshing are closed. #ui("As is") keeps the mesh. #ui("Offset")
     sets the distance of the sides wherever they face each other, whatever the mesh: negative
     for an interference fit, such as a shaft pressed into a hub (`*CLEARANCE`, surface to
-    surface contacts only). Auto adjusts bonded regions and keeps the others as they are.],
+    surface contacts only). Auto adjusts bonded regions and keeps the others as they are. Where
+    the sides are apart by about the size of the elements, moving the nodes would turn elements
+    inside out: the model check reports this as #ui("Adjustment folds elements") at the region,
+    with the elements; choose #ui("As is") there.],
   [Tolerance], [Distance within which the sides count as touching: tied by a tie, held by no
     separation, closed by the adjustment. Auto is a quarter of the slave mesh size, for a
     region a detection found at least the distance the detection searched within.],
@@ -161,13 +260,16 @@ millimetres or metres. Bonded regions whose slave sides share nodes are written 
 Instead of picking every pair of sides by hand, let Nodalis find them:
 #menu("Connections", "Detect Contacts") creates a contact detection. #ui("OK") searches the parts for surfaces that
 touch and adds a contact region for every pair it finds, listed under the detection in the tree.
+Ropes lying on a surface are found too, see @rope-contact.
 
-#screenshot("contact-detection-dialog.png", [A contact detection of all visible parts with the
-  derived tolerance])
+#screenshot("contact-detection-dialog.png", [A contact detection of an assembly with its rules:
+  bolts frictional, plates against plates left out, rubber pads frictionless, all other pairs
+  bonded; rule 1 is open below the table])
 
 #fields(
-  [Parts], [#ui("All visible parts"), or untick it and choose the parts to search, e.g. only the
-    bolts and the plates they hold.],
+  [Search in], [The parts searched, as a part filter (@part-filters). Without parts to include
+    it searches #ui("All visible parts"), less those after #ui("except"), e.g. all visible parts
+    except the group of the screws.],
   [Tolerance], [Surfaces closer than this touch. Auto is 0.5 % of the size of the parts
     searched, but at least half their element size, so that two meshes on a curved face still
     meet (on the geometry, see @contact-detection-geometry, just the 0.5 %). The regions found get it as their tolerance, so that a tie catches every node the
@@ -180,8 +282,62 @@ touch and adds a contact region for every pair it finds, listed under the detect
   [Group by], [#ui("Parts") (default): one region per pair of touching parts. #ui("Faces"): one
     per pair of touching faces. #ui("Graph"): touching faces sharing nodes are merged, so that
     every node is on the slave side of one region only.],
-  [Type], [The type of the regions found, #ui("Bonded") by default.],
+  [Rules], [The type each pair found gets, see below. The last row, #ui("Any") to #ui("Any"),
+    is the type of all other pairs, #ui("Bonded") by default.],
 )
+
+===== Rules <contact-rules>
+
+A large assembly has different contacts: bolts sit on plates with friction, housings are
+glued, rubber pads slide. One detection handles them all: it searches once and gives each pair
+found the type of the first rule whose sides match the parts of the pair, as Abaqus' contact
+property assignments do. #ui("Add Rule") adds a rule above the last row; #ui("Up") and
+#ui("Down") change the order, which matters where rules overlap: put the specific ones first.
+Clicking a rule opens its two sides below the table, each a part filter (@part-filters). A pair
+matches when the parts of one of its sides all pass #ui("Side A") and those of the other all
+pass #ui("Side B"), whichever way round.
+
+#fields(
+  [Side A, Side B], [The parts of the two sides, e.g. #ui("Group: Bolts") and #ui("Any").],
+  [Type], [The type the pairs get. #ui("Exclude") makes no region for them, e.g. for plates that
+    touch side by side but carry nothing between them.],
+  [Regions], [How many of the regions the detection found take their type from the rule, of
+    the last run; #ui("-") before the first.],
+)
+
+A rule names groups, patterns or materials rather than single parts, so it keeps working when
+parts are added, renamed or meshed again: #ui("Detect Again") applies the rules as they are
+now. Regions you changed by hand stay as they are, as before.
+
+A pair found by two detections belongs to the one lower in the tree: running a detection takes
+over the regions of the detections above it for the same parts and leaves those of detections
+below alone; the output window says how many it took over or left. So a detection for all
+parts can sit at the top and a narrower one with other settings, say a larger tolerance for
+the bolts, below it.
+
+===== Part filters and part groups <part-filters>
+
+Wherever a detection asks for parts, a part filter chooses them. Its terms are small buttons; a
+click on one removes it. #ui("+") adds a term:
+
+#fields(
+  [Name pattern], [Parts whose name matches, case ignored: #ui("*") stands for any text,
+    #ui("?") for one character, and a pattern without them matches names containing it, e.g.
+    #ui("Bolt*") or #ui("M10"). #ui("Add Pattern") adds the pattern; the list below it adds one
+    of the matching parts by name instead.],
+  [Selected Parts], [The parts selected in the 3D view or the FE Model tree;
+    #key("Ctrl")+click parts there to select several while the dialog is open.],
+  [Material], [Parts with a section of this material.],
+  [Part Group], [The parts of a part group.],
+)
+
+Terms before #ui("except") include parts, those after it exclude them. #ui("Matches 8 of 19
+parts") below says how many parts the filter takes; hover it for their names.
+
+A part group is a named filter: #menu("Connections", "Part Group") creates one, listed under
+#ui("Part Groups") in #ui("Connections"). A group follows its filter, so a part added later joins
+it when it matches. Deleting a group or a material removes it from the filters that named it;
+renaming a part renames it there too.
 
 The regions found are named from their definition, e.g. #ui("Bonded - Base to Block"), and work
 like regions made by hand. #ui("Detect Again") in the context menu of the detection searches
@@ -215,6 +371,14 @@ the triangles that show the faces say nothing about the mesh to come. The region
 catches every node of faces the detection found touching, also across a small gap. A model with parts that do not come from the
 geometry, such as an imported mesh, is searched on its mesh as before.
 
+Of a solid only the outside of its faces touches: faces of two parts that lie side by side in
+one plane, such as the faces of a pin and of the plate around it on a plane of symmetry, are
+no contact, even where the triangles showing them overlap. In a bonded region such faces would
+do harm: the tie moves the slave nodes within its tolerance onto the master side and pulls
+those of a neighbouring face across their elements. If that happens anyway, e.g. with faces
+added by hand, the solver stops with elements turned inside out and names the tie; take the
+faces out of the region or make its tolerance smaller.
+
 #screenshot("contact-detection-geometry-region.png", [The region found before meshing, shown
   on the mesh: the whole top face of the plate (side A) against the bottom of the block])
 
@@ -225,7 +389,7 @@ all contact regions share. CalculiX allows only one contact #ui("Formulation") p
 "Which method?" below). Auto takes surface to surface, or the method of your manual contact
 pairs if you have any. The #ui("Stiffness factor") replaces the 10 of the normal stiffness.
 The model check reports a manual contact pair whose method differs from the formulation, and
-mortar contact in a step other than static.
+mortar contact in a step that is neither static nor dynamic.
 
 #screenshot("connection-settings-weak-springs.png", [Connection settings with weak springs for
   parts held only by contact])
@@ -247,6 +411,16 @@ iteration, before its contact closes: a ball on a plate touches in one point onl
 solver therefore stops that first move where the contact carries the load, instead of letting
 the part move far into the other one, and the contact zone grows to its size in a few
 iterations.
+
+In a static step the weak springs also hold the part against its motion within each
+increment, ten times stiffer (10#super[-5] E L in total), with a force that starts from zero
+in every increment and so leaves none behind once the part stops moving. A part whose contacts open again, such as
+a gasket the plate lets go of, lying loose in its groove, then stays where the increment found
+it. On the weak springs alone the small force the tolerance leaves in every increment moved
+it by tenths of a millimetre, against another wall of the groove in every iteration, and the
+step stopped although nothing in the results showed why. In the increment in which the part
+moves it takes ten times the share of the weak springs, e.g. when it closes an initial gap in
+a single increment.
 
 The springs carry about a millionth of the load once the contacts are closed, and the force
 it takes to close an initial gap g, of the order 10#super[-6] E g L. Two things to keep in mind:
@@ -270,6 +444,22 @@ definition, or delete them.
 
 #screenshot("contact-worksheet.png", [The contact worksheet after a run: the bonded region
   is closed, the frictional one partly closed, and after solving it sticks and slides])
+
+#ui("Filter") above the table keeps the rows whose name, detection or sides contain the text
+or match it as a pattern, e.g. #ui("Bolt*"); #ui("Select Shown") selects all of them, so
+that the buttons change them at once.
+
+==== Contact matrix <contact-matrix>
+
+#menu("Connections", "Contact Matrix") shows the contact regions between part groups
+(@part-filters): a cell per pair of groups with the number of regions and their type, or
+#ui("Mixed") with the types on hover. Each part counts in the first group it matches; parts in
+no group are under #ui("Other"). A click on a cell selects its regions and opens the worksheet;
+its context menu sets their type, activates or deactivates them. Without part groups the rows
+are the parts.
+
+#screenshot("contact-matrix.png", [The contact matrix of the assembly: bolts on plates
+  frictional, plates on the housing bonded, pads frictionless])
 
 ==== Contact check <contact-check>
 
@@ -351,7 +541,8 @@ A bolt joins the two sides of a cut through a bolt shank and tightens them with 
 Create it with #menu("Connections", "Bolt") or #ui("Create Bolt ...") in the context
 menu of #ui("Connections"); it is listed under #ui("Connections") #sym.arrow.r #ui("Bolts").
 You pick the faces on the two sides of the cut and give the preload, Nodalis works out the
-rest.
+rest. Optionally you also pick the internal thread the bolt is screwed into, and Nodalis joins
+the bolt to it.
 
 #screenshot("bolt-dialog.png", [A bolt between two parts. The bonded contact region the contact
   detection found on the cut is replaced by the bolt and shown greyed out in the tree])
@@ -361,13 +552,19 @@ rest.
     the CAD geometry these are the two cut faces, for a bolt meshed in one piece the element
     faces on one side of the cut (side B stays empty). For a bolt that is not cut at all, pick
     only the cylindrical face of its shank as side A, see below.],
+  [Thread], [Optional: the faces of the internal thread of the nut or of the part the bolt is
+    screwed into, e.g. the bore of a tapped hole, see below. Empty, join the bolt there with
+    a contact region or a joint yourself.],
   [Preload by], [#ui("Force") pulls the two sides together with the preload, #ui("Shortening")
     shortens the bolt by a length.],
   [Axis], [The direction of the bolt axis. Unticked, Nodalis uses the normal of the cut;
     #ui("Given") takes the components #ui("X"), #ui("Y"), #ui("Z").],
-  [Steps], [What the bolt does in each step that takes loads, see below.],
+  [Steps], [What the bolt does in each step that takes loads and, for a load or an
+    adjustment, the #ui("Amplitude") it follows over the step (@amplitudes); #ui("Default")
+    is the step's ramp.],
   [Exported as], [How Nodalis writes the bolt for CalculiX: where it cuts the mesh, whether it
-    ties the two halves and which contact regions the bolt replaces.],
+    ties the two halves, how many faces of the bolt it ties to the thread and which contact
+    regions the bolt replaces.],
 )
 
 ==== Steps of a bolt
@@ -383,6 +580,30 @@ an action of its own instead:
   [Lock], [Kept at its length at the end of the previous step (`*BOUNDARY, FIXED`).],
   [Open], [Loose: no preload, the cut carries no force.],
 )
+
+To feed a screw by a given length, as when it is tightened to pull a part, choose
+#ui("Preload by") #ui("Shortening"): the shortening is the feed. Several steps with growing
+#ui("Adjustment") values tighten it in stages, a #ui("Lock") afterwards keeps it there.
+
+==== Thread
+
+The thread need not be modelled. Pick the faces of the internal thread as #ui("Thread"),
+usually the bore of the tapped hole, blind or through: Nodalis ties to it the faces of the bolt
+inside it, the shank over the length it is screwed in. For a screw simplified to a cylinder
+that stops short of the part it is screwed into, pick the face of that part opposite its end
+instead; the end face of the screw is tied to it. In general Nodalis takes the outer faces of
+the bolt nearest to the thread, a band half an element wide, and only on the thread's side of
+the cut. The tie keeps the faces where they are and bridges a gap between them, so the force
+flows from the bolt into the part without a contact or joint of your own. The thread must belong
+to another part than the bolt, or another body of a compound part (@compound-parts).
+
+With a thread, a shank picked by its cylindrical face is cut across the middle of its free
+part, the longer piece of the face beside the length in the thread, not across the middle of
+the whole face. #ui("Exported as") says how many faces of the bolt are tied and across which
+gap.
+
+#screenshot("bolt-thread.png", [A screw through a tapped ring: the bore of the ring is the thread
+  (32 faces), the shank in it is tied to it, and the cut lies on the free part of the shank below])
 
 ==== Picking the shank
 
@@ -406,7 +627,10 @@ region holds it at its cut; make that region frictional or frictionless.
 When the two sides share their nodes (one mesh through the cut), Nodalis cuts the mesh between
 them. For two parts it cuts the side with the finer mesh and ties its nodes to the other side;
 the sides cannot slide against each other. The preload is the first degree of freedom of a new
-node, as with a pre-tension load (@pre-tension).
+node per bolt (`*CLOAD` for a force, `*BOUNDARY` for a shortening or a lock). Nodalis
+separates every element on the cut side, also one that touches the cut with only an edge or a
+corner, so a tetrahedral mesh needs no layer of wedge elements at the cut, as CalculiX's
+`*PRE-TENSION SECTION` would.
 
 The contact detection (@contact-detection) usually finds the two cut faces as a bonded contact
 region. A tie or contact on the cut next to the bolt would hold the halves together and keep
@@ -521,8 +745,8 @@ the shell (S3 and up). For a contact on a shell edge use #ui("Surface to surface
     Slower per iteration. A good choice for static contact.],
   [Mortar], [Face-to-face mortar contact. The most accurate contact pressure and little
     dependence on which side is master, which matters when you read contact pressures. Static
-    steps only, element-face surfaces required, and the slowest method. Try it if surface to
-    surface gives oscillating pressures; it is not meant for dynamics.],
+    and Dynamic steps only, element-face surfaces required, and the slowest method. Try it if
+    surface to surface gives oscillating pressures.],
   [Massless], [Massless node-to-face contact for explicit dynamics. Use it only in explicit
     dynamic steps.],
 )
@@ -532,6 +756,54 @@ the shell (S3 and up). For a contact on a shell edge use #ui("Surface to surface
   formulations and limits.]
 
 Hover over a method in the list to see a short description.
+
+==== Ropes on sheaves <rope-contact>
+
+A rope of beam elements (@rope-profiles) can lie on a sheave, a drum or a clamp of solids or
+shells. Give the rope its rope profile first, then #menu("Connections", "Detect Contacts")
+finds it: every searched rope whose axis passes within its radius plus the tolerance of a
+surface of another part becomes a contact region from the whole faces it touches (side A) to
+the rope part (side B). A bonded or no separation detection makes these regions frictionless,
+as a rope slides over a sheave; change the type to #ui("Frictional") for friction.
+
+By hand, create a contact region (or, under #ui("Advanced"), a contact pair) and set one side
+to #ui("Parts") to click the rope; pick the running surface of the sheave for the other side.
+A rope side is always the slave of #ui("Node to surface") contact, whatever formulation the
+other contacts use; a contact pair of a rope refuses the other methods when the model is
+written. The contact check of the region measures the gap from the rope's surface.
+
+Every node of the rope then touches the master with 16 points round its circumference, half
+the rope diameter (the #ui("Rope diameter") of its profile) off its axis, so the rope's surface,
+not its axis, rests on the sheave. The points turn with the rope's axis as it bends. A rope in a
+groove touches both flanks at once and is held sideways by them, also in a groove of exactly the
+rope's radius; nothing else needs to hold the rope out of the plane of the sheave. Each point
+carries the contact force of its share of the rope's surface, and friction from the
+#ui("Surface interaction") acts as on any other contact. The contact results of a rope node are
+those of its point pressed hardest. A bonded rope keeps its axis half the diameter off the
+master instead. Beside the edge of the master surface the distance is measured to the edge, so a
+rope that leaves a sheave of small width lifts off it smoothly instead of resting on the
+extended face.
+
+#screenshot("contact-pair-rope.png", [A rope wound round a sheave: the running surface of the
+  sheave as master (red), the rope part as slave (yellow), Node to surface])
+
+The solver was checked against two closed-form cases:
+
+- A sheave that deflects a pretensioned rope by 3 degrees touches it in one point, since the
+  rope's curvature α / 2λ stays below 1 / R of the sheave. The force is that of the formula in
+  @rope-profiles to 0.2 %.
+- A rope wrapped by 90 degrees round a fixed drum and pulled at one end slides with the tension
+  ratio e^(-μφ) of Euler and Eytelwein to 1 % (μ = 0.2), and without friction both ends carry
+  the same tension.
+- A rope in a round groove of its own radius, held out of the plane only by the groove, gives
+  the force of the first case to 2 % and stays in the middle of the groove.
+
+Facet the sheave finely: a running surface of flat faces of 3 degrees each changes the rope
+tension by a few percent; faces of 0.5 to 1 degree give the round drum. A sliding rope with
+friction converges best in many small increments. Mesh a groove finely too: the nodes of a coarse
+tetrahedral mesh of a groove lie a little inside the true round, and a rope drawn in the middle
+of a groove of its own radius then starts pressed into their high points. Real grooves are a
+little wider than the rope (radius about 0.53 times the rope diameter).
 
 === Ties <ties>
 
@@ -550,6 +822,17 @@ Hover over a method in the list to see a short description.
   [Cyclic symmetry], [Ties the two cut faces of a sector of a rotationally repeating part, see
     @cyclic-symmetry.],
 )
+
+Membranes (`M3D3`, `M3D4`, `M3D4R`, @membrane-section) can be tied with their faces and their
+edges, as master or as slave: a solid glued on a foil, a foil glued between two solids, or a
+membrane edge glued to the side of a solid or to another membrane. The solver computes a membrane
+in its mesh surface, so a node anywhere within the membrane's thickness (shifted by its offset)
+counts as lying on it, also on the membrane's top and bottom faces, and all three displacements
+are tied. A solid tied to a membrane edge cannot turn about that edge, although a real membrane
+would carry no moment there.
+
+#screenshot("membrane-tie.png", [A block glued on the top face of a membrane strip and pulled
+  along it: the free half of the strip carries the whole force])
 
 CalculiX ties the edge faces of membranes to nothing (the solver stops with a singular stiffness
 matrix), so Nodalis writes the slave side of a tie on membrane edges as a node surface of the

@@ -174,6 +174,7 @@ fn quadratic_tetrahedra_follow_calculix_numbering() {
         .unwrap()
         .geometry;
     geometry.meshing.max_size = 8.0;
+    geometry.meshing.hexahedra_where_possible = false;
     let mesh = generate_mesh(&geometry).unwrap().mesh;
     assert_eq!(mesh.parts.len(), 1);
     assert!(mesh.element_count() > 100);
@@ -213,6 +214,7 @@ fn every_solid_becomes_a_part_and_size_controls_the_count() {
         .geometry;
     geometry.meshing.second_order = false;
     geometry.meshing.max_size = 5.0;
+    geometry.meshing.hexahedra_where_possible = false;
     let coarse = generate_mesh(&geometry).unwrap().mesh;
     let names: Vec<&str> = coarse.parts.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, ["SOLID-1", "SOLID-2"]);
@@ -473,6 +475,7 @@ fn rectangle(origin: [f64; 3], size: [f64; 2], radius: f64) -> Geometry {
     })
     .unwrap();
     Geometry {
+        compounds: Vec::new(),
         source: "rechteck.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
@@ -513,6 +516,7 @@ fn faces_outside_solids_are_meshed_as_shell_parts() {
     assert_eq!(display.mesh.parts[0].name, "SHELL-1");
 
     geometry.meshing.max_size = 2.0;
+    geometry.meshing.quad_dominated = false;
     let mesh = generate_mesh(&geometry).unwrap().mesh;
     assert_eq!(mesh.parts.len(), 1);
     assert!(mesh.elements().iter().all(|e| e.type_name == "S6"));
@@ -556,15 +560,76 @@ fn faces_outside_solids_are_meshed_as_shell_parts() {
             .filter(|e| e.type_name == name)
             .count()
     };
-    assert!(
-        count("S4") > 10 * count("S3"),
-        "{} S4, {} S3",
-        count("S4"),
-        count("S3")
-    );
+    // Quadrilaterals only, of the size asked for: about 200 / 2² of them.
+    assert_eq!(count("S3"), 0);
+    assert!((40..=300).contains(&count("S4")), "{} S4", count("S4"));
     geometry.meshing.second_order = true;
     let quadratic = generate_mesh(&geometry).unwrap().mesh;
     assert!(quadratic.elements().iter().any(|e| e.type_name == "S8"));
+}
+
+#[test]
+fn thickened_shells_are_meshed_as_solids() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = rectangle([10.0, 0.0, 0.0], [20.0, 10.0], 2.0);
+    geometry.meshing.max_size = 2.0;
+    geometry.meshing.second_order = false;
+    geometry.meshing.quad_dominated = true;
+    geometry.mesh_items.push(MeshSetupItem {
+        name: "Thicken_Shell_Mesh-1".into(),
+        kind: MeshSetupKind::ThickenShellMesh(plx_model::ThickenShellMesh {
+            parts: vec!["SHELL-1".into()],
+            thickness: 1.0,
+            layers: 3,
+            offset: 0.5,
+        }),
+    });
+    let shell = {
+        let mut plain = geometry.clone();
+        plain.mesh_items.clear();
+        generate_mesh(&plain).unwrap().mesh
+    };
+    let mesh = generate_mesh(&geometry).unwrap().mesh;
+    assert_eq!(mesh.element_count(), 3 * shell.element_count());
+    assert!((mesh.elements().iter()).all(|e| ["C3D8", "C3D6"].contains(&e.type_name.as_str())));
+    assert!(mesh.elements().iter().any(|e| e.type_name == "C3D8"));
+    assert!(
+        mesh.elements()
+            .iter()
+            .all(|e| e.min_jacobian(&mesh).unwrap() > 0.0)
+    );
+    // The rectangle faces +z: the solid reaches from it up to z = 1, and its face is the
+    // bottom side, where the shell was.
+    let (min, max) = mesh.bounds().unwrap();
+    assert!(
+        min[2].abs() < 1e-9 && (max[2] - 1.0).abs() < 1e-9,
+        "{min:?} {max:?}"
+    );
+    let face = *mesh.cad.faces.keys().next().unwrap();
+    assert_eq!(mesh.cad.faces[&face].len(), shell.element_count());
+    let on_face = mesh.cad_nodes(&[CadEntity::Face(face)]);
+    assert_eq!(on_face.len(), shell.node_count());
+    assert!(
+        on_face
+            .iter()
+            .all(|&n| mesh.node(n).unwrap()[2].abs() < 1e-9)
+    );
+    // An edge holds its nodes through the thickness.
+    let edge = *mesh.cad.segments.keys().next().unwrap();
+    assert_eq!(
+        mesh.cad_nodes(&[CadEntity::Edge(edge)]).len(),
+        4 * shell.cad_nodes(&[CadEntity::Edge(edge)]).len()
+    );
+
+    // Second order: twenty-node hexahedra and fifteen-node wedges.
+    geometry.meshing.second_order = true;
+    let quadratic = generate_mesh(&geometry).unwrap().mesh;
+    assert!(
+        (quadratic.elements().iter()).all(|e| ["C3D20", "C3D15"].contains(&e.type_name.as_str()))
+    );
+    assert!((quadratic.elements().iter()).all(|e| e.min_jacobian(&quadratic).unwrap() > 0.0));
 }
 
 /// A geometry of a box and, beside it, an L of two lines: one along x, one up along z.
@@ -581,10 +646,12 @@ fn box_and_lines() -> Geometry {
     })
     .unwrap();
     Geometry {
+        compounds: Vec::new(),
         source: "rahmen.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
             max_size: 5.0,
+            hexahedra_where_possible: false,
             ..MeshingParameters::default()
         },
         mesh_items: Vec::new(),
@@ -615,6 +682,7 @@ fn a_long_thin_round_bar_is_displayed_with_few_triangles() {
     })
     .unwrap();
     let geometry = Geometry {
+        compounds: Vec::new(),
         source: "stab.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::default(),
@@ -1009,6 +1077,7 @@ fn beam_on_block() -> Geometry {
     })
     .unwrap();
     Geometry {
+        compounds: Vec::new(),
         source: "balken.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(40.0),
@@ -1045,6 +1114,8 @@ fn contact_edges_found_in_2d_survive_remeshing() {
         group_by: plx_mesh::GroupBy::Parts,
         stiffness: Vec::new(),
         filter: plx_mesh::GeometryFilter::default(),
+        one_sided: Vec::new(),
+        solid_skins: Vec::new(),
     };
     let searched = vec![true; coarse.parts.len()];
     let items = plx_mesh::find_contact_pairs(&coarse, &skins, &searched, &parameters);
@@ -1079,6 +1150,90 @@ fn contact_edges_found_in_2d_survive_remeshing() {
             faces.len() > coarse_count,
             "{} <= {coarse_count}",
             faces.len()
+        );
+    }
+}
+
+/// Four blocks meeting at one edge, like the slices of a lug cut along two planes: each
+/// block touches two neighbours with one face each, and its two faces at the junction lie in
+/// one plane with faces of the blocks beside them. The detection on the geometry finds four
+/// regions of one face a side; the borders of the faces, where the triangles of the display
+/// end, once joined the faces beside them into the regions and the regions into one, whose
+/// ties then pulled nodes across the junction.
+#[test]
+fn detection_on_geometry_keeps_to_the_faces_that_touch() {
+    if !gmsh_available() {
+        return;
+    }
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        for origin in [[0.0, 0.0], [0.0, 20.0], [30.0, 0.0], [30.0, 20.0]] {
+            gmsh.add_box([origin[0], origin[1], 0.0], [30.0, 20.0, 10.0])?;
+        }
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    let geometry = Geometry {
+        compounds: Vec::new(),
+        source: "bloecke.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters::for_diagonal(60.0),
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+        signatures: Vec::new(),
+    };
+    let display = tessellate(&geometry).unwrap();
+    let skins: Vec<_> = (display.mesh.parts.iter())
+        .map(|part| {
+            let mut skin = plx_mesh::extract_part_skin(&display.mesh, part, 180.0);
+            for face in &mut skin.faces {
+                let id = display.mesh.elements()[face.element].id;
+                if let Some(CadEntity::Face(tag)) = display.entity(id) {
+                    face.region = tag as usize;
+                }
+            }
+            skin
+        })
+        .collect();
+    let mut model = plx_model::FeModel::default();
+    model
+        .contact_detections
+        .push(plx_model::ContactDetection::new("Contacts"));
+    let geometry = plx_model::DetectionGeometry {
+        mesh: &display.mesh,
+        skins: &skins,
+        entities: &display.entities,
+        face_edges: &display.topology.face_edges,
+        part_dimensions: &display.part_dimensions,
+        compounds: &[],
+    };
+    let visible = vec![true; display.mesh.parts.len()];
+    let report = model
+        .detect_contacts_on_geometry(0, &geometry, &visible)
+        .unwrap();
+    assert_eq!(report.added, 4, "{:#?}", model.contact_regions);
+    // Each side is the one face of its block at the plane between the two blocks.
+    let mut mesh = display.mesh.clone();
+    mesh.cad = plx_mesh::display_cad_map(&mesh, &display.entities, &display.topology.face_edges);
+    let plane_of = |region: &plx_model::Region| {
+        let plx_model::Region::Geometry(entities) = region else {
+            panic!("{region:?}");
+        };
+        assert_eq!(entities.len(), 1, "{entities:?}");
+        let nodes = mesh.cad_nodes(entities);
+        let points: Vec<[f64; 3]> = nodes.iter().map(|&n| mesh.node(n).unwrap()).collect();
+        let flat = |k: usize| points.iter().all(|p| (p[k] - points[0][k]).abs() < 1e-6);
+        (flat(0), flat(1), points[0])
+    };
+    for region in &model.contact_regions {
+        let (a, b) = (plane_of(&region.side_a), plane_of(&region.side_b));
+        assert_eq!((a.0, a.1), (b.0, b.1), "{}", region.name);
+        let k = if a.0 { 0 } else { 1 };
+        assert!(
+            a.0 != a.1 && (a.2[k] - b.2[k]).abs() < 1e-6,
+            "{}",
+            region.name
         );
     }
 }
@@ -1487,19 +1642,19 @@ fn meshing_parameters_find_extrusions_and_keep_tetrahedra_for_the_rest() {
     );
 
     // A shaft with a split face is no extrusion of one face, and no body of revolution
-    // without elements collapsing on its axis: it falls back to tetrahedra.
-    let mut shaft = import_cad(
+    // without elements collapsing on its axis, but a stack of extrusions along its axis.
+    let shaft = import_cad(
         &testdata("welle_mit_teilflaeche.step"),
         UnitSystem::Unitless,
     )
     .unwrap()
     .geometry;
-    shaft.meshing.hexahedra_where_possible = true;
+    assert!(shaft.meshing.hexahedra_where_possible, "the default");
     let mesh = generate_part_mesh(&shaft, "SOLID-1").unwrap().mesh;
     assert!(
         mesh.elements()
             .iter()
-            .all(|e| e.shape == ElementShape::Tet10)
+            .all(|e| e.shape == ElementShape::Hex20)
     );
 }
 
@@ -1517,6 +1672,7 @@ fn revolved(origin: [f64; 3], size: [f64; 2], radius: f64, angle: f64) -> Geomet
     })
     .unwrap();
     Geometry {
+        compounds: Vec::new(),
         source: "ring.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
@@ -1688,6 +1844,7 @@ fn plate_and_cube(size: [f64; 3], cube_first: bool) -> Geometry {
     })
     .unwrap();
     with_signatures(Geometry {
+        compounds: Vec::new(),
         source: "platte.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
@@ -1770,6 +1927,7 @@ fn cube() -> Geometry {
     })
     .unwrap();
     with_signatures(Geometry {
+        compounds: Vec::new(),
         source: "wuerfel.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
@@ -1914,6 +2072,7 @@ fn corners_of_flat_faces_are_rounded_and_bevelled() {
     })
     .unwrap();
     let input = with_signatures(Geometry {
+        compounds: Vec::new(),
         source: "quadrate.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
@@ -1990,10 +2149,819 @@ fn quad_dominated_meshing_leaves_solids_whole() {
     geometry.meshing.second_order = false;
     geometry.meshing.max_size = 2.0;
     let total = |mesh: &FeMesh| -> f64 { mesh.elements().iter().map(|e| volume(mesh, e)).sum() };
+    geometry.meshing.quad_dominated = false;
+    geometry.meshing.hexahedra_where_possible = false;
     let triangles = generate_mesh(&geometry).unwrap().mesh;
     geometry.meshing.quad_dominated = true;
     let quads = generate_mesh(&geometry).unwrap().mesh;
     assert!(quads.elements().iter().all(|e| e.type_name == "C3D4"));
     let (a, b) = (total(&triangles), total(&quads));
     assert!((a - b).abs() / a < 1e-9, "Volume {b} instead of {a}");
+}
+
+/// A sheave of radius 100 and a rope of 16 drawn as two lines that meet 108 above its axis
+/// and fall away by 3 degrees to each side, as a rope deflected by a sheave is drawn in CAD.
+#[test]
+fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
+    if !gmsh_available() {
+        return;
+    }
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        let ring = gmsh.add_rectangle([20.0, -10.0, 0.0], [80.0, 20.0], 0.0)?;
+        gmsh.revolve(
+            &[(2, ring)],
+            [0.0; 3],
+            [0.0, 1.0, 0.0],
+            std::f64::consts::TAU,
+        )?;
+        gmsh.remove_only(&[(2, ring)])?;
+        let drop = 200.0 * 3f64.to_radians().tan();
+        let a = gmsh.add_point([-200.0, 0.0, 108.0 - drop])?;
+        let b = gmsh.add_point([0.0, 0.0, 108.0])?;
+        let c = gmsh.add_point([200.0, 0.0, 108.0 - drop])?;
+        gmsh.add_line(a, b)?;
+        gmsh.add_line(b, c)?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    let geometry = Geometry {
+        compounds: Vec::new(),
+        source: "seilrolle.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters::for_diagonal(400.0),
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+        signatures: Vec::new(),
+    };
+    let display = tessellate(&geometry).unwrap();
+    let skins: Vec<_> = (display.mesh.parts.iter())
+        .map(|part| {
+            let mut skin = plx_mesh::extract_part_skin(&display.mesh, part, 180.0);
+            for face in &mut skin.faces {
+                let id = display.mesh.elements()[face.element].id;
+                if let Some(CadEntity::Face(tag)) = display.entity(id) {
+                    face.region = tag as usize;
+                }
+            }
+            skin
+        })
+        .collect();
+    // The rope's diameter in the units of the display.
+    let reach = (display.mesh.coords().iter()).fold(0.0f64, |m, p| m.max(p[0]));
+    let scale = reach / 200.0;
+    // The two lines of the rope, which reach out beyond the sheave; the edges left of the
+    // revolved rectangle are lines too.
+    let mesh = &display.mesh;
+    let lines: Vec<String> = (mesh.parts.iter())
+        .filter(|p| {
+            (p.elements.iter().filter_map(|&e| mesh.element(e)))
+                .flat_map(|e| e.nodes.iter().filter_map(|&n| mesh.node(n)))
+                .any(|x| x[0].abs() > 150.0 * scale)
+        })
+        .map(|p| p.name.clone())
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let mut model = plx_model::FeModel::default();
+    let rope = plx_model::CrossSection {
+        id: plx_model::Id::new(),
+        name: "Rope".into(),
+        profile: plx_model::BeamProfile::Rope {
+            diameter: 16.0 * scale,
+            wire: 1.0 * scale,
+            fill: 0.5,
+            bending: plx_model::RopeBending::Share(0.1),
+        },
+    };
+    model.sections.push(plx_model::Section {
+        name: "Rope".into(),
+        material: None,
+        region: plx_model::Region::Parts(lines.clone()),
+        thickness: 1.0,
+        kind: plx_model::SectionKind::Beam(plx_model::BeamSection {
+            cross_section: Some(rope.id),
+            ..plx_model::BeamSection::DEFAULT
+        }),
+    });
+    model.cross_sections.push(rope);
+    model
+        .contact_detections
+        .push(plx_model::ContactDetection::new("Contacts"));
+    let detection = plx_model::DetectionGeometry {
+        mesh: &display.mesh,
+        skins: &skins,
+        entities: &display.entities,
+        face_edges: &display.topology.face_edges,
+        part_dimensions: &display.part_dimensions,
+        compounds: &[],
+    };
+    let visible = vec![true; display.mesh.parts.len()];
+    let report = model
+        .detect_contacts_on_geometry(0, &detection, &visible)
+        .unwrap();
+    // Both lines touch the running surface at the top, where they meet.
+    assert_eq!(report.added, 2, "{:#?}", model.contact_regions);
+    for region in &model.contact_regions {
+        assert_eq!(region.behavior, plx_model::ContactBehavior::Frictionless);
+        let plx_model::Region::Geometry(faces) = &region.side_a else {
+            panic!("{region:?}");
+        };
+        assert!(
+            faces.iter().all(|f| matches!(f, CadEntity::Face(_))),
+            "{faces:?}"
+        );
+        assert!(matches!(&region.side_b, plx_model::Region::Parts(p) if p.len() == 1));
+    }
+    // Without the rope profile nothing touches: the lines are 8 off the surface.
+    model.sections.clear();
+    let report = model
+        .detect_contacts_on_geometry(0, &detection, &visible)
+        .unwrap();
+    assert_eq!(report.added, 0, "{:#?}", model.contact_regions);
+}
+
+#[test]
+fn a_composite_curve_is_one_line_part() {
+    if !gmsh_available() {
+        return;
+    }
+    // A sphere and a rope of a straight piece that runs tangentially into an arc, which the
+    // CAD program exports as one curve of two trimmed curves.
+    let import = import_cad(&testdata("seilpendel.step"), UnitSystem::Unitless).unwrap();
+    let names = part_names(&import.geometry).unwrap();
+    assert_eq!(names, ["KUGEL", "LINE-1"]);
+    assert_eq!(import.display.part_dimensions, [3, 1]);
+    // Both edges are shown as parts of the one line, which is meshed as a whole.
+    let mesh = generate_mesh(&import.geometry).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 2);
+    let line = &mesh.parts[1];
+    let nodes: BTreeSet<_> = (line.elements.iter())
+        .flat_map(|&id| mesh.element(id).unwrap().nodes.clone())
+        .collect();
+    // The elements hang together: a chain has one node more than it has two-node elements.
+    let ends: BTreeSet<_> = (line.elements.iter())
+        .map(|&id| mesh.element(id).unwrap().nodes.len())
+        .collect();
+    assert_eq!(ends, BTreeSet::from([3]));
+    assert_eq!(nodes.len(), 2 * line.elements.len() + 1);
+}
+
+/// Two boxes 10 mm wide side by side along x, touching on the face x = 10, as a block cut in
+/// two for the mesher; joined into a compound part.
+fn cut_block() -> Geometry {
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        gmsh.add_box([0.0; 3], [10.0; 3])?;
+        gmsh.add_box([10.0, 0.0, 0.0], [10.0; 3])?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    let mut geometry = with_signatures(Geometry {
+        source: "block.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters {
+            max_size: 4.0,
+            second_order: false,
+            ..MeshingParameters::default()
+        },
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+        signatures: Vec::new(),
+        compounds: Vec::new(),
+    })
+    .unwrap();
+    geometry.compounds.push(plx_model::CompoundPart {
+        name: "COMPOUND-1".into(),
+        parts: vec!["SOLID-1".into(), "SOLID-2".into()],
+    });
+    geometry
+}
+
+#[test]
+fn a_compound_part_is_one_part_of_bodies_tied_where_they_touch() {
+    if !gmsh_available() {
+        return;
+    }
+    let geometry = cut_block();
+    assert_eq!(part_names(&geometry).unwrap(), ["SOLID-1", "SOLID-2"]);
+    let mesh = generate_mesh(&geometry).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 1);
+    let part = &mesh.parts[0];
+    assert_eq!(part.name, "COMPOUND-1");
+    let bodies: Vec<&str> = part.bodies.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(bodies, ["SOLID-1", "SOLID-2"]);
+    let in_bodies: usize = part.bodies.iter().map(|b| b.elements.len()).sum();
+    assert_eq!(in_bodies, part.elements.len());
+    // Each body has its own nodes, also on the face they share.
+    let nodes = |elements: &[ElementId]| -> BTreeSet<NodeId> {
+        (elements.iter())
+            .flat_map(|&id| mesh.element(id).unwrap().nodes.clone())
+            .collect()
+    };
+    let (first, second) = (
+        nodes(&part.bodies[0].elements),
+        nodes(&part.bodies[1].elements),
+    );
+    assert!(first.is_disjoint(&second));
+
+    // The solver input ties them on that face, and only there.
+    let ties = plx_model::FeModel::default().compound_ties(&mesh);
+    assert_eq!(ties.len(), 1);
+    for side in [&ties[0].region.side_a, &ties[0].region.side_b] {
+        let nodes = side.nodes(&mesh);
+        assert!(!nodes.is_empty());
+        for node in nodes {
+            assert!((mesh.node(node).unwrap()[0] - 10.0).abs() < 1e-9);
+        }
+    }
+
+    // Meshed anew, a body replaces its own mesh and the part stays a compound.
+    let mut split = mesh.clone();
+    split.split_compounds();
+    let names: Vec<&str> = split.parts.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["SOLID-1", "SOLID-2"]);
+    let mut finer = geometry.clone();
+    finer.meshing.max_size = 2.0;
+    let mut remeshed = merge_part(&split, generate_part_mesh(&finer, "SOLID-2").unwrap().mesh);
+    remeshed.compose_compounds(&geometry.compound_members());
+    assert_eq!(remeshed.parts.len(), 1);
+    assert_eq!(remeshed.parts[0].bodies[0], part.bodies[0]);
+    assert!(remeshed.parts[0].bodies[1].elements.len() > part.bodies[1].elements.len());
+}
+
+/// A geometry made by Gmsh in `make`, its signatures recorded.
+fn made_geometry(make: impl FnOnce(&Gmsh) -> Result<(), GmshError>) -> Geometry {
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        make(gmsh)?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    with_signatures(Geometry {
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        ..cube()
+    })
+    .unwrap()
+}
+
+/// A plate of 40 x 30 x 5 mm with a hole of 10 mm diameter through it at (15, 15).
+fn plate_with_hole() -> Geometry {
+    made_geometry(|gmsh| {
+        let plate = gmsh.add_box([0.0; 3], [40.0, 30.0, 5.0])?;
+        let disk = gmsh.add_disk([15.0, 15.0, -1.0], 5.0, [0.0, 0.0, 1.0])?;
+        let pin = (gmsh.extrude(&[(2, disk)], [0.0, 0.0, 7.0])?.into_iter())
+            .filter(|e| e.0 == 3)
+            .collect::<Vec<_>>();
+        gmsh.boolean(crate::gmsh::Boolean::Cut, &[(3, plate)], &pin, true)?;
+        // The extruded disk's face stays behind: only the plate is kept.
+        let faces: Vec<(i32, i32)> = (gmsh.entities(2)?.into_iter())
+            .filter(|&f| gmsh.adjacencies(2, f).is_ok_and(|a| a.0.is_empty()))
+            .map(|f| (2, f))
+            .collect();
+        if !faces.is_empty() {
+            gmsh.remove(&faces)?;
+        }
+        Ok(())
+    })
+}
+
+fn split(kind: plx_model::CadOperationKind, value: f64) -> plx_model::CadOperation {
+    plx_model::CadOperation {
+        kind,
+        value,
+        ..plx_model::CadOperation::default()
+    }
+}
+
+/// The faces of a geometry of a kind with their areas.
+fn face_areas(geometry: &Geometry, kind: &str) -> Vec<f64> {
+    (geometry.signatures.iter())
+        .filter(|s| s.entity.dim() == 2 && s.kind == kind)
+        .map(|s| s.size)
+        .collect()
+}
+
+#[test]
+fn solids_split_by_a_plane_become_a_compound_or_lose_a_side() {
+    use plx_model::{CadOperationKind::SplitPlane, SplitKeep, SplitPlane as Plane};
+    if !gmsh_available() {
+        return;
+    }
+    let input = cube();
+    let name = part_names(&input).unwrap().remove(0);
+    let mut operation = split(SplitPlane, 4.0);
+    // Along the YZ plane at x = 4: two solids, one part of the FE model.
+    let both = apply_operation(&input, &operation, &[]).unwrap();
+    let mut pieces = part_names(&both).unwrap();
+    pieces.sort();
+    assert_eq!(pieces, [format!("{name}-1"), format!("{name}-2")]);
+    assert_eq!(both.compounds.len(), 1);
+    assert_eq!(both.compounds[0].name, name);
+    assert!((solid_volume(&both) - 1000.0).abs() < 1e-6);
+    let mesh = generate_mesh(&both).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 1);
+    // Each a part of its own.
+    operation.compound = false;
+    let apart = apply_operation(&input, &operation, &[]).unwrap();
+    assert!(apart.compounds.is_empty());
+    assert_eq!(part_names(&apart).unwrap().len(), 2);
+    // Only the side towards +x, which keeps the name.
+    operation.keep = SplitKeep::Positive;
+    let kept = apply_operation(&input, &operation, &[]).unwrap();
+    assert_eq!(part_names(&kept).unwrap(), std::slice::from_ref(&name));
+    assert!((solid_volume(&kept) - 600.0).abs() < 1e-6);
+    // A plane beside the cube cuts nothing.
+    let beside = split(SplitPlane, 20.0);
+    let error = apply_operation(&input, &beside, &[]).unwrap_err();
+    assert!(error.to_string().contains("no part"), "{error}");
+    // The plane of the top face, 3 mm into the cube: the slice between face and cut.
+    let top = (input.signatures.iter())
+        .find(|s| s.entity.dim() == 2 && (s.centroid[2] - 10.0).abs() < 1e-6)
+        .unwrap()
+        .entity;
+    let slice = plx_model::CadOperation {
+        plane: Plane::Face,
+        keep: SplitKeep::Negative,
+        ..split(SplitPlane, 3.0)
+    };
+    let sliced = apply_operation(&input, &slice, &[top]).unwrap();
+    assert!((solid_volume(&sliced) - 300.0).abs() < 1e-6);
+    let rest = plx_model::CadOperation {
+        keep: SplitKeep::Positive,
+        ..slice
+    };
+    let rest = apply_operation(&input, &rest, &[top]).unwrap();
+    assert!((solid_volume(&rest) - 700.0).abs() < 1e-6);
+}
+
+#[test]
+fn shells_split_by_a_plane_stay_one_part() {
+    use plx_model::{CadOperationKind::SplitPlane, SplitKeep};
+    if !gmsh_available() {
+        return;
+    }
+    let input = rectangle([0.0; 3], [20.0, 10.0], 0.0);
+    let name = part_names(&input).unwrap();
+    let both = apply_operation(&input, &split(SplitPlane, 5.0), &[]).unwrap();
+    assert_eq!(part_names(&both).unwrap(), name);
+    let mut areas = face_areas(&both, "Plane");
+    areas.sort_by(f64::total_cmp);
+    assert_eq!(areas.len(), 2);
+    assert!((areas[0] - 50.0).abs() < 1e-6 && (areas[1] - 150.0).abs() < 1e-6);
+    // The pieces share the cut edge: the mesh is one part with nodes in common.
+    let mesh = generate_mesh(&both).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 1);
+    let left = plx_model::CadOperation {
+        keep: SplitKeep::Negative,
+        ..split(SplitPlane, 5.0)
+    };
+    let left = apply_operation(&input, &left, &[]).unwrap();
+    assert_eq!(face_areas(&left, "Plane").len(), 1);
+    assert!((face_areas(&left, "Plane")[0] - 50.0).abs() < 1e-6);
+}
+
+#[test]
+fn a_hole_gets_a_ring_face_of_its_width() {
+    use plx_model::CadOperationKind::HoleRing;
+    if !gmsh_available() {
+        return;
+    }
+    let input = plate_with_hole();
+    let top_faces = |g: &Geometry| {
+        (g.signatures.iter())
+            .filter(|s| s.entity.dim() == 2 && s.kind == "Plane")
+            .filter(|s| (s.centroid[2] - 5.0).abs() < 1e-6 && s.max[2] - s.min[2] < 1e-3)
+            .map(|s| s.size)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(top_faces(&input).len(), 1);
+    // A circular edge of the hole on the top face.
+    let edge = (input.signatures.iter())
+        .find(|s| s.entity.dim() == 1 && s.kind != "Line" && (s.centroid[2] - 5.0).abs() < 1e-6)
+        .unwrap()
+        .entity;
+    let ringed = apply_operation(&input, &split(HoleRing, 3.0), &[edge]).unwrap();
+    assert_eq!(part_names(&ringed).unwrap(), part_names(&input).unwrap());
+    let (before, after) = (solid_volume(&input), solid_volume(&ringed));
+    assert!((after - before).abs() < 1e-6 * before, "{before} {after}");
+    let mut areas = top_faces(&ringed);
+    areas.sort_by(f64::total_cmp);
+    let ring = std::f64::consts::PI * (8.0f64.powi(2) - 5.0f64.powi(2));
+    assert_eq!(areas.len(), 2, "{areas:?}");
+    assert!((areas[0] - ring).abs() < 1e-3, "{areas:?}");
+    assert!((areas[0] + areas[1] - top_faces(&input)[0]).abs() < 1e-3);
+    // Meshed as one solid, with the ring's nodes found on it.
+    let mesh = generate_mesh(&ringed).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 1);
+    // Wider than the plate: the ring is cut off at the plate's edges, which leaves its
+    // corners at the left and the right part outside it.
+    let wide = apply_operation(&input, &split(HoleRing, 12.0), &[edge]).unwrap();
+    let areas = top_faces(&wide);
+    assert_eq!(areas.len(), 4, "{areas:?}");
+    assert!((areas.iter().sum::<f64>() - top_faces(&input)[0]).abs() < 1e-3);
+    assert!((solid_volume(&wide) - before).abs() < 1e-6 * before);
+    // A straight edge is no hole.
+    let straight = (input.signatures.iter())
+        .find(|s| s.entity.dim() == 1 && s.kind == "Line")
+        .unwrap()
+        .entity;
+    let error = apply_operation(&input, &split(HoleRing, 3.0), &[straight]).unwrap_err();
+    assert!(error.to_string().contains("circular"), "{error}");
+}
+
+#[test]
+fn a_hole_in_a_shell_gets_a_ring_face() {
+    use plx_model::CadOperationKind::HoleRing;
+    if !gmsh_available() {
+        return;
+    }
+    let input = made_geometry(|gmsh| {
+        let plate = gmsh.add_rectangle([0.0; 3], [40.0, 30.0], 0.0)?;
+        let hole = gmsh.add_disk([15.0, 15.0, 0.0], 5.0, [0.0, 0.0, 1.0])?;
+        gmsh.boolean(crate::gmsh::Boolean::Cut, &[(2, plate)], &[(2, hole)], true)?;
+        Ok(())
+    });
+    let edge = (input.signatures.iter())
+        .find(|s| s.entity.dim() == 1 && s.kind.ends_with("pse"))
+        .unwrap()
+        .entity;
+    let ringed = apply_operation(&input, &split(HoleRing, 2.0), &[edge]).unwrap();
+    assert_eq!(part_names(&ringed).unwrap(), part_names(&input).unwrap());
+    let mut areas = face_areas(&ringed, "Plane");
+    areas.sort_by(f64::total_cmp);
+    assert_eq!(areas.len(), 2, "{areas:?}");
+    let ring = std::f64::consts::PI * (7.0f64.powi(2) - 5.0f64.powi(2));
+    assert!((areas[0] - ring).abs() < 1e-3, "{areas:?}");
+    assert_eq!(generate_mesh(&ringed).unwrap().mesh.parts.len(), 1);
+}
+
+#[test]
+fn every_hole_edge_of_a_step_plate_gives_a_ring_and_the_plate_splits_across() {
+    use plx_model::CadOperationKind::{HoleRing, SplitPlane};
+    if !gmsh_available() {
+        return;
+    }
+    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless).unwrap();
+    let input = with_signatures(import.geometry).unwrap();
+    let faces = |g: &Geometry| {
+        (g.signatures.iter())
+            .filter(|s| s.entity.dim() == 2)
+            .count()
+    };
+    let circles: Vec<_> = (input.signatures.iter())
+        .filter(|s| s.entity.dim() == 1 && s.kind == "Circle")
+        .map(|s| s.entity)
+        .collect();
+    assert!(!circles.is_empty());
+    // All hole edges at once, top and bottom: a ring on each face.
+    let ringed = apply_operation(&input, &split(HoleRing, 2.0), &circles).unwrap();
+    let holes = circles.len().min(2);
+    assert_eq!(faces(&ringed), faces(&input) + holes, "{circles:?}");
+    assert_eq!(generate_mesh(&ringed).unwrap().mesh.parts.len(), 1);
+    // Across the middle of its length, in two halves of one compound.
+    let (lo, hi) = input.signatures.iter().fold(
+        ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]),
+        |(lo, hi), s| {
+            (
+                [0, 1, 2].map(|k| lo[k].min(s.min[k])),
+                [0, 1, 2].map(|k| hi[k].max(s.max[k])),
+            )
+        },
+    );
+    let middle = 0.5 * (lo[0] + hi[0]) + 0.1 * (hi[0] - lo[0]);
+    let halves = apply_operation(&ringed, &split(SplitPlane, middle), &[]).unwrap();
+    assert_eq!(part_names(&halves).unwrap().len(), 2);
+    assert_eq!(halves.compounds.len(), 1);
+    let mesh = generate_mesh(&halves).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 1);
+}
+
+/// Inner nodes of a quadrilateral mesh that do not join four elements.
+fn irregular_nodes(mesh: &FeMesh) -> usize {
+    let mut elements: HashMap<NodeId, usize> = HashMap::new();
+    let mut edges: HashMap<(NodeId, NodeId), usize> = HashMap::new();
+    for element in mesh.elements() {
+        let corners = &element.nodes[..4];
+        for k in 0..4 {
+            *elements.entry(corners[k]).or_default() += 1;
+            let (a, b) = (corners[k], corners[(k + 1) % 4]);
+            *edges.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    let boundary: BTreeSet<NodeId> = (edges.iter())
+        .filter(|&(_, &n)| n == 1)
+        .flat_map(|(&(a, b), _)| [a, b])
+        .collect();
+    (elements.iter())
+        .filter(|&(node, &n)| !boundary.contains(node) && n != 4)
+        .count()
+}
+
+#[test]
+fn faces_get_quasi_structured_quadrilaterals_unless_an_algorithm_is_chosen() {
+    if !gmsh_available() {
+        return;
+    }
+    // New geometries ask for quadrilaterals.
+    assert!(MeshingParameters::default().quad_dominated);
+    let mut geometry = made_geometry(|gmsh| {
+        let disk = gmsh.add_disk([0.0; 3], 30.0, [0.0, 0.0, 1.0])?;
+        let hole = gmsh.add_disk([12.0, 0.0, 0.0], 5.0, [0.0, 0.0, 1.0])?;
+        gmsh.boolean(crate::gmsh::Boolean::Cut, &[(2, disk)], &[(2, hole)], true)?;
+        Ok(())
+    });
+    geometry.meshing.second_order = false;
+    geometry.meshing.max_size = 3.0;
+    geometry.meshing.min_size = 0.0;
+    let structured = generate_mesh(&geometry).unwrap();
+    assert!(structured.warnings.is_empty(), "{:?}", structured.warnings);
+    let structured = structured.mesh;
+    assert!(structured.elements().iter().all(|e| e.type_name == "S4"));
+
+    geometry.mesh_items.push(MeshSetupItem {
+        name: "Gmsh".into(),
+        kind: MeshSetupKind::TetrahedralGmsh {
+            parts: part_names(&geometry).unwrap(),
+            algorithm_2d: Algorithm2d::FrontalDelaunay,
+            algorithm_3d: Default::default(),
+        },
+    });
+    let recombined = generate_mesh(&geometry).unwrap().mesh;
+    let (few, many) = (irregular_nodes(&structured), irregular_nodes(&recombined));
+    assert!(3 * few < many, "{few} irregular nodes instead of {many}");
+    // The same size along the outline, where both algorithms are bound to it.
+    let outline = |mesh: &FeMesh| mesh.cad.segments.values().map(Vec::len).sum::<usize>();
+    let (a, b) = (outline(&structured), outline(&recombined));
+    assert!(a.abs_diff(b) * 5 <= b, "{a} segments instead of {b}");
+
+    // A local size is met as well: about 2 π 5 / 0.5 segments around the hole.
+    geometry.mesh_items.clear();
+    let hole = (structured.cad.segments.iter())
+        .min_by_key(|(_, segments)| segments.len())
+        .map(|(&edge, _)| edge)
+        .unwrap();
+    geometry.mesh_items.push(MeshSetupItem {
+        name: "Hole".into(),
+        kind: MeshSetupKind::LocalMeshSize {
+            faces: Vec::new(),
+            edges: vec![hole],
+            size: 0.5,
+        },
+    });
+    let refined = generate_mesh(&geometry).unwrap().mesh;
+    let around = refined.cad.segments[&hole].len();
+    assert!((50..=80).contains(&around), "{around} segments");
+}
+
+#[test]
+fn faces_too_fine_for_the_quasi_structured_algorithm_are_recombined() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = rectangle([0.0; 3], [200.0, 150.0], 0.0);
+    geometry.meshing.second_order = false;
+    geometry.meshing.max_size = 1.0;
+    geometry.meshing.min_size = 0.0;
+    let generated = generate_mesh(&geometry).unwrap();
+    assert!(
+        generated.warnings.iter().any(|w| w.contains("too many")),
+        "{:?}",
+        generated.warnings
+    );
+    let count = generated.mesh.element_count();
+    assert!((25_000..40_000).contains(&count), "{count} elements");
+}
+
+#[test]
+fn spheres_are_meshed_whatever_algorithm_is_chosen() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = made_geometry(|gmsh| {
+        let ball = gmsh.add_sphere([0.0; 3], 10.0)?;
+        // Only the skin stays, a shell.
+        gmsh.remove_only(&[(3, ball)])
+    });
+    geometry.meshing.max_size = 3.0;
+    geometry.mesh_items.push(MeshSetupItem {
+        name: "Gmsh".into(),
+        kind: MeshSetupKind::TetrahedralGmsh {
+            parts: part_names(&geometry).unwrap(),
+            algorithm_2d: Algorithm2d::FrontalQuads,
+            algorithm_3d: Default::default(),
+        },
+    });
+    let generated = generate_mesh(&geometry).unwrap();
+    assert!(
+        generated.warnings.iter().any(|w| w.contains("spheres")),
+        "{:?}",
+        generated.warnings
+    );
+    assert!(generated.mesh.element_count() > 50);
+}
+
+/// A cylinder along z as a solid: the tag of its volume.
+fn cylinder(
+    gmsh: &Gmsh,
+    centre: [f64; 3],
+    radius: f64,
+    height: f64,
+) -> Result<(i32, i32), GmshError> {
+    let disk = gmsh.add_disk(centre, radius, [0.0, 0.0, 1.0])?;
+    (gmsh.extrude(&[(2, disk)], [0.0, 0.0, height])?.into_iter())
+        .find(|e| e.0 == 3)
+        .ok_or_else(|| GmshError::Other("no cylinder".into()))
+}
+
+/// Removes the faces no solid has, which extruding and cutting leave behind.
+fn drop_loose_faces(gmsh: &Gmsh) -> Result<(), GmshError> {
+    let faces: Vec<(i32, i32)> = (gmsh.entities(2)?.into_iter())
+        .filter(|&f| gmsh.adjacencies(2, f).is_ok_and(|a| a.0.is_empty()))
+        .map(|f| (2, f))
+        .collect();
+    if !faces.is_empty() {
+        gmsh.remove(&faces)?;
+    }
+    Ok(())
+}
+
+/// A hollow shaft along z with a step and a counterbore: 20 mm radius to z = 40, 14 mm to
+/// z = 70, a bore of 6 mm radius through it, widened to 10 mm over the first 15 mm.
+fn stepped_shaft() -> Geometry {
+    use crate::gmsh::Boolean;
+    let mut geometry = made_geometry(|gmsh| {
+        let thick = cylinder(gmsh, [0.0; 3], 20.0, 40.0)?;
+        let thin = cylinder(gmsh, [0.0, 0.0, 40.0], 14.0, 30.0)?;
+        let shaft = gmsh.boolean(Boolean::Fuse, &[thick], &[thin], true)?;
+        let bore = cylinder(gmsh, [0.0, 0.0, -1.0], 6.0, 72.0)?;
+        let counterbore = cylinder(gmsh, [0.0, 0.0, -1.0], 10.0, 16.0)?;
+        gmsh.boolean(Boolean::Cut, &shaft, &[bore, counterbore], true)?;
+        drop_loose_faces(gmsh)
+    });
+    geometry.meshing.max_size = 5.0;
+    geometry.meshing.min_size = 0.0;
+    geometry.meshing.second_order = false;
+    geometry
+}
+
+/// Volume of a hexahedron by its corners, as six tetrahedra about the diagonal 1-7.
+fn hex_volume(mesh: &FeMesh, element: &Element) -> f64 {
+    let p = |k: usize| glam_free::V(mesh.node(element.nodes[k]).unwrap());
+    [[1, 2], [2, 3], [3, 7], [7, 4], [4, 5], [5, 1]]
+        .iter()
+        .map(|&[b, c]| {
+            let (a, d) = (p(0), p(6));
+            p(b).sub(a).cross(p(c).sub(a)).dot(d.sub(a)) / 6.0
+        })
+        .sum()
+}
+
+/// A mesh's nodes lie apart: no two at one place.
+fn nodes_are_shared(mesh: &FeMesh) -> bool {
+    let places: BTreeSet<[i64; 3]> = (mesh.coords().iter())
+        .map(|c| c.map(|x| (x * 1e6).round() as i64))
+        .collect();
+    places.len() == mesh.node_count()
+}
+
+#[test]
+fn stacks_of_extrusions_are_meshed_with_hexahedra_through_their_steps() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = stepped_shaft();
+    let display = tessellate(&geometry).unwrap();
+    // Hexahedra are the default for solids.
+    assert!(MeshingParameters::default().hexahedra_where_possible);
+    let generated = generate_part_mesh(&geometry, "SOLID-1").unwrap();
+    assert!(generated.warnings.is_empty(), "{:?}", generated.warnings);
+    let mesh = generated.mesh;
+    assert!(mesh.elements().iter().all(|e| e.type_name == "C3D8"));
+    assert!(
+        mesh.elements()
+            .iter()
+            .all(|e| e.min_jacobian(&mesh).unwrap() > 0.0)
+    );
+    assert!(nodes_are_shared(&mesh));
+    // The volume, but for the circles drawn with straight element edges.
+    let total: f64 = mesh.elements().iter().map(|e| hex_volume(&mesh, e)).sum();
+    let exact = solid_volume(&geometry);
+    assert!((total - exact).abs() / exact < 0.02, "{total} of {exact}");
+    // A layer of nodes at every step: z = 0, 15, 40 and 70.
+    for z in [0.0, 15.0, 40.0, 70.0] {
+        assert!(
+            mesh.coords().iter().any(|c| (c[2] - z).abs() < 1e-9),
+            "no nodes at z = {z}"
+        );
+    }
+    check_cad_map(&mesh, &display);
+
+    // Quadratic elements; an extrude mesh without source faces sets the layers.
+    geometry.meshing.second_order = true;
+    geometry.mesh_items = vec![extrude_item(
+        Vec::new(),
+        plx_model::ExtrudeLayers::NumberOfElements(3),
+    )];
+    let mesh = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+    assert!(mesh.elements().iter().all(|e| e.type_name == "C3D20"));
+    assert!(
+        mesh.elements()
+            .iter()
+            .all(|e| e.min_jacobian(&mesh).unwrap() > 0.0)
+    );
+    // One layer in each of the three intervals between the steps: corner and midside
+    // levels only.
+    let levels: BTreeSet<i64> = (mesh.coords().iter())
+        .map(|c| (c[2] * 1e6).round() as i64)
+        .collect();
+    assert_eq!(levels.len(), 7, "{levels:?}");
+    check_cad_map(&mesh, &display);
+}
+
+#[test]
+fn local_sizes_on_walls_and_rising_edges_refine_the_layers_of_a_stack() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = stepped_shaft();
+    let coarse = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+    // The wall of the thin end: the face with the most nodes at z > 40 only.
+    let wall = (coarse.cad.nodes.iter())
+        .filter_map(|(entity, nodes)| match entity {
+            CadEntity::Face(face) => Some((*face, nodes)),
+            _ => None,
+        })
+        .filter(|(_, nodes)| {
+            let z: Vec<f64> = nodes.iter().map(|&n| coarse.node(n).unwrap()[2]).collect();
+            z.iter().all(|&z| z > 40.0 - 1e-9)
+                && z.iter().any(|&z| z < 41.0)
+                && z.iter().any(|&z| z > 69.0)
+        })
+        .max_by_key(|(_, nodes)| {
+            let r = |n: &NodeId| {
+                let p = coarse.node(*n).unwrap();
+                (p[0].hypot(p[1]) * 1e3) as i64
+            };
+            nodes.iter().map(r).max()
+        })
+        .map(|(face, _)| face)
+        .unwrap();
+    geometry.mesh_items = vec![MeshSetupItem {
+        name: "Local_Mesh_Size-1".into(),
+        kind: MeshSetupKind::LocalMeshSize {
+            faces: vec![wall],
+            edges: Vec::new(),
+            size: 2.0,
+        },
+    }];
+    let fine = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+    assert!(fine.elements().iter().all(|e| e.type_name == "C3D8"));
+    let levels = |mesh: &FeMesh, from: f64, to: f64| {
+        (mesh.coords().iter())
+            .filter(|c| c[2] > from + 1e-9 && c[2] < to - 1e-9)
+            .map(|c| (c[2] * 1e6).round() as i64)
+            .collect::<BTreeSet<_>>()
+            .len()
+    };
+    // 15 layers of 2 mm along the wall, the layers below as before.
+    assert_eq!(levels(&fine, 40.0, 70.0), 14);
+    assert_eq!(levels(&fine, 0.0, 40.0), levels(&coarse, 0.0, 40.0));
+    // And about 2 π 14 / 2 elements around it.
+    let around = fine.cad.nodes[&CadEntity::Face(wall)].len() / 16;
+    assert!((38..=56).contains(&around), "{around} nodes around");
+}
+
+#[test]
+fn solids_that_are_no_sweep_get_tetrahedra_and_say_why() {
+    if !gmsh_available() {
+        return;
+    }
+    use crate::gmsh::Boolean;
+    // A block with a hole along z and one across it.
+    let geometry = made_geometry(|gmsh| {
+        let block = gmsh.add_box([0.0; 3], [40.0, 30.0, 20.0])?;
+        let along = cylinder(gmsh, [12.0, 15.0, -1.0], 5.0, 22.0)?;
+        let disk = gmsh.add_disk([-1.0, 15.0, 10.0], 4.0, [1.0, 0.0, 0.0])?;
+        let across = (gmsh.extrude(&[(2, disk)], [42.0, 0.0, 0.0])?.into_iter())
+            .find(|e| e.0 == 3)
+            .unwrap();
+        gmsh.boolean(Boolean::Cut, &[(3, block)], &[along, across], true)?;
+        drop_loose_faces(gmsh)
+    });
+    let generated = generate_part_mesh(&geometry, "SOLID-1").unwrap();
+    assert!(
+        generated
+            .mesh
+            .elements()
+            .iter()
+            .all(|e| e.type_name == "C3D10")
+    );
+    assert!(
+        (generated.warnings.iter())
+            .any(|w| w.contains("meshed with tetrahedra") && w.contains("no stack of extrusions")),
+        "{:?}",
+        generated.warnings
+    );
 }

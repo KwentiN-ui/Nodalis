@@ -4,21 +4,28 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CompressionOnly, NodeTie, Region, RigidBody, Spring};
-
-/// The default colour of contact and constraint surfaces, yellow.
-pub const DEFAULT_SURFACE_COLOR: [u8; 3] = [255, 255, 0];
+use crate::{CompressionOnly, NodeTie, Region, RigidBody, Spring, SpringEnd};
 
 /// Mechanical and thermal behaviour of touching surfaces (`*SURFACE INTERACTION`), referred to
 /// by contact pairs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SurfaceInteraction {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     /// The interaction models in the order the user added them; each kind at most once.
     pub properties: Vec<InteractionProperty>,
 }
 
 impl SurfaceInteraction {
+    pub fn new(name: impl Into<String>, properties: Vec<InteractionProperty>) -> Self {
+        Self {
+            id: crate::Id::new(),
+            name: name.into(),
+            properties,
+        }
+    }
+
     /// Whether the surface behavior is tied.
     pub fn is_tied(&self) -> bool {
         (self.properties.iter()).any(|p| {
@@ -240,12 +247,14 @@ impl ContactMethod {
 /// Two surfaces that may touch (`*CONTACT PAIR`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContactPair {
+    /// The internal identity other items refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     /// A deactivated contact pair is written to the input file as a comment only.
     #[serde(default = "crate::active")]
     pub active: bool,
     /// Name of the surface interaction.
-    pub interaction: String,
+    pub interaction: Option<crate::Id>,
     pub method: ContactMethod,
     /// Pairing only at the start of each increment; node to surface contact only.
     pub small_sliding: bool,
@@ -259,8 +268,6 @@ pub struct ContactPair {
     pub clearance: Option<f64>,
     pub master: Region,
     pub slave: Region,
-    pub master_color: [u8; 3],
-    pub slave_color: [u8; 3],
 }
 
 /// The name of a swapped pair: `<slave>_to_<master>` for `<master>_to_<slave>`, other
@@ -279,11 +286,12 @@ impl ContactPair {
         self.name = swapped_name(&self.name);
     }
 
-    pub fn new(name: impl Into<String>, interaction: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>, interaction: Option<crate::Id>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
-            interaction: interaction.into(),
+            interaction,
             method: ContactMethod::default(),
             small_sliding: false,
             adjust: false,
@@ -291,8 +299,6 @@ impl ContactPair {
             clearance: None,
             master: Region::Faces(Vec::new()),
             slave: Region::Faces(Vec::new()),
-            master_color: DEFAULT_SURFACE_COLOR,
-            slave_color: DEFAULT_SURFACE_COLOR,
         }
     }
 }
@@ -306,6 +312,7 @@ pub enum Constraint {
     /// them to the model's ties, listed with the contact pairs.
     Tie(Tie),
     RigidBody(RigidBody),
+    Joint(crate::Joint),
     /// Only in projects saved while node ties were constraints; [`crate::FeModel::migrate`]
     /// moves them to the model's node ties, where they belong with the contact pairs.
     NodeTie(NodeTie),
@@ -318,6 +325,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => &c.name,
             Constraint::Tie(tie) => &tie.name,
             Constraint::RigidBody(c) => &c.name,
+            Constraint::Joint(c) => &c.name,
             Constraint::NodeTie(c) => &c.name,
         }
     }
@@ -328,6 +336,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => c.active,
             Constraint::Tie(tie) => tie.active,
             Constraint::RigidBody(c) => c.active,
+            Constraint::Joint(c) => c.active,
             Constraint::NodeTie(c) => c.active,
         }
     }
@@ -338,6 +347,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => &mut c.active,
             Constraint::Tie(tie) => &mut tie.active,
             Constraint::RigidBody(c) => &mut c.active,
+            Constraint::Joint(c) => &mut c.active,
             Constraint::NodeTie(c) => &mut c.active,
         }
     }
@@ -348,6 +358,7 @@ impl Constraint {
             Constraint::Spring(c) => c.visible,
             Constraint::CompressionOnly(c) => c.visible,
             Constraint::RigidBody(c) => c.visible,
+            Constraint::Joint(c) => c.visible,
             Constraint::Tie(_) | Constraint::NodeTie(_) => true,
         }
     }
@@ -358,6 +369,7 @@ impl Constraint {
             Constraint::Spring(c) => Some(&mut c.visible),
             Constraint::CompressionOnly(c) => Some(&mut c.visible),
             Constraint::RigidBody(c) => Some(&mut c.visible),
+            Constraint::Joint(c) => Some(&mut c.visible),
             Constraint::Tie(_) | Constraint::NodeTie(_) => None,
         }
     }
@@ -368,6 +380,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => &mut c.name,
             Constraint::Tie(tie) => &mut tie.name,
             Constraint::RigidBody(c) => &mut c.name,
+            Constraint::Joint(c) => &mut c.name,
             Constraint::NodeTie(c) => &mut c.name,
         }
     }
@@ -377,12 +390,11 @@ impl Constraint {
     pub fn swap_master_slave(&mut self) -> bool {
         let (name, master, slave) = match self {
             Constraint::Tie(tie) => (&mut tie.name, &mut tie.master, &mut tie.slave),
-            Constraint::Spring(Spring {
-                name,
-                master: Some(master),
-                region,
-                ..
-            }) => (name, master, region),
+            Constraint::Spring(spring) if spring.master_slave().is_some() => {
+                spring.ends.swap(0, 1);
+                spring.name = swapped_name(&spring.name);
+                return true;
+            }
             _ => return false,
         };
         std::mem::swap(master, slave);
@@ -394,7 +406,7 @@ impl Constraint {
     pub fn master_slave(&self) -> Option<[&Region; 2]> {
         match self {
             Constraint::Tie(tie) => Some([&tie.master, &tie.slave]),
-            Constraint::Spring(c) => Some([c.master.as_ref()?, &c.region]),
+            Constraint::Spring(c) => c.master_slave(),
             _ => None,
         }
     }
@@ -402,20 +414,26 @@ impl Constraint {
     /// The regions the constraint is defined on, master before slave.
     pub fn regions(&self) -> Vec<&Region> {
         match self {
-            Constraint::Spring(c) => c.master.iter().chain([&c.region]).collect(),
+            Constraint::Spring(c) => c.ends.iter().rev().filter_map(SpringEnd::region).collect(),
             Constraint::CompressionOnly(c) => vec![&c.region],
             Constraint::Tie(tie) => vec![&tie.master, &tie.slave],
             Constraint::RigidBody(c) => vec![&c.region],
+            Constraint::Joint(c) => c.ends.iter().rev().filter_map(SpringEnd::region).collect(),
             Constraint::NodeTie(c) => vec![&c.region],
         }
     }
 
     pub fn regions_mut(&mut self) -> Vec<&mut Region> {
         match self {
-            Constraint::Spring(c) => c.master.iter_mut().chain([&mut c.region]).collect(),
+            Constraint::Spring(c) => (c.ends.iter_mut().rev())
+                .filter_map(SpringEnd::region_mut)
+                .collect(),
             Constraint::CompressionOnly(c) => vec![&mut c.region],
             Constraint::Tie(tie) => vec![&mut tie.master, &mut tie.slave],
             Constraint::RigidBody(c) => vec![&mut c.region],
+            Constraint::Joint(c) => (c.ends.iter_mut().rev())
+                .filter_map(SpringEnd::region_mut)
+                .collect(),
             Constraint::NodeTie(c) => vec![&mut c.region],
         }
     }
@@ -433,8 +451,6 @@ pub struct Tie {
     pub adjust: bool,
     pub master: Region,
     pub slave: Region,
-    pub master_color: [u8; 3],
-    pub slave_color: [u8; 3],
     /// Makes the tie the cyclic symmetry of a sector: the slave side is the master side
     /// rotated by one sector about the axis (`*TIE, CYCLIC SYMMETRY`).
     #[serde(default)]
@@ -586,8 +602,6 @@ impl Tie {
             adjust: true,
             master: Region::Faces(Vec::new()),
             slave: Region::Faces(Vec::new()),
-            master_color: DEFAULT_SURFACE_COLOR,
-            slave_color: DEFAULT_SURFACE_COLOR,
             cyclic: None,
         }
     }
@@ -633,9 +647,8 @@ impl ContactScale {
     pub fn element_young(model: &crate::FeModel, mesh: &plx_mesh::FeMesh) -> ElementYoung {
         let mut young = ElementYoung::new();
         for section in &model.sections {
-            let Some(e) = (model.materials.iter())
-                .find(|m| m.name == section.material)
-                .and_then(|m| m.elastic)
+            let Some(e) = (section.material.and_then(|m| model.material(m)))
+                .and_then(|m| m.small_strain_elastic())
                 .map(|elastic| elastic.young)
                 .filter(|&e| e > 0.0)
             else {
@@ -780,6 +793,7 @@ mod tests {
             }
             let name = ["LOWER", "UPPER"][block as usize];
             mesh.parts.push(Part {
+                bodies: Vec::new(),
                 name: name.into(),
                 elements,
             });
@@ -796,7 +810,7 @@ mod tests {
             });
             model.sections.push(crate::Section {
                 name: part.into(),
-                material: name.into(),
+                material: model.materials.last().map(|m| m.id),
                 region: Region::Parts(vec![part.into()]),
                 thickness: 1.0,
                 kind: crate::SectionKind::Solid,
@@ -835,6 +849,7 @@ mod tests {
         assert_eq!(default_stick_slope(1e12, true), 1e12);
         assert_eq!(default_stick_slope(1e12, false), 1e10);
         let tied = SurfaceInteraction {
+            id: crate::Id::new(),
             name: "Tied".into(),
             properties: vec![
                 InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tied { k: 5e15 }),
@@ -843,6 +858,7 @@ mod tests {
         };
         assert_eq!(tied.own_normal_stiffness(), Some(5e15));
         let hard = SurfaceInteraction {
+            id: crate::Id::new(),
             name: "Hard".into(),
             properties: vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)],
         };
@@ -851,8 +867,7 @@ mod tests {
 
     #[test]
     fn constraints_saved_before_hiding_are_visible() {
-        let text =
-            r#"RigidBody((name: "Rigid_Body-1", region: Parts([]), reference_point: "RP-1"))"#;
+        let text = r#"RigidBody((name: "Rigid_Body-1", region: Parts([]), reference_point: 7))"#;
         let mut constraint: Constraint = ron::from_str(text).unwrap();
         assert!(constraint.visible());
         *constraint.visible_mut().unwrap() = false;
@@ -862,7 +877,7 @@ mod tests {
 
     #[test]
     fn swapping_turns_regions_and_a_pair_name_around() {
-        let mut pair = ContactPair::new("BEAM_to_DISC", "Steel");
+        let mut pair = ContactPair::new("BEAM_to_DISC", None);
         pair.master = Region::Surface("TOP".into());
         pair.slave = Region::Surface("BOTTOM".into());
         pair.swap_master_slave();

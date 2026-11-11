@@ -21,7 +21,6 @@ pub enum StepCategory {
     CoupledTempDisp,
     UncoupledTempDisp,
     Dynamic,
-    ModalDynamics,
     SteadyStateDynamics,
     Frequency,
     ComplexFrequency,
@@ -58,7 +57,6 @@ impl StepCategory {
             K::UncoupledTempDisp(_) => Self::UncoupledTempDisp,
             K::Dynamic(_) => Self::Dynamic,
             K::Visco(_) => Self::Visco,
-            K::ModalDynamics(_) => Self::ModalDynamics,
             K::SteadyStateDynamics(_) => Self::SteadyStateDynamics,
             K::Sensitivity(_) => Self::Sensitivity,
         }
@@ -85,7 +83,6 @@ impl StepCategory {
             Self::CoupledTempDisp => "Coupled temperature-displacement",
             Self::UncoupledTempDisp => "Uncoupled temperature-displacement",
             Self::Dynamic => "Dynamic",
-            Self::ModalDynamics => "Modal dynamics",
             Self::SteadyStateDynamics => "Steady state dynamics",
             Self::Frequency => "Frequency",
             Self::ComplexFrequency => "Complex frequency",
@@ -98,7 +95,7 @@ impl StepCategory {
     pub fn family(self) -> StepFamily {
         match self {
             Self::Static | Self::Visco => StepFamily::Mechanical,
-            Self::Dynamic | Self::ModalDynamics | Self::SteadyStateDynamics => StepFamily::Dynamic,
+            Self::Dynamic | Self::SteadyStateDynamics => StepFamily::Dynamic,
             Self::HeatTransfer | Self::CoupledTempDisp | Self::UncoupledTempDisp => {
                 StepFamily::Thermal
             }
@@ -117,7 +114,6 @@ impl StepCategory {
                 | Self::CoupledTempDisp
                 | Self::UncoupledTempDisp
                 | Self::Dynamic
-                | Self::ModalDynamics
                 | Self::Unknown
         )
     }
@@ -139,6 +135,9 @@ pub struct StepRecord {
     pub solver_steps: Vec<u32>,
     /// The analysis the step was taken over from, for an analysis that continues another.
     pub inherited_from: Option<String>,
+    /// For a step that leaves the state as it found it: the state it was computed about,
+    /// "End of Preload" or "Unloaded model".
+    pub base: Option<String>,
 }
 
 impl StepRecord {
@@ -146,18 +145,16 @@ impl StepRecord {
     pub fn new(name: &str, kind: &plx_model::StepKind, solver_steps: Vec<u32>) -> Self {
         use plx_model::StepKind as K;
         let time_period = match kind {
-            K::Static(s) => Some(s.time_period),
+            K::Static(s) => Some(s.duration),
             K::HeatTransfer(s) | K::CoupledTempDisp(s) | K::UncoupledTempDisp(s) => {
-                Some(s.increments.time_period)
+                Some(s.increments.duration)
             }
-            K::Dynamic(s) => Some(s.increments.time_period),
-            K::Visco(s) => Some(s.increments.time_period),
-            K::ModalDynamics(s) => Some(s.time_period),
+            K::Dynamic(s) => Some(s.duration),
+            K::Visco(s) => Some(s.increments.duration),
             _ => None,
         };
         let perturbation = match kind {
-            K::Frequency(s) => s.perturbation,
-            K::Buckle(s) => s.perturbation,
+            K::Frequency(_) | K::Buckle(_) => kind.base().is_some_and(|b| b.is_preloaded()),
             _ => false,
         };
         Self {
@@ -168,6 +165,7 @@ impl StepRecord {
             time_period: time_period.filter(|t| t.is_finite() && *t > 0.0),
             solver_steps,
             inherited_from: None,
+            base: None,
         }
     }
 }
@@ -184,6 +182,9 @@ pub struct IncrementRecord {
     pub iterations: u32,
     pub step_time: f64,
     pub total_time: f64,
+    /// Integrated explicitly (a step with automatic switching).
+    #[serde(default)]
+    pub explicit: bool,
 }
 
 /// A step of the results with the increments that belong to it.
@@ -195,6 +196,8 @@ pub struct ResultStep {
     pub perturbation: bool,
     pub time_period: Option<f64>,
     pub inherited_from: Option<String>,
+    /// The state a probing step was computed about, see [`StepRecord::base`].
+    pub base: Option<String>,
     pub solver_steps: Vec<u32>,
     /// Indices into the increments of the results, in order.
     pub increments: Vec<usize>,
@@ -206,6 +209,9 @@ pub struct ResultStep {
     pub converged: bool,
     /// Whether the name is only the number, for results without records.
     pub numbered: bool,
+    /// The spans of total time the solver integrated explicitly in a step that switches
+    /// between implicit and explicit integration.
+    pub explicit: Vec<(f64, f64)>,
 }
 
 impl ResultStep {
@@ -230,14 +236,17 @@ impl ResultStep {
         }
     }
 
-    /// The kind with its options, e.g. "Static, NLGEOM" or "Frequency, perturbation".
+    /// The kind with its options, e.g. "Static, NLGEOM" or "Frequency, about the end of
+    /// Preload".
     pub fn description(&self) -> String {
         let mut text = self.category.label().to_owned();
         if self.nlgeom {
             text.push_str(", NLGEOM");
         }
-        if self.perturbation {
-            text.push_str(", perturbation");
+        match &self.base {
+            Some(base) => text.push_str(&format!(", about the {}", lower_first(base))),
+            None if self.perturbation => text.push_str(", perturbation"),
+            None => {}
         }
         if self.has_positions() {
             text.push_str(&format!(
@@ -266,6 +275,8 @@ pub struct IncrementPlace {
     /// Attempts and iterations, when the solver reported them.
     pub attempts: Option<u32>,
     pub iterations: Option<u32>,
+    /// Integrated explicitly (a step with automatic switching).
+    pub explicit: bool,
 }
 
 /// The steps of results and where each increment lies in them.
@@ -321,12 +332,14 @@ impl ResultSteps {
                         perturbation: r.perturbation,
                         time_period: r.time_period,
                         inherited_from: r.inherited_from.clone(),
+                        base: r.base.clone(),
                         solver_steps: r.solver_steps.clone(),
                         increments: Vec::new(),
                         start_time: 0.0,
                         end_time: 0.0,
                         converged: true,
                         numbered: false,
+                        explicit: Vec::new(),
                     }
                 }
                 Source::Number(n) => {
@@ -338,12 +351,14 @@ impl ResultSteps {
                         perturbation: false,
                         time_period: None,
                         inherited_from: None,
+                        base: None,
                         solver_steps: vec![*n],
                         increments: Vec::new(),
                         start_time: 0.0,
                         end_time: 0.0,
                         converged: true,
                         numbered: true,
+                        explicit: Vec::new(),
                     }
                 }
             })
@@ -379,6 +394,8 @@ impl ResultSteps {
             let start = if start.is_finite() { start } else { clock };
             step.start_time = if timed { start } else { clock };
             let mut reached = step.start_time;
+            // The end of the increment before, for the explicit spans.
+            let mut before_time = step.start_time;
             // The increments give the total time, or the step time when one of them lies
             // before the start of the step.
             let step_times =
@@ -398,6 +415,17 @@ impl ResultSteps {
                 if let Some(total) = total_time {
                     reached = reached.max(total);
                 }
+                // Event frames between the increments have no report and do not break a
+                // span.
+                if let (Some(c), Some(total)) = (report, total_time) {
+                    if c.explicit {
+                        match step.explicit.last_mut() {
+                            Some(span) if span.1 >= before_time => span.1 = total,
+                            _ => step.explicit.push((before_time, total)),
+                        }
+                    }
+                    before_time = total;
+                }
                 places[i] = IncrementPlace {
                     step: s,
                     index: position,
@@ -405,6 +433,7 @@ impl ResultSteps {
                     total_time,
                     attempts: report.map(|c| c.attempts),
                     iterations: report.map(|c| c.iterations),
+                    explicit: report.is_some_and(|c| c.explicit),
                 };
             }
             step.end_time = match step.time_period {
@@ -466,6 +495,15 @@ fn before(value: f64, start: f64) -> bool {
     value < start - 1e-9 * start.abs().max(1.0)
 }
 
+/// `text` with a lower-case first letter: "End of Preload" in a sentence.
+fn lower_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,6 +533,7 @@ mod tests {
             time_period: period,
             solver_steps: steps.to_vec(),
             inherited_from: None,
+            base: None,
         }
     }
 
@@ -579,6 +618,7 @@ mod tests {
             iterations: 5,
             step_time: 0.1,
             total_time: 4.1,
+            explicit: false,
         }];
         let records = [
             record("Shake", StepCategory::Dynamic, Some(0.5), &[1]),
@@ -595,12 +635,56 @@ mod tests {
         assert!(near(steps.steps[1].end_time, 4.5));
     }
 
+    /// A step with automatic switching: the increments the solver reported as explicit
+    /// make spans of total time, from the increment before; an event frame without a report
+    /// between them does not break a span.
+    #[test]
+    fn explicit_increments_make_spans_of_the_step() {
+        let increments: Vec<Increment> = [0.1, 0.2, 0.25, 0.3, 0.4, 0.5]
+            .iter()
+            .enumerate()
+            .map(|(k, t)| inc(1, k as u32 + 1, AnalysisKind::Dynamic, *t))
+            .collect();
+        let explicit = [false, true, false, true, false, true];
+        let convergence: Vec<IncrementRecord> = increments
+            .iter()
+            .zip(explicit)
+            // Increment 3 (0.25) is an event frame without a report.
+            .filter(|(i, _)| i.increment != 3)
+            .map(|(i, explicit)| IncrementRecord {
+                step: 1,
+                increment: i.increment,
+                attempts: 1,
+                iterations: 1,
+                step_time: i.value,
+                total_time: i.value,
+                explicit,
+            })
+            .collect();
+        let records = [record("Drop", StepCategory::Dynamic, Some(0.5), &[1])];
+        let steps = ResultSteps::new(&increments, &records, &convergence, None);
+        let spans = &steps.steps[0].explicit;
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        assert!(near(spans[0].0, 0.1) && near(spans[0].1, 0.3), "{spans:?}");
+        assert!(near(spans[1].0, 0.4) && near(spans[1].1, 0.5), "{spans:?}");
+        assert!(steps.place(1).unwrap().explicit);
+        assert!(!steps.place(4).unwrap().explicit);
+    }
+
     #[test]
     fn a_frequency_step_after_a_perturbed_preload_describes_itself() {
         let mut modes = record("Modes", StepCategory::Frequency, None, &[2]);
         modes.perturbation = true;
         let increments = [inc(2, 1, AnalysisKind::Frequency, 10.0)];
-        let steps = ResultSteps::new(&increments, &[modes], &[], None);
+        let steps = ResultSteps::new(&increments, &[modes.clone()], &[], None);
         assert_eq!(steps.steps[0].description(), "Frequency, perturbation");
+        // The record names its base.
+        modes.base = Some("End of Preload".into());
+        let steps = ResultSteps::new(&increments, &[modes], &[], None);
+        assert_eq!(
+            steps.steps[0].description(),
+            "Frequency, about the end of Preload"
+        );
     }
 }

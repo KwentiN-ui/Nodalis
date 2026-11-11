@@ -221,6 +221,18 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
         }
         concerning(&mut errors, before, ItemRef::RigidBody(index));
     }
+    for joint in &model.constraints.joints {
+        let before = errors.len();
+        for node in joint.ends.iter().flatten().flatten() {
+            if model.nodes.index(*node).is_none() {
+                errors.push(Error::undefined("*JOINT", "node", node.to_string()));
+            }
+        }
+        if joint.ends.iter().all(Option::is_none) {
+            errors.push(Error::input("*JOINT", "both ends are ground"));
+        }
+        concerning(&mut errors, before, ItemRef::Joint(joint.name.clone()));
+    }
     for tie in &model.constraints.ties {
         for surface in [&tie.slave, &tie.master] {
             if !model.sets.surfaces.contains_key(surface) {
@@ -295,6 +307,15 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
             if !model.sets.surfaces.contains_key(surface) {
                 errors.push(Error::undefined("*CLEARANCE", "surface", surface));
             }
+        }
+    }
+    for support in &model.contact.compression_only {
+        if !model.sets.surfaces.contains_key(&support.surface) {
+            errors.push(Error::undefined(
+                "*COMPRESSION ONLY",
+                "surface",
+                &support.surface,
+            ));
         }
     }
 

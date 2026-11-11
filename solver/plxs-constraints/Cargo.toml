@@ -10,6 +10,7 @@ repository.workspace = true
 plxs-core.workspace = true
 plxs-elements.workspace = true
 plxs-linalg.workspace = true
+rayon.workspace = true
 
 [lints]
 workspace = true

@@ -117,6 +117,9 @@ pub enum ProgressEvent {
         step_time: f64,
         size: f64,
     },
+    /// A dynamic step with `INTEGRATION=AUTOMATIC` goes on explicitly (`explicit`) or
+    /// implicitly from here: the increments done after it are of that kind.
+    Integration { step: u32, explicit: bool },
     /// An increment was cut back after failing to converge.
     Cutback {
         step: u32,

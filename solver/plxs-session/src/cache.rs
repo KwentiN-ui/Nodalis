@@ -27,7 +27,7 @@ use serde::Serialize;
 
 use crate::restart::{self, Fnv};
 
-const RESULTS_MAGIC: &[u8; 8] = b"PLXSSTP2";
+const RESULTS_MAGIC: &[u8; 8] = b"PLXSSTP3";
 
 /// Where the cache of a job is and which solver build it belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,21 +145,23 @@ impl StepCache {
     /// Keeps the state after step `step` (counted from 1) under `key`, with the results of
     /// that step out of `results`. A file that cannot be written is left out: the cache only
     /// saves time.
-    pub(crate) fn keep(&self, key: u64, step: u32, snapshot: &Snapshot, results: &Results) {
-        let of_step = Results {
-            increments: (results.increments.iter())
-                .filter(|i| i.step == step)
-                .cloned()
-                .collect(),
-            history: (results.history.iter())
-                .filter(|h| h.step == step)
-                .cloned()
-                .collect(),
-            modes: (results.modes.iter())
-                .filter(|m| m.step == step)
-                .cloned()
-                .collect(),
+    pub(crate) fn keep(&self, key: u64, step: u32, snapshot: &Snapshot, results: &mut Results) {
+        // The step's results are the latest ones: taken out for packing (no copy of a
+        // dynamic step's frames) and appended again afterwards.
+        fn split<T>(items: &mut Vec<T>, mine: impl Fn(&T) -> bool) -> Vec<T> {
+            let (taken, kept): (Vec<T>, Vec<T>) = std::mem::take(items).into_iter().partition(mine);
+            *items = kept;
+            taken
+        }
+        let mut of_step = Results {
+            increments: split(&mut results.increments, |i| i.step == step),
+            history: split(&mut results.history, |h| h.step == step),
+            modes: split(&mut results.modes, |m| m.step == step),
         };
+        let bytes = plxs_output::packed::pack_in_place(RESULTS_MAGIC, &mut of_step);
+        results.increments.append(&mut of_step.increments);
+        results.history.append(&mut of_step.history);
+        results.modes.append(&mut of_step.modes);
         let write = |extension: &str, bytes: Vec<u8>| -> std::io::Result<()> {
             // Written beside and renamed, so that a stopped run leaves no half file.
             let path = self.path(key, extension);
@@ -168,7 +170,7 @@ impl StepCache {
             std::fs::rename(&partial, &path)
         };
         let _ = std::fs::create_dir_all(&self.dir);
-        let written = write("results", plxs_output::packed::pack(RESULTS_MAGIC, of_step))
+        let written = write("results", bytes)
             .ok()
             .and_then(|()| restart::encode_snapshot(snapshot).ok())
             .and_then(|bytes| write("state", bytes).ok());

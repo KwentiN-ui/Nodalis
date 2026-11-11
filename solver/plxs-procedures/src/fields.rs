@@ -9,6 +9,8 @@ use plxs_core::results::{
 use plxs_core::state::IntegrationPointField;
 use plxs_core::{Model, ProgressEvent, Result, Step};
 
+use rayon::prelude::*;
+
 use crate::ProcedureContext;
 
 /// The variables a field request asks for, upper case, from all `*NODE FILE` / `*EL FILE`
@@ -49,9 +51,8 @@ pub fn add_mode(
     imaginary: Option<&[f64]>,
 ) {
     let order = node_order(ctx.model);
-    let zeros = vec![0.0; u.len()];
     let rows = |u: &[f64]| -> Vec<[f32; 3]> {
-        let (reported, _) = ctx.table.reported(ctx.model, u, &zeros);
+        let reported = ctx.table.reported_displacements(u);
         (order.iter())
             .map(|&(_, i)| {
                 let at = i as usize * 3;
@@ -126,29 +127,36 @@ pub fn nodal_average_with(
     let nodes = model.nodes.len();
     let mut sum = vec![[0.0; 6]; nodes];
     let mut count = vec![0u32; nodes];
-    let mut per_element = Vec::with_capacity(table.entries.len());
-    for (index, entry) in table.entries.iter().enumerate() {
-        let formulation = table.formulation(entry);
-        let ips = formulation.integration_points();
-        let start = table.layout.offsets[index] as usize;
-        let e = formulation.extrapolation();
-        let mut nodal = vec![[0.0; 6]; entry.nodes.len()];
-        for (a, node) in nodal.iter_mut().enumerate() {
-            for g in 0..ips {
-                let w = e[a * ips + g];
-                let at = (start + g) * 6;
-                for (k, v) in node.iter_mut().enumerate() {
-                    *v += w * field.values[at + k];
+    // The extrapolation of every element in parallel; the sums at the shared nodes after.
+    let per_element: Vec<Vec<[f64; 6]>> = table
+        .entries
+        .par_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let formulation = table.formulation(entry);
+            let ips = formulation.integration_points();
+            let start = table.layout.offsets[index] as usize;
+            let e = formulation.extrapolation();
+            let mut nodal = vec![[0.0; 6]; entry.nodes.len()];
+            for (a, node) in nodal.iter_mut().enumerate() {
+                for g in 0..ips {
+                    let w = e[a * ips + g];
+                    let at = (start + g) * 6;
+                    for (k, v) in node.iter_mut().enumerate() {
+                        *v += w * field.values[at + k];
+                    }
                 }
             }
-        }
+            nodal
+        })
+        .collect();
+    for (entry, nodal) in table.entries.iter().zip(&per_element) {
         for (a, &n) in entry.nodes.iter().enumerate() {
             for k in 0..6 {
                 sum[n as usize][k] += nodal[a][k];
             }
             count[n as usize] += 1;
         }
-        per_element.push(nodal);
     }
     for (nodes, values) in extra {
         for (&n, value) in nodes.iter().zip(values) {
@@ -158,18 +166,9 @@ pub fn nodal_average_with(
             count[n as usize] += 1;
         }
     }
-    // CalculiX averages over every element it writes to the `.frd`, so two-node springs and
-    // gaps count with zero stress at their nodes (observed with ccx 2.21; `SPRING1`, which
-    // it does not write, does not count).
-    for element in &table.discrete {
-        if model.elements[element.element as usize].kind != plxs_core::ElementType::SPRING1 {
-            let mut nodes: Vec<u32> = element.dofs.iter().map(|d| d / 3).collect();
-            nodes.dedup();
-            for n in nodes {
-                count[n as usize] += 1;
-            }
-        }
-    }
+    // Springs and gaps carry no stress: they do not count at their nodes. (CalculiX counts
+    // the two-node ones it writes to the `.frd` with zero stress, which lowers the stress
+    // wherever a support or contact gap sits, at its peak.)
     for (s, &c) in sum.iter_mut().zip(&count) {
         if c > 0 {
             for v in s.iter_mut() {
@@ -340,6 +339,10 @@ pub fn principal_stresses(s: &[f64; 6]) -> [f64; 3] {
     v
 }
 
+/// A general beam's two nodes, its stress and strain tensors there and its section forces
+/// `[N, T, M1, M2]` at them.
+type BeamValues = ([u32; 2], [[f64; 6]; 2], [[f64; 6]; 2], [[f64; 4]; 2]);
+
 /// The nodal fields of a displacement state as the step's `*NODE FILE` / `*EL FILE`
 /// requests ask for them, in CalculiX's order: DISP, STRESS, TOSTRAIN, FORC, ENER, ERROR.
 pub fn build_fields(
@@ -380,8 +383,52 @@ pub fn build_fields_with(
             ((m.nodes.as_slice(), e), (m.nodes.as_slice(), s))
         })
         .unzip();
+    // General beams (U1, ropes): the normal stress N / A and the extension along their
+    // current axis, at both nodes, and their section forces (`SECFORC`: normal force,
+    // bending moment, torque). The stress of the outer fibres is not known: a general
+    // section has no shape, and the wires of a rope bend each about their own axis.
+    let beam_values: Vec<BeamValues> = table
+        .beams
+        .iter()
+        .map(|b| {
+            let q = b.gather(u);
+            let linear = !step.nlgeom;
+            let (t, strain) = b.formulation.axis_and_strain(&q, linear);
+            let forces = b.formulation.section_forces(&q, linear);
+            let along = |v: f64| {
+                [
+                    v * t[0] * t[0],
+                    v * t[1] * t[1],
+                    v * t[2] * t[2],
+                    v * t[0] * t[1],
+                    v * t[1] * t[2],
+                    v * t[2] * t[0],
+                ]
+            };
+            let stress = forces.map(|f| along(if b.area > 0.0 { f[0] / b.area } else { 0.0 }));
+            (
+                [b.dofs[0] / 3, b.dofs[6] / 3],
+                stress,
+                [along(strain); 2],
+                forces,
+            )
+        })
+        .collect();
+    let beam_stresses: Vec<(&[u32], Vec<[f64; 6]>)> = (beam_values.iter())
+        .map(|(nodes, s, ..)| (&nodes[..], s.to_vec()))
+        .collect();
+    let beam_strains: Vec<(&[u32], Vec<[f64; 6]>)> = (beam_values.iter())
+        .map(|(nodes, _, e, _)| (&nodes[..], e.to_vec()))
+        .collect();
+    let membrane_stresses: Vec<_> = membrane_stresses.into_iter().chain(beam_stresses).collect();
+    let membrane_strains: Vec<_> = membrane_strains.into_iter().chain(beam_strains).collect();
     // Internal unknowns (thickness change of plane stress nodes) are no displacements.
-    let (u, reactions) = &table.reported(model, u, reactions);
+    // The reported forces cost an element stiffness of every plane element: only for `RF`.
+    let (u, reactions) = &if has("RF") {
+        table.reported(model, u, reactions)
+    } else {
+        (table.reported_displacements(u), Vec::new())
+    };
     if has("U") {
         fields.push(vector_field("DISP", ["D1", "D2", "D3"], &order, u));
     }
@@ -393,6 +440,39 @@ pub fn build_fields_with(
             &order,
             &average,
         ));
+    }
+    if has("S") && !beam_values.is_empty() {
+        // Averaged over the beams at a node; other nodes have none.
+        // The bending moment as its magnitude: the beam's 1- and 2-direction turn with
+        // the rotation about its axis, which nothing may hold (a rope on a frictionless
+        // sheave spins freely), so the components alone would say little.
+        let mut sum = vec![[0.0; 3]; model.nodes.len()];
+        let mut count = vec![0u32; model.nodes.len()];
+        for (nodes, _, _, forces) in &beam_values {
+            for (&n, f) in nodes.iter().zip(forces) {
+                let values = [f[0], f[2].hypot(f[3]), f[1]];
+                for k in 0..3 {
+                    sum[n as usize][k] += values[k];
+                }
+                count[n as usize] += 1;
+            }
+        }
+        let beam_nodes: Vec<(u32, u32)> = (order.iter())
+            .filter(|&&(_, i)| count[i as usize] > 0)
+            .copied()
+            .collect();
+        fields.push(ResultField {
+            name: "SECFORC".into(),
+            components: ["N", "M", "MT"].map(String::from).to_vec(),
+            nodes: beam_nodes.iter().map(|&(id, _)| id).collect(),
+            values: (0..3)
+                .map(|k| {
+                    (beam_nodes.iter())
+                        .map(|&(_, i)| sum[i as usize][k] / f64::from(count[i as usize]))
+                        .collect()
+                })
+                .collect(),
+        });
     }
     if has("E") {
         let (average, _) = nodal_average_with(table, model, strains, &membrane_strains);
@@ -459,10 +539,16 @@ pub fn write_increment(
     let mut fields = build_fields_with(
         ctx.table, ctx.model, step, u, reactions, stresses, strains, material,
     );
-    if let Some(evaluation) = &ctx.contact.last {
+    {
         let order = node_order(ctx.model);
-        let contact =
-            crate::contact::contact_fields(ctx.model, step, &ctx.contact, evaluation, &order);
+        let contact = crate::contact::contact_fields(
+            ctx.model,
+            step,
+            &ctx.contact,
+            ctx.contact.last.as_ref(),
+            u,
+            &order,
+        );
         // CalculiX writes the contact fields before the error estimator.
         let at = fields
             .iter()
@@ -489,8 +575,8 @@ pub fn unsupported_outputs(step: &Step) -> Vec<String> {
     // `V` only means something in dynamic steps, `PU`/`PHS` in steady state and complex
     // frequency steps; CalculiX ignores them in the others.
     let known = [
-        "U", "V", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL", "PU", "PHS",
-        "SEN", "CDIS", "CSTR", "CELS", "EVOL",
+        "U", "V", "A", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL", "PU",
+        "PHS", "SEN", "CDIS", "CSTR", "CELS", "EVOL",
     ];
     let mut out = Vec::new();
     for v in requested(step) {

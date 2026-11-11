@@ -34,6 +34,8 @@ pub struct Analysis {
     /// The item of the model each item of the solver's analysis came from, which leads the
     /// solver's diagnostics back to the tree.
     origins: plx_model::Origins,
+    /// The active steps, a line each, for the solver report.
+    step_lines: Vec<String>,
 }
 
 /// Why an analysis did not start, with the item of the model it is about when the lowering
@@ -96,6 +98,10 @@ pub struct RunView {
     pub seconds: f32,
     pub progress: Option<String>,
     pub lines: Vec<String>,
+    /// Where the time of the solver went, once it has finished.
+    pub profile: Option<plx_solve::JobProfile>,
+    /// The steps solved, a line each, for the solver report.
+    pub steps: Vec<String>,
     /// Lines of the solve copied so far, also those dropped from `lines` since.
     pub copied: usize,
     pub filter: String,
@@ -139,6 +145,14 @@ impl RunView {
                 event = MonitorEvent::OpenResults;
             }
             ui.separator();
+            let info = crate::solver_profile::ReportInfo {
+                name,
+                state: self.state,
+                seconds: self.seconds,
+                steps: &self.steps,
+            };
+            crate::solver_profile::buttons(ui, self.profile.as_ref(), &info);
+            ui.separator();
             ui.label("Filter:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
@@ -162,21 +176,30 @@ impl RunView {
             }
             dropped_note(ui, self.copied - self.lines.len().min(self.copied));
         });
-        let area = egui::ScrollArea::both()
-            .id_salt("solve output")
-            .auto_shrink([false, false])
-            .stick_to_bottom(true);
-        if self.filter.is_empty() {
-            crate::virtual_table::lines(ui, area, &self.lines);
-        } else {
-            let needle = self.filter.to_lowercase();
-            let shown: Vec<&String> = (self.lines.iter())
-                .filter(|line| line.to_lowercase().contains(&needle))
-                .collect();
-            crate::virtual_table::lines(ui, area, &shown);
-        }
+        let (lines, filter) = (&self.lines, &self.filter);
+        crate::solver_profile::with_output(ui, self.profile.as_ref(), |ui| {
+            let area = egui::ScrollArea::both()
+                .id_salt("solve output")
+                .auto_shrink([false, false])
+                .stick_to_bottom(true);
+            if filter.is_empty() {
+                crate::virtual_table::lines(ui, area, lines);
+            } else {
+                let needle = filter.to_lowercase();
+                let shown: Vec<&String> = (lines.iter())
+                    .filter(|line| line.to_lowercase().contains(&needle))
+                    .collect();
+                crate::virtual_table::lines(ui, area, &shown);
+            }
+        });
         event
     }
+}
+
+/// The name of the files and folders of the block `id`: the blocks are free to share a name,
+/// so the folder of a run carries the id and never the name.
+pub fn job_dir(id: u64) -> String {
+    format!("a{id}")
 }
 
 /// The analysis name as the name of its files: the solver takes no spaces in them, and the
@@ -291,9 +314,13 @@ pub fn step_records(
             None => {
                 let mut record =
                     plx_results::steps::StepRecord::new(&step.name, &step.kind, vec![number]);
+                // Hyperelastic materials switch NLGEOM on.
+                record.nlgeom |= lowered.analysis.steps[index].nlgeom;
                 record.inherited_from = (inherited.iter())
                     .find(|(name, _)| *name == step.name)
                     .map(|(_, source)| source.clone());
+                // A probing step names the state it was computed about.
+                record.base = fe.step_handover(model).base_state();
                 records.push((model, record));
             }
         }
@@ -416,6 +443,10 @@ impl Analysis {
             initial.apply(&mut lowered.analysis)?;
         }
         let overlaps = std::mem::take(&mut lowered.resolved_overlaps);
+        let step_lines = (fe.steps.iter())
+            .filter(|s| s.active)
+            .map(crate::solver_profile::step_line)
+            .collect();
         let origins = lowered.origins.clone();
         let prepared = prepare(lowered, &fe, &continuation.inherited_steps);
         let copied = copy_result_files(&fe, work_dir);
@@ -456,12 +487,23 @@ impl Analysis {
             finished: None,
             status: JobStatus::Running,
             origins,
+            step_lines,
         })
     }
 
     /// The item of the model each item of the solver's analysis came from.
     pub fn origins(&self) -> &plx_model::Origins {
         &self.origins
+    }
+
+    /// Where the time of the solver went, once the run has finished with results.
+    pub fn profile(&self) -> Option<plx_solve::JobProfile> {
+        self.job.profile()
+    }
+
+    /// The active steps, a line each, for the solver report.
+    pub fn step_lines(&self) -> &[String] {
+        &self.step_lines
     }
 
     /// Adds a line of nodalis's own to the monitor output.
@@ -557,6 +599,7 @@ impl Analysis {
     pub fn monitor(&mut self, ui: &mut egui::Ui) -> MonitorEvent {
         let mut event = MonitorEvent::None;
         let status = self.status;
+        let profile = self.job.profile();
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(status == JobStatus::Running, egui::Button::new("Kill"))
@@ -572,6 +615,14 @@ impl Analysis {
             {
                 event = MonitorEvent::OpenResults;
             }
+            ui.separator();
+            let info = crate::solver_profile::ReportInfo {
+                name: &self.name,
+                state: Self::status_text(status),
+                seconds: self.seconds(),
+                steps: &self.step_lines,
+            };
+            crate::solver_profile::buttons(ui, profile.as_ref(), &info);
             ui.separator();
             ui.label("Filter:");
             ui.add(
@@ -601,21 +652,22 @@ impl Analysis {
             }
             dropped_note(ui, self.dropped);
         });
-        let area = egui::ScrollArea::both()
-            .id_salt("analysis output")
-            .auto_shrink([false, false])
-            .stick_to_bottom(true);
-        if self.filter.is_empty() {
-            crate::virtual_table::lines(ui, area, &self.output);
-        } else {
-            let needle = self.filter.to_lowercase();
-            let shown: Vec<&String> = self
-                .output
-                .iter()
-                .filter(|line| line.to_lowercase().contains(&needle))
-                .collect();
-            crate::virtual_table::lines(ui, area, &shown);
-        }
+        let (output, filter) = (&self.output, &self.filter);
+        crate::solver_profile::with_output(ui, profile.as_ref(), |ui| {
+            let area = egui::ScrollArea::both()
+                .id_salt("analysis output")
+                .auto_shrink([false, false])
+                .stick_to_bottom(true);
+            if filter.is_empty() {
+                crate::virtual_table::lines(ui, area, output);
+            } else {
+                let needle = filter.to_lowercase();
+                let shown: Vec<&String> = (output.iter())
+                    .filter(|line| line.to_lowercase().contains(&needle))
+                    .collect();
+                crate::virtual_table::lines(ui, area, &shown);
+            }
+        });
         event
     }
 
@@ -696,10 +748,12 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: "Solid-1".into(),
             elements: vec![1, 2, 3],
         });
         let bc = |name: &str, nodes: Vec<u32>, kind| BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: name.into(),
             active: true,
@@ -730,6 +784,7 @@ mod tests {
         let mut model = Model::new(std::path::Path::new("cubes.ndl"), mesh);
         model.fe = plx_model::FeModel {
             materials: vec![Material {
+                id: crate::test_ids::named("S235"),
                 name: "S235".into(),
                 elastic: Some(Elastic {
                     young: 210000.0,
@@ -739,7 +794,7 @@ mod tests {
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
-                material: "S235".into(),
+                material: Some(crate::test_ids::named("S235")),
                 region: Region::Parts(vec!["Solid-1".into()]),
                 thickness: 1.0,
                 kind: plx_model::SectionKind::Solid,
@@ -834,6 +889,7 @@ mod tests {
         let mut model = pulled_cubes(0.03);
         model.mesh.parts[0].elements = vec![1, 2];
         model.mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
             name: "Solid-2".into(),
             elements: vec![3],
         });
@@ -1009,6 +1065,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nodalis-linked-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let bc = |name: &str, nodes: Vec<u32>, kind| BoundaryCondition {
+            id: plx_model::Id::new(),
             distribution: None,
             name: name.into(),
             active: true,
@@ -1025,7 +1082,7 @@ mod tests {
             material.specific_heat = Some(4.6e8);
             model
         };
-        // Eigenmodes of one analysis, the response over time from them in another one.
+        // Eigenmodes of one analysis, the harmonic response from them in another one.
         let mut frequency = Step::new_frequency("Modes");
         if let plx_model::StepKind::Frequency(f) = &mut frequency.kind {
             f.storage = true;
@@ -1035,9 +1092,14 @@ mod tests {
             vec![1, 2, 3, 4],
             BoundaryKind::displacement([Some(0.0); 6]),
         )];
-        let mut modal = Step::new_modal_dynamics("Shake");
+        let mut modal = Step::new_steady_state_dynamics("Shake");
+        // Alone it computes as many modes as the frequency step of the other analysis.
+        if let plx_model::StepKind::SteadyStateDynamics(settings) = &mut modal.kind {
+            settings.modes = 10;
+        }
         modal.boundary_conditions = frequency.boundary_conditions.clone();
         modal.loads.push(Load {
+            id: crate::test_ids::named("Push"),
             distribution: None,
             name: "Push".into(),
             active: true,
@@ -1046,6 +1108,9 @@ mod tests {
             kind: LoadKind::force([0.0, 1.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
+            tables: Default::default(),
+            system: None,
+            follower: false,
         });
         let mut both = cubes();
         both.fe.steps = vec![frequency.clone(), modal.clone()];
@@ -1056,9 +1121,6 @@ mod tests {
         let mut target = cubes();
         target.fe.steps = vec![modal];
         target.fe.properties.stored_modes = Some(dir.join("Modes/Modes.eig"));
-        assert!(
-            !(target.findings().iter()).any(|f| f.problem == plx_model::Problem::NoStoredModes)
-        );
         solve_as(&target, &dir.join("Shake"), "Shake", &Default::default());
         let alone = results(&dir.join("Shake/Shake.ndlr"));
         let joint = results(&dir.join("Both/Both.ndlr"));
@@ -1125,5 +1187,18 @@ mod tests {
         // A new solve starts over.
         view.copy(&["first".to_owned()], 1);
         assert_eq!(view.lines, ["first"]);
+    }
+}
+
+#[cfg(test)]
+mod job_dir_tests {
+    use super::job_dir;
+
+    #[test]
+    fn job_dir_depends_on_the_id_only() {
+        assert_eq!(job_dir(12), "a12");
+        assert_ne!(job_dir(1), job_dir(11));
+        // The solver takes the name as it is.
+        assert_eq!(super::job_name(&job_dir(12)), job_dir(12));
     }
 }

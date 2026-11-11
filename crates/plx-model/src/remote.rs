@@ -9,7 +9,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 use serde::{Deserialize, Serialize};
 
-use crate::features::GLOBAL;
 use crate::{BoundaryKind, FeModel, ModelSpace, Region};
 
 /// How the selection follows its prescribed displacements, Ansys' "Behavior".
@@ -46,8 +45,9 @@ impl Behavior {
 }
 
 /// How the selection follows a point.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RemoteBehavior {
+    #[default]
     Rigid,
     Deformable,
 }
@@ -68,14 +68,20 @@ pub struct Displacement {
     /// `None` leaves one free.
     pub values: [Option<f64>; 6],
     pub behavior: Behavior,
-    /// Coordinate system of the location and of the directions, by name ([`GLOBAL`]).
-    pub system: String,
+    /// Coordinate system of the location and of the directions; `None` is the global one.
+    pub system: Option<crate::Id>,
     /// Coordinates of the point in `system`; `None` is the centre of the selection. Setting
     /// it asks for a point.
     pub location: Option<[f64; 3]>,
     /// Only the nodes within this distance of the point take part, Ansys' pinball region.
     /// Setting it asks for a point.
     pub pinball: Option<f64>,
+    /// A time table per degree of freedom that replaces its value in `values`: the value
+    /// follows the table over the step time instead of the amplitude of the boundary
+    /// condition. The degree of freedom must be held (`Some` in `values`); the number there
+    /// is kept for when the table is removed.
+    #[serde(default, skip_serializing_if = "crate::no_tables")]
+    pub tables: [Option<crate::ValueTable>; 6],
 }
 
 /// A remote displacement resolved on a mesh.
@@ -144,16 +150,16 @@ impl FeModel {
         })
     }
 
-    /// The first displacement boundary condition of the name that is written with a point,
+    /// The first displacement boundary condition of the id that is written with a point,
     /// of any step, with the index of its step.
     pub fn remote_displacement(
         &self,
         mesh: &FeMesh,
-        name: &str,
+        id: crate::Id,
     ) -> Option<(usize, &crate::BoundaryCondition, &Displacement)> {
         self.steps.iter().enumerate().find_map(|(s, step)| {
             let (i, bc) =
-                (step.boundary_conditions.iter().enumerate()).find(|(_, bc)| bc.name == name)?;
+                (step.boundary_conditions.iter().enumerate()).find(|(_, bc)| bc.id == id)?;
             let BoundaryKind::Displacement(displacement) = &bc.kind else {
                 return None;
             };
@@ -274,14 +280,14 @@ impl FeModel {
                             continue;
                         }
                         let given = std::array::from_fn(|k| d.values[k].is_some());
-                        if d.system != GLOBAL && given.iter().any(|&g| g) {
+                        if d.system.is_some() && given.iter().any(|&g| g) {
                             [true; 3]
                         } else {
                             given
                         }
                     }
                     BoundaryKind::Submodel { dofs, .. } => [dofs[0], dofs[1], dofs[2]],
-                    BoundaryKind::Symmetry { normal } => {
+                    BoundaryKind::Symmetry { normal, .. } => {
                         let axis = crate::symmetry_plane(mesh, &bc.region, space, *normal)
                             .ok()
                             .and_then(|plane| plane.axis());
@@ -305,17 +311,6 @@ impl FeModel {
         }
         held
     }
-
-    /// Follows a renamed displacement: history outputs of its point keep referring to it.
-    pub fn rename_remote_point(&mut self, old: &str, new: &str) {
-        for output in self.steps.iter_mut().flat_map(|s| &mut s.history_outputs) {
-            if let Some(Region::RemotePoint(name)) = output.kind.region_mut()
-                && name == old
-            {
-                *name = new.to_string();
-            }
-        }
-    }
 }
 
 impl Displacement {
@@ -323,10 +318,29 @@ impl Displacement {
         Self {
             values,
             behavior: Behavior::default(),
-            system: GLOBAL.into(),
+            system: None,
             location: None,
             pinball: None,
+            tables: Default::default(),
         }
+    }
+
+    /// The table of degree of freedom `d` (0..6), if it is held and follows one.
+    pub fn table(&self, d: usize) -> Option<&crate::ValueTable> {
+        self.values[d].and(self.tables[d].as_ref())
+    }
+
+    /// Whether degree of freedom `d` is held at zero throughout the step.
+    pub fn still(&self, d: usize) -> bool {
+        match self.table(d) {
+            Some(table) => !table.moves(),
+            None => self.values[d] == Some(0.0),
+        }
+    }
+
+    /// Whether degree of freedom `d` is held and moves at some time of the step.
+    pub fn moves(&self, d: usize) -> bool {
+        self.values[d].is_some() && !self.still(d)
     }
 
     /// A displacement whose selection follows a rigid point.
@@ -379,7 +393,7 @@ impl Displacement {
                 if s == step && n == name)
                 && crate::Field::ROTATION.contains(&e.path.field)
         });
-        let still = rotations.iter().all(|&d| self.values[d] == Some(0.0));
+        let still = rotations.iter().all(|&d| self.still(d));
         if still && !exposed {
             return Formulation::Nodes;
         }
@@ -421,8 +435,8 @@ impl Displacement {
         region: &Region,
         excluded: &BTreeSet<NodeId>,
     ) -> Result<RemotePoint, String> {
-        let system = (model.coordinate_system_or_global(&self.system))
-            .ok_or_else(|| format!("Coordinate System {} does not exist", self.system))?;
+        let system = (model.coordinate_system_or_global(self.system))
+            .ok_or("The coordinate system does not exist")?;
         let position = match self.location {
             Some(local) => system.global(local)?,
             None => (region.centroid(mesh))

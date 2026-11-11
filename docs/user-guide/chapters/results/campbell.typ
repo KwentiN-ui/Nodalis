@@ -51,6 +51,10 @@ the sweep runs: the block goes on and shows its progress.
   [Frequency axis \[Hz\]], [Upper end of the frequency axis; 0 (default) fits the axis to
     the modes. A limit zooms in on the low frequencies, where the order lines of a stiff rotor
     run close to the speed axis. It can be changed at any time, also during the sweep.],
+  [Frame of reference], [#ui("Rotating") (default) shows the frequencies as the solver
+    computes them, in the frame turning with the rotor. #ui("Stationary") shows what an
+    observer at rest sees, see @campbell-frame. It is a view of the same sweep and can be
+    changed at any time.],
 )
 
 #ui("Start Sweep") sets the Complex Frequency step to every speed, runs the solver in
@@ -94,7 +98,8 @@ CalculiX finds at fewer than three neighbouring speeds, such as a spurious root 
 drawn as grey crosses named #ui("Unmatched roots") instead of tearing the curves; growing modes,
 whose eigenvalue has an imaginary part of weight, are drawn as red diamonds named
 #ui("Unstable"). A mode that whirls the same way at every speed carries its direction in the
-legend, F (forward) or B (backward) as CalculiX reports it.
+legend, F (forward) or B (backward) as the solver reports it, and its number of nodal
+diameters, such as ND 2, where the solver finds a clear one in the mode shape.
 
 The diagram can be moved and zoomed like the plots of egui: drag it to pan, scroll to zoom,
 drag along an axis to zoom only that axis, and double-click to fit the view to the curves again.
@@ -107,7 +112,10 @@ into the diagram; the speed of 30000 rpm is selected])
 
 Where a mode crosses an order line, the rotor is
 excited at one of its eigenfrequencies: these crossings are listed under #ui("Critical speeds")
-in the panel with the order, the mode, its whirl, the speed in rpm and the frequency.
+in the panel with the order, the mode, its whirl and nodal diameter, the speed in rpm and the
+frequency. For a disc, mind the frame of reference (@campbell-frame): the excitation by a
+load at rest is the crossing of a mode with the order line of its own number of nodal
+diameters, not with 1x.
 
 A click on a point of the diagram selects the computed speed nearest to it, a click on the speed
 of a critical speed selects that speed. A vertical line marks it in the diagram, and the points of
@@ -125,6 +133,39 @@ CalculiX found at that speed (unmatched and unstable, separated by spaces), and 
 every order line. Numbers use a decimal point and the cells are separated by commas.
 #ui("Export JSON ...") saves the same table as JSON (@table-json).
 
-#note[The solver computes the Coriolis modes in the rotating frame of reference. The frequencies of
-the diagram are therefore those an observer rotating with the shaft would see, and a pair of
-bending modes splits into a rising and a falling branch with the speed.]
+=== Rotating and stationary frame <campbell-frame>
+
+The solver computes the Coriolis modes in the frame of reference that turns with the rotor.
+The frequencies of the diagram are therefore those an observer rotating with the shaft would
+see: a pair of bending modes of a shaft splits into a rising and a falling branch with the
+speed, while the bending modes of a disc, such as a saw blade or a CD, hardly split at all,
+because the Coriolis forces do not act on a motion along the axis. A microphone, a sensor on
+the housing or a camera sees something else. A mode whose shape has $n$ nodal diameters about
+the axis (two for the saddle of a disc, one for the bending of a shaft, none for an umbrella
+mode) is in the stationary frame a pair of travelling waves: the forward wave at
+$f + n dot "speed"$, running with the rotation, and the backward wave at $|f - n dot "speed"|$,
+running against it. Where the backward wave comes to rest, at $f = n dot "speed"$, the rotor
+carries a standing wave that any load at rest excites, such as the air around a disc: the
+classic critical speed of a disc, which in the rotating frame is the crossing of the mode
+with the order line of its own $n$.
+
+The solver finds the number of nodal diameters of every complex mode from its shape, as the
+circumferential harmonic about the rotation axis that carries most of the mode, and writes
+it next to the whirl direction. A rotor that is not axisymmetric, or a mode spread over
+several harmonics, gets none; such a mode is named without ND and stays out of the
+stationary frame, which the line under the diagram says.
+
+#ui("Frame of reference") set to #ui("Stationary") draws every mode with a nodal diameter as
+its forward wave (solid) and, for $n > 0$, its backward wave (dashed) in the colour of the
+mode, and the critical speeds become the crossings of the waves with the order lines plus
+the speeds where a backward wave comes to rest, listed with the order #ui("standing").
+#ui("Selected speed") then shows both waves of every mode. The table and the exports keep
+the solver's frequencies with a column of the nodal diameters.
+
+#screenshot("campbell-stationary.png", [The diagram of a spinning disc in the stationary
+frame: the saddle mode (ND 2) as its forward wave rising steeply and its backward wave coming
+to rest at the critical speed, the umbrella mode (ND 0) unsplit])
+
+#note[The frequencies and whirl directions the solver reports, in the results of the analysis
+and in the rotating frame of the diagram, are those of the rotating frame of reference; only
+the diagram converts them.]

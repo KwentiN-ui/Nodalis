@@ -82,8 +82,13 @@ gmsh_api! {
         *mut *mut c_double, *mut usize,
         Ierr,
     );
+    get_normal = "gmshModelGetNormal":
+        fn(c_int, *const c_double, usize, *mut *mut c_double, *mut usize, Ierr);
+    occ_copy = "gmshModelOccCopy": fn(*const c_int, usize, *mut *mut c_int, *mut usize, Ierr);
     is_inside = "gmshModelIsInside": fn(c_int, c_int, *const c_double, usize, c_int, Ierr) -> c_int;
     set_visibility = "gmshModelSetVisibility": fn(*const c_int, usize, c_int, c_int, Ierr);
+    occ_translate = "gmshModelOccTranslate":
+        fn(*const c_int, usize, c_double, c_double, c_double, Ierr);
     occ_affine_transform = "gmshModelOccAffineTransform":
         fn(*const c_int, usize, *const c_double, usize, Ierr);
     occ_intersect = "gmshModelOccIntersect": fn(
@@ -136,6 +141,14 @@ gmsh_api! {
         c_int, c_int, c_int,
         Ierr,
     );
+    occ_fragment = "gmshModelOccFragment": fn(
+        *const c_int, usize,
+        *const c_int, usize,
+        *mut *mut c_int, *mut usize,
+        *mut *mut *mut c_int, *mut *mut usize, *mut usize,
+        c_int, c_int, c_int,
+        Ierr,
+    );
     occ_revolve = "gmshModelOccRevolve": fn(
         *const c_int, usize,
         c_double, c_double, c_double,
@@ -150,7 +163,16 @@ gmsh_api! {
     occ_import_shapes = "gmshModelOccImportShapes":
         fn(*const c_char, *mut *mut c_int, *mut usize, c_int, *const c_char, Ierr);
     occ_add_box = "gmshModelOccAddBox":
-        fn(c_double, c_double, c_double, c_double, c_double, c_double, c_int, Ierr);
+        fn(c_double, c_double, c_double, c_double, c_double, c_double, c_int, Ierr) -> c_int;
+    occ_add_sphere = "gmshModelOccAddSphere": fn(
+        c_double, c_double, c_double, c_double, c_int, c_double, c_double, c_double, Ierr,
+    ) -> c_int;
+    occ_add_disk = "gmshModelOccAddDisk": fn(
+        c_double, c_double, c_double, c_double, c_double, c_int,
+        *const c_double, usize,
+        *const c_double, usize,
+        Ierr,
+    ) -> c_int;
     occ_add_rectangle = "gmshModelOccAddRectangle":
         fn(c_double, c_double, c_double, c_double, c_double, c_int, c_double, Ierr) -> c_int;
     occ_add_point = "gmshModelOccAddPoint":
@@ -164,6 +186,8 @@ gmsh_api! {
     field_set_numbers = "gmshModelMeshFieldSetNumbers":
         fn(c_int, *const c_char, *const c_double, usize, Ierr);
     field_set_as_background = "gmshModelMeshFieldSetAsBackgroundMesh": fn(c_int, Ierr);
+    field_remove = "gmshModelMeshFieldRemove": fn(c_int, Ierr);
+    mesh_clear = "gmshModelMeshClear": fn(*const c_int, usize, Ierr);
     mesh_generate = "gmshModelMeshGenerate": fn(c_int, Ierr);
     mesh_set_order = "gmshModelMeshSetOrder": fn(c_int, Ierr);
     mesh_import_stl = "gmshModelMeshImportStl": fn(Ierr);

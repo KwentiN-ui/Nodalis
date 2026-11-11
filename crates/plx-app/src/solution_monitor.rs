@@ -23,7 +23,7 @@ use crate::status::CellState;
 enum Stage {
     /// Building the model on a worker thread, and finding the default equation solver.
     Loading(Receiver<Loaded>),
-    Meshing(MeshingJob),
+    Meshing(Box<MeshingJob>),
     Running,
     /// Keeping the results in the project; compressing them takes a while.
     Keeping(Receiver<Result<BoundResults, String>>),
@@ -214,6 +214,16 @@ impl BackgroundSolve {
         self.before.len() + solver + self.after.len()
     }
 
+    /// Where the time of the solver went, once it has finished with results.
+    pub fn profile(&self) -> Option<plx_solve::JobProfile> {
+        self.analysis.as_ref()?.profile()
+    }
+
+    /// The steps solved, a line each, for the solver report.
+    pub fn step_lines(&self) -> &[String] {
+        self.analysis.as_ref().map_or(&[], Analysis::step_lines)
+    }
+
     /// The lines dropped from the front of the solver's output in a long run.
     pub fn dropped(&self) -> usize {
         self.analysis
@@ -374,7 +384,7 @@ impl BackgroundSolve {
                 None => geometry.source.clone(),
             };
             self.before.push(format!("Meshing {what} …"));
-            self.stage = Stage::Meshing(MeshingJob::start(geometry, parts, ctx));
+            self.stage = Stage::Meshing(Box::new(MeshingJob::start(geometry, parts, ctx)));
             return;
         }
         if !status.needs_solve() && !self.force {
@@ -392,13 +402,13 @@ impl BackgroundSolve {
         };
         // Solve Again computes every step, also those that did not change.
         if self.force {
-            crate::analysis::forget_steps(&self.work_dir, &self.name);
+            crate::analysis::forget_steps(&self.work_dir, &crate::analysis::job_dir(self.id));
         }
         let started = Analysis::start(
             &self.solver,
             model,
             false,
-            &self.name,
+            &crate::analysis::job_dir(self.id),
             &self.work_dir,
             &self.continuation,
         );

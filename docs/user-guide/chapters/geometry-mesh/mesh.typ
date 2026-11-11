@@ -30,10 +30,11 @@ Solution Monitor and #ui("Stop") in the Project workspace cancel a meshing in th
   stroke: (x, y) => if y == 0 { (bottom: 0.7pt) } else { (bottom: 0.3pt + luma(200)) },
   inset: (x: 5pt, y: 4pt),
   table.header([*Part*], [*Elements*]),
-  [Solid (3D models)], [Tetrahedra `C3D4` (linear) or `C3D10` (quadratic)],
-  [Face (3D models)], [Shells: triangles `S3`, `S6` or quad-dominated with `S4`, `S8`; the
-    thickness comes from a shell section (@shell-section)],
-  [Face (2D models)], [Triangles, or quad-dominated with quadrilaterals; written as `CPS`,
+  [Solid (3D models)], [Hexahedra `C3D8` (linear) or `C3D20` (quadratic) where the solid can be
+    swept (@stacked-sweep); otherwise tetrahedra `C3D4` or `C3D10`],
+  [Face (3D models)], [Shells: quadrilaterals `S4`, `S8`, or triangles `S3`, `S6` if the
+    quadrilaterals are switched off; the thickness comes from a shell section (@shell-section)],
+  [Face (2D models)], [Quadrilaterals, or triangles if they are switched off; written as `CPS`,
     `CPE` or `CAX` elements depending on the model space],
   [Line (3D models)], [`B31` or `B32` lines; the section decides whether they are written as
     beams or trusses (@sections)],
@@ -81,8 +82,8 @@ where the problem is. The marking disappears with the next meshing.
 == Mesh setup <mesh-setup>
 
 The mesh is controlled by the #ui("Mesh Setup") items in the Geometry workspace. Create them
-with #ui("Local Mesh Size"), #ui("Extrude Mesh") or #ui("Tetra. Gmsh") on the #ui("Geometry")
-tab of the ribbon.
+with #ui("Local Mesh Size"), #ui("Extrude Mesh"), #ui("Thicken Shell") or #ui("Tetra. Gmsh") on
+the #ui("Geometry") tab of the ribbon.
 
 === Default mesh parameters
 
@@ -101,17 +102,38 @@ values and meshes at once.
   [Midside nodes on geometry], [Places midside nodes on the curved geometry instead of on the
     straight edge between the corner nodes (only with second order).],
   [Optimize mesh (Netgen)], [Improves the element quality after meshing (default on).],
-  [Quad-dominated surface mesh], [Creates mainly quadrilaterals on faces: plane elements of 2D
-    models and shells of 3D models. Solids are not affected: their tetrahedra need triangles on
-    the faces. The option is greyed out when the parameters reach only solids.],
-  [Hexahedra where possible], [Meshes every solid that is a straight extrusion of one of its
-    faces, as an Extrude Mesh item with its defaults would (@extrude-mesh), or a body of
-    revolution with hexahedra (@revolve-mesh); the other solids keep tetrahedra (default
-    off).],
+  [Quadrilaterals on faces], [Meshes faces with quadrilaterals (default on): plane elements of
+    2D models and shells of 3D models; off gives triangles. Solids are not affected: their
+    tetrahedra need triangles on the faces. The option is greyed out when the parameters reach
+    only solids. See @quad-faces.],
+  [Hexahedra where possible], [Meshes every solid that can be swept with hexahedra (default
+    on): a stack of extrusions along one direction (@stacked-sweep), a straight extrusion of
+    one of its faces (@extrude-mesh) or a body of revolution (@revolve-mesh). The other solids
+    get tetrahedra, with a warning that says why; off gives tetrahedra everywhere.],
 )
 
-#screenshot("quad-dominated-solids.png", [Quad-dominated surface mesh greyed out for a geometry of
+#screenshot("quad-dominated-solids.png", [Quadrilaterals on faces greyed out for a geometry of
   solids only])
+
+=== Quadrilaterals on faces <quad-faces>
+
+Faces are meshed with Gmsh's quasi-structured algorithm. It lays the quadrilaterals in a grid
+that follows the outline and the holes, so that nearly every inner node joins four elements,
+and it leaves no triangles. The element sizes are those of the meshing parameters and the
+local mesh sizes; next to a rounded outline the grid may come out finer than asked for.
+
+#screenshot("quad-faces.png", [A flange meshed with the quasi-structured algorithm])
+
+Nodalis falls back to the Frontal-Delaunay algorithm, whose triangles are joined to
+quadrilaterals, and says so in the output pane:
+
+- if a face would get more than about 20 000 quadrilaterals, where the quasi-structured
+  algorithm takes minutes;
+- if the quasi-structured algorithm fails or leaves a badly distorted quadrilateral and the
+  other algorithm does better.
+
+A #ui("Tetrahedral Gmsh") item that names the part chooses the algorithm instead: its
+triangles are then joined to quadrilaterals, which is faster and less regular.
 
 === Mesh setup items
 
@@ -128,9 +150,13 @@ values and meshes at once.
   cylinder. A box takes the faces inside it. The default size is a quarter of the maximum
   element size.
 / Tetrahedral Gmsh: chooses the Gmsh algorithms for selected parts. #ui("Surface algorithm"):
-  Frontal-Delaunay (default), Delaunay, MeshAdapt or Automatic. #ui("Volume algorithm"):
+  Frontal-Delaunay (default), Delaunay, MeshAdapt or Automatic; on shells and 2D models it
+  replaces the quasi-structured algorithm (@quad-faces). #ui("Volume algorithm"):
   Delaunay (default), Frontal or HXT.
-/ Extrude Mesh: hexahedra and wedges for parts that are extrusions of a face (@extrude-mesh).
+/ Extrude Mesh: hexahedra and wedges for parts that are extrusions of a face or stacks of
+  extrusions (@extrude-mesh), with the layers and the surface algorithm of your choice.
+/ Thicken Shell Mesh: solid elements for shell parts, the face mesh offset through a thickness
+  (@thicken-shell-mesh).
 
 #screenshot("mesh-parameters-item.png", [The #ui("Mesh Parameters") tile in the Geometry ribbon and the
   dialog that creates a Meshing Parameters item for picked parts])
@@ -153,21 +179,27 @@ order), every triangle a wedge (`C3D6`, `C3D15`). The size of the face mesh come
 meshing parameters and local mesh sizes, as for tetrahedra.
 
 #fields(
-  [Source faces], [#ui("Automatic") finds a face of each selected part that the part is an
-    extrusion of. #ui("Selected faces") uses the faces you click at one end of the parts; the
+  [Source faces], [#ui("Automatic") finds how each selected part is swept: as a stack of
+    extrusions (@stacked-sweep) or, failing that, as the extrusion of one of its faces.
+    #ui("Selected faces") uses the faces you click at one end of the parts; the
     dialog shows which parts they belong to. A source may consist of several faces; the
     #ui("Surface angle") mode of the selection window takes the faces that continue the
     clicked one with one click.],
-  [Surface algorithm], [The Gmsh algorithm for the source face. #ui("Frontal-Delaunay for
-    quads") (default) gives triangles that join well to quadrilaterals.],
-  [Recombine algorithm], [How triangles are joined to quadrilaterals: #ui("Blossom") (default)
+  [Surface algorithm], [The Gmsh algorithm for the source face. #ui("Quasi-structured quad")
+    (default) gives a regular grid of quadrilaterals only (@quad-faces), so the part gets
+    hexahedra only. #ui("Frontal-Delaunay for quads") gives triangles that join well to
+    quadrilaterals and is faster on very fine faces.],
+  [Recombine algorithm], [Greyed out for #ui("Quasi-structured quad"), which joins no
+    triangles. How the other algorithms' triangles are joined to quadrilaterals: #ui("Blossom") (default)
     or #ui("Simple") leave a few triangles, which become wedges. #ui("Simple full-quad") and
     #ui("Blossom full-quad") give quadrilaterals only, so the part gets hexahedra only; they
     split the mesh once more, which halves the element size. #ui("None") keeps the triangles.],
   [Layers defined by], [The element size in the extrude direction. #ui("Scale factor"): layers
     as thick as the part's max. element size times the factor. #ui("Number of elements"): this
     many layers of the same thickness. #ui("Multi-layered"): relative layer sizes such as
-    `0.2; 0.6; 0.2;` and the elements per layer such as `2; 4; 2;`.],
+    `0.2; 0.6; 0.2;` and the elements per layer such as `2; 4; 2;`. In a stack of extrusions
+    the layers are counted over the whole height; every step gets a layer boundary and at
+    least one layer.],
 )
 
 #screenshot("extrude-mesh.png", [Extrude Mesh item with the top face of a plate as source,
@@ -182,8 +214,78 @@ example to `C3D8I`, which bends without the locking of `C3D8`. A later #ui("Tetr
 item for the same part meshes it with tetrahedra again.
 
 Without an item, #ui("Hexahedra where possible") in the meshing parameters runs the same
-automatic search for every part they cover. A part where no source face is found is meshed with
-tetrahedra without an error; a #ui("Tetrahedral Gmsh") item naming a part keeps it tetrahedral.
+automatic search for every part they cover. A part that cannot be swept is meshed with
+tetrahedra, and a warning names what stands against the sweep; a #ui("Tetrahedral Gmsh") item
+naming a part keeps it tetrahedral without a warning.
+
+=== Stacks of extrusions <stacked-sweep>
+
+Most machined parts are no extrusion of one face, but several extrusions along one direction on
+top of each other: a stepped shaft, a plate with a boss, a pocket or counterbored holes, a
+flange with a hub. nodalis recognises them by their faces: every face is either planar and
+normal to one common direction, an end or a step, or runs along that direction, such as the
+wall of a hole or the outside of a boss. Such a part is meshed with hexahedra only, without
+any input (@fig-stacked-sweep):
+
++ All ends and steps are laid over each other in one plane and cut at each other, into cells:
+  under a counterbored hole, for example, a disk for the hole and a ring for the counterbore.
++ The cells are meshed together with quadrilaterals, with the surface algorithm of the
+  Extrude Mesh item or the quasi-structured algorithm (@quad-faces).
++ Each cell's mesh is swept through the heights where the part has material above the cell.
+  Every step is a layer boundary, so the hexahedra of neighbouring cells share their nodes.
+
+#figure(
+  image("../../images/stacked-sweep.png", width: 80%),
+  caption: [A plate with a boss, a bore and four counterbored holes, meshed with hexahedra by
+    the default parameters.],
+) <fig-stacked-sweep>
+
+The layers between two steps are as thick as the max. element size at most, or as an Extrude
+Mesh item with automatic source faces sets them. A Local Mesh Size on an end or a step refines
+the cells below it, on a wall or an edge the quadrilaterals along it and the layers through
+its height. Faces, edges and vertices of the geometry stay selectable on the mesh.
+
+A part is no stack as soon as one face is neither an end nor a wall: a chamfer, a fillet
+between a step and a wall, a hole across the direction or a conical seat. Such parts are tried
+as a plain extrusion and as a body of revolution and get tetrahedra otherwise. Splitting the
+geometry (@split-by-plane) so that the feature lies in a part of its own keeps hexahedra in
+the rest.
+
+=== Thicken shell mesh <thicken-shell-mesh>
+
+A thin part drawn as faces, such as a sheet metal bracket, is meshed with shell elements. When
+the model needs solid elements instead, for example for contact on both sides of the sheet or
+for a material that shells do not take, the #ui("Thicken Shell Mesh") item turns the shell into
+a solid. Create it with #ui("Thicken Shell") in the #ui("Mesh Setup") group and click the shell
+parts. The faces are meshed as usual, after the part's meshing parameters and local mesh sizes,
+and the face mesh is then offset along its normals in layers: every quadrilateral becomes a
+hexahedron (`C3D8`, or `C3D20` with second order), every triangle a wedge (`C3D6`, `C3D15`).
+#ui("Quad-dominated surface mesh") in the meshing parameters gives mostly hexahedra.
+
+#fields(
+  [Parts], [The shell parts to thicken. #ui("OK") refuses solids and lines.],
+  [Thickness], [The thickness of the solid (default a tenth of the max. element size).],
+  [Number of layers], [Layers of elements through the thickness (default 2). Linear elements
+    need several layers to bend correctly.],
+  [Offset], [Where the solid lies relative to the shell's faces, along the face normals: 0
+    (default) centres it on the faces, half the thickness puts the faces on one side of the
+    solid, minus half the thickness on the other.],
+)
+
+#screenshot("thicken-shell-mesh.png", [A bent sheet with a hole thickened to 2 mm in three
+  layers of hexahedra])
+
+All faces of a part are turned to one side first, so that the solid is one piece. Where faces
+meet at an angle, as at a bend or a kink, the nodes move so that the solid keeps its thickness
+on both faces. A thickness so large that the elements fold over, at a sharp inner corner or a
+tight curvature, is refused with a message giving the place. Faces where more than two faces
+meet at one edge cannot be thickened.
+
+Selections made on the geometry stay valid: a face of the shell takes the side of the solid
+nearest to the shell's faces, at offset 0 the side its normals point to; an edge or a vertex
+takes all nodes through the thickness, so that a support on an edge holds the whole side of the
+solid. After meshing, the part is a solid: give it a solid section (@sections) instead of a
+shell section.
 
 === Bodies of revolution <revolve-mesh>
 

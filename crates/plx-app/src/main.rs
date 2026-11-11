@@ -1,6 +1,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod amplitude_dialog;
+#[cfg(test)]
+mod test_ids {
+    /// The id of the test items called `name`, the same for all of them: a test refers to
+    /// an item by its name, also before the item is made.
+    pub fn named(name: &str) -> plx_model::Id {
+        use std::collections::HashMap;
+        use std::sync::{LazyLock, Mutex};
+        static IDS: LazyLock<Mutex<HashMap<String, plx_model::Id>>> =
+            LazyLock::new(Default::default);
+        *(IDS.lock().unwrap().entry(name.into())).or_default()
+    }
+}
 mod analysis;
 mod animation;
 mod animation_export;
@@ -15,12 +27,14 @@ mod color_scale_dialog;
 mod command;
 mod connections;
 mod constraint_dialog;
+mod contact_matrix;
 mod contacts;
 mod crash_log;
 mod cross_section;
 mod dialog;
 mod distribution_dialog;
 mod dock;
+mod excitation_rows;
 mod exploded;
 mod expose;
 mod features;
@@ -53,13 +67,16 @@ mod numeric;
 mod output_news;
 mod overlay;
 mod parameter_set;
+mod part_filter_ui;
 mod path_plot;
+mod pick_item;
 mod portable;
 mod project;
 mod properties;
 mod query;
 mod results;
 mod ribbon;
+mod save_status;
 mod screenshot;
 mod section;
 mod selection;
@@ -69,8 +86,10 @@ mod sketch;
 mod solution_monitor;
 mod solve_fingerprint;
 mod solver_check;
+mod solver_profile;
 mod sound;
 mod status;
+mod step_overview;
 mod study;
 mod style;
 mod symbols;
@@ -83,6 +102,7 @@ mod tree_icons;
 mod tree_rows;
 mod undo;
 mod update;
+mod value_table;
 mod viewport;
 mod virtual_table;
 mod vtk_export_dialog;

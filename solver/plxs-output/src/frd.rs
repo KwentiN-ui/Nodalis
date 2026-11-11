@@ -56,18 +56,54 @@ pub fn frd_element(kind: ElementType) -> Option<(u8, &'static [usize])> {
 
 /// The dense indices of the nodes CalculiX writes, ascending by id: those of elements
 /// (springs and gaps included, although their elements are not written). Nodes no element
-/// uses, such as reference and rotation nodes of rigid bodies, are left out.
+/// uses, such as reference and rotation nodes of rigid bodies, are left out; so are nodes
+/// with nothing but springs to ground (`SPRING1`, which the file has no element for) and the
+/// rotation nodes of rigid bodies, whose displacements are rotations, also when springs
+/// hold them.
 pub fn written_nodes(model: &Model) -> Vec<usize> {
+    let used = node_mask(model);
+    let mut order: Vec<usize> = (0..model.nodes.len()).filter(|&i| used[i]).collect();
+    order.sort_by_key(|&i| model.nodes.ids[i]);
+    order
+}
+
+/// Which nodes [`written_nodes`] writes, by dense index.
+fn node_mask(model: &Model) -> Vec<bool> {
     let mut used = vec![false; model.nodes.len()];
-    for element in &model.elements {
+    for element in model
+        .elements
+        .iter()
+        .filter(|e| e.kind != ElementType::SPRING1)
+    {
         for &id in &element.nodes {
             if let Some(i) = model.nodes.index(id) {
                 used[i as usize] = true;
             }
         }
     }
-    let mut order: Vec<usize> = (0..model.nodes.len()).filter(|&i| used[i]).collect();
-    order.sort_by_key(|&i| model.nodes.ids[i]);
+    for body in &model.constraints.rigid_bodies {
+        if body.rotation_node != body.reference_node
+            && let Some(i) = model.nodes.index(body.rotation_node)
+        {
+            used[i as usize] = false;
+        }
+    }
+    used
+}
+
+/// The indices of the elements the file holds, ascending by id: those of a type it has,
+/// without springs to a node it leaves out (a spring between rotation nodes).
+pub fn written_elements(model: &Model) -> Vec<usize> {
+    let used = node_mask(model);
+    let mut order: Vec<usize> = (0..model.elements.len())
+        .filter(|&i| {
+            let element = &model.elements[i];
+            frd_element(element.kind).is_some()
+                && (element.nodes.iter())
+                    .all(|&id| model.nodes.index(id).is_some_and(|n| used[n as usize]))
+        })
+        .collect();
+    order.sort_by_key(|&i| model.elements[i].id);
     order
 }
 
@@ -219,8 +255,6 @@ pub fn write_frd_to_as(
     }
 
     // Elements, ascending by id, with the material number of their section.
-    let mut element_order: Vec<usize> = (0..model.elements.len()).collect();
-    element_order.sort_by_key(|&i| model.elements[i].id);
     let material_number = |element: &plxs_core::Element| -> usize {
         element
             .section
@@ -229,11 +263,7 @@ pub fn write_frd_to_as(
             .and_then(|name| model.materials.iter().position(|m| m.name == name))
             .map_or(1, |i| i + 1)
     };
-    let written: Vec<usize> = element_order
-        .iter()
-        .copied()
-        .filter(|&i| frd_element(model.elements[i].kind).is_some())
-        .collect();
+    let written = written_elements(model);
     writeln!(
         out,
         "    3C{:>30}{:>38}",
@@ -441,7 +471,9 @@ fn write_block(
     )?;
     let components = field.components.len();
     let (declared, trailer) = match field.name.as_str() {
-        "DISP" | "FORC" | "VELO" | "FLUX" | "NORM" | "DISPI" | "FORCI" => (components + 1, true),
+        "DISP" | "FORC" | "VELO" | "ACCE" | "FLUX" | "NORM" | "DISPI" | "FORCI" => {
+            (components + 1, true)
+        }
         _ => (components, false),
     };
     writeln!(out, " -4  {:<8}{:>5}{:>5}", field.name, declared, 1)?;

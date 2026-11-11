@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use plxs_core::constraints::{Equation, EquationTerm};
 use plxs_core::mesh::{ElementRef, NodeId, NodeRef};
 use plxs_core::section::SectionKind;
-use plxs_core::step::{Boundary, ConcentratedLoad, DistributedLoadKind};
+use plxs_core::step::{Boundary, ConcentratedLoad, DistributedLoadKind, Follower};
 use plxs_core::{Analysis, ElementFamily, ElementType, Error, Model, Result};
 
 pub use beam::section_rule;
@@ -324,6 +324,7 @@ impl Expander {
         let original = self.analysis.model.clone();
         self.replace_elements()?;
         self.drop_unused_nodes();
+        self.initial_motion();
         self.u1_nodes()?;
         self.transforms()?;
         let knot_nodes = self.knot_nodes();
@@ -331,6 +332,22 @@ impl Expander {
         self.remap_steps(&original)?;
         let mut model = std::mem::take(&mut self.analysis.model);
         model.constraints.equations.append(&mut self.equations);
+        model.expanded_structure = !self.structural.is_empty();
+        model.shell_fibres = self
+            .groups
+            .values()
+            .flatten()
+            .filter(|g| g.kind == Kind::Shell)
+            .map(|g| {
+                g.nodes
+                    .iter()
+                    .zip(&g.used)
+                    .filter(|(_, u)| **u)
+                    .map(|(n, _)| *n)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|f| f.len() >= 2)
+            .collect();
         let groups: BTreeMap<NodeId, Vec<Vec<NodeId>>> = self
             .groups
             .iter()
@@ -572,6 +589,71 @@ impl Expander {
             }
         }
         model.nodes = nodes;
+    }
+
+    /// `*INITIAL CONDITIONS, TYPE=VELOCITY / DISPLACEMENT` on a structural node move its
+    /// whole section: the original node depends on its expansion through the constraints,
+    /// so the values go to the expanded nodes, translations as they are and rotations
+    /// (DOFs 4 to 6) as the rigid motion `ω × r` of the section about the node.
+    fn initial_motion(&mut self) {
+        let model = &mut self.analysis.model;
+        let moved = |entries: &[(NodeRef, u8, f64)], model: &plxs_core::model::Model| {
+            let mut added: Vec<(NodeRef, u8, f64)> = Vec::new();
+            for (region, dof, value) in entries {
+                for node in model.nodes_of(region) {
+                    let Some(groups) = self.groups.get(&node) else {
+                        continue;
+                    };
+                    let Some(x0) = model.nodes.coordinates(node) else {
+                        continue;
+                    };
+                    for group in groups {
+                        for (&id, _) in group.nodes.iter().zip(&group.used).filter(|(_, u)| **u) {
+                            match dof {
+                                1..=3 => added.push((NodeRef::Node(id), *dof, *value)),
+                                4..=6 => {
+                                    let Some(x) = model.nodes.coordinates(id) else {
+                                        continue;
+                                    };
+                                    let r = [x[0] - x0[0], x[1] - x0[1], x[2] - x0[2]];
+                                    let mut w = [0.0; 3];
+                                    w[*dof as usize - 4] = *value;
+                                    let v = [
+                                        w[1] * r[2] - w[2] * r[1],
+                                        w[2] * r[0] - w[0] * r[2],
+                                        w[0] * r[1] - w[1] * r[0],
+                                    ];
+                                    for (k, c) in v.iter().enumerate() {
+                                        if *c != 0.0 {
+                                            added.push((NodeRef::Node(id), k as u8 + 1, *c));
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            added
+        };
+        let velocities = moved(&model.initial.velocities, model);
+        let displacements = moved(&model.initial.displacements, model);
+        // Rotations add up per node and component (several DOFs 4 to 6 on one node).
+        let merge = |into: &mut Vec<(NodeRef, u8, f64)>, added: Vec<(NodeRef, u8, f64)>| {
+            let mut sums: BTreeMap<(NodeId, u8), f64> = BTreeMap::new();
+            for (region, dof, value) in added {
+                if let NodeRef::Node(id) = region {
+                    *sums.entry((id, dof)).or_default() += value;
+                }
+            }
+            into.extend(
+                sums.into_iter()
+                    .map(|((id, dof), v)| (NodeRef::Node(id), dof, v)),
+            );
+        };
+        merge(&mut model.initial.velocities, velocities);
+        merge(&mut model.initial.displacements, displacements);
     }
 
     /// U1 beams keep their nodes; the rotations of every U1 node live on a helper node,
@@ -1146,6 +1228,21 @@ impl Expander {
                 }
             }
             step.boundaries = boundaries;
+            // Every node of a follower load names the same nodes: they are mapped once.
+            let mut followers: Vec<(NodeRef, Follower)> = Vec::new();
+            for load in &mut loads {
+                if let Some(Follower::Nodes(nodes)) = &load.follower {
+                    let mapped = match followers.iter().find(|(n, _)| n == nodes) {
+                        Some((_, f)) => f.clone(),
+                        None => {
+                            let f = self.follower(original, nodes);
+                            followers.push((nodes.clone(), f.clone()));
+                            f
+                        }
+                    };
+                    load.follower = Some(mapped);
+                }
+            }
             step.loads.concentrated = loads;
             for load in &mut step.loads.distributed {
                 self.remap_pressure(original, &mut load.region, &mut load.kind)?;
@@ -1208,6 +1305,47 @@ impl Expander {
             return None;
         }
         self.mean_rotation(node, (d - 4) as usize).map(|h| (h, 1))
+    }
+
+    /// What a follower load on nodes of the original model turns with in the expanded one:
+    /// a single node with a knot or with U1 rotations with its rotation node, nodes of
+    /// beams and shells with the nodes they expand to.
+    fn follower(&mut self, original: &Model, nodes: &NodeRef) -> Follower {
+        let ids = original.nodes_of(nodes);
+        if let [single] = ids[..] {
+            if let Some(&helper) = self.u1_rotations.get(&single) {
+                return Follower::Rotation(helper);
+            }
+            if let Some(&(rotation, _)) = self.knots.get(&single) {
+                return Follower::Rotation(rotation);
+            }
+        }
+        if !ids.iter().any(|n| self.groups.contains_key(n)) {
+            return Follower::Nodes(nodes.clone());
+        }
+        let mut expanded = Vec::new();
+        // An expanded node stays in the model without motion of its own (its results come
+        // from the nodes it expands to): only those take part.
+        for id in ids {
+            match self.groups.get(&id) {
+                Some(groups) => {
+                    for group in groups {
+                        let used = group.nodes.iter().zip(&group.used).filter(|(_, u)| **u);
+                        expanded.extend(used.map(|(&n, _)| n));
+                    }
+                }
+                None => expanded.push(id),
+            }
+        }
+        expanded.sort_unstable();
+        expanded.dedup();
+        let sets = &mut self.analysis.model.sets.node_sets;
+        let name = (1..)
+            .map(|k| format!("PLXS-FOLLOWER-{k}"))
+            .find(|name| !sets.contains_key(name))
+            .unwrap_or_default();
+        sets.insert(name.clone(), expanded);
+        Follower::Nodes(NodeRef::Set(name))
     }
 
     fn remap_pressure(

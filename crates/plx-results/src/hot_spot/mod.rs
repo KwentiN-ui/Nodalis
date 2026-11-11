@@ -655,6 +655,7 @@ mod tests {
             }
         }
         mesh.parts.push(Part {
+            bodies: Vec::new(),
             name: "PLATE".into(),
             elements,
         });
@@ -677,6 +678,7 @@ mod tests {
                     _ => column(&|_| 0.0),
                 },
                 derived: false,
+                out_of_plane: false,
             })
             .collect();
         Increment {

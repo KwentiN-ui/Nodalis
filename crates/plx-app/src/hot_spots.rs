@@ -140,6 +140,9 @@ pub struct HotSpotPlot {
     pub marks: Marks,
     /// Start and end of the plotted stretch of the path, in model coordinates.
     pub ends: [[f64; 3]; 2],
+    /// Interpolation weights of nodal positions of the points of `distances`, to draw the
+    /// path where the shown mesh has it, deformed.
+    pub weights: Vec<Vec<(usize, f64)>>,
     pub warnings: Vec<String>,
 }
 
@@ -280,6 +283,7 @@ impl Located {
                 hot_spot: value.hot_spot,
             },
             ends,
+            weights: curve.iter().map(|p| p.weights.clone()).collect(),
             warnings: self.warnings.clone(),
         })
     }
@@ -353,6 +357,26 @@ mod tests {
     }
 
     #[test]
+    fn thickness_is_in_the_units_of_the_results() {
+        // Results of a millimetre model: t = 500 mm gives read-out points at 200 and 500
+        // (mesh units), not at 0.2 and 0.5 as if t were taken as SI metres. The dialog's
+        // thickness field must therefore convert from the results' units, not from SI.
+        let results = load(&testdata("kragbalken_c3d20r.frd"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
+        assert_eq!(units(&results), UnitSystem::MmTonSC);
+        assert_eq!(results.stored_units(), units(&results));
+        let hot_spot = HotSpot {
+            thickness: 500.0,
+            ..HotSpot::new("t")
+        };
+        assert_eq!(
+            hot_spot.in_units(units(&results)).distances(),
+            [200.0, 500.0]
+        );
+    }
+
+    #[test]
     fn plot_shows_the_edge_node_with_the_highest_stress() {
         // The cantilever of the test above: an edge across the top at x = 40 to 60 picks the
         // node nearest to the support, x = 40, where the bending stress is highest.
@@ -394,6 +418,36 @@ mod tests {
         // Without toe nodes there is nothing to plot.
         let empty = HotSpot::new("Hot_Spot-2");
         assert!(located.plot(&results, &empty).is_err());
+    }
+
+    #[test]
+    fn plot_on_the_path_follows_the_deformed_mesh() {
+        // The path is drawn on the shown, deformed mesh, so the plot standing on it must start
+        // at the deformed toe and end on the deformed path, not at the undeformed positions.
+        let mut results = load(&testdata("kragbalken_c3d20r.frd"), UnitSystem::Unitless)
+            .unwrap()
+            .model;
+        results.results.as_mut().unwrap().user_scale = 50.0;
+        let toe = [40.0, 50.0, 60.0].map(|x| node_at(&results, [x, 5.0, 10.0]));
+        let hot_spot = HotSpot {
+            toe: Region::Nodes(toe.to_vec()),
+            direction: [1.0, 0.0, 0.0],
+            thickness: 10.0,
+            ..HotSpot::new("Hot_Spot-1")
+        };
+        let mut plot = crate::path_plot::PathPlot::hot_spot("Hot_Spot-1".into());
+        let shown = plot.hot_spot_box(0, &results, &hot_spot).unwrap();
+        let toe_index = results.mesh.node_index(toe[0]).unwrap();
+        let drawn = results.node_position(toe_index).unwrap();
+        let undeformed = results.to_render([40.0, 5.0, 10.0]);
+        assert!(
+            (drawn - undeformed).length() > 1e-3,
+            "no deformation to test"
+        );
+        assert!((shown.ends[0] - drawn).length() < 1e-4, "{:?}", shown.ends);
+        assert_eq!(shown.track.len(), shown.distances.len());
+        assert_eq!(shown.track.first(), Some(&shown.ends[0]));
+        assert_eq!(shown.track.last(), Some(&shown.ends[1]));
     }
 
     #[test]

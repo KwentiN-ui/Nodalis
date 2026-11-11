@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use egui::{RichText, Ui};
 use glam::{DVec3, Vec3};
 use plx_mesh::NodeId;
+use plx_model::ModelSpace;
 use plx_results::transformation::{SymmetryPlane, Transformation, TransformationKind};
 
 use crate::icons::{self, Icon};
@@ -24,11 +25,55 @@ enum Available {
 }
 
 impl Available {
-    fn create(self) -> Transformation {
-        match self {
+    fn create(self, space: ModelSpace) -> Transformation {
+        let mut transformation = match self {
             Available::Symmetry(plane) => Transformation::symmetry(plane),
             Available::Linear => Transformation::linear_pattern(),
             Available::Circular => Transformation::circular_pattern(),
+        };
+        normalize(&mut transformation.kind, space);
+        transformation
+    }
+}
+
+/// Whether the model lies in the x-y plane, so that nothing may leave it.
+fn flat(space: ModelSpace) -> bool {
+    matches!(space, ModelSpace::PlaneStress | ModelSpace::PlaneStrain)
+}
+
+/// The planes a symmetry may use: the planes normal to the axes of the model's plane.
+fn planes(space: ModelSpace) -> &'static [SymmetryPlane] {
+    if space.is_2d() {
+        &SymmetryPlane::ALL[..2]
+    } else {
+        &SymmetryPlane::ALL
+    }
+}
+
+/// Keeps a transformation of a 2D model in its plane: all points at z = 0 and, for a plane
+/// model, a circular pattern about the z axis through its one centre point. (A body of
+/// revolution keeps its axis about y: the pattern then makes a 3D body of it.)
+fn normalize(kind: &mut TransformationKind, space: ModelSpace) {
+    if !space.is_2d() {
+        return;
+    }
+    match kind {
+        TransformationKind::Symmetry { point, .. } => point[2] = 0.0,
+        TransformationKind::LinearPattern { start, end, .. } => {
+            start[2] = 0.0;
+            end[2] = 0.0;
+        }
+        TransformationKind::CircularPattern {
+            axis_start,
+            axis_end,
+            ..
+        } => {
+            axis_start[2] = 0.0;
+            if flat(space) {
+                *axis_end = [axis_start[0], axis_start[1], 1.0];
+            } else {
+                axis_end[2] = 0.0;
+            }
         }
     }
 }
@@ -61,6 +106,8 @@ pub enum TransformationAction {
 }
 
 pub struct TransformationDialog {
+    /// Model space of the results: a 2D model offers only what stays meaningful in 2D.
+    space: ModelSpace,
     /// The results file the dialog edits the transformations of.
     pub result: usize,
     active: Vec<Transformation>,
@@ -86,13 +133,19 @@ pub struct TransformationDialog {
 }
 
 impl TransformationDialog {
-    pub fn new(result: usize, current: &[Transformation], model: &Model) -> Self {
+    pub fn new(
+        result: usize,
+        current: &[Transformation],
+        model: &Model,
+        space: ModelSpace,
+    ) -> Self {
         let (min, max) = model
             .mesh
             .bounds()
             .map_or((DVec3::ZERO, DVec3::ONE), |(a, b)| (a.into(), b.into()));
         let size = ((max - min).length() * 0.5).max(1e-9);
         Self {
+            space,
             result,
             active: current.to_vec(),
             selected: (!current.is_empty()).then_some(0),
@@ -233,6 +286,7 @@ impl TransformationDialog {
             return;
         };
         *point_mut(&mut transformation.kind, slot) = picked;
+        normalize(&mut transformation.kind, self.space);
         self.marked = nodes;
         self.picking = None;
         self.changed = true;
@@ -351,6 +405,7 @@ impl TransformationDialog {
     fn lists(&mut self, ui: &mut Ui) {
         let height = 130.0;
         let mut add = false;
+        let space = self.space;
         ui.vertical(|ui| {
             ui.label("Available");
             frame().show(ui, |ui| {
@@ -359,7 +414,7 @@ impl TransformationDialog {
                 let branches = [
                     (
                         "Symmetry",
-                        SymmetryPlane::ALL
+                        planes(space)
                             .iter()
                             .map(|&p| (Available::Symmetry(p), p.label()))
                             .collect::<Vec<_>>(),
@@ -408,7 +463,7 @@ impl TransformationDialog {
             }
         });
         if add && let Some(entry) = self.available {
-            self.active.push(entry.create());
+            self.active.push(entry.create(self.space));
             self.selected = Some(self.active.len() - 1);
             self.focus = Row::Name;
             self.picking = None;
@@ -442,7 +497,9 @@ impl TransformationDialog {
             return;
         };
         let speed = self.speed;
+        let space = self.space;
         let mut grid = Grid {
+            space,
             focus: &mut self.focus,
             picking: &mut self.picking,
             changed: false,
@@ -476,6 +533,9 @@ impl TransformationDialog {
             TransformationKind::LinearPattern { .. } => {
                 &[(Slot::First, "Start Point"), (Slot::Second, "End Point")]
             }
+            TransformationKind::CircularPattern { .. } if flat(space) => {
+                &[(Slot::First, "Center Point")]
+            }
             TransformationKind::CircularPattern { .. } => &[
                 (Slot::First, "First Axis Point"),
                 (Slot::Second, "Second Axis Point"),
@@ -489,6 +549,7 @@ impl TransformationDialog {
             });
         }
         if grid.changed {
+            normalize(&mut transformation.kind, space);
             self.changed = true;
             self.marked.clear();
         }
@@ -524,6 +585,15 @@ impl TransformationDialog {
                  the end point."
                     .into(),
             ),
+            (Row::Point(_), Some(TransformationKind::CircularPattern { .. }))
+                if flat(self.space) =>
+            {
+                (
+                    "Center point",
+                    "The items are turned about the axis normal to the plane through this point."
+                        .into(),
+                )
+            }
             (Row::Point(_), Some(TransformationKind::CircularPattern { .. })) => (
                 "Axis points",
                 "Two points on the rotation axis of the pattern.".into(),
@@ -534,6 +604,7 @@ impl TransformationDialog {
 
 /// The property grid's rows with the focus and picking state they change.
 struct Grid<'a> {
+    space: ModelSpace,
     focus: &'a mut Row,
     picking: &'a mut Option<Slot>,
     changed: bool,
@@ -601,7 +672,8 @@ impl Grid<'_> {
         if toggle {
             *self.picking = if picking { None } else { Some(slot) };
         }
-        for (k, axis) in ["X", "Y", "Z"].into_iter().enumerate() {
+        let axes = if self.space.is_2d() { 2 } else { 3 };
+        for (k, axis) in ["X", "Y", "Z"].into_iter().take(axes).enumerate() {
             self.labelled(ui, row, axis, |ui| {
                 let value = numeric::drag_value(&mut point[k])
                     .speed(speed)
@@ -630,5 +702,71 @@ fn point_mut(kind: &mut TransformationKind, slot: Slot) -> &mut [f64; 3] {
         (TransformationKind::LinearPattern { end, .. }, Slot::Second) => end,
         (TransformationKind::CircularPattern { axis_start, .. }, Slot::First) => axis_start,
         (TransformationKind::CircularPattern { axis_end, .. }, Slot::Second) => axis_end,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_2d_model_offers_no_symmetry_about_the_plane() {
+        assert_eq!(planes(ModelSpace::ThreeD).len(), 3);
+        for space in [
+            ModelSpace::PlaneStress,
+            ModelSpace::PlaneStrain,
+            ModelSpace::Axisymmetric,
+        ] {
+            assert_eq!(planes(space), &[SymmetryPlane::X, SymmetryPlane::Y]);
+        }
+    }
+
+    #[test]
+    fn a_plane_model_turns_about_the_z_axis_through_one_centre() {
+        let mut t = Available::Circular.create(ModelSpace::PlaneStrain);
+        let TransformationKind::CircularPattern {
+            axis_start,
+            axis_end,
+            ..
+        } = &mut t.kind
+        else {
+            unreachable!()
+        };
+        assert_eq!(*axis_end, [0.0, 0.0, 1.0]);
+        *axis_start = [2.0, 3.0, 5.0];
+        normalize(&mut t.kind, ModelSpace::PlaneStrain);
+        let TransformationKind::CircularPattern {
+            axis_start,
+            axis_end,
+            ..
+        } = t.kind
+        else {
+            unreachable!()
+        };
+        assert_eq!(axis_start, [2.0, 3.0, 0.0]);
+        assert_eq!(axis_end, [2.0, 3.0, 1.0]);
+    }
+
+    #[test]
+    fn a_body_of_revolution_keeps_its_axis_and_3d_models_are_untouched() {
+        let t = Available::Circular.create(ModelSpace::Axisymmetric);
+        assert_eq!(t, Transformation::circular_pattern());
+        let mut kind = TransformationKind::LinearPattern {
+            start: [0.0, 0.0, 1.0],
+            end: [1.0, 0.0, 2.0],
+            count: 2,
+        };
+        let before = kind.clone();
+        normalize(&mut kind, ModelSpace::ThreeD);
+        assert_eq!(kind, before);
+        normalize(&mut kind, ModelSpace::PlaneStress);
+        assert_eq!(
+            kind,
+            TransformationKind::LinearPattern {
+                start: [0.0; 3],
+                end: [1.0, 0.0, 0.0],
+                count: 2
+            }
+        );
     }
 }

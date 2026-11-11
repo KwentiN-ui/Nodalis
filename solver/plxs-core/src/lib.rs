@@ -41,7 +41,7 @@ pub mod step;
 pub mod validate;
 
 pub use amplitude::Amplitude;
-pub use constraints::{Constraints, Equation, RigidBody, Submodel, Tie, Transform};
+pub use constraints::{Constraints, Equation, Joint, RigidBody, Submodel, Tie, Transform};
 pub use contact::{Contact, ContactPair, SurfaceBehavior, SurfaceInteraction};
 pub use diagnostic::{Diagnostic, DiagnosticCode, ItemRef, Severity};
 pub use element::{Element, ElementFamily, ElementType};

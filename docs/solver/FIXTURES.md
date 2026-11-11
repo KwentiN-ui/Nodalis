@@ -138,14 +138,14 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `constraints/hinge-and-pin` | A | M2 | plxs 0.2.0 | C3D8, \*RIGID BODY, \*STATIC |
 | `constraints/hinged-beam` | A | M2 | plxs 0.2.0 | C3D20R, \*RIGID BODY, \*STATIC |
 | `constraints/moment` | A | M2 | plxs 0.2.0 | C3D8, \*RIGID BODY, \*STATIC |
-| `constraints/referenzpunkt-2d` | A | M2 | plxs 0.2.0 | CPS8, \*RIGID BODY, \*STATIC |
+| `constraints/referenzpunkt-2d` | A | M2 | plxs 0.2.6 | CPS8, \*RIGID BODY, \*STATIC |
 | `constraints/region-bonded` | A | M2 | plxs 0.2.0 | C3D8, \*TIE, \*STATIC |
 | `constraints/region-detected-gap` | A | M2 | plxs 0.2.0 | C3D8, \*TIE, \*STATIC |
 | `constraints/region-no-separation-held` | A | M2 | plxs 0.2.0 | C3D8, \*EQUATION, \*STATIC |
 | `constraints/region-no-separation` | A | M2 | plxs 0.2.0 | C3D8, \*EQUATION, \*STATIC |
 | `constraints/region-tie` | A | M2 | plxs 0.2.0 | C3D8, \*RIGID BODY, \*TIE, \*STATIC |
-| `constraints/remote-2d-deformable` | A | M2 | plxs 0.2.0 | CPS8, \*EQUATION, \*STATIC |
-| `constraints/remote-2d` | A | M2 | plxs 0.2.0 | CPS8, \*RIGID BODY, \*STATIC |
+| `constraints/remote-2d-deformable` | A | M2 | plxs 0.2.6 | CPS8, \*EQUATION, \*STATIC |
+| `constraints/remote-2d` | A | M2 | plxs 0.2.6 | CPS8, \*RIGID BODY, \*STATIC |
 | `constraints/remote-c3d20r-deformable` | A | M2 | plxs 0.2.0 | C3D20R, \*EQUATION, \*STATIC |
 | `constraints/remote-c3d20r-rigid` | A | M2 | plxs 0.2.0 | C3D20R, \*RIGID BODY, \*STATIC |
 | `constraints/remote-deformable` | A | M2 | plxs 0.2.0 | C3D8, \*EQUATION, \*STATIC |
@@ -154,7 +154,7 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `constraints/remote` | A | M2 | plxs 0.2.0 | C3D8, \*RIGID BODY, \*STATIC |
 | `constraints/rigid-body-held` | A | M2 | plxs 0.2.0 | C3D8, \*RIGID BODY, \*TIE, \*STATIC |
 | `constraints/schraube-ganz` | A | M2 | plxs 0.2.0 | C3D8, \*EQUATION, \*STATIC, \*NODE PRINT |
-| `constraints/symmetrie-2d-30` | A | M2 | plxs 0.2.0 | CPS8, \*TRANSFORM, \*STATIC |
+| `constraints/symmetrie-2d-30` | A | M2 | plxs 0.2.6 | CPS8, \*TRANSFORM, \*STATIC |
 | `constraints/symmetrie-solid-30` | A | M2 | plxs 0.2.0 | C3D8, \*TRANSFORM, \*STATIC |
 | `constraints/tet-schraeg` | A | M2 | plxs 0.2.0 | C3D10, \*EQUATION, \*STATIC, \*NODE PRINT |
 | `constraints/tet-vorspannung` | A | M2 | plxs 0.2.0 | C3D10, \*EQUATION, \*STATIC, \*NODE PRINT |
@@ -164,7 +164,7 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `constraints/verteilte-temperatur` | A | M2 | plxs 0.2.0 | C3D8, \*EXPANSION, \*CONDUCTIVITY, \*SPECIFIC HEAT, \*RIGID BODY, \*INITIAL CONDITIONS, \*STATIC, \*TEMPERATURE |
 | `constraints/vorspannung` | A | M2 | plxs 0.2.0 | C3D8, \*EQUATION, \*STATIC, \*NODE PRINT |
 | `contact/kontakt-2d-axi` | C | M3 | plxs 0.2.0 | CAX8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC |
-| `contact/kontakt-2d-cps` | C | M3 | plxs 0.2.0 | CPS8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC |
+| `contact/kontakt-2d-cps` | C | M3 | plxs 0.2.6 | CPS8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC |
 | `contact/kontakt-2d` | C | M3 | plxs 0.2.0 | CPE8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC |
 | `contact/kontakt-hard-m` | C | M3 | plxs 0.2.0 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC |
 | `contact/kontakt-hard-mm` | C | M3 | plxs 0.2.0 | C3D8, SPRING1, \*SPRING, \*SURFACE INTERACTION, \*SURFACE BEHAVIOR, \*CONTACT PAIR, \*STATIC |
@@ -245,12 +245,13 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `modal/rotor-perturbation-true` | A | M3 | plxs 0.2.0 | C3D8, \*STATIC, \*FREQUENCY, \*COMPLEX FREQUENCY |
 | `modal/rotor` | A | M3 | plxs 0.2.0 | C3D8, \*STATIC, \*FREQUENCY, \*COMPLEX FREQUENCY |
 | `nonlinear/amplitude_force` | B | M2 | plxs 0.2.0 | C3D8, \*AMPLITUDE, \*STATIC, NLGEOM |
-| `nonlinear/druck-nur-druck` | B | M2 | plxs 0.2.0 | C3D8, SPRING1, GAPUNI, \*PLASTIC, \*SPRING, \*GAP, \*STATIC |
-| `nonlinear/druck-nur-einzeln` | B | M2 | plxs 0.2.0 | C3D8, SPRING1, GAPUNI, \*PLASTIC, \*SPRING, \*GAP, \*STATIC |
-| `nonlinear/druck-nur-umgedreht-druck` | B | M2 | plxs 0.2.0 | C3D8, SPRING1, GAPUNI, \*PLASTIC, \*SPRING, \*GAP, \*STATIC |
-| `nonlinear/druck-nur-umgedreht-zug` | B | M2 | plxs 0.2.0 | C3D8, SPRING1, GAPUNI, \*PLASTIC, \*SPRING, \*GAP, \*STATIC |
-| `nonlinear/druck-nur-verteilt` | B | M2 | plxs 0.2.0 | C3D8, SPRING1, GAPUNI, \*PLASTIC, \*SPRING, \*GAP, \*STATIC |
-| `nonlinear/druck-nur-zug` | B | M2 | plxs 0.2.0 | C3D8, SPRING1, GAPUNI, \*PLASTIC, \*SPRING, \*GAP, \*STATIC |
+| `nonlinear/druck-nur-druck` | B | M2 | plxs 0.3.2 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
+| `nonlinear/druck-nur-einzeln` | B | M2 | plxs 0.3.1 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
+| `nonlinear/druck-nur-pressung` | B | M2 | plxs 0.3.2 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC, \*CONTACT FILE, \*CONTACT PRINT |
+| `nonlinear/druck-nur-umgedreht-druck` | B | M2 | plxs 0.3.2 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
+| `nonlinear/druck-nur-umgedreht-zug` | B | M2 | plxs 0.3.2 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
+| `nonlinear/druck-nur-verteilt` | B | M2 | plxs 0.3.1 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
+| `nonlinear/druck-nur-zug` | B | M2 | plxs 0.3.2 | C3D8, SPRING1, \*PLASTIC, \*SPRING, \*COMPRESSION ONLY, \*STATIC |
 | `nonlinear/gap_stuetzen` | B | M2 | plxs 0.2.0 | C3D8, GAPUNI, \*GAP, \*STATIC, NLGEOM |
 | `nonlinear/kriechen` | B | M2 | plxs 0.2.0 | C3D8, \*CREEP, \*STATIC, \*VISCO |
 | `nonlinear/membran-vorgespannt` | B | M2 | plxs 0.2.0 | M3D4, \*MEMBRANE SECTION, \*STATIC, NLGEOM |
@@ -270,20 +271,20 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `plane/ebene-cpe6` | A | M2 | plxs 0.2.0 | CPE6, \*STATIC |
 | `plane/ebene-cpe8` | A | M2 | plxs 0.2.0 | CPE8, \*STATIC |
 | `plane/ebene-cpe8r` | A | M2 | plxs 0.2.0 | CPE8R, \*STATIC |
-| `plane/ebene-cps3` | A | M2 | plxs 0.2.0 | CPS3, \*STATIC |
-| `plane/ebene-cps4` | A | M2 | plxs 0.2.0 | CPS4, \*STATIC |
-| `plane/ebene-cps4r` | A | M2 | plxs 0.2.0 | CPS4R, \*STATIC |
-| `plane/ebene-cps6` | A | M2 | plxs 0.2.0 | CPS6, \*STATIC |
-| `plane/ebene-cps8` | A | M2 | plxs 0.2.0 | CPS8, \*STATIC |
-| `plane/ebene-cps8r` | A | M2 | plxs 0.2.0 | CPS8R, \*STATIC |
+| `plane/ebene-cps3` | A | M2 | plxs 0.2.6 | CPS3, \*STATIC |
+| `plane/ebene-cps4` | A | M2 | plxs 0.2.6 | CPS4, \*STATIC |
+| `plane/ebene-cps4r` | A | M2 | plxs 0.2.6 | CPS4R, \*STATIC |
+| `plane/ebene-cps6` | A | M2 | plxs 0.2.6 | CPS6, \*STATIC |
+| `plane/ebene-cps8` | A | M2 | plxs 0.2.6 | CPS8, \*STATIC |
+| `plane/ebene-cps8r` | A | M2 | plxs 0.2.6 | CPS8R, \*STATIC |
 | `plane/ebener-spannungszustand` | A | M2 | plxs 0.2.0 | CPS8, \*STATIC |
 | `plane/ebener-verzerrungszustand` | A | M2 | plxs 0.2.0 | CPE8, \*STATIC |
 | `plane/elementtyp-cax8r` | A | M2 | plxs 0.2.0 | CAX8R, \*STATIC |
 | `plane/elementtyp-cpe8r` | A | M2 | plxs 0.2.0 | CPE8R, \*STATIC |
-| `plane/rectangle-block` | A | M2 | plxs 0.2.0 | CPS8R, \*STATIC |
+| `plane/rectangle-block` | A | M2 | plxs 0.2.6 | CPS8R, \*STATIC |
 | `plane/rohr-innendruck` | A | M2 | plxs 0.2.0 | CAX8, \*STATIC |
 | `plane/rohr-zug` | A | M2 | plxs 0.2.0 | CAX8, \*STATIC |
-| `plane/symmetrie-2d-0` | A | M2 | plxs 0.2.0 | CPS8, \*STATIC |
+| `plane/symmetrie-2d-0` | A | M2 | plxs 0.2.6 | CPS8, \*STATIC |
 | `sensitivity/sensitivitaet-filter` | B | M3 | plxs 0.2.0 | C3D8, \*DESIGN VARIABLES, \*STATIC, \*SENSITIVITY, \*DESIGN RESPONSE, \*FILTER |
 | `sensitivity/sensitivitaet-frequenz` | B | M3 | plxs 0.2.0 | C3D8, \*DESIGN VARIABLES, \*FREQUENCY, \*SENSITIVITY, \*DESIGN RESPONSE |
 | `sensitivity/sensitivitaet` | B | M3 | plxs 0.2.0 | C3D8, \*DESIGN VARIABLES, \*STATIC, \*SENSITIVITY, \*DESIGN RESPONSE |
@@ -340,7 +341,7 @@ nicht mehr zum Korpus passt. Die Spalte Features lässt weg, was fast jede Fixtu
 | `structural/symmetrie-30` | A | M2 | plxs 0.2.0 | S8, \*TRANSFORM, \*SHELL SECTION, \*STATIC |
 | `structural/symmetrie-frei` | A | M2 | plxs 0.2.0 | S8, \*SHELL SECTION, \*STATIC |
 | `structural/symmetrie-voll` | A | M2 | plxs 0.2.0 | S8, \*SHELL SECTION, \*STATIC |
-| `structural/u1-angle` | A | M2 | plxs 0.2.0 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |
-| `structural/u1-beam` | A | M2 | plxs 0.2.0 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |
-| `structural/u1-round-sketch` | A | M2 | plxs 0.2.0 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |
-| `structural/u1-sketch` | A | M2 | plxs 0.2.0 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |
+| `structural/u1-angle` | A | M2 | plxs 0.3.3 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |
+| `structural/u1-beam` | A | M2 | plxs 0.3.3 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |
+| `structural/u1-round-sketch` | A | M2 | plxs 0.3.3 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |
+| `structural/u1-sketch` | A | M2 | plxs 0.3.3 | \*USER ELEMENT, U1, \*BEAM SECTION, \*STATIC |

@@ -1,0 +1,25 @@
+[package]
+name = "plxs-gpu"
+description = "Nodalis solver: the graphics card shared by the solvers (adapter choice, device, buffers, pipelines; wgpu)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The wgpu of the user interface.
+wgpu = { version = "30", default-features = false, features = [
+    "std",
+    "parking_lot",
+    "wgsl",
+    "vulkan",
+    "dx12",
+    "metal",
+] }
+pollster = "1"
+bytemuck.workspace = true
+# The Vulkan bindings wgpu-hal uses, to read the card's memory heaps and their budget.
+ash = { version = "0.38", default-features = false }
+
+[lints]
+workspace = true

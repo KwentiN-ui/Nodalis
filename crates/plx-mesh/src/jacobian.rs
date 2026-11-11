@@ -15,6 +15,15 @@ impl Element {
     /// the solver does not check this way (beams, shells) or with missing nodes. Plane
     /// elements are checked in the xy plane: CalculiX expects them counterclockwise.
     pub fn min_jacobian(&self, mesh: &FeMesh) -> Option<f64> {
+        self.min_jacobian_at(|node| mesh.node(node))
+    }
+
+    /// [`Element::min_jacobian`] with the nodes where `position` puts them, e.g. moved
+    /// before the mesh itself is.
+    pub fn min_jacobian_at(
+        &self,
+        position: impl Fn(crate::NodeId) -> Option<[f64; 3]>,
+    ) -> Option<f64> {
         let dim = if self.shape.is_solid() {
             3
         } else if self.is_plane() && self.shape.family() == crate::ElementFamily::Surface {
@@ -28,7 +37,7 @@ impl Element {
             return None;
         }
         for (c, &node) in coords.iter_mut().zip(&self.nodes[..count]) {
-            *c = mesh.node(node)?;
+            *c = position(node)?;
         }
         derivatives(self.shape)
             .iter()
