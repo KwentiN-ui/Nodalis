@@ -81,8 +81,8 @@ where the problem is. The marking disappears with the next meshing.
 == Mesh setup <mesh-setup>
 
 The mesh is controlled by the #ui("Mesh Setup") items in the Geometry workspace. Create them
-with #ui("Local Mesh Size"), #ui("Extrude Mesh") or #ui("Tetra. Gmsh") on the #ui("Geometry")
-tab of the ribbon.
+with #ui("Local Mesh Size"), #ui("Extrude Mesh"), #ui("Thicken Shell") or #ui("Tetra. Gmsh") on
+the #ui("Geometry") tab of the ribbon.
 
 === Default mesh parameters
 
@@ -131,6 +131,8 @@ values and meshes at once.
   Frontal-Delaunay (default), Delaunay, MeshAdapt or Automatic. #ui("Volume algorithm"):
   Delaunay (default), Frontal or HXT.
 / Extrude Mesh: hexahedra and wedges for parts that are extrusions of a face (@extrude-mesh).
+/ Thicken Shell Mesh: solid elements for shell parts, the face mesh offset through a thickness
+  (@thicken-shell-mesh).
 
 #screenshot("mesh-parameters-item.png", [The #ui("Mesh Parameters") tile in the Geometry ribbon and the
   dialog that creates a Meshing Parameters item for picked parts])
@@ -184,6 +186,42 @@ item for the same part meshes it with tetrahedra again.
 Without an item, #ui("Hexahedra where possible") in the meshing parameters runs the same
 automatic search for every part they cover. A part where no source face is found is meshed with
 tetrahedra without an error; a #ui("Tetrahedral Gmsh") item naming a part keeps it tetrahedral.
+
+=== Thicken shell mesh <thicken-shell-mesh>
+
+A thin part drawn as faces, such as a sheet metal bracket, is meshed with shell elements. When
+the model needs solid elements instead, for example for contact on both sides of the sheet or
+for a material that shells do not take, the #ui("Thicken Shell Mesh") item turns the shell into
+a solid. Create it with #ui("Thicken Shell") in the #ui("Mesh Setup") group and click the shell
+parts. The faces are meshed as usual, after the part's meshing parameters and local mesh sizes,
+and the face mesh is then offset along its normals in layers: every quadrilateral becomes a
+hexahedron (`C3D8`, or `C3D20` with second order), every triangle a wedge (`C3D6`, `C3D15`).
+#ui("Quad-dominated surface mesh") in the meshing parameters gives mostly hexahedra.
+
+#fields(
+  [Parts], [The shell parts to thicken. #ui("OK") refuses solids and lines.],
+  [Thickness], [The thickness of the solid (default a tenth of the max. element size).],
+  [Number of layers], [Layers of elements through the thickness (default 2). Linear elements
+    need several layers to bend correctly.],
+  [Offset], [Where the solid lies relative to the shell's faces, along the face normals: 0
+    (default) centres it on the faces, half the thickness puts the faces on one side of the
+    solid, minus half the thickness on the other.],
+)
+
+#screenshot("thicken-shell-mesh.png", [A bent sheet with a hole thickened to 2 mm in three
+  layers of hexahedra])
+
+All faces of a part are turned to one side first, so that the solid is one piece. Where faces
+meet at an angle, as at a bend or a kink, the nodes move so that the solid keeps its thickness
+on both faces. A thickness so large that the elements fold over, at a sharp inner corner or a
+tight curvature, is refused with a message giving the place. Faces where more than two faces
+meet at one edge cannot be thickened.
+
+Selections made on the geometry stay valid: a face of the shell takes the side of the solid
+nearest to the shell's faces, at offset 0 the side its normals point to; an edge or a vertex
+takes all nodes through the thickness, so that a support on an edge holds the whole side of the
+solid. After meshing, the part is a solid: give it a solid section (@sections) instead of a
+shell section.
 
 === Bodies of revolution <revolve-mesh>
 

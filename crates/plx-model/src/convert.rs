@@ -528,6 +528,10 @@ impl Geometry {
             match &mut item.kind {
                 MeshSetupKind::MeshingParameters { parameters, .. } => parameters.convert_units(c),
                 MeshSetupKind::LocalMeshSize { size, .. } => c.value(size, Quantity::Length),
+                MeshSetupKind::ThickenShellMesh(thicken) => {
+                    c.value(&mut thicken.thickness, Quantity::Length);
+                    c.value(&mut thicken.offset, Quantity::Length);
+                }
                 MeshSetupKind::TetrahedralGmsh { .. } | MeshSetupKind::ExtrudeMesh(_) => {}
             }
         }
