@@ -74,8 +74,10 @@ fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem
         );
         ui.checkbox(&mut d.hexahedra_where_possible, "Hexahedra where possible")
             .on_hover_text(
-                "Parts that are straight extrusions of a face or bodies of revolution get a \
-                 swept mesh of hexahedra; the others stay tetrahedra.",
+                "Parts that can be swept get hexahedra: stacks of extrusions along one \
+                 direction (stepped shafts, plates with bosses, pockets and counterbores), \
+                 straight extrusions of a face and bodies of revolution. The others get \
+                 tetrahedra, with a warning that says why.",
             );
     });
     ui.end_row();
@@ -667,8 +669,10 @@ impl MeshItemEditor {
             }
             MeshSetupKind::ExtrudeMesh(extrude) => {
                 ui.label("Source faces").on_hover_text(
-                    "Automatic finds for each part a face it is a straight extrusion of. \
-                     Selected: click the faces at one end of the parts.",
+                    "Automatic finds how each part is swept: as a stack of extrusions along \
+                     one direction, with steps, pockets and holes of any depth, or as the \
+                     straight extrusion of a face. Selected: click the faces at one end of \
+                     the parts.",
                 );
                 let mut selected = self.source_faces;
                 egui::ComboBox::from_id_salt("extrude source")
@@ -740,8 +744,11 @@ impl MeshItemEditor {
                      joining triangles.",
                 );
                 ui.end_row();
-                ui.label("Layers defined by")
-                    .on_hover_text("The element size in the extrude direction.");
+                ui.label("Layers defined by").on_hover_text(
+                    "The element size in the extrude direction. In a stack of \
+                         extrusions the layers are counted over the whole height; every \
+                         step gets a layer boundary and at least one layer.",
+                );
                 let mut kind = layer_type(&extrude.layers);
                 egui::ComboBox::from_id_salt("extrude layers")
                     .selected_text(LAYER_TYPES[kind])

@@ -174,6 +174,7 @@ fn quadratic_tetrahedra_follow_calculix_numbering() {
         .unwrap()
         .geometry;
     geometry.meshing.max_size = 8.0;
+    geometry.meshing.hexahedra_where_possible = false;
     let mesh = generate_mesh(&geometry).unwrap().mesh;
     assert_eq!(mesh.parts.len(), 1);
     assert!(mesh.element_count() > 100);
@@ -213,6 +214,7 @@ fn every_solid_becomes_a_part_and_size_controls_the_count() {
         .geometry;
     geometry.meshing.second_order = false;
     geometry.meshing.max_size = 5.0;
+    geometry.meshing.hexahedra_where_possible = false;
     let coarse = generate_mesh(&geometry).unwrap().mesh;
     let names: Vec<&str> = coarse.parts.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, ["SOLID-1", "SOLID-2"]);
@@ -649,6 +651,7 @@ fn box_and_lines() -> Geometry {
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
             max_size: 5.0,
+            hexahedra_where_possible: false,
             ..MeshingParameters::default()
         },
         mesh_items: Vec::new(),
@@ -1639,19 +1642,19 @@ fn meshing_parameters_find_extrusions_and_keep_tetrahedra_for_the_rest() {
     );
 
     // A shaft with a split face is no extrusion of one face, and no body of revolution
-    // without elements collapsing on its axis: it falls back to tetrahedra.
-    let mut shaft = import_cad(
+    // without elements collapsing on its axis, but a stack of extrusions along its axis.
+    let shaft = import_cad(
         &testdata("welle_mit_teilflaeche.step"),
         UnitSystem::Unitless,
     )
     .unwrap()
     .geometry;
-    shaft.meshing.hexahedra_where_possible = true;
+    assert!(shaft.meshing.hexahedra_where_possible, "the default");
     let mesh = generate_part_mesh(&shaft, "SOLID-1").unwrap().mesh;
     assert!(
         mesh.elements()
             .iter()
-            .all(|e| e.shape == ElementShape::Tet10)
+            .all(|e| e.shape == ElementShape::Hex20)
     );
 }
 
@@ -2147,6 +2150,7 @@ fn quad_dominated_meshing_leaves_solids_whole() {
     geometry.meshing.max_size = 2.0;
     let total = |mesh: &FeMesh| -> f64 { mesh.elements().iter().map(|e| volume(mesh, e)).sum() };
     geometry.meshing.quad_dominated = false;
+    geometry.meshing.hexahedra_where_possible = false;
     let triangles = generate_mesh(&geometry).unwrap().mesh;
     geometry.meshing.quad_dominated = true;
     let quads = generate_mesh(&geometry).unwrap().mesh;
@@ -2756,4 +2760,208 @@ fn spheres_are_meshed_whatever_algorithm_is_chosen() {
         generated.warnings
     );
     assert!(generated.mesh.element_count() > 50);
+}
+
+/// A cylinder along z as a solid: the tag of its volume.
+fn cylinder(
+    gmsh: &Gmsh,
+    centre: [f64; 3],
+    radius: f64,
+    height: f64,
+) -> Result<(i32, i32), GmshError> {
+    let disk = gmsh.add_disk(centre, radius, [0.0, 0.0, 1.0])?;
+    (gmsh.extrude(&[(2, disk)], [0.0, 0.0, height])?.into_iter())
+        .find(|e| e.0 == 3)
+        .ok_or_else(|| GmshError::Other("no cylinder".into()))
+}
+
+/// Removes the faces no solid has, which extruding and cutting leave behind.
+fn drop_loose_faces(gmsh: &Gmsh) -> Result<(), GmshError> {
+    let faces: Vec<(i32, i32)> = (gmsh.entities(2)?.into_iter())
+        .filter(|&f| gmsh.adjacencies(2, f).is_ok_and(|a| a.0.is_empty()))
+        .map(|f| (2, f))
+        .collect();
+    if !faces.is_empty() {
+        gmsh.remove(&faces)?;
+    }
+    Ok(())
+}
+
+/// A hollow shaft along z with a step and a counterbore: 20 mm radius to z = 40, 14 mm to
+/// z = 70, a bore of 6 mm radius through it, widened to 10 mm over the first 15 mm.
+fn stepped_shaft() -> Geometry {
+    use crate::gmsh::Boolean;
+    let mut geometry = made_geometry(|gmsh| {
+        let thick = cylinder(gmsh, [0.0; 3], 20.0, 40.0)?;
+        let thin = cylinder(gmsh, [0.0, 0.0, 40.0], 14.0, 30.0)?;
+        let shaft = gmsh.boolean(Boolean::Fuse, &[thick], &[thin], true)?;
+        let bore = cylinder(gmsh, [0.0, 0.0, -1.0], 6.0, 72.0)?;
+        let counterbore = cylinder(gmsh, [0.0, 0.0, -1.0], 10.0, 16.0)?;
+        gmsh.boolean(Boolean::Cut, &shaft, &[bore, counterbore], true)?;
+        drop_loose_faces(gmsh)
+    });
+    geometry.meshing.max_size = 5.0;
+    geometry.meshing.min_size = 0.0;
+    geometry.meshing.second_order = false;
+    geometry
+}
+
+/// Volume of a hexahedron by its corners, as six tetrahedra about the diagonal 1-7.
+fn hex_volume(mesh: &FeMesh, element: &Element) -> f64 {
+    let p = |k: usize| glam_free::V(mesh.node(element.nodes[k]).unwrap());
+    [[1, 2], [2, 3], [3, 7], [7, 4], [4, 5], [5, 1]]
+        .iter()
+        .map(|&[b, c]| {
+            let (a, d) = (p(0), p(6));
+            p(b).sub(a).cross(p(c).sub(a)).dot(d.sub(a)) / 6.0
+        })
+        .sum()
+}
+
+/// A mesh's nodes lie apart: no two at one place.
+fn nodes_are_shared(mesh: &FeMesh) -> bool {
+    let places: BTreeSet<[i64; 3]> = (mesh.coords().iter())
+        .map(|c| c.map(|x| (x * 1e6).round() as i64))
+        .collect();
+    places.len() == mesh.node_count()
+}
+
+#[test]
+fn stacks_of_extrusions_are_meshed_with_hexahedra_through_their_steps() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = stepped_shaft();
+    let display = tessellate(&geometry).unwrap();
+    // Hexahedra are the default for solids.
+    assert!(MeshingParameters::default().hexahedra_where_possible);
+    let generated = generate_part_mesh(&geometry, "SOLID-1").unwrap();
+    assert!(generated.warnings.is_empty(), "{:?}", generated.warnings);
+    let mesh = generated.mesh;
+    assert!(mesh.elements().iter().all(|e| e.type_name == "C3D8"));
+    assert!(
+        mesh.elements()
+            .iter()
+            .all(|e| e.min_jacobian(&mesh).unwrap() > 0.0)
+    );
+    assert!(nodes_are_shared(&mesh));
+    // The volume, but for the circles drawn with straight element edges.
+    let total: f64 = mesh.elements().iter().map(|e| hex_volume(&mesh, e)).sum();
+    let exact = solid_volume(&geometry);
+    assert!((total - exact).abs() / exact < 0.02, "{total} of {exact}");
+    // A layer of nodes at every step: z = 0, 15, 40 and 70.
+    for z in [0.0, 15.0, 40.0, 70.0] {
+        assert!(
+            mesh.coords().iter().any(|c| (c[2] - z).abs() < 1e-9),
+            "no nodes at z = {z}"
+        );
+    }
+    check_cad_map(&mesh, &display);
+
+    // Quadratic elements; an extrude mesh without source faces sets the layers.
+    geometry.meshing.second_order = true;
+    geometry.mesh_items = vec![extrude_item(
+        Vec::new(),
+        plx_model::ExtrudeLayers::NumberOfElements(3),
+    )];
+    let mesh = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+    assert!(mesh.elements().iter().all(|e| e.type_name == "C3D20"));
+    assert!(
+        mesh.elements()
+            .iter()
+            .all(|e| e.min_jacobian(&mesh).unwrap() > 0.0)
+    );
+    // One layer in each of the three intervals between the steps: corner and midside
+    // levels only.
+    let levels: BTreeSet<i64> = (mesh.coords().iter())
+        .map(|c| (c[2] * 1e6).round() as i64)
+        .collect();
+    assert_eq!(levels.len(), 7, "{levels:?}");
+    check_cad_map(&mesh, &display);
+}
+
+#[test]
+fn local_sizes_on_walls_and_rising_edges_refine_the_layers_of_a_stack() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = stepped_shaft();
+    let coarse = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+    // The wall of the thin end: the face with the most nodes at z > 40 only.
+    let wall = (coarse.cad.nodes.iter())
+        .filter_map(|(entity, nodes)| match entity {
+            CadEntity::Face(face) => Some((*face, nodes)),
+            _ => None,
+        })
+        .filter(|(_, nodes)| {
+            let z: Vec<f64> = nodes.iter().map(|&n| coarse.node(n).unwrap()[2]).collect();
+            z.iter().all(|&z| z > 40.0 - 1e-9)
+                && z.iter().any(|&z| z < 41.0)
+                && z.iter().any(|&z| z > 69.0)
+        })
+        .max_by_key(|(_, nodes)| {
+            let r = |n: &NodeId| {
+                let p = coarse.node(*n).unwrap();
+                (p[0].hypot(p[1]) * 1e3) as i64
+            };
+            nodes.iter().map(r).max()
+        })
+        .map(|(face, _)| face)
+        .unwrap();
+    geometry.mesh_items = vec![MeshSetupItem {
+        name: "Local_Mesh_Size-1".into(),
+        kind: MeshSetupKind::LocalMeshSize {
+            faces: vec![wall],
+            edges: Vec::new(),
+            size: 2.0,
+        },
+    }];
+    let fine = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+    assert!(fine.elements().iter().all(|e| e.type_name == "C3D8"));
+    let levels = |mesh: &FeMesh, from: f64, to: f64| {
+        (mesh.coords().iter())
+            .filter(|c| c[2] > from + 1e-9 && c[2] < to - 1e-9)
+            .map(|c| (c[2] * 1e6).round() as i64)
+            .collect::<BTreeSet<_>>()
+            .len()
+    };
+    // 15 layers of 2 mm along the wall, the layers below as before.
+    assert_eq!(levels(&fine, 40.0, 70.0), 14);
+    assert_eq!(levels(&fine, 0.0, 40.0), levels(&coarse, 0.0, 40.0));
+    // And about 2 π 14 / 2 elements around it.
+    let around = fine.cad.nodes[&CadEntity::Face(wall)].len() / 16;
+    assert!((38..=56).contains(&around), "{around} nodes around");
+}
+
+#[test]
+fn solids_that_are_no_sweep_get_tetrahedra_and_say_why() {
+    if !gmsh_available() {
+        return;
+    }
+    use crate::gmsh::Boolean;
+    // A block with a hole along z and one across it.
+    let geometry = made_geometry(|gmsh| {
+        let block = gmsh.add_box([0.0; 3], [40.0, 30.0, 20.0])?;
+        let along = cylinder(gmsh, [12.0, 15.0, -1.0], 5.0, 22.0)?;
+        let disk = gmsh.add_disk([-1.0, 15.0, 10.0], 4.0, [1.0, 0.0, 0.0])?;
+        let across = (gmsh.extrude(&[(2, disk)], [42.0, 0.0, 0.0])?.into_iter())
+            .find(|e| e.0 == 3)
+            .unwrap();
+        gmsh.boolean(Boolean::Cut, &[(3, block)], &[along, across], true)?;
+        drop_loose_faces(gmsh)
+    });
+    let generated = generate_part_mesh(&geometry, "SOLID-1").unwrap();
+    assert!(
+        generated
+            .mesh
+            .elements()
+            .iter()
+            .all(|e| e.type_name == "C3D10")
+    );
+    assert!(
+        (generated.warnings.iter())
+            .any(|w| w.contains("meshed with tetrahedra") && w.contains("no stack of extrusions")),
+        "{:?}",
+        generated.warnings
+    );
 }

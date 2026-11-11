@@ -30,7 +30,8 @@ Solution Monitor and #ui("Stop") in the Project workspace cancel a meshing in th
   stroke: (x, y) => if y == 0 { (bottom: 0.7pt) } else { (bottom: 0.3pt + luma(200)) },
   inset: (x: 5pt, y: 4pt),
   table.header([*Part*], [*Elements*]),
-  [Solid (3D models)], [Tetrahedra `C3D4` (linear) or `C3D10` (quadratic)],
+  [Solid (3D models)], [Hexahedra `C3D8` (linear) or `C3D20` (quadratic) where the solid can be
+    swept (@stacked-sweep); otherwise tetrahedra `C3D4` or `C3D10`],
   [Face (3D models)], [Shells: quadrilaterals `S4`, `S8`, or triangles `S3`, `S6` if the
     quadrilaterals are switched off; the thickness comes from a shell section (@shell-section)],
   [Face (2D models)], [Quadrilaterals, or triangles if they are switched off; written as `CPS`,
@@ -105,10 +106,10 @@ values and meshes at once.
     2D models and shells of 3D models; off gives triangles. Solids are not affected: their
     tetrahedra need triangles on the faces. The option is greyed out when the parameters reach
     only solids. See @quad-faces.],
-  [Hexahedra where possible], [Meshes every solid that is a straight extrusion of one of its
-    faces, as an Extrude Mesh item with its defaults would (@extrude-mesh), or a body of
-    revolution with hexahedra (@revolve-mesh); the other solids keep tetrahedra (default
-    off).],
+  [Hexahedra where possible], [Meshes every solid that can be swept with hexahedra (default
+    on): a stack of extrusions along one direction (@stacked-sweep), a straight extrusion of
+    one of its faces (@extrude-mesh) or a body of revolution (@revolve-mesh). The other solids
+    get tetrahedra, with a warning that says why; off gives tetrahedra everywhere.],
 )
 
 #screenshot("quad-dominated-solids.png", [Quadrilaterals on faces greyed out for a geometry of
@@ -152,7 +153,8 @@ triangles are then joined to quadrilaterals, which is faster and less regular.
   Frontal-Delaunay (default), Delaunay, MeshAdapt or Automatic; on shells and 2D models it
   replaces the quasi-structured algorithm (@quad-faces). #ui("Volume algorithm"):
   Delaunay (default), Frontal or HXT.
-/ Extrude Mesh: hexahedra and wedges for parts that are extrusions of a face (@extrude-mesh).
+/ Extrude Mesh: hexahedra and wedges for parts that are extrusions of a face or stacks of
+  extrusions (@extrude-mesh), with the layers and the surface algorithm of your choice.
 / Thicken Shell Mesh: solid elements for shell parts, the face mesh offset through a thickness
   (@thicken-shell-mesh).
 
@@ -177,8 +179,9 @@ order), every triangle a wedge (`C3D6`, `C3D15`). The size of the face mesh come
 meshing parameters and local mesh sizes, as for tetrahedra.
 
 #fields(
-  [Source faces], [#ui("Automatic") finds a face of each selected part that the part is an
-    extrusion of. #ui("Selected faces") uses the faces you click at one end of the parts; the
+  [Source faces], [#ui("Automatic") finds how each selected part is swept: as a stack of
+    extrusions (@stacked-sweep) or, failing that, as the extrusion of one of its faces.
+    #ui("Selected faces") uses the faces you click at one end of the parts; the
     dialog shows which parts they belong to. A source may consist of several faces; the
     #ui("Surface angle") mode of the selection window takes the faces that continue the
     clicked one with one click.],
@@ -194,7 +197,9 @@ meshing parameters and local mesh sizes, as for tetrahedra.
   [Layers defined by], [The element size in the extrude direction. #ui("Scale factor"): layers
     as thick as the part's max. element size times the factor. #ui("Number of elements"): this
     many layers of the same thickness. #ui("Multi-layered"): relative layer sizes such as
-    `0.2; 0.6; 0.2;` and the elements per layer such as `2; 4; 2;`.],
+    `0.2; 0.6; 0.2;` and the elements per layer such as `2; 4; 2;`. In a stack of extrusions
+    the layers are counted over the whole height; every step gets a layer boundary and at
+    least one layer.],
 )
 
 #screenshot("extrude-mesh.png", [Extrude Mesh item with the top face of a plate as source,
@@ -209,8 +214,42 @@ example to `C3D8I`, which bends without the locking of `C3D8`. A later #ui("Tetr
 item for the same part meshes it with tetrahedra again.
 
 Without an item, #ui("Hexahedra where possible") in the meshing parameters runs the same
-automatic search for every part they cover. A part where no source face is found is meshed with
-tetrahedra without an error; a #ui("Tetrahedral Gmsh") item naming a part keeps it tetrahedral.
+automatic search for every part they cover. A part that cannot be swept is meshed with
+tetrahedra, and a warning names what stands against the sweep; a #ui("Tetrahedral Gmsh") item
+naming a part keeps it tetrahedral without a warning.
+
+=== Stacks of extrusions <stacked-sweep>
+
+Most machined parts are no extrusion of one face, but several extrusions along one direction on
+top of each other: a stepped shaft, a plate with a boss, a pocket or counterbored holes, a
+flange with a hub. nodalis recognises them by their faces: every face is either planar and
+normal to one common direction, an end or a step, or runs along that direction, such as the
+wall of a hole or the outside of a boss. Such a part is meshed with hexahedra only, without
+any input (@fig-stacked-sweep):
+
++ All ends and steps are laid over each other in one plane and cut at each other, into cells:
+  under a counterbored hole, for example, a disk for the hole and a ring for the counterbore.
++ The cells are meshed together with quadrilaterals, with the surface algorithm of the
+  Extrude Mesh item or the quasi-structured algorithm (@quad-faces).
++ Each cell's mesh is swept through the heights where the part has material above the cell.
+  Every step is a layer boundary, so the hexahedra of neighbouring cells share their nodes.
+
+#figure(
+  image("../../images/stacked-sweep.png", width: 80%),
+  caption: [A plate with a boss, a bore and four counterbored holes, meshed with hexahedra by
+    the default parameters.],
+) <fig-stacked-sweep>
+
+The layers between two steps are as thick as the max. element size at most, or as an Extrude
+Mesh item with automatic source faces sets them. A Local Mesh Size on an end or a step refines
+the cells below it, on a wall or an edge the quadrilaterals along it and the layers through
+its height. Faces, edges and vertices of the geometry stay selectable on the mesh.
+
+A part is no stack as soon as one face is neither an end nor a wall: a chamfer, a fillet
+between a step and a wall, a hole across the direction or a conical seat. Such parts are tried
+as a plain extrusion and as a body of revolution and get tetrahedra otherwise. Splitting the
+geometry (@split-by-plane) so that the feature lies in a part of its own keeps hexahedra in
+the rest.
 
 === Thicken shell mesh <thicken-shell-mesh>
 

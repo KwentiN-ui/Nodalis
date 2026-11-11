@@ -17,7 +17,7 @@ use crate::extrude::{
     Motion, Point, Topology, add, cross, dot, norm, scale, source_elements, sub, sweep_mesh,
 };
 use crate::gmsh::{Gmsh, GmshError};
-use crate::{GeneratedMesh, MeshOptions, generate_faces, node_coords};
+use crate::{GeneratedMesh, MeshOptions, generate_faces, local_sizes, node_coords};
 
 /// What a curve of the part is in relation to the axis.
 #[derive(Clone, Copy, Debug)]
@@ -330,14 +330,8 @@ pub(crate) fn revolve_part_mesh(
         .copied()
         .collect();
     let mut notes = Vec::new();
-    generate_faces(
-        gmsh,
-        geometry,
-        &mut options,
-        &revolution.source,
-        &own,
-        &mut notes,
-    )?;
+    let sizes = local_sizes(gmsh, geometry, &own)?;
+    generate_faces(gmsh, &mut options, &revolution.source, &sizes, &mut notes)?;
     gmsh.set_number("Mesh.MeshOnlyVisible", 0.0)?;
     let quadratic = options.order == 2;
     let coords = node_coords(gmsh)?;
@@ -370,7 +364,15 @@ pub(crate) fn revolve_part_mesh(
     let levels: Vec<f64> = (1..=steps)
         .map(|k| f64::from(k) / f64::from(steps))
         .collect();
-    let (mut mesh, _) = sweep_mesh(part, &coords, &elements, motion, &levels, quadratic)?;
+    let (mut mesh, _) = sweep_mesh(
+        part,
+        &coords,
+        &elements,
+        motion,
+        &levels,
+        quadratic,
+        &|_, _| true,
+    )?;
     mesh.cad = classify(gmsh, &mesh, &topology)?;
     let mut warnings = gmsh.warnings()?;
     warnings.extend(notes.into_iter().map(|note| format!("{part}: {note}")));
