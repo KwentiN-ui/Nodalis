@@ -1187,14 +1187,24 @@ mod tests {
         block(&mut mesh, "Base", [0.0, 0.0, 0.0], [160.0, 40.0, 10.0]);
         for i in 0..4 {
             let x = 40.0 * f64::from(i);
-            block(&mut mesh, &format!("Plate_{}", i + 1), [x, 0.0, 10.0], [40.0, 40.0, 5.0]);
+            block(
+                &mut mesh,
+                &format!("Plate_{}", i + 1),
+                [x, 0.0, 10.0],
+                [40.0, 40.0, 5.0],
+            );
             for (k, dx) in [5.0, 25.0].into_iter().enumerate() {
                 let name = format!("Bolt_M10_{}", 2 * i + k as u32 + 1);
                 block(&mut mesh, &name, [x + dx, 15.0, 15.0], [10.0, 10.0, 10.0]);
             }
         }
         block(&mut mesh, "Pad_left", [0.0, 0.0, -5.0], [20.0, 40.0, 5.0]);
-        block(&mut mesh, "Pad_right", [140.0, 0.0, -5.0], [20.0, 40.0, 5.0]);
+        block(
+            &mut mesh,
+            "Pad_right",
+            [140.0, 0.0, -5.0],
+            [20.0, 40.0, 5.0],
+        );
         let mut model = FeModel::default();
         let (steel, rubber) = (plx_model::Id::new(), plx_model::Id::new());
         for (id, name, young) in [(steel, "Steel", 210e9), (rubber, "Rubber", 10e6)] {

@@ -409,45 +409,48 @@ fn rules_table(
     };
     let mut action = None;
     ui.vertical(|ui| {
-        egui::Grid::new("detection rules")
-            .striped(true)
-            .num_columns(6)
-            .show(ui, |ui| {
-                ui.weak("");
-                ui.weak("Side A");
-                ui.weak("Side B");
-                ui.weak("Type");
-                ui.weak("Regions").on_hover_text(
-                    "Regions of the last detection that take their type from the rule.",
+        // Two lines per rule, to fit the side panel: its sides, then its type, how many
+        // regions take it and the buttons to move or remove it.
+        let n = detection.rules.len();
+        for (i, rule) in detection.rules.iter_mut().enumerate() {
+            let open = editing == Some(i);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let sides = format!(
+                    "{}.  {}  to  {}",
+                    i + 1,
+                    rule.side_a.describe(fe),
+                    rule.side_b.describe(fe)
                 );
-                ui.weak("");
-                ui.end_row();
-                let n = detection.rules.len();
-                for (i, rule) in detection.rules.iter_mut().enumerate() {
-                    let open = editing == Some(i);
-                    if ui.selectable_label(open, format!("{}", i + 1)).clicked() {
-                        editing = if open { None } else { Some(i) };
-                    }
-                    for side in [&rule.side_a, &rule.side_b] {
-                        if ui
-                            .selectable_label(open, side.describe(fe))
-                            .on_hover_text("Click to edit the sides of the rule.")
-                            .clicked()
-                        {
-                            editing = if open { None } else { Some(i) };
-                        }
-                    }
+                if ui
+                    .selectable_label(open, sides)
+                    .on_hover_text("Click to edit the sides of the rule.")
+                    .clicked()
+                {
+                    editing = if open { None } else { Some(i) };
+                }
+                ui.horizontal(|ui| {
                     action_combo(ui, ("detection rule type", i), &mut rule.action, true);
-                    ui.label(count_text(i));
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("{} regions", count_text(i))).weak(),
+                        )
+                        .extend(),
+                    )
+                    .on_hover_text(
+                        "Regions of the last detection that take their type from the rule.",
+                    );
+                });
+                if open {
                     ui.horizontal(|ui| {
                         if ui
-                            .add_enabled(i > 0, egui::Button::new("Up").small())
+                            .add_enabled(i > 0, egui::Button::new("Move Up").small())
                             .clicked()
                         {
                             action = Some((i, -1));
                         }
                         if ui
-                            .add_enabled(i + 1 < n, egui::Button::new("Down").small())
+                            .add_enabled(i + 1 < n, egui::Button::new("Move Down").small())
                             .clicked()
                         {
                             action = Some((i, 1));
@@ -456,20 +459,39 @@ fn rules_table(
                             action = Some((i, 0));
                         }
                     });
-                    ui.end_row();
                 }
-                ui.weak("");
-                ui.label("Any");
-                ui.label("Any");
+                if open {
+                    ui.separator();
+                    for (label, side, id) in [
+                        ("Side A", &mut rule.side_a, "rule side a"),
+                        ("Side B", &mut rule.side_b, "rule side b"),
+                    ] {
+                        ui.horizontal(|ui| {
+                            ui.label(label);
+                            crate::part_filter_ui::filter_editor(
+                                ui, id, fe, side, context, "Any part",
+                            );
+                        });
+                    }
+                    ui.weak(
+                        "A pair matches when the parts of one of its sides all pass Side A \
+                         and those of the other all pass Side B.",
+                    );
+                }
+            });
+        }
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label("All other pairs:  Any  to  Any");
+            ui.horizontal(|ui| {
                 let mut other = RuleAction::Type(detection.behavior);
                 action_combo(ui, "detection other type", &mut other, false);
                 if let RuleAction::Type(behavior) = other {
                     detection.behavior = behavior;
                 }
-                ui.label(count_text(n));
-                ui.weak("all other pairs");
-                ui.end_row();
+                ui.weak(format!("{} regions", count_text(n)));
             });
+        });
         if ui
             .button("Add Rule")
             .on_hover_text("Adds a rule above the type of all other pairs.")
@@ -497,39 +519,6 @@ fn rules_table(
                 }
             }
         }
-        if let Some(i) = editing.filter(|&i| i < detection.rules.len()) {
-            ui.separator();
-            ui.strong(format!("Rule {}", i + 1));
-            egui::Grid::new("detection rule sides")
-                .num_columns(2)
-                .show(ui, |ui| {
-                    let rule = &mut detection.rules[i];
-                    ui.label("Side A");
-                    crate::part_filter_ui::filter_editor(
-                        ui,
-                        "rule side a",
-                        fe,
-                        &mut rule.side_a,
-                        context,
-                        "Any part",
-                    );
-                    ui.end_row();
-                    ui.label("Side B");
-                    crate::part_filter_ui::filter_editor(
-                        ui,
-                        "rule side b",
-                        fe,
-                        &mut rule.side_b,
-                        context,
-                        "Any part",
-                    );
-                    ui.end_row();
-                });
-            ui.weak(
-                "A pair matches when the parts of one of its sides all pass Side A and those \
-                 of the other all pass Side B.",
-            );
-        }
     });
     ui.data_mut(|d| d.insert_temp(editing_id, editing));
 }
@@ -550,7 +539,7 @@ fn action_combo(
         };
         egui::ComboBox::from_id_salt(id)
             .selected_text(current.clone())
-            .width(120.0)
+            .width(105.0)
             .show_ui(ui, |ui| {
                 for choice in ContactBehavior::ALL {
                     let response = ui.selectable_label(current == choice.name(), choice.name());
@@ -570,7 +559,8 @@ fn action_combo(
                 }
             });
         if let RuleAction::Type(ContactBehavior::Frictional { mu }) = action {
-            ui.add(
+            ui.add_sized(
+                [64.0, ui.spacing().interact_size.y],
                 numeric::drag_value(mu)
                     .speed(0.01)
                     .range(0.0..=5.0)

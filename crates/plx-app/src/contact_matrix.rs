@@ -133,7 +133,6 @@ pub fn window(
         .open(open)
         .collapsible(false)
         .default_width(640.0)
-        .default_height(400.0)
         .resizable(true)
         .show(ctx, |ui| {
             if axes.by_groups {
