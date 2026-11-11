@@ -249,9 +249,7 @@ impl FeModel {
                         }
                     }
                     LoadKind::Pressure(pressure) => c.value(pressure, Quantity::Pressure),
-                    LoadKind::ConcentratedFlux(flux) => c.value(flux, Quantity::Power),
-                    LoadKind::SurfaceFlux(flux) => c.value(flux, Quantity::HeatFlux),
-                    LoadKind::BodyFlux(flux) => c.value(flux, Quantity::PowerPerVolume),
+                    LoadKind::Flux { value, .. } => c.value(value, Quantity::Power),
                     LoadKind::Film { sink, coefficient } => {
                         c.value(sink, Quantity::Temperature);
                         c.value(coefficient, Quantity::HeatTransferCoefficient);

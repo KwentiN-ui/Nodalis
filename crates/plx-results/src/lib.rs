@@ -8,6 +8,7 @@ mod derived;
 pub mod display;
 pub use plx_model::equation;
 pub mod field_output;
+pub mod harmonic;
 pub mod history_output;
 pub mod hot_spot;
 pub mod names;

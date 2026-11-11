@@ -6118,7 +6118,10 @@ fn writes_heat_transfer_keywords() {
             heat_load(
                 "Flux-1",
                 Region::Nodes(vec![99]),
-                LoadKind::ConcentratedFlux(3.0),
+                LoadKind::Flux {
+                    value: 3.0,
+                    each_node: true,
+                },
             ),
             heat_load(
                 "Film-1",
@@ -6128,11 +6131,7 @@ fn writes_heat_transfer_keywords() {
                     coefficient: 0.01,
                 },
             ),
-            heat_load(
-                "Body-1",
-                Region::Parts(vec!["EALL".into()]),
-                LoadKind::BodyFlux(0.5),
-            ),
+            heat_load("Points-1", Region::Nodes(vec![98, 99]), LoadKind::flux(0.5)),
             tip_force(),
         ],
     );
@@ -6154,7 +6153,8 @@ fn writes_heat_transfer_keywords() {
         // Displacements and forces do not act in a heat transfer step.
         "*Boundary\nFIX, 11, 11, 20\n*Cflux",
         "*Cflux, op=New\nINTERNAL_SELECTION-1_FLUX-1, 11, 3\n",
-        "*Dflux, op=New\nINTERNAL_SELECTION-1_BODY-1, BF, 0.5\n",
+        // Points share the total heat flow equally.
+        "INTERNAL_SELECTION-1_POINTS-1, 11, 0.25\n",
         "*Film, op=New\nINTERNAL-1_TIP_S4, F4, 25, 0.01\n",
         "*Node file\nNT, RFL\n",
         "*El file\nHFL\n",
@@ -6162,9 +6162,57 @@ fn writes_heat_transfer_keywords() {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
     assert!(
-        !text.contains("Cload") && !text.contains("Radiate"),
+        !text.contains("Cload") && !text.contains("Radiate") && !text.contains("Dflux"),
         "{text}"
     );
+}
+
+/// The area of the bar's cross-section and its length, from the extent of its nodes.
+fn bar_section_and_length(mesh: &FeMesh) -> (f64, f64) {
+    let (mut low, mut high) = ([f64::MAX; 3], [f64::MIN; 3]);
+    for &id in mesh.node_ids() {
+        let p = mesh.node(id).unwrap();
+        for k in 0..3 {
+            low[k] = low[k].min(p[k]);
+            high[k] = high[k].max(p[k]);
+        }
+    }
+    let size: Vec<f64> = (0..3).map(|k| high[k] - low[k]).collect();
+    (size[1] * size[2], size[0])
+}
+
+/// A total heat flow is spread over faces by area, over parts by volume.
+#[test]
+fn a_total_heat_flow_is_spread_over_faces_and_volumes() {
+    let (mesh, model) = thermal_bar(
+        steady(),
+        Vec::new(),
+        vec![
+            heat_load("Tip-1", Region::Surface("TIP".into()), LoadKind::flux(2.0)),
+            heat_load(
+                "Body-1",
+                Region::Parts(vec!["EALL".into()]),
+                LoadKind::flux(5.0),
+            ),
+        ],
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let cflux = text.split("*Cflux, op=New\n").nth(1).unwrap();
+    let cflux = &cflux[..cflux.find('*').unwrap()];
+    let values: Vec<f64> = (cflux.lines())
+        .map(|line| line.rsplit(", ").next().unwrap().parse().unwrap())
+        .collect();
+    let total: f64 = values.iter().sum();
+    assert!((total - 7.0).abs() < 1e-9, "{cflux}");
+    let tip = nodes_at(&mesh, 0, 100.0);
+    let at_tip: f64 = (cflux.lines())
+        .filter(|line| {
+            let node: u32 = line.split(", ").next().unwrap().parse().unwrap();
+            tip.contains(&node)
+        })
+        .map(|line| line.rsplit(", ").next().unwrap().parse::<f64>().unwrap())
+        .sum();
+    assert!(at_tip > 2.0 && at_tip < 2.0 + 5.0 / 2.0, "{cflux}");
 }
 
 /// Steady conduction along the bar, held at 0 at x = 0: a heat flux q into the far end
@@ -6172,19 +6220,21 @@ fn writes_heat_transfer_keywords() {
 #[test]
 fn solver_conducts_heat_along_a_bar() {
     let q = 1.0;
-    let (mesh, model) = thermal_bar(
+    let (mesh, mut model) = thermal_bar(
         steady(),
         vec![temperature(
             "Temperature-1",
             Region::NodeSet("FIX".into()),
             0.0,
         )],
-        vec![heat_load(
-            "Surface_Flux-1",
-            Region::Surface("TIP".into()),
-            LoadKind::SurfaceFlux(q),
-        )],
+        Vec::new(),
     );
+    let (area, _) = bar_section_and_length(&mesh);
+    model.steps[0].loads = vec![heat_load(
+        "Flux-1",
+        Region::Surface("TIP".into()),
+        LoadKind::flux(q * area),
+    )];
     let Some(frd) = run_solver("waermeleitung", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
@@ -6442,19 +6492,21 @@ fn solver_strains_the_bar_by_the_temperatures_of_a_result_file() {
 #[test]
 fn solver_conducts_body_heat() {
     let (body, length) = (0.01, 100.0);
-    let (mesh, model) = thermal_bar(
+    let (mesh, mut model) = thermal_bar(
         steady(),
         vec![temperature(
             "Temperature-1",
             Region::NodeSet("FIX".into()),
             0.0,
         )],
-        vec![heat_load(
-            "Body_Flux-1",
-            Region::Parts(vec!["EALL".into()]),
-            LoadKind::BodyFlux(body),
-        )],
+        Vec::new(),
     );
+    let (area, _) = bar_section_and_length(&mesh);
+    model.steps[0].loads = vec![heat_load(
+        "Flux-1",
+        Region::Parts(vec!["EALL".into()]),
+        LoadKind::flux(body * area * length),
+    )];
     let Some(frd) = run_solver("koerperwaerme", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
@@ -6835,16 +6887,12 @@ fn writes_both_amplitudes_of_films_and_radiation() {
         },
     );
     radiation.factor_amplitude = Some(named("Coefficient"));
-    let mut flux = heat_load(
-        "Flux-1",
-        Region::Nodes(vec![99]),
-        LoadKind::ConcentratedFlux(3.0),
-    );
+    let mut flux = heat_load("Flux-1", Region::Nodes(vec![99]), LoadKind::flux(3.0));
     flux.amplitude = Some(named("Sink"));
     let mut surface_flux = heat_load(
         "Surface_Flux-1",
         Region::Surface("TIP".into()),
-        LoadKind::SurfaceFlux(1.0),
+        LoadKind::flux(1.0),
     );
     surface_flux.amplitude = Some(named("Sink"));
     let mut temperature = temperature("Temperature-1", Region::NodeSet("FIX".into()), 20.0);
@@ -6866,7 +6914,6 @@ fn writes_both_amplitudes_of_films_and_radiation() {
         "*Film, op=New, Amplitude=SINK, Film amplitude=COEFFICIENT\n",
         "*Radiate, op=New, Radiation amplitude=COEFFICIENT\n",
         "*Cflux, op=New, Amplitude=SINK\n",
-        "*Dflux, op=New, Amplitude=SINK\n",
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }
@@ -12799,4 +12846,72 @@ fn a_bolt_through_a_tapped_hole_is_tied_in_the_bore_and_cut_below_it() {
     let (foot, rim) = (sum("FOOT"), sum("RIM"));
     assert!(foot < -1.0, "{foot}");
     assert!((foot + rim).abs() < 1e-4 * foot.abs(), "{foot} {rim}");
+}
+
+/// The imaginary parts of a frequency response (`DISPI`, `STRESSI`, ...) are the part of the
+/// response a quarter period behind the load, which only damping gives: undamped they are
+/// zero, damped they are not.
+#[test]
+fn solver_writes_imaginary_parts_that_damping_fills() {
+    let largest = |name: &str, damping: Option<ModalDamping>| {
+        let (mesh, mut model) = modal_cantilever(damping);
+        let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
+            unreachable!()
+        };
+        // Below the first mode (about 800 Hz): no undamped resonance on the grid.
+        settings.lower_frequency = 100.0;
+        settings.upper_frequency = 700.0;
+        settings.data_points = 4;
+        let frd = run_solver(name, &write_inp(&mesh, &model, "").unwrap())?;
+        let sweep: Vec<_> = frd.increments.iter().filter(|i| i.step == 5).collect();
+        let field = sweep.first()?.field("DISPI")?;
+        Some(
+            (field.components.iter())
+                .flat_map(|c| c.values.iter())
+                .filter(|v| v.is_finite())
+                .fold(0.0_f32, |m, v| m.max(v.abs())),
+        )
+    };
+    let Some(undamped) = largest("ssd-ungedaempft", None) else {
+        return;
+    };
+    assert_eq!(undamped, 0.0);
+    let damped = largest("ssd-gedaempft", Some(ModalDamping::Constant(0.05))).unwrap();
+    assert!(damped > 0.0, "{damped}");
+}
+
+/// Writes a project of the cantilever of `kragbalken_c3d20r.inp` with a damped Steady State
+/// Dynamics step over its first modes, for the user guide's screenshots of steady state
+/// results: `PLX_SSD_DEMO=path cargo test steady_state_demo -- --ignored`.
+#[test]
+#[ignore]
+fn steady_state_demo_project() {
+    let Some(path) = std::env::var_os("PLX_SSD_DEMO") else {
+        return;
+    };
+    let (mesh, mut model) = modal_cantilever(Some(ModalDamping::Constant(0.02)));
+    let mut sweep = model.steps.pop().unwrap();
+    let StepKind::SteadyStateDynamics(settings) = &mut sweep.kind else {
+        unreachable!()
+    };
+    settings.lower_frequency = 0.0;
+    settings.upper_frequency = 6000.0;
+    settings.data_points = 20;
+    settings.bias = 3.0;
+    settings.modes = 10;
+    sweep.name = "Frequency response".into();
+    model.steps = vec![sweep];
+    let project = crate::project::Project {
+        nodes: vec![crate::project::ProjectNode::Analysis(Box::new(
+            crate::project::ProjectAnalysis {
+                id: 1,
+                name: "Analysis-1".into(),
+                mesh,
+                model,
+                ..Default::default()
+            },
+        ))],
+        ..Default::default()
+    };
+    crate::project::save_project(std::path::Path::new(&path), &project).unwrap();
 }

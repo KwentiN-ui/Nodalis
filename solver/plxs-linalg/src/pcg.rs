@@ -577,6 +577,21 @@ impl PcgSolver {
             }
             let pq = dot(&p, &q);
             if pq <= 0.0 || !pq.is_finite() {
+                // The deflated operator `P A` can turn indefinite by rounding when the
+                // learned modes do not fit the matrix well (a preloaded stiffness under
+                // shift-invert Lanczos, positive definite all along); without the
+                // deflation the matrix itself decides.
+                if let Some(b0) = b0.as_ref() {
+                    if trace {
+                        eprintln!(
+                            "pcg: iteration {iteration}: the deflated operator is not positive definite, solving again without the deflation"
+                        );
+                    }
+                    *deflation = None;
+                    drop(deflation);
+                    self.unpad(b0, rhs);
+                    return self.iterate(rhs, loose);
+                }
                 return Err(indefinite());
             }
             let alpha = rz / pq;

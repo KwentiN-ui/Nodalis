@@ -447,12 +447,23 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     }
                 }
             }
+            // Films and radiation leave the faces; a heat flow onto faces enters them, one
+            // onto edges, points or into parts shows like a temperature.
             Kind::Load(
-                LoadKind::SurfaceFlux(_) | LoadKind::Film { .. } | LoadKind::Radiation { .. },
-            ) => {
+                ref kind @ (LoadKind::Flux { .. }
+                | LoadKind::Film { .. }
+                | LoadKind::Radiation { .. }),
+            ) if !matches!(
+                kind,
+                LoadKind::Flux {
+                    each_node: true,
+                    ..
+                }
+            ) && !item.region.faces(&model.mesh).is_empty() =>
+            {
                 let faces = face_geometry(model, &item.region, &visible);
                 let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
-                let into = matches!(item.kind, Kind::Load(LoadKind::SurfaceFlux(q)) if q >= 0.0);
+                let into = matches!(kind, LoadKind::Flux { value, .. } if *value >= 0.0);
                 for index in sample(&centers, DIVISIONS) {
                     let face = &faces[index];
                     if into {
@@ -462,8 +473,8 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     }
                 }
             }
-            Kind::Load(LoadKind::ConcentratedFlux(_) | LoadKind::BodyFlux(_))
-            | Kind::Boundary(BoundaryKind::Temperature(_)) => {
+            Kind::Load(LoadKind::Film { .. } | LoadKind::Radiation { .. }) => {}
+            Kind::Load(LoadKind::Flux { .. }) | Kind::Boundary(BoundaryKind::Temperature(_)) => {
                 let points = node_points(model, &item.region, &visible);
                 for index in sample(&points, DIVISIONS) {
                     add(points[index], DVec3::Z, SymbolShape::Ball);

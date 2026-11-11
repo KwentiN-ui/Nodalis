@@ -60,6 +60,76 @@ impl Element {
     }
 }
 
+impl Element {
+    /// The nodes' shares of the element's volume, the integrals of their shape functions
+    /// over it: the consistent nodal loads of a load that is constant per volume. Plane
+    /// elements and shells give their area, times the radius x with `axisymmetric` (the
+    /// volume swept about the y axis, divided by 2 pi). Quadratic tetrahedra give their
+    /// corners negative shares. `None` for line elements or with missing nodes.
+    pub fn node_volumes(&self, mesh: &FeMesh, axisymmetric: bool) -> Option<Vec<f64>> {
+        let solid = self.shape.is_solid();
+        if !solid && self.shape.family() != crate::ElementFamily::Surface {
+            return None;
+        }
+        let count = self.shape.node_count();
+        if self.nodes.len() < count {
+            return None;
+        }
+        let coords = (self.nodes[..count].iter())
+            .map(|&node| mesh.node(node))
+            .collect::<Option<Vec<_>>>()?;
+        let (points, weight) = integration_rule(self.shape);
+        let mut shares = vec![0.0; count];
+        let mut n = [0.0; 20];
+        for (&p, d) in points.iter().zip(derivatives(self.shape)) {
+            let mut j = [[0.0; 3]; 3];
+            for (dn, c) in d.iter().zip(&coords) {
+                for (row, ci) in j.iter_mut().zip(c) {
+                    for (entry, dk) in row.iter_mut().zip(dn) {
+                        *entry += dk * ci;
+                    }
+                }
+            }
+            // Columns of `j` are the tangents along the natural coordinates.
+            let column = |k: usize| [j[0][k], j[1][k], j[2][k]];
+            let measure = if solid {
+                determinant3(&j).abs()
+            } else {
+                let (a, b) = (column(0), column(1));
+                let cross = [
+                    a[1] * b[2] - a[2] * b[1],
+                    a[2] * b[0] - a[0] * b[2],
+                    a[0] * b[1] - a[1] * b[0],
+                ];
+                cross.iter().map(|v| v * v).sum::<f64>().sqrt()
+            };
+            shape_functions(self.shape, p, &mut n);
+            let radius = if axisymmetric {
+                (n[..count].iter().zip(&coords))
+                    .map(|(ni, c)| ni * c[0])
+                    .sum()
+            } else {
+                1.0
+            };
+            for (share, ni) in shares.iter_mut().zip(&n[..count]) {
+                *share += weight * measure * radius * ni;
+            }
+        }
+        Some(shares)
+    }
+}
+
+/// The integration points of a shape and their common weight.
+fn integration_rule(shape: ElementShape) -> (&'static [[f64; 3]], f64) {
+    match shape {
+        ElementShape::Tet4 | ElementShape::Tet10 => (&TET_POINTS, 1.0 / 24.0),
+        ElementShape::Wedge6 | ElementShape::Wedge15 => (&WEDGE_POINTS, 1.0 / 6.0),
+        ElementShape::Tri3 | ElementShape::Tri6 => (&TRI_POINTS, 1.0 / 6.0),
+        ElementShape::Quad4 | ElementShape::Quad8 => (&QUAD_POINTS, 1.0),
+        _ => (&HEX_POINTS, 1.0),
+    }
+}
+
 /// Derivatives of the shape functions by the natural coordinates at each integration point,
 /// computed once per shape.
 fn derivatives(shape: ElementShape) -> &'static [Vec<[f64; 3]>] {
@@ -387,6 +457,45 @@ mod tests {
         assert!((check(ElementShape::Quad8, "CPS8", &quad8) - 0.25).abs() < 1e-6);
         let tri6 = quadratic(&TET[..3], &[[0, 1], [1, 2], [2, 0]]);
         assert!((check(ElementShape::Tri6, "CPE6", &tri6) - 1.0).abs() < 1e-6);
+    }
+
+    fn shares(shape: ElementShape, type_name: &str, coords: &[[f64; 3]], axi: bool) -> Vec<f64> {
+        let (mesh, element) = element(shape, type_name, coords);
+        element.node_volumes(&mesh, axi).unwrap()
+    }
+
+    #[test]
+    fn node_volumes_add_up_to_the_volume() {
+        let total = |v: &[f64]| v.iter().sum::<f64>();
+        let tet = shares(ElementShape::Tet4, "C3D4", &TET, false);
+        assert!(tet.iter().all(|v| (v - 1.0 / 24.0).abs() < 1e-9));
+        let tet10 = shares(
+            ElementShape::Tet10,
+            "C3D10",
+            &quadratic(&TET, &TET_EDGES),
+            false,
+        );
+        assert!((total(&tet10) - 1.0 / 6.0).abs() < 1e-9);
+        // The corners of a quadratic tetrahedron take -1/20 of the volume, the midside
+        // nodes 1/5.
+        assert!((tet10[0] + 1.0 / 120.0).abs() < 1e-9);
+        assert!((tet10[4] - 1.0 / 30.0).abs() < 1e-9);
+        let hex20 = quadratic(&unit_hex(), &HEX_EDGES);
+        assert!((total(&shares(ElementShape::Hex20, "C3D20", &hex20, false)) - 1.0).abs() < 1e-9);
+        // A shell gives its area, wherever it lies.
+        let tilted: Vec<[f64; 3]> = unit_hex()[..4].iter().map(|c| [c[0], c[1], c[1]]).collect();
+        let shell = shares(ElementShape::Quad4, "S4", &tilted, false);
+        assert!((total(&shell) - 2f64.sqrt()).abs() < 1e-9);
+        // An axisymmetric square from x = 1 to 2 sweeps 2 pi times 1.5.
+        let ring: Vec<[f64; 3]> = unit_hex()[..4]
+            .iter()
+            .map(|c| [c[0] + 1.0, c[1], 0.0])
+            .collect();
+        let ring = shares(ElementShape::Quad4, "CAX4", &ring, true);
+        assert!((total(&ring) - 1.5).abs() < 1e-9);
+        assert!(ring[1] > ring[0]);
+        let (mesh, line) = element(ElementShape::Line2, "B31", &TET[..2]);
+        assert_eq!(line.node_volumes(&mesh, false), None);
     }
 
     #[test]

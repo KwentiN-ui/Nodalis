@@ -52,6 +52,8 @@ the fixed end stiffens it most])
 The history output `STEP_n` of the step lists the value of every response (`DESIGN_RESPONSE`)
 and the length of its gradient (`GRADIENT_LENGTH`).
 
-#limitation[Only the coordinates of the design nodes are design variables; the step does not
+#limitation[The step exists for 3D models only. The design nodes lie on the free faces of solid
+elements, which plane stress, plane strain and axisymmetric models do not have, so the dialog
+does not offer the type there. Only the coordinates of the design nodes are design variables; the step does not
 move them. Optimization with constraints (`*FEASIBLE DIRECTION`), displacement and stress
 responses are not available yet.]

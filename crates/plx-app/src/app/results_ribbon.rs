@@ -591,6 +591,18 @@ fn increment_panel(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
         return false;
     };
     let mut chosen = None;
+    let mut phase_changed = false;
+    if step.category == StepCategory::SteadyStateDynamics {
+        ui.horizontal(|ui| {
+            ui.label("Phase angle");
+            let slider = egui::Slider::new(&mut view.harmonic_phase, 0.0..=360.0)
+                .step_by(5.0)
+                .suffix(" deg");
+            phase_changed = ui.add(slider).changed();
+        });
+        ui.weak("The moment of the period shown: at 0 deg the load peaks. Animate plays a period.");
+        ui.separator();
+    }
     let noun = step.entry_noun();
     let plural = match noun {
         "Frequency" => "Frequencies".to_owned(),
@@ -705,6 +717,6 @@ fn increment_panel(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
             view.switch_increment(index);
             true
         }
-        _ => false,
+        _ => phase_changed,
     }
 }

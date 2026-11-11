@@ -258,7 +258,7 @@ pub(crate) fn lanczos_modes(
     count: usize,
     lower: Option<f64>,
     solver: EquationSolver,
-    coordinates: Vec<[f64; 3]>,
+    unknowns: Unknowns,
     progress: &mut dyn Progress,
 ) -> Result<plxs_linalg::EigenPairs> {
     let lower_shift = lower
@@ -268,7 +268,10 @@ pub(crate) fn lanczos_modes(
     // The positions of the unknowns make the nested dissection of the direct solver
     // geometric. Without them it bisects along level structures, which on a 600k-equation
     // mesh took minutes instead of seconds and filled more.
-    lanczos.direct_mut().set_coordinates(Some(coordinates));
+    lanczos
+        .direct_mut()
+        .set_coordinates(Some(unknowns.coordinates.clone()));
+    lanczos.set_unknowns(Some(unknowns));
     let started = std::time::Instant::now();
     let mut shifts = vec![lower_shift.unwrap_or(0.0)];
     if lower_shift.is_none() {
@@ -443,7 +446,7 @@ impl Procedure for FrequencyProcedure {
             count,
             parameters.lower,
             parameters.solver,
-            Unknowns::from_free(&reduction.free, 3, &ctx.model.nodes.coordinates).coordinates,
+            crate::equations::displacement_unknowns(ctx.model, &reduction.free),
             progress,
         )?;
 
@@ -717,9 +720,11 @@ impl Procedure for BuckleProcedure {
         std::mem::swap(lanczos.direct_mut(), &mut ctx.solver);
         lanczos.direct_mut().set_regularization(1e-12);
         // Taken by a fresh analysis only (the reference solution solved iteratively).
-        lanczos.direct_mut().set_coordinates(Some(
-            Unknowns::from_free(&reduction.free, 3, &ctx.model.nodes.coordinates).coordinates,
-        ));
+        let unknowns = crate::equations::displacement_unknowns(ctx.model, &reduction.free);
+        lanczos
+            .direct_mut()
+            .set_coordinates(Some(unknowns.coordinates.clone()));
+        lanczos.set_unknowns(Some(unknowns));
         let pairs = with_eigen_solver(
             &mut lanczos,
             parameters.solver,

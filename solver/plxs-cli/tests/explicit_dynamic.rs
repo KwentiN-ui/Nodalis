@@ -12,6 +12,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 fn plxs() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_plxs"))
@@ -489,8 +490,9 @@ fn an_elastic_bar_bounces_off_a_wall_surface_to_surface() {
     check_bar_on_wall("Surface to surface", "wall-s2s");
 }
 
-/// A block (2 × 2 CPE4, 10 mm) sliding at `v0` on a steel plate under gravity `g` with
-/// friction `mu`.
+/// A block (2 × 2 CPE4, 10 mm) sliding at `v0` on a plate under gravity `g` with
+/// friction `mu`. Block and plate are a hundred times softer than steel, so that the stable
+/// time step is ten times longer; sliding and friction do not depend on the stiffness.
 fn sliding_block(v0: f64, mu: f64, g: f64) -> String {
     let mut s = String::from("*Node\n");
     for j in 0..2 {
@@ -542,21 +544,22 @@ fn sliding_block(v0: f64, mu: f64, g: f64) -> String {
          *Nset, Nset=BLOCKN, Generate\n1001, 1009, 1\n*Nset, Nset=CORNER\n1001\n\
          *Elset, Elset=BLOCKLOW\n101, 102\n*Surface, Name=SLAVE, Type=Element\nBLOCKLOW, S1\n\
          *Surface, Name=MASTER, Type=Element\nPLATE, S3\n\
-         *Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
-         *Solid section, Elset=EALL, Material=STEEL\n1\n\
+         *Material, Name=SOFT\n*Elastic\n{}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=SOFT\n1\n\
          *Surface interaction, Name=SI\n*Surface behavior, Pressure-overclosure=Linear\n1e15\n\
          *Friction\n{mu}, 1e13\n\
          *Contact pair, Interaction=SI, Type=Surface to surface\nSLAVE, MASTER\n\
          *Initial conditions, Type=Velocity\nBLOCKN, 1, {v0}\n\
          *Step\n*Dynamic, Integration=Explicit\n0.005, 0.06\n*Boundary\nBOTTOM, 1, 2, 0\n\
          *Dload\nEALL, GRAV, {g}, 0, -1, 0\n\
-         *Node print, Nset=CORNER\nU\n*End step"
+         *Node print, Nset=CORNER\nU\n*End step",
+        E / 100.0
     )
     .unwrap();
     s
 }
 
-/// A block (2 × 2 CPE4, 10 mm) sliding at `v0` on a steel plate under gravity stops after
+/// A block (2 × 2 CPE4, 10 mm) sliding at `v0` on a plate under gravity stops after
 /// `v0² / (2 μ g)`.
 #[test]
 fn a_block_sliding_on_a_plate_stops_by_friction() {
@@ -866,10 +869,12 @@ fn an_explicit_impact_logs_frames_at_the_contact_events() {
 // ---------------------------------------------------------------------------------------
 // Stage 3: rigid bodies under finite rotations, mass scaling
 
-/// A steel plate (plane stress, 100 × 20 mm, 10 × 2 CPS4, 10 mm thick) whose left edge is
+/// A plate (plane stress, 100 × 20 mm, 10 × 2 CPS4, 10 mm thick) whose left edge is
 /// a rigid body held at its reference point, released horizontally under gravity: a
 /// physical pendulum that hangs straight down after `K(sin 45°) / ω₀`, and keeps its
-/// length while it turns.
+/// length while it turns. The plate is a hundred times softer than steel, so that the
+/// stable time step is ten times longer; it still stretches and sags by less than a
+/// thousandth of its length.
 #[test]
 fn a_plate_hinged_at_a_rigid_edge_swings_as_a_pendulum() {
     let (length, height, g) = (0.1, 0.02, 9.81);
@@ -917,8 +922,8 @@ fn a_plate_hinged_at_a_rigid_edge_swings_as_a_pendulum() {
     writeln!(
         s,
         "*Nset, Nset=LEFT\n{}, {}, {}\n*Nset, Nset=TIPNODE\n{}\n\
-         *Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
-         *Solid section, Elset=EALL, Material=STEEL\n0.01\n\
+         *Material, Name=SOFT\n*Elastic\n{}, 0.3\n*Density\n{RHO}\n\
+         *Solid section, Elset=EALL, Material=SOFT\n0.01\n\
          *Rigid body, Nset=LEFT, Ref node=100, Rot node=101\n\
          *Step, Nlgeom\n*Dynamic, Integration=Explicit\n{}, {period}\n*Boundary\n100, 1, 2, 0\n\
          *Dload\nEALL, GRAV, {g}, 0, -1, 0\n*Node print, Nset=TIPNODE\nU\n*End step",
@@ -926,6 +931,7 @@ fn a_plate_hinged_at_a_rigid_edge_swings_as_a_pendulum() {
         id(0, 1),
         id(0, 2),
         id(10, 1),
+        E / 100.0,
         period / 110.0
     )
     .unwrap();
@@ -957,12 +963,13 @@ fn a_plate_hinged_at_a_rigid_edge_swings_as_a_pendulum() {
     );
 }
 
-/// The tip of a cantilever (20 × 2 × 2 C3D8I, 200 × 20 × 20 mm) whose first element
+/// The tip of a cantilever (20 × 1 × 1 C3D8I, 200 × 40 × 40 mm) whose first element
 /// layer is thin (a tenth of the others), released from a static tip load: its zero
-/// crossings. `scaling` is the `MASS SCALING` target.
+/// crossings. `scaling` is the `MASS SCALING` target. Stocky and one element across, so
+/// that the thin layer's time steps over three swings stay few.
 fn released_cantilever(job: &str, scaling: Option<f64>) -> (Vec<f64>, String) {
-    let (length, side, cells) = (0.2, 0.02, 20);
-    let mut mesh = bar_mesh(cells, 2, 2, [length, side, side], "C3D8I");
+    let (length, side, cells) = (0.2, 0.04, 20);
+    let mut mesh = bar_mesh(cells, 1, 1, [length, side, side], "C3D8I");
     // Station 1 close to the support: x = cell/10.
     let cell = length / cells as f64;
     let mut moved = String::new();
@@ -979,7 +986,7 @@ fn released_cantilever(job: &str, scaling: Option<f64>) -> (Vec<f64>, String) {
         }
     }
     mesh = moved;
-    let swing = 0.007;
+    let swing = 0.0035;
     let input = format!(
         "{mesh}*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
          *Solid section, Elset=EALL, Material=STEEL\n*Boundary\nEND0, 1, 3, 0\n\
@@ -1324,6 +1331,35 @@ fn run_with_gpu(dir: &Path, job: &str, input: &str, mode: &str) -> (String, Stri
     (dat, log)
 }
 
+/// The log of a tiny explicit job with `PLXS_GPU=on` if it stepped on the processor for want
+/// of a card (none, or none with double precision), else `None`. Probed once per test
+/// binary: without a card the comparisons skip before their two runs instead of running
+/// the same job twice on the processor.
+fn missing_card() -> Option<&'static str> {
+    static LOG: OnceLock<Option<String>> = OnceLock::new();
+    LOG.get_or_init(|| {
+        let mut input = bar_mesh(2, 1, 1, [0.02, 0.01, 0.01], "C3D8");
+        writeln!(
+            input,
+            "*Material, Name=STEEL\n*Elastic\n{E}, 0.3\n*Density\n{RHO}\n\
+             *Solid section, Elset=EALL, Material=STEEL\n\
+             *Step\n*Dynamic, Integration=Explicit\n1e-6, 1e-6\n\
+             *Boundary\nEND0, 1, 3, 0\n*Node print, Nset=END1\nU\n*End step"
+        )
+        .unwrap();
+        let dir = work_dir("card-probe");
+        let (_, log) = run_with_gpu(&dir, "probe", &input, "on");
+        clean(&dir);
+        log.lines()
+            .any(|l| {
+                l.contains("explicit: time steps on the processor")
+                    && (l.contains("no graphics card") || l.contains("double precision"))
+            })
+            .then_some(log)
+    })
+    .as_deref()
+}
+
 /// A bar of `kind` elements, moving at the start, held at one end and pulled at the other
 /// by a growing load: the same on the graphics card as on the processor. `how` is in the
 /// message that names the card: how it forms the forces.
@@ -1433,18 +1469,15 @@ fn gpu_matches_processor_with(
         period / frames as f64
     )
     .unwrap();
+    // Only a missing card skips the comparison, not a fallback for another reason.
+    if let Some(log) = missing_card() {
+        eprintln!("no graphics card with double precision: {log}");
+        return;
+    }
     let dir = work_dir(job);
     let (cpu, _) = run_with_gpu(&dir, "cpu", &input, "off");
     let (gpu, log) = run_with_gpu(&dir, "gpu", &input, "on");
     clean(&dir);
-    // Only a missing card skips the comparison, not a fallback for another reason.
-    if log.lines().any(|l| {
-        l.contains("explicit: time steps on the processor")
-            && (l.contains("no graphics card") || l.contains("double precision"))
-    }) {
-        eprintln!("no graphics card with double precision: {log}");
-        return;
-    }
     assert!(log.contains(how), "{kind}: not by {how}:\n{log}");
     for heading in [
         "displacements",
@@ -1677,11 +1710,11 @@ fn a_shell_plate_keeps_its_initial_velocity() {
 // ---------------------------------------------------------------------------------------
 // Stage 6: selective mass scaling of expanded shells
 
-/// An S8R strip (50 × 10 mm, 1 mm thick, 10 × 2 elements) clamped at one end, released from
+/// An S8R strip (50 × 10 mm, 1 mm thick, 5 × 2 elements) clamped at one end, released from
 /// its static deflection under a tip load; with `full` the shells keep their whole inertia.
 /// Returns the zero crossings of the tip and the log.
 fn released_shell_strip(job: &str, full: bool) -> (Vec<f64>, String) {
-    let (length, width, thickness, cells) = (0.05, 0.01, 0.001, 10);
+    let (length, width, thickness, cells) = (0.05, 0.01, 0.001, 5);
     let (hx, hy) = (length / (2 * cells) as f64, width / 4.0);
     let id = |i: usize, j: usize| i * 5 + j + 1;
     let mut input = String::from("*Node\n");
@@ -1834,17 +1867,14 @@ fn shells_with_constraints_on_the_graphics_card_match_the_processor() {
         swing / frames as f64
     )
     .unwrap();
+    if let Some(log) = missing_card() {
+        eprintln!("no graphics card with double precision: {log}");
+        return;
+    }
     let dir = work_dir("gpu-shells");
     let (cpu, _) = run_with_gpu(&dir, "cpu", &input, "off");
     let (gpu, log) = run_with_gpu(&dir, "gpu", &input, "on");
     clean(&dir);
-    if log.lines().any(|l| {
-        l.contains("explicit: time steps on the processor")
-            && (l.contains("no graphics card") || l.contains("double precision"))
-    }) {
-        eprintln!("no graphics card with double precision: {log}");
-        return;
-    }
     assert!(log.contains("element forces"), "not on the card:\n{log}");
     assert!(log.contains("the mass couples"), "no coupled mass:\n{log}");
     // The reactions are small differences of the large forces across the thin thickness
@@ -1935,17 +1965,14 @@ fn prescribed_motion_on_the_graphics_card_matches_the_processor() {
         period / frames as f64
     )
     .unwrap();
+    if let Some(log) = missing_card() {
+        eprintln!("no graphics card with double precision: {log}");
+        return;
+    }
     let dir = work_dir("gpu-prescribed");
     let (cpu, _) = run_with_gpu(&dir, "cpu", &input, "off");
     let (gpu, log) = run_with_gpu(&dir, "gpu", &input, "on");
     clean(&dir);
-    if log.lines().any(|l| {
-        l.contains("explicit: time steps on the processor")
-            && (l.contains("no graphics card") || l.contains("double precision"))
-    }) {
-        eprintln!("no graphics card with double precision: {log}");
-        return;
-    }
     assert!(log.contains("element forces"), "not on the card:\n{log}");
     assert!(!log.contains("card failed"), "{log}");
     for heading in [
@@ -1978,19 +2005,16 @@ fn prescribed_motion_on_the_graphics_card_matches_the_processor() {
 /// `input` on the graphics card as on the processor: the blocks under `headings` agree to
 /// `tolerance` of their largest value.
 fn contact_on_the_card(job: &str, input: &str, headings: &[&str], tolerance: f64) {
+    if let Some(log) = missing_card() {
+        eprintln!("no graphics card with double precision: {log}");
+        return;
+    }
     let dir = work_dir(job);
     let (cpu, _) = run_with_gpu(&dir, "cpu", input, "off");
     let (gpu, log) = run_with_gpu(&dir, "gpu", input, "on");
     clean(&dir);
     if std::env::var("PLXS_TEST_LOG").is_ok() {
         eprintln!("{log}");
-    }
-    if log.lines().any(|l| {
-        l.contains("explicit: time steps on the processor")
-            && (l.contains("no graphics card") || l.contains("double precision"))
-    }) {
-        eprintln!("no graphics card with double precision: {log}");
-        return;
     }
     assert!(log.contains("element forces"), "not on the card:\n{log}");
     assert!(!log.contains("card failed"), "{log}");
