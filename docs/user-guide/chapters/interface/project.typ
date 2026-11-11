@@ -129,8 +129,8 @@ the state of another analysis (@data-links).
 - *Drag* a block by its header to move it. Drag the background to select the blocks in a
   rectangle, and click it to clear the selection. Drag with the middle mouse button to pan,
   scroll to pan up and down, and scroll with #key("Ctrl") held to zoom, from a tenth of the
-  true size up to four times it. #menu("Arrange", "Show All") (#key("Home")) fits all
-  blocks into the view.
+  true size up to four times it; the text is drawn again for the zoom, so it stays sharp when
+  magnified. #menu("Arrange", "Show All") (#key("Home")) fits all blocks into the view.
 - The *minimap* in the lower right corner shows all blocks and frames in small, with the part
   in view outlined; click or drag in it to move the view there.
   #menu("Arrange", "Minimap") shows or hides it.
@@ -209,6 +209,8 @@ Large schematics stay readable with three things borrowed from Blender's node ed
   #key("H"); a double-click on the header of a compact block opens it again.
 
 Frames, notes and compact blocks are saved with the project, and undo and redo cover them.
+
+#screenshot("schematic-zoom.png", [A block zoomed in: the text stays sharp])
 
 #screenshot("schematic-frames.png", [Two frames, a note and a compact analysis that shows only
   its linked rows])

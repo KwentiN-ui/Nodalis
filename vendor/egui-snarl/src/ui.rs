@@ -1410,9 +1410,91 @@ where
         }
     }
 
+    sharpen_text(ui.ctx(), snarl_layer_id, to_global.scaling);
+
     snarl_state.store(snarl, ui.ctx());
 
     snarl_resp
+}
+
+/// Nodalis: lays the text of the schematic out again for the zoom.
+///
+/// The layer transform scales the glyph quads of a text laid out at the screen's
+/// resolution, so zooming in magnifies the bitmaps and the text turns pixelated. A galley laid
+/// out with `pixels_per_point * zoom` has its glyphs rasterised at the size they end up at,
+/// while its geometry in points stays the same, so the transform then gives crisp text. The zoom
+/// is quantised to steps of a quarter octave: the glyph atlas holds one set of glyphs per
+/// step, not one per scroll tick, and the galley cache keeps the layouts from frame to frame.
+fn sharpen_text(ctx: &egui::Context, layer_id: LayerId, zoom: f32) {
+    const STEPS_PER_OCTAVE: f32 = 4.0;
+    // Below half size the minified bitmaps still look fine; above four times the glyphs would
+    // outgrow the atlas.
+    let quantised = ((zoom.log2() * STEPS_PER_OCTAVE).round() / STEPS_PER_OCTAVE)
+        .exp2()
+        .clamp(0.5, 4.0);
+    if (quantised - 1.0).abs() < 1e-3 {
+        return;
+    }
+
+    let ppp = ctx.pixels_per_point();
+    let count = ctx.graphics_mut(|g| g.get(layer_id).map_or(0, |list| list.next_idx().0));
+
+    // The texts of the layer, in drawing order.
+    let mut jobs = Vec::new();
+    ctx.graphics_mut(|g| {
+        if let Some(list) = g.get_mut(layer_id) {
+            for idx in 0..count {
+                list.mutate_shape(egui::layers::ShapeIdx(idx), |clipped| {
+                    visit_texts(&mut clipped.shape, &mut |text| jobs.push(text.galley.job.clone()));
+                });
+            }
+        }
+    });
+    if jobs.is_empty() {
+        return;
+    }
+
+    // `FontsView` takes the resolution of the layout from the context, so the context claims
+    // the finer one for the duration of the layouts.
+    ctx.input_mut(|i| i.pixels_per_point = ppp * quantised);
+    let galleys: Vec<_> = jobs
+        .iter()
+        .map(|job| {
+            let mut galley = ctx.fonts_mut(|fonts| fonts.layout_job((**job).clone()));
+            // The tessellator draws at the resolution of the screen; the galley's own
+            // resolution only matters to its layout.
+            std::sync::Arc::make_mut(&mut galley).pixels_per_point = ppp;
+            galley
+        })
+        .collect();
+    ctx.input_mut(|i| i.pixels_per_point = ppp);
+
+    let mut galleys = galleys.into_iter();
+    ctx.graphics_mut(|g| {
+        if let Some(list) = g.get_mut(layer_id) {
+            for idx in 0..count {
+                list.mutate_shape(egui::layers::ShapeIdx(idx), |clipped| {
+                    visit_texts(&mut clipped.shape, &mut |text| {
+                        if let Some(galley) = galleys.next() {
+                            text.galley = galley;
+                        }
+                    });
+                });
+            }
+        }
+    });
+}
+
+fn visit_texts(shape: &mut egui::Shape, f: &mut impl FnMut(&mut egui::epaint::TextShape)) {
+    match shape {
+        egui::Shape::Text(text) => f(text),
+        egui::Shape::Vec(shapes) => {
+            for shape in shapes {
+                visit_texts(shape, f);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
