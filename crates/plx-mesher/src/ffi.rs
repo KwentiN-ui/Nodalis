@@ -136,6 +136,14 @@ gmsh_api! {
         c_int, c_int, c_int,
         Ierr,
     );
+    occ_fragment = "gmshModelOccFragment": fn(
+        *const c_int, usize,
+        *const c_int, usize,
+        *mut *mut c_int, *mut usize,
+        *mut *mut *mut c_int, *mut *mut usize, *mut usize,
+        c_int, c_int, c_int,
+        Ierr,
+    );
     occ_revolve = "gmshModelOccRevolve": fn(
         *const c_int, usize,
         c_double, c_double, c_double,
@@ -150,7 +158,13 @@ gmsh_api! {
     occ_import_shapes = "gmshModelOccImportShapes":
         fn(*const c_char, *mut *mut c_int, *mut usize, c_int, *const c_char, Ierr);
     occ_add_box = "gmshModelOccAddBox":
-        fn(c_double, c_double, c_double, c_double, c_double, c_double, c_int, Ierr);
+        fn(c_double, c_double, c_double, c_double, c_double, c_double, c_int, Ierr) -> c_int;
+    occ_add_disk = "gmshModelOccAddDisk": fn(
+        c_double, c_double, c_double, c_double, c_double, c_int,
+        *const c_double, usize,
+        *const c_double, usize,
+        Ierr,
+    ) -> c_int;
     occ_add_rectangle = "gmshModelOccAddRectangle":
         fn(c_double, c_double, c_double, c_double, c_double, c_int, c_double, Ierr) -> c_int;
     occ_add_point = "gmshModelOccAddPoint":

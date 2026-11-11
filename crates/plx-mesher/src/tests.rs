@@ -2387,3 +2387,250 @@ fn a_compound_part_is_one_part_of_bodies_tied_where_they_touch() {
     assert_eq!(remeshed.parts[0].bodies[0], part.bodies[0]);
     assert!(remeshed.parts[0].bodies[1].elements.len() > part.bodies[1].elements.len());
 }
+
+/// A geometry made by Gmsh in `make`, its signatures recorded.
+fn made_geometry(make: impl FnOnce(&Gmsh) -> Result<(), GmshError>) -> Geometry {
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        make(gmsh)?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    with_signatures(Geometry {
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        ..cube()
+    })
+    .unwrap()
+}
+
+/// A plate of 40 x 30 x 5 mm with a hole of 10 mm diameter through it at (15, 15).
+fn plate_with_hole() -> Geometry {
+    made_geometry(|gmsh| {
+        let plate = gmsh.add_box([0.0; 3], [40.0, 30.0, 5.0])?;
+        let disk = gmsh.add_disk([15.0, 15.0, -1.0], 5.0, [0.0, 0.0, 1.0])?;
+        let pin = (gmsh.extrude(&[(2, disk)], [0.0, 0.0, 7.0])?.into_iter())
+            .filter(|e| e.0 == 3)
+            .collect::<Vec<_>>();
+        gmsh.boolean(crate::gmsh::Boolean::Cut, &[(3, plate)], &pin, true)?;
+        // The extruded disk's face stays behind: only the plate is kept.
+        let faces: Vec<(i32, i32)> = (gmsh.entities(2)?.into_iter())
+            .filter(|&f| gmsh.adjacencies(2, f).is_ok_and(|a| a.0.is_empty()))
+            .map(|f| (2, f))
+            .collect();
+        if !faces.is_empty() {
+            gmsh.remove(&faces)?;
+        }
+        Ok(())
+    })
+}
+
+fn split(kind: plx_model::CadOperationKind, value: f64) -> plx_model::CadOperation {
+    plx_model::CadOperation {
+        kind,
+        value,
+        ..plx_model::CadOperation::default()
+    }
+}
+
+/// The faces of a geometry of a kind with their areas.
+fn face_areas(geometry: &Geometry, kind: &str) -> Vec<f64> {
+    (geometry.signatures.iter())
+        .filter(|s| s.entity.dim() == 2 && s.kind == kind)
+        .map(|s| s.size)
+        .collect()
+}
+
+#[test]
+fn solids_split_by_a_plane_become_a_compound_or_lose_a_side() {
+    use plx_model::{CadOperationKind::SplitPlane, SplitKeep, SplitPlane as Plane};
+    if !gmsh_available() {
+        return;
+    }
+    let input = cube();
+    let name = part_names(&input).unwrap().remove(0);
+    let mut operation = split(SplitPlane, 4.0);
+    // Along the YZ plane at x = 4: two solids, one part of the FE model.
+    let both = apply_operation(&input, &operation, &[]).unwrap();
+    let mut pieces = part_names(&both).unwrap();
+    pieces.sort();
+    assert_eq!(pieces, [format!("{name}-1"), format!("{name}-2")]);
+    assert_eq!(both.compounds.len(), 1);
+    assert_eq!(both.compounds[0].name, name);
+    assert!((solid_volume(&both) - 1000.0).abs() < 1e-6);
+    let mesh = generate_mesh(&both).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 1);
+    // Each a part of its own.
+    operation.compound = false;
+    let apart = apply_operation(&input, &operation, &[]).unwrap();
+    assert!(apart.compounds.is_empty());
+    assert_eq!(part_names(&apart).unwrap().len(), 2);
+    // Only the side towards +x, which keeps the name.
+    operation.keep = SplitKeep::Positive;
+    let kept = apply_operation(&input, &operation, &[]).unwrap();
+    assert_eq!(part_names(&kept).unwrap(), std::slice::from_ref(&name));
+    assert!((solid_volume(&kept) - 600.0).abs() < 1e-6);
+    // A plane beside the cube cuts nothing.
+    let beside = split(SplitPlane, 20.0);
+    let error = apply_operation(&input, &beside, &[]).unwrap_err();
+    assert!(error.to_string().contains("no part"), "{error}");
+    // The plane of the top face, 3 mm into the cube: the slice between face and cut.
+    let top = (input.signatures.iter())
+        .find(|s| s.entity.dim() == 2 && (s.centroid[2] - 10.0).abs() < 1e-6)
+        .unwrap()
+        .entity;
+    let slice = plx_model::CadOperation {
+        plane: Plane::Face,
+        keep: SplitKeep::Negative,
+        ..split(SplitPlane, 3.0)
+    };
+    let sliced = apply_operation(&input, &slice, &[top]).unwrap();
+    assert!((solid_volume(&sliced) - 300.0).abs() < 1e-6);
+    let rest = plx_model::CadOperation {
+        keep: SplitKeep::Positive,
+        ..slice
+    };
+    let rest = apply_operation(&input, &rest, &[top]).unwrap();
+    assert!((solid_volume(&rest) - 700.0).abs() < 1e-6);
+}
+
+#[test]
+fn shells_split_by_a_plane_stay_one_part() {
+    use plx_model::{CadOperationKind::SplitPlane, SplitKeep};
+    if !gmsh_available() {
+        return;
+    }
+    let input = rectangle([0.0; 3], [20.0, 10.0], 0.0);
+    let name = part_names(&input).unwrap();
+    let both = apply_operation(&input, &split(SplitPlane, 5.0), &[]).unwrap();
+    assert_eq!(part_names(&both).unwrap(), name);
+    let mut areas = face_areas(&both, "Plane");
+    areas.sort_by(f64::total_cmp);
+    assert_eq!(areas.len(), 2);
+    assert!((areas[0] - 50.0).abs() < 1e-6 && (areas[1] - 150.0).abs() < 1e-6);
+    // The pieces share the cut edge: the mesh is one part with nodes in common.
+    let mesh = generate_mesh(&both).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 1);
+    let left = plx_model::CadOperation {
+        keep: SplitKeep::Negative,
+        ..split(SplitPlane, 5.0)
+    };
+    let left = apply_operation(&input, &left, &[]).unwrap();
+    assert_eq!(face_areas(&left, "Plane").len(), 1);
+    assert!((face_areas(&left, "Plane")[0] - 50.0).abs() < 1e-6);
+}
+
+#[test]
+fn a_hole_gets_a_ring_face_of_its_width() {
+    use plx_model::CadOperationKind::HoleRing;
+    if !gmsh_available() {
+        return;
+    }
+    let input = plate_with_hole();
+    let top_faces = |g: &Geometry| {
+        (g.signatures.iter())
+            .filter(|s| s.entity.dim() == 2 && s.kind == "Plane")
+            .filter(|s| (s.centroid[2] - 5.0).abs() < 1e-6 && s.max[2] - s.min[2] < 1e-3)
+            .map(|s| s.size)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(top_faces(&input).len(), 1);
+    // A circular edge of the hole on the top face.
+    let edge = (input.signatures.iter())
+        .find(|s| s.entity.dim() == 1 && s.kind != "Line" && (s.centroid[2] - 5.0).abs() < 1e-6)
+        .unwrap()
+        .entity;
+    let ringed = apply_operation(&input, &split(HoleRing, 3.0), &[edge]).unwrap();
+    assert_eq!(part_names(&ringed).unwrap(), part_names(&input).unwrap());
+    let (before, after) = (solid_volume(&input), solid_volume(&ringed));
+    assert!((after - before).abs() < 1e-6 * before, "{before} {after}");
+    let mut areas = top_faces(&ringed);
+    areas.sort_by(f64::total_cmp);
+    let ring = std::f64::consts::PI * (8.0f64.powi(2) - 5.0f64.powi(2));
+    assert_eq!(areas.len(), 2, "{areas:?}");
+    assert!((areas[0] - ring).abs() < 1e-3, "{areas:?}");
+    assert!((areas[0] + areas[1] - top_faces(&input)[0]).abs() < 1e-3);
+    // Meshed as one solid, with the ring's nodes found on it.
+    let mesh = generate_mesh(&ringed).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 1);
+    // Wider than the plate: the ring is cut off at the plate's edges, which leaves its
+    // corners at the left and the right part outside it.
+    let wide = apply_operation(&input, &split(HoleRing, 12.0), &[edge]).unwrap();
+    let areas = top_faces(&wide);
+    assert_eq!(areas.len(), 4, "{areas:?}");
+    assert!((areas.iter().sum::<f64>() - top_faces(&input)[0]).abs() < 1e-3);
+    assert!((solid_volume(&wide) - before).abs() < 1e-6 * before);
+    // A straight edge is no hole.
+    let straight = (input.signatures.iter())
+        .find(|s| s.entity.dim() == 1 && s.kind == "Line")
+        .unwrap()
+        .entity;
+    let error = apply_operation(&input, &split(HoleRing, 3.0), &[straight]).unwrap_err();
+    assert!(error.to_string().contains("circular"), "{error}");
+}
+
+#[test]
+fn a_hole_in_a_shell_gets_a_ring_face() {
+    use plx_model::CadOperationKind::HoleRing;
+    if !gmsh_available() {
+        return;
+    }
+    let input = made_geometry(|gmsh| {
+        let plate = gmsh.add_rectangle([0.0; 3], [40.0, 30.0], 0.0)?;
+        let hole = gmsh.add_disk([15.0, 15.0, 0.0], 5.0, [0.0, 0.0, 1.0])?;
+        gmsh.boolean(crate::gmsh::Boolean::Cut, &[(2, plate)], &[(2, hole)], true)?;
+        Ok(())
+    });
+    let edge = (input.signatures.iter())
+        .find(|s| s.entity.dim() == 1 && s.kind.ends_with("pse"))
+        .unwrap()
+        .entity;
+    let ringed = apply_operation(&input, &split(HoleRing, 2.0), &[edge]).unwrap();
+    assert_eq!(part_names(&ringed).unwrap(), part_names(&input).unwrap());
+    let mut areas = face_areas(&ringed, "Plane");
+    areas.sort_by(f64::total_cmp);
+    assert_eq!(areas.len(), 2, "{areas:?}");
+    let ring = std::f64::consts::PI * (7.0f64.powi(2) - 5.0f64.powi(2));
+    assert!((areas[0] - ring).abs() < 1e-3, "{areas:?}");
+    assert_eq!(generate_mesh(&ringed).unwrap().mesh.parts.len(), 1);
+}
+
+#[test]
+fn every_hole_edge_of_a_step_plate_gives_a_ring_and_the_plate_splits_across() {
+    use plx_model::CadOperationKind::{HoleRing, SplitPlane};
+    if !gmsh_available() {
+        return;
+    }
+    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless).unwrap();
+    let input = with_signatures(import.geometry).unwrap();
+    let faces = |g: &Geometry| {
+        (g.signatures.iter())
+            .filter(|s| s.entity.dim() == 2)
+            .count()
+    };
+    let circles: Vec<_> = (input.signatures.iter())
+        .filter(|s| s.entity.dim() == 1 && s.kind == "Circle")
+        .map(|s| s.entity)
+        .collect();
+    assert!(!circles.is_empty());
+    // All hole edges at once, top and bottom: a ring on each face.
+    let ringed = apply_operation(&input, &split(HoleRing, 2.0), &circles).unwrap();
+    let holes = circles.len().min(2);
+    assert_eq!(faces(&ringed), faces(&input) + holes, "{circles:?}");
+    assert_eq!(generate_mesh(&ringed).unwrap().mesh.parts.len(), 1);
+    // Across the middle of its length, in two halves of one compound.
+    let (lo, hi) = input.signatures.iter().fold(
+        ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]),
+        |(lo, hi), s| {
+            (
+                [0, 1, 2].map(|k| lo[k].min(s.min[k])),
+                [0, 1, 2].map(|k| hi[k].max(s.max[k])),
+            )
+        },
+    );
+    let middle = 0.5 * (lo[0] + hi[0]) + 0.1 * (hi[0] - lo[0]);
+    let halves = apply_operation(&ringed, &split(SplitPlane, middle), &[]).unwrap();
+    assert_eq!(part_names(&halves).unwrap().len(), 2);
+    assert_eq!(halves.compounds.len(), 1);
+    let mesh = generate_mesh(&halves).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 1);
+}

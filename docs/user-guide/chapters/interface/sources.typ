@@ -257,8 +257,10 @@ frequency step cannot be linked, as the `.frd` file does not hold them.]
 === CAD Operation <cad-operation-block>
 
 A CAD Operation block changes geometry before it is meshed: it rounds (#ui("Fillet")) or bevels
-(#ui("Chamfer")) picked edges of solids or corners of flat faces, or moves picked planar faces (#ui("Push/Pull")), of the geometry
-linked to it and gives the changed geometry on.
+(#ui("Chamfer")) picked edges of solids or corners of flat faces, moves picked planar faces
+(#ui("Push/Pull")), splits parts and faces along a plane (#ui("Split by Plane"),
+@split-by-plane) or splits the face around a hole into a ring (#ui("Split around Hole"),
+@split-around-hole), of the geometry linked to it and gives the changed geometry on.
 Add it with #menu("Sources", "CAD Operation") or from the picker, drag the
 #ui("Geometry") of a file block, of an analysis with imported geometry or of another CAD
 Operation block to the pin on the left of its #ui("Geometry") row, and drag the pin on the
@@ -276,10 +278,13 @@ radius, distance or offset; #ui("Preview") applies it and shows the result, #ui(
 #fields(
   [Geometry], [Left pin: the geometry to change. Right pin: the changed geometry, with its
     state.],
-  [Fillet / Chamfer / Push/Pull], [What it does and to how many edges, corners or faces.],
-  [Radius / Distance / Offset], [The radius of the fillet, the distance of the chamfer from
-    the edge on both faces, or how far the faces move: outwards when positive, inwards when
-    negative. Zero leaves the geometry as it is, so that a parameter study can
+  [Fillet / Chamfer / Push/Pull / Split], [What it does and to how many edges, corners or
+    faces, or along which plane.],
+  [Radius / Distance / Offset / Width], [The radius of the fillet, the distance of the chamfer
+    from the edge on both faces, how far the faces move (outwards when positive, inwards when
+    negative), where the plane of a split lies, or the width of the ring around a hole. Zero
+    leaves the geometry as it is (except for a split by plane, where it is the plane through
+    the origin or the face), so that a parameter study can
     switch the operation off in some design points. Type or drag it in place, or drop the value of a Parameters block or an
     input of a parameter study on its pin (@parameter-study): every design point then makes the
     geometry again, and the analyses after it mesh and solve it anew.],
@@ -319,6 +324,44 @@ a second CAD Operation block behind the first. Curved faces cannot be picked. Se
 faces move one after the other, so two faces that meet both move as a whole.
 
 #screenshot("cad-push-pull.png", [The top face of a stepped bar picked to make it thicker])
+
+==== Split by Plane <split-by-plane>
+
+#ui("Split by Plane") cuts every part a plane runs through, so that the faces on either side
+can be picked on their own, a symmetry model keeps only one half, or a region gets its own
+mesh size. Choose the #ui("Plane") in the editor:
+
+- #ui("YZ plane"), #ui("XZ plane") or #ui("XY plane"): a plane of the global coordinate system,
+  moved along its axis by the #ui("Offset"); the editor draws its outline over the geometry.
+- #ui("Plane of a face"): click a planar face; the cut lies parallel to it, the #ui("Offset")
+  into the part.
+
+#ui("Keep") chooses what stays: #ui("Both sides"), or only the side along the positive axis
+(#ui("+X side")) or the negative one, or for the plane of a face the part #ui("Beyond the cut") or
+the slice #ui("Between face and cut"). Parts wholly on the side that goes are removed.
+
+A solid cut in two becomes two solids. With #ui("Keep the pieces as one part") on, the default,
+they form a compound part (@compound-parts) named like the solid: the FE model still has one
+part, with its section and material, and the pieces are tied where they were cut. Turned off,
+each piece is a part of its own, named after the solid with -1, -2. Faces of shell parts are
+cut into faces that share the cut edge, so a shell stays one part with a common mesh along the
+cut. When the plane runs through no part and both sides are kept, the block reports so.
+
+#screenshot("cad-split-plane.png", [A plate split by the YZ plane at an offset of 70 mm: the
+  preview shows the two solids, which stay one part of the FE model])
+
+==== Split around Hole <split-around-hole>
+
+#ui("Split around Hole") cuts a ring around a hole into the planar face it goes through, as wide
+as the #ui("Width"): the ring is then a face of its own to pick, for a bearing load, a bolt
+head's contact area or a finer mesh next to the hole. Click the circular edges of the holes on
+the faces to split; a hole whose edge is two half circles needs only one of them, and several
+holes, also on top and bottom, are split in one go. A ring wider than the face is cut off at the
+face's edges. Edges that are no circles, and holes in curved faces, are refused with the reason.
+This works on solids and on shell parts alike; the parts keep their names.
+
+#screenshot("cad-hole-ring.png", [The upper edge of a hole picked and the preview: a ring of
+  8 mm around the hole is a face of its own])
 
 ==== Example: a fillet radius study <cad-fillet-study>
 

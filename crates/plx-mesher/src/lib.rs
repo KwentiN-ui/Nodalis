@@ -9,10 +9,11 @@ mod ffi;
 pub mod gmsh;
 mod operation;
 mod revolve;
+mod split;
 mod step_names;
 mod thicken;
 
-pub use operation::apply_cad_operation;
+pub use operation::{apply_cad_operation, apply_operation};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
