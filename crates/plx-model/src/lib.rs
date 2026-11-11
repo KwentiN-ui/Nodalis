@@ -62,7 +62,7 @@ mod validity;
 
 pub use amplitude::{Amplitude, AmplitudeTime, ValueTable, no_tables};
 pub use bolt::{Bolt, BoltAction, BoltChange, LoweredBolts, Preload, ResolvedBolt};
-pub use cad_operation::{CadOperation, CadOperationKind};
+pub use cad_operation::{CadOperation, CadOperationKind, SplitKeep, SplitPlane};
 pub use checks::{
     Finding, MeshCheck, Problem, Severity, diagnose_solver_output, diagnose_solver_warnings,
 };
@@ -173,8 +173,10 @@ use serde::{Deserialize, Serialize};
 /// Format 22 adds node groups; format 21 reads as it is. Format 23 adds the Thicken Shell
 /// Mesh item of the mesh setup; formats 21 and 22 read as they are. Format 24 adds the
 /// compound parts of the geometry ([`CompoundPart`]) and the bodies of mesh parts; formats 21
-/// to 23 read as they are.
-pub const PROJECT_FORMAT: u32 = 24;
+/// to 23 read as they are. Format 25 adds the splits of the CAD Operation block
+/// ([`CadOperationKind::SplitPlane`], [`CadOperationKind::HoleRing`]); formats 21 to 24 read as
+/// they are.
+pub const PROJECT_FORMAT: u32 = 25;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
