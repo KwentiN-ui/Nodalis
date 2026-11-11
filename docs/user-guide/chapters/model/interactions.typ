@@ -225,7 +225,10 @@ shows the derived value in brackets; choosing something else overrides it for th
     so that small gaps from meshing are closed. #ui("As is") keeps the mesh. #ui("Offset")
     sets the distance of the sides wherever they face each other, whatever the mesh: negative
     for an interference fit, such as a shaft pressed into a hub (`*CLEARANCE`, surface to
-    surface contacts only). Auto adjusts bonded regions and keeps the others as they are.],
+    surface contacts only). Auto adjusts bonded regions and keeps the others as they are. Where
+    the sides are apart by about the size of the elements, moving the nodes would turn elements
+    inside out: the model check reports this as #ui("Adjustment folds elements") at the region,
+    with the elements; choose #ui("As is") there.],
   [Tolerance], [Distance within which the sides count as touching: tied by a tie, held by no
     separation, closed by the adjustment. Auto is a quarter of the slave mesh size, for a
     region a detection found at least the distance the detection searched within.],
