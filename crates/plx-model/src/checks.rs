@@ -186,6 +186,9 @@ pub enum Problem {
     /// A contact region whose sides do not touch in the mesh: a bonded one ties nothing,
     /// another one lets its parts move freely until they meet.
     ContactRegionOpen,
+    /// A contact region whose adjustment (Adjust to touch) moves slave nodes across a gap so
+    /// wide that elements turn inside out: the solver rejects the mesh.
+    AdjustFoldsElements,
     /// A region of no separation in a step with large deformations: its equations hold for
     /// small displacements only.
     NoSeparationLargeDeformation,
@@ -355,6 +358,7 @@ impl Problem {
             Problem::ContactFormulationsDiffer => "Contact formulations differ",
             Problem::MortarNotSupported => "Mortar contact not possible in this step",
             Problem::ContactRegionOpen => "Contact region open",
+            Problem::AdjustFoldsElements => "Adjustment folds elements",
             Problem::NoSeparationLargeDeformation => "No separation with large deformations",
             Problem::ContactChangeIgnored => "Contact cannot change in steps",
             Problem::ContactOutputIgnored => "No contact values to print",
@@ -747,6 +751,13 @@ impl Problem {
                 "The solver takes mortar contact in static and dynamic steps only. In \
                  frequency, buckling and thermal steps the run aborts or the contact is left \
                  out."
+            }
+            Problem::AdjustFoldsElements => {
+                "With Adjust to touch the solver moves every slave node within the tolerance \
+                 on to the master side before it starts. Where the sides are apart by about \
+                 the size of the elements, e.g. a pin with play in its hole or a gap left in \
+                 the CAD geometry, the moved nodes pull their elements inside out, and the \
+                 run aborts. The elements named are those the move folds."
             }
             Problem::ContactRegionOpen => {
                 "No node of the slave side lies within the tolerance of the master side in \
@@ -1159,6 +1170,12 @@ impl Problem {
                 "Set the formulation at the Connections to Auto or Surface to surface, or \
                  deactivate the step."
             }
+            Problem::AdjustFoldsElements => {
+                "Set Initial gap to As is in the region's advanced settings: the \
+                 sides are then tied where they are, across the gap. Or pick only faces that \
+                 touch, make the Tolerance smaller than the gap, or close the gap in the \
+                 geometry."
+            }
             Problem::ContactRegionOpen => {
                 "Check the sides of the region in the 3D view and the gap in the Contact \
                  Worksheet. Pick faces that touch, raise the Tolerance in the region's \
@@ -1564,6 +1581,19 @@ impl FeModel {
             let Some(check) = check.filter(|_| region.active) else {
                 continue;
             };
+            if !check.folded.is_empty() {
+                findings.push(Finding::new(
+                    ModelItem::ContactRegion(i),
+                    Problem::AdjustFoldsElements,
+                    format!(
+                        "{}: moving the slave nodes on to the master turns {} element(s) inside \
+                         out, e.g. {}",
+                        region.name,
+                        check.folded.len(),
+                        list(check.folded.iter().take(5))
+                    ),
+                ));
+            }
             if matches!(
                 check.status,
                 crate::ContactStatus::NearOpen | crate::ContactStatus::FarOpen

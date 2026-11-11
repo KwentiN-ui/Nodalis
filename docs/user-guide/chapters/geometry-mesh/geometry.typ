@@ -99,8 +99,11 @@ context menu of the compound part has #ui("Create Mesh"), a #ui("Name") field wi
   contact detection see one part.
 - Where the pieces touch, the input file ties them, as a bonded contact region does
   (@contact-regions): the touching faces are found when the input file is written, with the
-  tolerance of a contact detection on the mesh, and written as `*TIE`. These ties do not appear
-  in the tree; problems the model check finds on them are shown on the compound part.
+  tolerance of a contact detection on the mesh, and written as `*TIE`. The pieces are tied where
+  they are: a gap between them within the tolerance, such as the play of a pin in its hole, is
+  bridged, not closed, so the nodes stay in place and no element is pulled inside out. These
+  ties do not appear in the tree; problems the model check finds on them are shown on the
+  compound part.
 - Changing a compound joins the existing mesh anew at once, without meshing again. Sections and
   other items on a part that joins a compound move to the compound; when a compound is dissolved,
   they apply to each of its parts.

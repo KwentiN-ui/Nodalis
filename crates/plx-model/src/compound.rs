@@ -127,6 +127,10 @@ impl FeModel {
                 region.side_a = Region::Faces(master);
                 region.side_b = Region::Faces(slave);
                 region.settings.tolerance = Some(tolerance);
+                // The bodies stay where they are: a gap between them, such as the play of a
+                // pin in its hole, is bridged by the tie. Moving the slave nodes across a gap
+                // as wide as their elements would turn those inside out.
+                region.settings.interface = Some(crate::InterfaceTreatment::AsIs);
                 ties.push(CompoundTie { part, region });
             }
         }
@@ -231,6 +235,16 @@ mod tests {
         let mut both = [a, b];
         both.sort();
         assert_eq!(both, [vec![2, 3, 6, 7], vec![9, 12, 13, 16]]);
+    }
+
+    #[test]
+    fn bodies_with_a_gap_are_tied_where_they_are() {
+        // A gap of a fifth of the elements, within the tolerance of half their size.
+        let mesh = two_cubes(0.2);
+        let model = FeModel::default();
+        let (lowered, _) = model.lower_contacts(&mesh);
+        assert_eq!(lowered.ties.len(), 1);
+        assert!(!lowered.ties[0].adjust);
     }
 
     #[test]
