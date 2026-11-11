@@ -55,6 +55,11 @@ impl ContactRegion {
         }
     }
 
+    /// The parts, by index in `mesh`, of side A and of side B.
+    pub fn parts(&self, mesh: &FeMesh) -> (BTreeSet<usize>, BTreeSet<usize>) {
+        (parts_of(&self.side_a, mesh), parts_of(&self.side_b, mesh))
+    }
+
     pub fn regions(&self) -> [&Region; 2] {
         [&self.side_a, &self.side_b]
     }
@@ -728,7 +733,7 @@ impl FeModel {
             .map(|d| {
                 let distance = d
                     .tolerance
-                    .unwrap_or_else(|| d.searched_diagonal(mesh) * 0.005);
+                    .unwrap_or_else(|| d.searched_diagonal(self, mesh) * 0.005);
                 (d.id, distance)
             })
             .collect();

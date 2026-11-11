@@ -41,6 +41,7 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         node_ties,
         contact_regions,
         contact_detections: _,
+        part_groups: _,
         contact_defaults,
         bolts,
         amplitudes,

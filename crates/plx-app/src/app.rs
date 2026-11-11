@@ -184,6 +184,8 @@ struct Workbench {
     problems_tab_before: bool,
     /// The table of all contact regions is open.
     contact_worksheet: bool,
+    /// The contact regions between part groups, by type, is open.
+    contact_matrix: bool,
     /// The step overview, items against steps, is open.
     step_overview: bool,
     /// Open mesh tool: transform parts, merge nodes or renumber.
@@ -344,6 +346,7 @@ impl AnalysisWindow {
                 analysis_tab_before: false,
                 problems_tab_before: false,
                 contact_worksheet: false,
+                contact_matrix: false,
                 step_overview: false,
                 mesh_tool: None,
                 query: None,
@@ -1716,6 +1719,7 @@ impl AnalysisWindow {
         self.workbench.confirm_remove_results(&ctx);
         self.workbench.toast(&ctx);
         self.workbench.contact_worksheet_window(&ctx);
+        self.workbench.contact_matrix_window(&ctx);
         self.workbench.step_overview_window(&ctx);
         self.workbench.mesh_tool_window(&ctx);
         self.workbench.query_window(&ctx);
@@ -4959,6 +4963,24 @@ impl Workbench {
         self.contact_worksheet = open;
     }
 
+    /// The contact regions between part groups by type: a cell selects its regions in the
+    /// tree and the worksheet, its menu sets their type.
+    fn contact_matrix_window(&mut self, ctx: &egui::Context) {
+        if !self.contact_matrix {
+            return;
+        }
+        let Some(model) = &mut self.model else {
+            self.contact_matrix = false;
+            return;
+        };
+        let mut open = true;
+        let worksheet = crate::contact_matrix::window(ctx, &mut open, model, &mut self.tree);
+        if worksheet {
+            self.contact_worksheet = true;
+        }
+        self.contact_matrix = open;
+    }
+
     /// The step overview: a click opens an item in its step, its menu copies the item to
     /// the following steps or removes it from them.
     fn step_overview_window(&mut self, ctx: &egui::Context) {
@@ -5728,13 +5750,19 @@ impl Workbench {
         editor.set_linked(crate::links::linked_parameters(&self.incoming.paths));
         // A contact detection searches the geometry, if there is one to search; its derived
         // tolerance is worked out again only when the parts searched change.
-        let scope = (editor.detection_parts()).and_then(|parts| {
+        let picked: Vec<String> = (self.tree.selected_parts(TreeView::FeModel).into_iter())
+            .filter_map(|p| model.mesh.parts.get(p).map(|p| p.name.clone()))
+            .collect();
+        crate::part_filter_ui::set_selected_part_names(ctx, picked);
+        let scope = (editor.detection_filter()).and_then(|filter| {
             let display = crate::connections::detection_display(model, self.geometry.as_ref())?;
-            let current = editor.detection_scope();
-            Some(match current {
-                Some(scope) if scope.auto.0 == parts => scope.clone(),
-                _ => crate::connections::DetectionScope::new(model, display, parts),
-            })
+            Some(crate::connections::DetectionScope::new(
+                ctx,
+                model,
+                display,
+                filter,
+                editor.detection_scope(),
+            ))
         });
         editor.set_detection_scope(scope);
         match editor.show(ctx, model) {
@@ -7644,6 +7672,7 @@ fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
         NewItem::SurfaceInteraction
         | NewItem::ContactRegion
         | NewItem::Bolt
+        | NewItem::PartGroup
         | NewItem::ContactPair
         | NewItem::Tie
         | NewItem::NodeTie => TreeItem::Group("Contacts"),

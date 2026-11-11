@@ -48,6 +48,8 @@ pub enum TreeItem {
     ContactRegion(usize),
     /// A search for contact regions under Connections, holding the regions it found.
     ContactDetection(usize),
+    /// A named set of parts under Connections, for the rules of contact detections.
+    PartGroup(usize),
     /// A bolt preloaded across a cut, under Connections.
     Bolt(usize),
     ContactPair(usize),
@@ -215,6 +217,18 @@ impl TreeState {
         self.selected = Some((view, item.clone()));
         self.more_items = None;
         self.item_anchor = Some(item);
+    }
+
+    /// Selects these items together, the first leading; none clears the selection.
+    pub fn select_items(&mut self, view: TreeView, items: Vec<TreeItem>) {
+        let Some((lead, more)) = items.split_first() else {
+            self.selected = None;
+            self.more_items = None;
+            return;
+        };
+        self.selected = Some((view, lead.clone()));
+        self.more_items = (!more.is_empty()).then(|| (lead.clone(), more.to_vec()));
+        self.item_anchor = Some(lead.clone());
     }
 
     /// Ctrl click (adds or takes out `item`) or Shift click (the items from the last one
@@ -642,6 +656,8 @@ pub const CROSS_SECTIONS: &str = "Cross-Sections";
 pub const CONTACT_REGIONS: &str = "Contact Regions";
 /// The container of the bolts, under Connections.
 pub const BOLTS: &str = "Bolts";
+/// The container of the part groups, under Connections.
+pub const PART_GROUPS: &str = "Part Groups";
 /// The container of the keyword-near contact objects under Connections: surface
 /// interactions, contact pairs, ties and node ties.
 pub const ADVANCED_CONTACTS: &str = "Advanced";
@@ -658,6 +674,7 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group("Contact Pairs") => Some(NewItem::ContactPair),
         TreeItem::Group(CONTACT_REGIONS) => Some(NewItem::ContactRegion),
         TreeItem::Group(BOLTS) => Some(NewItem::Bolt),
+        TreeItem::Group(PART_GROUPS) => Some(NewItem::PartGroup),
         TreeItem::Group("Amplitudes") => Some(NewItem::Amplitude),
         TreeItem::Group("Distributions") => Some(NewItem::Distribution),
         TreeItem::Group("Initial Conditions") => Some(NewItem::InitialCondition),
@@ -749,6 +766,7 @@ fn is_fe_item(item: &TreeItem) -> bool {
             | TreeItem::SurfaceInteraction(_)
             | TreeItem::ContactRegion(_)
             | TreeItem::ContactDetection(_)
+            | TreeItem::PartGroup(_)
             | TreeItem::Bolt(_)
             | TreeItem::ContactPair(_)
             | TreeItem::Tie(_)
@@ -824,6 +842,8 @@ fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
             SurfaceInteraction(_)
                 | ContactRegion(_)
                 | ContactDetection(_)
+                | PartGroup(_)
+                | Group(PART_GROUPS)
                 | Bolt(_)
                 | ContactPair(_)
                 | Tie(_)
@@ -836,6 +856,7 @@ fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
         ),
         Group(CONTACT_REGIONS) => matches!(item, ContactRegion(_)),
         Group(BOLTS) => matches!(item, Bolt(_)),
+        Group(PART_GROUPS) => matches!(item, PartGroup(_)),
         Group(ADVANCED_CONTACTS) => matches!(
             item,
             SurfaceInteraction(_)
@@ -1518,6 +1539,7 @@ impl Tree<'_> {
             TreeItem::Group(CONTACT_REGIONS) => TreeIcon::ContactPair,
             TreeItem::Group(BOLTS) => TreeIcon::Load,
             TreeItem::ContactDetection(_) => TreeIcon::Contacts,
+            TreeItem::Group(PART_GROUPS) | TreeItem::PartGroup(_) => TreeIcon::Part,
             TreeItem::Group("Distributions") => TreeIcon::Distribution,
             TreeItem::Group("Amplitudes") => TreeIcon::Amplitude,
             TreeItem::Group("Initial Conditions") => TreeIcon::InitialConditions,
@@ -2271,6 +2293,7 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
         let open = advanced
             || !fe.contact_regions.is_empty()
             || !fe.contact_detections.is_empty()
+            || !fe.part_groups.is_empty()
             || !fe.bolts.is_empty();
         // A region a bolt replaces says so after its name.
         let region_names: Vec<String> = (fe.contact_regions.iter().enumerate())
@@ -2284,6 +2307,10 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
         // The group keeps its name "Contacts", which links of the project schematic use.
         if open {
             tree.branch(ui, contacts, "Connections", open, |tree, ui| {
+                let groups = (fe.part_groups.iter().enumerate())
+                    .map(|(i, g)| (TreeItem::PartGroup(i), g.name.as_str()))
+                    .collect();
+                tree.container(ui, PART_GROUPS, groups);
                 for (d, detection) in fe.contact_detections.iter().enumerate() {
                     let regions = (0..fe.contact_regions.len())
                         .filter(|r| tree.detected.get(r) == Some(&d))

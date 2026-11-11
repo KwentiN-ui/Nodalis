@@ -10179,11 +10179,105 @@ fn a_detection_finds_the_touching_blocks_and_keeps_regions_the_user_changed() {
     // Parts left out of the detection are not searched.
     model.contact_regions.clear();
     model.contact_detections[0].tolerance = None;
-    model.contact_detections[0].parts = vec!["LOWER".into()];
+    model.contact_detections[0].scope = plx_model::PartFilter::parts(["LOWER"]);
     let report = model
         .detect_contacts(0, &mesh, &skins, &[true, true])
         .unwrap();
     assert_eq!(report.added, 0);
+}
+
+#[test]
+fn detection_rules_give_the_pairs_their_type_and_the_lower_detection_wins() {
+    use plx_model::{ContactBehavior, ContactRule, PartFilter, PartGroup, PartTerm, RuleAction};
+    let (mesh, mut model, skins) = detected_blocks(0.01);
+    // A group by name pattern, and a rule on it: the pair takes the rule's type.
+    let mut upper = PartGroup::new("Upper");
+    upper.filter.include.push(PartTerm::Pattern("up*".into()));
+    let group = upper.id;
+    model.part_groups.push(upper);
+    model.contact_detections[0].rules.push(ContactRule {
+        side_a: PartFilter {
+            include: vec![PartTerm::Group(group)],
+            exclude: Vec::new(),
+        },
+        side_b: PartFilter::all(),
+        action: RuleAction::Type(ContactBehavior::Frictional { mu: 0.3 }),
+    });
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.per_rule, [1, 0]);
+    assert_eq!(
+        model.contact_regions[0].behavior,
+        ContactBehavior::Frictional { mu: 0.3 }
+    );
+    let context = model.part_context(&mesh);
+    let counts = model.rule_counts(&model.contact_detections[0], &mesh, &context);
+    assert_eq!(counts, [1, 0]);
+    // A rule matching neither side leaves the pair to the type of all other pairs.
+    model.contact_detections[0].rules[0].side_a = PartFilter::parts(["NOPE"]);
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.per_rule, [0, 1]);
+    assert_eq!(model.contact_regions[0].behavior, ContactBehavior::Bonded);
+    // An excluding rule leaves the pair out.
+    model.contact_detections[0].rules[0] = ContactRule {
+        side_a: PartFilter::parts(["LOWER"]),
+        side_b: PartFilter::parts(["UPPER"]),
+        action: RuleAction::Exclude,
+    };
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!((report.added, report.excluded), (0, 1));
+    assert!(model.contact_regions.is_empty());
+    // A scope excluding the group searches the lower block alone: nothing touches.
+    model.contact_detections[0].rules.clear();
+    model.contact_detections[0]
+        .scope
+        .exclude
+        .push(PartTerm::Group(group));
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.added, 0);
+    model.contact_detections[0].scope = PartFilter::all();
+    // Two detections finding the same pair: the lower one in the tree keeps it.
+    model.detect_contacts(0, &mesh, &skins, &[true, true]);
+    let mut second = plx_model::ContactDetection::new("Friction");
+    second.behavior = ContactBehavior::Frictionless;
+    model.contact_detections.push(second);
+    let report = model
+        .detect_contacts(1, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.taken_from.get("Contacts"), Some(&1));
+    assert_eq!(model.contact_regions.len(), 1);
+    assert_eq!(
+        model.contact_regions[0].behavior,
+        ContactBehavior::Frictionless
+    );
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.left_to.get("Friction"), Some(&1));
+    assert_eq!(report.added, 0);
+    assert_eq!(model.contact_regions.len(), 1);
+    // Deleting the group drops the terms naming it.
+    model.contact_detections[0]
+        .scope
+        .include
+        .push(PartTerm::Group(group));
+    model.part_groups.clear();
+    model.forget_in_filters(group);
+    assert!(model.contact_detections[0].scope.is_all());
+    // Renaming a part follows into the filters.
+    model.contact_detections[0].scope = PartFilter::parts(["LOWER"]);
+    model.rename_part("LOWER", "BASE");
+    assert_eq!(
+        model.contact_detections[0].scope,
+        PartFilter::parts(["BASE"])
+    );
 }
 
 #[test]

@@ -43,6 +43,7 @@ mod moving_load;
 mod number;
 pub mod overview;
 mod parameter;
+mod part_filter;
 mod plot;
 mod primitive;
 mod properties;
@@ -90,8 +91,8 @@ pub use cross_section::{
     Sketch, triangulate, triangulate_with_holes,
 };
 pub use detection::{
-    ContactDetection, DetectionFilter, DetectionGeometry, DetectionGrouping, DetectionReport,
-    auto_detection_tolerance, auto_geometry_detection_tolerance,
+    ContactDetection, ContactRule, DetectionFilter, DetectionGeometry, DetectionGrouping,
+    DetectionReport, RuleAction, auto_detection_tolerance, auto_geometry_detection_tolerance,
 };
 pub use distribution::{Distribution, DistributionKind, Interpolation, Sampler, parse_points};
 pub use dynamic::{Integration, RayleighFit, StableStepEstimate, StepLimit};
@@ -119,6 +120,7 @@ pub use moving_load::{AXIS_LABELS, LoadStations, MovingFrame, MovingLoad, Wheel,
 pub use number::{MathOp, apply_series, switch};
 pub use overview::{Cell, OverviewGroup, OverviewRow, StepItemKey, StepOverview};
 pub use parameter::{Parameter, ValueKind};
+pub use part_filter::{PartContext, PartFilter, PartGroup, PartTerm, name_matches};
 pub use plot::{PlotKind, histogram};
 pub use primitive::{MAX_PRIMITIVE_ELEMENTS, MeshPrimitive, Param, ParamSlot, ParamValue};
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
@@ -176,8 +178,10 @@ use serde::{Deserialize, Serialize};
 /// to 23 read as they are. Format 25 adds the splits of the CAD Operation block
 /// ([`CadOperationKind::SplitPlane`], [`CadOperationKind::HoleRing`]); formats 21 to 24 read as
 /// they are. Format 26 adds the thread of a bolt ([`Bolt::thread`]) and the amplitude of its
-/// steps ([`BoltChange::amplitude`]); formats 21 to 25 read as they are.
-pub const PROJECT_FORMAT: u32 = 26;
+/// steps ([`BoltChange::amplitude`]); formats 21 to 25 read as they are. Format 27 lets contact
+/// detections choose their parts by filters and give the pairs they find their type by rules
+/// ([`ContactRule`]), and adds part groups ([`PartGroup`]); formats 21 to 26 read as they are.
+pub const PROJECT_FORMAT: u32 = 27;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -210,6 +214,9 @@ pub struct FeModel {
     /// Searches that found contact regions, kept to run them again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contact_detections: Vec<ContactDetection>,
+    /// Named sets of parts, chosen by filters, that contact detections refer to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub part_groups: Vec<PartGroup>,
     /// Settings shared by the contact regions.
     #[serde(default)]
     pub contact_defaults: ContactDefaults,
@@ -469,6 +476,17 @@ impl FeModel {
         self.rename_element_types(old, new);
         self.rename_mesh_operation_parts(old, new);
         self.replace_part_in_regions(old, &[new.to_owned()]);
+        self.rename_part_in_filters(old, new);
+    }
+
+    /// Part filters naming the part `old` name the part `new`.
+    fn rename_part_in_filters(&mut self, old: &str, new: &str) {
+        for detection in &mut self.contact_detections {
+            detection.rename_part(old, new);
+        }
+        for group in &mut self.part_groups {
+            group.filter.rename_part(old, new);
+        }
     }
 
     /// Follows a part split into several, as a dissolved compound part into the parts it
@@ -492,6 +510,7 @@ impl FeModel {
             }
         }
         self.rename_element_types(old, first);
+        self.split_part_in_filters(old, new);
         for operation in &mut self.mesh_operations {
             if let Some(at) = operation.parts.iter().position(|n| n == old) {
                 operation.parts.splice(at..=at, new.iter().cloned());
