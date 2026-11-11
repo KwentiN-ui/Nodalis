@@ -56,6 +56,9 @@ pub(super) fn takes_series(nodes: &[Node], id: u64, slot: &[String]) -> bool {
     if let Some((number, false)) = node.as_number() {
         return number.inputs(false).iter().any(|(k, ..)| k == key);
     }
+    if node.as_preview().is_some() {
+        return key == visualize::PREVIEW_VALUE;
+    }
     node.as_plot().is_some_and(|plot| plot.takes_series(key))
 }
 
@@ -141,6 +144,7 @@ impl ProjectApp {
     /// numbers of value links to Plot blocks; whether any input changed.
     pub(super) fn apply_series(&mut self) -> bool {
         let mut taken: HashMap<u64, BTreeMap<String, Vec<f64>>> = HashMap::new();
+        let mut given_series = std::collections::HashSet::new();
         for link in self.links.iter().filter(|l| links::is_value(l)) {
             let [cell, key] = links::slot(link) else {
                 continue;
@@ -149,12 +153,16 @@ impl ProjectApp {
                 continue;
             }
             let target = self.nodes.iter().find(|n| n.id == link.target);
-            let plot = target.is_some_and(|n| n.as_plot().is_some());
+            let plot = target.is_some_and(|n| n.as_plot().is_some() || n.as_preview().is_some());
             let number = target.is_some_and(|n| n.as_number().is_some_and(|(_, s)| !s));
             if !plot && !number {
                 continue;
             }
-            let values = match self.series_of(link.source, &link.item) {
+            let series = self.series_of(link.source, &link.item);
+            if series.is_some() {
+                given_series.insert(link.target);
+            }
+            let values = match series {
                 Some(series) => series,
                 // A Math block takes a single number as it always did.
                 None if number => continue,
@@ -175,6 +183,10 @@ impl ProjectApp {
                 changed |= number.set_series(&mut given);
             } else if let Some(plot) = node.as_plot_mut() {
                 changed |= plot.take_inputs(given);
+            } else if let Block::Preview(preview) = &mut node.block {
+                let series = given_series.contains(&node.id);
+                let values = given.remove(visualize::PREVIEW_VALUE).map(|v| (v, series));
+                changed |= preview.take_values(values);
             }
         }
         changed

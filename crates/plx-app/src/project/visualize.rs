@@ -1,7 +1,8 @@
 //! The blocks of the Visualize category of the project schematic: a Plot block that draws
 //! the numbers and series linked to it in the block, as a line, points or a histogram, and a
-//! Mesh Preview block that shows a small picture of the mesh linked to it, so that a glance at
-//! the schematic shows the geometry beside its analysis without opening it.
+//! Preview block that shows what is linked to it: a small picture of a mesh, so that a glance
+//! at the schematic shows the geometry beside its analysis without opening it, a number, or a
+//! series of numbers with its statistics.
 
 use super::*;
 use plx_model::PlotKind;
@@ -145,30 +146,77 @@ pub(super) fn plot_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<
     rows
 }
 
-/// The rows of a Mesh Preview block: the mesh it shows.
+/// The input of a Preview block before anything is linked to it: a mesh or a number goes to
+/// it.
+pub(super) const PREVIEW_INPUT: &str = "Input";
+/// The key of the number or series a Preview block shows.
+pub(super) const PREVIEW_VALUE: &str = "Input";
+
+/// The row a link to the Preview block `target` goes to: the Mesh row for a mesh, the value
+/// row for anything else. `None` if `target` is no Preview block.
+pub(super) fn preview_slot(nodes: &[Node], target: u64, item: &[String]) -> Option<Vec<String>> {
+    nodes.iter().find(|n| n.id == target)?.as_preview()?;
+    let mesh = [links::MESH.to_owned()];
+    Some(if links::compatible(item, &mesh) {
+        mesh.to_vec()
+    } else {
+        vec![links::PARAMETERS.to_owned(), PREVIEW_VALUE.to_owned()]
+    })
+}
+
+/// The row of a Preview block: the mesh or number it shows, or its open input.
 pub(super) fn preview_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
     let Some(preview) = node.as_preview() else {
         return Vec::new();
     };
     let mesh = [links::MESH.to_owned()];
-    let linked_from = (incoming.iter())
-        .find(|(slot, _)| links::covers(slot, &mesh))
-        .map(|(_, source)| source.clone());
-    let count = preview.model.mesh.element_count();
-    let tip = if count == 0 {
-        "Mesh: drag the Mesh of an analysis or a mesh block here to see it.".to_owned()
-    } else {
-        format!(
+    let value = [links::PARAMETERS.to_owned(), PREVIEW_VALUE.to_owned()];
+    let from = |path: &[String]| {
+        (incoming.iter())
+            .find(|(slot, _)| links::covers(slot, path))
+            .map(|(_, source)| source.clone())
+    };
+    let (path, text, icon, linked_from, tip) = if let Some(source) = from(&mesh) {
+        let count = preview.model.mesh.element_count();
+        let tip = format!(
             "Mesh: {count} elements and {} nodes, seen from the side the views of the \
              analysis call isometric.",
             preview.model.mesh.node_count()
+        );
+        (
+            mesh.to_vec(),
+            links::MESH.to_owned(),
+            NodeIcon::Mesh,
+            Some(source),
+            tip,
+        )
+    } else if let Some(source) = from(&value) {
+        let tip = if preview.series {
+            "Value: the series linked here, drawn with its statistics."
+        } else {
+            "Value: the number linked here."
+        };
+        (
+            value.to_vec(),
+            "Value".to_owned(),
+            NodeIcon::Results,
+            Some(source),
+            tip.to_owned(),
+        )
+    } else {
+        (
+            vec![PREVIEW_INPUT.to_owned()],
+            PREVIEW_INPUT.to_owned(),
+            NodeIcon::Picture,
+            None,
+            "Input: drag a mesh, a number or a series here to see it.".to_owned(),
         )
     };
     vec![Row {
-        path: mesh.to_vec(),
-        text: links::MESH.to_owned(),
+        path,
+        text,
         depth: 0,
-        icon: NodeIcon::Mesh,
+        icon,
         state: None,
         expander: None,
         input: true,
@@ -181,13 +229,44 @@ pub(super) fn preview_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> V
     }]
 }
 
-/// A Mesh Preview block: the mesh its link brings.
+/// A Preview block: the mesh its link brings, or the number or series. Brought by every
+/// sync, not kept in the file.
 #[derive(Default)]
 pub(super) struct PreviewBlock {
     pub model: LinkedModel,
+    /// The numbers linked to it, in SI units; one number is a series of one value.
+    pub values: Option<Vec<f64>>,
+    /// Whether the link brings a series rather than one number.
+    pub series: bool,
 }
 
-/// The picture of a Mesh Preview block, made on a worker thread whenever its mesh changes.
+impl PreviewBlock {
+    /// Takes the numbers a link gives it; whether they changed.
+    pub(super) fn take_values(&mut self, values: Option<(Vec<f64>, bool)>) -> bool {
+        let (values, series) = match values {
+            Some((v, s)) => (Some(v), s),
+            None => (None, false),
+        };
+        let changed = values != self.values || series != self.series;
+        self.values = values;
+        self.series = series;
+        changed
+    }
+}
+
+/// What a Preview block shows of the numbers linked to it.
+#[derive(Clone)]
+pub(super) struct PreviewView {
+    /// The numbers in SI units.
+    pub values: Vec<f64>,
+    pub series: bool,
+    pub kind: Option<ValueKind>,
+    pub units: UnitSystem,
+    /// The block the numbers come from.
+    pub source: String,
+}
+
+/// The picture of the mesh of a Preview block, made on a worker thread whenever its mesh changes.
 #[derive(Default)]
 pub(super) struct MeshPicture {
     /// The fingerprint of the mesh the texture shows.
@@ -213,18 +292,15 @@ impl ProjectApp {
         id
     }
 
-    /// Adds a Mesh Preview block.
-    pub(super) fn add_mesh_preview(&mut self, position: egui::Pos2) -> u64 {
+    /// Adds a Preview block.
+    pub(super) fn add_preview(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
-        let name = "Mesh Preview".to_string();
-        self.nodes.push(Node::new(
-            id,
-            name.clone(),
-            Block::MeshPreview(Box::default()),
-        ));
+        let name = "Preview".to_string();
+        self.nodes
+            .push(Node::new(id, name.clone(), Block::Preview(Box::default())));
         self.graph.insert_node(position, id);
         self.output.push(format!(
-            "{name} created: drag the Mesh of an analysis or a mesh block to its Mesh row."
+            "{name} created: drag a mesh, a number or a series to its Input row."
         ));
         id
     }
@@ -283,7 +359,42 @@ impl ProjectApp {
         })
     }
 
-    /// Brings the pictures of the Mesh Preview blocks up to date: a mesh that changed is
+    /// What a Preview block shows of the numbers linked to it, if any.
+    pub(super) fn preview_view(&self, node: &Node) -> Option<PreviewView> {
+        let preview = node.as_preview()?;
+        // Linked before the numbers are computed: nothing to show yet.
+        let values = preview.values.clone().unwrap_or_default();
+        let link = self.links.iter().find(|l| {
+            l.target == node.id
+                && matches!(links::slot(l), [c, k] if c == links::PARAMETERS && k == PREVIEW_VALUE)
+        })?;
+        let mut source = self.name_of(link.source);
+        if link.item.get(1).is_some_and(|n| n == series::TIME) {
+            source.push_str(" Time");
+        }
+        Some(PreviewView {
+            values,
+            series: preview.series,
+            kind: value_kind(&self.nodes, link.source, &link.item),
+            units: self.settings.new_model.units,
+            source,
+        })
+    }
+
+    /// Takes the links to a Preview block other than the one just made: it shows one thing.
+    pub(super) fn keep_one_preview_link(&mut self, target: u64, slot: &[String]) {
+        if self.node(target).and_then(|n| n.as_preview()).is_none() {
+            return;
+        }
+        let before = self.links.len();
+        self.links
+            .retain(|l| l.target != target || links::slot(l) == slot);
+        if self.links.len() != before {
+            self.sync_due = true;
+        }
+    }
+
+    /// Brings the pictures of the Preview blocks up to date: a mesh that changed is
     /// drawn anew on a worker thread, a picture that came is loaded as a texture.
     pub(super) fn refresh_pictures(&mut self, ctx: &egui::Context) {
         let ids: BTreeSet<u64> = (self.nodes.iter())
@@ -338,7 +449,7 @@ impl ProjectApp {
         }
     }
 
-    /// The texture of the picture of a Mesh Preview block, once drawn.
+    /// The texture of the picture of the mesh of a Preview block, once drawn.
     pub(super) fn picture(&self, id: u64) -> Option<egui::TextureId> {
         self.pictures
             .get(&id)
@@ -830,16 +941,23 @@ impl Viewer {
         }
     }
 
-    /// The body of a Mesh Preview block: the picture of its mesh, or what it needs.
-    pub(super) fn show_picture(
+    /// The body of a Preview block: the picture of its mesh, the number or series linked to
+    /// it, or what it needs.
+    pub(super) fn show_preview(
         &self,
         ui: &mut egui::Ui,
         texture: Option<egui::TextureId>,
         has_mesh: bool,
+        view: Option<&PreviewView>,
     ) {
         let (rect, _) = ui.allocate_exact_size(PICTURE, egui::Sense::hover());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 3.0, crate::style::label_fill());
+        let faint = crate::style::plot_text().gamma_multiply(0.6);
+        if let Some(view) = view {
+            show_values(&painter, rect, view);
+            return;
+        }
         match texture {
             Some(texture) if has_mesh => {
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -852,12 +970,144 @@ impl Viewer {
                     if has_mesh {
                         "Drawing ..."
                     } else {
-                        "Link a mesh"
+                        "Link a mesh, a number or a series"
                     },
                     egui::FontId::proportional(11.0),
-                    crate::style::plot_text().gamma_multiply(0.6),
+                    faint,
                 );
             }
+        }
+    }
+}
+
+/// Draws a number large, or a series as a line over its index with its statistics below.
+fn show_values(painter: &egui::Painter, rect: egui::Rect, view: &PreviewView) {
+    let ink = crate::style::plot_text();
+    let faint = ink.gamma_multiply(0.6);
+    let small = egui::FontId::proportional(10.0);
+    let shown = |v: f64| numbers::shown_number(v, view.kind, view.units);
+    let finite: Vec<f64> = view
+        .values
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
+    if !view.series {
+        let Some(&value) = view.values.first() else {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "No value yet",
+                egui::FontId::proportional(11.0),
+                faint,
+            );
+            return;
+        };
+        painter.text(
+            rect.center() - egui::vec2(0.0, 6.0),
+            egui::Align2::CENTER_CENTER,
+            shown(value),
+            egui::FontId::proportional(22.0),
+            ink,
+        );
+        painter.text(
+            rect.center_bottom() - egui::vec2(0.0, 8.0),
+            egui::Align2::CENTER_BOTTOM,
+            &view.source,
+            small,
+            faint,
+        );
+        return;
+    }
+    if finite.is_empty() {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "An empty series",
+            egui::FontId::proportional(11.0),
+            faint,
+        );
+        return;
+    }
+    let stats = Stats::of(&finite);
+    // The statistics take the lower lines, the line of the series the space above.
+    let lines = [
+        format!("{} values   mean {}", view.values.len(), shown(stats.mean)),
+        format!("min {}   max {}", shown(stats.min), shown(stats.max)),
+        format!("std. dev. {}", shown(stats.deviation)),
+    ];
+    let line_height = 13.0;
+    let text_top = rect.bottom() - 6.0 - line_height * lines.len() as f32;
+    for (i, line) in lines.iter().enumerate() {
+        painter.text(
+            egui::pos2(rect.left() + 8.0, text_top + line_height * i as f32),
+            egui::Align2::LEFT_TOP,
+            line,
+            small.clone(),
+            ink,
+        );
+    }
+    let area = egui::Rect::from_min_max(
+        rect.min + egui::vec2(8.0, 8.0),
+        egui::pos2(rect.right() - 8.0, text_top - 6.0),
+    );
+    painter.rect_stroke(
+        area,
+        0.0,
+        egui::Stroke::new(1.0, crate::style::plot_grid()),
+        egui::StrokeKind::Inside,
+    );
+    let span = (stats.max - stats.min).max(f64::MIN_POSITIVE);
+    let count = view.values.len();
+    let at = |i: usize, v: f64| {
+        let x = if count > 1 {
+            i as f32 / (count - 1) as f32
+        } else {
+            0.5
+        };
+        let y = if stats.max > stats.min {
+            ((v - stats.min) / span) as f32
+        } else {
+            0.5
+        };
+        egui::pos2(
+            area.left() + 2.0 + x * (area.width() - 4.0),
+            area.bottom() - 2.0 - y * (area.height() - 4.0),
+        )
+    };
+    let points: Vec<egui::Pos2> = (view.values.iter().enumerate())
+        .filter(|(_, v)| v.is_finite())
+        .map(|(i, &v)| at(i, v))
+        .collect();
+    let line = crate::style::highlight();
+    if points.len() == 1 {
+        painter.circle_filled(points[0], 2.5, line);
+    } else {
+        painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, line)));
+    }
+}
+
+/// The statistics of a series that a Preview block shows.
+#[derive(Debug, PartialEq)]
+struct Stats {
+    min: f64,
+    max: f64,
+    mean: f64,
+    /// The standard deviation of the values as a whole population.
+    deviation: f64,
+}
+
+impl Stats {
+    /// Of finite values, at least one.
+    fn of(values: &[f64]) -> Self {
+        let n = values.len() as f64;
+        let mean = values.iter().sum::<f64>() / n;
+        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
+        Self {
+            min: values.iter().copied().fold(f64::INFINITY, f64::min),
+            max: values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            mean,
+            deviation: variance.sqrt(),
         }
     }
 }
@@ -883,6 +1133,23 @@ mod tests {
         assert_eq!(alpha(0, 0), 0, "the corner stays transparent");
         let plane = draw_mesh(&mesh, true, [100, 60]);
         assert_eq!(plane.pixels[30 * 100 + 50].a(), 255);
+    }
+
+    #[test]
+    fn the_statistics_of_a_series() {
+        let stats = Stats::of(&[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!((stats.min, stats.max, stats.mean), (1.0, 4.0, 2.5));
+        assert!((stats.deviation - 1.25f64.sqrt()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_preview_takes_a_number_or_a_series() {
+        let mut preview = PreviewBlock::default();
+        assert!(preview.take_values(Some((vec![2.0], false))));
+        assert!(!preview.take_values(Some((vec![2.0], false))));
+        assert!(preview.take_values(Some((vec![2.0], true))));
+        assert!(preview.take_values(None));
+        assert_eq!((preview.values, preview.series), (None, false));
     }
 
     #[test]

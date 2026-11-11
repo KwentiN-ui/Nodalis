@@ -1445,7 +1445,10 @@ fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 4] {
         (
             "Symmetry",
             SYMMETRY,
-            BoundaryKind::Symmetry { normal: None },
+            BoundaryKind::Symmetry {
+                normal: None,
+                halve_beams: true,
+            },
         ),
     ]
 }
@@ -1719,8 +1722,15 @@ fn formulation_hint(
 }
 
 /// Rows of a symmetry boundary condition: where the normal of the plane comes from, the
-/// plane found for the region and a warning when the region is no plane.
-fn symmetry_rows(ui: &mut egui::Ui, normal: &mut Option<[f64; 3]>, region: &Region, model: &Model) {
+/// plane found for the region, a warning when the region is no plane and whether beams on
+/// the plane get half their section.
+fn symmetry_rows(
+    ui: &mut egui::Ui,
+    normal: &mut Option<[f64; 3]>,
+    halve_beams: &mut bool,
+    region: &Region,
+    model: &Model,
+) {
     let space = model.fe.properties.space;
     let plane = symmetry_plane(&model.mesh, region, space, *normal);
     ui.label("Plane normal");
@@ -1767,14 +1777,43 @@ fn symmetry_rows(ui: &mut egui::Ui, normal: &mut Option<[f64; 3]>, region: &Regi
         ui.end_row();
     }
     ui.label("");
-    ui.weak("Holds the displacement normal to the plane and,");
+    let text = "Holds the displacement normal to the plane and, for beams and shells, the \
+                rotations about the in-plane axes. Select the faces in the cut plane, and \
+                beams lying on it.";
+    ui.add(egui::Label::new(egui::RichText::new(text).weak()).wrap());
     ui.end_row();
-    ui.label("");
-    ui.weak("for beams and shells, the rotations about the");
-    ui.end_row();
-    ui.label("");
-    ui.weak("in-plane axes. Select the faces in the cut plane.");
-    ui.end_row();
+    let beams = model.fe.beams_on_plane(&model.mesh, region);
+    if beams.total > 0 {
+        ui.label("Beams on the plane");
+        ui.checkbox(halve_beams, "Halve their section");
+        ui.end_row();
+        let text = if *halve_beams {
+            format!(
+                "{} beam elements get half their area, second moments and mass. \
+                 Halve the loads on them yourself.",
+                beams.total - beams.expanded
+            )
+        } else {
+            format!(
+                "{} beam elements lie on the plane with their full section.",
+                beams.total
+            )
+        };
+        ui.label("");
+        ui.add(egui::Label::new(egui::RichText::new(text).weak()).wrap());
+        ui.end_row();
+        if beams.expanded > 0 {
+            ui.label("");
+            let text = format!(
+                "{} of them have a rectangular, circular, pipe or box profile. The solver \
+                 expands these into solids, which the plane holds too stiffly and cannot \
+                 halve: give them a general profile.",
+                beams.expanded
+            );
+            ui.add(egui::Label::new(egui::RichText::new(text).color(crate::style::error())).wrap());
+            ui.end_row();
+        }
+    }
 }
 
 /// Rows of a submodel boundary condition: the displacements
@@ -3090,8 +3129,12 @@ impl Editor {
                 if let BoundaryKind::Submodel { step, dofs } = &mut bc.kind {
                     submodel_rows(ui, *step, dofs, two_d, &model.fe);
                 }
-                if let BoundaryKind::Symmetry { normal } = &mut bc.kind {
-                    symmetry_rows(ui, normal, &region.region(), model);
+                if let BoundaryKind::Symmetry {
+                    normal,
+                    halve_beams,
+                } = &mut bc.kind
+                {
+                    symmetry_rows(ui, normal, halve_beams, &region.region(), model);
                 }
                 if bc.kind.takes_amplitude() {
                     let playing = self.motion.is_some();
@@ -4016,7 +4059,9 @@ impl Editor {
             }
         }
         if let Draft::BoundaryCondition(_, bc, _) = &self.draft
-            && let BoundaryKind::Symmetry { normal: Some(n) } = bc.kind
+            && let BoundaryKind::Symmetry {
+                normal: Some(n), ..
+            } = bc.kind
             && n.iter().all(|v| *v == 0.0)
         {
             return Err("The normal must not be the zero vector.".into());

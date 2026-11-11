@@ -40,6 +40,7 @@ impl ProjectApp {
     /// What the minimap shows with the view `view` of the schematic.
     fn map_content(&self, view: egui::Rect) -> MapContent {
         let blocks = (self.graph.nodes_pos_ids())
+            .filter(|(_, _, id)| self.shown.contains(id))
             .filter_map(|(_, pos, id)| {
                 let node = self.nodes.iter().find(|n| n.id == *id)?;
                 let size = (self.block_sizes.get(id).copied()).unwrap_or(egui::vec2(220.0, 60.0));
@@ -50,7 +51,7 @@ impl ProjectApp {
         let frames = (self.frames.iter())
             .filter_map(|f| {
                 Some((
-                    frames::frame_rect(f, &self.graph, &self.block_sizes)?,
+                    frames::frame_rect(f, &self.graph, &self.block_sizes, &self.shown)?,
                     f.color,
                 ))
             })

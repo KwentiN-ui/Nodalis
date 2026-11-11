@@ -5303,6 +5303,98 @@ fn general_profiles_are_written_for_user_element_u1() {
     }
 }
 
+/// The rope of a half model lying on its symmetry plane z = 0: a cantilever along x bent
+/// in the plane by a force along y, held on the plane at every node.
+fn rope_on_symmetry_plane(halve_beams: bool, force: f64) -> (FeMesh, FeModel) {
+    let mesh = line_chain(10, 0, 1000.0, false);
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Beam(BeamSection {
+            orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+            ..beam("Rope")
+        }),
+        LoadKind::force([0.0, force, 0.0]),
+    );
+    model.cross_sections.push(CrossSection {
+        id: named("Rope"),
+        name: "Rope".into(),
+        profile: BeamProfile::Rope {
+            diameter: 20.0,
+            wire: 1.5,
+            fill: 0.6,
+            bending: plx_model::RopeBending::Share(1.0),
+        },
+    });
+    model.steps[0]
+        .boundary_conditions
+        .push(BoundaryCondition::new(
+            "Symmetry-1",
+            Region::Parts(vec!["BEAM".into()]),
+            // The nodes are on a line, which leaves the plane open: the normal is entered.
+            BoundaryKind::Symmetry {
+                normal: Some([0.0, 0.0, 1.0]),
+                halve_beams,
+            },
+        ));
+    (mesh, model)
+}
+
+/// A beam on the symmetry plane of a half model has half its section in the model: the
+/// solver gets half the area and second moments, so that half the force bends it as the
+/// full force bends the full beam.
+#[test]
+fn beams_on_a_symmetry_plane_get_half_their_section() {
+    // The full rope under the full force, without the plane.
+    let (mesh, mut full) = rope_on_symmetry_plane(true, 100.0);
+    full.steps[0].boundary_conditions.truncate(1);
+    let (_, half) = rope_on_symmetry_plane(true, 50.0);
+    let (_, kept) = rope_on_symmetry_plane(false, 50.0);
+    assert_eq!(half.halved_beams(&mesh).len(), 10);
+    assert!(kept.halved_beams(&mesh).is_empty());
+    let line = full.cross_sections.last().unwrap().profile.data_line();
+    let general = |share: f64| {
+        format!(
+            "Section=General, Contact radius=10\n{:?}, {:?}, 0, {:?}, ",
+            share * line[0],
+            share * line[1],
+            share * line[3]
+        )
+    };
+    let full_text = write_inp(&mesh, &full, "").unwrap();
+    let half_text = write_inp(&mesh, &half, "").unwrap();
+    let kept_text = write_inp(&mesh, &kept, "").unwrap();
+    assert!(full_text.contains(&general(1.0)), "{full_text}");
+    assert!(half_text.contains(&general(0.5)), "{half_text}");
+    assert!(!half_text.contains(&general(1.0)), "{half_text}");
+    // A halved section is no profile of the model: it has no profile comment.
+    assert!(!half_text.contains("** Profile: Rope"), "{half_text}");
+    assert!(kept_text.contains(&general(1.0)), "{kept_text}");
+    // The plane holds the displacement along z and the rotations about x and y.
+    for dof in [3, 4, 5] {
+        assert!(
+            half_text.contains(&format!("_SYMMETRY-1, {dof}, {dof}, 0\n")),
+            "{half_text}"
+        );
+    }
+    let Some(frd) = run_solver("symmetrie-seil-voll", &full_text) else {
+        return;
+    };
+    let tip = |frd: &FrdImport| node_value(frd, "DISP", "U2", 11);
+    let expected = tip(&frd);
+    let halved = tip(&run_solver("symmetrie-seil-halb", &half_text).unwrap());
+    assert!(
+        (halved - expected).abs() < 1e-6 * expected.abs(),
+        "{halved} != {expected}"
+    );
+    // The full section under half the force bends half as far.
+    let stiff = tip(&run_solver("symmetrie-seil-ganz", &kept_text).unwrap());
+    assert!(
+        (stiff - 0.5 * expected).abs() < 1e-6 * expected.abs(),
+        "{stiff} != {}",
+        0.5 * expected
+    );
+}
+
 /// A sketched profile goes the way of the I-beam: a general section of U1, its polygons in
 /// the comment, which may be longer than a line of CalculiX.
 #[test]
@@ -7928,7 +8020,10 @@ fn half_shell_plate(angle: f64) -> (FeMesh, FeModel, NodeId) {
         active: true,
         visible: true,
         region: Region::Nodes(edge),
-        kind: BoundaryKind::Symmetry { normal: None },
+        kind: BoundaryKind::Symmetry {
+            normal: None,
+            halve_beams: true,
+        },
         amplitude: None,
     });
     (mesh, model, corner)
@@ -8044,7 +8139,10 @@ fn solver_holds_solids_in_a_skewed_symmetry_plane_alike() {
             active: true,
             visible: true,
             region: Region::Nodes(side),
-            kind: BoundaryKind::Symmetry { normal: None },
+            kind: BoundaryKind::Symmetry {
+                normal: None,
+                halve_beams: true,
+            },
             amplitude: None,
         });
         let text = write_inp(&mesh, &model, "").unwrap();
@@ -8092,7 +8190,10 @@ fn solver_holds_a_2d_model_in_a_skewed_symmetry_line_alike() {
             active: true,
             visible: true,
             region: Region::Nodes(bottom),
-            kind: BoundaryKind::Symmetry { normal: None },
+            kind: BoundaryKind::Symmetry {
+                normal: None,
+                halve_beams: true,
+            },
             amplitude: None,
         });
         let text = write_inp(&mesh, &model, "").unwrap();

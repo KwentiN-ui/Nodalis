@@ -36,11 +36,12 @@ use crate::tree::TreeView;
 use crate::tree_icons::StepGlyph;
 use cad::{CAD_LENGTH, CadBlock};
 use deformed::{DEFORM_FACTOR, DEFORM_INCREMENT, DeformedBlock};
-use visualize::{MeshPicture, PlotBlock, PlotView, PreviewBlock};
+use visualize::{MeshPicture, PlotBlock, PlotView, PreviewBlock, PreviewView};
 
 mod cad;
 mod deformed;
 mod frames;
+mod groups;
 mod history;
 mod minimap;
 mod numbers;
@@ -75,7 +76,10 @@ enum Kind {
     Math,
     Switch,
     Plot,
-    MeshPreview,
+    Preview,
+    Group,
+    GroupInput,
+    GroupOutput,
 }
 
 impl Kind {
@@ -104,7 +108,10 @@ impl Kind {
             Self::Math => "math block",
             Self::Switch => "switch block",
             Self::Plot => "plot block",
-            Self::MeshPreview => "mesh preview block",
+            Self::Preview => "preview block",
+            Self::Group => "group",
+            Self::GroupInput => "group input",
+            Self::GroupOutput => "group output",
         }
     }
 }
@@ -164,8 +171,13 @@ enum Block {
     Switch(NumberBlock),
     /// A plot of the numbers and series linked to it.
     Plot(PlotBlock),
-    /// A small picture of the mesh linked to it.
-    MeshPreview(Box<PreviewBlock>),
+    /// What is linked to it: a picture of a mesh, a number or a series.
+    Preview(Box<PreviewBlock>),
+    /// Blocks put together into one, see [`groups`].
+    Group(Box<file::NodeGroup>),
+    /// The blocks inside a group that give its inputs and take its outputs.
+    GroupInput,
+    GroupOutput,
 }
 
 /// A Math or a Switch block: the numbers of its inputs, which value links give or the block
@@ -186,6 +198,10 @@ struct NumberBlock {
     /// every sync, not kept in the file.
     series: Vec<Option<Vec<f64>>>,
 }
+
+/// The first element of the path of the rows over the outputs and inputs of a study, which
+/// have no pin: the empty pins below them add columns.
+const STUDY_HEADING: &str = "Heading";
 
 /// The row of the result of a Math or Switch block.
 const RESULT: &str = "Result";
@@ -799,7 +815,10 @@ impl Node {
             Block::Math(_) => Kind::Math,
             Block::Switch(_) => Kind::Switch,
             Block::Plot(_) => Kind::Plot,
-            Block::MeshPreview(_) => Kind::MeshPreview,
+            Block::Preview(_) => Kind::Preview,
+            Block::Group(_) => Kind::Group,
+            Block::GroupInput => Kind::GroupInput,
+            Block::GroupOutput => Kind::GroupOutput,
         }
     }
 
@@ -1014,7 +1033,7 @@ impl Node {
 
     fn as_preview(&self) -> Option<&PreviewBlock> {
         match &self.block {
-            Block::MeshPreview(p) => Some(p),
+            Block::Preview(p) => Some(p),
             _ => None,
         }
     }
@@ -1089,12 +1108,15 @@ impl Node {
             Block::Math(n) | Block::Switch(n) => n.units,
             Block::Plot(p) => p.units,
             Block::CadOperation(c) => c.units,
-            Block::MeshPreview(_)
+            Block::Preview(_)
             | Block::MeshExport(_)
             | Block::Campbell(_)
             | Block::RefineMesh(_)
             | Block::DeformedMesh(_)
-            | Block::Note(_) => UnitSystem::default(),
+            | Block::Note(_)
+            | Block::Group(_)
+            | Block::GroupInput
+            | Block::GroupOutput => UnitSystem::default(),
         }
     }
 
@@ -1334,9 +1356,14 @@ impl Node {
                 plot.name,
                 Block::Plot(PlotBlock::new(plot.units, plot.kind, plot.bins)),
             ),
-            ProjectNode::MeshPreview(preview) => {
-                Self::new(preview.id, preview.name, Block::MeshPreview(Box::default()))
+            ProjectNode::Preview(preview) => {
+                Self::new(preview.id, preview.name, Block::Preview(Box::default()))
             }
+            ProjectNode::Group(group) => {
+                Self::new(group.id, group.name.clone(), Block::Group(Box::new(group)))
+            }
+            ProjectNode::GroupInput(end) => Self::new(end.id, end.name, Block::GroupInput),
+            ProjectNode::GroupOutput(end) => Self::new(end.id, end.name, Block::GroupOutput),
         }
     }
 
@@ -1497,9 +1524,15 @@ impl Node {
                 bins: plot.bins,
             }),
             // It keeps no mesh: the link brings it again.
-            Block::MeshPreview(_) => {
-                ProjectNode::MeshPreview(file::MeshPreview { id, name, position })
-            }
+            Block::Preview(_) => ProjectNode::Preview(file::Preview { id, name, position }),
+            Block::Group(group) => ProjectNode::Group(file::NodeGroup {
+                id,
+                name,
+                position,
+                ..(**group).clone()
+            }),
+            Block::GroupInput => ProjectNode::GroupInput(file::GroupEnd { id, name, position }),
+            Block::GroupOutput => ProjectNode::GroupOutput(file::GroupEnd { id, name, position }),
         })
     }
 
@@ -1597,7 +1630,9 @@ impl Node {
             Block::Math(math) => Block::Math(math.clone()),
             Block::Switch(switch) => Block::Switch(switch.clone()),
             Block::Plot(plot) => Block::Plot(PlotBlock::new(plot.units, plot.kind, plot.bins)),
-            Block::MeshPreview(_) => Block::MeshPreview(Box::default()),
+            Block::Preview(_) => Block::Preview(Box::default()),
+            // A group is copied with its blocks, see [`ProjectApp::duplicate_group`].
+            Block::Group(_) | Block::GroupInput | Block::GroupOutput => return None,
         };
         Some(Self::new(id, name, block))
     }
@@ -1655,7 +1690,7 @@ impl Node {
             Block::DeformedMesh(d) => d.link_data(),
             Block::CadOperation(c) => c.link_data(),
             Block::MeshExport(e) => Some(e.model.data()),
-            Block::MeshPreview(p) => Some(p.model.data()),
+            Block::Preview(p) => Some(p.model.data()),
             Block::File(f) => Some(f.model.data()),
             Block::Parameters(_)
             | Block::Measure(_)
@@ -1664,7 +1699,10 @@ impl Node {
             | Block::Note(_)
             | Block::Math(_)
             | Block::Switch(_)
-            | Block::Plot(_) => None,
+            | Block::Plot(_)
+            | Block::Group(_)
+            | Block::GroupInput
+            | Block::GroupOutput => None,
         }
     }
 
@@ -1683,7 +1721,7 @@ impl Node {
             Block::Materials(m) | Block::CrossSections(m) => Some(m.model.data_mut()),
             Block::Mesh(m) => Some(m.model.data_mut()),
             Block::MeshExport(e) => Some(e.model.data_mut()),
-            Block::MeshPreview(p) => Some(p.model.data_mut()),
+            Block::Preview(p) => Some(p.model.data_mut()),
             _ => None,
         }
     }
@@ -1997,12 +2035,21 @@ enum Action {
     SetOperation(u64, MathOp),
     SetNumberInput(u64, String, f64),
     SetChoices(u64, usize),
-    /// A new Plot or Mesh Preview block at the position.
+    /// A new Plot or Preview block at the position.
     AddPlot(egui::Pos2),
-    AddMeshPreview(egui::Pos2),
+    AddPreview(egui::Pos2),
     /// The kind of plot of a Plot block, or the bins of its histogram, changed in its block.
     SetPlotKind(u64, plx_model::PlotKind),
     SetBins(u64, u32),
+    /// Put the blocks into a new group, or the blocks of the groups back where they are.
+    Group(Vec<u64>),
+    Ungroup(Vec<u64>),
+    /// Show the blocks inside the group, or go out to the level around the group shown.
+    EnterGroup(u64),
+    LeaveGroup,
+    /// Rename the socket of the row of `path` of a group or its Group Input or Group
+    /// Output block.
+    RenameSocket(u64, Vec<String>),
 }
 
 /// A project read from its file, with notes on its conversion, or why it could not be read.
@@ -2042,7 +2089,7 @@ pub struct ProjectApp {
     frame_label: Option<(usize, String)>,
     /// The note whose text takes the keyboard in the next frame.
     focus_note: Option<u64>,
-    /// The pictures of the Mesh Preview blocks, by block.
+    /// The pictures of the meshes of the Preview blocks, by block.
     pictures: HashMap<u64, MeshPicture>,
     /// The positions of the blocks in the last frame, and the blocks moved while a button
     /// is down, to put those dropped onto a frame in it.
@@ -2144,6 +2191,15 @@ pub struct ProjectApp {
     search: Option<NodePicker>,
     /// The kind of block hanging at the pointer until a click places it.
     placing: Option<BlockTile>,
+    /// The groups opened in the schematic, the outermost first; the schematic shows the
+    /// blocks of the last one, or those outside all groups.
+    level: Vec<u64>,
+    /// The blocks there were in the last frame: a new one goes into the group shown.
+    known: BTreeSet<u64>,
+    /// The blocks the schematic shows in this frame: those right in the group shown.
+    shown: BTreeSet<u64>,
+    /// The socket of a group being renamed, with the name typed.
+    rename_socket: Option<(u64, u32, String)>,
 }
 
 impl ProjectApp {
@@ -2243,6 +2299,10 @@ impl ProjectApp {
             ribbon: Default::default(),
             search: None,
             placing: None,
+            level: Vec::new(),
+            known: BTreeSet::new(),
+            shown: BTreeSet::new(),
+            rename_socket: None,
         };
         if app.settings.updates.check_at_startup && app.updater.installation().checks_at_startup() {
             app.updater.check(&cc.egui_ctx, false);
@@ -3205,18 +3265,14 @@ impl ProjectApp {
             tip: tip.to_owned(),
         };
         let current = table.current();
-        let mut rows = vec![Row {
-            input: true,
-            collection: true,
-            ..row(
-                vec![links::OUTPUTS.to_owned()],
-                format!("Outputs ({})", table.outputs.len()),
-                0,
-                NodeIcon::Results,
-                "The numbers it reads once the points are solved: drop the value of a \
-                 Measure block here to add a column.",
-            )
-        }];
+        let mut rows = vec![row(
+            vec![STUDY_HEADING.to_owned(), links::OUTPUTS.to_owned()],
+            format!("Outputs ({})", table.outputs.len()),
+            0,
+            NodeIcon::Results,
+            "The numbers it reads once the points are solved: drop the value of a Measure \
+             block on the empty pin below them to add a column.",
+        )];
         for (i, column) in table.outputs.iter().enumerate() {
             let path = vec![links::OUTPUTS.to_owned(), column.name.clone()];
             let linked_from = (incoming.get(&node.id).into_iter().flatten())
@@ -3238,19 +3294,26 @@ impl ProjectApp {
                 )
             });
         }
+        // An empty pin below the outputs: a wire dropped on it adds a column, as in Blender.
         rows.push(Row {
-            output: true,
-            collection: true,
+            input: true,
             ..row(
-                vec![links::LOOP.to_owned()],
-                format!("Inputs ({})", table.inputs.len()),
-                0,
-                NodeIcon::Setup,
-                "The numbers it varies: drag this pin to an exposed parameter of an analysis, \
-                 a number of a mesh block or the Factor of a Refine Mesh block to add a \
-                 column. The wires are dashed, as they lead back.",
+                vec![links::OUTPUTS.to_owned()],
+                String::new(),
+                1,
+                NodeIcon::Results,
+                "Drop the value of a Measure block here to add an output column.",
             )
         });
+        rows.push(row(
+            vec![STUDY_HEADING.to_owned(), links::LOOP.to_owned()],
+            format!("Inputs ({})", table.inputs.len()),
+            0,
+            NodeIcon::Setup,
+            "The numbers it varies: drag the empty pin below them to an exposed parameter of \
+             an analysis, a number of a mesh block or the Factor of a Refine Mesh block to \
+             add a column. The wires are dashed, as they lead back.",
+        ));
         for (i, column) in table.inputs.iter().enumerate() {
             let value =
                 (current.and_then(|p| p.inputs.get(i).copied())).map_or_else(String::new, |v| {
@@ -3271,6 +3334,16 @@ impl ProjectApp {
                 )
             });
         }
+        rows.push(Row {
+            output: true,
+            ..row(
+                vec![links::LOOP.to_owned()],
+                String::new(),
+                1,
+                NodeIcon::Setup,
+                "Drag this empty pin to a number to add an input column that varies it.",
+            )
+        });
         let (solved, failed, all) = table.summary(study.body);
         let running = (self.looping.as_ref())
             .filter(|run| run.id == node.id)
@@ -4450,7 +4523,9 @@ impl ProjectApp {
                 return;
             }
             // Its numbers are edited in its block.
-            Some(Kind::Math | Kind::Switch | Kind::Plot | Kind::MeshPreview) => return,
+            Some(Kind::Math | Kind::Switch | Kind::Plot | Kind::Preview) => return,
+            Some(Kind::Group) => return self.enter_group(id),
+            Some(Kind::GroupInput | Kind::GroupOutput) => return,
             None => return,
         }
         self.open_analysis(ctx, id, view, false);
@@ -4588,6 +4663,7 @@ impl ProjectApp {
         self.links.clear();
         self.frames.clear();
         self.compact.clear();
+        self.level.clear();
         self.frame_label = None;
         self.applied.clear();
         self.restoring.clear();
@@ -4686,6 +4762,8 @@ impl ProjectApp {
                 self.output.extend(notes);
                 self.nodes.clear();
                 self.history.clear();
+                self.level.clear();
+                self.known.clear();
                 self.graph = Snarl::new();
                 self.graph_generation += 1;
                 // The view of the schematic is not saved: it starts out showing all blocks.
@@ -4780,8 +4858,15 @@ impl ProjectApp {
         self.output.push(format!("{name} created"));
     }
 
-    /// Deletes the block; undo brings it back.
+    /// Deletes the block, a group with the blocks in it; undo brings it back.
     fn delete(&mut self, id: u64) {
+        let inner = match self.node(id).map(|n| &n.block) {
+            Some(Block::Group(group)) => group.nodes.clone(),
+            _ => Vec::new(),
+        };
+        for inner in inner {
+            self.delete(inner);
+        }
         if let Some(node) = self.detach(id) {
             self.output.push(format!("{} deleted", node.name));
             self.keep_deleted(node);
@@ -4805,6 +4890,7 @@ impl ProjectApp {
         let node = (self.nodes.iter().position(|n| n.id == id)).map(|i| self.nodes.remove(i));
         self.links.retain(|l| l.source != id && l.target != id);
         self.applied.retain(|(target, _), _| *target != id);
+        self.leave_groups(id);
         self.leave_frames(&[id]);
         self.compact.remove(&id);
         self.selected.retain(|&s| s != id);
@@ -5590,6 +5676,9 @@ impl ProjectApp {
     }
 
     fn schematic(&mut self, ui: &mut egui::Ui) -> Vec<Action> {
+        self.keep_level();
+        self.prune_sockets();
+        self.shown = self.here();
         let mut incoming: HashMap<u64, Vec<(Vec<String>, String)>> = HashMap::new();
         let mut continuations: HashMap<u64, Continuation> = HashMap::new();
         let mut bundles: HashMap<u64, Vec<Bundle>> = HashMap::new();
@@ -5620,6 +5709,7 @@ impl ProjectApp {
         let base = self.export_base();
         self.refresh_pictures(ui.ctx());
         let mut blocks: Vec<BlockView> = (self.nodes.iter())
+            .filter(|n| self.shown.contains(&n.id))
             .map(|n| {
                 let fe = n.link_data().map(|d| d.fe);
                 let rows = match (n.kind(), &n.status()) {
@@ -5685,10 +5775,11 @@ impl ProjectApp {
                     (Kind::Plot, _) => {
                         visualize::plot_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
                     }
-                    (Kind::MeshPreview, _) => visualize::preview_rows(
+                    (Kind::Preview, _) => visualize::preview_rows(
                         n,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
                     ),
+                    (Kind::Group | Kind::GroupInput | Kind::GroupOutput, _) => self.group_rows(n),
                     (Kind::Analysis, None) | (Kind::Note, _) => Vec::new(),
                 };
                 let continues = (self.links.iter())
@@ -5736,8 +5827,10 @@ impl ProjectApp {
                     has_mesh: n
                         .as_preview()
                         .is_some_and(|p| p.model.mesh.element_count() > 0),
+                    preview: self.preview_view(n),
                     framed: frames::frame_of(&self.frames, n.id).is_some(),
                     chain,
+                    sockets: self.socket_kinds(n.id),
                 }
             })
             .collect();
@@ -5786,6 +5879,7 @@ impl ProjectApp {
             drawn: HashMap::new(),
             focus_note: self.focus_note.take(),
             selected: self.selected.clone(),
+            here: self.shown.clone(),
         };
         let snarl_id = egui::Id::new(("project schematic", self.graph_generation));
         // Text on the blocks is not selectable: a drag on it moves the block.
@@ -5796,6 +5890,7 @@ impl ProjectApp {
             .style(schematic_style())
             .show(&mut self.graph, &mut viewer, ui);
         ui.style_mut().interaction.selectable_labels = selectable;
+        self.group_path(ui, ui.max_rect());
         // Blocks not drawn this frame keep their last size.
         self.block_sizes = std::mem::take(&mut viewer.sizes);
         self.block_sizes.extend(viewer.drawn.drain());
@@ -5903,6 +5998,7 @@ impl ProjectApp {
         }
         let at = to_global.inverse() * pos;
         (self.graph.nodes_pos_ids())
+            .filter(|(_, _, id)| self.shown.contains(id))
             .filter(|(_, min, id)| {
                 let size = self
                     .block_sizes
@@ -5956,28 +6052,24 @@ impl ProjectApp {
                     output: !drag.output,
                 };
                 let why = if drag.output {
-                    refusal(
-                        &self.nodes,
-                        &self.links,
-                        drag.id,
-                        &drag.path,
-                        block.id,
-                        &row.path,
-                    )
+                    self.verdict((drag.id, &drag.path), (block.id, &row.path))
                 } else {
-                    refusal(
-                        &self.nodes,
-                        &self.links,
-                        block.id,
-                        &row.path,
-                        drag.id,
-                        &drag.path,
-                    )
+                    self.verdict((block.id, &row.path), (drag.id, &drag.path))
                 };
                 verdicts.insert(key, why);
             }
         }
         verdicts
+    }
+
+    /// Why a wire from the pin `from` cannot end at the pin `to`; `None` if it can.
+    fn verdict(&self, from: (u64, &[String]), to: (u64, &[String])) -> Option<String> {
+        if self.group_pin(from.0, from.1) || self.group_pin(to.0, to.1) {
+            return self.group_refusal(from, to);
+        }
+        let slot = visualize::preview_slot(&self.nodes, to.0, from.1)
+            .unwrap_or_else(|| self.checked_slot(to.0, to.1));
+        refusal(&self.nodes, &self.links, from.0, from.1, to.0, &slot)
     }
 
     /// Says why the wire being dragged cannot end at the pin under the pointer.
@@ -6040,6 +6132,18 @@ impl ProjectApp {
                 if let (Some(output), Some(input)) = (output, input) {
                     wired.push(((link.source, output), (link.target, input)));
                 }
+            }
+        }
+        // The wires of the sockets of groups.
+        for (from, to) in self.socket_wires() {
+            let (Some(source), Some(target)) = (block(from.node), block(to.node)) else {
+                continue;
+            };
+            if let (Some(output), Some(input)) = (
+                shown_row(&source.rows, &from.path),
+                shown_row(&target.rows, &to.path),
+            ) {
+                wired.push(((from.node, output), (to.node, input)));
             }
         }
         wired
@@ -7280,9 +7384,15 @@ impl ProjectApp {
             | Action::RunStudy(_)
             | Action::DeleteAll(_)
             | Action::Pick(..)
+            | Action::EnterGroup(_)
+            | Action::LeaveGroup
+            | Action::RenameSocket(..)
             // Blocks moved are noticed on their own.
             | Action::MoveFrame(..) => return None,
-            Action::Link { target, .. } => vec![*target],
+            Action::Link { target, slot, .. } => match self.group_targets(*target, slot) {
+                Some(targets) => targets,
+                None => vec![*target],
+            },
             Action::SetExposed(id, ..)
             | Action::RenameExposed(id, ..)
             | Action::Unexpose(id, _) => {
@@ -7339,9 +7449,11 @@ impl ProjectApp {
             | Action::SetNumberInput(..)
             | Action::SetChoices(..)
             | Action::AddPlot(_)
-            | Action::AddMeshPreview(_)
+            | Action::AddPreview(_)
             | Action::SetPlotKind(..)
-            | Action::SetBins(..) => Vec::new(),
+            | Action::SetBins(..)
+            | Action::Group(_)
+            | Action::Ungroup(_) => Vec::new(),
         })
     }
 
@@ -7492,10 +7604,19 @@ impl ProjectApp {
                     .map(|n| n.name.clone());
                 self.rename = name.map(|name| (id, name));
             }
-            Action::DeleteAll(ids) => self.confirm_delete = ids,
+            Action::DeleteAll(ids) => self.confirm_delete = self.deletable(ids),
             Action::DuplicateAll(ids) => {
                 for id in ids {
-                    self.duplicate(id);
+                    match self.node(id).map(|n| n.kind()) {
+                        Some(Kind::Group) => {
+                            if let Some(copy) = self.duplicate_group(id, egui::vec2(40.0, 260.0)) {
+                                let name = self.name_of(copy);
+                                self.output.push(format!("{name} created"));
+                            }
+                        }
+                        Some(Kind::GroupInput | Kind::GroupOutput) => {}
+                        _ => self.duplicate(id),
+                    }
                 }
             }
             Action::AddNote(pos) => {
@@ -7544,8 +7665,8 @@ impl ProjectApp {
             Action::AddPlot(pos) => {
                 self.add_plot(pos);
             }
-            Action::AddMeshPreview(pos) => {
-                self.add_mesh_preview(pos);
+            Action::AddPreview(pos) => {
+                self.add_preview(pos);
             }
             Action::SetPlotKind(id, kind) => self.set_plot_kind(id, kind),
             Action::SetBins(id, bins) => self.set_bins(id, bins),
@@ -7561,7 +7682,28 @@ impl ProjectApp {
                 item,
                 target,
                 slot,
-            } => self.link(source, item, target, slot),
+            } => {
+                if self.group_pin(source, &item) || self.group_pin(target, &slot) {
+                    let pin = |node, path| file::GroupPin { node, path };
+                    self.link_pins(pin(source, item), pin(target, slot));
+                } else if let Some(slot) = self.new_choice(target, &slot) {
+                    self.link(source, item, target, slot);
+                } else if let Some(slot) = visualize::preview_slot(&self.nodes, target, &item) {
+                    self.keep_one_preview_link(target, &slot);
+                    self.link(source, item, target, slot);
+                } else {
+                    self.link(source, item, target, slot);
+                }
+            }
+            Action::Group(ids) => self.group_blocks(&ids),
+            Action::Ungroup(ids) => {
+                for id in ids {
+                    self.ungroup(id);
+                }
+            }
+            Action::EnterGroup(id) => self.enter_group(id),
+            Action::LeaveGroup => self.leave_group(),
+            Action::RenameSocket(id, path) => self.ask_socket_name(id, &path),
             Action::Continue {
                 source,
                 step,
@@ -7572,6 +7714,9 @@ impl ProjectApp {
             Action::Split(id, step) => self.split(id, step),
             Action::Merge(id) => self.merge(id),
             Action::Unlink { source, target } => {
+                if self.unlink_pins(source.as_ref(), target.as_ref()) {
+                    return;
+                }
                 self.exclude(source.as_ref(), target.as_ref());
                 self.unlink(|link| {
                     source.as_ref().is_none_or(|(id, path)| {
@@ -8016,6 +8161,7 @@ impl eframe::App for ProjectApp {
             self.project_ui(ui);
         }
         self.rename_window(&ctx);
+        self.socket_name_window(&ctx);
         self.confirm_delete_window(&ctx);
         self.material_set_window(&ctx);
         self.mesh_block_window(&ctx);
@@ -8258,11 +8404,16 @@ struct BlockView {
     number: Option<(NumberBlock, bool)>,
     /// What a Plot block draws.
     plot: Option<PlotView>,
-    /// Of a Mesh Preview block, the picture of its mesh once drawn, and whether it has one.
+    /// Of a Preview block, the picture of its mesh once drawn, whether it has one, and the
+    /// numbers it shows.
     picture: Option<egui::TextureId>,
     has_mesh: bool,
+    preview: Option<PreviewView>,
     /// The mark of the step chain at the rows of steps, by row path.
     chain: HashMap<Vec<String>, ChainMark>,
+    /// Of a group and its Group Input and Group Output blocks, the type of each row of a
+    /// socket, by row path: the path of the row the socket was made from.
+    sockets: HashMap<Vec<String>, Vec<String>>,
 }
 
 /// Where a row of a step lies on the chain of steps, for the trace at the left of the rows
@@ -9287,10 +9438,11 @@ fn refusal(
         // of what it gives to; so does a Math or Switch block without a kind, at either end.
         let open =
             |id: u64, path: &[String]| node(id).is_some_and(|n| numbers::open_number(n, path));
-        // A plot takes numbers of any kind.
-        let plotted = target_node.as_plot().is_some_and(
+        // A plot and a preview take numbers of any kind.
+        let plotted = (target_node.as_plot().is_some_and(
             |p| matches!(slot, [_, key] if p.kind.inputs().iter().any(|(k, _)| k == key)),
-        ) && taken.is_none();
+        ) || target_node.as_preview().is_some())
+            && taken.is_none();
         let any = (feedback && given.is_none() && (taken.is_some() || open(target, slot)))
             || (open(source, item) && (taken.is_some() || open(target, slot)))
             || (open(target, slot) && given.is_some())
@@ -10138,7 +10290,7 @@ enum BlockKind {
     File,
     Note,
     Plot,
-    MeshPreview,
+    Preview,
 }
 
 fn block_kinds() -> Vec<BlockKind> {
@@ -10161,7 +10313,7 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::File,
         BlockKind::Note,
         BlockKind::Plot,
-        BlockKind::MeshPreview,
+        BlockKind::Preview,
     ]
 }
 
@@ -10294,12 +10446,14 @@ impl BlockKind {
                  line or points of Y over X, such as a whole history over its time, or a \
                  histogram of the values of a field. Its type of plot decides its inputs.",
             ),
-            Self::MeshPreview => (
+            Self::Preview => (
                 "Visualize",
-                "Mesh Preview",
-                "picture image thumbnail geometry mesh view visualize",
-                "Adds a block that shows a small picture of the mesh linked to it, so that the \
-                 schematic shows the geometry beside its analysis without opening it.",
+                "Preview",
+                "preview picture image thumbnail geometry mesh number value series vector \
+                 statistics view visualize",
+                "Adds a block that shows what is linked to it: a small picture of a mesh, so \
+                 that the schematic shows the geometry beside its analysis, a number, or a \
+                 series with its statistics.",
             ),
             Self::Note => (
                 "Note",
@@ -10337,7 +10491,7 @@ impl BlockKind {
             Self::File => Action::AddFile(pos),
             Self::Note => Action::AddNote(pos),
             Self::Plot => Action::AddPlot(pos),
-            Self::MeshPreview => Action::AddMeshPreview(pos),
+            Self::Preview => Action::AddPreview(pos),
         }
     }
 }
@@ -10466,7 +10620,8 @@ fn header_fill(kind: Kind) -> Option<egui::Color32> {
         Kind::Study | Kind::Campbell => crate::style::study_header(),
         Kind::MeshExport => crate::style::export_header(),
         Kind::Note => crate::style::note_header(),
-        Kind::Plot | Kind::MeshPreview => crate::style::visualize_header(),
+        Kind::Plot | Kind::Preview => crate::style::visualize_header(),
+        Kind::Group | Kind::GroupInput | Kind::GroupOutput => crate::style::group_header(),
         _ => return None,
     })
 }
@@ -10502,11 +10657,35 @@ struct Viewer {
     focus_note: Option<u64>,
     /// The blocks selected, which the items of a block's menu work on if it is one of them.
     selected: Vec<u64>,
+    /// The blocks shown: those right in the group open.
+    here: BTreeSet<u64>,
 }
 
 impl Viewer {
     fn block(&self, id: u64) -> Option<&BlockView> {
         self.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// The path that gives the pin of the row its colour: that of the pin a socket was made
+    /// from for the pin of a socket, else that of the row.
+    fn pin_type(&self, id: u64, path: &[String]) -> Vec<String> {
+        (self.block(id))
+            .and_then(|b| b.sockets.get(path))
+            .cloned()
+            .unwrap_or_else(|| path.to_vec())
+    }
+
+    /// Whether the row's pin is an empty one, which makes a new input, choice or column of
+    /// the block once a wire is dropped on it.
+    fn is_open_pin(&self, id: u64, path: &[String]) -> bool {
+        let Some(block) = self.block(id) else {
+            return false;
+        };
+        match block.kind {
+            Kind::GroupInput | Kind::GroupOutput | Kind::Switch => groups::is_open(path),
+            Kind::Study => matches!(path, [cell] if cell == links::OUTPUTS || cell == links::LOOP),
+            _ => false,
+        }
     }
 
     /// `pin` of the row of `path` in the block `id`, marked as fitting the wire being dragged
@@ -10954,6 +11133,7 @@ impl SnarlViewer<u64> for Viewer {
         } else {
             "Shows only the header and the rows with a wire (H)"
         };
+        let toggle_rect = toggle.rect;
         let toggled = toggle.on_hover_text(toggle_tip).clicked();
         let (rect, icon) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
         match block.kind {
@@ -11043,10 +11223,25 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Plot, ink);
                 icon.on_hover_text("Plots the numbers and series linked to it");
             }
-            Kind::MeshPreview => {
+            Kind::Preview => {
                 let ink = ui.visuals().text_color();
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Picture, ink);
-                icon.on_hover_text("Shows a small picture of the mesh linked to it");
+                icon.on_hover_text("Shows the mesh, number or series linked to it");
+            }
+            Kind::Group => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Group, ink);
+                icon.on_hover_text("Blocks put together into one; Tab opens it");
+            }
+            Kind::GroupInput => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::GroupInput, ink);
+                icon.on_hover_text("Gives the inputs of the group to the blocks in it");
+            }
+            Kind::GroupOutput => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::GroupOutput, ink);
+                icon.on_hover_text("Takes what the group gives out");
             }
         }
         let text = egui::RichText::new(&block.name).strong();
@@ -11074,7 +11269,29 @@ impl SnarlViewer<u64> for Viewer {
         if toggled {
             self.actions.push(Action::Compact(vec![id]));
         }
-        if label.double_clicked() {
+        // A double-click anywhere on the header bar right of the triangle opens the block,
+        // not only on its name: the bar itself belongs to the schematic, to move the block.
+        let bar = egui::Rect::from_x_y_ranges(
+            toggle_rect.right()..=ui.max_rect().right(),
+            label.rect.y_range().expand(6.0),
+        );
+        // The schematic is zoomed and panned: the pointer is brought into its space first.
+        let layer = ui.layer_id();
+        let ctx = ui.ctx();
+        let bar_double = ctx.input(|i| {
+            i.pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+        }) && ctx.pointer_interact_pos().is_some_and(|screen| {
+            let local = ctx
+                .layer_transform_to_global(layer)
+                .map_or(screen, |t| t.inverse() * screen);
+            // Not through a window or menu over the schematic.
+            ctx.layer_id_at(screen)
+                .is_none_or(|l| l.order == egui::Order::Background)
+                && bar.contains(local)
+                && ui.clip_rect().contains(local)
+        });
+        if label.double_clicked() || bar_double {
             // A compact block opens to show its rows first, as in Blender.
             self.actions.push(if compact {
                 Action::Compact(vec![id])
@@ -11103,7 +11320,19 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Math => "Its operation and numbers are edited in the block.",
             Kind::Switch => "Its index and choices are edited in the block.",
             Kind::Plot => "Its type of plot and its inputs are chosen in the block.",
-            Kind::MeshPreview => "Shows the mesh linked to its Mesh row.",
+            Kind::Preview => "Shows the mesh, number or series linked to its row.",
+            Kind::Group => {
+                "Double-click or Tab opens the group; Ctrl+Tab or the path at the top left \
+                 goes back out."
+            }
+            Kind::GroupInput => {
+                "Drag a wire from its empty pin at the bottom to a block of the group to give \
+                 the group a new input."
+            }
+            Kind::GroupOutput => {
+                "Drag a wire from a block of the group to its empty pin at the bottom to give \
+                 the group a new output."
+            }
         };
         // The name takes the clicks of the header, so it opens the block's menu too.
         label.on_hover_text(tip).context_menu(|ui| {
@@ -11268,11 +11497,16 @@ impl SnarlViewer<u64> for Viewer {
         let response = response.on_hover_text(tip);
         if toggled || (row.expander.is_some() && response.double_clicked()) {
             self.actions.push(Action::Toggle(id, row.path.clone()));
+        } else if response.double_clicked() && groups::socket_of(&row.path).is_some() {
+            self.actions
+                .push(Action::RenameSocket(id, row.path.clone()));
         } else if response.double_clicked() {
             self.actions.push(Action::Open(id, workspace_of(&row.path)));
         }
-        let color = wire_color(&row.path);
-        if row.path.first().is_some_and(|c| c == links::STATE) {
+        let color = wire_color(&self.pin_type(id, &row.path));
+        if row.input && self.is_open_pin(id, &row.path) {
+            self.typed(BlockPin::single(open_pin()), id, &row.path, false)
+        } else if row.path.first().is_some_and(|c| c == links::STATE) {
             let pin = BlockPin::single(PinInfo::square().with_fill(color).with_wire_color(color));
             self.typed(pin, id, &row.path, false)
         } else if row.input {
@@ -11311,7 +11545,11 @@ impl SnarlViewer<u64> for Viewer {
     ) -> impl egui_snarl::ui::SnarlPin + 'static {
         ui.allocate_exact_size(egui::vec2(0.0, ROW_HEIGHT), egui::Sense::hover());
         match self.row(snarl, pin.id.node, pin.id.output) {
-            Some((id, row)) if row.output && row.path.first().is_some_and(|c| c == links::LOOP) => {
+            Some((id, row))
+                if row.output
+                    && row.path.first().is_some_and(|c| c == links::LOOP)
+                    && !self.is_open_pin(id, &row.path) =>
+            {
                 let color = wire_color(&row.path);
                 let info = PinInfo::circle().with_fill(color).with_wire_color(color);
                 let shown = if pin.remotes.is_empty() {
@@ -11321,8 +11559,11 @@ impl SnarlViewer<u64> for Viewer {
                 };
                 self.typed(shown, id, &row.path, true)
             }
+            Some((id, row)) if row.output && self.is_open_pin(id, &row.path) => {
+                self.typed(BlockPin::single(open_pin()), id, &row.path, true)
+            }
             Some((id, row)) if row.output => {
-                let color = wire_color(&row.path);
+                let color = wire_color(&self.pin_type(id, &row.path));
                 // A wire takes the mixed colour of its two pins, so the results pin of a step
                 // whose wires all go to a State row gives them the green of a state link.
                 let state = vec![links::STATE.to_owned()];
@@ -11340,16 +11581,21 @@ impl SnarlViewer<u64> for Viewer {
         }
     }
 
+    // Blocks of other groups are not drawn.
+    fn visible(&mut self, node: &u64) -> bool {
+        self.here.contains(node)
+    }
+
     // Only a note has a body: its text.
     fn has_body(&mut self, node: &u64) -> bool {
         self.block(*node)
             .is_some_and(|b| b.kind == Kind::Note && !b.compact)
     }
 
-    // A Plot and a Mesh Preview block show their picture below their rows, also compact.
+    // A Plot and a Preview block show their picture below their rows, also compact.
     fn has_footer(&mut self, node: &u64) -> bool {
         self.block(*node)
-            .is_some_and(|b| matches!(b.kind, Kind::Plot | Kind::MeshPreview))
+            .is_some_and(|b| matches!(b.kind, Kind::Plot | Kind::Preview))
     }
 
     fn show_footer(
@@ -11370,7 +11616,9 @@ impl SnarlViewer<u64> for Viewer {
                     self.show_plot(ui, view);
                 }
             }
-            Kind::MeshPreview => self.show_picture(ui, block.picture, block.has_mesh),
+            Kind::Preview => {
+                self.show_preview(ui, block.picture, block.has_mesh, block.preview.as_ref())
+            }
             _ => {}
         }
     }
@@ -11518,7 +11766,7 @@ impl SnarlViewer<u64> for Viewer {
             });
             // With the label bands of the frames above them.
             let blocks = (self.frames.iter())
-                .filter_map(|f| frames::frame_rect(f, snarl, &self.sizes))
+                .filter_map(|f| frames::frame_rect(f, snarl, &self.sizes, &self.here))
                 .fold(blocks, egui::Rect::union);
             if blocks.is_finite() {
                 let blocks = blocks.expand(40.0);
@@ -11935,6 +12183,15 @@ fn rounded(corners: &[egui::Pos2], radius: f32) -> Vec<egui::Pos2> {
     points
 }
 
+/// An empty pin, as Blender draws the one that makes a new socket: a ring without fill.
+fn open_pin() -> PinInfo {
+    let gray = egui::Color32::from_gray(150);
+    PinInfo::circle()
+        .with_fill(egui::Color32::TRANSPARENT)
+        .with_stroke(egui::Stroke::new(1.5, gray))
+        .with_wire_color(gray)
+}
+
 /// The pin of a row that takes or gives no link: there, but not to be seen.
 fn hidden_pin() -> PinInfo {
     PinInfo::circle()
@@ -11966,6 +12223,7 @@ fn layout_menu(ui: &mut egui::Ui, layout: &Layout, actions: &mut Vec<Action>) {
         "Compact View"
     };
     entry(ui, compact, "H", Action::Compact(targets.clone()));
+    entry(ui, "Group Blocks", "Ctrl+G", Action::Group(targets.clone()));
     entry(ui, "Frame Blocks", "Ctrl+J", Action::Frame(targets.clone()));
     if layout.framed {
         entry(ui, "Remove from Frame", "Alt+P", Action::Unframe(targets));
@@ -11990,7 +12248,31 @@ fn node_menu(
     };
     if kind.is_source() {
         // Sources have no steps and are not solved.
-        if kind == Kind::MeshExport {
+        if kind == Kind::Group {
+            entry(ui, "Open Group", "Tab", Action::EnterGroup(id));
+            entry(
+                ui,
+                "Ungroup",
+                "Ctrl+Alt+G",
+                Action::Ungroup(targets.clone()),
+            );
+        } else if matches!(kind, Kind::GroupInput | Kind::GroupOutput) {
+            entry(ui, "Leave Group", "Ctrl+Tab", Action::LeaveGroup);
+            ui.separator();
+            layout_menu(ui, layout, actions);
+            ui.separator();
+            let mut rename = |ui: &mut egui::Ui| {
+                if ui
+                    .add(egui::Button::new("Rename …").shortcut_text("F2"))
+                    .clicked()
+                {
+                    actions.push(Action::Rename(id));
+                    ui.close();
+                }
+            };
+            rename(ui);
+            return;
+        } else if kind == Kind::MeshExport {
             entry(ui, "Export Now", "", Action::ExportNow(id));
             entry(ui, "Choose File …", "", Action::Open(id, None));
         } else if kind == Kind::File {
@@ -12000,7 +12282,7 @@ fn node_menu(
             entry(ui, "Open Diagram …", "", Action::Open(id, None));
         } else if !matches!(
             kind,
-            Kind::RefineMesh | Kind::DeformedMesh | Kind::Plot | Kind::MeshPreview
+            Kind::RefineMesh | Kind::DeformedMesh | Kind::Plot | Kind::Preview
         ) {
             entry(ui, "Edit …", "", Action::Open(id, None));
         }
@@ -13103,17 +13385,20 @@ mod tests {
             color: frames::FRAME_COLORS[1].1,
             nodes: vec![1, 2],
         };
-        let rect = frames::frame_rect(&frame, &graph, &sizes).unwrap();
+        let shown = BTreeSet::from([1, 2, 3, 5]);
+        let rect = frames::frame_rect(&frame, &graph, &sizes, &shown).unwrap();
         assert!(rect.contains(egui::pos2(10.0, 10.0)));
         assert!(rect.contains(egui::pos2(510.0, 210.0)));
         assert!(!rect.contains(egui::pos2(900.0, 900.0)));
         // The label band lies above the blocks.
         assert!(rect.top() < -30.0);
+        // Blocks of another group do not count.
+        assert!(frames::frame_rect(&frame, &graph, &sizes, &BTreeSet::new()).is_none());
         let empty = file::Frame {
             nodes: vec![5],
             ..frame
         };
-        assert!(frames::frame_rect(&empty, &graph, &sizes).is_none());
+        assert!(frames::frame_rect(&empty, &graph, &sizes, &shown).is_none());
         assert_eq!(frames::frame_of(&[empty], 5), Some(0));
     }
 
