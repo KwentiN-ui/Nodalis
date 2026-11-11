@@ -25,7 +25,7 @@ use plxs_core::results::{IncrementKind, ModeKind, ResultField, ResultsIncrement}
 use plxs_core::state::{NodalField, StoredModes};
 use plxs_core::step::Frequency;
 use plxs_core::{Error, Progress, ProgressEvent, Result, Step};
-use plxs_linalg::{Pattern, SparseMatrix};
+use plxs_linalg::{Pattern, SparseMatrix, Unknowns};
 use plxs_output::{EigenTable, StaRow, imaginary_field_name};
 
 use crate::eigen::{
@@ -152,10 +152,16 @@ pub(crate) fn cyclic_frequency(
             count,
             parameters.lower,
             parameters.solver,
-            // Both copies of the sector at the nodes' positions.
-            (set.free.iter())
-                .map(|&d| ctx.model.nodes.coordinates[(d as usize % total_dofs) / 3])
-                .collect(),
+            // Both copies of the sector at the nodes' positions, each copy's nodes their
+            // own.
+            Unknowns {
+                node: set.free.iter().map(|&d| d / 3).collect(),
+                component: set.free.iter().map(|&d| (d % 3) as u8).collect(),
+                coordinates: (set.free.iter())
+                    .map(|&d| ctx.model.nodes.coordinates[(d as usize % total_dofs) / 3])
+                    .collect(),
+                body: Vec::new(),
+            },
             progress,
         )?;
 
