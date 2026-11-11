@@ -5,10 +5,11 @@
 This chapter walks through a complete static analysis of a plate with a hole that is fixed at one
 end and pulled at the other. Each step links to the chapter with the details.
 
-+ *Create the analysis.* A new project starts with one empty analysis, #ui("Analysis-1"),
-  already picked in the app bar; click #ui("Geometry") there to work on it. Its model space and unit system come from the settings;
-  keep #ui("3D") and #ui("mm, ton, s, °C"). Further analyses are added with
-  #ui("New Analysis") in the Project workspace (@new-analysis, @workspaces).
++ *Create the analysis.* A new project starts empty. Click #ui("New Analysis") on the ribbon
+  of the Project workspace, keep #ui("3D") and #ui("mm, ton, s, °C") in the dialog and place
+  the block in the schematic (@new-analysis, @workspaces). The model space and the unit system
+  of an analysis cannot be changed later. Double-click the block, or pick it in the app bar
+  and click #ui("Geometry"), to work on it.
 + *Import the geometry.* #ui("Import Geometry") on the ribbon (or #menu("Geometry", "Import
   ...")) reads the STEP file of the plate. It
   appears as part `SOLID-1` in the Geometry workspace (@geometry-import).
