@@ -1292,12 +1292,11 @@ enum Draft {
     /// A contact region with side A as master and side B as slave of the drafts.
     ContactRegion(plx_model::ContactRegion, MasterSlave, RegionView),
     ContactDetection(plx_model::ContactDetection),
-    /// A bolt with side A as master and side B as slave of the drafts, and its action in
-    /// each step (`None` automatic).
+    /// A bolt with the sides of its cut and its thread, and what it does in each step.
     Bolt(
         plx_model::Bolt,
-        MasterSlave,
-        Vec<Option<plx_model::BoltAction>>,
+        crate::bolts::BoltSides,
+        Vec<crate::bolts::BoltStep>,
         crate::bolts::BoltView,
     ),
     /// The settings the contact regions share.
@@ -1323,8 +1322,8 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
         | Draft::MeshSet(_, r, _) => Some(r),
         Draft::ContactPair(_, regions)
         | Draft::Tie(_, regions)
-        | Draft::ContactRegion(_, regions, _)
-        | Draft::Bolt(_, regions, ..) => Some(regions.current()),
+        | Draft::ContactRegion(_, regions, _) => Some(regions.current()),
+        Draft::Bolt(_, sides, ..) => Some(sides.current()),
         Draft::Constraint(c) => Some(c.region()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
@@ -1343,8 +1342,8 @@ fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
         | Draft::MeshSet(_, r, _) => Some(r),
         Draft::ContactPair(_, regions)
         | Draft::Tie(_, regions)
-        | Draft::ContactRegion(_, regions, _)
-        | Draft::Bolt(_, regions, ..) => Some(regions.current_mut()),
+        | Draft::ContactRegion(_, regions, _) => Some(regions.current_mut()),
+        Draft::Bolt(_, sides, ..) => Some(sides.current_mut()),
         Draft::Constraint(c) => Some(c.region_mut()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
@@ -1860,7 +1859,7 @@ fn nearest_direction(vector: [f64; 3]) -> GravityDirection {
     }
 }
 
-fn load_kinds() -> [(&'static str, &'static str, LoadKind); 14] {
+fn load_kinds() -> [(&'static str, &'static str, LoadKind); 13] {
     [
         ("Force", FORCE, LoadKind::force([0.0; 3])),
         (
@@ -1893,16 +1892,6 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 14] {
             "Moving Load",
             MOVING,
             LoadKind::Moving(MovingLoad::default()),
-        ),
-        (
-            "Pre-tension (bolt preload)",
-            PRE_TENSION,
-            LoadKind::PreTension {
-                value: 0.0,
-                by_displacement: false,
-                lock: false,
-                direction: None,
-            },
         ),
         ("Concentrated Flux", CFLUX, LoadKind::ConcentratedFlux(0.0)),
         ("Surface Flux", SURFACE_FLUX, LoadKind::SurfaceFlux(0.0)),
@@ -2239,8 +2228,8 @@ impl Editor {
                 let name = next_name("Bolt", names(&fe.bolts, |b| &b.name));
                 Draft::Bolt(
                     plx_model::Bolt::new(name),
-                    MasterSlave::new(contact_target(fe)),
-                    vec![None; fe.steps.len()],
+                    crate::bolts::BoltSides::new(contact_target(fe)),
+                    vec![Default::default(); fe.steps.len()],
                     Default::default(),
                 )
             }
@@ -2466,8 +2455,7 @@ impl Editor {
             ),
             TreeItem::Bolt(i) => {
                 let bolt = fe.bolts.get(i)?.clone();
-                let sides =
-                    MasterSlave::from_regions(&bolt.side_a, &bolt.side_b, contact_target(fe), mesh);
+                let sides = crate::bolts::BoltSides::of(&bolt, contact_target(fe), mesh);
                 let actions = crate::bolts::step_actions(fe, bolt.id);
                 (Draft::Bolt(bolt, sides, actions, Default::default()), i)
             }
@@ -2648,8 +2636,8 @@ impl Editor {
         match &self.draft {
             Draft::ContactPair(_, regions)
             | Draft::Tie(_, regions)
-            | Draft::ContactRegion(_, regions, _)
-            | Draft::Bolt(_, regions, ..) => regions.highlight(model),
+            | Draft::ContactRegion(_, regions, _) => regions.highlight(model),
+            Draft::Bolt(_, sides, ..) => sides.highlight(model),
             Draft::Constraint(c) => c.highlight(model),
             _ => self
                 .region()
@@ -3327,64 +3315,11 @@ impl Editor {
                         let nlgeom = step_kind.is_some_and(|k| model.fe.step_nlgeom(k));
                         direction_rows(ui, &mut load.system, &mut load.follower, &model.fe, nlgeom);
                     }
-                    LoadKind::PreTension {
-                        value,
-                        by_displacement,
-                        lock,
-                        direction,
-                    } => {
-                        // Force, displacement or lock: one choice of the two flags.
-                        let mut by = (*lock, *by_displacement);
-                        ui.label("Preload by");
-                        crate::layout::wrapped_row(ui, |ui| {
-                            ui.radio_value(&mut by, (false, false), "Force");
-                            ui.radio_value(&mut by, (false, true), "Displacement");
-                            ui.radio_value(&mut by, (true, *by_displacement), "Lock")
-                                .on_hover_text(
-                                    "Keeps the length the bolt has at the end of the previous \
-                                     step; the bolt force then follows the other loads.",
-                                );
-                        });
-                        (*lock, *by_displacement) = by;
+                    LoadKind::PreTension { .. } => {
+                        // Written for bolts only; a Bolt under Connections makes them.
+                        ui.label("");
+                        ui.weak("Bolt preloads are made by a Bolt under Connections.");
                         ui.end_row();
-                        if *lock {
-                            ui.label("");
-                            ui.weak("Length of the previous step");
-                        } else if *by_displacement {
-                            ui.label("Shortening");
-                            expose::field(ui, Field::Value, |ui| {
-                                ui.add(
-                                    numeric::quantity(value, units, Quantity::Length).speed(0.001),
-                                )
-                            });
-                        } else {
-                            ui.label("Force");
-                            expose::field(ui, Field::Value, |ui| {
-                                ui.add(numeric::quantity(value, units, Quantity::Force).speed(1.0))
-                            });
-                        }
-                        ui.end_row();
-                        let mut given = direction.is_some();
-                        ui.label("Direction");
-                        ui.checkbox(&mut given, "Given (otherwise the surface normal)");
-                        ui.end_row();
-                        let mut values = direction.unwrap_or([1.0, 0.0, 0.0]);
-                        for (value, label) in values.iter_mut().zip(["    X", "    Y", "    Z"]) {
-                            ui.label(label);
-                            ui.add_enabled(given, numeric::drag_value(value).speed(0.01));
-                            ui.end_row();
-                        }
-                        *direction = given.then_some(values);
-                        for line in [
-                            "Select the element faces on one side of a cut through the bolt shank.",
-                            "A positive force pulls the two sides together; a displacement shortens the bolt.",
-                            "The shortening counts from the start: 0 loosens the bolt.",
-                            "Lock in a later step to keep the bolt at its length.",
-                        ] {
-                            ui.label("");
-                            ui.weak(line);
-                            ui.end_row();
-                        }
                     }
                     LoadKind::ConcentratedFlux(flux) => {
                         ui.label("Heat flux");
@@ -4362,7 +4297,7 @@ impl Editor {
             }
             Draft::ContactDetection(detection) => put(&mut fe.contact_detections, index, detection),
             Draft::Bolt(mut bolt, sides, actions, _) => {
-                (bolt.side_a, bolt.side_b) = sides.regions();
+                (bolt.side_a, bolt.side_b, bolt.thread) = sides.regions();
                 if let Some(existing) = index.and_then(|i| fe.bolts.get(i)) {
                     bolt.active = existing.active;
                     let old = existing.id;
@@ -4710,7 +4645,11 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
         TreeItem::ContactPair(i) => fe.contact_pairs.get(i).map(|c| [&c.master, &c.slave]),
         TreeItem::Tie(i) => fe.ties.get(i).map(|t| [&t.master, &t.slave]),
         TreeItem::ContactRegion(i) => fe.contact_regions.get(i).map(|r| [&r.side_a, &r.side_b]),
-        TreeItem::Bolt(i) => fe.bolts.get(i).map(|b| [&b.side_a, &b.side_b]),
+        TreeItem::Bolt(i) => {
+            return fe.bolts.get(i).map_or_else(Highlight::default, |bolt| {
+                crate::bolts::bolt_highlight(model, &bolt.side_a, &bolt.side_b, &bolt.thread)
+            });
+        }
         TreeItem::HistoryOutput(s, i) => {
             let output = fe.step_history_output(s, i);
             match output.map(|h| &h.kind) {

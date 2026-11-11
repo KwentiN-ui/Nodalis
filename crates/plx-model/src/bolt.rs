@@ -29,7 +29,16 @@ pub struct Bolt {
     /// Direction of the preload; `None` takes the normal of the cut.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis: Option<[f64; 3]>,
+    /// The faces of the internal thread the bolt is screwed into, on the nut or the part
+    /// with the tapped hole; empty when the user joins the bolt there himself. The faces of
+    /// the bolt that face them are tied to them where they are ([`FeModel::resolve_thread`]).
+    #[serde(default = "no_faces", skip_serializing_if = "Region::is_empty")]
+    pub thread: Region,
     pub color: [u8; 3],
+}
+
+fn no_faces() -> Region {
+    Region::Faces(Vec::new())
 }
 
 impl Bolt {
@@ -42,21 +51,23 @@ impl Bolt {
             side_b: Region::Faces(Vec::new()),
             preload: Preload::Force(0.0),
             axis: None,
+            thread: no_faces(),
             color: [230, 140, 0],
         }
     }
 
-    pub fn regions(&self) -> [&Region; 2] {
-        [&self.side_a, &self.side_b]
+    /// The sides of the cut and the thread.
+    pub fn regions(&self) -> [&Region; 3] {
+        [&self.side_a, &self.side_b, &self.thread]
     }
 
-    pub fn regions_mut(&mut self) -> [&mut Region; 2] {
-        [&mut self.side_a, &mut self.side_b]
+    pub fn regions_mut(&mut self) -> [&mut Region; 3] {
+        [&mut self.side_a, &mut self.side_b, &mut self.thread]
     }
 
     /// The nodes of both sides of the cut, of their faces too.
     pub fn nodes(&self, mesh: &FeMesh) -> BTreeSet<NodeId> {
-        self.regions()
+        [&self.side_a, &self.side_b]
             .into_iter()
             .flat_map(|region| side_nodes(region, mesh))
             .collect()
@@ -113,11 +124,18 @@ impl From<Preload> for BoltAction {
     }
 }
 
-/// What a bolt does in one step instead of the automatic action ([`FeModel::bolt_action`]).
+/// What a bolt does in one step instead of the automatic action ([`FeModel::bolt_action`]),
+/// and the amplitude its load or adjustment follows there.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BoltChange {
     pub bolt: crate::Id,
     pub action: BoltAction,
+    /// The step keeps the automatic action; the change only gives the amplitude.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto: bool,
+    /// The amplitude of the load or adjustment; `None` is the step's default ramp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amplitude: Option<crate::Id>,
 }
 
 /// How the two sides of a bolt's cut are joined in the input file.
@@ -136,6 +154,17 @@ pub struct ResolvedBolt {
     pub shank_axis: Option<[f64; 3]>,
     /// Why, in words, for the dialog.
     pub why: String,
+}
+
+/// The bolt's side of the tie to its internal thread ([`FeModel::resolve_thread`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedThread {
+    /// The outer faces of the bolt tied to the thread.
+    pub bolt_faces: Vec<(ElementId, u8)>,
+    /// The distance of the nearest of them to the thread.
+    pub gap: f64,
+    /// The position tolerance of the tie: farther than every node of those faces.
+    pub tolerance: f64,
 }
 
 /// What [`FeModel::lower_bolts`] added, by the bolt each item stands for.
@@ -175,9 +204,16 @@ impl FeModel {
     pub fn bolt_action(&self, bolt: &Bolt, index: usize) -> Option<BoltAction> {
         let auto = self.auto_bolt_action(bolt, index)?;
         let action = (self.steps[index].bolt_changes.iter())
-            .find(|c| c.bolt == bolt.id)
+            .find(|c| c.bolt == bolt.id && !c.auto)
             .map_or(auto, |c| c.action);
         (action != BoltAction::Open).then_some(action)
+    }
+
+    /// The amplitude the bolt's load or adjustment follows in the step `index`.
+    pub fn bolt_amplitude(&self, bolt: &Bolt, index: usize) -> Option<crate::Id> {
+        (self.steps.get(index)?.bolt_changes.iter())
+            .find(|c| c.bolt == bolt.id)?
+            .amplitude
     }
 
     /// What the bolt does in the step `index` without a change: the preload in the first
@@ -255,6 +291,104 @@ impl FeModel {
                 }
             ),
         })
+    }
+
+    /// How the bolt is joined to its internal thread: the outer faces of the bolt nearest to
+    /// the thread faces, a band half an element wide beyond the nearest, tied to them where
+    /// they are. They are the shank in a tapped hole, or the end face of a bolt simplified to
+    /// a cylinder that stops short of the part it is screwed into. `None` without thread
+    /// faces.
+    pub fn resolve_thread(
+        &self,
+        bolt: &Bolt,
+        mesh: &FeMesh,
+    ) -> Result<Option<ResolvedThread>, String> {
+        let thread = solid_faces(&bolt.thread, mesh);
+        if thread.is_empty() {
+            return if bolt.thread.is_empty() {
+                Ok(None)
+            } else {
+                Err("the thread has no faces of solid elements".into())
+            };
+        }
+        // The elements of the bolt: the bodies (or parts) of its cut, without that of the
+        // thread when both are bodies of one compound part.
+        let body_of = |element: ElementId| -> Option<Vec<ElementId>> {
+            let part = mesh.parts.iter().find(|p| p.elements.contains(&element))?;
+            Some(
+                (part.bodies.iter())
+                    .find(|b| b.elements.contains(&element))
+                    .map_or_else(|| part.elements.clone(), |b| b.elements.clone()),
+            )
+        };
+        let sides: BTreeSet<ElementId> = (solid_faces(&bolt.side_a, mesh).into_iter())
+            .chain(solid_faces(&bolt.side_b, mesh))
+            .map(|(e, _)| e)
+            .collect();
+        let nut: BTreeSet<ElementId> = (thread.iter())
+            .filter_map(|&(e, _)| body_of(e))
+            .flatten()
+            .collect();
+        let mut elements: BTreeSet<ElementId> = BTreeSet::new();
+        for &e in &sides {
+            if !elements.contains(&e)
+                && let Some(body) = body_of(e)
+            {
+                elements.extend(body);
+            }
+        }
+        elements.retain(|e| !nut.contains(e));
+        if elements.is_empty() {
+            return Err("the bolt is the part of the thread: no faces of the bolt left".into());
+        }
+        // The outer faces of the bolt: those no other of its elements shares.
+        let mut faces: BTreeMap<Vec<NodeId>, Option<(ElementId, u8)>> = BTreeMap::new();
+        for element in elements.iter().filter_map(|&e| mesh.element(e)) {
+            if element.shape.family() != plx_mesh::ElementFamily::Solid {
+                continue;
+            }
+            for (i, face) in element.faces().iter().enumerate() {
+                let key = corner_key(element, face.corners);
+                faces
+                    .entry(key)
+                    .and_modify(|f| *f = None)
+                    .or_insert(Some((element.id, (i + 1) as u8)));
+            }
+        }
+        let outer: Vec<(ElementId, u8)> = faces.into_values().flatten().collect();
+        let centres: Vec<[f64; 3]> = (outer.iter())
+            .map(|&f| face_centre(mesh, f).unwrap_or([f64::NAN; 3]))
+            .collect();
+        let distances = crate::contact_check::distances(mesh, &thread, &centres);
+        let Some(nearest) = distances
+            .iter()
+            .copied()
+            .filter(|d| d.is_finite())
+            .reduce(f64::min)
+        else {
+            return Err("no face of the bolt near the thread".into());
+        };
+        let band = nearest + 0.5 * mean_size(&outer, mesh);
+        let bolt_faces: Vec<(ElementId, u8)> = (outer.iter().zip(&distances))
+            .filter(|(_, d)| **d <= band)
+            .map(|(&f, _)| f)
+            .collect();
+        // Far enough for every node of those faces.
+        let nodes: Vec<[f64; 3]> = (bolt_faces.iter())
+            .flat_map(|&f| face_nodes(mesh, f))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|n| mesh.node(n))
+            .collect();
+        let farthest = (crate::contact_check::distances(mesh, &thread, &nodes).into_iter())
+            .filter(|d| d.is_finite())
+            .fold(nearest, f64::max);
+        let size = mean_size(&thread, mesh);
+        Ok(Some(ResolvedThread {
+            bolt_faces,
+            gap: nearest,
+            tolerance: farthest + 0.1 * size.max(farthest),
+        }))
     }
 
     /// The nodes on the cut of a bolt: of both its sides, or of the faces the slice through
@@ -335,10 +469,23 @@ impl FeModel {
                 lowered.ties.push(tie);
                 origin.tie_bolts.push(b);
             }
+            if let Ok(Some(thread)) = self.resolve_thread(bolt, mesh) {
+                let mut tie = Tie::new(unique(&format!("{name}_Thread"), &mut taken));
+                tie.master = bolt.thread.clone();
+                tie.slave = Region::Faces(thread.bolt_faces);
+                tie.position_tolerance = Some(thread.tolerance);
+                tie.adjust = false;
+                lowered.ties.push(tie);
+                origin.tie_bolts.push(b);
+            }
             let load_id = crate::Id::new();
             for s in 0..self.steps.len() {
                 let Some(action) = self.bolt_action(bolt, s) else {
                     continue;
+                };
+                let amplitude = match action {
+                    BoltAction::Load(_) | BoltAction::Adjust(_) => self.bolt_amplitude(bolt, s),
+                    _ => None,
                 };
                 let (value, by_displacement, lock) = match action {
                     BoltAction::Load(f) => (f, false, false),
@@ -358,7 +505,7 @@ impl FeModel {
                         lock,
                         direction: bolt.axis.or(resolved.shank_axis),
                     },
-                    amplitude: None,
+                    amplitude,
                     factor_amplitude: None,
                     tables: Default::default(),
                     distribution: None,

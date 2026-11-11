@@ -3846,6 +3846,8 @@ fn a_bolt_follows_the_actions_of_its_steps() {
     model.steps[1].bolt_changes.push(plx_model::BoltChange {
         bolt: named("Bolt-1"),
         action: plx_model::BoltAction::Open,
+        auto: false,
+        amplitude: None,
     });
     let (lowered, _) = model.lower_bolts(&mesh);
     assert_eq!(lowered.steps[1].loads, []);
@@ -12387,4 +12389,149 @@ fn solver_carries_the_load_across_the_bodies_of_a_compound_part() {
         (below - above).abs() < 1e-3 * below.abs(),
         "{below} != {above}"
     );
+}
+
+/// A square bolt 10 x 10 x 40 along z of 8 hexahedra, part BOLT, cut inside its mesh at
+/// z = 20, held at its foot (node set FOOT); and a plate 30 x 30 x 10 a gap of 2 above its
+/// end, part NUT, held on top (node set TOP). The bolt is screwed into the plate's lower
+/// face, its thread, which the bolt's end does not touch.
+fn bolt_with_thread(shortening: f64) -> (FeMesh, FeModel) {
+    let mut text = String::from("*Node\n");
+    let mut id = 1;
+    let mut bolt_nodes = std::collections::BTreeMap::new();
+    for k in 0..=8 {
+        for (j, y) in [0.0, 10.0].into_iter().enumerate() {
+            for (i, x) in [0.0, 10.0].into_iter().enumerate() {
+                let _ = writeln!(text, "{id}, {x}, {y}, {}", 5.0 * k as f64);
+                bolt_nodes.insert((i, j, k), id);
+                id += 1;
+            }
+        }
+    }
+    let mut nut_nodes = std::collections::BTreeMap::new();
+    for (k, z) in [42.0, 52.0].into_iter().enumerate() {
+        for (j, y) in [-10.0, 20.0].into_iter().enumerate() {
+            for (i, x) in [-10.0, 20.0].into_iter().enumerate() {
+                let _ = writeln!(text, "{id}, {x}, {y}, {z}");
+                nut_nodes.insert((i, j, k), id);
+                id += 1;
+            }
+        }
+    }
+    let hex = |n: &std::collections::BTreeMap<(usize, usize, usize), i32>, k: usize| {
+        [
+            (0, 0, k),
+            (1, 0, k),
+            (1, 1, k),
+            (0, 1, k),
+            (0, 0, k + 1),
+            (1, 0, k + 1),
+            (1, 1, k + 1),
+            (0, 1, k + 1),
+        ]
+        .map(|key| n[&key].to_string())
+        .join(", ")
+    };
+    text.push_str("*Element, Type=C3D8, Elset=BOLT\n");
+    for k in 0..8 {
+        let _ = writeln!(text, "{}, {}", k + 1, hex(&bolt_nodes, k));
+    }
+    text.push_str("*Element, Type=C3D8, Elset=NUT\n");
+    let _ = writeln!(text, "9, {}", hex(&nut_nodes, 0));
+    let foot: Vec<String> = (0..2)
+        .flat_map(|j| (0..2).map(move |i| (i, j)))
+        .map(|(i, j)| bolt_nodes[&(i, j, 0)].to_string())
+        .collect();
+    let top: Vec<String> = (0..2)
+        .flat_map(|j| (0..2).map(move |i| (i, j)))
+        .map(|(i, j)| nut_nodes[&(i, j, 1)].to_string())
+        .collect();
+    let _ = write!(
+        text,
+        "*Nset, Nset=FOOT\n{}\n*Nset, Nset=TOP\n{}\n",
+        foot.join(", "),
+        top.join(", ")
+    );
+    let mesh = crate::inp::read_inp_str(&text, None).unwrap().mesh;
+    let (_, mut model) = cantilever(tip_force());
+    model.sections[0].region = Region::Parts(vec!["BOLT".into(), "NUT".into()]);
+    let step = &mut model.steps[0];
+    step.loads.clear();
+    step.boundary_conditions[0].region = Region::NodeSet("FOOT".into());
+    let mut top = step.boundary_conditions[0].clone();
+    top.name = "Fixed-2".into();
+    top.region = Region::NodeSet("TOP".into());
+    step.boundary_conditions.push(top);
+    // The face of an element whose corners all lie at height z.
+    let face_at = |element: ElementId, z: f64| -> (ElementId, u8) {
+        let e = mesh.element(element).unwrap();
+        let index = (e.faces().iter())
+            .position(|f| {
+                (f.corners.iter()).all(|&c| (mesh.node(e.nodes[c]).unwrap()[2] - z).abs() < 1e-9)
+            })
+            .unwrap();
+        (element, index as u8 + 1)
+    };
+    let mut bolt = plx_model::Bolt {
+        id: named("Bolt-1"),
+        ..plx_model::Bolt::new("Bolt-1")
+    };
+    bolt.side_a = Region::Faces(vec![face_at(4, 20.0)]);
+    bolt.thread = Region::Faces(vec![face_at(9, 42.0)]);
+    bolt.preload = plx_model::Preload::Shortening(shortening);
+    model.bolts.push(bolt);
+    (mesh, model)
+}
+
+/// The thread of a bolt is tied to the faces of the bolt nearest to it where they are,
+/// across the gap, and carries the preload; the preload follows the amplitude of its step.
+#[test]
+fn a_bolt_screwed_into_its_thread_pulls_the_plate() {
+    let shortening = 0.01;
+    let (mesh, mut model) = bolt_with_thread(shortening);
+    let thread = (model.resolve_thread(&model.bolts[0], &mesh).unwrap()).unwrap();
+    assert!((thread.gap - 2.0).abs() < 1e-9, "{thread:?}");
+    // The end face of the bolt and the sides of its last element, not the rest.
+    assert!(thread.bolt_faces.contains(&(8, 2)), "{thread:?}");
+    assert!(thread.bolt_faces.iter().all(|&(e, _)| e == 8), "{thread:?}");
+    assert!(thread.tolerance > 2.0, "{thread:?}");
+    let mut amplitude = plx_model::Amplitude::new("Smooth");
+    amplitude.id = named("Smooth");
+    model.amplitudes.push(amplitude);
+    model.steps[0].bolt_changes.push(plx_model::BoltChange {
+        bolt: named("Bolt-1"),
+        action: plx_model::BoltAction::Lock,
+        auto: true,
+        amplitude: Some(named("Smooth")),
+    });
+    let (lowered, origin) = model.lower_bolts(&mesh);
+    let tie = &lowered.ties[0];
+    assert_eq!(tie.name, "Bolt-1_Thread");
+    assert!(!tie.adjust);
+    assert_eq!(origin.bolt_of(plx_model::ModelItem::Tie(0)), Some(0));
+    let load = &lowered.steps[0].loads[0];
+    assert!(matches!(
+        load.kind,
+        LoadKind::PreTension {
+            by_displacement: true,
+            lock: false,
+            ..
+        }
+    ));
+    assert_eq!(load.amplitude, Some(named("Smooth")));
+    model.steps[0].bolt_changes.clear();
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("Name=BOLT-1_THREAD"), "{text}");
+    let Some((frd, _)) = run_frd_dat("schraube-gewinde", &text) else {
+        return;
+    };
+    // The plate is pulled down towards the foot: the supports pull against each other.
+    let sum = |set: &str| -> f64 {
+        (mesh.node_sets[set].iter())
+            .map(|&node| node_value(&frd, "FORC", "F3", node))
+            .sum()
+    };
+    let (foot, top) = (sum("FOOT"), sum("TOP"));
+    assert!(foot < -1.0, "{foot}");
+    assert!((foot + top).abs() < 1e-6 * foot.abs(), "{foot} {top}");
 }
