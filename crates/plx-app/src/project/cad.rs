@@ -15,8 +15,8 @@ pub(super) const CAD_LENGTH: &str = "length";
 pub(super) struct CadBlock {
     /// Its geometry is the result as last made, given on through links.
     pub(super) model: LinkedModel,
-    /// The geometry the link of its Geometry row brings.
-    pub(super) input: Option<Geometry>,
+    /// The geometry the link of its Geometry row brings; set by [`CadBlock::set_input`].
+    input: Option<Geometry>,
     pub(super) operation: CadOperation,
     pub(super) units: UnitSystem,
     /// Fingerprint of the input and operation the result was made from, see
@@ -24,6 +24,9 @@ pub(super) struct CadBlock {
     pub(super) made_from: Option<u64>,
     /// Why the operation failed, for that fingerprint.
     pub(super) failed: Option<(u64, String)>,
+    /// [`CadBlock::wanted`] as last found, by a quick key of the operation: its fingerprint
+    /// hashes the whole input, too slow for every frame. Forgotten with a new input.
+    wanted_memo: std::cell::Cell<Option<(u64, Option<u64>)>>,
 }
 
 impl CadBlock {
@@ -43,12 +46,38 @@ impl CadBlock {
             units,
             made_from,
             failed: None,
+            wanted_memo: std::cell::Cell::new(None),
         }
+    }
+
+    /// The geometry the link of its Geometry row brings.
+    pub(super) fn input(&self) -> Option<&Geometry> {
+        self.input.as_ref()
+    }
+
+    /// Takes a new input geometry.
+    pub(super) fn set_input(&mut self, input: Option<Geometry>) {
+        self.input = input;
+        self.wanted_memo.set(None);
     }
 
     /// Fingerprint of what the result is to be made from now; `None` without input or
     /// before anything is picked.
     fn wanted(&self) -> Option<u64> {
+        let mut key = plx_mesh::Fnv::new();
+        key.add_debug(&self.operation);
+        let key = key.finish();
+        if let Some((seen, wanted)) = self.wanted_memo.get()
+            && seen == key
+        {
+            return wanted;
+        }
+        let wanted = self.find_wanted();
+        self.wanted_memo.set(Some((key, wanted)));
+        wanted
+    }
+
+    fn find_wanted(&self) -> Option<u64> {
         if self.operation.needs_picks() && self.operation.entities.is_empty() {
             return None;
         }
@@ -187,7 +216,7 @@ pub(super) fn take_cad_input(nodes: &mut [Node], links: &[Link], id: u64) {
     if let Some(input) = &input {
         block.operation.follow(input);
     }
-    block.input = input;
+    block.set_input(input);
     if block.model.geometry.is_none() && block.state() == CellState::OutOfDate {
         let _ = block.generate();
     }

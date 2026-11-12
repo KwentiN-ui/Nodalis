@@ -40,11 +40,13 @@ pub fn fingerprints(mesh: &FeMesh, fe: &FeModel) -> Fingerprints {
 }
 
 /// What the whole solution is computed from.
+#[cfg(test)]
 pub fn solve_input(mesh: &FeMesh, fe: &FeModel) -> u64 {
     fingerprints(mesh, fe).input
 }
 
 /// What the results of each step are computed from: the model and the steps up to it.
+#[cfg(test)]
 pub fn step_inputs(mesh: &FeMesh, fe: &FeModel) -> Vec<u64> {
     fingerprints(mesh, fe).steps
 }

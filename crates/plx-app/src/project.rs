@@ -1914,8 +1914,7 @@ impl Node {
         match data.fe.steps.iter().position(|s| s.name == step) {
             // Results solved before they kept the fingerprints of their steps count whole.
             Some(index) if !bound.steps.is_empty() => {
-                let inputs = crate::solve_fingerprint::step_inputs(data.mesh, data.fe);
-                bound.steps.get(index) != inputs.get(index)
+                bound.steps.get(index) != status.step_inputs.get(index)
             }
             _ => self.results_out_of_date(),
         }
@@ -4434,7 +4433,7 @@ impl ProjectApp {
         let Some(cad) = node.as_cad() else {
             return;
         };
-        let Some(input) = cad.input.clone() else {
+        let Some(input) = cad.input().cloned() else {
             let line = format!(
                 "{}: link a geometry to its Geometry row first, then pick the edges on it.",
                 node.name
@@ -4470,7 +4469,7 @@ impl ProjectApp {
                     if let Some(cad) = node.as_cad_mut() {
                         cad.operation = operation;
                         // The preview made it for this very input and operation.
-                        if let (Some(made), Some(input)) = (made, &cad.input) {
+                        if let (Some(made), Some(input)) = (made, cad.input()) {
                             let print = cad.operation.fingerprint(input);
                             cad.take_result(*made, print);
                         }
@@ -13098,7 +13097,7 @@ mod tests {
         let cad = node.as_cad_mut().unwrap();
         assert_eq!(cad.state(), CellState::Missing);
         assert!(cad.link_data().is_none() || cad.model.geometry.is_none());
-        cad.input = Some(input.clone());
+        cad.set_input(Some(input.clone()));
         assert_eq!(cad.state(), CellState::OutOfDate);
         assert!(cad.generate().is_ok());
         assert_eq!(cad.state(), CellState::UpToDate);

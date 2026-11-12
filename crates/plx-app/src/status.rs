@@ -56,6 +56,10 @@ pub struct AnalysisStatus {
     /// Analyses whose results it takes that are out of date: the project window solves them
     /// again first.
     pub stale_results: Vec<String>,
+    /// What the results of each step are computed from now, see
+    /// [`crate::solve_fingerprint::step_inputs`]; empty without results. Kept here so that
+    /// what is drawn in every frame does not fingerprint the whole model again.
+    pub step_inputs: Vec<u64>,
 }
 
 impl AnalysisStatus {
@@ -147,11 +151,11 @@ pub fn analysis_status(
     } else {
         CellState::UpToDate
     };
-    let solution = match results {
+    let prints = results.map(|_| crate::solve_fingerprint::fingerprints(mesh, fe));
+    let solution = match (results, &prints) {
         _ if running => CellState::Running,
-        None => CellState::Missing,
-        Some(results) => {
-            let solved = results.input == Some(crate::solve_fingerprint::solve_input(mesh, fe));
+        (Some(results), Some(prints)) => {
+            let solved = results.input == Some(prints.input);
             // Results taken from analyses whose own results are out of date are too.
             if !solved || mesh_state != CellState::UpToDate || !upstream.stale_results.is_empty() {
                 CellState::OutOfDate
@@ -161,6 +165,7 @@ pub fn analysis_status(
                 CellState::UpToDate
             }
         }
+        _ => CellState::Missing,
     };
     let results_state = match (results, solution) {
         (None, _) => CellState::Missing,
@@ -176,6 +181,7 @@ pub fn analysis_status(
         stale_parts,
         stale_sources: upstream.stale_meshes.clone(),
         stale_results: upstream.stale_results.clone(),
+        step_inputs: prints.map(|p| p.steps).unwrap_or_default(),
     }
 }
 
@@ -284,6 +290,12 @@ mod tests {
         assert_eq!(status.mesh, CellState::UpToDate);
         assert_eq!(status.solution, CellState::UpToDate);
         assert!(!status.needs_solve());
+        // It keeps what the results of each step are made from, for the blocks drawn in
+        // every frame.
+        assert_eq!(
+            status.step_inputs,
+            crate::solve_fingerprint::step_inputs(&mesh, &fe)
+        );
         // A result path changes nothing that the solver computes.
         fe.result_paths.push(plx_model::ResultPath::new("Path-1"));
         let status = analysis_status(
