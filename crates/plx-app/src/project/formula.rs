@@ -179,6 +179,109 @@ pub(super) fn formula_gives_series(
     expr.gives_series(&flags)
 }
 
+/// Removes the inputs of Formula blocks that no link and no wire through a group reaches
+/// any more: the inputs after one that goes move up a letter, in the formula, the links and
+/// the wires of groups too, so that the formula keeps its meaning. Whether any went.
+pub(super) fn drop_unlinked_inputs(nodes: &mut [Node], links: &mut [Link]) -> bool {
+    let formulas: Vec<(u64, usize)> = (nodes.iter())
+        .filter_map(|n| match &n.block {
+            Block::Formula(number) => Some((n.id, number.values.len())),
+            _ => None,
+        })
+        .collect();
+    let input_of = |path: &[String]| match path {
+        [c, k] if c == links::PARAMETERS => input_index(k),
+        _ => None,
+    };
+    let mut dropped = false;
+    for (id, count) in formulas {
+        let mut used = vec![false; count];
+        let mut mark = |path: &[String]| {
+            if let Some(i) = input_of(path).filter(|i| *i < count) {
+                used[i] = true;
+            }
+        };
+        for l in links.iter().filter(|l| l.target == id) {
+            mark(links::slot(l));
+        }
+        for node in nodes.iter() {
+            if let Block::Group(group) = &node.block {
+                for socket in group.inputs.iter().chain(&group.outputs) {
+                    let pins = socket.targets.iter().chain(&socket.source);
+                    for pin in pins.filter(|p| p.node == id) {
+                        mark(&pin.path);
+                    }
+                }
+            }
+        }
+        if used.iter().all(|u| *u) {
+            continue;
+        }
+        dropped = true;
+        // The new index of every input that stays.
+        let mut moved = vec![0; count];
+        let mut next = 0;
+        for i in 0..count {
+            moved[i] = next;
+            if used[i] {
+                next += 1;
+            }
+        }
+        let rename = |path: &mut Vec<String>| {
+            if let Some(i) = input_of(path).filter(|i| *i < count) {
+                path[1] = input_letter(moved[i]).to_string();
+            }
+        };
+        for l in links.iter_mut().filter(|l| l.target == id) {
+            if l.slot.is_empty() {
+                rename(&mut l.item);
+            } else {
+                rename(&mut l.slot);
+            }
+        }
+        for node in nodes.iter_mut() {
+            if let Block::Group(group) = &mut node.block {
+                for socket in group.inputs.iter_mut().chain(group.outputs.iter_mut()) {
+                    let pins = socket.targets.iter_mut().chain(socket.source.iter_mut());
+                    for pin in pins.filter(|p| p.node == id) {
+                        rename(&mut pin.path);
+                    }
+                }
+            }
+        }
+        let Some(Block::Formula(number)) =
+            (nodes.iter_mut().find(|n| n.id == id)).map(|n| &mut n.block)
+        else {
+            continue;
+        };
+        let keep = |v: &mut Vec<f64>| {
+            let mut i = 0;
+            v.retain(|_| {
+                i += 1;
+                used.get(i - 1).copied().unwrap_or(false)
+            });
+        };
+        keep(&mut number.values);
+        let mut i = 0;
+        number.series.retain(|_| {
+            i += 1;
+            used.get(i - 1).copied().unwrap_or(false)
+        });
+        if let Some(formula) = &mut number.formula {
+            formula.text = plx_model::formula::rename_inputs(&formula.text, &|i| {
+                match used.get(i) {
+                    Some(true) => Some(moved[i]),
+                    Some(false) => None,
+                    // A letter beyond the inputs stays as typed, and is reported.
+                    None => Some(i),
+                }
+            });
+        }
+        number.settle_formula();
+    }
+    dropped
+}
+
 /// The unlinked inputs of the Formula blocks of `numbers` are factors, the linked ones open
 /// until their link gives a kind, see [`numbers::settle_numbers`].
 pub(super) fn open_linked_inputs(number: &mut NumberBlock, id: u64, links: &[Link]) {
@@ -312,7 +415,7 @@ impl FormulaEditor {
                             });
                             match self.sources.get(i).cloned().flatten() {
                                 Some(source) => ui.weak(format!("from {source}")),
-                                None => ui.weak("typed in the block"),
+                                None => ui.weak("not linked"),
                             };
                             ui.end_row();
                         }
@@ -387,8 +490,8 @@ impl ProjectApp {
             .push(Node::new(id, name.clone(), Block::Formula(block)));
         self.graph.insert_node(position, id);
         self.output.push(format!(
-            "{name} created: drag numbers to its empty pin, they become a, b, c, ...; then \
-             type the formula, or double-click the block for its functions."
+            "{name} created: drag numbers or series to its empty pin, they become a, b, c, \
+             ...; then click its formula row to write the formula."
         ));
         id
     }
@@ -408,35 +511,20 @@ impl ProjectApp {
         self.sync_due = true;
     }
 
-    /// The number of inputs of a Formula block; links to inputs it no longer has go.
-    pub(super) fn set_formula_inputs(&mut self, id: u64, count: usize) {
-        let Some(Block::Formula(number)) = self.node(id).map(|n| &mut n.block) else {
-            return;
-        };
-        let count = count.min(MAX_INPUTS);
-        number.values.resize(count, 0.0);
-        number.series.truncate(count);
-        number.settle_formula();
-        self.links.retain(|l| {
-            l.target != id
-                || !matches!(links::slot(l), [c, k]
-                    if c == links::PARAMETERS && input_index(k).is_some_and(|i| i >= count))
-        });
-        self.refresh_number_kinds();
-        self.sync_due = true;
-    }
-
     /// The input of a Formula block a wire dropped on its empty pin takes: a new one, by
-    /// the next letter, which is added.
+    /// the next letter, which is added. It goes again at the next sync unless the link is
+    /// made, see [`drop_unlinked_inputs`].
     pub(super) fn new_formula_input(&mut self, target: u64) -> Option<Vec<String>> {
-        let Some(Block::Formula(number)) = self.node(target).map(|n| &n.block) else {
+        let Some(Block::Formula(number)) = self.node(target).map(|n| &mut n.block) else {
             return None;
         };
         let count = number.values.len();
         if count >= MAX_INPUTS {
             return None;
         }
-        self.set_formula_inputs(target, count + 1);
+        number.values.push(0.0);
+        number.settle_formula();
+        self.sync_due = true;
         Some(vec![
             links::PARAMETERS.to_owned(),
             input_letter(count).to_string(),
@@ -510,9 +598,8 @@ impl ProjectApp {
 }
 
 impl Viewer {
-    /// The row of a Formula block that edits its formula in place: the text being typed is
-    /// kept until the field lets go of the keyboard, and then becomes the formula, as one
-    /// change to undo.
+    /// The row of a Formula block that shows its formula, read-only, in red while it gives
+    /// no result; a click opens its editor.
     pub(super) fn edit_formula_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -523,27 +610,50 @@ impl Viewer {
         let Some((block, _)) = self.block(id).and_then(|b| b.number.clone()) else {
             return;
         };
-        let formula = block.formula_text().to_owned();
-        let draft = egui::Id::new(("formula draft", id));
-        let mut text = ui
-            .data(|d| d.get_temp::<String>(draft))
-            .unwrap_or_else(|| formula.clone());
-        let mut edit = egui::TextEdit::singleline(&mut text)
-            .font(egui::TextStyle::Monospace)
-            .hint_text("a * b");
-        if block.formula_problem().is_some() {
-            edit = edit.text_color(crate::style::error());
-        }
-        let response = ui.add_sized(field.size(), edit).on_hover_text(tip);
-        if response.has_focus() {
-            ui.data_mut(|d| d.insert_temp(draft, text.clone()));
-        }
-        if response.lost_focus() {
-            ui.data_mut(|d| d.remove::<String>(draft));
-            if text.trim() != formula {
-                self.actions
-                    .push(Action::SetFormula(id, text.trim().to_owned()));
-            }
+        let formula = block.formula_text();
+        let (text, color) = if formula.is_empty() {
+            ("Click to write a formula", ui.visuals().weak_text_color())
+        } else if block.formula_problem().is_some() {
+            (formula, crate::style::error())
+        } else {
+            (formula, ui.visuals().text_color())
+        };
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            text.to_owned(),
+            egui::TextStyle::Monospace.resolve(ui.style()),
+            color,
+        );
+        job.wrap = egui::text::TextWrapping {
+            max_width: field.width() - 8.0,
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let galley = ui.painter().layout_job(job);
+        let response = ui.allocate_rect(field, egui::Sense::click());
+        let frame = if response.hovered() {
+            ui.visuals().widgets.hovered.bg_stroke
+        } else {
+            ui.visuals().widgets.noninteractive.bg_stroke
+        };
+        ui.painter()
+            .rect_stroke(field, 2.0, frame, egui::StrokeKind::Inside);
+        ui.painter().galley(
+            egui::pos2(field.left() + 4.0, field.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+        let tip = if formula.is_empty() {
+            tip.to_owned()
+        } else {
+            format!("{formula}\n{tip}")
+        };
+        if response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(tip)
+            .clicked()
+        {
+            self.actions.push(Action::Open(id, None));
         }
     }
 }
@@ -623,7 +733,7 @@ mod tests {
         );
         assert_eq!(block.formula_number(), None);
         // A square root halves the powers; an unlinked input is a factor.
-        nodes[1] = formula(2, "sqrt(b * b * c)", 3);
+        nodes[1] = formula(2, "sqrt(b * b * 4)", 2);
         numbers::refresh_kinds(&mut nodes, &mut links);
         assert_eq!(number(&nodes, 2).kind, Some(ValueKind::LENGTH));
     }
@@ -690,6 +800,31 @@ mod tests {
         assert_eq!(block.formula_series(), Some(Ok(vec![2.0, 10.0, 4.0])));
         assert_eq!(block.result(false), None);
         assert!(formula_gives_series(&number(&nodes, 1), &links, 1, &series));
+    }
+
+    #[test]
+    fn an_input_whose_link_goes_goes_too_and_later_ones_move_up() {
+        let length = Parameter::new("L", ValueKind::LENGTH, 2.0);
+        let mut nodes = vec![
+            parameters(1, vec![length]),
+            formula(2, "a + max(b, c) + 2[mm]", 3),
+        ];
+        // b lost its link: c becomes b, in the formula and in its link.
+        let mut links = vec![
+            link(1, &["Value", "L"], 2, &["Parameters", "a"]),
+            link(1, &["Value", "L"], 2, &["Parameters", "c"]),
+        ];
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        let block = number(&nodes, 2);
+        assert_eq!(block.formula_text(), "a + max(?, b) + 2[mm]");
+        assert!(
+            block
+                .formula_problem()
+                .is_some_and(|p| p.contains("link was removed"))
+        );
+        assert_eq!(block.values.len(), 2);
+        assert_eq!(links[1].slot, path(&["Parameters", "b"]));
+        assert_eq!(block.kind, None);
     }
 
     #[test]

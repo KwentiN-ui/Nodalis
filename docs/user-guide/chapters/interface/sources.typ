@@ -630,15 +630,16 @@ components, the utilization of the largest stress of a region. Add it with
 
 A new block has no inputs, only an empty pin. Drag the pin of a number or a series to it, and
 it becomes the input #ui("a"); the next one #ui("b"), then #ui("c"), up to #ui("z"), as with
-the choices of a Switch block (@math-switch). An input without a link is a number without unit
-to type in its field. #ui("Add") adds such an input, #ui("Remove") removes the last one with
-its link. The #ui("Result") row gives the number or the series the formula computes; drag its
-pin on to any number of its kind, another Math or Formula block, a Plot or a Preview block.
+the inputs of a group (@node-groups). Every input comes from its link: remove the link (right-click
+its pin) and the input goes. The inputs after it move up a letter, in the formula too, and
+where the formula used the removed input it now shows `?`, so it gives no result until you
+link a new input or change the formula. The #ui("Result") row gives the number or the series the formula computes; drag
+its pin on to any number of its kind, another Math or Formula block, a Plot or a Preview block.
 
-Type the formula in the #ui("Formula") row of the block; it applies once the field lets go of
-the keyboard. Double-click the block for its editor: a larger field, the result the formula
-gives as you type, the inputs with their kinds and where they come from, and the list of the
-functions; a click on a function adds it to the formula. #ui("OK") applies the formula.
+The block shows its formula read-only. Click it, or double-click the block, to edit it in its
+window: the formula, the result it gives as you type, the inputs with their kinds and where
+they come from, and below the list of the functions; a click on a function adds it to the
+formula. #ui("OK") applies the formula.
 
 #screenshot("formula-editor.png", [The editor of the Formula block: the formula, what it gives,
   its inputs and the functions it can call])
@@ -660,7 +661,7 @@ a force over a length is a stiffness; a power to a number written in the formula
 `sqrt` halves them (m² gives m), and the result of `asin` or `atan2` is an angle. A sum, a
 difference, `min`, `max` and `clamp` take numbers of one unit, and `exp`, `ln` or `floor` a
 number without unit. A formula whose units do not go together, such as a force plus a length,
-gives no result; the #ui("Formula") row turns red and its tooltip says why. So does a formula
+gives no result; the formula in the block turns red and its tooltip says why. So does a formula
 whose result goes to a number of another unit: the link stays while you correct the formula.
 
 *Series* go element by element, as in NumPy (@series): a number goes with every value of a

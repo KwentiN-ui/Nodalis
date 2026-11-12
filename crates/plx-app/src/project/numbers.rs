@@ -61,7 +61,8 @@ pub(super) fn number_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Ve
     if formula {
         let mut tip = "The formula of the inputs a, b, c, ...: + - * / ^, numbers with units in \
                        brackets such as 5[mm], and functions such as sqrt, max, min and mean. \
-                       Double-click the block for the list of functions."
+                       Click it or double-click the block to edit it, with the list of \
+                       functions."
             .to_owned();
         if let Some(problem) = number.formula_problem() {
             tip.push_str(&format!("\nNo result: {problem}."));
@@ -122,35 +123,31 @@ pub(super) fn number_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Ve
             ..row(
                 path,
                 label,
-                format!(
-                    "{what}. Type it, or drag the pin of a number here: a parameter, another \
-                     Math, Switch or Formula block or an input of a parameter study."
-                ),
+                if formula {
+                    format!(
+                        "{what}. Its link gives it; remove the link to remove the input, and \
+                         the inputs after it move up a letter in the formula."
+                    )
+                } else {
+                    format!(
+                        "{what}. Type it, or drag the pin of a number here: a parameter, \
+                         another Math, Switch or Formula block or an input of a parameter \
+                         study."
+                    )
+                },
             )
         });
     }
     if formula && number.values.len() < plx_model::formula::MAX_INPUTS {
         rows.push(Row {
             input: true,
+            icon: NodeIcon::Link,
             ..row(
                 vec![links::PARAMETERS.to_owned(), super::groups::OPEN.to_owned()],
                 String::new(),
                 "Drag the pin of a number or a series here to add it as the next input of the \
                  formula: a, b, c, ..."
                     .into(),
-            )
-        });
-    }
-    if formula {
-        rows.push(Row {
-            widget: Some(RowWidget::Choices),
-            ..row(
-                vec![CHOICES.to_owned()],
-                match number.values.len() {
-                    1 => "1 input".to_owned(),
-                    n => format!("{n} inputs"),
-                },
-                "Adds an input, or removes the last one with its link.".into(),
             )
         });
     }
@@ -435,11 +432,12 @@ fn settle_numbers(
 /// see [`settle_numbers`]. A link whose ends no longer fit together, after an operation
 /// changed, goes. Whether any kind changed, and whether a link went.
 pub(super) fn refresh_kinds(nodes: &mut [Node], links: &mut Vec<Link>) -> (bool, bool) {
+    let dropped = super::formula::drop_unlinked_inputs(nodes, links);
     let mut numbers: Vec<Number> = (nodes.iter())
         .filter_map(|n| n.as_number().map(|(b, switch)| (n.id, b.clone(), switch)))
         .collect();
     if numbers.is_empty() {
-        return (false, false);
+        return (dropped, false);
     }
     let mut removed = false;
     loop {
@@ -499,7 +497,7 @@ pub(super) fn refresh_kinds(nodes: &mut [Node], links: &mut Vec<Link>) -> (bool,
             formula.problem = Some(why);
         }
     }
-    let mut changed = false;
+    let mut changed = dropped;
     for (id, new, _) in numbers {
         if let Some((old, _)) =
             (nodes.iter_mut().find(|n| n.id == id)).and_then(Node::as_number_mut)
@@ -677,23 +675,6 @@ impl Viewer {
                 if value != before {
                     self.actions.push(Action::SetNumberInput(id, key, value));
                 }
-            }
-            RowWidget::Choices if block.formula.is_some() => {
-                let count = block.values.len();
-                let most = plx_model::formula::MAX_INPUTS;
-                ui.horizontal(|ui| {
-                    let add = ui.add_enabled(count < most, egui::Button::new("Add").small());
-                    if add.on_hover_text("Adds an input").clicked() {
-                        self.actions.push(Action::SetChoices(id, count + 1));
-                    }
-                    let remove = ui.add_enabled(count > 0, egui::Button::new("Remove").small());
-                    if remove
-                        .on_hover_text("Removes the last input, with its link")
-                        .clicked()
-                    {
-                        self.actions.push(Action::SetChoices(id, count - 1));
-                    }
-                });
             }
             RowWidget::Choices => {
                 let count = block.values.len().saturating_sub(1);

@@ -27,6 +27,70 @@ pub fn input_index(letter: &str) -> Option<usize> {
     c.is_ascii_lowercase().then(|| (c as u8 - b'a') as usize)
 }
 
+/// The formula `text` with its inputs named anew: the input of index `i` becomes
+/// `rename(i)`, as inputs of a Formula block move up when one before them goes, and an input
+/// that went (`None`) becomes `?`, which the formula then reports. Function names, units in
+/// brackets and everything else stay as typed.
+pub fn rename_inputs(text: &str, rename: &dyn Fn(usize) -> Option<usize>) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '[' {
+            // A unit such as [mm] keeps its letters.
+            let end = (i..chars.len())
+                .find(|&j| chars[j] == ']')
+                .unwrap_or(chars.len() - 1);
+            out.extend(&chars[i..=end]);
+            i = end + 1;
+            continue;
+        }
+        if c.is_alphabetic() || c == '_' {
+            let start = i;
+            while i < chars.len()
+                && (chars[i].is_alphabetic() || chars[i].is_ascii_digit() || chars[i] == '_')
+            {
+                i += 1;
+            }
+            let name: String = chars[start..i].iter().collect();
+            let call = chars[i..].iter().find(|c| !c.is_whitespace()) == Some(&'(');
+            match input_index(&name) {
+                Some(index) if !call => match rename(index) {
+                    Some(new) => out.push(input_letter(new)),
+                    None => out.push('?'),
+                },
+                _ => out.push_str(&name),
+            }
+            continue;
+        }
+        if c.is_ascii_digit() || c == '.' {
+            // A number, with its exponent: 1e5 is no input e.
+            let start = i;
+            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                i += 1;
+            }
+            if i < chars.len() && (chars[i] == 'e' || chars[i] == 'E') {
+                let mut j = i + 1;
+                if j < chars.len() && (chars[j] == '+' || chars[j] == '-') {
+                    j += 1;
+                }
+                if j < chars.len() && chars[j].is_ascii_digit() {
+                    i = j;
+                    while i < chars.len() && chars[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                }
+            }
+            out.extend(&chars[start..i]);
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 /// A function a formula can call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Function {
@@ -775,6 +839,13 @@ fn tokenize(text: &str) -> Result<Vec<Token>, String> {
                 }
                 tokens.push(Token::Name(chars[start..i].iter().collect()));
             }
+            '?' => {
+                return Err(
+                    "? stands for an input whose link was removed: link a new input \
+                            or change the formula"
+                        .into(),
+                );
+            }
             c => return Err(format!("{c} is not part of a formula")),
         }
     }
@@ -1043,6 +1114,25 @@ mod tests {
         assert!(err.contains("exponent"), "{err}");
         let err = d("c", &force_length).unwrap_err();
         assert_eq!(err, "there is no input c");
+    }
+
+    #[test]
+    fn inputs_are_renamed_but_not_functions_units_or_exponents() {
+        let down = |i: usize| match i {
+            1 => None,
+            0 => Some(0),
+            _ => Some(i - 1),
+        };
+        assert_eq!(
+            rename_inputs("max(a, c) * 2e3 + d[mm] / 5[mm] + e", &down),
+            "max(a, b) * 2e3 + c[mm] / 5[mm] + d"
+        );
+        assert_eq!(rename_inputs("sqrt (c) + b", &down), "sqrt (b) + ?");
+        assert!(
+            Expr::parse("a + ?")
+                .unwrap_err()
+                .contains("link was removed")
+        );
     }
 
     #[test]

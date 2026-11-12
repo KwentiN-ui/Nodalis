@@ -2130,8 +2130,6 @@ enum Action {
     AddMath(egui::Pos2),
     AddSwitch(egui::Pos2),
     AddFormula(egui::Pos2),
-    /// The formula of a Formula block was edited.
-    SetFormula(u64, String),
     /// The operation of a Math block, the value of one of the inputs of a Math or Switch
     /// block by key, or the number of choices of a Switch block changed in its block.
     SetOperation(u64, MathOp),
@@ -7569,7 +7567,6 @@ impl ProjectApp {
             | Action::AddMath(_)
             | Action::AddSwitch(_)
             | Action::AddFormula(_)
-            | Action::SetFormula(..)
             | Action::SetOperation(..)
             | Action::SetNumberInput(..)
             | Action::SetChoices(..)
@@ -7785,7 +7782,6 @@ impl ProjectApp {
             Action::AddFormula(pos) => {
                 self.add_formula(pos);
             }
-            Action::SetFormula(id, text) => self.set_formula(id, text),
             Action::SetOperation(id, operation) => self.set_operation(id, operation),
             Action::SetNumberInput(id, key, value) => {
                 if let Some((number, switch)) = self.node(id).and_then(Node::as_number_mut) {
@@ -7793,17 +7789,7 @@ impl ProjectApp {
                 }
                 self.sync_due = true;
             }
-            Action::SetChoices(id, count) => {
-                if self
-                    .nodes
-                    .iter()
-                    .any(|n| n.id == id && n.kind() == Kind::Formula)
-                {
-                    self.set_formula_inputs(id, count);
-                } else {
-                    self.set_choices(id, count);
-                }
-            }
+            Action::SetChoices(id, count) => self.set_choices(id, count),
             Action::AddPlot(pos) => {
                 self.add_plot(pos);
             }
