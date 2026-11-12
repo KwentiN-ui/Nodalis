@@ -22,7 +22,8 @@ button per region to switch between them.
 
 Next to #ui("...") a check mark button takes over the selection: it closes the #ui("Selection")
 window and clicks in the 3D view no longer change the region. Click #ui("...") again to pick on.
-The window stays open when the dialog opens for the first time. All dialogs with a region field
+The window stays open when a new item's dialog opens; when you edit an item that already has a
+selection, the selection starts locked so that a click cannot overwrite it by accident. All dialogs with a region field
 behave this way, for parts as well as for picked nodes, faces and edges.
 
 #screenshot("region-confirm.png", [A region with the confirm button next to #ui("..."), while the selection window is open])
