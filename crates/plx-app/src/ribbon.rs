@@ -1213,6 +1213,7 @@ pub enum BarEvent {
     Help,
     Pill,
     Update,
+    ReleaseNotes,
 }
 
 /// The app bar. `menus` draws the menus after the segments.
@@ -1339,10 +1340,21 @@ pub fn app_bar(ui: &mut Ui, bar: &Bar, menus: &mut dyn FnMut(&mut Ui)) -> Vec<Ba
             }
             left_end = ui.cursor().min.x;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
-                        .color(ui.visuals().weak_text_color()),
-                );
+                // The version number opens the release notes.
+                if ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+                                .color(ui.visuals().weak_text_color()),
+                        )
+                        .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text("Release notes")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    events.push(BarEvent::ReleaseNotes);
+                }
                 if let Some(tip) = &bar.update
                     && crate::update::indicator(ui, tip).clicked()
                 {
