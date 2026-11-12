@@ -18,6 +18,10 @@ use sha2::Digest;
 /// The latest release that is neither a draft nor a pre-release.
 const LATEST_RELEASE: &str = "https://api.github.com/repos/KwentiN-ui/Nodalis/releases/latest";
 pub const RELEASES_PAGE: &str = "https://github.com/KwentiN-ui/Nodalis/releases/latest";
+/// The most recent releases, newest first, for the release notes window.
+const RELEASE_LIST: &str = "https://api.github.com/repos/KwentiN-ui/Nodalis/releases?per_page=30";
+/// All releases on GitHub.
+const ALL_RELEASES_PAGE: &str = "https://github.com/KwentiN-ui/Nodalis/releases";
 
 const CANCELLED: &str = "download cancelled";
 
@@ -191,6 +195,70 @@ fn parse_release(json: &str, installation: &Installation) -> Result<Release, Str
         page: release.html_url,
         asset,
     })
+}
+
+/// One published release with its notes, as listed in the release notes window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NotesRelease {
+    pub version: Version,
+    pub tag: String,
+    /// `2025-11-10`, the day it was published.
+    pub date: String,
+    pub notes: String,
+    pub page: String,
+}
+
+#[derive(Deserialize)]
+struct ApiListed {
+    tag_name: String,
+    html_url: String,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    published_at: Option<String>,
+}
+
+/// The releases of GitHub's list answer, newest version first; drafts and tags that are not a
+/// version number are left out.
+fn parse_releases(json: &str) -> Result<Vec<NotesRelease>, String> {
+    let listed: Vec<ApiListed> =
+        serde_json::from_str(json).map_err(|e| format!("unexpected answer from GitHub: {e}"))?;
+    let mut releases: Vec<NotesRelease> = (listed.into_iter())
+        .filter(|r| !r.draft)
+        .filter_map(|r| {
+            Some(NotesRelease {
+                version: Version::parse(&r.tag_name)?,
+                tag: r.tag_name,
+                date: (r.published_at.as_deref())
+                    .and_then(|d| d.get(..10))
+                    .unwrap_or_default()
+                    .to_owned(),
+                notes: r.body.unwrap_or_default().replace("\r\n", "\n"),
+                page: r.html_url,
+            })
+        })
+        .collect();
+    releases.sort_by_key(|r| std::cmp::Reverse(r.version));
+    Ok(releases)
+}
+
+/// Asks GitHub for the latest releases with their notes.
+fn fetch_releases() -> Result<Vec<NotesRelease>, String> {
+    let agent = agent(Some(Duration::from_secs(30)));
+    let mut response =
+        get(&agent, RELEASE_LIST, "application/vnd.github+json").map_err(|e| match e {
+            ureq::Error::StatusCode(403 | 429) => {
+                "GitHub allows no more requests for now, try again later".to_owned()
+            }
+            e => format!("GitHub not reachable: {e}"),
+        })?;
+    let json = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("GitHub not reachable: {e}"))?;
+    parse_releases(&json)
 }
 
 fn agent(timeout: Option<Duration>) -> ureq::Agent {
@@ -393,6 +461,16 @@ pub struct Updater {
     /// (up to date, or failed) or of a failed installation.
     window: bool,
     message: Option<String>,
+    /// The release notes window (a click on the version number).
+    notes: Notes,
+}
+
+/// The release notes window: what was fetched from GitHub, or is being fetched.
+enum Notes {
+    Closed,
+    Loading(Receiver<Result<Vec<NotesRelease>, String>>),
+    Ready(Vec<NotesRelease>),
+    Failed(String),
 }
 
 impl Default for Updater {
@@ -403,6 +481,7 @@ impl Default for Updater {
             available: None,
             window: false,
             message: None,
+            notes: Notes::Closed,
         }
     }
 }
@@ -441,6 +520,21 @@ impl Updater {
                 release.version
             )
         })
+    }
+
+    /// Opens the release notes window (a click on the version number) and fetches the notes in
+    /// the background.
+    pub fn open_notes(&mut self, ctx: &egui::Context) {
+        if matches!(self.notes, Notes::Loading(_)) {
+            return;
+        }
+        let (sender, receiver) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(fetch_releases());
+            ctx.request_repaint();
+        });
+        self.notes = Notes::Loading(receiver);
     }
 
     /// Opens the update window (a click on the symbol).
@@ -488,6 +582,7 @@ impl Updater {
     /// Lines for the output pane are pushed to `output`.
     pub fn show(&mut self, ctx: &egui::Context, output: &mut Vec<String>) {
         self.poll(ctx, output);
+        self.show_notes(ctx, output);
         if !self.window {
             return;
         }
@@ -545,6 +640,90 @@ impl Updater {
             }
             self.window = false;
             self.message = None;
+        }
+    }
+
+    /// The release notes window: this version's notes and those of the newer releases, with the
+    /// older ones below.
+    fn show_notes(&mut self, ctx: &egui::Context, output: &mut Vec<String>) {
+        if let Notes::Loading(receiver) = &self.notes
+            && let Ok(result) = receiver.try_recv()
+        {
+            self.notes = match result {
+                Ok(releases) => Notes::Ready(releases),
+                Err(error) => Notes::Failed(error),
+            };
+        }
+        if matches!(self.notes, Notes::Closed) {
+            return;
+        }
+        let (mut open, mut close, mut retry) = (true, false, false);
+        let current = Version::current();
+        egui::Window::new("Release Notes")
+            .id(crate::ids::window(ctx, "release notes window"))
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(520.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(format!("Nodalis {current}")).strong());
+                ui.add_space(4.0);
+                match &self.notes {
+                    Notes::Loading(_) => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Loading the release notes from GitHub …");
+                        });
+                    }
+                    Notes::Failed(error) => {
+                        ui.add(
+                            egui::Label::new(format!(
+                                "The release notes could not be loaded: {error}."
+                            ))
+                            .wrap(),
+                        );
+                        ui.add_space(2.0);
+                        ui.add(
+                            egui::Label::new(
+                                "They are also on the release page of GitHub, which needs an \
+                                 internet connection too.",
+                            )
+                            .wrap(),
+                        );
+                    }
+                    Notes::Ready(releases) if releases.is_empty() => {
+                        ui.label("No release published yet.");
+                    }
+                    Notes::Ready(releases) => {
+                        egui::ScrollArea::vertical()
+                            .max_height(420.0)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                for release in releases {
+                                    release_notes_ui(ui, release, current, output);
+                                }
+                            });
+                    }
+                    Notes::Closed => {}
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if matches!(self.notes, Notes::Failed(_)) && ui.button("Retry").clicked() {
+                        retry = true;
+                    }
+                    if ui.button("All Releases on GitHub").clicked() {
+                        open_page(ALL_RELEASES_PAGE, output);
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if retry {
+            self.open_notes(ctx);
+        } else if close || !open {
+            self.notes = Notes::Closed;
         }
     }
 
@@ -701,6 +880,39 @@ fn release_ui(
         }
     });
     (close, update)
+}
+
+/// One release of the notes window: a header with the version and day, the notes below.
+/// The installed version and newer ones start open.
+fn release_notes_ui(
+    ui: &mut egui::Ui,
+    release: &NotesRelease,
+    current: Version,
+    output: &mut Vec<String>,
+) {
+    let mut title = format!("Version {}", release.version);
+    if release.version == current {
+        title.push_str("  (installed)");
+    } else if release.version > current {
+        title.push_str("  (newer)");
+    }
+    if !release.date.is_empty() {
+        title.push_str(&format!("  -  {}", release.date));
+    }
+    egui::CollapsingHeader::new(egui::RichText::new(title).strong())
+        .id_salt(&release.tag)
+        .default_open(release.version >= current)
+        .show(ui, |ui| {
+            if release.notes.trim().is_empty() {
+                ui.label("No notes for this release.");
+            } else {
+                notes_ui(ui, &release.notes);
+            }
+            if ui.link("Open on GitHub").clicked() {
+                open_page(&release.page, output);
+            }
+            ui.add_space(4.0);
+        });
 }
 
 fn installing_ui(ui: &mut egui::Ui, release: &Release, progress: &AtomicU64, cancel: &AtomicBool) {
@@ -889,6 +1101,23 @@ mod tests {
             ..asset
         };
         assert!(check_download(&unknown, 3, "anything").is_ok());
+    }
+
+    #[test]
+    fn release_list_is_sorted_and_filtered() {
+        let json = r###"[
+            {"tag_name": "v0.4.3", "html_url": "https://example.com/3", "body": "a\r\nb",
+             "published_at": "2026-11-10T12:00:00Z"},
+            {"tag_name": "v0.4.10", "html_url": "https://example.com/10", "body": null},
+            {"tag_name": "nightly", "html_url": "https://example.com/n"},
+            {"tag_name": "v0.5.0", "html_url": "https://example.com/d", "draft": true}
+        ]"###;
+        let releases = parse_releases(json).unwrap();
+        let tags: Vec<_> = releases.iter().map(|r| r.tag.as_str()).collect();
+        assert_eq!(tags, ["v0.4.10", "v0.4.3"]);
+        assert_eq!(releases[1].date, "2026-11-10");
+        assert_eq!(releases[1].notes, "a\nb");
+        assert!(parse_releases("{}").is_err());
     }
 
     #[test]

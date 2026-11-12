@@ -119,6 +119,17 @@ internet connection. It can be turned off under #menu("Edit", "Settings ...", "U
 entered in the Internet Options (automatic configuration scripts are not read). The connection is
 checked with the certificates of the system, so a company proxy that inspects HTTPS works too.
 
+=== Release notes <release-notes>
+
+A click on the version number at the right of the app bar opens the release notes window. It
+loads the notes of the latest releases from GitHub in the background and lists them with the
+newest first. The version you are running is marked _(installed)_; it and the newer ones are
+open, the older ones fold up. Each release has a link to its page on GitHub, and #ui("All Releases
+on GitHub") opens the full list. Without an internet connection the window says so and offers
+#ui("Retry"), the notes are then only on the release page.
+
+#screenshot("release-notes.png", [Release notes window after a click on the version number])
+
 == Logs and crash reports <crash-logs>
 
 Nodalis writes its warnings and errors to `nodalis.log` in a `logs` folder; the log of the run

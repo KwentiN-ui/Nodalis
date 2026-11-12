@@ -1415,7 +1415,7 @@ impl AnalysisWindow {
                 BarEvent::Settings => self.open_settings(),
                 BarEvent::Help => self.open_user_guide(),
                 BarEvent::Pill => self.pill_clicked(),
-                BarEvent::Update => {}
+                BarEvent::Update | BarEvent::ReleaseNotes => {}
             }
         }
         let workspace = self.workspace();
