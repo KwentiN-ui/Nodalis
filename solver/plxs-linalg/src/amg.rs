@@ -126,6 +126,22 @@ pub struct AmgOptions {
     /// Whether a region where the cycle is slow gets a direct solve of its own, see
     /// [`crate::patch`] (`PLXS_AMG_PATCH`).
     pub patch: bool,
+    /// The corner level with rotations, solved directly (`PLXS_AMG_ROTATIONS`), see
+    /// [`Amg::build`].
+    pub rotations: Rotations,
+}
+
+/// Whether the corner level of a quadratic mesh carries rotations and is solved directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rotations {
+    /// Never (`PLXS_AMG_ROTATIONS=0`, the default: on solid parts the factor of the
+    /// level costs far more than the iterations it saves, on flat parts it saves a tenth
+    /// of the time at most).
+    Off,
+    /// When its factor is cheap, that is on flat parts (`PLXS_AMG_ROTATIONS=1`).
+    Automatic,
+    /// Always, whatever the factor costs (`PLXS_AMG_ROTATIONS=2`, measurements).
+    On,
 }
 
 /// Where the multigrid cycle runs (`PLXS_GPU=off|on`, automatic otherwise).
@@ -198,6 +214,11 @@ impl Default for AmgOptions {
             adaptive: env("PLXS_AMG_ADAPTIVE", 0),
             corners: env("PLXS_AMG_CORNERS", 1) != 0,
             patch: env("PLXS_AMG_PATCH", 1) != 0,
+            rotations: match env("PLXS_AMG_ROTATIONS", 0) {
+                0 => Rotations::Off,
+                2 => Rotations::On,
+                _ => Rotations::Automatic,
+            },
         }
     }
 }
@@ -371,9 +392,16 @@ impl Amg {
                 last = now;
             }
         };
+        if options.corners
+            && options.rotations != Rotations::Off
+            && let Some(u) = unknowns.filter(|u| u.midside.len() == n)
+            && let Some(amg) = Self::linked(a, u, options, trace, &mut lap)?
+        {
+            return Ok(amg);
+        }
         let corners = unknowns
             .filter(|u| options.corners && u.midside.len() == n)
-            .and_then(|u| corner_prolongator(a, u));
+            .and_then(|u| corner_prolongator(a, u, false));
         let corners = corners.as_ref();
         let mut amg = Self::assemble(
             a,
@@ -507,6 +535,115 @@ impl Amg {
             x.iter_mut().zip(&z).for_each(|(x, z)| *x -= z);
         }
         Some((x, factor))
+    }
+
+    /// The two-level hierarchy of a quadratic mesh with the corner level with rotations
+    /// (see [`linked_prolongator`]) solved directly, when the factor of that level is
+    /// cheap enough (or `options.rotations` asks for it whatever it costs); `None`
+    /// otherwise.
+    fn linked(
+        a: &Bsr,
+        u: &Unknowns,
+        options: AmgOptions,
+        trace: bool,
+        lap: &mut impl FnMut(&str, usize),
+    ) -> Result<Option<Amg>> {
+        let n = a.rows();
+        let Some(corners) = corner_prolongator(a, u, true) else {
+            return Ok(None);
+        };
+        let p = corners.p;
+        let pt = p.transpose();
+        lap("linked prolongator", n);
+        let mut a_c = galerkin(a, &p, &pt);
+        lap("galerkin product", n);
+        // A rotation of the whole body moves no midside node: the coarse operator is
+        // singular in it (three modes per body). A shift by a small part of the diagonal
+        // keeps the factorization definite; the residual restricted from the fine level
+        // has no part in these modes (`P v = 0`), and their correction is not
+        // prolongated.
+        for c in 0..a_c.brows {
+            let k = a_c.br;
+            let d = a_c.diagonal_block(c).expect("diagonal kept");
+            for r in 0..k {
+                a_c.val[k * k * d + r * k + r] *= 1.0 + LINKED_SHIFT;
+            }
+        }
+        let (pattern, matrix) = upper_triangle(&a_c);
+        lap("linked level upper triangle", a_c.rows());
+        let mut coarse = LdltSolver::new(rayon::current_num_threads());
+        let positions: Vec<[f64; 3]> = (corners.blocks.iter())
+            .flat_map(|&b| std::iter::repeat_n(u.coordinates[b as usize * a.br], a_c.br))
+            .collect();
+        coarse.set_coordinates(Some(positions));
+        coarse.analyze(&pattern)?;
+        let flops = coarse.factor_flops().unwrap_or(0.0);
+        let factor = coarse.factor_nonzeros().unwrap_or(0);
+        lap("linked level analysis", a_c.rows());
+        let cheap = flops <= LINKED_FLOPS_PER_NONZERO * a.nnz() as f64
+            && factor as f64 <= LINKED_FACTOR_PER_NONZERO * a.nnz() as f64;
+        if trace {
+            eprintln!(
+                "amg: linked corner level {} unknowns, {} blocks; factor {factor} nonzeros, \
+                 {flops:.2e} flops against {} nonzeros of the matrix: {}",
+                a_c.rows(),
+                a_c.blocks(),
+                a.nnz(),
+                if cheap { "cheap" } else { "too dear" }
+            );
+        }
+        if !cheap && options.rotations != Rotations::On {
+            return Ok(None);
+        }
+        let factorized = coarse.factorize(&matrix);
+        lap("linked level factorization", a_c.rows());
+        if factorized.is_err() || coarse.inertia().is_some_and(|negative| negative > 0) {
+            // Not definite: the matrix itself is not, or the shift fell short; the
+            // ordinary hierarchy decides.
+            return Ok(None);
+        }
+        let (inv_diag, inv_chol) = block_diagonal_inverses(a);
+        let lambda = largest_eigenvalue(a, &inv_chol);
+        lap("eigenvalue", n);
+        let n_c = a_c.rows();
+        let nonzeros = a.nnz() + p.nnz() * 2 + a_c.nnz();
+        let levels = vec![
+            Level {
+                a: None,
+                n,
+                inv_diag: inv_diag.iter().map(|&d| d as f32).collect(),
+                lambda_max: lambda,
+                p: Some(p.converted()),
+                pt: Some(pt.converted()),
+            },
+            Level {
+                a: Some(a_c.converted()),
+                n: n_c,
+                inv_diag: Vec::new(),
+                lambda_max: 0.0,
+                p: None,
+                pt: None,
+            },
+        ];
+        let work = vec![Work::new(n, false), Work::new(n_c, true)];
+        let fine = a.converted();
+        lap("single precision copy", n);
+        Ok(Some(Amg {
+            fine,
+            levels,
+            coarse,
+            coarsest: a_c,
+            work: Mutex::new(work),
+            options,
+            nonzeros,
+            #[cfg(feature = "gpu")]
+            gpu: None,
+            cpu_reason: Mutex::new(None),
+            patch: Default::default(),
+            patch_tried: Default::default(),
+            #[cfg(feature = "gpu")]
+            cg_note: Mutex::new(None),
+        }))
     }
 
     /// The hierarchy of `a` on the near-nullspace `nullspace`, on the processor.
@@ -1095,13 +1232,36 @@ struct Corners {
     p: Bsr,
 }
 
+/// The relative shift of the diagonal of the corner level with rotations (see
+/// [`Amg::linked`]).
+const LINKED_SHIFT: f64 = 1e-8;
+
+/// The corner level with rotations is solved directly when its factorization costs at
+/// most this many floating point operations per nonzero of the matrix ...
+const LINKED_FLOPS_PER_NONZERO: f64 = 2000.0;
+
+/// ... and its factor holds at most this many nonzeros per nonzero of the matrix (plates
+/// of one and two layers of tetrahedra: 1400 and 2000 operations, 2.0 and 2.2 nonzeros;
+/// a bracket 2500 and 2.4, a cube 21 000 and 6.5).
+const LINKED_FACTOR_PER_NONZERO: f64 = 2.3;
+
 /// A midside node is held from outside when the blocks of its row within its body add up
 /// to more than this fraction of its diagonal block (Frobenius norms).
 const HELD: f64 = 0.05;
 
 /// The corner nodes of `a`'s blocks and the interpolation from them, when enough of the
 /// nodes are midside nodes for the corner level to be worth its while.
-fn corner_prolongator(a: &Bsr, u: &Unknowns) -> Option<Corners> {
+///
+/// With `rotations` every corner carries a rotation besides its translation, and a
+/// midside node `m` on the edge from `a` to `b` moves by the linked interpolation
+/// `u_m = ½ (t_a + t_b) + ½ ω_a × (x_m − x_a) + ½ ω_b × (x_m − x_b)` (for `m` halfway:
+/// `¼ (ω_a − ω_b) × (x_b − x_a)`), the interpolation of elements with rotational degrees
+/// of freedom. The linear interpolation of the corners locks in bending: a thin wall a
+/// few elements thick bends on the corner level only by shearing its elements, and the
+/// level is far too stiff for the slow modes of the wall. With the rotations it bends
+/// almost freely (a plate one element thick, two levels with exact solves: 49
+/// iterations without, 25 with).
+fn corner_prolongator(a: &Bsr, u: &Unknowns, rotations: bool) -> Option<Corners> {
     const NONE: u32 = u32::MAX;
     let (blocks, br) = (a.brows, a.br);
     if a.bc != br || blocks == 0 {
@@ -1152,43 +1312,69 @@ fn corner_prolongator(a: &Bsr, u: &Unknowns) -> Option<Corners> {
     if corners.len() * 10 > blocks * 8 {
         return None;
     }
+    let bc = if rotations { 6 } else { br };
+    if rotations && (br != 3 || u.coordinates.len() != u.node.len()) {
+        return None;
+    }
     let mut ptr = Vec::with_capacity(blocks + 1);
     let mut col = Vec::new();
     let mut val = Vec::new();
     ptr.push(0);
-    let identity = |weight: f64, val: &mut Vec<f64>| {
+    // The block `weight · [I, S]` with `S δ = ω × d` (rotations) or `weight · I`.
+    let push = |weight: f64, d: [f64; 3], val: &mut Vec<f64>| {
         for r in 0..br {
-            for c in 0..br {
-                val.push(if r == c { weight } else { 0.0 });
+            for c in 0..bc {
+                val.push(if c < br {
+                    if r == c { weight } else { 0.0 }
+                } else {
+                    // (ω × d)_r = ε_rjk ω_j d_k: column j = c - 3.
+                    let j = c - br;
+                    let k = 3 - r - j;
+                    if r == j {
+                        0.0
+                    } else if (r + 1) % 3 == j {
+                        weight * d[k]
+                    } else {
+                        -weight * d[k]
+                    }
+                });
             }
         }
     };
+    let position = |b: usize| u.coordinates[b * br];
     for b in 0..blocks {
         if is_corner(b) {
             col.push(coarse_of[b]);
-            identity(1.0, &mut val);
+            push(1.0, [0.0; 3], &mut val);
         } else {
-            let mut ends: Vec<u32> = (u.midside[b * br].iter())
+            let mut ends: Vec<(u32, u32)> = (u.midside[b * br].iter())
                 .filter_map(|end| block_of.get(end))
-                .map(|&e| coarse_of[e as usize])
-                .filter(|&c| c != NONE)
+                .map(|&e| (coarse_of[e as usize], e))
+                .filter(|&(c, _)| c != NONE)
                 .collect();
             ends.sort_unstable();
             ends.dedup();
-            for c in ends {
+            let x_m = position(b);
+            for (c, e) in ends {
                 col.push(c);
-                identity(0.5, &mut val);
+                let x_e = position(e as usize);
+                let d = if rotations {
+                    [x_m[0] - x_e[0], x_m[1] - x_e[1], x_m[2] - x_e[2]]
+                } else {
+                    [0.0; 3]
+                };
+                push(0.5, d, &mut val);
             }
         }
         ptr.push(col.len());
     }
-    debug_assert_eq!(val.len(), col.len() * size);
+    debug_assert_eq!(val.len(), col.len() * br * bc);
     Some(Corners {
         p: Bsr {
             brows: blocks,
             bcols: corners.len(),
             br,
-            bc: br,
+            bc,
             ptr,
             col,
             val,
@@ -1708,6 +1894,127 @@ fn upper_triangle(a: &Bsr) -> (Pattern, SparseMatrix) {
 mod tests {
     use super::*;
 
+    /// The nodes of a chain of quadratic edges along a bent line: corners at the even
+    /// positions, midside nodes halfway between, three unknowns each; the stiffness of
+    /// springs between all nodes up to two apart (rows that add up to zero), with a
+    /// spring to the ground at the first node when `ground`.
+    fn quadratic_chain(edges: usize, ground: bool) -> (Bsr, Unknowns) {
+        let nodes = 2 * edges + 1;
+        let position = |i: usize| {
+            let t = i as f64 * 0.5;
+            [t, (0.3 * t).sin(), 0.1 * t * t]
+        };
+        let none = [u32::MAX; 2];
+        let unknowns = Unknowns {
+            node: (0..nodes as u32).flat_map(|n| [n; 3]).collect(),
+            component: (0..nodes).flat_map(|_| [0, 1, 2]).collect(),
+            coordinates: (0..nodes).flat_map(|i| [position(i); 3]).collect(),
+            body: Vec::new(),
+            midside: (0..nodes)
+                .flat_map(|i| {
+                    let ends = if i % 2 == 1 {
+                        [i as u32 - 1, i as u32 + 1]
+                    } else {
+                        none
+                    };
+                    [ends; 3]
+                })
+                .collect(),
+        };
+        let a = Bsr::build(
+            nodes,
+            nodes,
+            3,
+            3,
+            || (),
+            |i, _, acc| {
+                let near = i.saturating_sub(2)..(i + 3).min(nodes);
+                let mut diagonal = if ground && i == 0 { 5.0 } else { 0.0 };
+                for j in near.clone().filter(|&j| j != i) {
+                    let k = 1.0 + ((i + j) % 3) as f64;
+                    diagonal += k;
+                    let block = acc.block(j as u32);
+                    for r in 0..3 {
+                        block[r * 3 + r] = -k;
+                    }
+                }
+                let block = acc.block(i as u32);
+                for r in 0..3 {
+                    block[r * 3 + r] = diagonal;
+                }
+            },
+        );
+        (a, unknowns)
+    }
+
+    #[test]
+    fn the_linked_interpolation_moves_the_midside_nodes_with_a_rigid_rotation() {
+        let (a, unknowns) = quadratic_chain(4, false);
+        let corners = corner_prolongator(&a, &unknowns, true).unwrap();
+        assert_eq!(corners.blocks, [0, 2, 4, 6, 8]);
+        let p = &corners.p;
+        assert_eq!((p.brows, p.bcols, p.br, p.bc), (9, 5, 3, 6));
+        // A rotation w about the origin and a translation s: t_c = s + w × x_c, ω_c = w.
+        let (w, s) = ([0.2, -0.7, 0.4], [1.0, 2.0, -3.0]);
+        let cross = |a: [f64; 3], b: [f64; 3]| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let x = |b: usize| unknowns.coordinates[b * 3];
+        let coarse: Vec<f64> = (corners.blocks.iter())
+            .flat_map(|&b| {
+                let t = cross(w, x(b as usize));
+                [s[0] + t[0], s[1] + t[1], s[2] + t[2], w[0], w[1], w[2]]
+            })
+            .collect();
+        let mut fine = vec![0.0; 27];
+        p.multiply(&coarse, &mut fine);
+        for b in 0..9 {
+            let t = cross(w, x(b));
+            for r in 0..3 {
+                let expected = s[r] + t[r];
+                assert!((fine[b * 3 + r] - expected).abs() < 1e-12, "node {b}");
+            }
+        }
+        // Without rotations the blocks are the translations only.
+        let plain = corner_prolongator(&a, &unknowns, false).unwrap();
+        assert_eq!(plain.p.bc, 3);
+    }
+
+    #[test]
+    fn the_corner_level_with_rotations_is_solved_directly_below_the_fine_level() {
+        let (a, unknowns) = quadratic_chain(40, true);
+        let options = AmgOptions {
+            rotations: Rotations::On,
+            ..AmgOptions::default()
+        };
+        let amg = Amg::build(&a, Some(&unknowns), &[], options).unwrap();
+        assert_eq!(amg.levels.len(), 2);
+        assert_eq!(amg.levels[1].n, 41 * 6);
+        // As a preconditioner it is symmetric and positive definite: rᵀ M r > 0 and
+        // sᵀ M r = rᵀ M s.
+        let n = a.rows();
+        let r: Vec<f64> = (0..n).map(|i| ((i * 7) % 5) as f64 - 2.0).collect();
+        let t: Vec<f64> = (0..n).map(|i| ((i * 3) % 7) as f64 - 3.0).collect();
+        let (mut mr, mut mt) = (vec![0.0; n], vec![0.0; n]);
+        amg.apply(&r, &mut mr).unwrap();
+        amg.apply(&t, &mut mt).unwrap();
+        let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+        assert!(dot(&r, &mr) > 0.0);
+        let (tmr, rmt) = (dot(&t, &mr), dot(&r, &mt));
+        assert!(
+            (tmr - rmt).abs() <= 1e-4 * tmr.abs().max(rmt.abs()),
+            "{tmr} {rmt}"
+        );
+        // Off (the default), the ordinary hierarchy: this system is small enough to be
+        // its own coarsest level.
+        let amg = Amg::build(&a, Some(&unknowns), &[], AmgOptions::default()).unwrap();
+        assert_eq!(amg.levels.len(), 1);
+    }
+
     #[test]
     fn gram_schmidt_factorizes() {
         let m = 4;
@@ -1967,7 +2274,7 @@ mod tests {
             )
         };
         let a = chain(None);
-        let corners = corner_prolongator(&a, &unknowns).unwrap();
+        let corners = corner_prolongator(&a, &unknowns, false).unwrap();
         assert_eq!(corners.blocks, [0, 2, 4]);
         let p = &corners.p;
         assert_eq!((p.brows, p.bcols, p.br, p.bc), (6, 3, 2, 2));
@@ -1995,7 +2302,7 @@ mod tests {
         );
 
         // A midside node held by a spring to the ground stays on the corner level.
-        let held = corner_prolongator(&chain(Some(3)), &unknowns).unwrap();
+        let held = corner_prolongator(&chain(Some(3)), &unknowns, false).unwrap();
         assert_eq!(held.blocks, [0, 2, 3, 4]);
         let (col, val) = held.p.block_row(3);
         assert_eq!((col, val), (&[2u32][..], &[1.0, 0.0, 0.0, 1.0][..]));
@@ -2005,7 +2312,7 @@ mod tests {
         linear.midside = vec![[u32::MAX; 2]; 12];
         linear.midside[2] = [10, 30];
         linear.midside[3] = [10, 30];
-        assert!(corner_prolongator(&a, &linear).is_none());
+        assert!(corner_prolongator(&a, &linear, false).is_none());
     }
 
     #[test]

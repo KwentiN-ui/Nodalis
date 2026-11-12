@@ -1754,3 +1754,37 @@ Gemessen (4 Threads, ohne GPU): Streifen 442 000 Gl. (vorhergesagt 246 Iteration
 (gewechselt, die Analyse mit 1,3 s frisst den Gewinn). Nicht ausgelöst: Bracket (27
 Iterationen mit C2), Würfel (17), Platten mit einer und zwei Schichten (63, 73), Balken
 (21).
+
+## Stand nach dem Grobraum mit Rotationen (2026-11-12, Thread "Speed up plxs solver: block matrix, thin walls, solver choice")
+
+Vorschlag C1 des Architektur-Reviews, als Option (`PLXS_AMG_ROTATIONS`, Standard 0 = aus):
+Die Eckknotenstufe eines quadratischen Netzes trägt je Eckknoten zusätzlich eine
+Drehung, ein Mittenknoten folgt der verknüpften Interpolation
+`u_m = ½ (t_a + t_b) + ½ ω_a × (x_m − x_a) + ½ ω_b × (x_m − x_b)`
+(`corner_prolongator(.., true)` in `amg.rs`). Die lineare Eckknotenstufe verriegelt bei
+Biegung dünner Wände, mit Drehungen biegt sie fast frei. Darunter hilft das
+Aggregations-Mehrgitter nicht (Labor), also wird diese Stufe direkt gelöst
+(`Amg::linked`, zwei Stufen, `LdltSolver` mit allen Threads). Eine Drehung des ganzen
+Körpers bewegt keinen Mittenknoten, die Stufe ist darin singulär; eine Verschiebung der
+Diagonale um 1e-8 hält die Faktorisierung definit.
+
+- `PLXS_AMG_ROTATIONS=1`: nur wenn der Faktor billig ist (höchstens 2000 Operationen und
+  2,3 Nichtnullen je Nichtnull der Matrix), das trifft flache Teile. Die Analyse für
+  diese Entscheidung kostet selbst 1 bis 3 s.
+- `PLXS_AMG_ROTATIONS=2`: immer, für Messungen.
+
+Gemessen (4 Threads, ohne GPU, Aufbau + Lösen, erzwungen):
+
+| Modell | Iterationen | Zeit |
+|---|---|---|
+| Platte, 1 Schicht C3D10 | 63 → 20 | 7,7 → 6,9 s |
+| Platte, 2 Schichten | 73 → 20 | 8,8 → 8,4 s |
+| Bracket | 27 → 42 | 6,0 → 14,7 s |
+| Würfel | 17 → 14 | 4,3 → 22,9 s |
+| Balken | 21 → 15 | 1,6 → 3,9 s |
+
+Die Iterationen dritteln sich auf Platten, die Zeit sinkt aber nur um 5 bis 11 %: Ordnung
+(1 s) und Faktorisierung der Stufe (0,6 s) kosten fast so viel, wie die Iterationen
+sparen, und die Lösung mit dem Faktor macht jeden Zyklus teurer (0,12 statt 0,09 s).
+Deshalb ist C1 standardmäßig aus. Lohnen dürfte es bei vielen Lösungen mit derselben
+Hierarchie (Newton, Lastschritte) auf flachen Teilen.

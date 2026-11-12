@@ -28,7 +28,7 @@ pub mod pcg;
 pub mod solver;
 pub mod supernodal;
 
-pub use amg::{Amg, AmgOptions, GpuMode, Unknowns};
+pub use amg::{Amg, AmgOptions, GpuMode, Rotations, Unknowns};
 pub use gmres::gmres;
 pub use memory::available_memory;
 
