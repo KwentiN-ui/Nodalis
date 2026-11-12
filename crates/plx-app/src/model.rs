@@ -3773,15 +3773,18 @@ S
                 path_plots: vec![
                     crate::path_plot::PathPlot::new("Path-1".into()).saved(),
                     crate::path_plot::PathPlot::hot_spot("Hot_Spot-1".into()).saved(),
-                    crate::path_plot::PathPlot::table(crate::xy_plot::XyData {
-                        title: "SP_A.STRESSES.MISES".into(),
-                        x_label: "Increment".into(),
-                        x: vec![1.0, 2.0],
-                        curves: vec![("12_1".into(), vec![0.5, 1.5])],
-                        guides: Vec::new(),
-                        y_max: None,
-                        ..Default::default()
-                    })
+                    crate::path_plot::PathPlot::table(
+                        crate::xy_plot::XyData {
+                            title: "SP_A.STRESSES.MISES".into(),
+                            x_label: "Increment".into(),
+                            x: vec![1.0, 2.0],
+                            curves: vec![("12_1".into(), vec![0.5, 1.5])],
+                            guides: Vec::new(),
+                            y_max: None,
+                            ..Default::default()
+                        },
+                        Vec::new(),
+                    )
                     .saved(),
                 ],
                 vector_display: Some(plx_results::display::VectorDisplay {

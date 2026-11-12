@@ -90,6 +90,9 @@ pub struct PathPlot {
     hot_spot: crate::hot_spots::Located,
     /// The curves of a table's plot.
     pub table: Option<XyData>,
+    /// The history output tables the curves come from; with them the plot follows new
+    /// results.
+    pub sources: Vec<crate::history_table::HistoryTable>,
 }
 
 impl PathPlot {
@@ -114,6 +117,7 @@ impl PathPlot {
                     x_label: data.x_label.clone(),
                     x: data.x.clone(),
                     curves: data.curves.clone(),
+                    sources: self.sources.iter().map(|t| t.recipe()).collect(),
                 }),
         }
     }
@@ -125,6 +129,9 @@ impl PathPlot {
         }
         if let Some(table) = &saved.table {
             plot.kind = PlotKind::Table;
+            plot.sources = (table.sources.iter())
+                .map(crate::history_table::HistoryTable::from_recipe)
+                .collect();
             plot.table = Some(XyData {
                 title: saved.path.clone(),
                 x_label: table.x_label.clone(),
@@ -156,6 +163,7 @@ impl PathPlot {
             located: None,
             hot_spot: Default::default(),
             table: None,
+            sources: Vec::new(),
         }
     }
 
@@ -168,12 +176,34 @@ impl PathPlot {
     }
 
     /// The plot of curves from a history output table.
-    pub fn table(data: XyData) -> Self {
+    pub fn table(data: XyData, sources: Vec<crate::history_table::HistoryTable>) -> Self {
         let mut plot = Self::new(data.title.clone());
+        plot.sources = sources;
         plot.kind = PlotKind::Table;
         plot.placement.x_label = data.x_label.clone();
         plot.table = Some(data);
         plot
+    }
+
+    /// Redraws the curves from the history of `view` when it has changed, as after a new
+    /// solution or a running analysis. The user's x axis choice stays.
+    pub fn refresh_table(&mut self, view: &crate::results::ResultsView) {
+        if self.sources.is_empty() {
+            return;
+        }
+        let Some(mut data) = crate::history_table::replot(&self.sources, view) else {
+            return;
+        };
+        if let Some(old) = &self.table {
+            data.title = old.title.clone();
+            if old.x_axis < data.x_axes.len() && old.x_axes.len() == data.x_axes.len() {
+                data.choose_x_axis(old.x_axis);
+            }
+            if old == &data {
+                return;
+            }
+        }
+        self.table = Some(data);
     }
 
     /// Whether this is the plot of these curves of a table.

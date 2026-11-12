@@ -102,4 +102,19 @@ pub struct SavedTablePlot {
     pub x_label: String,
     pub x: Vec<f64>,
     pub curves: Vec<(String, Vec<f64>)>,
+    /// The history output tables the curves came from, so they follow new results.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<SavedTableSource>,
+}
+
+/// The selection of a history output table that a plot was made from.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedTableSource {
+    pub set: usize,
+    pub field: usize,
+    pub component: usize,
+    pub columns: Vec<usize>,
+    pub rows: Option<(usize, usize)>,
+    pub sort: Option<(usize, bool)>,
+    pub started: u64,
 }

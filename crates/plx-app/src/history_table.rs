@@ -343,6 +343,30 @@ impl HistoryTable {
     }
 
     /// The rows of the selection in the order shown: indices in the file.
+    /// The table as a plot's recipe: what [`HistoryTable::from_recipe`] rebuilds.
+    pub fn recipe(&self) -> plx_results::saved_view::SavedTableSource {
+        plx_results::saved_view::SavedTableSource {
+            set: self.set,
+            field: self.field,
+            component: self.component,
+            columns: self.selection.columns.clone(),
+            rows: self.selection.rows,
+            sort: self.sort.map(|s| (s.column, s.descending)),
+            started: self.selection.started,
+        }
+    }
+
+    pub fn from_recipe(saved: &plx_results::saved_view::SavedTableSource) -> Self {
+        let mut table = Self::new(saved.set, saved.field, saved.component);
+        table.selection.columns = saved.columns.clone();
+        table.selection.rows = saved.rows;
+        table.selection.started = saved.started;
+        table.sort = saved
+            .sort
+            .map(|(column, descending)| Sort { column, descending });
+        table
+    }
+
     fn chosen_rows(&self, table: &Columns) -> Vec<usize> {
         let order = self.order(table);
         match self.selection.rows {
@@ -1224,6 +1248,30 @@ mod tests {
     }
 
     /// Forces of a node in a set of their own, written at every second increment only.
+    #[test]
+    fn a_plot_made_again_from_its_recipe_follows_new_rows() {
+        let mut sets = sets();
+        let mut table = HistoryTable::new(0, 0, 0);
+        table.selection.press(3, None, Modifiers::NONE);
+        table.selection.press(4, None, Modifiers::COMMAND);
+        let recipe = table.recipe();
+        let again = HistoryTable::from_recipe(&recipe);
+        let first = again
+            .plot(&sets, AnalysisKind::Static, no_places())
+            .unwrap();
+        assert_eq!(first.x, [-1.0, -2.0, -4.0]);
+        // A new solution brings a fourth row.
+        sets[0].rows.push((1, 4, 2.0));
+        for entry in &mut sets[0].fields[0].components[0].entries {
+            entry.values.push(-8.0);
+        }
+        let later = again
+            .plot(&sets, AnalysisKind::Static, no_places())
+            .unwrap();
+        assert_eq!(later.x, [-1.0, -2.0, -4.0, -8.0]);
+        assert_eq!(later.curves.len(), first.curves.len());
+    }
+
     fn forces() -> HistorySet {
         HistorySet {
             name: "NH_OUTPUT-2".into(),
@@ -1331,4 +1379,19 @@ mod tests {
         // Rows outside the other table's chosen rows are gaps.
         assert_eq!(matching_rows(&plot_rows, &other, &[1]), [None, None, None]);
     }
+}
+
+/// The plot the tables in `sources` give for the history of `view` as it is now, so a plot
+/// kept in the 3D view follows new results. `None` when the history no longer has the
+/// columns.
+pub fn replot(sources: &[HistoryTable], view: &crate::results::ResultsView) -> Option<XyData> {
+    let kind = view
+        .current_increment()
+        .map_or(AnalysisKind::Static, |i| i.kind);
+    let places = Places {
+        steps: &view.steps,
+        increments: &view.increments,
+    };
+    let all: Vec<&HistoryTable> = sources.iter().collect();
+    plot(&all, &view.history, kind, places).ok()
 }
