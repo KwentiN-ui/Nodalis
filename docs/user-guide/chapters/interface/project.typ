@@ -412,4 +412,6 @@ Nodalis (meshing, model checks, restart, keeping the results) around those of Ca
     output, once it is done (@solver-profile).],
   [Copy Report], [Copies the version, the system, the size of the model and the profile of the
     picked analysis as text, e.g. for an issue on GitHub.],
+  [Convergence], [Plots how the solver converges for the picked analysis, right of the output,
+    while it runs and after (@convergence-plot).],
 )

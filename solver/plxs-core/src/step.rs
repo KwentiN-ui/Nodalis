@@ -168,6 +168,23 @@ impl Procedure {
         )
     }
 
+    /// The step time the procedure runs to, for those that go through time in
+    /// increments; `None` for the others (eigenvalues, a steady state).
+    pub fn period(&self) -> Option<f64> {
+        match self {
+            Procedure::Static(s) => Some(s.increments.period()),
+            Procedure::Visco(s) => Some(s.increments.period()),
+            Procedure::HeatTransfer(s)
+            | Procedure::CoupledTemperatureDisplacement(s)
+            | Procedure::UncoupledTemperatureDisplacement(s) => {
+                (!s.steady_state || s.increments.period.is_some()).then(|| s.increments.period())
+            }
+            Procedure::Dynamic(s) => Some(s.increments.period()),
+            Procedure::ModalDynamics(s) => (!s.steady_state).then_some(s.period),
+            _ => None,
+        }
+    }
+
     /// The keyword of the procedure as written in the input.
     pub fn keyword(&self) -> &'static str {
         match self {

@@ -431,6 +431,22 @@ impl PcgSolver {
         }
         let trace = std::env::var("PLXS_PCG_TRACE").is_ok();
         let cancel = plxs_core::CancelToken::current();
+        // A loose solve is a part of another solver's iteration, not a solve of its own.
+        let watch = loose
+            .is_none()
+            .then(plxs_core::LinearWatch::current)
+            .flatten();
+        if let Some(watch) = &watch {
+            watch.report(plxs_core::LinearIteration::Start { tolerance });
+        }
+        let tell = |iteration: usize, residual: f64| {
+            if let Some(watch) = &watch {
+                watch.report(plxs_core::LinearIteration::Residual {
+                    iteration: iteration as u32,
+                    residual,
+                });
+            }
+        };
         // The first solve with a fresh hierarchy of a pattern learns the near-nullspace
         // candidates of the next hierarchy from its Lanczos vectors (see [`Deflation`]),
         // which only the processor's loop collects.
@@ -468,7 +484,10 @@ impl PcgSolver {
                 TOLERANCE,
                 max_iterations,
                 &cancelled,
-                &mut |i, r| stall.stalls(i, r),
+                &mut |i, r| {
+                    tell(i, r);
+                    stall.stalls(i, r)
+                },
             ) {
                 Ok(Err(error)) => return Err(error),
                 Ok(Ok(crate::gpu::CgOutcome::Converged {
@@ -599,6 +618,7 @@ impl PcgSolver {
             axpy(alpha, &p, x);
             axpy(-alpha, &q, &mut r);
             residual = norm(&r) / b_norm;
+            tell(iteration, residual);
             if residual <= tolerance {
                 if trace {
                     eprintln!(

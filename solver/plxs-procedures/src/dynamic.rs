@@ -609,6 +609,8 @@ impl DynamicProcedure {
                 iteration: 1,
                 residual: 0.0,
                 correction: 0.0,
+                residual_limit: None,
+                correction_limit: None,
                 converged: true,
             });
             if writes {

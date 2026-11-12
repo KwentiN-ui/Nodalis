@@ -539,6 +539,8 @@ impl<'h> HeatRun<'h> {
                 iteration,
                 residual: residual_norm,
                 correction,
+                residual_limit: None,
+                correction_limit: self.nonlinear.then_some(1e-10 * scale),
                 converged,
             });
             if converged {

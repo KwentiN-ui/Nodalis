@@ -60,6 +60,59 @@ impl CancelToken {
 
 thread_local! {
     static CURRENT: RefCell<Option<CancelToken>> = const { RefCell::new(None) };
+    static WATCH: RefCell<Option<LinearWatch>> = const { RefCell::new(None) };
+}
+
+/// Receives the iterations of the iterative linear solver as it computes, one call per
+/// iteration with the relative residual `|r| / |b|` reached: Nodalis plots them live, a
+/// solve of a large model can take minutes. Like the [`CancelToken`], the solver finds the
+/// watch of the run it computes through the thread ([`LinearWatch::scope`]); events through
+/// [`Progress`] come only between the solves.
+#[derive(Clone)]
+pub struct LinearWatch(Arc<dyn Fn(LinearIteration) + Send + Sync>);
+
+/// What the iterative linear solver tells per iteration, see [`LinearWatch`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LinearIteration {
+    /// A solve starts, to the relative residual `tolerance`.
+    Start { tolerance: f64 },
+    /// Iteration `iteration` (from 1) reached `residual`.
+    Residual { iteration: u32, residual: f64 },
+}
+
+impl std::fmt::Debug for LinearWatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LinearWatch")
+    }
+}
+
+impl LinearWatch {
+    pub fn new(watch: impl Fn(LinearIteration) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(watch))
+    }
+
+    /// Runs `f` with this watch as the [`LinearWatch::current`] one of the calling thread;
+    /// the one before is restored afterwards, also when `f` panics.
+    pub fn scope<R>(&self, f: impl FnOnce() -> R) -> R {
+        struct Restore(Option<LinearWatch>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                WATCH.with(|current| *current.borrow_mut() = self.0.take());
+            }
+        }
+        let before = WATCH.with(|current| current.borrow_mut().replace(self.clone()));
+        let _restore = Restore(before);
+        f()
+    }
+
+    /// The watch of the run the calling thread computes, if any.
+    pub fn current() -> Option<LinearWatch> {
+        WATCH.with(|current| current.borrow().clone())
+    }
+
+    pub fn report(&self, iteration: LinearIteration) {
+        (self.0)(iteration)
+    }
 }
 
 /// Receives the events of a run. Implementations must be cheap: events come per iteration.
@@ -105,6 +158,11 @@ pub enum ProgressEvent {
         residual: f64,
         /// Largest increment of the solution in this iteration.
         correction: f64,
+        /// What `residual` must reach for the increment to converge, when the procedure
+        /// checks it (`None`: a linear solution, or no force to compare with).
+        residual_limit: Option<f64>,
+        /// What `correction` must reach, when the procedure checks it.
+        correction_limit: Option<f64>,
         converged: bool,
     },
     /// An increment converged (`.sta` row).
@@ -133,6 +191,16 @@ pub enum ProgressEvent {
         mode: u32,
         /// The eigenvalue itself (omega^2 or the buckling factor).
         value: f64,
+    },
+    /// A solve of the iterative linear solver finished: its iterations and the relative
+    /// residual `|r| / |b|` it reached.
+    LinearSolve {
+        iterations: u32,
+        relative_residual: f64,
+        seconds: f64,
+        /// Not printed: one of the many solves of a Newton iteration, whose lines would
+        /// drown the output.
+        quiet: bool,
     },
     /// A step finished.
     StepDone { step: u32, converged: bool },

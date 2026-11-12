@@ -22,6 +22,7 @@ pub use plxs_session::JobProfile;
 
 pub mod awake;
 pub mod live;
+pub mod monitor;
 pub mod process;
 
 /// The one thread pool every built-in run computes on, sized `threads` (0: all cores). Runs
@@ -134,6 +135,8 @@ pub struct Run {
     profile: plxs_session::ProfileSink,
     /// Keeps the computer from going to standby while the run is active.
     awake: Option<awake::Guard>,
+    /// How the run converges, as it goes on.
+    convergence: monitor::LiveLog,
 }
 
 /// An analysis lowered from the model for the solver, which validates it first.
@@ -441,12 +444,20 @@ impl Run {
         ]));
         let cancel = CancelToken::new();
         let profile = plxs_session::ProfileSink::default();
+        let plan = match &job {
+            Job::Analysis(prepared) => (prepared.analysis.steps.iter())
+                .map(|step| (step.name.clone(), step.procedure.period()))
+                .collect(),
+            Job::Text(_) => Vec::new(),
+        };
+        let convergence = monitor::LiveLog::new(monitor::ConvergenceLog::new(plan));
         let options = plxs_session::JobOptions {
             profile_sink: (!check).then(|| Arc::clone(&profile)),
             threads: threads as usize,
             pool: Some(pool(threads)?),
             write_files: false,
             cancel: cancel.clone(),
+            linear_watch: (!check).then(|| convergence.linear_watch()),
             step_cache: reuse.then(|| plxs_session::StepCache {
                 dir: work_dir.join(format!("{name}.steps")),
                 salt: solver_build(),
@@ -454,6 +465,7 @@ impl Run {
             ..plxs_session::JobOptions::new(work_dir, name)
         };
         let lines = Arc::clone(&output);
+        let log = convergence.clone();
         let (records, preparation) = match &job {
             Job::Analysis(prepared) => (prepared.steps.clone(), prepared.preparation_steps.clone()),
             Job::Text(_) => (Vec::new(), Vec::new()),
@@ -471,6 +483,7 @@ impl Run {
                 let mut track = Convergence::default();
                 let mut progress = |event: ProgressEvent| {
                     track.event(&event);
+                    log.lock().event(&event);
                     for line in plxs_session::format_event(&event) {
                         say(line);
                     }
@@ -604,7 +617,13 @@ impl Run {
             diagnostics,
             profile,
             awake: Some(awake::Guard::new()),
+            convergence,
         })
+    }
+
+    /// How the run converges, filled while it goes on: the monitor plots it.
+    pub fn convergence(&self) -> &monitor::LiveLog {
+        &self.convergence
     }
 
     /// Where the time of the run went, once it has finished with results (also of a step

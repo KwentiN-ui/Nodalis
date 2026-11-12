@@ -887,16 +887,15 @@ impl NonlinearStatic {
                 });
                 let zero_flux =
                     scale <= controls.zero_flux * average_force.max(1e-300) || scale == 0.0;
-                let residual_ok = if zero_flux {
-                    true
-                } else {
+                let residual_limit = (!zero_flux).then(|| {
                     let tolerance = if iteration > controls.relaxed_after {
                         controls.residual_relaxed
                     } else {
                         controls.residual
                     };
-                    r_max <= tolerance * scale
-                };
+                    tolerance * scale
+                });
+                let residual_ok = residual_limit.is_none_or(|limit| r_max <= limit);
                 let linear = !zero_flux && r_max <= controls.residual_linear * scale;
                 let correction_ok = if zero_flux {
                     last_correction <= controls.correction_zero_flux * du_max || du_max == 0.0
@@ -918,6 +917,14 @@ impl NonlinearStatic {
                     iteration,
                     residual: r_max,
                     correction: last_correction,
+                    residual_limit,
+                    correction_limit: Some(
+                        if zero_flux {
+                            controls.correction_zero_flux
+                        } else {
+                            controls.correction
+                        } * du_max,
+                    ),
                     converged,
                 });
                 if converged {

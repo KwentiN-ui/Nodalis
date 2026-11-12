@@ -584,6 +584,7 @@ impl AnalysisWindow {
         run.seconds = solve.seconds();
         run.progress = solve.progress();
         run.copy(&solve.output(), solve.output_total());
+        run.convergence = solve.convergence();
         if run.profile.is_none() && !solve.active() {
             run.profile = solve.profile();
             run.steps = solve.step_lines().to_vec();

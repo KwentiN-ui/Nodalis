@@ -219,6 +219,11 @@ impl BackgroundSolve {
         self.analysis.as_ref()?.profile()
     }
 
+    /// How the solver converges, once it runs.
+    pub fn convergence(&self) -> Option<plx_solve::monitor::LiveLog> {
+        self.analysis.as_ref().map(Analysis::convergence)
+    }
+
     /// The steps solved, a line each, for the solver report.
     pub fn step_lines(&self) -> &[String] {
         self.analysis.as_ref().map_or(&[], Analysis::step_lines)

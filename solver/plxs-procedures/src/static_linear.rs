@@ -301,6 +301,8 @@ impl StaticLinear {
                 iteration: iterations,
                 residual: 0.0,
                 correction: rhs.iter().fold(0.0_f64, |m, v| m.max(v.abs())),
+                residual_limit: None,
+                correction_limit: None,
                 converged: true,
             });
 

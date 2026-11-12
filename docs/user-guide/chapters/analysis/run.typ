@@ -156,6 +156,48 @@ The profile covers the solver itself. Meshing and preparing the model before the
 in it; the running time in the top row includes them. A stopped run and a run with a step that
 did not converge show the profile up to where they ended.
 
+=== Convergence plot <convergence-plot>
+
+While the solver runs, the monitor plots how it converges, right of the output, so a hard
+nonlinear run shows where it struggles long before it ends; like the solution information of
+Ansys Mechanical or the job monitor of Abaqus. The plot fills as the solver reports, from the
+first iteration on, and stays after the run until the next one. #ui("Convergence") in the top row
+of every monitor hides and shows it; the choice is kept with the window layout.
+
+Above the plot are the views to pick from and a line on where the solver is: the step with its
+name, the increment, the attempt once an increment was cut back, the iteration and the size of
+the increment. For a step that goes through time, a bar shows how far the step got through its
+time period.
+
+#fields(
+  [Residuals], [The largest residual force and the largest correction of the displacements of
+    every Newton iteration, each divided by the criterion it has to reach, over the iterations
+    of the whole run. An increment converges when both lines are below 1, the dashed
+    #ui("Criterion") line; the residual criterion follows from the average force of the step,
+    the correction criterion from the change of the displacements in the increment. Thin green
+    lines mark the converged increments, red dashed lines the cutbacks, grey lines the start of
+    a step. Hovering over a point tells the step, increment, attempt and iteration with the
+    values themselves and their criteria.],
+  [Time], [The total time each converged increment reached, over the increments. Red crosses
+    are attempts that did not converge and were cut back.],
+  [Increment Size], [The size of each increment, on a logarithmic axis, with the cut back
+    attempts as red crosses: the automatic incrementation shrinking and growing the increments
+    shows here.],
+  [Linear Solver], [For the iterative equation solver: the relative residual of each of its
+    iterations in the solve going on, live, with the one before dashed and its tolerance;
+    above it the number of solves and their iterations. The direct solver needs no iterations,
+    so the view stays empty.],
+)
+
+Linear steps check no convergence and add no points to #ui("Residuals"); their increments still
+show under #ui("Time"). Drag to pan, drag along an axis to zoom and double-click to fit the plot
+to its values again. Click an entry of the legend to hide or show its line. A long run keeps the
+last 200000 iterations and increments.
+
+#screenshot("convergence-plot.png", [The residuals of an elastic-plastic cantilever loaded beyond
+  its limit load (NLGEOM): once it yields, the increments need more iterations and three are cut
+  back])
+
 == Analyses that continue others <restart>
 
 One analysis can continue another one after a step, through a state link in the project
