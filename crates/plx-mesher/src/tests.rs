@@ -3588,14 +3588,3 @@ fn splits_keep_planes_and_circles() {
     }
     assert!(edge_stray_of(&geometry) < 1e-4);
 }
-
-#[test]
-fn zz_dump() {
-    use plx_model::{CadOperationKind::SplitPlane, CoordinatePlane, SplitPlane as Plane};
-    let mut g = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless).unwrap().geometry;
-    let across = plx_model::CadOperation { plane: Plane::Global(CoordinatePlane::Xz), ..split(SplitPlane, 18.0) };
-    for (i, op) in [split(SplitPlane, 50.0), across, split(SplitPlane, 53.0), split(SplitPlane, 47.0), split(SplitPlane, 45.0)].into_iter().enumerate() {
-        g = apply_operation(&g, &op, &[]).unwrap();
-        std::fs::write(format!("/tmp/claude-0/-home-user/555ba432-d185-51b9-914c-aed35799b95c/scratchpad/{}{i}.brep", std::env::var("TAG").unwrap()), &g.brep).unwrap();
-    }
-}
