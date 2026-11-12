@@ -579,18 +579,11 @@ impl Picker {
         }
         let face = hit.face;
         let angle = self.angle.to_radians();
-        // The surface angle mode on a mesh generated from geometry selects whole CAD faces,
-        // like the geometry mode, instead of the nodes or element faces it grew over.
-        if self.select_by == SelectBy::GeometrySurfaceAngle && model.has_cad() {
-            let entities: BTreeSet<CadEntity> = picker
-                .faces_by_angle(face, angle)
-                .into_iter()
-                .filter_map(|f| crate::cad_selection::face_of(model, picker.face_id(f)))
-                .map(CadEntity::Face)
-                .collect();
-            if !entities.is_empty() {
-                return Items::Geometry(entities);
-            }
+        if matches!(
+            self.select_by,
+            SelectBy::GeometrySurfaceAngle | SelectBy::FaceAngle
+        ) {
+            return self.pick_by_surface_angle(model, hit.part, face, target);
         }
         let faces: Vec<usize> = match self.select_by {
             SelectBy::Geometry => {
@@ -641,9 +634,8 @@ impl Picker {
                 }
                 return Items::Nodes(nodes);
             }
-            SelectBy::GeometrySurfaceAngle | SelectBy::FaceAngle => {
-                picker.faces_by_angle(face, angle)
-            }
+            // Picked above, across the borders of the parts.
+            SelectBy::GeometrySurfaceAngle | SelectBy::FaceAngle => Vec::new(),
             SelectBy::Node => return Items::Nodes(BTreeSet::from([model.hit_node(hit)])),
             SelectBy::Element => {
                 let element = picker.faces()[face].element;
@@ -676,6 +668,43 @@ impl Picker {
 }
 
 impl Picker {
+    /// What a click on `face` of `part` picks in the surface angle modes: the faces reached
+    /// across edges where neighbouring faces fold less than the angle, on into the visible
+    /// parts and bodies meeting there. On a mesh generated from geometry the geometry mode
+    /// selects whole CAD faces, like the geometry mode, instead of the faces it grew over.
+    fn pick_by_surface_angle(
+        &self,
+        model: &Model,
+        part: usize,
+        face: usize,
+        target: Target,
+    ) -> Items {
+        let faces = faces_by_angle_across(model, part, face, self.angle.to_radians());
+        let ids = || (faces.iter()).map(|&(part, face)| MeshPicker::new(model, part).face_id(face));
+        if self.select_by == SelectBy::GeometrySurfaceAngle && model.has_cad() {
+            let entities: BTreeSet<CadEntity> = ids()
+                .filter_map(|id| crate::cad_selection::face_of(model, id))
+                .map(CadEntity::Face)
+                .collect();
+            if !entities.is_empty() {
+                return Items::Geometry(entities);
+            }
+        }
+        match target {
+            Target::Faces | Target::Surfaces | Target::Edges => Items::Faces(ids().collect()),
+            Target::Lines => Items::Edges(BTreeSet::new()),
+            Target::Nodes | Target::Point => {
+                let ids = model.mesh.node_ids();
+                Items::Nodes(
+                    (faces.iter())
+                        .flat_map(|&(part, face)| MeshPicker::new(model, part).face_nodes(face))
+                        .map(|n| ids[n])
+                        .collect(),
+                )
+            }
+        }
+    }
+
     /// What a click picks as edges of a 3D part: the chain of outline edges nearest to it,
     /// running to the corners or, in the angle modes, on while it bends less than the angle.
     fn pick_edges(&self, model: &Model, hit: &Hit) -> Items {
@@ -1241,47 +1270,12 @@ impl<'a> MeshPicker<'a> {
         self.model.render_position(node)
     }
 
-    fn normal(&self, face: usize) -> DVec3 {
-        DVec3::from(face_normal(
-            self.model.mesh.coords(),
-            &self.faces()[face].corners,
-        ))
-        .normalize_or_zero()
-    }
-
     /// The smooth patch around a face, bounded by feature edges.
     fn patch(&self, face: usize) -> Vec<usize> {
         let region = self.faces()[face].region;
         (0..self.faces().len())
             .filter(|&f| self.faces()[f].region == region)
             .collect()
-    }
-
-    /// Faces reached from `start` across edges where neighbouring faces fold less than `angle`.
-    fn faces_by_angle(&self, start: usize, angle: f64) -> Vec<usize> {
-        let faces = self.faces();
-        let mut by_edge: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
-        for (index, face) in faces.iter().enumerate() {
-            for (a, b) in corner_edges(&face.corners) {
-                by_edge.entry((a.min(b), a.max(b))).or_default().push(index);
-            }
-        }
-        let cos_limit = angle.cos();
-        let mut seen = vec![false; faces.len()];
-        seen[start] = true;
-        let mut stack = vec![start];
-        while let Some(face) = stack.pop() {
-            let normal = self.normal(face);
-            for (a, b) in corner_edges(&faces[face].corners) {
-                for &next in &by_edge[&(a.min(b), a.max(b))] {
-                    if !seen[next] && normal.dot(self.normal(next)) >= cos_limit {
-                        seen[next] = true;
-                        stack.push(next);
-                    }
-                }
-            }
-        }
-        (0..faces.len()).filter(|&f| seen[f]).collect()
     }
 
     fn feature_edges(&self) -> impl Iterator<Item = (usize, &'a plx_mesh::SkinEdge)> + 'a {
@@ -1476,6 +1470,68 @@ pub fn edge_segments(model: &Model, part: usize, point: Vec3) -> Vec<[NodeId; 2]
             }
         })
         .collect()
+}
+
+/// The faces, as part and face of its skin, reached from `start` of `part` across edges
+/// where neighbouring faces fold less than `angle` (radians): within the part over shared
+/// edges, and into other visible parts, or other bodies of a compound part, over outline
+/// edges lying on each other ([`crate::seams`]). A plane model stays in the part: all its
+/// parts lie in one plane.
+fn faces_by_angle_across(
+    model: &Model,
+    part: usize,
+    start: usize,
+    angle: f64,
+) -> Vec<(usize, usize)> {
+    let coords = model.mesh.coords();
+    let cos_limit = angle.cos();
+    let across = !model.is_plane();
+    let seams = across.then(|| model.seams());
+    let visible = |p: usize| model.parts.get(p).is_some_and(|info| info.visible);
+    // The faces at each edge of a part, built when the selection reaches it.
+    let mut edge_faces: HashMap<usize, HashMap<(usize, usize), Vec<usize>>> = HashMap::new();
+    let mut faces_at = |part: usize, a: usize, b: usize| -> Vec<usize> {
+        let map = edge_faces.entry(part).or_insert_with(|| {
+            let mut map: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+            for (index, face) in model.skin(part).faces.iter().enumerate() {
+                for (a, b) in corner_edges(&face.corners) {
+                    map.entry((a.min(b), a.max(b))).or_default().push(index);
+                }
+            }
+            map
+        });
+        map.get(&(a.min(b), a.max(b))).cloned().unwrap_or_default()
+    };
+    let normal = |part: usize, face: usize| {
+        let face = &model.skin(part).faces[face];
+        DVec3::from(face_normal(coords, &face.corners)).normalize_or_zero()
+    };
+    let mut seen: HashSet<(usize, usize)> = HashSet::from([(part, start)]);
+    let mut stack = vec![(part, start)];
+    while let Some((part, face)) = stack.pop() {
+        let here = normal(part, face);
+        let corners = model.skin(part).faces[face].corners.clone();
+        for (a, b) in corner_edges(&corners) {
+            let mut next: Vec<(usize, usize)> = faces_at(part, a, b)
+                .into_iter()
+                .map(|f| (part, f))
+                .collect();
+            if let Some(seams) = seams {
+                for (other, c, d) in seams.along(part, a, b, coords, visible) {
+                    next.extend(faces_at(other, c, d).into_iter().map(|f| (other, f)));
+                }
+            }
+            for next in next {
+                if !seen.contains(&next) && here.dot(normal(next.0, next.1)) >= cos_limit {
+                    seen.insert(next);
+                    stack.push(next);
+                }
+            }
+        }
+    }
+    let mut faces: Vec<(usize, usize)> = seen.into_iter().collect();
+    faces.sort_unstable();
+    faces
 }
 
 fn corner_edges(corners: &[usize]) -> impl Iterator<Item = (usize, usize)> + '_ {
@@ -1710,6 +1766,130 @@ mod tests {
         let region = Region::Edges(top.into_iter().collect());
         let lines = region.edges(&model.mesh);
         assert_eq!(lines.len(), 10);
+    }
+
+    /// Two blocks of hexahedra side by side, x from 0 to 10 and from 10 to 20, 10 wide and
+    /// high, divided in 2 and 3 along y and z: their meshes share no nodes and do not match.
+    /// As two parts, or as the two bodies of one compound part.
+    fn two_blocks(compound: bool) -> Model {
+        use plx_mesh::{Body, Element, ElementShape, FeMesh, Part};
+        let mut mesh = FeMesh::default();
+        let mut next_node = 1;
+        let mut next_element = 1;
+        let mut block = |mesh: &mut FeMesh, x0: f64, n: u32| -> Vec<ElementId> {
+            let first = next_node;
+            let id = |i: u32, j: u32, k: u32| first + (k * (n + 1) + j) * (n + 1) + i;
+            let h = 10.0 / f64::from(n);
+            for k in 0..=n {
+                for j in 0..=n {
+                    for i in 0..=n {
+                        let at = [x0 + h * f64::from(i), h * f64::from(j), h * f64::from(k)];
+                        mesh.set_node(id(i, j, k), at);
+                        next_node += 1;
+                    }
+                }
+            }
+            let mut elements = Vec::new();
+            for k in 0..n {
+                for j in 0..n {
+                    for i in 0..n {
+                        let nodes = vec![
+                            id(i, j, k),
+                            id(i + 1, j, k),
+                            id(i + 1, j + 1, k),
+                            id(i, j + 1, k),
+                            id(i, j, k + 1),
+                            id(i + 1, j, k + 1),
+                            id(i + 1, j + 1, k + 1),
+                            id(i, j + 1, k + 1),
+                        ];
+                        let element = Element {
+                            id: next_element,
+                            type_name: "C3D8".into(),
+                            shape: ElementShape::Hex8,
+                            nodes,
+                        };
+                        mesh.add_element(element).unwrap();
+                        elements.push(next_element);
+                        next_element += 1;
+                    }
+                }
+            }
+            elements
+        };
+        let left = block(&mut mesh, 0.0, 2);
+        let right = block(&mut mesh, 10.0, 3);
+        if compound {
+            mesh.parts.push(Part {
+                bodies: vec![
+                    Body {
+                        name: "LEFT".into(),
+                        elements: left.clone(),
+                    },
+                    Body {
+                        name: "RIGHT".into(),
+                        elements: right.clone(),
+                    },
+                ],
+                name: "BLOCKS".into(),
+                elements: left.into_iter().chain(right).collect(),
+            });
+        } else {
+            for (name, elements) in [("LEFT", left), ("RIGHT", right)] {
+                mesh.parts.push(Part {
+                    bodies: Vec::new(),
+                    name: name.into(),
+                    elements,
+                });
+            }
+        }
+        Model::new(std::path::Path::new("bloecke.inp"), mesh)
+    }
+
+    /// A click from above at x, y onto the blocks of [`two_blocks`].
+    fn block_hit(model: &Model, x: f32, y: f32) -> Hit {
+        let p = model.mesh.coords()[0];
+        let first = Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32);
+        let origin = Vec3::new(x, y, 50.0) - first + model.render_position(0);
+        model.pick(origin, Vec3::NEG_Z).unwrap()
+    }
+
+    #[test]
+    fn surface_angle_grows_across_parts_and_bodies() {
+        let mut model = two_blocks(false);
+        let by_angle = picker(SelectBy::FaceAngle);
+        // The tops of both blocks: 2 x 2 faces on the left, 3 x 3 on the right; the walls
+        // where they meet stand at right angles.
+        let hit = block_hit(&model, 5.0, 5.0);
+        assert_eq!(
+            faces(by_angle.pick(&model, &hit, Target::Faces, 0.1)).len(),
+            13
+        );
+        let hit = block_hit(&model, 15.0, 5.0);
+        let top = by_angle.pick(&model, &hit, Target::Nodes, 0.1);
+        assert_eq!(nodes(top).len(), 9 + 16);
+        // Not into a hidden part.
+        model.parts[1].visible = false;
+        let hit = block_hit(&model, 5.0, 5.0);
+        assert_eq!(
+            faces(by_angle.pick(&model, &hit, Target::Faces, 0.1)).len(),
+            4
+        );
+        // A larger angle takes every side of both blocks, the walls where they meet too.
+        model.parts[1].visible = true;
+        let mut wide = picker(SelectBy::FaceAngle);
+        wide.angle = 95.0;
+        let hit = block_hit(&model, 5.0, 5.0);
+        let all = faces(wide.pick(&model, &hit, Target::Faces, 0.1));
+        assert_eq!(all.len(), 6 * 4 + 6 * 9);
+
+        // The bodies of a compound part are crossed alike.
+        let model = two_blocks(true);
+        let hit = block_hit(&model, 15.0, 5.0);
+        assert_eq!(
+            faces(by_angle.pick(&model, &hit, Target::Faces, 0.1)).len(),
+            13
+        );
     }
 
     /// The side of a flat shell ends at the corners of the plate, although its outline is
