@@ -200,7 +200,7 @@ Besides the properties panel, Nodalis has three kinds of windows, each with the 
 / Confirmations: only for what Undo cannot take back, such as deleting parts of the geometry,
   removing the results of an analysis or dropping the changes to the material library. The
   question is the title, below it what follows; the button that does it is red.
-  #key("Enter") and #key("Esc") cancel, so only a click does it.
+  #key("Enter") does it, #key("Esc") cancels.
 
 #screenshot("confirm-delete-part.png", [Deleting a part of the geometry asks first])
 

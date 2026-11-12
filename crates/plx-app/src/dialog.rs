@@ -92,8 +92,8 @@ pub fn close_bar(ui: &mut Ui, id: &str) -> bool {
 }
 
 /// A confirmation over the whole window: `question` as its title, `consequence` below,
-/// Cancel and `verb`, drawn in red. Enter and Escape cancel; only a click on the verb does
-/// it. Returns `Some(true)` for the verb, `Some(false)` for Cancel, `None` while open.
+/// Cancel and `verb`, drawn in red. Enter does it, Escape
+/// cancels. Returns `Some(true)` for the verb, `Some(false)` for Cancel, `None` while open.
 pub fn confirm(
     ctx: &Context,
     id: &str,
@@ -119,10 +119,12 @@ pub fn confirm(
             }
         });
     });
-    if answer.is_none()
-        && ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape))
-    {
-        answer = Some(false);
+    if answer.is_none() {
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            answer = Some(true);
+        } else if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            answer = Some(false);
+        }
     }
     answer
 }
@@ -160,10 +162,10 @@ mod tests {
     }
 
     #[test]
-    fn enter_and_escape_cancel_a_confirmation() {
+    fn enter_confirms_and_escape_cancels_a_confirmation() {
         let ctx = Context::default();
         assert_eq!(frame(&ctx, Vec::new()), None);
-        assert_eq!(frame(&ctx, vec![key(egui::Key::Enter)]), Some(false));
+        assert_eq!(frame(&ctx, vec![key(egui::Key::Enter)]), Some(true));
         assert_eq!(frame(&ctx, vec![key(egui::Key::Escape)]), Some(false));
     }
 }
