@@ -172,7 +172,7 @@ solved:
 In frequency and buckle steps the eigenvalue iteration (shift-invert Lanczos) solves one
 system per iteration step. With #ui("Iterative") these are solved by conjugate gradients,
 which takes longer than with a factorization but fits large models into the memory. A
-frequency step needs no #ui("Lower frequency") bound for it; with one it solves directly.
+frequency step needs no frequency bound for it; with one it solves directly.
 Without a factorization there is no Sturm sequence check that no eigenvalue was missed;
 instead the iteration restarts with a fresh start vector until no new eigenvalue turns up
 among the wanted ones, which also finds the second copies of double eigenvalues (symmetric
@@ -274,14 +274,27 @@ Computes eigenfrequencies and mode shapes (`*FREQUENCY`). A frequency step takes
 #fields(
   [Base state], [#ui("Unloaded model") (default), or the state at the end of the step before
     with its prestress (@step-handover).],
-  [Number of eigenfrequencies], [Default 10.],
-  [Lower / Upper frequency bound], [Optional range of frequencies to compute.],
+  [Number of eigenfrequencies], [Default 10. Counted from the lower bound: the lowest
+    eigenfrequencies at or above it. Disabled while an upper bound is set.],
+  [Lower frequency bound], [Optional. Modes below it are left out and the number is filled
+    from above it: 10 eigenfrequencies from 1 Hz on a free body are 10 elastic modes, not the
+    6 rigid body modes dropped from the 10 lowest (CalculiX would return 4).],
+  [Upper frequency bound], [Optional. Computes every eigenfrequency between the lower bound
+    (or zero) and this one, however many there are; replaces the number of
+    eigenfrequencies.],
   [Store matrices and eigenmodes], [Writes the `.eig` file (`STORAGE=YES`).],
   [Nodal diameter range], [Only in cyclic symmetric models (@cyclic-symmetry): the nodal
     diameters to compute.],
   [Equation solver], [How the systems of the eigenvalue iteration are solved
     (@equation-solver).],
 )
+
+#screenshot("frequency-bounds.png", [A frequency step with both bounds: the upper bound
+  disables the number of eigenfrequencies])
+
+The bounds work by a shift of the eigenvalue iteration to the lower bound, and Sturm sequence
+counts at the bounds give the number of modes between them. Both need a factorization, so a
+step with a bound solves directly whatever #ui("Equation solver") says.
 
 Materials need a density in a frequency step.
 

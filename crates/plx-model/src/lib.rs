@@ -1280,11 +1280,13 @@ impl Base {
 /// Settings of a `*FREQUENCY` step, with the default values.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FrequencyStep {
-    /// Number of eigenfrequencies to compute.
+    /// Number of eigenfrequencies to compute, counted from the lower bound (modes below it,
+    /// rigid body modes say, are not among them). Unused with an upper bound.
     pub num_frequencies: u32,
-    /// Lower bound of the frequency range in cycles per time unit; `None` is CalculiX's 0.
+    /// Lower bound of the frequency range in cycles per time unit; `None` is 0.
     pub lower_frequency: Option<f64>,
-    /// Upper bound of the frequency range; `None` leaves it open.
+    /// Upper bound of the frequency range: every mode between the bounds is computed,
+    /// whatever [`Self::num_frequencies`] says; `None` leaves it open.
     pub upper_frequency: Option<f64>,
     /// Writes eigenvalues, mode shapes and the mass and stiffness matrices to the `.eig`
     /// file (`STORAGE=YES`).

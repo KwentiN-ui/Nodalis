@@ -164,6 +164,62 @@ impl ShiftInvertLanczos {
         count: usize,
         shift: f64,
     ) -> Result<EigenPairs> {
+        self.shifted_frequencies(k, m, count, shift, false)
+    }
+
+    /// `K x = λ M x`: the `count` smallest eigenvalues at or above `lower`, ascending, with
+    /// mass normalized vectors. Eigenvalues below the bound (the rigid body modes of a free
+    /// structure under a lower frequency bound, say) are not counted, unlike in
+    /// [`Self::frequencies`], which takes the nearest ones on both sides. Needs the direct
+    /// inner solver: `K − lower·M` is indefinite.
+    ///
+    /// The factor of `K − lower·M` tells by its inertia how many eigenvalues lie below the
+    /// bound. When those are few (no more than `count`), the nearest `count` plus them are
+    /// computed and the ones below dropped: they converge as fast as the wanted ones. When
+    /// there are more, the iteration keeps only the Ritz values right of the shift
+    /// (`θ = 1/(λ − σ) > 0`).
+    pub fn frequencies_above(
+        &mut self,
+        k: &SparseMatrix,
+        m: &SparseMatrix,
+        count: usize,
+        lower: f64,
+    ) -> Result<EigenPairs> {
+        if self.iterative.is_some() {
+            return Err(Error::Unsupported(
+                "a lower frequency bound needs the direct equation solver".into(),
+            ));
+        }
+        self.shifted_frequencies(k, m, count, lower, true)
+    }
+
+    /// Number of eigenvalues of `K x = λ M x` in `[lo, hi)` by two Sturm counts (two
+    /// factorizations of the direct solver).
+    pub fn count_between(
+        &mut self,
+        k: &SparseMatrix,
+        m: &SparseMatrix,
+        lo: f64,
+        hi: f64,
+    ) -> Result<usize> {
+        if hi <= lo {
+            return Ok(0);
+        }
+        self.solver.analyze(k.pattern())?;
+        let mut scratch = Vec::new();
+        let below_hi = self.count_below(k, m, hi, &mut scratch)?;
+        let below_lo = self.count_below(k, m, lo, &mut scratch)?;
+        Ok(below_hi.saturating_sub(below_lo))
+    }
+
+    fn shifted_frequencies(
+        &mut self,
+        k: &SparseMatrix,
+        m: &SparseMatrix,
+        count: usize,
+        shift: f64,
+        above: bool,
+    ) -> Result<EigenPairs> {
         let n = k.dimension();
         let count = count.min(n);
         if count == 0 {
@@ -215,8 +271,26 @@ impl ShiftInvertLanczos {
             other => other,
         })?;
         let below_shift = self.solver.inertia().unwrap_or(0);
+        // Eigenvalues left of a lower bound: computed along when few (and dropped after),
+        // otherwise left out of the iteration (see `frequencies_above`).
+        let along = if above && below_shift <= count {
+            below_shift
+        } else {
+            0
+        };
+        let right_only = above && along < below_shift;
+        let preference = move |theta: f64| {
+            if !right_only {
+                theta.abs()
+            } else if theta > 0.0 {
+                theta
+            } else {
+                -1e300 - theta
+            }
+        };
+        let fetch = (count + along).min(n);
         let mut scratch = vec![0.0; n];
-        let mut lanczos = Lanczos::new(n, self.basis_size(count), self.options.seed);
+        let mut lanczos = Lanczos::new(n, self.basis_size(fetch), self.options.seed);
         let mut rounds = 0;
         let (values, vectors) = loop {
             {
@@ -226,38 +300,59 @@ impl ShiftInvertLanczos {
                     solver.solve(y)
                 };
                 let b_mul = |x: &[f64], y: &mut [f64]| m.multiply(x, y);
-                lanczos.run(count, &mut op, &b_mul, |theta| theta.abs(), &self.options)?;
+                lanczos.run(fetch, &mut op, &b_mul, preference, &self.options)?;
             }
             let mut pairs: Vec<(f64, Vec<f64>)> = lanczos
-                .wanted(count, |theta| theta.abs())
+                .wanted(fetch, preference)
                 .into_iter()
                 .map(|(theta, x)| (shift + 1.0 / theta, x))
                 .collect();
             pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
             let values: Vec<f64> = pairs.iter().map(|p| p.0).collect();
 
-            // Sturm check: the number of eigenvalues in (lo, hi] must be `count`.
+            // Sturm check: the number of eigenvalues in (lo, hi] must be `fetch`; above a
+            // lower bound, in [bound, hi] the number of found ones there.
             let margin = |v: f64| v.abs().max(1e-300) * 1e-7 + f64::MIN_POSITIVE;
-            let hi = values[count - 1] + margin(values[count - 1]);
-            let below_hi = self.count_below(k, m, hi, &mut scratch)?;
-            let lo_value = values[0] - margin(values[0]);
-            let below_lo = if lo_value >= shift {
-                below_shift
+            let (actual, found) = if above {
+                let right: Vec<f64> = values.iter().copied().filter(|v| *v >= shift).collect();
+                // Fewer found right of the bound than wanted while more exist: missed ones.
+                let wanted_right = count.min(n - below_shift.min(n));
+                let deficit = wanted_right.saturating_sub(right.len());
+                if right.is_empty() {
+                    (deficit, 0)
+                } else {
+                    let last = right.len().min(count) - 1;
+                    let hi = right[last] + margin(right[last]);
+                    let below_hi = self.count_below(k, m, hi, &mut scratch)?;
+                    let found = right.iter().filter(|v| **v <= hi).count();
+                    (below_hi.saturating_sub(below_shift) + deficit, found)
+                }
             } else {
-                self.count_below(k, m, lo_value, &mut scratch)?
+                let last = values.len().min(fetch) - 1;
+                let hi = values[last] + margin(values[last]);
+                let below_hi = self.count_below(k, m, hi, &mut scratch)?;
+                let lo_value = values[0] - margin(values[0]);
+                let below_lo = if lo_value >= shift {
+                    below_shift
+                } else {
+                    self.count_below(k, m, lo_value, &mut scratch)?
+                };
+                // Everything the Sturm count sees in the interval must be among the found
+                // eigenvalues (the extra ones of earlier rounds included: a multiple
+                // eigenvalue at the upper end is found completely and then truncated).
+                let found = values
+                    .iter()
+                    .filter(|v| **v > lo_value && **v <= hi)
+                    .count();
+                (below_hi.saturating_sub(below_lo), found)
             };
-            let actual = below_hi.saturating_sub(below_lo);
-            // Everything the Sturm count sees in the interval must be among the found
-            // eigenvalues (the extra ones of earlier rounds included: a multiple eigenvalue
-            // at the upper end is found completely and then truncated).
-            let found = values
-                .iter()
-                .filter(|v| **v > lo_value && **v <= hi)
-                .count();
             if actual <= found || rounds >= self.options.max_sturm_rounds {
                 // The solver keeps the factor of the last Sturm count: refactorizing the
                 // shifted matrix would cost a factorization nobody uses.
                 let mut pairs = pairs;
+                if above {
+                    pairs.retain(|p| p.0 >= shift);
+                }
                 pairs.truncate(count);
                 lanczos.sturm_confirmed = actual == found;
                 break (
@@ -1087,6 +1182,64 @@ mod tests {
             assert!((v - e).abs() <= 1e-9, "{v} vs {e}");
         }
         assert!(pairs.sturm_confirmed);
+    }
+
+    /// The lowest `count` eigenvalues at or above `lower` of the sorted `exact` ones.
+    fn exact_above(exact: &[f64], lower: f64, count: usize) -> Vec<f64> {
+        exact
+            .iter()
+            .copied()
+            .filter(|v| *v >= lower)
+            .take(count)
+            .collect()
+    }
+
+    #[test]
+    fn a_lower_bound_inside_the_spectrum_finds_the_lowest_above_it() {
+        // Many eigenvalues below the bound: only the Ritz values right of it are kept.
+        let n = 200;
+        let (k, m) = chain(n, 1.0, 1.0);
+        let exact = exact_chain(n, 1.0, 1.0);
+        let lower = 1.05;
+        let mut solver = ShiftInvertLanczos::new(1, LanczosOptions::default());
+        let pairs = solver.frequencies_above(&k, &m, 6, lower).unwrap();
+        let wanted = exact_above(&exact, lower, 6);
+        assert_eq!(pairs.values.len(), 6);
+        for (v, e) in pairs.values.iter().zip(&wanted) {
+            assert!((v - e).abs() <= 1e-9, "{v} vs {e}");
+        }
+        assert!(pairs.sturm_confirmed);
+    }
+
+    #[test]
+    fn a_lower_bound_above_rigid_body_modes_skips_them() {
+        // A free chain: one rigid body mode at 0, then the elastic ones. Asking for 5 above
+        // a small bound gives 5 elastic modes, not the rigid one and 4 elastic ones.
+        let n = 300;
+        let (spring, mass) = (1000.0, 0.5);
+        let (mut k, m) = chain(n, spring, mass);
+        k.add(0, 0, -spring);
+        k.add(n as u32 - 1, n as u32 - 1, -spring);
+        let mut exact: Vec<f64> = (0..n)
+            .map(|j| {
+                spring / mass * (2.0 - 2.0 * (j as f64 * std::f64::consts::PI / n as f64).cos())
+            })
+            .collect();
+        exact.sort_by(f64::total_cmp);
+        let lower = 0.5 * exact[1];
+        let mut solver = ShiftInvertLanczos::new(1, LanczosOptions::default());
+        let pairs = solver.frequencies_above(&k, &m, 5, lower).unwrap();
+        let wanted = exact_above(&exact, lower, 5);
+        assert_eq!(pairs.values.len(), 5);
+        for (v, e) in pairs.values.iter().zip(&wanted) {
+            assert!((v - e).abs() <= 1e-8 * e, "{v} vs {e}");
+        }
+        assert!(pairs.sturm_confirmed);
+        // The Sturm count of a range gives the number of modes in it.
+        let inside = solver
+            .count_between(&k, &m, lower, exact[7] * 1.001)
+            .unwrap();
+        assert_eq!(inside, 7);
     }
 
     #[test]

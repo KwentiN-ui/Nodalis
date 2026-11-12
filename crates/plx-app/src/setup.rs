@@ -7381,17 +7381,36 @@ fn frequency_form(
     units: UnitSystem,
     cyclic_sectors: Option<u32>,
 ) {
-    ui.label("Number of eigenfrequencies");
-    expose::field(ui, Field::Modes, |ui| {
-        ui.add(numeric::drag_value(&mut settings.num_frequencies).range(1..=10_000))
+    // An upper bound takes every mode between the bounds; the number does not count then.
+    let counted = settings.upper_frequency.is_none();
+    ui.label("Number of eigenfrequencies").on_hover_text(
+        "The lowest eigenfrequencies at or above the lower bound (from zero without one), \
+         rigid body modes below the bound not among them. With an upper bound, every \
+         eigenfrequency between the bounds instead.",
+    );
+    ui.add_enabled_ui(counted, |ui| {
+        expose::field(ui, Field::Modes, |ui| {
+            ui.add(numeric::drag_value(&mut settings.num_frequencies).range(1..=10_000))
+        })
+        .on_disabled_hover_text("The upper frequency bound sets the number of eigenfrequencies.")
     });
     ui.end_row();
-    for (label, bound) in [
-        ("Lower frequency bound", &mut settings.lower_frequency),
-        ("Upper frequency bound", &mut settings.upper_frequency),
+    for (label, bound, hint) in [
+        (
+            "Lower frequency bound",
+            &mut settings.lower_frequency,
+            "The eigenfrequencies count from here: rigid body modes and other modes below \
+             it are left out, and the number of eigenfrequencies is filled from above it.",
+        ),
+        (
+            "Upper frequency bound",
+            &mut settings.upper_frequency,
+            "Computes every eigenfrequency between the lower bound (or zero) and this one; \
+             replaces the number of eigenfrequencies.",
+        ),
     ] {
         let mut set = bound.is_some();
-        ui.checkbox(&mut set, label);
+        ui.checkbox(&mut set, label).on_hover_text(hint);
         let mut value = bound.unwrap_or(0.0);
         ui.add_enabled(
             set,
