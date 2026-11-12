@@ -77,8 +77,8 @@ selection of the model.
     a lever arm. A system given in a moving base moves with the base.],
 )
 
-#screenshot("moving-coordinate-system.png", [A coordinate system bound to the free end of a
-  cantilever, given in a base system by offset and rotation])
+#screenshot("moving-coordinate-system.png", [A coordinate system bound to the end face of a
+  lever; a second one is given in it by offset and rotation and moves with it])
 
 A moving system is marked everywhere it appears: the tree shows it with an orange turning arrow
 and #ui("(moving)") after its name, the 3D view with an orange ring about its origin, and the
@@ -100,3 +100,6 @@ What moves with the system under large deformations (#ui("Nlgeom")):
   undeformed model. Material axes turn with the material under #ui("Nlgeom") anyway.
 
 Without #ui("Nlgeom") a moving system acts like a fixed one in the solver.
+
+#screenshot("moving-coordinate-system-results.png", [The lever bent under Nlgeom: both moving
+  systems are drawn where the end face took them, the fixed system #ui("Ground") stays])

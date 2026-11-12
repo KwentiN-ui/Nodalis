@@ -1404,9 +1404,18 @@ fn system_rows(
 
     // Fixed in space, or moving with a selection.
     let mut moves = system.attached.is_some();
+    // Without a selection of its own a system moves with a moving base.
+    let base_moves = (system.base)
+        .and_then(|id| systems.iter().find(|c| c.id == id))
+        .is_some_and(|base| base.moves(&systems));
     ui.label("Motion");
     crate::layout::wrapped_row(ui, |ui| {
-        ui.radio_value(&mut moves, false, "Fixed in space");
+        let own = if base_moves {
+            "With base system"
+        } else {
+            "Fixed in space"
+        };
+        ui.radio_value(&mut moves, false, own);
         ui.radio_value(&mut moves, true, "Moves with selection");
     });
     ui.end_row();

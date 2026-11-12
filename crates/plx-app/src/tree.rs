@@ -1563,6 +1563,7 @@ impl Tree<'_> {
             TreeItem::CoordinateSystem(i) if self.moving_systems.contains(i) => {
                 TreeIcon::MovingCoordinateSystem
             }
+            TreeItem::CoordinateSystem(_) => TreeIcon::CoordinateSystem,
             _ => dots,
         }
     }
