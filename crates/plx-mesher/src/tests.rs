@@ -2496,6 +2496,40 @@ fn solids_split_by_a_plane_become_a_compound_or_lose_a_side() {
     assert!((solid_volume(&rest) - 700.0).abs() < 1e-6);
 }
 
+/// The faces an earlier split cut have bounding boxes far larger than they are, so that
+/// a part beside the plane of the next split seems to lie across it: OpenCASCADE gives
+/// such a part back whole, and it must stay as it is.
+#[test]
+fn a_split_geometry_splits_again_with_parts_beside_the_plane() {
+    use plx_model::{CadOperationKind::SplitPlane, CoordinatePlane, SplitPlane as Plane};
+    if !gmsh_available() {
+        return;
+    }
+    // Two cubes of 10 mm, the second 20 mm further along y.
+    let input = with_signatures(Geometry {
+        compounds: Vec::new(),
+        ..made_geometry(|gmsh| {
+            gmsh.add_box([0.0; 3], [10.0; 3])?;
+            gmsh.add_box([0.0, 20.0, 0.0], [10.0; 3])?;
+            Ok(())
+        })
+    })
+    .unwrap();
+    let once = apply_operation(&input, &split(SplitPlane, 4.0), &[]).unwrap();
+    assert_eq!(part_names(&once).unwrap().len(), 4);
+    // Along the XZ plane at y = 5: the pieces of the first cube are cut, those of the
+    // second lie beside the plane, their cut faces reaching over it.
+    let across = plx_model::CadOperation {
+        plane: Plane::Global(CoordinatePlane::Xz),
+        ..split(SplitPlane, 5.0)
+    };
+    let twice = apply_operation(&once, &across, &[]).unwrap();
+    assert_eq!(part_names(&twice).unwrap().len(), 6);
+    assert!((solid_volume(&twice) - 2000.0).abs() < 1e-6);
+    let parts: usize = twice.compounds.iter().map(|c| c.parts.len()).sum();
+    assert_eq!(parts, 6);
+}
+
 #[test]
 fn shells_split_by_a_plane_stay_one_part() {
     use plx_model::{CadOperationKind::SplitPlane, SplitKeep};
