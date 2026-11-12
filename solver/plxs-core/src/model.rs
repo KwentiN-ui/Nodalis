@@ -22,6 +22,9 @@ pub struct Model {
     pub sets: Sets,
     pub materials: Vec<Material>,
     pub sections: Vec<Section>,
+    /// `*ORIENTATION`s of sections.
+    #[serde(default)]
+    pub orientations: Vec<crate::section::Orientation>,
     pub constraints: Constraints,
     pub contact: Contact,
     pub amplitudes: Vec<Amplitude>,
@@ -83,6 +86,10 @@ impl Model {
 
     pub fn material(&self, name: &str) -> Option<&Material> {
         self.materials.iter().find(|m| m.name == name)
+    }
+
+    pub fn orientation(&self, name: &str) -> Option<&crate::section::Orientation> {
+        self.orientations.iter().find(|o| o.name == name)
     }
 
     pub fn amplitude(&self, name: &str) -> Option<&Amplitude> {

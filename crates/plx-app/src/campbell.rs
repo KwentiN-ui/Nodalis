@@ -2371,6 +2371,7 @@ mod tests {
                 ..Default::default()
             }],
             sections: vec![plx_model::Section {
+                orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("Steel")),
                 region: plx_model::Region::Parts(vec!["EALL".into()]),
@@ -2533,6 +2534,7 @@ mod tests {
                 ..Default::default()
             }],
             sections: vec![plx_model::Section {
+                orientation: None,
                 name: "Shell-1".into(),
                 material: Some(polycarbonate),
                 region: plx_model::Region::Parts(vec!["DISC".into()]),

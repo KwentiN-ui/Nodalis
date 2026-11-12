@@ -70,6 +70,10 @@ impl FeModel {
                 crate::SectionKind::Truss { area } => c.value(area, Quantity::Area),
                 crate::SectionKind::Beam(_) => {}
                 crate::SectionKind::Solid => {}
+                crate::SectionKind::Infill(infill) => {
+                    c.value(&mut infill.wall_thickness, Quantity::Length);
+                    c.value(&mut infill.top_bottom_thickness, Quantity::Length);
+                }
             }
         }
         for cross_section in &mut self.cross_sections {
@@ -415,6 +419,17 @@ impl Material {
         if let Some(elastic) = &mut self.elastic {
             c.value(&mut elastic.young, Quantity::Pressure);
         }
+        match &mut self.anisotropic {
+            Some(crate::Anisotropic::Orthotropic(e)) => {
+                for value in [
+                    &mut e.e1, &mut e.e2, &mut e.e3, &mut e.g12, &mut e.g13, &mut e.g23,
+                ] {
+                    c.value(value, Quantity::Pressure);
+                }
+            }
+            Some(crate::Anisotropic::General(d)) => c.all(&mut d[..], Quantity::Pressure),
+            None => {}
+        }
         if let Some(hyper) = &mut self.hyperelastic {
             let kinds = hyper.model.parameters();
             for (value, parameter) in hyper.constants.iter_mut().zip(kinds) {
@@ -596,6 +611,7 @@ mod tests {
             ..Material::default()
         });
         model.sections.push(Section {
+            orientation: None,
             name: "Section-1".into(),
             material: model.materials.last().map(|m| m.id),
             region: Region::Parts(Vec::new()),

@@ -2235,6 +2235,7 @@ fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
         },
     };
     model.sections.push(plx_model::Section {
+        orientation: None,
         name: "Rope".into(),
         material: None,
         region: plx_model::Region::Parts(lines.clone()),

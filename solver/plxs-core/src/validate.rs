@@ -608,6 +608,7 @@ mod tests {
             kind: SectionKind::Solid {
                 material: "STEEL".into(),
                 thickness: None,
+                orientation: None,
             },
         });
         analysis
@@ -629,6 +630,7 @@ mod tests {
         analysis.model.sections[0].kind = SectionKind::Solid {
             material: "RUBBER".into(),
             thickness: None,
+            orientation: None,
         };
         analysis.steps[0].boundaries.push(crate::step::Boundary {
             region: NodeRef::Set("NOWHERE".into()),
@@ -658,6 +660,7 @@ mod tests {
         analysis.model.sections[0].kind = SectionKind::Solid {
             material: "RUBBER".into(),
             thickness: None,
+            orientation: None,
         };
         analysis.steps[0].boundaries.push(crate::step::Boundary {
             region: NodeRef::Set("NOWHERE".into()),

@@ -2391,14 +2391,62 @@ impl FeModel {
             s.kind.supports_loads() && (s.loads.iter()).any(|l| l.active && l.kind.is_body_force())
         });
         for (i, material) in self.materials.iter().enumerate() {
+            let core_of = |s: &crate::Section| match &s.kind {
+                crate::SectionKind::Infill(infill)
+                    if infill.pattern == crate::InfillPattern::Custom =>
+                {
+                    infill.core_material
+                }
+                _ => None,
+            };
             if !self
                 .sections
                 .iter()
-                .any(|s| s.material == Some(material.id))
+                .any(|s| s.material == Some(material.id) || core_of(s) == Some(material.id))
             {
                 continue;
             }
             let item = ModelItem::Material(i);
+            if let Some(anisotropic) = &material.anisotropic
+                && mechanical
+            {
+                let detail = if let Some(problem) = anisotropic.problem() {
+                    Some(format!("{}: {problem}", material.name))
+                } else if material.plastic.is_some()
+                    || material.creep.is_some()
+                    || material.hyperelastic.is_some()
+                {
+                    Some(format!(
+                        "{} is anisotropic and plastic, creeping or hyperelastic; \
+                         anisotropic elasticity takes none of them",
+                        material.name
+                    ))
+                } else if self.properties.space.is_2d() {
+                    Some(format!(
+                        "{} is anisotropic; anisotropic materials work in 3D models only",
+                        material.name
+                    ))
+                } else {
+                    (self.sections.iter())
+                        .find(|s| {
+                            s.material == Some(material.id)
+                                && s.kind != crate::SectionKind::Solid
+                                && !matches!(s.kind, crate::SectionKind::Infill(_))
+                        })
+                        .map(|s| {
+                            format!(
+                                "{} is anisotropic, but {} is a {} section; anisotropic \
+                                 materials work in solid sections only",
+                                material.name,
+                                s.name,
+                                s.kind.label().to_ascii_lowercase()
+                            )
+                        })
+                };
+                if let Some(detail) = detail {
+                    findings.push(Finding::new(item, Problem::InvalidElastic, detail));
+                }
+            }
             if let Some(hyper) = &material.hyperelastic
                 && mechanical
             {
@@ -2434,7 +2482,10 @@ impl FeModel {
                 }
             }
             match material.elastic.filter(|_| material.hyperelastic.is_none()) {
-                None if mechanical && material.hyperelastic.is_none() => {
+                None if mechanical
+                    && material.hyperelastic.is_none()
+                    && material.anisotropic.is_none() =>
+                {
                     findings.push(Finding::new(
                         item,
                         Problem::NoElastic,
@@ -2454,7 +2505,7 @@ impl FeModel {
                 && mechanical
             {
                 let detail = match plastic.invalid_row() {
-                    _ if material.elastic.is_none() => {
+                    _ if material.elastic.is_none() && material.anisotropic.is_none() => {
                         Some(format!("{} is plastic but not elastic", material.name))
                     }
                     Some(row) => Some(format!(
@@ -2472,7 +2523,7 @@ impl FeModel {
                 && mechanical
             {
                 let detail = match creep.problem() {
-                    _ if material.elastic.is_none() => {
+                    _ if material.elastic.is_none() && material.anisotropic.is_none() => {
                         Some(format!("{} creeps but is not elastic", material.name))
                     }
                     Some(problem) => Some(format!("{}: {problem}", material.name)),
@@ -4294,6 +4345,7 @@ mod tests {
         FeModel {
             materials: vec![steel],
             sections: vec![Section {
+                orientation: None,
                 name: "Section-1".into(),
                 material: Some(steel_id),
                 region: Region::Parts(mesh.parts.iter().map(|p| p.name.clone()).collect()),

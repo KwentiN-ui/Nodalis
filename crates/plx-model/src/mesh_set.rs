@@ -205,6 +205,7 @@ mod tests {
         // Renamed and changed: the old name is gone, regions follow.
         let before = fe.mesh_sets.clone();
         fe.sections.push(crate::Section {
+            orientation: None,
             name: "Section-1".into(),
             material: None,
             region: Region::ElementSet("All".into()),

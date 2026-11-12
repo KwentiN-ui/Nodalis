@@ -6,6 +6,7 @@
 //! file is written, so the user never has to define sets by hand.
 
 mod amplitude;
+mod anisotropic;
 mod bolt;
 mod cad_operation;
 pub mod campbell;
@@ -35,6 +36,7 @@ mod history;
 pub mod hyperelastic;
 pub mod hyperelastic_fit;
 mod id;
+pub mod infill;
 pub mod library;
 mod measure;
 mod mesh_operation;
@@ -112,6 +114,7 @@ pub use handover::Handover;
 pub use history::{HistoryKind, HistoryOutput, Totals};
 pub use hyperelastic::{Hyperelastic, HyperelasticModel, TestMode};
 pub use id::Id;
+pub use infill::{InfillPattern, InfillSection};
 pub use library::MaterialLibrary;
 pub use measure::{MeasureKind, MeasureRegion, POINT_AXES};
 pub use mesh_operation::{MeshOperation, MeshOperationKind};
@@ -184,8 +187,11 @@ use serde::{Deserialize, Serialize};
 /// Format 28 merges the concentrated, surface and body flux into one total heat flow
 /// ([`LoadKind::Flux`]); formats 21 to 27 read as they are unless a step has one of those
 /// loads. Format 29 adds the defeaturing of the CAD Operation block
-/// ([`CadOperationKind::Defeature`]); formats 21 to 28 read as they are.
-pub const PROJECT_FORMAT: u32 = 29;
+/// ([`CadOperationKind::Defeature`]); formats 21 to 28 read as they are. Format 30 adds
+/// anisotropic elasticity ([`Material::anisotropic`]), the orientation of sections
+/// ([`Section::orientation`]) and infill sections ([`SectionKind::Infill`]); formats 21 to
+/// 29 read as they are.
+pub const PROJECT_FORMAT: u32 = 30;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -463,6 +469,26 @@ impl FeModel {
         }
     }
 
+    /// The axes (rows, global coordinates) of a section's orientation: the material axes of
+    /// a solid section, the print axes of an infill section. `None` without an orientation
+    /// (the global axes); `Err` when its coordinate system is missing or not rectangular.
+    pub fn section_axes(&self, section: &Section) -> Result<Option<[[f64; 3]; 3]>, String> {
+        let Some(id) = section.orientation else {
+            return Ok(None);
+        };
+        let Some(system) = self.coordinate_system_or_global(Some(id)) else {
+            return Err("The coordinate system of the orientation does not exist".into());
+        };
+        if system.kind != CoordinateSystemKind::Rectangular {
+            return Err(format!(
+                "The orientation {} is cylindrical; material axes take a rectangular \
+                 coordinate system",
+                system.name
+            ));
+        }
+        system.axes().map(Some)
+    }
+
     /// The distributions some item uses.
     pub fn used_distributions(&self) -> std::collections::BTreeSet<Id> {
         let initial = self.initial_conditions.iter().map(|c| &c.distribution);
@@ -577,6 +603,10 @@ pub struct Material {
     /// Hyperelasticity: a strain energy model for large strains in place of `elastic`.
     #[serde(default)]
     pub hyperelastic: Option<Hyperelastic>,
+    /// Anisotropic linear elasticity in place of `elastic`, in the material axes 1, 2, 3
+    /// that a section's orientation puts into the model (the global x, y, z without one).
+    #[serde(default)]
+    pub anisotropic: Option<Anisotropic>,
     /// Thermal conductivity (`*CONDUCTIVITY`), for heat transfer.
     #[serde(default)]
     pub conductivity: Option<f64>,
@@ -598,10 +628,16 @@ impl Material {
     /// The elastic constants at small strains: the linear elasticity, or the initial moduli
     /// of a hyperelastic material.
     pub fn small_strain_elastic(&self) -> Option<Elastic> {
-        match &self.hyperelastic {
-            Some(hyper) => Some(hyper.small_strain()),
-            None => self.elastic,
+        match (&self.hyperelastic, &self.anisotropic) {
+            (Some(hyper), _) => Some(hyper.small_strain()),
+            (None, Some(anisotropic)) => anisotropic.isotropic_equivalent(),
+            (None, None) => self.elastic,
         }
+    }
+
+    /// Whether the material has any elasticity: linear, anisotropic or hyperelastic.
+    pub fn has_elasticity(&self) -> bool {
+        self.elastic.is_some() || self.hyperelastic.is_some() || self.anisotropic.is_some()
     }
 }
 
@@ -739,6 +775,11 @@ impl Default for Expansion {
         }
     }
 }
+
+pub use anisotropic::{
+    Anisotropic, EngineeringConstants, GENERAL_COMPONENTS, from_matrix as anisotropic_upper,
+    upper_index,
+};
 
 /// Linear isotropic elasticity.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -2753,6 +2794,7 @@ mod tests {
     fn regions_follow_renamed_parts() {
         let mut model = FeModel::default();
         model.sections.push(Section {
+            orientation: None,
             name: "Section-1".into(),
             material: None,
             region: Region::Parts(vec!["A".into(), "B".into()]),

@@ -13,6 +13,7 @@
 //! Conventions: strains are engineering strains `[xx, yy, zz, xy, yz, zx]` (γ for the shear
 //! components), stresses `[xx, yy, zz, xy, yz, zx]`; tangents act on engineering strains.
 
+pub mod anisotropic;
 pub mod finite;
 pub mod hyper;
 pub mod plane_stress;
@@ -21,6 +22,7 @@ pub mod plastic;
 use plxs_core::material::{Material, interpolate};
 use plxs_core::{Error, Result};
 
+pub use anisotropic::AnisotropicLinear;
 pub use finite::FiniteStrainJ2;
 pub use hyper::Hyperelastic;
 pub use plane_stress::PlaneStress;
@@ -50,10 +52,14 @@ pub struct LinearElastic {
 impl LinearElastic {
     /// The elastic constants of a material at `temperature`, interpolated in its
     /// `*ELASTIC` table; for a hyperelastic material the initial moduli of its strain
-    /// energy (what linear steps and small vibrations see).
+    /// energy (what linear steps and small vibrations see); for an anisotropic material
+    /// the Voigt average of its moduli ([`anisotropic::isotropic_equivalent`]).
     pub fn of(material: &Material, temperature: f64) -> Result<Self> {
         if let Some(hyper) = Hyperelastic::of(material)? {
             return Ok(hyper.initial());
+        }
+        if let Some(law) = AnisotropicLinear::of(material, None)? {
+            return Ok(anisotropic::isotropic_equivalent(&law.d));
         }
         let elastic = material.elastic.as_ref().ok_or_else(|| {
             Error::input(
@@ -242,6 +248,33 @@ pub fn law_of(
     temperature: f64,
     finite_strain: bool,
 ) -> Result<Box<dyn MaterialLaw>> {
+    law_in_axes(material, temperature, finite_strain, None)
+}
+
+/// [`law_of`] with the material axes of an orientation (rows: the unit axes in global
+/// coordinates), which the constants of an anisotropic material refer to; isotropic laws
+/// ignore them. Anisotropic elasticity is linear (Saint Venant-Kirchhoff under NLGEOM) and
+/// takes no plasticity or creep.
+pub fn law_in_axes(
+    material: &Material,
+    temperature: f64,
+    finite_strain: bool,
+    axes: Option<&[[f64; 3]; 3]>,
+) -> Result<Box<dyn MaterialLaw>> {
+    if let Some(law) = AnisotropicLinear::of(material, axes)? {
+        if material.plastic.is_some() || material.creep.is_some() || material.hyperelastic.is_some()
+        {
+            return Err(Error::input(
+                "*ELASTIC",
+                format!(
+                    "material {}: anisotropic elasticity cannot be combined with *PLASTIC, \
+                     *CREEP or *HYPERELASTIC",
+                    material.name
+                ),
+            ));
+        }
+        return Ok(Box::new(law));
+    }
     if let Some(hyper) = Hyperelastic::of(material)? {
         if material.plastic.is_some() || material.creep.is_some() {
             return Err(Error::input(

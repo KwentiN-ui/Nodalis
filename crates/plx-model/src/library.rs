@@ -42,6 +42,8 @@ pub struct Category {
     pub items: Vec<LibraryNode>,
 }
 
+// A library holds a few hundred nodes: the size of a material does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum LibraryNode {
     Category(Category),
