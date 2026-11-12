@@ -2070,6 +2070,8 @@ enum Action {
     /// The factor or the increment of a deformed mesh block changed in its block.
     SetDeformFactor(u64, f64),
     SetDeformIncrement(u64, f64),
+    /// A number of a transform block changed in its block, by its key.
+    SetTransformValue(u64, &'static str, f64),
 
     /// Make the mesh of a mesh block anew.
     Generate(u64),
@@ -3249,6 +3251,14 @@ impl ProjectApp {
                 Block::CadOperation(cad) => {
                     cad.body_print(driven(links::PARAMETERS, CAD_LENGTH), &mut print);
                 }
+                Block::Transform(block) => {
+                    for (key, _, _, value) in transform::transform_values(&block.transform) {
+                        print.add_str(key);
+                        if !driven(links::PARAMETERS, key) {
+                            print.add(&value.to_le_bytes());
+                        }
+                    }
+                }
                 Block::Parameters(parameters) => {
                     for parameter in &parameters.parameters {
                         print.add(format!("{}{:?}", parameter.name, parameter.kind).as_bytes());
@@ -3752,6 +3762,11 @@ impl ProjectApp {
             [cell, key] if cell == links::PARAMETERS && node.as_cad().is_some() => {
                 (key == CAD_LENGTH).then(|| node.as_cad().map(|c| c.operation.value))?
             }
+            [cell, key] if cell == links::PARAMETERS && node.as_transform().is_some() => {
+                (transform::transform_values(&node.as_transform()?.transform).into_iter())
+                    .find(|(k, ..)| k == key)
+                    .map(|(.., value)| value)
+            }
             [cell, key] if cell == links::PARAMETERS => match node.exposing_fe() {
                 Some(fe) => fe.value_at(&fe.exposed(key.parse().ok()?)?.path),
                 None => node.as_mesh()?.primitive.value(key),
@@ -3807,6 +3822,11 @@ impl ProjectApp {
                     [_, key] if node.as_measure().is_some() => {
                         if let Some(measure) = node.as_measure_mut() {
                             measure.kind.set_coordinate(key, value);
+                        }
+                    }
+                    [_, key] if node.as_transform().is_some() => {
+                        if let Some(block) = node.as_transform_mut() {
+                            transform::set_transform_value(&mut block.transform, key, value);
                         }
                     }
                     [_, key] if key == CAD_LENGTH && node.as_cad().is_some() => {
@@ -5925,6 +5945,7 @@ impl ProjectApp {
                         .as_deformed()
                         .map_or((1.0, 1), |d| (d.factor, d.increment)),
                     cad_length: n.as_cad().map_or(0.0, |c| c.operation.value),
+                    transform: n.as_transform().map(|t| t.transform),
                     point: n.as_measure().and_then(|m| m.kind.point()),
                     parameters: (n.as_parameters()).map_or_else(Vec::new, |p| p.parameters.clone()),
                     exposed: n.exposing_fe().map_or_else(Vec::new, ExposedView::of),
@@ -6342,6 +6363,10 @@ impl ProjectApp {
                     return;
                 }
             }
+        } else if part && (self.nodes.iter()).any(|n| n.id == target && n.kind() == Kind::Transform)
+        {
+            // The one pin of a transform block takes a part as a geometry.
+            vec![links::GEOMETRY.to_owned()]
         } else if value || part {
             slot
         } else {
@@ -6906,6 +6931,7 @@ impl ProjectApp {
             }
             if (self.nodes.iter()).any(|n| n.id == target && n.kind() == Kind::Transform) {
                 transform::take_transform_input(&mut self.nodes, &self.links, target);
+                self.retype_transform_links(target);
                 continue;
             }
             let to_target: Vec<Link> = (self.links.iter())
@@ -7552,6 +7578,7 @@ impl ProjectApp {
             | Action::AddDeformedMesh(_)
             | Action::SetDeformFactor(..)
             | Action::SetDeformIncrement(..)
+            | Action::SetTransformValue(..)
 
             | Action::AddMeshExport(_)
             | Action::AddCampbell(_)
@@ -7660,6 +7687,12 @@ impl ProjectApp {
             Action::SetDeformIncrement(id, value) => {
                 if let Some(block) = self.node(id).and_then(Node::as_deformed_mut) {
                     block.set_increment(value);
+                }
+                self.sync_due = true;
+            }
+            Action::SetTransformValue(id, key, value) => {
+                if let Some(block) = self.node(id).and_then(Node::as_transform_mut) {
+                    transform::set_transform_value(&mut block.transform, key, value);
                 }
                 self.sync_due = true;
             }
@@ -8485,6 +8518,8 @@ enum RowWidget {
     /// The factor and the increment of a deformed mesh block.
     DeformFactor,
     DeformIncrement,
+    /// A number of a transform block, by its index in [`transform::transform_values`].
+    TransformValue(usize),
     /// A coordinate of the point of a measure block, by axis.
     Coordinate(usize),
     /// A number of a parameters block, by its index.
@@ -8546,6 +8581,8 @@ struct BlockView {
     deform: (f64, u32),
     /// The length of a CAD operation block.
     cad_length: f64,
+    /// The transform of a transform block.
+    transform: Option<plx_mesh::MeshTransform>,
     /// The point of a measure block that measures at a point.
     point: Option<[f64; 3]>,
     /// The numbers of a parameters block.
@@ -9517,7 +9554,12 @@ fn refusal(
     if source == target {
         return Some(format!("{from} cannot take data from itself."));
     }
-    if !links::compatible(item, slot) {
+    // The one pin of a transform block takes a geometry, a part of one or a mesh.
+    let transformed = target_node.kind() == Kind::Transform
+        && matches!(slot, [cell] if transform::takes(cell))
+        && item.first().is_some_and(|c| transform::takes(c))
+        && item.len() <= 2;
+    if !transformed && !links::compatible(item, slot) {
         let kind = |path: &[String]| links::DataType::of(path).map_or("nothing", |t| t.label());
         return Some(format!(
             "{} of {from} is {} and {} of {to} takes {}.",
@@ -9747,6 +9789,11 @@ fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
                 DEFORM_INCREMENT => Some(ValueKind::Count),
                 _ => None,
             }
+        }
+        [cell, key] if cell == links::PARAMETERS && node.as_transform().is_some() => {
+            (transform::transform_values(&node.as_transform()?.transform).into_iter())
+                .find(|(k, ..)| k == key)
+                .map(|(_, _, kind, _)| kind)
         }
         [cell, key]
             if cell == links::PARAMETERS && key == CAD_LENGTH && node.as_cad().is_some() =>
@@ -10984,6 +11031,7 @@ impl Viewer {
         }
         let (units, space, refinement) = (block.units, block.space, block.refinement);
         let cad_length = block.cad_length;
+        let transform = block.transform;
         let deform = block.deform;
         let point = block.point;
         let parameters = block.parameters.clone();
@@ -11158,6 +11206,28 @@ impl Viewer {
                 }
                 return;
             }
+            RowWidget::TransformValue(index) => {
+                let Some((key, _, kind, before)) = (transform.as_ref())
+                    .and_then(|t| transform::transform_values(t).into_iter().nth(index))
+                else {
+                    return;
+                };
+                let mut value = before;
+                if kind == ValueKind::LENGTH {
+                    let drag = crate::numeric::quantity(&mut value, units, Quantity::Length);
+                    number_field(&mut ui, field, row, drag, &tip);
+                } else {
+                    let mut drag = crate::numeric::drag_value(&mut value).speed(0.01);
+                    if key == transform::ANGLE {
+                        drag = drag.suffix("°");
+                    }
+                    number_field(&mut ui, field, row, drag, &tip);
+                }
+                if value != before {
+                    (self.actions).push(Action::SetTransformValue(id, key, value));
+                }
+                return;
+            }
             RowWidget::Coordinate(axis) => {
                 let Some(point) = point else {
                     return;
@@ -11271,6 +11341,7 @@ impl Viewer {
             | RowWidget::DeformFactor
             | RowWidget::DeformIncrement
             | RowWidget::CadLength
+            | RowWidget::TransformValue(_)
             | RowWidget::Coordinate(_)
             | RowWidget::Value(_)
             | RowWidget::Exposed(_)
