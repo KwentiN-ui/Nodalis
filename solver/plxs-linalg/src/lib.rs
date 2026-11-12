@@ -34,5 +34,5 @@ pub use memory::available_memory;
 
 pub use eigen::{EigenPairs, EigenSolver, LanczosOptions, ShiftInvertLanczos};
 pub use pattern::{Pattern, SparseMatrix};
-pub use pcg::{PcgSolver, PcgStats};
+pub use pcg::{PcgProbe, PcgSolver, PcgStats};
 pub use solver::{LdltSolver, LinearSolver, OUT_OF_MEMORY, is_out_of_memory};

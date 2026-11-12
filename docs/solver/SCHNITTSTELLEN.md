@@ -1724,3 +1724,33 @@ Lösen 7,4 → 3,7 s (davon 0,9 s Suche), gesamt 14,3 → 10,3 s, Ergebnisse inn
 Toleranz (Verschiebung rel. 1e-8). Ohne Wirkung und ohne Kosten, weil nicht ausgelöst:
 Würfel C3D10 670 000 Gl. (17 Iterationen), Platten mit einer und zwei Schichten (63 und
 73), Balken C3D10 und C3D20R, Lifting Lug (Newton-Lösungen mit loser Toleranz).
+
+## Stand nach der Solverwahl aus Kostenschätzung (2026-11-12, Thread "Speed up plxs solver: block matrix, thin walls, solver choice")
+
+Vorschlag D des Architektur-Reviews: Die automatische Wahl (`Equations`, Modus
+Automatic) beginnt auf großen Systemen aus Translationen weiter iterativ, prüft aber
+nach `PROBE_AT` (30) Iterationen, ob sich das lohnt.
+
+- Die Vorhersage nimmt die kleinsten Residuen je Iteration und misst die Rate über die
+  zweite Hälfte der bisherigen Iterationen (`predicted_iterations` in `pcg.rs`). Die
+  ersten Residuen liegen auf steifen dünnen Teilen weit über dem Start (Streifen: Faktor
+  10⁵ nach der ersten Iteration) und würden die Rate verfälschen. Dieselbe Vorhersage
+  löst auch die Suche nach dem langsamen Bereich (C2) aus.
+- Sagt sie mehr als `PROBE_SUSPICIOUS` (120) Iterationen voraus, bricht die Lösung ab
+  (`PcgSolver::set_probe`, `take_probe`) und `Equations::weigh_probe` rechnet die
+  symbolische Analyse des Direktlösers: Zeit der Faktorisierung aus deren Gleitkomma-
+  operationen (`FACTOR_FLOPS_PER_THREAD`, 25e9 je Thread) und dem Speicher des Faktors
+  (`TOUCH_BYTES_PER_SECOND`, 1,4 GB/s), gegen die restlichen Iterationen mal der Zeit je
+  Iteration bisher. Ist der Direktlöser billiger und passt der Faktor in den Speicher,
+  übernimmt er für den Rest der Rechnung (wie beim Rückfall), sonst geht die Iteration
+  ohne Probe neu los. Die Abwägung läuft einmal je `Equations` und steht als Info im
+  Monitor.
+- Nur in der automatischen Wahl ohne vorherigen Rückfall; ausdrücklich iterativ oder
+  direkt gewählte Löser und lose Lösungen (Newton, GMRES) bleiben unberührt. Die Zeit der
+  Analyse (Ordnung) ist zum Zeitpunkt der Abwägung schon bezahlt und zählt nicht mit.
+
+Gemessen (4 Threads, ohne GPU): Streifen 442 000 Gl. (vorhergesagt 246 Iterationen,
+20,5 s; direkt geschätzt 1,3 s) gesamt 14,1 → 11,7 s; Streifen 167 000 Gl. 3,8 → 3,9 s
+(gewechselt, die Analyse mit 1,3 s frisst den Gewinn). Nicht ausgelöst: Bracket (27
+Iterationen mit C2), Würfel (17), Platten mit einer und zwei Schichten (63, 73), Balken
+(21).

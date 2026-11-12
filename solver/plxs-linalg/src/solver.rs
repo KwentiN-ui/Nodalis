@@ -180,6 +180,12 @@ impl LdltSolver {
         self.symbolic.as_ref().map(|s| s.len_val())
     }
 
+    /// Floating point operations of the factorization of the analyzed pattern, when the
+    /// analysis chose the supernodal structure (the large systems).
+    pub fn factor_flops(&self) -> Option<f64> {
+        self.tree.as_ref().map(|t| t.total_work())
+    }
+
     /// Replaces pivots smaller than `relative` times the largest diagonal entry by that
     /// value with the pivot's sign (dynamic regularization), for indefinite matrices.
     /// `0.0` switches it off (the default: a zero pivot is then an error).

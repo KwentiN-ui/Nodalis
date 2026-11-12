@@ -58,6 +58,25 @@ pub struct PcgStats {
     pub relative_residual: f64,
 }
 
+/// What a solve that stopped to be weighed against the direct solver saw (see
+/// [`PcgSolver::set_probe`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PcgProbe {
+    /// Iterations done when it stopped.
+    pub iterations: usize,
+    /// Iterations the whole solve would take at the rate so far.
+    pub predicted: usize,
+    /// Wall clock seconds per iteration so far.
+    pub seconds_per_iteration: f64,
+}
+
+/// The iteration at which a probing solve judges its rate (after the search for a slow
+/// region, see [`crate::patch`]).
+pub const PROBE_AT: usize = 30;
+
+/// A probing solve stops when its rate predicts more than this many iterations.
+pub const PROBE_SUSPICIOUS: usize = 120;
+
 /// Which preconditioner the solver builds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preconditioner {
@@ -110,6 +129,10 @@ pub struct PcgSolver {
     /// Whether a solve gives up early when the residual stalls ([`Stall`]): when another
     /// solver stands by.
     give_up_on_stall: bool,
+    /// Whether the next solves stop at [`PROBE_AT`] when they look slow.
+    probe: bool,
+    /// What the last solve that stopped saw.
+    probed: std::sync::Mutex<Option<PcgProbe>>,
     /// Iterations of the first solve after the hierarchy was built, and of the last
     /// solve (0: none yet); a factorization keeps the hierarchy while the count stays
     /// reasonable.
@@ -151,6 +174,8 @@ impl Default for PcgSolver {
             max_iterations: None,
             tolerance: TOLERANCE,
             give_up_on_stall: false,
+            probe: false,
+            probed: std::sync::Mutex::new(None),
             iterations_after_build: AtomicUsize::new(0),
             last_iterations: AtomicUsize::new(0),
             build_seconds: 0.0,
@@ -411,6 +436,19 @@ impl PcgSolver {
         self.give_up_on_stall = give_up;
     }
 
+    /// Lets the solves stop at [`PROBE_AT`] iterations when their rate predicts more
+    /// than [`PROBE_SUSPICIOUS`]: for a caller that weighs the rest of the iteration
+    /// against a direct solve. A solve that stops fails; [`Self::take_probe`] tells what
+    /// it saw.
+    pub fn set_probe(&mut self, probe: bool) {
+        self.probe = probe;
+    }
+
+    /// What the last solve that stopped for [`Self::set_probe`] saw, once.
+    pub fn take_probe(&self) -> Option<PcgProbe> {
+        self.probed.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
     /// Entries of the preconditioner, its memory in values.
     pub fn preconditioner_nonzeros(&self) -> Option<usize> {
         match &self.amg {
@@ -620,6 +658,11 @@ impl PcgSolver {
             }
         };
         let mut residual = 1.0;
+        // The smallest residual after each iteration since the start (or the restart with a
+        // slow region solved directly): that of conjugate gradients is not monotone, and
+        // on a stiff part the first ones lie far above that of the start (a factor 10⁵ on
+        // a thin strip).
+        let mut bests: Vec<f64> = Vec::new();
         let mut stall = Stall::new(self.give_up_on_stall);
         let (mut t_product, mut t_precondition, mut t_vectors) = (0.0, 0.0, 0.0);
         // The Lanczos tridiagonal of the preconditioned operator: its eigenvalues (Ritz
@@ -675,6 +718,7 @@ impl PcgSolver {
             axpy(alpha, &p, x);
             axpy(-alpha, &q, &mut r);
             residual = norm(&r) / b_norm;
+            bests.push(bests.last().map_or(residual, |b: &f64| b.min(residual)));
             tell(iteration, residual);
             if residual <= tolerance {
                 if trace {
@@ -778,8 +822,7 @@ impl PcgSolver {
             if iteration == crate::patch::CHECK_AT
                 && loose.is_none()
                 && deflation.is_none()
-                && residual > 0.0
-                && tolerance.ln() / residual.ln() * iteration as f64 > crate::patch::SLOW_ITERATIONS
+                && predicted_iterations(&bests, tolerance) > crate::patch::SLOW_ITERATIONS
                 && let Some(amg) = self.amg.as_ref().filter(|a| a.wants_patch())
                 && let Some(patch) = self.slow_region(trace)
             {
@@ -791,6 +834,28 @@ impl PcgSolver {
                 collect = false;
                 lanczos.clear();
                 ritz = RitzTrace::new(trace);
+                bests.clear();
+            }
+            if self.probe && iteration == PROBE_AT && loose.is_none() {
+                let predicted = predicted_iterations(&bests, tolerance);
+                if predicted > PROBE_SUSPICIOUS as f64 {
+                    let probe = PcgProbe {
+                        iterations: iteration,
+                        predicted: predicted.min(1e9) as usize,
+                        seconds_per_iteration: clock.elapsed().as_secs_f64() / iteration as f64,
+                    };
+                    if trace {
+                        eprintln!("pcg: probe {probe:?}");
+                    }
+                    *self.probed.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe);
+                    return Err(numerical(
+                        plxs_core::Failure::IterativeSolver,
+                        format!(
+                            "the iterative solver would take about {} iterations",
+                            probe.predicted
+                        ),
+                    ));
+                }
             }
         }
         if loose.is_some() && residual.is_finite() {
@@ -1943,6 +2008,24 @@ fn zip_mut(a: &mut [f64], b: &[f64], f: impl Fn(&mut f64, f64) + Sync + Send) {
     }
 }
 
+/// The iterations to the relative residual `tolerance` that the smallest residuals after
+/// each iteration so far (`bests`) predict, at their rate over the second half (the first
+/// iterations show the transient of the start); infinite when they do not fall.
+fn predicted_iterations(bests: &[f64], tolerance: f64) -> f64 {
+    let k = bests.len();
+    if k == 0 {
+        return f64::INFINITY;
+    }
+    let half = (k / 2).max(1);
+    let (last, before) = (bests[k - 1], bests[half - 1]);
+    let per_iteration = (last / before).ln() / (k - half).max(1) as f64;
+    if per_iteration < 0.0 && last > 0.0 {
+        k as f64 + (tolerance / last).ln().min(0.0) / per_iteration
+    } else {
+        f64::INFINITY
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1963,6 +2046,59 @@ mod tests {
         // Off: never.
         let mut stall = super::Stall::new(false);
         assert!((1..3000).all(|i| !stall.stalls(i, 10.0)));
+    }
+
+    #[test]
+    fn the_prediction_measures_the_rate_after_the_transient_of_the_start() {
+        // Up by 10⁵ in the first iteration, then a tenth every 10 iterations.
+        let bests: Vec<f64> = (1..=30)
+            .map(|i| 1e5 * 0.1f64.powf(i as f64 / 10.0))
+            .collect();
+        let predicted = predicted_iterations(&bests, 1e-8);
+        assert!((predicted - 130.0).abs() < 1.0, "{predicted}");
+        // No progress: never.
+        assert!(predicted_iterations(&[1.0; 30], 1e-8).is_infinite());
+        assert!(predicted_iterations(&[], 1e-8).is_infinite());
+        // There already.
+        assert_eq!(predicted_iterations(&[1.0, 1e-9], 1e-8), 2.0);
+    }
+
+    #[test]
+    fn a_probed_slow_solve_stops_and_tells_its_prediction() {
+        // A square grid of springs fixed at one corner: incomplete Cholesky takes some
+        // hundred iterations.
+        let m = 200u32;
+        let n = (m * m) as usize;
+        let blocks: Vec<[u32; 2]> = (0..m * m)
+            .flat_map(|i| {
+                let right = (i % m + 1 < m).then_some([i, i + 1]);
+                let up = (i + m < m * m).then_some([i, i + m]);
+                right.into_iter().chain(up)
+            })
+            .collect();
+        let pattern = Arc::new(Pattern::from_blocks(n, blocks.iter().map(|b| &b[..])));
+        let mut a = SparseMatrix::zeros(pattern);
+        for block in &blocks {
+            a.add_block(block, &[1.0, -1.0, -1.0, 1.0]);
+        }
+        a.add(0, 0, 1.0);
+        let b: Vec<f64> = (0..n).map(|i| ((i * 37) % 11) as f64 - 5.0).collect();
+        let mut pcg = PcgSolver::new();
+        pcg.set_preconditioner(Preconditioner::IncompleteCholesky);
+        pcg.analyze(a.pattern()).unwrap();
+        pcg.factorize(&a).unwrap();
+        pcg.set_probe(true);
+        let first = pcg.solve_counted(&mut b.clone());
+        assert!(first.is_err(), "{:?}", first.map(|s| s.iterations));
+        let probe = pcg.take_probe().expect("probed");
+        assert_eq!(probe.iterations, PROBE_AT);
+        assert!(probe.predicted > PROBE_SUSPICIOUS);
+        assert!(pcg.take_probe().is_none());
+        // Without the probe the same solve goes on to the end.
+        pcg.set_probe(false);
+        let mut x = b.clone();
+        let stats = pcg.solve_counted(&mut x).unwrap();
+        assert!(stats.iterations > PROBE_SUSPICIOUS);
     }
 
     use super::*;
