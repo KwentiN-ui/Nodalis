@@ -1428,6 +1428,9 @@ Was T15 gebaut hat:
   Budget). Gemessen (4 Threads): Würfel 36³ C3D8 NLGEOM direkt 60,1 → 32,5 s
   (Faktorisierung 47,8 → 14,2 s), Lifting Lug iterativ 52,6 → 39,5 s (Lösen 21,1 → 8,7 s),
   Newton-Iterationen jeweils unverändert, Ergebnisse innerhalb 1e-6.
+- Toleranz der linearen Statik (Quentin 2026-11-12): der iterative Löser hört in
+  `StaticLinear` bei `LINEAR_TOLERANCE = 1e-8` auf statt bei 1e-12. Bracket 591k: 82 statt
+  125 Iterationen, Spannungen innerhalb 4e-7.
 - Offen (p-Multigrid inzwischen umgesetzt, siehe "Stand nach dem Multigrid über die
   Eckknoten"): Blätter der
   Dissection per Minimum Degree statt Cuthill-McKee und ein mehrstufiger Partitionierer
