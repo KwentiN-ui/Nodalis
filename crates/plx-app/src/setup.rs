@@ -279,6 +279,9 @@ impl RegionDraft {
                 draft.point = Some(*point);
             }
         }
+        // An existing selection stays as it is until "..." is clicked: the Selection window
+        // does not open over it, where a click could overwrite it by accident.
+        draft.locked = draft.picks() && !draft.is_empty();
         draft
     }
 
@@ -7836,6 +7839,16 @@ fn infill_form(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_region_with_a_selection_starts_locked() {
+        let mesh = FeMesh::default();
+        let region = Region::Parts(["A".to_string()].into_iter().collect());
+        let draft = RegionDraft::from_region(&region, SOLID_SOURCES, Target::Faces, &mesh);
+        assert!(draft.locked && !draft.picks());
+        let empty = RegionDraft::new(SOLID_SOURCES, Target::Faces);
+        assert!(!empty.locked && empty.picks());
+    }
+
     #[test]
     fn a_locked_region_stops_picking_until_it_is_unlocked() {
         let mut region = RegionDraft::new(FACE_SOURCES, Target::Faces);
