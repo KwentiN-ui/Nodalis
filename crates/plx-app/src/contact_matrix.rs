@@ -167,8 +167,8 @@ pub fn window(
                                 ui.strong(name);
                             }
                             ui.end_row();
-                            for r in 0..n {
-                                ui.strong(&axes.names[r]);
+                            for (r, name) in axes.names.iter().enumerate() {
+                                ui.strong(name);
                                 for c in 0..n {
                                     if c < r {
                                         ui.label("");
