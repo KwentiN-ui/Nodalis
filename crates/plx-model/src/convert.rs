@@ -540,7 +540,10 @@ impl Geometry {
         for item in &mut self.mesh_items {
             match &mut item.kind {
                 MeshSetupKind::MeshingParameters { parameters, .. } => parameters.convert_units(c),
-                MeshSetupKind::LocalMeshSize { size, .. } => c.value(size, Quantity::Length),
+                MeshSetupKind::LocalMeshSize { size, depth, .. } => {
+                    c.value(size, Quantity::Length);
+                    c.value(depth, Quantity::Length);
+                }
                 MeshSetupKind::ThickenShellMesh(thicken) => {
                     c.value(&mut thicken.thickness, Quantity::Length);
                     c.value(&mut thicken.offset, Quantity::Length);

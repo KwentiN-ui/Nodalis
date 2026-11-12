@@ -2,9 +2,10 @@
 //! depth below the surface of the region that lies in the walls (perimeters on the sides,
 //! solid layers at top and bottom), and a material that mixes the printed material and the
 //! homogenized core by that share. The shares are rounded to [`LEVELS`] steps, so that a
-//! section writes at most `LEVELS + 1` materials.
+//! section writes at most `LEVELS + 1` materials. Faces on a symmetry plane are no surface:
+//! the part goes on beyond them.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 use plx_model::InfillSection;
@@ -12,12 +13,14 @@ use plx_model::InfillSection;
 /// Steps of the wall share between the core (0) and the wall (`LEVELS`).
 pub const LEVELS: u32 = 8;
 
-/// The elements of an infill region by their wall share in steps of `1 / LEVELS`.
+/// The elements of an infill region by their wall share in steps of `1 / LEVELS`. Faces
+/// whose corners are all `inside` (on a symmetry plane) are not printed surface.
 pub fn wall_levels(
     mesh: &FeMesh,
     elements: &[ElementId],
     infill: &InfillSection,
     build: [f64; 3],
+    inside: &HashSet<NodeId>,
 ) -> BTreeMap<u32, Vec<ElementId>> {
     let solids: Vec<&plx_mesh::Element> = (elements.iter())
         .filter_map(|&id| mesh.element(id))
@@ -39,7 +42,7 @@ pub fn wall_levels(
     let mut sides = Vec::new();
     let mut tops = Vec::new();
     for (count, corners) in faces.values() {
-        if *count != 1 || corners.len() < 3 {
+        if *count != 1 || corners.len() < 3 || corners.iter().all(|n| inside.contains(n)) {
             continue;
         }
         let p: Vec<[f64; 3]> = corners.iter().map(|&n| point(n)).collect();
@@ -220,6 +223,58 @@ fn point_triangle(p: [f64; 3], [a, b, c]: &[[f64; 3]; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn faces_on_a_symmetry_plane_are_no_walls() {
+        use plx_mesh::{Element, ElementShape};
+        // Unit cubes, 3 x 3 x 2; the middle one at the bottom touches the surface only below.
+        let mut mesh = FeMesh::default();
+        let id = |x: u32, y: u32, z: u32| 1 + x + 4 * y + 16 * z;
+        for z in 0..3 {
+            for y in 0..4 {
+                for x in 0..4 {
+                    mesh.set_node(id(x, y, z), [x as f64, y as f64, z as f64]);
+                }
+            }
+        }
+        let mut elements = Vec::new();
+        for z in 0..2 {
+            for y in 0..3 {
+                for x in 0..3 {
+                    let e = 1 + x + 3 * y + 9 * z;
+                    let nodes: [(u32, u32); 4] = [(0, 0), (1, 0), (1, 1), (0, 1)];
+                    let nodes: Vec<NodeId> = (0..2)
+                        .flat_map(|dz| nodes.map(|(dx, dy)| id(x + dx, y + dy, z + dz)))
+                        .collect();
+                    (mesh.add_element(Element {
+                        id: e,
+                        type_name: "C3D8".into(),
+                        shape: ElementShape::Hex8,
+                        nodes,
+                    }))
+                    .unwrap();
+                    elements.push(e);
+                }
+            }
+        }
+        let infill = InfillSection {
+            wall_thickness: 0.5,
+            top_bottom_thickness: 0.5,
+            ..InfillSection::DEFAULT
+        };
+        let level_of = |inside: &HashSet<NodeId>, element: ElementId| {
+            let levels = wall_levels(&mesh, &elements, &infill, [0.0, 0.0, 1.0], inside);
+            (levels.into_iter())
+                .find(|(_, list)| list.contains(&element))
+                .map(|(level, _)| level)
+                .unwrap()
+        };
+        let bottom: HashSet<NodeId> = (0..4)
+            .flat_map(|y| (0..4).map(move |x| id(x, y, 0)))
+            .collect();
+        assert!(level_of(&HashSet::new(), 5) > 0);
+        assert_eq!(level_of(&bottom, 5), 0);
+    }
 
     #[test]
     fn point_triangle_distances() {

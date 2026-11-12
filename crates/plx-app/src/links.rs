@@ -1669,6 +1669,7 @@ mod tests {
                 faces: vec![1],
                 edges: Vec::new(),
                 size: 0.5,
+                depth: 0.0,
             },
         });
         own.refinement = 2.0;
@@ -1722,6 +1723,7 @@ mod tests {
                     faces: vec![1, 2],
                     edges: Vec::new(),
                     size: 0.5,
+                    depth: 0.0,
                 },
             }],
             part_names: Vec::new(),

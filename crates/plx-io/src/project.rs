@@ -2069,6 +2069,7 @@ mod tests {
                         faces: vec![3, 4],
                         edges: vec![7],
                         size: 0.5,
+                        depth: 0.0,
                     },
                 },
                 MeshSetupItem {

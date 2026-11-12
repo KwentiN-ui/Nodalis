@@ -75,12 +75,19 @@ The sets and materials are internal and do not show in the model.
 
 #note[The walls are resolved by the mesh: an element at the surface that is much thicker than
 the wall gets the wall spread over its depth, which stiffens it less in bending than a thin
-wall at the surface would. Elements about as thick as the wall, or a finer mesh near the
-surface, give the best results. The infill is a smeared continuum: the stress in the core is the
-mean stress over a cell, not the stress in the infill walls.]
+wall at the surface would. Give the outer faces a #ui("Local Mesh Size") with an element size
+and a #ui("Depth") of about the wall thickness (@mesh-setup): the elements are then as thin as
+the wall at the surface and grow towards the core. The model check warns when the elements of
+an infill section are more than twice as large as its thinnest wall. The infill is a smeared
+continuum: the stress in the core is the mean stress over a cell, not the stress in the infill
+walls.]
 
-#limitation[Every face of the region is taken as a printed surface, also faces where the region
-meets another part through a tie or contact, or a plane of symmetry; split such parts only where
-the printed part has a surface. The core's stiffness is an estimate from the geometry of the
+Faces on a plane of a #ui("Symmetry") boundary condition are no printed surface: the part goes
+on beyond them, so the elements there keep the core. Contacts, ties and symmetry act on the
+mesh as with any other section.
+
+#limitation[Every other face of the region is taken as a printed surface, also faces where the
+region meets another part through a tie or contact; split such parts only where the printed part
+has a surface. The core's stiffness is an estimate from the geometry of the
 pattern; for a component that matters, check it against a printed specimen and enter measured
 values as a #ui("Custom core material").]

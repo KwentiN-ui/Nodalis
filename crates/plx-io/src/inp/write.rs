@@ -1807,6 +1807,17 @@ fn initial_conditions(
 
 /// The sections; infill sections add the materials of their elements to `materials`,
 /// oriented solid sections their orientations to `orientations`.
+/// The nodes on symmetry planes of the active steps, inside an infill part rather than on its
+/// printed surface.
+fn symmetry_nodes(mesh: &FeMesh, model: &FeModel) -> std::collections::HashSet<NodeId> {
+    (model.steps.iter())
+        .filter(|step| step.active)
+        .flat_map(|step| &step.boundary_conditions)
+        .filter(|bc| bc.active && matches!(bc.kind, BoundaryKind::Symmetry { .. }))
+        .flat_map(|bc| bc.region.nodes(mesh))
+        .collect()
+}
+
 fn sections(
     sets: &mut Sets,
     model: &FeModel,
@@ -1896,7 +1907,8 @@ fn sections(
                 if elements.is_empty() {
                     return Err(empty(&section.name, "elements"));
                 }
-                let levels = infill::wall_levels(sets.mesh, &elements, infill, axes[2]);
+                let inside = symmetry_nodes(sets.mesh, model);
+                let levels = infill::wall_levels(sets.mesh, &elements, infill, axes[2], &inside);
                 let core_density = match core_material {
                     Some(core) => core.density,
                     None => base.density.map(|rho| rho * infill.density),

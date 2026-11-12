@@ -385,7 +385,12 @@ fn local_mesh_sizes_refine_faces_and_edges() {
         .unwrap();
     let local = |faces: Vec<i32>, edges: Vec<i32>, size| MeshSetupItem {
         name: "Local_Mesh_Size-1".into(),
-        kind: MeshSetupKind::LocalMeshSize { faces, edges, size },
+        kind: MeshSetupKind::LocalMeshSize {
+            faces,
+            edges,
+            size,
+            depth: 0.0,
+        },
     };
     geometry.mesh_items = vec![local(vec![face], vec![], 1.0)];
     let on_face = count(&geometry);
@@ -402,6 +407,26 @@ fn local_mesh_sizes_refine_faces_and_edges() {
     // Tags of other parts or faces that do not exist change nothing.
     geometry.mesh_items = vec![local(vec![9999], vec![], 1.0)];
     assert_eq!(count(&geometry), coarse);
+    // A depth keeps the size in a layer below the face: more elements, and small ones
+    // inside the plate close to the face.
+    geometry.mesh_items = vec![local(vec![face], vec![], 1.0)];
+    let MeshSetupKind::LocalMeshSize { depth, .. } = &mut geometry.mesh_items[0].kind else {
+        unreachable!()
+    };
+    *depth = 3.0;
+    let in_depth = count(&geometry);
+    assert!(in_depth > on_face, "swept: {in_depth} vs {on_face}");
+    // With tetrahedra the layer fills the solid below the face.
+    geometry.meshing.hexahedra_where_possible = false;
+    let depth_item = geometry.mesh_items.clone();
+    geometry.mesh_items = vec![local(vec![face], vec![], 1.0)];
+    let on_face = count(&geometry);
+    geometry.mesh_items = depth_item;
+    let in_depth = count(&geometry);
+    assert!(
+        4 * in_depth > 5 * on_face,
+        "tetrahedra: {in_depth} vs {on_face}"
+    );
 }
 
 #[test]
@@ -784,6 +809,7 @@ fn edges_outside_faces_are_meshed_as_line_parts() {
             faces: vec![],
             edges: vec![14],
             size: 1.0,
+            depth: 0.0,
         },
     });
     let fine = generate_part_mesh(&geometry, "LINE-2").unwrap().mesh;
@@ -816,6 +842,7 @@ fn a_deleted_part_leaves_the_others_with_their_names_and_local_sizes() {
             faces: vec![first, second],
             edges: Vec::new(),
             size: 1.0,
+            depth: 0.0,
         },
     });
 
@@ -1008,6 +1035,7 @@ fn added_files_keep_the_old_parts_with_names_sizes_and_faces() {
             faces: vec![second],
             edges: Vec::new(),
             size: 1.0,
+            depth: 0.0,
         },
     });
     let (geometry, tags) = delete_part_renumbered(&geometry, "SOLID-1").unwrap();
@@ -1901,6 +1929,7 @@ fn picked_entities_are_found_in_changed_and_renumbered_shapes() {
             faces: vec![old_top.tag()],
             edges: Vec::new(),
             size: 0.5,
+            depth: 0.0,
         },
     }];
     assert_eq!(new.renumber_mesh_items(&tags), 0);
@@ -2743,6 +2772,7 @@ fn faces_get_quasi_structured_quadrilaterals_unless_an_algorithm_is_chosen() {
             faces: Vec::new(),
             edges: vec![hole],
             size: 0.5,
+            depth: 0.0,
         },
     });
     let refined = generate_mesh(&geometry).unwrap().mesh;
@@ -2950,6 +2980,7 @@ fn local_sizes_on_walls_and_rising_edges_refine_the_layers_of_a_stack() {
             faces: vec![wall],
             edges: Vec::new(),
             size: 2.0,
+            depth: 0.0,
         },
     }];
     let fine = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;

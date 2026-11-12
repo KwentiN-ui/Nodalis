@@ -148,7 +148,12 @@ triangles are then joined to quadrilaterals, which is faster and less regular.
   the clicked edge and the edges that continue it, #ui("Surface angle") the clicked face and
   the neighbouring faces that meet it at less than the angle, such as the pieces of a split
   cylinder. A box takes the faces inside it. The default size is a quarter of the maximum
-  element size.
+  element size. #ui("Depth") keeps the size inside the solid up to that distance below the
+  selected faces (and around the selected edges), so that a layer of that thickness gets
+  elements of the size, such as the walls of an infill section (@infill-section); beyond it
+  the elements grow to the size of the part. 0 (the default) refines the faces alone. In a
+  swept hexahedral mesh a depth below a cap refines the layers along the sweep, a depth below a
+  wall the face mesh next to it.
 / Tetrahedral Gmsh: chooses the Gmsh algorithms for selected parts. #ui("Surface algorithm"):
   Frontal-Delaunay (default), Delaunay, MeshAdapt or Automatic; on shells and 2D models it
   replaces the quasi-structured algorithm (@quad-faces). #ui("Volume algorithm"):

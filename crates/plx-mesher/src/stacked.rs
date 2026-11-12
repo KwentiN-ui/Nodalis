@@ -151,12 +151,21 @@ fn local_sizes_on_cells(
         )
     };
     let mut sizes = Vec::new();
-    for (faces, edges, size) in geometry.local_sizes() {
+    // A depth below a cap holds the size in the layers that far from it; below a wall, in
+    // the cells that far from its edges in the plane of the cells.
+    for (faces, edges, size, depth) in geometry.local_sizes() {
         let mut on_faces = BTreeSet::new();
         let mut on_edges = BTreeSet::new();
         for face in faces.iter().filter(|f| topology.faces.contains(f)) {
             if let Some(own) = cap_cells.get(face) {
                 on_faces.extend(own.iter().copied());
+                if depth > 0.0
+                    && let Some(&(min, max)) = topology.boxes.get(&(2, *face))
+                {
+                    let height = |p: [f64; 3]| dot(p, stack.direction);
+                    let (a, b) = (height(min), height(max));
+                    layer_sizes.push((a.min(b) - depth, a.max(b) + depth, size));
+                }
             } else if stack.walls.contains(face) {
                 if let Some(&(min, max)) = topology.boxes.get(&(2, *face)) {
                     let along = [0, 1].map(|side| {
@@ -204,6 +213,7 @@ fn local_sizes_on_cells(
                 faces: on_faces.into_iter().map(f64::from).collect(),
                 edges: on_edges.into_iter().map(f64::from).collect(),
                 size,
+                depth,
             });
         }
     }

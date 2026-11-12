@@ -1532,7 +1532,7 @@ fn line_part_mesh(
     }
     let options = MeshOptions::of_part(geometry, part);
     options.apply(gmsh)?;
-    for (_, local_edges, size) in geometry.local_sizes() {
+    for (_, local_edges, size, _) in geometry.local_sizes() {
         let on_wire: Vec<f64> = (wire.iter())
             .filter(|e| local_edges.contains(e))
             .map(|&e| f64::from(e))
@@ -1639,6 +1639,8 @@ pub(crate) struct LocalSize {
     pub faces: Vec<f64>,
     pub edges: Vec<f64>,
     pub size: f64,
+    /// The depth below the faces to which the size holds, 0 for the faces alone.
+    pub depth: f64,
 }
 
 /// The local mesh sizes of the mesh setup on the given faces and their edges.
@@ -1659,10 +1661,11 @@ fn local_sizes(
     };
     Ok(geometry
         .local_sizes()
-        .map(|(local_faces, local_edges, size)| LocalSize {
+        .map(|(local_faces, local_edges, size, depth)| LocalSize {
             faces: own(local_faces, faces),
             edges: own(local_edges, &edges),
             size,
+            depth,
         })
         .collect())
 }
@@ -1672,6 +1675,9 @@ fn local_sizes(
 /// [`MeshOptions::size_factor`]. Returns the fields made, to take them back with.
 fn size_fields(gmsh: &Gmsh, sizes: &[LocalSize], factor: f64) -> Result<Vec<i32>, GmshError> {
     let mut fields = Vec::new();
+    // The fields of sizes, which the background field takes the smallest of; `fields`
+    // also has the distances they are made from.
+    let mut size_list = Vec::new();
     for local in sizes {
         if local.size.is_nan()
             || local.size <= 0.0
@@ -1690,13 +1696,37 @@ fn size_fields(gmsh: &Gmsh, sizes: &[LocalSize], factor: f64) -> Result<Vec<i32>
         gmsh.set_field_number(field, "VOut", 1e22)?;
         gmsh.set_field_number(field, "IncludeBoundary", 1.0)?;
         fields.push(field);
+        size_list.push(field);
+        // Within the depth below the faces and around the edges the size holds in the
+        // volume as well: the distance to them, cut off at the depth.
+        if local.depth > 0.0 {
+            let distance = gmsh.add_field("Distance")?;
+            if !local.faces.is_empty() {
+                gmsh.set_field_numbers(distance, "SurfacesList", &local.faces)?;
+            }
+            if !local.edges.is_empty() {
+                gmsh.set_field_numbers(distance, "CurvesList", &local.edges)?;
+            }
+            gmsh.set_field_number(distance, "Sampling", distance_sampling(gmsh, local)?)?;
+            fields.push(distance);
+            let threshold = gmsh.add_field("Threshold")?;
+            gmsh.set_field_number(threshold, "InField", f64::from(distance))?;
+            gmsh.set_field_number(threshold, "SizeMin", local.size * factor)?;
+            gmsh.set_field_number(threshold, "SizeMax", 1e22)?;
+            gmsh.set_field_number(threshold, "DistMin", local.depth)?;
+            // A little beyond the depth, so that the threshold does not divide by zero.
+            gmsh.set_field_number(threshold, "DistMax", local.depth * (1.0 + 1e-6))?;
+            gmsh.set_field_number(threshold, "StopAtDistMax", 1.0)?;
+            fields.push(threshold);
+            size_list.push(threshold);
+        }
     }
-    let background = match fields.as_slice() {
+    let background = match size_list.as_slice() {
         [] => return Ok(fields),
         [field] => *field,
         _ => {
             let min = gmsh.add_field("Min")?;
-            let list: Vec<f64> = fields.iter().map(|&f| f64::from(f)).collect();
+            let list: Vec<f64> = size_list.iter().map(|&f| f64::from(f)).collect();
             gmsh.set_field_numbers(min, "FieldsList", &list)?;
             fields.push(min);
             min
@@ -1704,6 +1734,21 @@ fn size_fields(gmsh: &Gmsh, sizes: &[LocalSize], factor: f64) -> Result<Vec<i32>
     };
     gmsh.set_background_field(background)?;
     Ok(fields)
+}
+
+/// The points per direction a distance field samples the faces and edges of a local size
+/// by: enough for a tenth of the depth between them on the largest, within limits that keep
+/// the field fast.
+fn distance_sampling(gmsh: &Gmsh, local: &LocalSize) -> Result<f64, GmshError> {
+    let mut extent = 0.0_f64;
+    let entities = (local.faces.iter().map(|&f| (2, f))).chain(local.edges.iter().map(|&e| (1, e)));
+    for (dim, tag) in entities {
+        let (lo, hi) = gmsh.entity_bounding_box(dim, tag as i32)?;
+        for k in 0..3 {
+            extent = extent.max(hi[k] - lo[k]);
+        }
+    }
+    Ok((extent / (0.1 * local.depth)).clamp(20.0, 400.0).ceil())
 }
 
 /// Faces the quasi-structured algorithm is expected to give more quadrilaterals than this
