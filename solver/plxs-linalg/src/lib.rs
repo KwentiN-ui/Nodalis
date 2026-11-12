@@ -22,6 +22,7 @@ pub mod gmres;
 pub mod gpu;
 pub mod memory;
 pub mod ordering;
+mod patch;
 pub mod pattern;
 pub mod pcg;
 pub mod solver;

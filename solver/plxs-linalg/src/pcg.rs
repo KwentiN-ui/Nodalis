@@ -318,6 +318,39 @@ impl PcgSolver {
         Some(defl)
     }
 
+    /// The patch of the region the slow error of the hierarchy sits in: the error a few
+    /// cycles of the stationary iteration leave of a random one (see [`crate::patch`]);
+    /// `None` when it is not local.
+    fn slow_region(&self, trace: bool) -> Option<crate::patch::Patch> {
+        let unknowns = self.padded_unknowns();
+        let padding: Vec<bool> = (unknowns.as_ref())
+            .map(|u| u.component.iter().map(|&c| c == u8::MAX).collect())
+            .unwrap_or_default();
+        let amg = self.amg.as_ref()?;
+        let coordinates = unknowns.map(|u| u.coordinates);
+        // In rounds: the slow error stands out more with every cycle, as long as the
+        // contraction per cycle still grows.
+        let mut error = None;
+        let mut last_factor = 0.0;
+        for (round, &cycles) in crate::patch::TEST_ROUNDS.iter().enumerate() {
+            let (e, factor) = amg.test_error(&self.full, &padding, error.take(), cycles)?;
+            if trace {
+                eprintln!("pcg: test error contracts by {factor:.3} per cycle");
+            }
+            if let Ok(Some(patch)) =
+                crate::patch::Patch::find(&self.full, &e, coordinates.as_deref(), trace)
+            {
+                return Some(patch);
+            }
+            if factor < crate::patch::SLOW_CYCLE || (round > 0 && factor - last_factor < 0.02) {
+                return None;
+            }
+            last_factor = factor;
+            error = Some(e);
+        }
+        None
+    }
+
     /// Whether the matrix is stored in `3 × 3` blocks.
     pub fn is_blocked(&self) -> bool {
         self.full.br == 3
@@ -338,9 +371,13 @@ impl PcgSolver {
                     amg.nonzeros() as f64 / (2 * self.full.nnz().max(1)) as f64,
                     if self.reused { ", kept" } else { "" }
                 ) + &amg
-                    .placement()
-                    .map(|p| format!(", {p}"))
+                    .patch_size()
+                    .map(|n| format!(", direct solve of a slow region of {n} unknowns"))
                     .unwrap_or_default()
+                    + &amg
+                        .placement()
+                        .map(|p| format!(", {p}"))
+                        .unwrap_or_default()
             }
             None if self.shift.is_infinite() => {
                 "diagonal (incomplete Cholesky broke down)".to_owned()
@@ -554,7 +591,7 @@ impl PcgSolver {
         // The Lanczos vectors of the solve (single precision), from which the slowest
         // modes of the preconditioned operator are taken after it (see [`Deflation`]).
         let mut deflation = self.deflation.lock().unwrap_or_else(|e| e.into_inner());
-        let collect = deflation.is_none() && loose.is_none() && self.amg.is_some();
+        let mut collect = deflation.is_none() && loose.is_none() && self.amg.is_some();
         let mut lanczos: Vec<Vec<f32>> = Vec::new();
         if collect {
             lanczos.push(z.iter().map(|v| (v / rz.sqrt()) as f32).collect());
@@ -735,6 +772,26 @@ impl PcgSolver {
             rz = rz_new;
             // p = z + beta p
             zip_mut(&mut p, &z, |p, z| *p = z + beta * *p);
+            // A solve on its way to many iterations looks for the region its slow modes
+            // sit in and, when they are local, solves it directly in every cycle from
+            // here on (see [`crate::patch`]); the iteration starts again from its iterate.
+            if iteration == crate::patch::CHECK_AT
+                && loose.is_none()
+                && deflation.is_none()
+                && residual > 0.0
+                && tolerance.ln() / residual.ln() * iteration as f64 > crate::patch::SLOW_ITERATIONS
+                && let Some(amg) = self.amg.as_ref().filter(|a| a.wants_patch())
+                && let Some(patch) = self.slow_region(trace)
+            {
+                amg.set_patch(patch);
+                self.precondition(&r, &mut z)?;
+                rz = dot(&r, &z);
+                p.copy_from_slice(&z);
+                // The Lanczos relation does not hold across the restart.
+                collect = false;
+                lanczos.clear();
+                ritz = RitzTrace::new(trace);
+            }
         }
         if loose.is_some() && residual.is_finite() {
             finish(x);
