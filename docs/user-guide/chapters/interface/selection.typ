@@ -20,6 +20,13 @@ The #ui("...") button next to a field makes it the target of clicks in the 3D vi
 pressed while it is active. Dialogs with two regions (master and slave) use one #ui("...")
 button per region to switch between them.
 
+Next to #ui("...") a check mark button takes over the selection: it closes the #ui("Selection")
+window and clicks in the 3D view no longer change the region. Click #ui("...") again to pick on.
+The window stays open when the dialog opens for the first time. All dialogs with a region field
+behave this way, for parts as well as for picked nodes, faces and edges.
+
+#screenshot("region-confirm.png", [A region with the confirm button next to #ui("..."), while the selection window is open])
+
 === Selection window <selection-window>
 
 While a dialog picks, the #ui("Selection") window opens next to it and decides what a click

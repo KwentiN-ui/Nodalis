@@ -42,7 +42,7 @@ const TRANSFORM_KINDS: [(TransformKind, &str); 4] = [
 
 /// The values of every transform kind, so that switching the kind keeps what was typed.
 #[derive(Clone, Debug, PartialEq)]
-struct TransformDraft {
+pub(crate) struct TransformDraft {
     kind: TransformKind,
     translation: [f64; 3],
     point: [f64; 3],
@@ -55,7 +55,7 @@ struct TransformDraft {
 
 impl TransformDraft {
     /// The draft of a new transform: nothing moves yet.
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             kind: TransformKind::Translate,
             translation: [0.0; 3],
@@ -69,7 +69,7 @@ impl TransformDraft {
     }
 
     /// The draft of a transform there is; the other kinds keep their defaults.
-    fn of(transform: &MeshTransform) -> Self {
+    pub(crate) fn of(transform: &MeshTransform) -> Self {
         let mut draft = Self::new();
         match *transform {
             MeshTransform::Translate(d) => {
@@ -92,7 +92,7 @@ impl TransformDraft {
         draft
     }
 
-    fn transform(&self) -> MeshTransform {
+    pub(crate) fn transform(&self) -> MeshTransform {
         match self.kind {
             TransformKind::Translate => MeshTransform::Translate(self.translation),
             TransformKind::Rotate => MeshTransform::Rotate {
@@ -222,6 +222,12 @@ impl MeshToolDialog {
         let transform = &mut self.transform;
         scope.show(ui, |ui| transform_form(ui, transform, two_d, units));
         self.expose = Some(scope);
+        ui.label("");
+        ui.weak(
+            "Kept under Mesh > Mesh Operations: meshing the parts again applies it again; \
+             deleting it moves them back.",
+        );
+        ui.end_row();
     }
 
     fn title(&self) -> &'static str {
@@ -492,7 +498,12 @@ fn direction_row(ui: &mut Ui, direction: &mut [f64; 3], fields: [Field; 3], coun
     });
 }
 
-fn transform_form(ui: &mut Ui, draft: &mut TransformDraft, two_d: bool, units: UnitSystem) {
+pub(crate) fn transform_form(
+    ui: &mut Ui,
+    draft: &mut TransformDraft,
+    two_d: bool,
+    units: UnitSystem,
+) {
     ui.label("Kind");
     let label = TRANSFORM_KINDS
         .iter()
@@ -571,12 +582,6 @@ fn transform_form(ui: &mut Ui, draft: &mut TransformDraft, two_d: bool, units: U
             );
         }
     }
-    ui.label("");
-    ui.weak(
-        "Kept under Mesh > Mesh Operations: meshing the parts again applies it again; \
-         deleting it moves them back.",
-    );
-    ui.end_row();
 }
 
 #[cfg(test)]

@@ -962,10 +962,23 @@ impl PartPicks {
     /// them. `active` tells whether clicks in the 3D view pick parts for this row; returns
     /// whether the user wants them to.
     pub fn ui(&mut self, ui: &mut egui::Ui, active: bool) -> bool {
+        self.ui_locking(ui, active, None)
+    }
+
+    /// Like `ui`, with a button next to "..." that sets `locked` while the row is active.
+    pub fn ui_locking(
+        &mut self,
+        ui: &mut egui::Ui,
+        active: bool,
+        locked: Option<&mut bool>,
+    ) -> bool {
         let mut wanted = false;
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 wanted = crate::setup::pick_button(ui, active);
+                if let Some(locked) = locked {
+                    *locked |= crate::setup::confirm_button(ui, active);
+                }
                 let names: Vec<String> = self.names().into_iter().collect();
                 let label = match names.len() {
                     0 => "Empty".to_string(),

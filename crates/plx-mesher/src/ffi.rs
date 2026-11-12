@@ -105,6 +105,21 @@ gmsh_api! {
     set_visibility = "gmshModelSetVisibility": fn(*const c_int, usize, c_int, c_int, Ierr);
     occ_translate = "gmshModelOccTranslate":
         fn(*const c_int, usize, c_double, c_double, c_double, Ierr);
+    occ_rotate = "gmshModelOccRotate": fn(
+        *const c_int, usize,
+        c_double, c_double, c_double,
+        c_double, c_double, c_double,
+        c_double,
+        Ierr,
+    );
+    occ_mirror = "gmshModelOccMirror":
+        fn(*const c_int, usize, c_double, c_double, c_double, c_double, Ierr);
+    occ_dilate = "gmshModelOccDilate": fn(
+        *const c_int, usize,
+        c_double, c_double, c_double,
+        c_double, c_double, c_double,
+        Ierr,
+    );
     occ_affine_transform = "gmshModelOccAffineTransform":
         fn(*const c_int, usize, *const c_double, usize, Ierr);
     occ_intersect = "gmshModelOccIntersect": fn(

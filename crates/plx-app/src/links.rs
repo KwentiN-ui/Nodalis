@@ -106,6 +106,170 @@ impl MeshCopy {
     }
 }
 
+/// Meshes of several sources put together into one, in their order, for the Mesh row of an
+/// analysis that takes several mesh links. Node and element numbers of each mesh are
+/// shifted past those before it; parts, sets and surfaces whose names an earlier mesh has
+/// get "-2", "-3" …; `merged` is the geometry of all, put together from theirs, with the new
+/// tags of each one's CAD entities: without it, where one has no geometry, the meshes have
+/// none either. The parts stay as meshed, see [`MeshCopy::mesh_inputs`]. Returns the mesh with the renamings, by mesh, for the output.
+pub fn merge_meshes(
+    copies: Vec<MeshCopy>,
+    merged: Option<plx_mesher::MergedGeometry>,
+) -> (MeshCopy, Vec<BTreeMap<String, String>>) {
+    use plx_mesh::{Part, SurfaceDefinition};
+    use plx_model::Region;
+    use std::collections::BTreeSet;
+    let unique = |name: &str, used: &BTreeSet<String>| {
+        (1..)
+            .map(|n| {
+                if n == 1 {
+                    name.to_owned()
+                } else {
+                    format!("{name}-{n}")
+                }
+            })
+            .find(|c| !used.contains(c))
+            .unwrap_or_default()
+    };
+    let (geometry, tags, geometry_renamed) = match merged {
+        Some(m) => (Some(m.geometry), m.tags, m.renamed),
+        None => (None, Vec::new(), Vec::new()),
+    };
+    let mut mesh = FeMesh::default();
+    let mut out = MeshCopy {
+        geometry,
+        mesh: FeMesh::default(),
+        mesh_inputs: BTreeMap::new(),
+        mesh_sets: Vec::new(),
+        element_types: Vec::new(),
+        mesh_operations: Vec::new(),
+    };
+    let (mut parts_used, mut sets_used, mut ops_used) =
+        (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    let mut renamings = Vec::with_capacity(copies.len());
+    let (mut node_offset, mut element_offset) = (0, 0);
+    for (index, copy) in copies.into_iter().enumerate() {
+        let mut parts: BTreeMap<String, String> = BTreeMap::new();
+        for part in &copy.mesh.parts {
+            let wanted = (geometry_renamed.get(index))
+                .and_then(|r| r.get(&part.name))
+                .cloned()
+                .unwrap_or_else(|| part.name.clone());
+            let name = unique(&wanted, &parts_used);
+            parts_used.insert(name.clone());
+            parts.insert(part.name.clone(), name);
+        }
+        let part = |name: &String| parts.get(name).cloned().unwrap_or_else(|| name.clone());
+        let mut sets: BTreeMap<String, String> = BTreeMap::new();
+        let names = (copy.mesh.node_sets.keys())
+            .chain(copy.mesh.element_sets.keys())
+            .chain(copy.mesh.surfaces.keys())
+            .chain(copy.mesh_sets.iter().map(|s| &s.name));
+        for name in names.collect::<BTreeSet<_>>() {
+            let new = unique(name, &sets_used);
+            sets.insert(name.clone(), new);
+        }
+        sets_used.extend(sets.values().cloned());
+        let set = |name: &String| sets.get(name).cloned().unwrap_or_else(|| name.clone());
+        let (nodes, elements) = (node_offset, element_offset);
+        for (&id, &coords) in copy.mesh.node_ids().iter().zip(copy.mesh.coords()) {
+            mesh.set_node(id + nodes, coords);
+        }
+        for element in copy.mesh.elements() {
+            let _ = mesh.add_element(plx_mesh::Element {
+                id: element.id + elements,
+                nodes: element.nodes.iter().map(|n| n + nodes).collect(),
+                ..element.clone()
+            });
+        }
+        node_offset = mesh.node_ids().iter().copied().max().unwrap_or(0);
+        element_offset = mesh.elements().iter().map(|e| e.id).max().unwrap_or(0);
+        for p in &copy.mesh.parts {
+            mesh.parts.push(Part {
+                name: part(&p.name),
+                elements: p.elements.iter().map(|e| e + elements).collect(),
+                bodies: (p.bodies.iter())
+                    .map(|b| plx_mesh::Body {
+                        name: (geometry_renamed.get(index))
+                            .and_then(|r| r.get(&b.name))
+                            .cloned()
+                            .unwrap_or_else(|| b.name.clone()),
+                        elements: b.elements.iter().map(|e| e + elements).collect(),
+                    })
+                    .collect(),
+            });
+        }
+        for (name, ids) in &copy.mesh.node_sets {
+            (mesh.node_sets).insert(set(name), ids.iter().map(|n| n + nodes).collect());
+        }
+        for (name, ids) in &copy.mesh.element_sets {
+            (mesh.element_sets).insert(set(name), ids.iter().map(|e| e + elements).collect());
+        }
+        for (name, surface) in &copy.mesh.surfaces {
+            let surface = match surface {
+                SurfaceDefinition::ElementFaces(faces) => SurfaceDefinition::ElementFaces(
+                    faces.iter().map(|&(e, f)| (e + elements, f)).collect(),
+                ),
+                SurfaceDefinition::Nodes(ids) => {
+                    SurfaceDefinition::Nodes(ids.iter().map(|n| n + nodes).collect())
+                }
+            };
+            mesh.surfaces.insert(set(name), surface);
+        }
+        let entity_tags = tags.get(index);
+        if let Some(entity_tags) = entity_tags {
+            mesh.cad.extend(
+                copy.mesh
+                    .cad
+                    .offset(nodes, elements)
+                    .renumbered(entity_tags),
+            );
+        }
+        // No mesh inputs: the parts stay as they are, like parts read from an input file,
+        // and are out of date only with the meshes they come from.
+        for mut set_item in copy.mesh_sets {
+            set_item.name = set(&set_item.name);
+            set_item.region = match set_item.region {
+                Region::Parts(names) => Region::Parts(names.iter().map(part).collect()),
+                Region::Nodes(ids) => Region::Nodes(ids.iter().map(|n| n + nodes).collect()),
+                Region::Faces(faces) => {
+                    Region::Faces(faces.iter().map(|&(e, f)| (e + elements, f)).collect())
+                }
+                Region::Edges(edges) => {
+                    Region::Edges(edges.iter().map(|e| e.map(|n| n + nodes)).collect())
+                }
+                Region::NodeSet(name) => Region::NodeSet(set(&name)),
+                Region::ElementSet(name) => Region::ElementSet(set(&name)),
+                Region::Surface(name) => Region::Surface(set(&name)),
+                Region::Geometry(entities) => Region::Geometry(
+                    (entities.iter())
+                        .filter_map(|e| entity_tags.and_then(|t| t.get(e)).copied())
+                        .collect(),
+                ),
+                other => other,
+            };
+            out.mesh_sets.push(set_item);
+        }
+        for mut element_type in copy.element_types {
+            element_type.part = part(&element_type.part);
+            out.element_types.push(element_type);
+        }
+        for mut operation in copy.mesh_operations {
+            let name = unique(&operation.name, &ops_used);
+            ops_used.insert(name.clone());
+            operation.name = name;
+            operation.parts = operation.parts.iter().map(part).collect();
+            out.mesh_operations.push(operation);
+        }
+        let mut renamed: BTreeMap<String, String> =
+            parts.into_iter().filter(|(a, b)| a != b).collect();
+        renamed.extend(sets.into_iter().filter(|(a, b)| a != b));
+        renamings.push(renamed);
+    }
+    out.mesh = mesh;
+    (out, renamings)
+}
+
 /// The path as text, as the output pane names it: "Setup > Materials > Steel".
 pub fn label(path: &[String]) -> String {
     path.join(" > ")
@@ -209,6 +373,12 @@ pub fn is_bundle(link: &Link) -> bool {
 /// the setup. Every other row takes one, and a new wire replaces the old.
 pub fn is_collection(path: &[String]) -> bool {
     matches!(path, [cell, category] if cell == SETUP && CATEGORIES.contains(&category.as_str()))
+}
+
+/// Whether the row of `path` puts the geometries or meshes of several links together when it
+/// is a row of an analysis: its Geometry and its Mesh row.
+pub fn assembles(path: &[String]) -> bool {
+    matches!(path, [cell] if cell == GEOMETRY || cell == MESH)
 }
 
 /// The category of the setup a link of a category or of one of its items fills.
@@ -1405,6 +1575,64 @@ pub struct Incoming {
 mod tests {
     use super::*;
     use plx_model::{BoundaryCondition, Material, Region, Step};
+
+    #[test]
+    fn meshes_put_together_keep_their_own_nodes_and_names() {
+        use plx_mesh::{Element, ElementShape, Part};
+        let tet = |offset: f64, set: &str| {
+            let mut mesh = FeMesh::default();
+            for (i, p) in [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+            .iter()
+            .enumerate()
+            {
+                mesh.set_node(i as u32 + 1, [p[0] + offset, p[1], p[2]]);
+            }
+            mesh.add_element(Element {
+                id: 1,
+                type_name: "C3D4".into(),
+                shape: ElementShape::Tet4,
+                nodes: vec![1, 2, 3, 4],
+            })
+            .unwrap();
+            mesh.parts.push(Part::new("BLOCK", vec![1]));
+            mesh.node_sets.insert(set.into(), vec![1, 2]);
+            MeshCopy {
+                geometry: None,
+                mesh,
+                mesh_inputs: BTreeMap::from([("BLOCK".to_owned(), 7)]),
+                mesh_sets: vec![plx_model::MeshSet::new(
+                    set,
+                    plx_model::SetKind::Nodes,
+                    Region::Nodes(vec![1, 2]),
+                )],
+                element_types: vec![plx_model::PartElementType {
+                    part: "BLOCK".into(),
+                    type_name: "C3D4".into(),
+                }],
+                mesh_operations: Vec::new(),
+            }
+        };
+        let (merged, renamed) = merge_meshes(vec![tet(0.0, "FIX"), tet(5.0, "FIX")], None);
+        let mesh = &merged.mesh;
+        assert_eq!(mesh.node_ids(), [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(mesh.elements()[1].nodes, [5, 6, 7, 8]);
+        let names: Vec<&str> = mesh.parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["BLOCK", "BLOCK-2"]);
+        assert_eq!(mesh.parts[1].elements, [2]);
+        assert_eq!(mesh.node_sets["FIX-2"], [5, 6]);
+        assert_eq!(merged.mesh_sets[1].name, "FIX-2");
+        assert_eq!(merged.mesh_sets[1].region, Region::Nodes(vec![5, 6]));
+        assert_eq!(merged.element_types[1].part, "BLOCK-2");
+        // Parts as meshed: not out of date with a geometry of their own.
+        assert!(merged.mesh_inputs.is_empty());
+        assert!(renamed[0].is_empty());
+        assert_eq!(renamed[1]["BLOCK"], "BLOCK-2");
+    }
 
     fn path(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|p| p.to_string()).collect()

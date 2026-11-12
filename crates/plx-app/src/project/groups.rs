@@ -1076,7 +1076,9 @@ impl ProjectApp {
             return;
         }
         // A pin of a single value takes one wire, the new one.
-        if self.nodes.is_real(&to) && !links::is_collection(&to.path) {
+        let assembly =
+            links::assembles(&to.path) && self.nodes.kind_of(to.node) == Some(Kind::Analysis);
+        if self.nodes.is_real(&to) && !links::is_collection(&to.path) && !assembly {
             let pin = to.clone();
             self.nodes.forget_pins(|p| *p == pin);
             let here = self.nodes.parents().get(&to.node).copied();
