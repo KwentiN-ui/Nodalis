@@ -1411,6 +1411,26 @@ Was T15 gebaut hat:
   (Schalen, Balken), Eigenwertiteration und implizite Dynamik
   (`Equations::preferring_direct`, eine Faktorisierung für viele Systeme) sowie kleine
   Modelle bleiben bei der Speicherregel.
+- Newton und Gleichungslöser gekoppelt (2026-11-12, `NonlinearStatic`): (1) Inexaktes
+  Newton-Verfahren: vor jeder Lösung setzt die Prozedur über `Equations::set_tolerance` die
+  relative Toleranz der linearen Lösung auf `0,1 · residual · Kraftmaß / Restkraft`
+  (`FORCING_SHARE`, begrenzt auf 1e-10 bis 1e-3); ohne Kraftmaß volle Genauigkeit. Der
+  iterative Löser nimmt sie über `PcgSolver::set_tolerance`, seine Zähler für die
+  Wiederverwendung der Hierarchie sind auf 12 Stellen normiert. `PLXS_INEXACT_NEWTON=0`
+  schaltet ab. (2) Gehaltene Faktorisierung (`Equations::keeping_factors`,
+  `PLXS_KEEP_FACTOR=0` schaltet ab): im direkten Pfad wird eine Tangente mit gleichem
+  Besetzungsmuster nicht neu faktorisiert, sondern mit konjugierten Gradienten gelöst, die
+  Faktorisierung einer früheren Tangente ist der Vorkonditionierer. Die Lösung gehört zur
+  aktuellen Tangente (volles Newton). Neu faktorisiert wird, wenn eine Lösung mehr
+  Iterationen brauchte als etwa eine halbe Faktorisierung wert ist
+  (`√Faktor-Nichtnullen / KEPT_FACTOR_SOLVES`, gezählt statt gemessen, damit ein Lauf sich
+  wiederholt), und sofort, wenn die Iteration scheitert (indefinite Tangente, doppeltes
+  Budget). Gemessen (4 Threads): Würfel 36³ C3D8 NLGEOM direkt 60,1 → 32,5 s
+  (Faktorisierung 47,8 → 14,2 s), Lifting Lug iterativ 52,6 → 39,5 s (Lösen 21,1 → 8,7 s),
+  Newton-Iterationen jeweils unverändert, Ergebnisse innerhalb 1e-6.
+- Toleranz der linearen Statik (Quentin 2026-11-12): der iterative Löser hört in
+  `StaticLinear` bei `LINEAR_TOLERANCE = 1e-8` auf statt bei 1e-12. Bracket 591k: 82 statt
+  125 Iterationen, Spannungen innerhalb 4e-7.
 - Offen (p-Multigrid inzwischen umgesetzt, siehe "Stand nach dem Multigrid über die
   Eckknoten"): Blätter der
   Dissection per Minimum Degree statt Cuthill-McKee und ein mehrstufiger Partitionierer

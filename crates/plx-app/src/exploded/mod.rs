@@ -399,8 +399,8 @@ impl Assembly<'_> {
         }
         let mut groups: Vec<Vec<usize>> = Vec::new();
         let mut group_of = vec![usize::MAX; self.parts.len()];
-        for (part, piece) in self.parts.iter().enumerate() {
-            if piece.nodes.is_empty() {
+        for (part, body) in self.parts.iter().enumerate() {
+            if body.nodes.is_empty() {
                 continue;
             }
             let root = find(&mut parent, part);
