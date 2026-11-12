@@ -207,6 +207,8 @@ struct Workbench {
     history_tables: Vec<HistoryTable>,
     /// Diagram of a table selection.
     history_plot: Option<crate::xy_plot::XyData>,
+    /// The tables `history_plot` was made from, so it follows new results.
+    history_plot_sources: Vec<HistoryTable>,
     /// The tree selection whose region is highlighted.
     /// `None` until it is computed, so a dialog's highlight is cleared once it closes.
     highlighted: Option<TreeSelection>,
@@ -360,6 +362,7 @@ impl AnalysisWindow {
                 history_dialog: None,
                 history_tables: Vec::new(),
                 history_plot: None,
+                history_plot_sources: Vec::new(),
                 highlighted: None,
                 analysis: None,
                 project_run: None,
@@ -4817,6 +4820,18 @@ impl Workbench {
     }
 
     fn history_table_window(&mut self, ctx: &egui::Context) {
+        // The open plot follows new results as the one in the 3D view does.
+        if let Some(data) = &mut self.history_plot
+            && !self.history_plot_sources.is_empty()
+            && let Some(view) =
+                (self.results.get(self.current_result)).and_then(|m| m.results.as_ref())
+            && let Some(mut fresh) = crate::history_table::replot(&self.history_plot_sources, view)
+        {
+            if data.x_axis < fresh.x_axes.len() && data.x_axes.len() == fresh.x_axes.len() {
+                fresh.choose_x_axis(data.x_axis);
+            }
+            *data = fresh;
+        }
         if let Some(data) = &mut self.history_plot {
             let mut model = match self.tree_view {
                 TreeView::Results => self.results.get_mut(self.current_result),
@@ -4838,11 +4853,14 @@ impl Workbench {
             if response.toggle_view
                 && let Some(model) = model
             {
+                let sources = self.history_plot_sources.clone();
                 match model.path_plots.iter().position(|p| p.is_table(data)) {
                     Some(index) => {
                         model.path_plots.remove(index);
                     }
-                    None => model.path_plots.push(PathPlot::table(data.clone())),
+                    None => model
+                        .path_plots
+                        .push(PathPlot::table(data.clone(), sources)),
                 }
             }
             match response.export {
@@ -4920,7 +4938,13 @@ impl Workbench {
         if let Some(index) = plot_from {
             let all: Vec<&HistoryTable> = tables.iter().collect();
             match crate::history_table::plot(&all, &view.history, kind, places) {
-                Ok(data) => self.history_plot = Some(data),
+                Ok(data) => {
+                    self.history_plot = Some(data);
+                    self.history_plot_sources = (tables.iter())
+                        .filter(|t| !t.selection.columns.is_empty())
+                        .cloned()
+                        .collect();
+                }
                 Err(message) => tables[index].message = Some(message),
             }
         }
@@ -6393,6 +6417,12 @@ impl Workbench {
             }
             path_plot::PlotKind::Table => true,
         });
+        // Plots of history tables follow new results.
+        if let Some(view) = &model.results {
+            for plot in plots.iter_mut() {
+                plot.refresh_table(view);
+            }
+        }
         let boxes = (plots.iter_mut().enumerate())
             .filter_map(|(index, plot)| match plot.kind {
                 path_plot::PlotKind::Path => {

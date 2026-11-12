@@ -2601,6 +2601,7 @@ mod tests {
                 x_label: "Increment".into(),
                 x: vec![1.0, 2.0, 3.0],
                 curves: vec![("12_1".into(), vec![0.5, f64::NAN, 1.5])],
+                sources: Vec::new(),
             }),
         };
         let saved = ron::to_string(&plot).unwrap();

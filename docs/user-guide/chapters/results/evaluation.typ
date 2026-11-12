@@ -163,8 +163,10 @@ grid and legend, for reports in good print quality.
 path plot (see @paths): it stays after the window is closed and appears in screenshots. Drag the box
 to move it and its bottom right corner to resize it. #ui("Edit ...") in its context menu, or a
 double-click, opens #ui("Edit Annotation") for the title, the axis labels and a fixed value range;
-#ui("Delete"), or #ui("Remove from View") in the plot window, removes it. The plot keeps the values
-it was made from; with results kept with the project (@bind-result) it is saved with them.
+#ui("Delete"), or #ui("Remove from View") in the plot window, removes it. The plot remembers the
+columns it was made from and follows the history: when the analysis is solved again, or new
+increments arrive while it runs, the curves are drawn anew. With results kept with the project
+(@bind-result) the plot is saved with them and keeps following.
 
 #screenshot("table-plot-in-view.png", [Displacements of two nodes over time, plotted from their
   table and shown in the 3D view])
