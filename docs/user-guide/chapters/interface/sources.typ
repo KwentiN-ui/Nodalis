@@ -463,11 +463,16 @@ A Transform block moves the geometry or the mesh linked to it as a whole and giv
 #ui("Translate") by a vector, #ui("Rotate") by an angle about an axis through a point,
 #ui("Mirror") at a plane through a point, or #ui("Scale") about a center by a factor per axis,
 the same transforms as the Transform of mesh parts under FE Model (@mesh-tools). Add it
-with #menu("Modify", "Transform") or from the picker, drag the #ui("Geometry") or the
-#ui("Mesh") of a file block, an analysis, a CAD Operation or another block to the pin on the
-left of the row of that kind, and drag the pin on the right of the same row on to analyses.
-Double-click the block to choose the transform and its numbers; the last row of the block
-says what it does.
+with #menu("Modify", "Transform") or from the picker, and drag the #ui("Geometry"), a part or
+the #ui("Mesh") of a file block, an analysis, a CAD Operation or another block to the pin on the
+left of its first row. That one pin takes either: the row is then called #ui("Geometry") or
+#ui("Mesh") after what it takes, and the pin on its right gives the same on to analyses.
+Double-click the block to choose the kind of transform; the numbers of that kind, such as
+#ui("Offset X") to #ui("Offset Z") of a translation or the point, the axis and the
+#ui("Angle") in degrees of a rotation, are rows of the block. Type them there, or drag the pin
+of a number to their pin on the left: a parameter (@parameters-block), a Math block or an
+input of a parameter study, which then varies the transform. Choosing another kind removes the
+links to numbers it does not have.
 
 #screenshot("ribbon-modify.png", [The #ui("Modify") tab holds the blocks that change the
   geometry or the mesh linked to them])
@@ -478,8 +483,8 @@ part the transform moved takes the place of the same part of the file linked unc
 meshes it works the same way: the mesh of an analysis and its moved copy linked to the
 #ui("Mesh") row of another analysis give that one both, each with its own nodes.
 
-#screenshot("transform-block.png", [The mesh of Cube taken twice by Together, once moved
-  by 20 mm])
+#screenshot("transform-block.png", [SOLID-2 of the file lifted by the parameter Lift: the
+  analysis takes SOLID-1 as in the file and SOLID-2 moved])
 
 #screenshot("transform-mesh.png", [The mesh of Together: the cube and its moved copy, the
   second part named SOLID-1-2])
