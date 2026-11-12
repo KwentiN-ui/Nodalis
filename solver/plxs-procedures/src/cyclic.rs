@@ -151,6 +151,7 @@ pub(crate) fn cyclic_frequency(
             &m_free,
             count,
             parameters.lower,
+            parameters.upper,
             parameters.solver,
             // Both copies of the sector at the nodes' positions, each copy's nodes their
             // own.

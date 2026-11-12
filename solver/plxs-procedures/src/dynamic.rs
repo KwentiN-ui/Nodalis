@@ -786,6 +786,7 @@ pub(crate) fn fit_damping(
                 &m_free,
                 7,
                 None,
+                None,
                 solver,
                 crate::equations::displacement_unknowns(ctx.model, &set.free),
                 progress,

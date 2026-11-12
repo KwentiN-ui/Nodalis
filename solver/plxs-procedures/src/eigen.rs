@@ -247,9 +247,11 @@ pub(crate) fn restrict_to_free(
         .collect()
 }
 
-/// The lowest `count` eigenpairs of `K φ = λ M φ` (above the lower frequency bound when
-/// given) by shift-invert Lanczos; a singular stiffness (free structure) moves the shift
-/// below the spectrum.
+/// The lowest `count` eigenpairs of `K φ = λ M φ` by shift-invert Lanczos. A lower
+/// frequency bound counts from there: `count` modes at or above it, rigid body modes and
+/// others below it not among them. An upper bound replaces `count` by the number of modes
+/// between the bounds (Sturm counts). A singular stiffness (free structure) without a lower
+/// bound moves the shift below the spectrum.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn lanczos_modes(
     ctx: &ProcedureContext<'_>,
@@ -257,13 +259,14 @@ pub(crate) fn lanczos_modes(
     m_free: &SparseMatrix,
     count: usize,
     lower: Option<f64>,
+    upper: Option<f64>,
     solver: EquationSolver,
     unknowns: Unknowns,
     progress: &mut dyn Progress,
 ) -> Result<plxs_linalg::EigenPairs> {
-    let lower_shift = lower
-        .filter(|f| *f > 0.0)
-        .map(|f| (2.0 * std::f64::consts::PI * f).powi(2));
+    let to_eigenvalue = |f: f64| (2.0 * std::f64::consts::PI * f).powi(2);
+    let lower_shift = lower.filter(|f| *f > 0.0).map(to_eigenvalue);
+    let upper_shift = upper.filter(|f| *f > 0.0).map(to_eigenvalue);
     let mut lanczos = ShiftInvertLanczos::new(ctx.threads, lanczos_options(None));
     // The positions of the unknowns make the nested dissection of the direct solver
     // geometric. Without them it bisects along level structures, which on a 600k-equation
@@ -273,15 +276,15 @@ pub(crate) fn lanczos_modes(
         .set_coordinates(Some(unknowns.coordinates.clone()));
     lanczos.set_unknowns(Some(unknowns));
     let started = std::time::Instant::now();
+    let scale = k_free.diagonal().iter().sum::<f64>()
+        / m_free.diagonal().iter().sum::<f64>().max(f64::MIN_POSITIVE);
     let mut shifts = vec![lower_shift.unwrap_or(0.0)];
     if lower_shift.is_none() {
-        let scale = k_free.diagonal().iter().sum::<f64>()
-            / m_free.diagonal().iter().sum::<f64>().max(f64::MIN_POSITIVE);
         shifts.extend([-1e-6 * scale, -1e-4 * scale, -1e-2 * scale]);
     }
     // A shift above zero (a lower frequency bound) makes K − σM indefinite, which the
-    // iterative inner solver cannot take.
-    let definite = lower_shift.is_none();
+    // iterative inner solver cannot take; so does the Sturm count at an upper bound.
+    let definite = lower_shift.is_none() && upper_shift.is_none();
     let pairs = with_eigen_solver(
         &mut lanczos,
         solver,
@@ -289,6 +292,32 @@ pub(crate) fn lanczos_modes(
         definite,
         progress,
         |lanczos, progress| {
+            let count = match upper_shift {
+                None => count,
+                Some(hi) => {
+                    // From zero: rigid body modes (numerically a little off zero) included.
+                    let lo = lower_shift.unwrap_or(-1e-6 * scale);
+                    let inside = lanczos.count_between(k_free, m_free, lo, hi)?;
+                    progress.event(ProgressEvent::Info(format!(
+                        "{inside} eigenvalues between the frequency bounds {} and {}",
+                        lower.unwrap_or(0.0).max(0.0),
+                        upper.unwrap_or(0.0)
+                    )));
+                    if inside == 0 {
+                        progress.event(ProgressEvent::Warning(
+                            "no eigenfrequency between the frequency bounds".into(),
+                        ));
+                        return Ok(plxs_linalg::EigenPairs {
+                            sturm_confirmed: true,
+                            ..Default::default()
+                        });
+                    }
+                    inside
+                }
+            };
+            if let Some(shift) = lower_shift {
+                return lanczos.frequencies_above(k_free, m_free, count, shift);
+            }
             let mut last_error = None;
             for &shift in &shifts {
                 match lanczos.frequencies(k_free, m_free, count, shift) {
@@ -297,9 +326,7 @@ pub(crate) fn lanczos_modes(
                     // iteration breaks down or does not converge.
                     Err(Error::Numerical {
                         failure, message, ..
-                    }) if (message.contains("singular") || lanczos.is_iterative())
-                        && lower_shift.is_none() =>
-                    {
+                    }) if message.contains("singular") || lanczos.is_iterative() => {
                         progress.event(ProgressEvent::Info(format!(
                             "shift {shift:e}: {message}; trying a negative shift"
                         )));
@@ -435,16 +462,23 @@ impl Procedure for FrequencyProcedure {
         let reduction = homogeneous_constraints(ctx, step, progress)?;
         let k_free = reduction.reduce(&k);
         let m_free = reduction.reduce(&m);
-        progress.event(ProgressEvent::Info(format!(
-            "number of equations: {}; {count} eigenvalues requested",
-            reduction.reduced_len()
-        )));
+        progress.event(ProgressEvent::Info(match parameters.upper.filter(|f| *f > 0.0) {
+            Some(_) => format!(
+                "number of equations: {}; all eigenvalues between the frequency bounds requested",
+                reduction.reduced_len()
+            ),
+            None => format!(
+                "number of equations: {}; {count} eigenvalues requested",
+                reduction.reduced_len()
+            ),
+        }));
         let pairs = lanczos_modes(
             ctx,
             &k_free,
             &m_free,
             count,
             parameters.lower,
+            parameters.upper,
             parameters.solver,
             crate::equations::displacement_unknowns(ctx.model, &reduction.free),
             progress,
