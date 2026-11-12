@@ -45,6 +45,8 @@ pub struct SessionOptions {
     pub work_dir: PathBuf,
     /// Stops the run between increments when cancelled.
     pub cancel: CancelToken,
+    /// Receives the iterations of the iterative linear solver as they happen.
+    pub linear_watch: Option<plxs_core::LinearWatch>,
 }
 
 impl Default for SessionOptions {
@@ -54,6 +56,7 @@ impl Default for SessionOptions {
             pool: None,
             work_dir: PathBuf::from("."),
             cancel: CancelToken::new(),
+            linear_watch: None,
         }
     }
 }
@@ -246,13 +249,19 @@ impl Session {
         let (tx, rx) = std::sync::mpsc::channel::<ProgressEvent>();
         let pool = &self.pool;
         let cancel = self.options.cancel.clone();
+        let watch = self.options.linear_watch.clone();
         let (outcome, back) = std::thread::scope(|scope| {
             let handle = scope.spawn(move || {
                 let mut ctx = ctx;
                 let mut sink = ChannelProgress(tx);
                 // The linear algebra looks at the token itself: a stop ends a long
                 // factorization or eigensolution at once, not after it.
-                let outcome = pool.install(|| cancel.scope(|| run_step(&mut ctx, step, &mut sink)));
+                let outcome = pool.install(|| {
+                    cancel.scope(|| match &watch {
+                        Some(watch) => watch.scope(|| run_step(&mut ctx, step, &mut sink)),
+                        None => run_step(&mut ctx, step, &mut sink),
+                    })
+                });
                 let outcome = match outcome {
                     Err(Error::Cancelled) => Ok(StepOutcome::Cancelled),
                     outcome => outcome,

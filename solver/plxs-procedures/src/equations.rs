@@ -226,12 +226,12 @@ impl Equations {
             let b = b.filter(|_| self.kept.is_some());
             match result {
                 Ok(stats) => {
-                    progress.event(ProgressEvent::Info(format!(
-                        "iterative solver: {} iterations, relative residual {:.1e}, {:.2} s",
-                        stats.iterations,
-                        stats.relative_residual,
-                        started.elapsed().as_secs_f64()
-                    )));
+                    progress.event(ProgressEvent::LinearSolve {
+                        iterations: stats.iterations as u32,
+                        relative_residual: stats.relative_residual,
+                        seconds: started.elapsed().as_secs_f64(),
+                        quiet: false,
+                    });
                     return Ok(());
                 }
                 Err(error) if self.may_fall_back(&error) && b.is_some() => {
@@ -538,8 +538,23 @@ pub struct FirstOrWarnings<'a> {
 
 impl Progress for FirstOrWarnings<'_> {
     fn event(&mut self, event: ProgressEvent) {
-        if self.all || matches!(event, ProgressEvent::Warning(_)) {
-            self.inner.event(event);
+        match event {
+            // The monitor plots every solve, the output tells only the first.
+            ProgressEvent::LinearSolve {
+                iterations,
+                relative_residual,
+                seconds,
+                ..
+            } => self.inner.event(ProgressEvent::LinearSolve {
+                iterations,
+                relative_residual,
+                seconds,
+                quiet: !self.all,
+            }),
+            event if self.all || matches!(event, ProgressEvent::Warning(_)) => {
+                self.inner.event(event)
+            }
+            _ => {}
         }
     }
 }

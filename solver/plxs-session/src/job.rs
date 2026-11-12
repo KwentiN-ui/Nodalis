@@ -37,6 +37,9 @@ pub struct JobOptions {
     /// a step that did not converge or was cancelled. Nodalis shows it in its monitor.
     pub profile_sink: Option<ProfileSink>,
     pub cancel: CancelToken,
+    /// Receives the iterations of the iterative linear solver as they happen, see
+    /// [`plxs_core::LinearWatch`].
+    pub linear_watch: Option<plxs_core::LinearWatch>,
     /// Keeps the state and results after each step, and takes over the steps a run before
     /// computed already ([`crate::cache`]); `None`: every step is computed.
     pub step_cache: Option<StepCache>,
@@ -56,6 +59,7 @@ impl JobOptions {
             profile: false,
             profile_sink: None,
             cancel: CancelToken::new(),
+            linear_watch: None,
             step_cache: None,
         }
     }
@@ -259,6 +263,7 @@ fn run_continuing(
         pool: options.pool.clone(),
         work_dir: options.work_dir.clone(),
         cancel: options.cancel.clone(),
+        linear_watch: options.linear_watch.clone(),
     };
     let steps = analysis.steps.len();
     let (mut session, first) = match (snapshot, cached) {
@@ -435,6 +440,16 @@ pub fn format_event(event: &ProgressEvent) -> Vec<String> {
         ProgressEvent::Eigenvalue { mode, value, .. } => {
             vec![format!(" eigenvalue {mode}: {value:e}")]
         }
+        ProgressEvent::LinearSolve { quiet: true, .. } => Vec::new(),
+        ProgressEvent::LinearSolve {
+            iterations,
+            relative_residual,
+            seconds,
+            ..
+        } => vec![format!(
+            " *INFO: iterative solver: {iterations} iterations, relative residual \
+             {relative_residual:.1e}, {seconds:.2} s"
+        )],
         ProgressEvent::Warning(text) => vec![format!("*WARNING: {text}")],
         ProgressEvent::Info(text) => vec![format!(" *INFO: {text}")],
         ProgressEvent::IncrementDone { .. }

@@ -1628,6 +1628,8 @@ fn attempt(
                 iteration,
                 residual: r_max,
                 correction: last_correction,
+                residual_limit: Some(RESIDUAL * scale),
+                correction_limit: Some(CORRECTION * motion),
                 converged,
             });
             if converged {

@@ -105,6 +105,8 @@ pub struct RunView {
     /// Lines of the solve copied so far, also those dropped from `lines` since.
     pub copied: usize,
     pub filter: String,
+    /// How the solver converges, once it runs.
+    pub convergence: Option<plx_solve::monitor::LiveLog>,
 }
 
 impl RunView {
@@ -152,6 +154,7 @@ impl RunView {
                 steps: &self.steps,
             };
             crate::solver_profile::buttons(ui, self.profile.as_ref(), &info);
+            crate::convergence_plot::button(ui, self.convergence.as_ref());
             ui.separator();
             ui.label("Filter:");
             ui.add(
@@ -177,20 +180,23 @@ impl RunView {
             dropped_note(ui, self.copied - self.lines.len().min(self.copied));
         });
         let (lines, filter) = (&self.lines, &self.filter);
+        let convergence = self.convergence.as_ref();
         crate::solver_profile::with_output(ui, self.profile.as_ref(), |ui| {
-            let area = egui::ScrollArea::both()
-                .id_salt("solve output")
-                .auto_shrink([false, false])
-                .stick_to_bottom(true);
-            if filter.is_empty() {
-                crate::virtual_table::lines(ui, area, lines);
-            } else {
-                let needle = filter.to_lowercase();
-                let shown: Vec<&String> = (lines.iter())
-                    .filter(|line| line.to_lowercase().contains(&needle))
-                    .collect();
-                crate::virtual_table::lines(ui, area, &shown);
-            }
+            crate::convergence_plot::with_output(ui, convergence, |ui| {
+                let area = egui::ScrollArea::both()
+                    .id_salt("solve output")
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true);
+                if filter.is_empty() {
+                    crate::virtual_table::lines(ui, area, lines);
+                } else {
+                    let needle = filter.to_lowercase();
+                    let shown: Vec<&String> = (lines.iter())
+                        .filter(|line| line.to_lowercase().contains(&needle))
+                        .collect();
+                    crate::virtual_table::lines(ui, area, &shown);
+                }
+            });
         });
         event
     }
@@ -623,6 +629,7 @@ impl Analysis {
                 steps: &self.step_lines,
             };
             crate::solver_profile::buttons(ui, profile.as_ref(), &info);
+            crate::convergence_plot::button(ui, Some(self.job.convergence()));
             ui.separator();
             ui.label("Filter:");
             ui.add(
@@ -653,26 +660,34 @@ impl Analysis {
             dropped_note(ui, self.dropped);
         });
         let (output, filter) = (&self.output, &self.filter);
+        let convergence = self.job.convergence();
         crate::solver_profile::with_output(ui, profile.as_ref(), |ui| {
-            let area = egui::ScrollArea::both()
-                .id_salt("analysis output")
-                .auto_shrink([false, false])
-                .stick_to_bottom(true);
-            if filter.is_empty() {
-                crate::virtual_table::lines(ui, area, output);
-            } else {
-                let needle = filter.to_lowercase();
-                let shown: Vec<&String> = (output.iter())
-                    .filter(|line| line.to_lowercase().contains(&needle))
-                    .collect();
-                crate::virtual_table::lines(ui, area, &shown);
-            }
+            crate::convergence_plot::with_output(ui, Some(convergence), |ui| {
+                let area = egui::ScrollArea::both()
+                    .id_salt("analysis output")
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true);
+                if filter.is_empty() {
+                    crate::virtual_table::lines(ui, area, output);
+                } else {
+                    let needle = filter.to_lowercase();
+                    let shown: Vec<&String> = (output.iter())
+                        .filter(|line| line.to_lowercase().contains(&needle))
+                        .collect();
+                    crate::virtual_table::lines(ui, area, &shown);
+                }
+            });
         });
         event
     }
 
     pub fn results(&self) -> Option<PathBuf> {
         self.job.results()
+    }
+
+    /// How the solver converges, filled while it runs.
+    pub fn convergence(&self) -> plx_solve::monitor::LiveLog {
+        self.job.convergence().clone()
     }
 }
 

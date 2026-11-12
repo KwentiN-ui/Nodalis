@@ -116,6 +116,7 @@ pub fn check_analysis(
         pool: options.pool.clone(),
         work_dir: options.work_dir.clone(),
         cancel: options.cancel.clone(),
+        linear_watch: None,
     };
     let session = match Session::new(analysis.model, session_options) {
         Ok(session) => session,

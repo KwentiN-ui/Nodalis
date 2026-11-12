@@ -5410,6 +5410,7 @@ impl ProjectApp {
         let dropped = solve.map_or(0, |s| s.dropped());
         let profile = solve.filter(|s| !s.active()).and_then(|s| s.profile());
         let steps = solve.map(|s| s.step_lines().to_vec()).unwrap_or_default();
+        let convergence = solve.and_then(|s| s.convergence());
         ui.horizontal(|ui| {
             let row = rows.iter().find(|r| Some(r.id) == selected);
             let active = row.is_some_and(|r| r.active);
@@ -5452,6 +5453,7 @@ impl ProjectApp {
                     steps: &steps,
                 };
                 crate::solver_profile::buttons(ui, profile.as_ref(), &info);
+                crate::convergence_plot::button(ui, convergence.as_ref());
                 ui.separator();
             }
             ui.label("Filter:");
@@ -5523,6 +5525,7 @@ impl ProjectApp {
             ui.separator();
             // The lines go one below the other, not in the row of the list.
             ui.vertical(|ui| crate::solver_profile::with_output(ui, profile.as_ref(), |ui| {
+              crate::convergence_plot::with_output(ui, convergence.as_ref(), |ui| {
                 let area = egui::ScrollArea::both()
                     .id_salt(("monitor output", selected))
                     .auto_shrink([false, false])
@@ -5536,6 +5539,7 @@ impl ProjectApp {
                         .collect();
                     crate::virtual_table::lines(ui, area, &shown);
                 }
+              });
             }));
         });
         self.monitor.filter = filter;

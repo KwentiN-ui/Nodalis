@@ -29,6 +29,7 @@ mod connections;
 mod constraint_dialog;
 mod contact_matrix;
 mod contacts;
+mod convergence_plot;
 mod crash_log;
 mod cross_section;
 mod dialog;

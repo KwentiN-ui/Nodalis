@@ -49,7 +49,7 @@ pub use error::{Convergence, Divergence, Error, Failure, Result, Stop};
 pub use material::Material;
 pub use mesh::{ElementId, NodeId, Nodes, Sets, Surface, SurfaceFace};
 pub use model::{Analysis, InitialConditions, Model, PhysicalConstants};
-pub use progress::{CancelToken, Progress, ProgressEvent};
+pub use progress::{CancelToken, LinearIteration, LinearWatch, Progress, ProgressEvent};
 pub use results::{Results, ResultsIncrement};
 pub use section::Section;
 pub use state::State;
