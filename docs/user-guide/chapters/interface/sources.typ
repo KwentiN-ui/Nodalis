@@ -230,7 +230,7 @@ the geometry has more than one part, the #ui("Geometry") row opens with its arro
 of its own. Linking the #ui("Geometry") row gives the whole file; linking a part gives only
 that part. Link several parts to the #ui("Geometry") row of the same analysis and it takes
 them together, the other parts left out. A part link replaces a link of the whole geometry
-and the other way round, and parts of another block replace those linked before.
+of the same file and the other way round; geometry of other blocks stays (@geometry-assembly).
 
 #screenshot("file-block-parts.png", [Two of the three parts of an assembly go to the analysis])
 
@@ -239,6 +239,36 @@ The geometry without the other parts is made in the background, in the same way 
 analysis meshes and sets up its parts as with any geometry it takes. When the file changes,
 the parts are taken again by their names; a part the file no longer has is reported in the
 output pane, and the analysis keeps the geometry it had.
+
+==== Assemblies from several links <geometry-assembly>
+
+The #ui("Geometry") and #ui("Mesh") rows of an analysis have the tall pin of a collection
+(@links): they take any number of wires and put what comes through them together into one
+assembly. Link the parts of a file that stay as they are and the output of a
+#ui("CAD Operation") that changes one of them, or the geometry of several files, and the
+analysis meshes all parts together, each a part of its own as in an assembly read from one
+file.
+
+#screenshot("geometry-assembly.png", [The file gives its parts, the CAD operation the part it
+  split: the analysis takes the split part in place of the original])
+
+A part that reaches the analysis changed, through a #ui("CAD Operation") or an analysis it
+went through, takes the place of the same part of the file linked unchanged: link the whole
+file and the operation on one of its parts, and the part is there once, changed. The output
+pane says which part is replaced ("Assembly takes SOLID-2 changed from CAD Operation in place
+of SOLID-2 of File").
+
+#screenshot("geometry-assembly-parts.png", [The geometry of the analysis: SOLID-1 as in the
+  file, SOLID-2 split in two pieces, tied as a compound part])
+ Two parts of the same name from different blocks are kept
+both, the second named with "-2" appended, which the output pane reports as well. Putting the
+geometries together is done in the background; the analysis is out of date until it is done.
+
+Several meshes linked to the #ui("Mesh") row are put together in the same way, each with its
+own nodes and elements, numbered after those before it. Their parts, sets and surfaces keep
+their names unless an earlier mesh has one of the name. The geometries of the meshes are put
+together too, so that picks on the geometry find their nodes. An analysis takes either
+geometry or meshes: a geometry link replaces its mesh links and the other way round.
 
 #screenshot("file-block.png", [The results of a CalculiX run made elsewhere drive a submodel])
 

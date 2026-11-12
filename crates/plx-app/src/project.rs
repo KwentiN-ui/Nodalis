@@ -38,6 +38,7 @@ use cad::{CAD_LENGTH, CadBlock};
 use deformed::{DEFORM_FACTOR, DEFORM_INCREMENT, DeformedBlock};
 use visualize::{MeshPicture, PlotBlock, PlotView, PreviewBlock, PreviewView};
 
+mod assembly;
 mod cad;
 mod deformed;
 mod frames;
@@ -2162,6 +2163,8 @@ pub struct ProjectApp {
     /// Fingerprint of the geometry or mesh a link last copied into its target, by target and
     /// path: copied again once the source's differs.
     applied: HashMap<(u64, Vec<String>), u64>,
+    /// Geometries put together for analyses that take several, see [`assembly`].
+    merges: assembly::Merges,
     /// Whether links have to bring their targets up to date: something changed that they
     /// may take.
     sync_due: bool,
@@ -2288,6 +2291,7 @@ impl ProjectApp {
             output_news: Default::default(),
             startup_import: Vec::new(),
             applied: HashMap::new(),
+            merges: HashMap::new(),
             sync_due: true,
             history: Default::default(),
             restoring: HashMap::new(),
@@ -6245,6 +6249,11 @@ impl ProjectApp {
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
+        let assembles = (self.nodes.iter()).any(|n| n.id == target && n.kind() == Kind::Analysis);
+        let assembled = |path: &[String]| match path {
+            [cell] if cell == links::GEOMETRY || cell == links::MESH => Some(cell.clone()),
+            _ => None,
+        };
         let usage = |link: &Link| links::ResultsUse::of(link);
         let new_usage = usage(&Link {
             source,
@@ -6276,6 +6285,11 @@ impl ProjectApp {
             // The parts of a geometry linked from the same source go together.
             if part && links::is_geometry_part(link) && link.source == source {
                 return link.item == item;
+            }
+            // The Geometry and Mesh rows of an analysis are collections: the geometries or
+            // meshes of other sources stay, and it takes either geometries or meshes.
+            if assembles && let (Some(a), Some(b)) = (assembled(other), assembled(&slot)) {
+                return a != b || link.source == source;
             }
             // A category is a collection: links of categories and items of it from other
             // sources stay, and the later one wins an item both have.
@@ -6730,6 +6744,12 @@ impl ProjectApp {
         if self.freshness() != self.synced_freshness {
             self.sync_due = true;
         }
+        if self.poll_merges() {
+            self.sync_due = true;
+        }
+        if self.merging() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         if !self.sync_due {
             return;
         }
@@ -6894,9 +6914,12 @@ impl ProjectApp {
         {
             return None;
         }
+        let assembles = target.kind() == Kind::Analysis;
         let data = source.link_data();
         let path = &link.item;
         match path.first().map(String::as_str) {
+            Some(links::GEOMETRY) if assembles => self.assembled_geometry(link),
+            Some(links::MESH) if assembles => self.assembled_mesh(link),
             Some(links::RESULTS) if source.as_file().is_some() => {
                 let file = source.as_file()?;
                 let step = path.get(1)?;
@@ -8706,8 +8729,30 @@ fn block_rows(
     if !status.stale_parts.is_empty() {
         (geometry.tip).push_str(&format!(" ({})", status.stale_parts.join(", ")));
     }
+    let mut mesh = cell(links::MESH, NodeIcon::Mesh, status.mesh, true);
+    // Collections: the geometries or meshes of several links are put together.
+    for row in [&mut geometry, &mut mesh] {
+        let mut sources: Vec<&str> = Vec::new();
+        for (slot, source) in incoming {
+            if links::covers(slot, &row.path) && !sources.contains(&source.as_str()) {
+                sources.push(source);
+            }
+        }
+        if sources.len() > 1 {
+            row.linked_from = Some(sources.join(", "));
+        }
+        row.collection = true;
+        row.tip.push_str(if row.path[0] == links::GEOMETRY {
+            "\nA collection: link the geometries of several blocks, or single parts, to put \
+             them together into one assembly. A part a CAD operation changed takes the \
+             place of the same part linked unchanged."
+        } else {
+            "\nA collection: link the meshes of several blocks to put them together into one \
+             assembly, each with its own nodes."
+        });
+    }
     rows.push(geometry);
-    rows.push(cell(links::MESH, NodeIcon::Mesh, status.mesh, true));
+    rows.push(mesh);
     let setup = vec![links::SETUP.to_owned()];
     let setup_open = expanded.contains(&setup);
     let mut row = cell(links::SETUP, NodeIcon::Setup, status.setup, true);

@@ -3255,3 +3255,42 @@ fn defeaturing_a_bracket_by_size_removes_what_is_smaller() {
     // Nothing; the two chamfers; and the outer fillets; and the inner one.
     assert_eq!(removed, [0, 2, 4, 5]);
 }
+
+#[test]
+fn geometries_put_together_keep_their_parts_and_entities() {
+    if !gmsh_available() {
+        return;
+    }
+    let blocks = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless)
+        .unwrap()
+        .geometry;
+    let plate = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless)
+        .unwrap()
+        .geometry;
+    let (one, _) = delete_parts_renumbered(&blocks, &["SOLID-2".to_string()]).unwrap();
+    let one = one.unwrap();
+    let merged = merge_geometries(&[blocks.clone(), plate.clone()]).unwrap();
+    let mut names = part_names(&merged.geometry).unwrap();
+    names.sort();
+    // The plate's SOLID-1 is a second one.
+    assert_eq!(names, ["SOLID-1", "SOLID-1-2", "SOLID-2"]);
+    assert!(merged.renamed[0].is_empty());
+    assert_eq!(merged.renamed[1]["SOLID-1"], "SOLID-1-2");
+    // Every face of each input is found again.
+    let faces = |g: &Geometry| {
+        (g.signatures.iter())
+            .filter(|s| matches!(s.entity, CadEntity::Face(_)))
+            .count()
+    };
+    for (input, tags) in [&blocks, &plate].iter().zip(&merged.tags) {
+        let found = tags
+            .keys()
+            .filter(|e| matches!(e, CadEntity::Face(_)))
+            .count();
+        assert_eq!(found, faces(input));
+    }
+    assert_eq!(faces(&merged.geometry), faces(&blocks) + faces(&plate));
+    // A part on its own put with the same part from the whole: both there, the second renamed.
+    let twice = merge_geometries(&[one, blocks]).unwrap();
+    assert_eq!(part_names(&twice.geometry).unwrap().len(), 3);
+}

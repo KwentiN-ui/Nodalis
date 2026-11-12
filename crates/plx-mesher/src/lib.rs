@@ -8,6 +8,7 @@ mod defeature;
 mod extrude;
 mod ffi;
 pub mod gmsh;
+mod merge;
 mod operation;
 mod revolve;
 mod split;
@@ -16,6 +17,7 @@ mod step_names;
 mod thicken;
 
 pub use defeature::{Defeatured, defeature, find_blends};
+pub use merge::{MergedGeometry, merge_geometries};
 pub use operation::{apply_cad_operation, apply_operation};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
