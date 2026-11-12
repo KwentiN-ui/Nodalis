@@ -3617,6 +3617,7 @@ dependencies = [
  "plx-core",
  "plx-mesh",
  "plxs-core",
+ "plxs-materials",
  "ron",
  "serde",
 ]

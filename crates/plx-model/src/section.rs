@@ -10,7 +10,7 @@ use glam::DVec3;
 use plx_mesh::{Element, ElementFamily, ElementShape};
 use serde::{Deserialize, Serialize};
 
-use crate::{BeamProfile, Region};
+use crate::{BeamProfile, InfillSection, Region};
 
 /// Assigns a material to the elements of a region, a solid section, or a beam or
 /// truss section of CalculiX.
@@ -26,6 +26,11 @@ pub struct Section {
     /// Projects saved before beams existed hold solid sections.
     #[serde(default)]
     pub kind: SectionKind,
+    /// The coordinate system whose axes x, y, z are the material axes 1, 2, 3 of an
+    /// anisotropic material of a solid section, and the print axes of an infill section
+    /// (z the build direction); `None`: the global axes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orientation: Option<crate::Id>,
 }
 
 /// The default thickness of 2D sections, one millimetre in SI units, as values are
@@ -53,11 +58,16 @@ pub enum SectionKind {
     /// written as these (see [`membrane_type`]); see [`crate::element_type_options`] for
     /// why quadratic ones are refused.
     Membrane { thickness: f64, offset: f64 },
+    /// Solid elements of a part printed by fused deposition: solid walls under the surface
+    /// and a sparse infill inside, each element with the stiffness of what is printed there
+    /// (see [`crate::infill`]).
+    Infill(InfillSection),
 }
 
 impl SectionKind {
-    pub const ALL: [SectionKind; 5] = [
+    pub const ALL: [SectionKind; 6] = [
         SectionKind::Solid,
+        SectionKind::Infill(InfillSection::DEFAULT),
         // One square millimetre and one millimetre, in SI units.
         SectionKind::Truss { area: 1e-6 },
         SectionKind::Beam(BeamSection::DEFAULT),
@@ -80,6 +90,7 @@ impl SectionKind {
             SectionKind::Beam(_) => "Beam_Section",
             SectionKind::Shell { .. } => "Shell_Section",
             SectionKind::Membrane { .. } => "Membrane_Section",
+            SectionKind::Infill(_) => "Infill_Section",
         }
     }
 
@@ -91,7 +102,14 @@ impl SectionKind {
             SectionKind::Beam(_) => "Beam",
             SectionKind::Shell { .. } => "Shell",
             SectionKind::Membrane { .. } => "Membrane",
+            SectionKind::Infill(_) => "Infill (3D print)",
         }
+    }
+
+    /// Whether the section gives solid (or plane) elements a material: a solid or an
+    /// infill section.
+    pub fn is_solid(&self) -> bool {
+        matches!(self, SectionKind::Solid | SectionKind::Infill(_))
     }
 
     pub fn is_line(&self) -> bool {
@@ -109,9 +127,13 @@ impl SectionKind {
         profile: Option<&BeamProfile>,
     ) -> Option<&'static str> {
         match (self, shape) {
-            (SectionKind::Solid | SectionKind::Shell { .. } | SectionKind::Membrane { .. }, _) => {
-                None
-            }
+            (
+                SectionKind::Solid
+                | SectionKind::Infill(_)
+                | SectionKind::Shell { .. }
+                | SectionKind::Membrane { .. },
+                _,
+            ) => None,
             (SectionKind::Truss { .. }, ElementShape::Line2 | ElementShape::Line3) => Some("T3D2"),
             // The solver has the general profiles for its user element U1 only, of 2 nodes: a
             // 3-node line is written as two of them.
@@ -157,6 +179,14 @@ impl SectionKind {
                 element.id
             )),
             SectionKind::Solid => None,
+            SectionKind::Infill(_) if element.shape.family() != ElementFamily::Solid => {
+                Some(format!(
+                    "Element {} is not a solid element; an Infill Section needs the \
+                     volume elements of a 3D part",
+                    element.id
+                ))
+            }
+            SectionKind::Infill(_) => None,
             SectionKind::Shell { .. } | SectionKind::Membrane { .. } if !surface => Some(format!(
                 "Element {} is not a surface element; a {} section needs triangles or \
                      quads",

@@ -19,6 +19,10 @@ pub enum SectionKind {
         material: String,
         /// Thickness of plane stress/strain elements or area of trusses, when given.
         thickness: Option<f64>,
+        /// `ORIENTATION=`: the name (upper case) of the `*ORIENTATION` whose axes the
+        /// constants of an anisotropic material refer to.
+        #[serde(default)]
+        orientation: Option<String>,
     },
     /// `*SHELL SECTION`.
     Shell {
@@ -100,6 +104,45 @@ pub enum BeamProfile {
         #[serde(default)]
         contact_radius: Option<f64>,
     },
+}
+
+/// `*ORIENTATION, SYSTEM=RECTANGULAR`: material axes. The first axis is along `a`, the
+/// second in the plane of `a` and `b`, the third normal to both.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Orientation {
+    /// Upper case name.
+    pub name: String,
+    pub a: [f64; 3],
+    pub b: [f64; 3],
+}
+
+impl Orientation {
+    /// The unit axes of the orientation (rows), `None` when `a` and `b` are parallel or
+    /// zero.
+    pub fn axes(&self) -> Option<[[f64; 3]; 3]> {
+        let norm = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        let scale = |v: [f64; 3], s: f64| [v[0] * s, v[1] * s, v[2] * s];
+        let cross = |a: [f64; 3], b: [f64; 3]| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let la = norm(self.a);
+        if la == 0.0 || !la.is_finite() {
+            return None;
+        }
+        let e1 = scale(self.a, 1.0 / la);
+        let c = cross(e1, self.b);
+        let lc = norm(c);
+        if lc <= 1e-12 * norm(self.b).max(1e-300) {
+            return None;
+        }
+        let e3 = scale(c, 1.0 / lc);
+        let e2 = cross(e3, e1);
+        Some([e1, e2, e3])
+    }
 }
 
 /// `*SPRING`: the stiffness of a set of spring elements. A `SPRING1` acts on one DOF of one

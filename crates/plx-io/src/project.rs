@@ -1243,6 +1243,7 @@ mod tests {
             names.into_iter().partition(|n| n.starts_with("Pad"));
         for (name, material, parts) in [("Steel", steel, metal), ("Rubber", rubber, pads)] {
             model.sections.push(plx_model::Section {
+                orientation: None,
                 name: name.into(),
                 material: Some(material),
                 region: Region::Parts(parts),
@@ -1360,6 +1361,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            orientation: None,
             name: "Solid_Section-1".into(),
             material: Some(steel),
             region: Region::Parts(vec!["Base".into(), "Block".into(), "Cap".into()]),
@@ -1470,6 +1472,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
             region: Region::Parts(vec!["Column".into()]),
@@ -1546,6 +1549,7 @@ mod tests {
             region: Region::Parts(vec!["Lever".into()]),
             thickness: 1.0,
             kind: plx_model::SectionKind::Solid,
+            orientation: None,
         });
         let mut end = plx_model::CoordinateSystem::new("Lever_End");
         end.set_points([0.01, 0.01, 0.2], [0.02, 0.01, 0.2], [0.01, 0.02, 0.2]);
@@ -1624,6 +1628,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
             region: Region::Parts(vec!["Beam".into()]),
@@ -1694,6 +1699,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
             region: Region::Parts(vec!["Beam".into()]),
@@ -1905,6 +1911,7 @@ mod tests {
             }
         }
         model.sections.push(plx_model::Section {
+            orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
             region: Region::Parts(vec!["Pad".into()]),
@@ -2145,6 +2152,7 @@ mod tests {
                         faces: vec![3, 4],
                         edges: vec![7],
                         size: 0.5,
+                        depth: 0.0,
                     },
                 },
                 MeshSetupItem {

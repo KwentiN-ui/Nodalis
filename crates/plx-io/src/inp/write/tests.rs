@@ -78,6 +78,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
             ..Default::default()
         }],
         sections: vec![Section {
+            orientation: None,
             name: "Section-1".into(),
             material: Some(named("Steel")),
             region: Region::Parts(vec!["EALL".into()]),
@@ -3240,6 +3241,7 @@ fn plane_model(
             ..Default::default()
         }],
         sections: vec![Section {
+            orientation: None,
             name: "Section-1".into(),
             material: Some(named("Steel")),
             region: Region::Parts(vec!["PLATE".into()]),
@@ -3675,6 +3677,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         ..Default::default()
     });
     model.sections.push(Section {
+        orientation: None,
         name: "Section-1".into(),
         material: Some(named("Steel")),
         region: Region::Parts(vec!["LOWER".into(), "UPPER".into()]),
@@ -4536,6 +4539,7 @@ fn blocks_model(
             ..Default::default()
         }],
         sections: vec![Section {
+            orientation: None,
             name: "Section-1".into(),
             material: Some(named("Steel")),
             region: Region::Parts(vec!["A".into(), "B".into()]),
@@ -5102,6 +5106,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
     FeModel {
         cross_sections: line_cross_sections(),
         materials: vec![Material {
+            anisotropic: None,
             id: named("Steel"),
             name: "Steel".into(),
             density: None,
@@ -5117,6 +5122,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
             hyperelastic: None,
         }],
         sections: vec![Section {
+            orientation: None,
             name: "Beam-1".into(),
             material: Some(named("Steel")),
             region: Region::Parts(vec!["BEAM".into()]),
@@ -9074,6 +9080,7 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
         ("Section-2", "PLATE", plate_kind),
     ] {
         model.sections.push(Section {
+            orientation: None,
             name: name.into(),
             material: Some(named("Steel")),
             region: Region::Parts(vec![part.into()]),
@@ -9226,6 +9233,7 @@ fn block_on_membrane(strip_is_master: bool) -> (FeMesh, FeModel) {
         ),
     ] {
         model.sections.push(Section {
+            orientation: None,
             name: name.into(),
             material: Some(named("Steel")),
             region: Region::Parts(vec![part.into()]),
@@ -12986,4 +12994,124 @@ fn solver_turns_a_force_with_its_moving_system() {
     }
     // A force fixed in space keeps pointing down: no axial reaction.
     assert!(reaction[0].abs() > 0.1 * 9000.0, "{reaction:?}");
+}
+
+/// The tip deflection of the cantilever (along x, 100 long) with the material and the
+/// orientation of its section given.
+fn tip_deflection(name: &str, edit: impl FnOnce(&mut FeModel)) -> f64 {
+    let (mesh, mut model) = cantilever(tip_force());
+    edit(&mut model);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let frd = run_solver(name, &text).unwrap();
+    node_value(&frd, "DISP", "U3", 99)
+}
+
+fn orthotropic(c: plx_model::EngineeringConstants) -> impl FnOnce(&mut FeModel) {
+    move |model: &mut FeModel| {
+        model.materials[0].elastic = None;
+        model.materials[0].anisotropic = Some(plx_model::Anisotropic::Orthotropic(c));
+    }
+}
+
+#[test]
+fn orthotropic_materials_bend_by_their_modulus_along_the_material_axes() {
+    let steel = Elastic {
+        young: 210_000.0,
+        poisson: 0.3,
+    };
+    let isotropic = tip_deflection("aniso-iso", |_| {});
+    let same = tip_deflection(
+        "aniso-same",
+        orthotropic(plx_model::EngineeringConstants::isotropic(steel)),
+    );
+    assert!(
+        (same - isotropic).abs() < 1e-6 * isotropic.abs(),
+        "{same} {isotropic}"
+    );
+    // Twice as stiff along axis 1, the beam axis: near half the deflection (the coarse
+    // C3D8 also shear and lock).
+    let mut stiff = plx_model::EngineeringConstants::isotropic(steel);
+    stiff.e1 *= 2.0;
+    let along = tip_deflection("aniso-along", orthotropic(stiff));
+    assert!(along.abs() < 0.7 * isotropic.abs(), "{along} {isotropic}");
+    // Axis 1 turned on to y by an orientation: the same as the constants with 1 and 2
+    // swapped (ν21 = ν12 E2 / E1).
+    let turned = tip_deflection("aniso-turned", |model| {
+        orthotropic(stiff)(model);
+        let mut system = plx_model::CoordinateSystem::new("Turned");
+        system.set_points([0.0; 3], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]);
+        model.sections[0].orientation = Some(system.id);
+        model.coordinate_systems.push(system);
+    });
+    let swapped = plx_model::EngineeringConstants {
+        e1: stiff.e2,
+        e2: stiff.e1,
+        nu12: stiff.nu12 * stiff.e2 / stiff.e1,
+        nu13: stiff.nu23,
+        nu23: stiff.nu13,
+        g13: stiff.g23,
+        g23: stiff.g13,
+        ..stiff
+    };
+    let reference = tip_deflection("aniso-swapped", orthotropic(swapped));
+    assert!(
+        (turned - reference).abs() < 1e-6 * reference.abs(),
+        "{turned} {reference}"
+    );
+    assert!(turned.abs() > 0.9 * isotropic.abs(), "{turned} {isotropic}");
+}
+
+fn infill(section: plx_model::InfillSection) -> impl FnOnce(&mut FeModel) {
+    move |model: &mut FeModel| {
+        model.sections[0].kind = SectionKind::Infill(section);
+    }
+}
+
+#[test]
+fn infill_sections_lie_between_their_core_and_the_solid_part() {
+    let solid = tip_deflection("infill-solid", |_| {});
+    // Walls thicker than the part with the full stiffness across the layers: the solid.
+    let all_wall = tip_deflection(
+        "infill-all-wall",
+        infill(plx_model::InfillSection {
+            wall_thickness: 100.0,
+            top_bottom_thickness: 100.0,
+            layer_factor: 1.0,
+            ..plx_model::InfillSection::DEFAULT
+        }),
+    );
+    assert!(
+        (all_wall - solid).abs() < 1e-6 * solid.abs(),
+        "{all_wall} {solid}"
+    );
+    let core = plx_model::InfillSection {
+        wall_thickness: 0.0,
+        top_bottom_thickness: 0.0,
+        pattern: plx_model::InfillPattern::Triangles,
+        ..plx_model::InfillSection::DEFAULT
+    };
+    let core_only = tip_deflection("infill-core", infill(core));
+    // 1 mm walls in elements 10 x 5 x 5 thick: part of the outer elements is wall.
+    let printed = plx_model::InfillSection {
+        wall_thickness: 1.0,
+        top_bottom_thickness: 1.0,
+        ..core
+    };
+    let (mesh, mut model) = cantilever(tip_force());
+    infill(printed)(&mut model);
+    // Every element of the two by one across reaches the surface: a fifth of its depth
+    // is wall.
+    let lowered = lowered(&mesh, &model);
+    let names: Vec<&str> = (lowered.model.materials.iter())
+        .map(|m| m.name.as_str())
+        .collect();
+    assert!(names.iter().any(|n| n.ends_with("_WALL2")), "{names:?}");
+    let with_walls = tip_deflection("infill-walls", infill(printed));
+    assert!(
+        core_only.abs() > with_walls.abs(),
+        "{core_only} {with_walls}"
+    );
+    assert!(with_walls.abs() > solid.abs(), "{with_walls} {solid}");
+    // Triangles at 20 %: in the layer about a fifteenth of the solid.
+    assert!(core_only.abs() > 8.0 * solid.abs(), "{core_only} {solid}");
 }

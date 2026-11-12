@@ -11,6 +11,7 @@ glam.workspace = true
 plx-core.workspace = true
 plx-mesh.workspace = true
 plxs-core.workspace = true
+plxs-materials.workspace = true
 serde.workspace = true
 
 [lints]

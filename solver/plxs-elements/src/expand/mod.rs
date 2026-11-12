@@ -557,6 +557,7 @@ impl Expander {
                 section.kind = SectionKind::Solid {
                     material,
                     thickness: None,
+                    orientation: None,
                 };
             }
         }

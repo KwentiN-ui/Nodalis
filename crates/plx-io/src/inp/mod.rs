@@ -429,6 +429,7 @@ impl Reader {
                     // The model takes over no materials of the file.
                     let _ = material;
                     self.import.sections.push(Section {
+                        orientation: None,
                         name: set.clone(),
                         material: None,
                         region: Region::ElementSet(set.clone()),

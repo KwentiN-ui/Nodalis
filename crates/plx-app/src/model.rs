@@ -132,6 +132,8 @@ pub struct Model {
     part_nodes: std::sync::OnceLock<PartNodes>,
     /// Nodes and elements of each part's skin, built when first needed.
     skin_lookup: std::sync::OnceLock<SkinLookup>,
+    /// Where the skins of parts meet without sharing nodes, for selections across them.
+    seams: std::sync::OnceLock<crate::seams::Seams>,
     /// What shows each CAD entity of a geometry display, built when first needed.
     cad_display: std::sync::OnceLock<CadDisplay>,
     /// Lookups to the CAD entities of a mesh generated from geometry, built when first
@@ -444,6 +446,10 @@ fn shown_sections(import: &mut InpImport, units: UnitSystem) -> InputSections {
             plx_model::SectionKind::Shell { thickness, .. }
             | plx_model::SectionKind::Membrane { thickness, .. } => *thickness *= length,
             plx_model::SectionKind::Truss { area } => *area *= length * length,
+            plx_model::SectionKind::Infill(infill) => {
+                infill.wall_thickness *= length;
+                infill.top_bottom_thickness *= length;
+            }
             plx_model::SectionKind::Beam(_) | plx_model::SectionKind::Solid => {}
         }
         if let plx_model::Region::ElementSet(set) = &section.region
@@ -804,6 +810,7 @@ impl Model {
             cyclic_preview: None,
             part_nodes: Default::default(),
             skin_lookup: Default::default(),
+            seams: Default::default(),
             cad_display: Default::default(),
             checks: Default::default(),
             cad_index: Default::default(),
@@ -1091,6 +1098,7 @@ impl Model {
             })
             .collect();
         self.skin_lookup = Default::default();
+        self.seams = Default::default();
         self.part_nodes = Default::default();
         self.section_cells = Default::default();
         true
@@ -1113,6 +1121,7 @@ impl Model {
         self.section_cells = Default::default();
         self.part_nodes = Default::default();
         self.skin_lookup = Default::default();
+        self.seams = Default::default();
         self.cad_display = Default::default();
         self.checks = Default::default();
         self.cad_index = Default::default();
@@ -1196,6 +1205,10 @@ impl Model {
         let index = self.mesh.node_index(id)?;
         let part = *self.part_nodes().part_of.get(index)?;
         (part != u32::MAX).then_some(part as usize)
+    }
+
+    pub fn seams(&self) -> &crate::seams::Seams {
+        (self.seams).get_or_init(|| crate::seams::Seams::new(&self.skins, self.mesh.coords()))
     }
 
     fn skin_lookup(&self) -> &SkinLookup {
@@ -2555,6 +2568,7 @@ mod tests {
             .model;
         let (first, second) = (model.parts[0].name.clone(), model.parts[1].name.clone());
         model.fe.sections.push(plx_model::Section {
+            orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
             region: plx_model::Region::Parts(vec![first.clone()]),
@@ -3128,6 +3142,7 @@ mod tests {
                 ..Default::default()
             }],
             sections: vec![Section {
+                orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("Steel")),
                 region: Region::Parts(vec!["SOLID-1".into()]),
@@ -3277,6 +3292,7 @@ mod tests {
         });
         let mut model = Model::new(Path::new("plate.inp"), mesh);
         model.fe.sections.push(plx_model::Section {
+            orientation: None,
             name: "Shell_Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
             region: plx_model::Region::Parts(vec!["Plate".into()]),
@@ -3325,6 +3341,7 @@ mod tests {
         });
         let mut model = Model::new(Path::new("beam.inp"), mesh);
         model.fe.sections.push(plx_model::Section {
+            orientation: None,
             name: "Beam_Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
             region: plx_model::Region::Parts(vec!["Beam".into()]),
@@ -3528,6 +3545,7 @@ S
             follower: false,
         });
         let solid = Section {
+            orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
             region: Region::Parts(vec![part]),
@@ -3643,6 +3661,7 @@ S
                 ..Default::default()
             }],
             sections: vec![Section {
+                orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("S235")),
                 region: Region::Parts(names.map(String::from).to_vec()),

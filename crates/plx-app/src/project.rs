@@ -14251,6 +14251,7 @@ mod tests {
                 faces: vec![1],
                 edges: Vec::new(),
                 size: 1.0,
+                depth: 0.0,
             },
         });
         assert_ne!(print(&setup, &empty, StudyMesh::Remeshed), remeshed);

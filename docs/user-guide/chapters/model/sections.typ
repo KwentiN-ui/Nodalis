@@ -10,7 +10,8 @@ part (or overlapping element sets) appears in two sections, the model check repo
 #screenshot("section.png", [Section dialog])
 
 #fields(
-  [Type], [#ui("Solid"), #ui("Truss") or #ui("Beam").],
+  [Type], [#ui("Solid"), #ui("Infill (3D print)") (@infill-section), #ui("Truss"),
+    #ui("Beam"), #ui("Shell") or #ui("Membrane").],
   [Material], [One of the model's materials.],
   [Region], [#ui("Parts") (picked in the 3D view) or an #ui("Element Set") (@mesh-sets).],
 )
@@ -19,6 +20,10 @@ part (or overlapping element sets) appears in two sections, the model check repo
 
 For solid elements and the plane and axisymmetric elements of 2D models. In plane stress and plane
 strain models the section has a #ui("Thickness") (default 1). Written as `*SOLID SECTION`.
+
+In 3D models the section has an #ui("Orientation"): a rectangular coordinate system of the
+features whose axes x, y, z are the material axes 1, 2, 3 of an anisotropic material
+(@anisotropic). #ui("Global") keeps the global axes; isotropic materials ignore it.
 
 === Truss section
 

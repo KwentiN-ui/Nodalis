@@ -664,6 +664,30 @@ fn material_models(
             ],
         ));
     }
+    match &material.anisotropic {
+        Some(plx_model::Anisotropic::Orthotropic(c)) => {
+            let mut rows = vec![("Model", "Orthotropic".to_string())];
+            for (name, value) in [("E1", c.e1), ("E2", c.e2), ("E3", c.e3)] {
+                rows.push((name, with_unit(value, Quantity::Pressure)));
+            }
+            for (name, value) in [("nu12", c.nu12), ("nu13", c.nu13), ("nu23", c.nu23)] {
+                rows.push((name, format_value(value)));
+            }
+            for (name, value) in [("G12", c.g12), ("G13", c.g13), ("G23", c.g23)] {
+                rows.push((name, with_unit(value, Quantity::Pressure)));
+            }
+            models.push((ELASTIC, rows));
+        }
+        Some(plx_model::Anisotropic::General(d)) => {
+            let mut rows = vec![("Model", "Anisotropic".to_string())];
+            for (k, name) in ["D1111", "D2222", "D3333"].into_iter().enumerate() {
+                let value = d[plx_model::upper_index(k, k)];
+                rows.push((name, with_unit(value, Quantity::Pressure)));
+            }
+            models.push((ELASTIC, rows));
+        }
+        None => {}
+    }
     if let Some(hyper) = &material.hyperelastic {
         let mut rows = vec![("Model", hyper.model.label().to_string())];
         for (parameter, value) in hyper.model.parameters().iter().zip(&hyper.constants) {
