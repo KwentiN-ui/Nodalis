@@ -99,7 +99,7 @@ pub(crate) fn split_by_plane(
                     [-extent, -extent, 0.0],
                     [2.0 * extent, 2.0 * extent, extent],
                 )?;
-                gmsh.affine_transform(&[(3, tag)], &frame)?;
+                gmsh.place(&[(3, tag)], &frame)?;
                 half = Some(tag);
                 tag
             }
@@ -209,7 +209,7 @@ pub(crate) fn split_by_plane(
             .flat_map(|(shape, _)| shape.entities())
             .collect();
         let sheet = gmsh.add_rectangle([-extent, -extent, 0.0], [2.0 * extent; 2], 0.0)?;
-        gmsh.affine_transform(&[(2, sheet)], &frame)?;
+        gmsh.place(&[(2, sheet)], &frame)?;
         let pieces = fragment_keeping(gmsh, &objects, &[(2, sheet)])
             .map_err(|e| fail(format!("OpenCASCADE could not split the edges: {e}")))?;
         let mut pieces = pieces.into_iter();
