@@ -132,6 +132,8 @@ pub struct Model {
     part_nodes: std::sync::OnceLock<PartNodes>,
     /// Nodes and elements of each part's skin, built when first needed.
     skin_lookup: std::sync::OnceLock<SkinLookup>,
+    /// Where the skins of parts meet without sharing nodes, for selections across them.
+    seams: std::sync::OnceLock<crate::seams::Seams>,
     /// What shows each CAD entity of a geometry display, built when first needed.
     cad_display: std::sync::OnceLock<CadDisplay>,
     /// Lookups to the CAD entities of a mesh generated from geometry, built when first
@@ -804,6 +806,7 @@ impl Model {
             cyclic_preview: None,
             part_nodes: Default::default(),
             skin_lookup: Default::default(),
+            seams: Default::default(),
             cad_display: Default::default(),
             checks: Default::default(),
             cad_index: Default::default(),
@@ -1091,6 +1094,7 @@ impl Model {
             })
             .collect();
         self.skin_lookup = Default::default();
+        self.seams = Default::default();
         self.part_nodes = Default::default();
         self.section_cells = Default::default();
         true
@@ -1113,6 +1117,7 @@ impl Model {
         self.section_cells = Default::default();
         self.part_nodes = Default::default();
         self.skin_lookup = Default::default();
+        self.seams = Default::default();
         self.cad_display = Default::default();
         self.checks = Default::default();
         self.cad_index = Default::default();
@@ -1196,6 +1201,10 @@ impl Model {
         let index = self.mesh.node_index(id)?;
         let part = *self.part_nodes().part_of.get(index)?;
         (part != u32::MAX).then_some(part as usize)
+    }
+
+    pub fn seams(&self) -> &crate::seams::Seams {
+        (self.seams).get_or_init(|| crate::seams::Seams::new(&self.skins, self.mesh.coords()))
     }
 
     fn skin_lookup(&self) -> &SkinLookup {

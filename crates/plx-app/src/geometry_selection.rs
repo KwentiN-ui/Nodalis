@@ -1,7 +1,8 @@
 //! Selections of CAD faces and edges on the Geometry tab, e.g. for a local mesh size: what
 //! a click selects in the modes of the selection window. The surface angle mode grows the
 //! clicked face across edges where the next face continues at less than the angle, the
-//! edge angle mode the clicked edge across vertices.
+//! edge angle mode the clicked edge across vertices. The surface angle mode grows on into
+//! other visible parts, over edges lying on edges of theirs.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -24,6 +25,10 @@ pub struct GeometryIndex {
     edge_faces: HashMap<i32, Vec<i32>>,
     edge_vertices: BTreeMap<i32, Vec<i32>>,
     vertex_edges: HashMap<i32, Vec<i32>>,
+    /// The part drawing each face, the first one where several do.
+    face_part: HashMap<i32, usize>,
+    /// The edges of other parts lying on each edge, along a stretch at least.
+    edge_twins: HashMap<i32, Vec<i32>>,
 }
 
 impl GeometryIndex {
@@ -34,8 +39,9 @@ impl GeometryIndex {
         };
         let mut face_triangles: HashMap<i32, Vec<[NodeId; 3]>> = HashMap::new();
         let mut edge_points: HashMap<i32, Vec<NodeId>> = HashMap::new();
+        let mut face_part: HashMap<i32, usize> = HashMap::new();
         // A face or edge shared by parts is drawn by each of them; the first one counts.
-        for part in &mesh.parts {
+        for (part_index, part) in mesh.parts.iter().enumerate() {
             let mut triangles: HashMap<i32, Vec<[NodeId; 3]>> = HashMap::new();
             let mut points: HashMap<i32, Vec<NodeId>> = HashMap::new();
             for element in part.elements.iter().filter_map(|&id| mesh.element(id)) {
@@ -56,6 +62,7 @@ impl GeometryIndex {
                 }
             }
             for (tag, triangles) in triangles {
+                face_part.entry(tag).or_insert(part_index);
                 face_triangles.entry(tag).or_insert(triangles);
             }
             for (tag, points) in points {
@@ -74,7 +81,10 @@ impl GeometryIndex {
                 vertex_edges.entry(vertex).or_default().push(edge);
             }
         }
+        let edge_twins = edge_twins(mesh, &edge_points);
         Self {
+            face_part,
+            edge_twins,
             face_triangles,
             edge_points,
             face_edges: topology.face_edges.clone(),
@@ -85,15 +95,27 @@ impl GeometryIndex {
     }
 
     /// The faces reached from `start` across edges where the faces on both sides meet at
-    /// no more than `angle` degrees.
-    fn smooth_faces(&self, mesh: &FeMesh, start: i32, angle: f64) -> BTreeSet<i32> {
+    /// no more than `angle` degrees, on into other parts over edges lying on each other,
+    /// of the parts for which `visible` holds.
+    fn smooth_faces(
+        &self,
+        mesh: &FeMesh,
+        start: i32,
+        angle: f64,
+        visible: impl Fn(usize) -> bool,
+    ) -> BTreeSet<i32> {
         let limit = angle.to_radians();
+        let shown = |face: &i32| self.face_part.get(face).is_none_or(|&p| visible(p));
         let mut seen = BTreeSet::from([start]);
         let mut stack = vec![start];
         while let Some(face) = stack.pop() {
             for &edge in self.face_edges.get(&face).into_iter().flatten() {
-                for &next in self.edge_faces.get(&edge).into_iter().flatten() {
+                let twins = self.edge_twins.get(&edge).into_iter().flatten();
+                let next = (std::iter::once(&edge).chain(twins))
+                    .flat_map(|e| self.edge_faces.get(e).into_iter().flatten());
+                for &next in next {
                     if !seen.contains(&next)
+                        && shown(&next)
                         && self
                             .face_angle(mesh, face, next, edge)
                             .is_some_and(|a| a <= limit)
@@ -224,6 +246,60 @@ impl GeometryIndex {
     }
 }
 
+/// For each edge the other edges lying on it along a stretch, see [`crate::seams::overlap`]:
+/// where parts meet that do not share their edges. Edges whose boxes overlap are compared
+/// segment by segment.
+fn edge_twins(mesh: &FeMesh, edge_points: &HashMap<i32, Vec<NodeId>>) -> HashMap<i32, Vec<i32>> {
+    struct Polyline {
+        tag: i32,
+        points: Vec<DVec3>,
+        min: DVec3,
+        max: DVec3,
+    }
+    let mut lines: Vec<Polyline> = (edge_points.iter())
+        .filter_map(|(&tag, ids)| {
+            let points: Vec<DVec3> = (ids.iter())
+                .filter_map(|&id| Some(DVec3::from(mesh.node(id)?)))
+                .collect();
+            if points.len() < 2 {
+                return None;
+            }
+            let longest = (points.windows(2))
+                .map(|w| w[0].distance(w[1]))
+                .fold(0.0, f64::max);
+            let margin = DVec3::splat(0.05 * longest);
+            let min = points.iter().fold(DVec3::INFINITY, |m, p| m.min(*p)) - margin;
+            let max = points.iter().fold(DVec3::NEG_INFINITY, |m, p| m.max(*p)) + margin;
+            Some(Polyline {
+                tag,
+                points,
+                min,
+                max,
+            })
+        })
+        .collect();
+    lines.sort_by(|a, b| a.min.x.total_cmp(&b.min.x));
+    let mut twins: HashMap<i32, Vec<i32>> = HashMap::new();
+    for (i, a) in lines.iter().enumerate() {
+        for b in &lines[i + 1..] {
+            if b.min.x > a.max.x {
+                break;
+            }
+            if b.min.cmpgt(a.max).any() || a.min.cmpgt(b.max).any() {
+                continue;
+            }
+            let on_each_other = (a.points.windows(2)).any(|s| {
+                (b.points.windows(2)).any(|t| crate::seams::overlap(s[0], s[1], t[0], t[1]))
+            });
+            if on_each_other {
+                twins.entry(a.tag).or_default().push(b.tag);
+                twins.entry(b.tag).or_default().push(a.tag);
+            }
+        }
+    }
+    twins
+}
+
 /// The point of the triangle nearest to `p`.
 fn closest_on_triangle(p: DVec3, a: DVec3, b: DVec3, c: DVec3) -> DVec3 {
     let (ab, ac, ap) = (b - a, c - a, p - a);
@@ -308,8 +384,9 @@ pub fn pick(
         }
         SelectBy::GeometrySurfaceAngle => face_at(model, hit)
             .map(|face| {
+                let visible = |p: usize| model.parts.get(p).is_some_and(|info| info.visible);
                 (index
-                    .smooth_faces(&model.mesh, face, picker.angle())
+                    .smooth_faces(&model.mesh, face, picker.angle(), visible)
                     .into_iter())
                 .map(CadEntity::Face)
                 .collect()
@@ -418,15 +495,48 @@ mod tests {
         let mesh = &view.mesh;
         let cylinder = BTreeSet::from([4, 5, 6]);
         for face in [4, 5, 6] {
-            assert_eq!(index.smooth_faces(mesh, face, 30.0), cylinder);
+            assert_eq!(index.smooth_faces(mesh, face, 30.0, |_| true), cylinder);
         }
         // The end faces meet the cylinder at a right angle.
-        assert_eq!(index.smooth_faces(mesh, 7, 30.0), BTreeSet::from([7]));
-        assert_eq!(index.smooth_faces(mesh, 4, 95.0).len(), 7);
+        assert_eq!(
+            index.smooth_faces(mesh, 7, 30.0, |_| true),
+            BTreeSet::from([7])
+        );
+        assert_eq!(index.smooth_faces(mesh, 4, 95.0, |_| true).len(), 7);
         let seams = BTreeSet::from([5, 8, 10]);
         assert_eq!(index.smooth_edges(mesh, 8, 30.0), seams);
         // The circles at the ends turn away from the seams at a right angle.
         assert_eq!(index.smooth_edges(mesh, 6, 30.0), BTreeSet::from([6]));
+    }
+
+    #[test]
+    fn edges_of_touching_parts_are_twins() {
+        // Edge 1 of one part along x from 0 to 10, edge 2 of a neighbour from 4 to 10 in
+        // two pieces, edge 3 from 10 on and edge 4 beside it: only 1 and 2 lie on each other.
+        let mut mesh = FeMesh::default();
+        let points = [
+            (1, [0.0, 0.0, 0.0]),
+            (2, [10.0, 0.0, 0.0]),
+            (3, [4.0, 0.0, 0.0]),
+            (4, [7.0, 0.0, 0.0]),
+            (5, [10.0, 0.0, 0.0]),
+            (6, [20.0, 0.0, 0.0]),
+            (7, [0.0, 1.0, 0.0]),
+            (8, [10.0, 1.0, 0.0]),
+        ];
+        for (id, at) in points {
+            mesh.set_node(id, at);
+        }
+        let edges = HashMap::from([
+            (1, vec![1, 2]),
+            (2, vec![3, 4, 5]),
+            (3, vec![5, 6]),
+            (4, vec![7, 8]),
+        ]);
+        let twins = edge_twins(&mesh, &edges);
+        assert_eq!(twins.get(&1), Some(&vec![2]));
+        assert_eq!(twins.get(&2), Some(&vec![1]));
+        assert_eq!((twins.get(&3), twins.get(&4)), (None, None));
     }
 
     #[test]
