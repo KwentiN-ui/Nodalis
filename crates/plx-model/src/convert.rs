@@ -362,9 +362,18 @@ impl FeModel {
             }
         }
         for system in &mut self.coordinate_systems {
-            length(&mut system.origin);
-            length(&mut system.point_x);
-            length(&mut system.point_xy);
+            match &mut system.definition {
+                crate::SystemDefinition::ThreePoints {
+                    origin,
+                    point_x,
+                    point_xy,
+                } => {
+                    length(origin);
+                    length(point_x);
+                    length(point_xy);
+                }
+                crate::SystemDefinition::OffsetRotation { offset, .. } => length(offset),
+            }
         }
         let point = |p: &mut crate::PointRef| {
             if let crate::PointRef::Coordinates(p) = p {

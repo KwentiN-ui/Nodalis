@@ -82,6 +82,9 @@ pub enum FeatureMark {
         axes: [Vec3; 3],
         name: String,
         selected: bool,
+        /// The system moves with a selection of the model: drawn with a ring about its
+        /// origin and its name marked.
+        moving: bool,
     },
     /// A plane as a rectangle on it, with its centre and unit normal.
     Plane {
@@ -743,6 +746,7 @@ fn draw_feature(painter: &Painter, camera: &Camera, rect: Rect, feature: &Featur
             axes,
             name,
             selected,
+            moving,
         } => {
             let center = project(camera, rect, *origin);
             if !rect.contains(center) {
@@ -766,10 +770,17 @@ fn draw_feature(painter: &Painter, camera: &Camera, rect: Rect, feature: &Featur
                 crate::style::lift(FEATURE_COLOR)
             };
             painter.circle_filled(center, 3.0, color);
+            let label = if *moving {
+                let ring = crate::style::lift(crate::features::MOVING_COLOR);
+                painter.circle_stroke(center, 7.0, Stroke::new(1.5, ring));
+                format!("{name} (moving)")
+            } else {
+                name.clone()
+            };
             painter.text(
                 center + vec2(-6.0, 6.0),
                 Align2::RIGHT_TOP,
-                name,
+                label,
                 font(),
                 color,
             );

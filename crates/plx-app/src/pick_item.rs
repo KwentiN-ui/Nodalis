@@ -43,6 +43,13 @@ pub fn system_combo(
     fe: &FeModel,
     width: f32,
 ) -> bool {
-    let systems = (fe.coordinate_systems.iter()).map(|c| (c.id, c.name.as_str()));
+    // Systems that move with a selection are marked.
+    let labels: Vec<(Id, String)> = (fe.coordinate_systems.iter())
+        .map(|c| match c.moves(&fe.coordinate_systems) {
+            true => (c.id, format!("{} (moving)", c.name)),
+            false => (c.id, c.name.clone()),
+        })
+        .collect();
+    let systems = labels.iter().map(|(id, name)| (*id, name.as_str()));
     item_combo(ui, salt, system, systems, Some(GLOBAL), width)
 }

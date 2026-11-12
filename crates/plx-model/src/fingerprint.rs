@@ -270,7 +270,10 @@ mod tests {
         complex.system = Some(fe.coordinate_systems[0].id);
         let used = solve_input(&mesh, &fe);
         assert_ne!(used, before);
-        fe.coordinate_systems[0].origin = [0.0, 0.0, 1.0];
+        fe.coordinate_systems[0].definition = crate::SystemDefinition::OffsetRotation {
+            offset: [0.0, 0.0, 1.0],
+            angles: [0.0; 3],
+        };
         assert_ne!(solve_input(&mesh, &fe), used);
     }
 

@@ -42,9 +42,7 @@ nodes of a picked edge, element or surface, for example the centre of a hole.
 
   #screenshot("reference-point-coupling.png", [Reference point at the centre of an end face,
     coupled deformably to it])
-/ Coordinate System: #ui("Rectangular") or #ui("Cylindrical"), defined by #ui("Origin"),
-  #ui("Point on x-axis") and #ui("Point in xy-plane"). For a cylindrical system the z axis is the
-  cylinder axis and the directions are r, θ and z.
+/ Coordinate System: #ui("Rectangular") or #ui("Cylindrical"), see @coordinate-systems.
 / Plane: by #ui("Coordinate system") (a plane XY, YZ or XZ of a system with an offset), by
   #ui("Three points") (normal by the right-hand rule) or by #ui("Point and normal"). A plane
   built on reference points follows them when they change.
@@ -52,3 +50,53 @@ nodes of a picked edge, element or surface, for example the centre of a hole.
 #screenshot("reference-point.png", [Reference point at the centre of gravity of an end face])
 
 #screenshot("shared-coordinate-system.png", [A coordinate system created in the Results, shown in the FE Model])
+
+=== Coordinate systems <coordinate-systems>
+
+A coordinate system is given in a base system and either stays fixed in space or moves with a
+selection of the model.
+
+#fields(
+  [Type], [#ui("Rectangular") or #ui("Cylindrical"). For a cylindrical system the z axis is the
+    cylinder axis and the directions are r, θ and z.],
+  [Base system], [The system the definition is given in: #ui("Global") or another coordinate
+    system of the features, for example a system on a hub and one turned against it by a few
+    degrees. Coordinates and turns are taken along the x, y and z axes of the base, also when the
+    base is cylindrical. A system changes with its base; a base cannot be given in the system
+    itself. Choosing another base keeps the system where it is and gives it anew in the new base.
+    Deleting a base does the same for the systems given in it.],
+  [Define by], [#ui("Three points"): #ui("Origin"), #ui("Point on x axis") and #ui("Point in xy
+    plane"), typed in or picked with #ui("..."). #ui("Offset and rotation"): the base moved by
+    #ui("Offset") and turned about its x axis, then about the turned y axis, then about the
+    turned z axis, in degrees, as Ansys does. Switching between the two keeps the system in
+    place.],
+  [Motion], [#ui("Fixed in space") keeps the system where it is while the model deforms.
+    #ui("Moves with selection") binds it to faces, edges or nodes picked in the 3D view, whole
+    parts or a set: under large deformations it moves and turns with the rigid motion that fits
+    the motion of their nodes best, for example with the faces of a bore, a flange or the end of
+    a lever arm. A system given in a moving base moves with the base.],
+)
+
+#screenshot("moving-coordinate-system.png", [A coordinate system bound to the free end of a
+  cantilever, given in a base system by offset and rotation])
+
+A moving system is marked everywhere it appears: the tree shows it with an orange turning arrow
+and #ui("(moving)") after its name, the 3D view with an orange ring about its origin, and the
+lists that offer coordinate systems (loads, remote points, field outputs) name it with
+#ui("(moving)"). In the Results the system is drawn where the shown deformation takes it.
+
+What moves with the system under large deformations (#ui("Nlgeom")):
+
+- A #ui("Force"), #ui("Moment"), #ui("Excitation") or #ui("Remote Force") in a moving system turns
+  with it, as a follower load turning with the system's selection rather than with its own
+  region (@load-directions).
+- A #ui("Coordinate System Transformation") of the results (@derived-fields) takes the
+  directions the system has in each increment. Displacements in a moving system are taken
+  relative to it: the field less the rigid motion of the system, so that a rotating part shows
+  only how it deforms.
+- Displacement boundary conditions and remote displacements keep the directions the system has
+  in the undeformed model; the model check warns about them in steps with #ui("Nlgeom").
+- Materials, joints, planes, moving loads and reference points use the system as it lies in the
+  undeformed model. Material axes turn with the material under #ui("Nlgeom") anyway.
+
+Without #ui("Nlgeom") a moving system acts like a fixed one in the solver.

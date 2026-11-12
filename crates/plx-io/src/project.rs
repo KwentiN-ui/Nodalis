@@ -1478,9 +1478,7 @@ mod tests {
         });
         let mut axis = plx_model::CoordinateSystem::new("Column_Axis");
         axis.kind = plx_model::CoordinateSystemKind::Cylindrical;
-        axis.origin = [0.01, 0.01, 0.1];
-        axis.point_x = [0.02, 0.01, 0.1];
-        axis.point_xy = [0.01, 0.02, 0.1];
+        axis.set_points([0.01, 0.01, 0.1], [0.02, 0.01, 0.1], [0.01, 0.02, 0.1]);
         let system = axis.id;
         model.coordinate_systems.push(axis);
         let mut step = plx_model::Step::new_static("Step-1");
@@ -1507,6 +1505,90 @@ mod tests {
         );
         load.system = Some(system);
         load.follower = true;
+        step.loads.push(load);
+        model.steps.push(step);
+        let project = single(None, &mesh, &model, None);
+        save_project(std::path::Path::new(&path), &project).unwrap();
+    }
+
+    /// Writes a project of a lever bent far by a force at its end, in a coordinate system that
+    /// moves with the end face, with a second system given in it by offset and rotation, for
+    /// the user guide's screenshot of moving coordinate systems:
+    /// `PLX_MOVING_SYSTEM_DEMO=path cargo test moving_system_demo -- --ignored`.
+    #[test]
+    #[ignore]
+    fn moving_system_demo_project() {
+        let Some(path) = std::env::var_os("PLX_MOVING_SYSTEM_DEMO") else {
+            return;
+        };
+        let mut mesh = FeMesh::default();
+        let [bottom, top] = add_block(
+            &mut mesh,
+            "Lever",
+            1,
+            [0.0, 0.0, 0.0],
+            [0.02, 0.02, 0.2],
+            [4, 4, 40],
+        );
+        let mut model = FeModel::default();
+        model.materials.push(Material {
+            name: "Steel".into(),
+            density: Some(7850.0),
+            elastic: Some(plx_model::Elastic {
+                young: 2.1e11,
+                poisson: 0.3,
+            }),
+            ..Default::default()
+        });
+        model.sections.push(plx_model::Section {
+            name: "Solid_Section-1".into(),
+            material: model.materials.last().map(|m| m.id),
+            region: Region::Parts(vec!["Lever".into()]),
+            thickness: 1.0,
+            kind: plx_model::SectionKind::Solid,
+        });
+        let mut end = plx_model::CoordinateSystem::new("Lever_End");
+        end.set_points([0.01, 0.01, 0.2], [0.02, 0.01, 0.2], [0.01, 0.02, 0.2]);
+        end.attached = Some(Region::Faces(top.clone()));
+        let pin = plx_model::CoordinateSystem {
+            base: Some(end.id),
+            definition: plx_model::SystemDefinition::OffsetRotation {
+                offset: [0.0, 0.0, -0.05],
+                angles: [0.0, 30.0, 0.0],
+            },
+            ..plx_model::CoordinateSystem::new("Pin")
+        };
+        let fixed = plx_model::CoordinateSystem::from_points(
+            "Ground",
+            [0.05, 0.01, 0.0],
+            [0.06, 0.01, 0.0],
+            [0.05, 0.02, 0.0],
+        );
+        let system = end.id;
+        model.coordinate_systems.extend([end, pin, fixed]);
+        let mut step = plx_model::Step::new_static("Step-1");
+        if let plx_model::StepKind::Static(settings) = &mut step.kind {
+            settings.nlgeom = true;
+        }
+        step.boundary_conditions.push(plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
+            distribution: None,
+            name: "Fixed-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(bottom),
+            kind: plx_model::BoundaryKind::displacement([Some(0.0); 6]),
+            amplitude: None,
+        });
+        let mut load = plx_model::Load::new(
+            "Force-1",
+            Region::Faces(top),
+            plx_model::LoadKind::Force {
+                value: [30000.0, 0.0, 0.0],
+                each_node: false,
+            },
+        );
+        load.system = Some(system);
         step.loads.push(load);
         model.steps.push(step);
         let project = single(None, &mesh, &model, None);

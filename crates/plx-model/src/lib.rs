@@ -18,6 +18,7 @@ mod contact;
 mod contact_check;
 mod contact_steps;
 pub mod convert;
+mod coordinate_system;
 mod cross_section;
 mod detection;
 mod distribution;
@@ -86,6 +87,10 @@ pub use contact::{
 };
 pub use contact_check::{ContactCheck, ContactStatus};
 pub use contact_steps::{ContactChange, ContactState};
+pub use coordinate_system::{
+    CoordinatePlane, CoordinateSystem, CoordinateSystemKind, Frame, RigidMotion, SystemDefinition,
+    region_positions,
+};
 pub use cross_section::{
     BeamProfile, CrossSection, Dimension, Outline, ROUND_POINTS, RopeBending, SectionProperties,
     Sketch, triangulate, triangulate_with_holes,
@@ -100,8 +105,7 @@ pub use element_type::{PartElementType, element_type_options};
 pub use excitation::{Excitation, Signal, SignalKind, Sweep};
 pub use exposed::{Exposed, Field, ItemRef, ValuePath};
 pub use features::{
-    CoordinatePlane, CoordinateSystem, CoordinateSystemKind, GLOBAL, Plane, PlaneSource,
-    PointDefinition, PointRef, ReferencePoint, ResultPath, ResultPlane,
+    GLOBAL, Plane, PlaneSource, PointDefinition, PointRef, ReferencePoint, ResultPath, ResultPlane,
 };
 pub use field::{FieldOutput, OutputDimension, OutputKind, output_variable_description};
 pub use geometry::{
@@ -185,8 +189,12 @@ use serde::{Deserialize, Serialize};
 /// ([`LoadKind::Flux`]); formats 21 to 27 read as they are unless a step has one of those
 /// loads. Format 29 adds the defeaturing of the CAD Operation block
 /// ([`CadOperationKind::Defeature`]); formats 21 to 28 read as they are. Format 30 adds the
-/// Transform block of the project schematic; formats 21 to 29 read as they are.
-pub const PROJECT_FORMAT: u32 = 30;
+/// Transform block of the project schematic; formats 21 to 29 read as they are. Format 32
+/// gives coordinate systems a base system, a definition by three points or by offset and
+/// rotation ([`SystemDefinition`]) and a selection they move with
+/// ([`CoordinateSystem::attached`]); formats 21 to 31 read as they are unless they have
+/// coordinate systems.
+pub const PROJECT_FORMAT: u32 = 32;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1779,7 +1787,7 @@ impl ComplexFrequencyStep {
         let (point, axis) = match self.system {
             Some(id) => {
                 let system = fe
-                    .coordinate_system(id)
+                    .coordinate_system_or_global(Some(id))
                     .ok_or("The coordinate system does not exist")?;
                 (system.origin, system.axes()?[2])
             }
@@ -2171,10 +2179,10 @@ impl Load {
 impl Load {
     /// The coordinate system of the components ([`Load::system`]); `None` for the global
     /// one or for a kind without one.
-    pub fn component_system(&self, fe: &FeModel) -> Result<Option<CoordinateSystem>, String> {
+    pub fn component_system(&self, fe: &FeModel) -> Result<Option<Frame>, String> {
         match self.system.filter(|_| self.kind.takes_system()) {
             None => Ok(None),
-            Some(id) => (fe.coordinate_system(id).cloned())
+            Some(id) => (fe.coordinate_system_or_global(Some(id)))
                 .map(Some)
                 .ok_or_else(|| format!("{}: The coordinate system does not exist.", self.name)),
         }
@@ -2182,7 +2190,7 @@ impl Load {
 
     /// Components given in `system` (none: global) at `position` in global directions.
     pub fn to_global(
-        system: Option<&CoordinateSystem>,
+        system: Option<&Frame>,
         position: [f64; 3],
         local: [f64; 3],
     ) -> Result<[f64; 3], String> {

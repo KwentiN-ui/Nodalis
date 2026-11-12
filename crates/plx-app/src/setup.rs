@@ -1581,6 +1581,21 @@ fn direction_rows(
         ui.weak("Components 1, 2, 3 are radial, tangential and axial at every node.");
         ui.end_row();
     }
+    if fe.system_attachment(*system).is_some() {
+        // The load turns with the system; its own follower setting does not count.
+        ui.label("");
+        ui.colored_label(
+            crate::style::lift(crate::features::MOVING_COLOR),
+            if nlgeom {
+                "Turns with the coordinate system, which moves with a selection."
+            } else {
+                "The coordinate system moves with a selection: the load turns with it under \
+                 large deformations (Nlgeom) only."
+            },
+        );
+        ui.end_row();
+        return;
+    }
     ui.label("");
     ui.checkbox(follower, "Follow the deformation")
         .on_hover_text(
@@ -1605,6 +1620,15 @@ pub(crate) fn system_row(ui: &mut Ui, system: &mut Option<Id>, fe: &FeModel) {
     ui.label("Coordinate system");
     crate::pick_item::system_combo(ui, "remote system", system, fe, 200.0);
     ui.end_row();
+    if fe.system_attachment(*system).is_some() {
+        ui.label("");
+        ui.colored_label(
+            crate::style::lift(crate::features::MOVING_COLOR),
+            "Moves with a selection: a remote force turns with it under large deformations, \
+             a remote displacement keeps its directions in the undeformed model.",
+        );
+        ui.end_row();
+    }
 }
 
 /// Rows of a point a selection follows: where it is, where it resolves to, and the pinball

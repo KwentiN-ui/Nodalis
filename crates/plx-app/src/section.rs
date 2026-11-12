@@ -724,9 +724,7 @@ mod tests {
             id: crate::test_ids::named("CS"),
             ..plx_model::CoordinateSystem::new("CS")
         };
-        system.origin = [0.0, 0.0, 5.0];
-        system.point_x = [1.0, 0.0, 5.0];
-        system.point_xy = [0.0, 1.0, 5.0];
+        system.set_points([0.0, 0.0, 5.0], [1.0, 0.0, 5.0], [0.0, 1.0, 5.0]);
         fe.coordinate_systems.push(system);
         fe.planes.push(plx_model::Plane {
             source: plx_model::PlaneSource::CoordinateSystem {
@@ -759,8 +757,7 @@ mod tests {
         assert!((section.anchor(center).z - 6.0).abs() < EPS);
         // The plane moves with its coordinate system.
         let system = &mut fe.coordinate_systems[0];
-        (system.origin, system.point_x, system.point_xy) =
-            ([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        system.set_points([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
         assert!(section.resolve(&fe));
         assert!((section.anchor(center).z - 1.0).abs() < EPS);
     }

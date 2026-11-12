@@ -51,7 +51,8 @@ from the results.
     Component...") inserts a component name. #ui("Unit") is shown in the legend.],
   [Coordinate System Transformation], [Rotates a vector or tensor field into a coordinate system
     defined under #ui("Features"); cylindrical systems give radial, tangential and axial
-    components.],
+    components. A system that moves with a selection (@coordinate-systems) turns with it in
+    every increment, and displacements in it are taken relative to the system.],
   [Principal Direction], [The direction of the largest (#ui("Max")), middle (#ui("Mid")) or
     smallest (#ui("Min")) principal value of a tensor field such as `STRESS` or `TOSTRAIN`, or of
     the one largest in magnitude (#ui("Abs Max"): #ui("Max") where the part is pulled,

@@ -179,10 +179,12 @@ fn a_fully_covered_face_gets_the_nodal_forces_of_a_uniform_pressure() {
 fn the_path_follows_the_coordinate_system() {
     // A system turned so that its z axis runs along global x, as the crane runway's system.
     let mut model = FeModel::default();
-    let mut system = crate::CoordinateSystem::new("Runway");
-    system.origin = [100.0, 0.0, 0.0];
-    system.point_x = [100.0, 1.0, 0.0];
-    system.point_xy = [100.0, 0.0, 1.0];
+    let system = crate::CoordinateSystem::from_points(
+        "Runway",
+        [100.0, 0.0, 0.0],
+        [100.0, 1.0, 0.0],
+        [100.0, 0.0, 1.0],
+    );
     let runway = system.id;
     model.coordinate_systems.push(system);
     let (mesh, faces) = plate(false);

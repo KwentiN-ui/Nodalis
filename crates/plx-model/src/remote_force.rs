@@ -226,12 +226,8 @@ mod tests {
         );
         // A system turned 90 degrees about z: local x is global y.
         model.coordinate_systems.push(CoordinateSystem {
-            id: crate::Id::new(),
-            name: "Turned".into(),
             kind: CoordinateSystemKind::Rectangular,
-            origin: [0.0; 3],
-            point_x: [0.0, 1.0, 0.0],
-            point_xy: [-1.0, 0.0, 0.0],
+            ..CoordinateSystem::from_points("Turned", [0.0; 3], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0])
         });
         let turned = RemoteForce {
             system: model.coordinate_systems.last().map(|c| c.id),

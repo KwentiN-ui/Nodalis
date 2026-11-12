@@ -166,11 +166,13 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
         };
         // Components of a force or moment in the load's coordinate system, in global
         // directions at a point.
-        let system = item.system.and_then(|id| model.fe.coordinate_system(id));
-        let cylindrical =
-            system.is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
+        let system = (item.system).and_then(|id| model.fe.coordinate_system_or_global(Some(id)));
+        let cylindrical = system
+            .as_ref()
+            .is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
         let global = |point: DVec3, local: [f64; 3]| {
-            plx_model::Load::to_global(system, point.into(), local).map_or(DVec3::ZERO, DVec3::from)
+            plx_model::Load::to_global(system.as_ref(), point.into(), local)
+                .map_or(DVec3::ZERO, DVec3::from)
         };
         let mut add = |position: DVec3, direction: DVec3, shape: SymbolShape| {
             if let Some(direction) = direction.try_normalize() {

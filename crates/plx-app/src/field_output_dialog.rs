@@ -131,6 +131,9 @@ pub struct FieldOutputDialog {
     taken: Vec<String>,
     /// Coordinate systems a field can be transformed into.
     systems: Vec<String>,
+    /// The systems among them that move with a selection: displacements in them are taken
+    /// relative to the system, other results in its moved directions.
+    moving_systems: Vec<String>,
     /// Tensor fields, whose principal directions can be computed.
     tensors: Vec<String>,
 }
@@ -227,6 +230,10 @@ impl FieldOutputDialog {
         let systems: Vec<String> = (view.coordinate_systems.iter())
             .map(|c| c.name.clone())
             .collect();
+        let moving_systems: Vec<String> = (view.coordinate_systems.iter())
+            .filter(|c| c.moves(&view.coordinate_systems))
+            .map(|c| c.name.clone())
+            .collect();
         // Vectors and tensors can be transformed; STRESS or DISP first.
         let transformable = ["STRESS", "DISP"]
             .into_iter()
@@ -298,6 +305,7 @@ impl FieldOutputDialog {
             fields,
             taken,
             systems,
+            moving_systems,
             tensors,
         }
     }
@@ -504,6 +512,11 @@ impl FieldOutputDialog {
         });
         let fields = &self.fields;
         let systems = &self.systems;
+        let moving = &self.moving_systems;
+        let label = |name: &String| match moving.contains(name) {
+            true => format!("{name} (moving)"),
+            false => name.clone(),
+        };
         let tensors = &self.tensors;
         let focus = &mut self.focus;
         let draft = &mut self.drafts[self.kind];
@@ -568,11 +581,15 @@ impl FieldOutputDialog {
                         });
                         prop_row(ui, focus, Row::CoordinateSystem, |ui| {
                             let response = egui::ComboBox::from_id_salt("transform system")
-                                .selected_text(coordinate_system.as_str())
+                                .selected_text(label(coordinate_system))
                                 .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
                                     for name in systems {
-                                        ui.selectable_value(coordinate_system, name.clone(), name);
+                                        ui.selectable_value(
+                                            coordinate_system,
+                                            name.clone(),
+                                            label(name),
+                                        );
                                     }
                                 });
                             response.response.clicked()
