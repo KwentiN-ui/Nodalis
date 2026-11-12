@@ -1411,7 +1411,8 @@ Was T15 gebaut hat:
   (Schalen, Balken), Eigenwertiteration und implizite Dynamik
   (`Equations::preferring_direct`, eine Faktorisierung für viele Systeme) sowie kleine
   Modelle bleiben bei der Speicherregel.
-- Offen: p-Multigrid (erste Ebene = Eckknoten) für quadratische Netze; Blätter der
+- Offen (p-Multigrid inzwischen umgesetzt, siehe "Stand nach dem Multigrid über die
+  Eckknoten"): Blätter der
   Dissection per Minimum Degree statt Cuthill-McKee und ein mehrstufiger Partitionierer
   (Scotch-artig) wären die nächsten Schritte zum Füllgrad von PaStiX.
 
@@ -1590,3 +1591,50 @@ V-Zyklus, behaltene Hierarchie oft zu lange behalten.
   glatt, SXX_max 31.7 MPa (fester Bolzen mit Face-to-Face-Kontakt 32.05 MPa, 2D-Netz 31.9).
   Nebenbei besser konditioniert: automatischer (iterativer) Löser 142 statt ~360
   PCG-Iterationen pro Lösung, 64 s statt 168 s (Cloud, 4 Threads).
+
+## Stand nach dem Multigrid über die Eckknoten (2026-11-12, Thread "Investigate poor convergence of large quad meshes")
+
+- Anlass: große Hexaedernetze aus dem gestapelten Sweep (C3D20, Standard ist quadratisch)
+  konvergierten im iterativen Solver auffällig schlecht. Gemessen (Container, 4 Threads,
+  Stufenplatte aus `stufenplatte.step`, eingespannt und quer belastet): C3D20 mit 1,27 Mio.
+  Gleichungen 96 Iterationen, dasselbe Teil in C3D10 (0,8 Mio.) 46; ein Würfel aus C3D20 44,
+  aus C3D8 23. Dazu kostet eine Iteration auf C3D20 je Unbekannte gut das Doppelte von
+  C3D10 (rund 175 statt 87 Nichtnullen je Zeile). Newton-Iterationen und die
+  Elementformulierung sind nicht beteiligt; 2D-Vierecke (CPS4, CPE4, CAX4) und C3D8
+  konvergieren so gut wie Dreiecke und Tetraeder.
+- Ursache: die Aggregate der geglätteten Aggregation passen schlecht auf quadratische
+  Netze, am schlechtesten auf den 20-Knoten-Quader. Der Glätter mit der Blockdiagonalen ist
+  dort schwach (λ_max(D⁻¹A) = 5,4 gegen 2,7 bei C3D10 und 2,9 bei C3D8), und die langsamen
+  Fehleranteile liegen auf der Skala der Aggregate. Glätterfenster, Prolongator-Dämpfung,
+  Stärkeschwelle und kleinere Aggregate ändern daran wenig (62 → 49 bis 67 Iterationen auf
+  190k Gleichungen), ein höherer Glättergrad spart Iterationen, aber keine Zeit.
+- Lösung (`plxs-linalg::amg`, `Unknowns::midside`, `Model::midside_ends`,
+  `ElementType::midside_edges`): ein Netz mit Mittenknoten wird zuerst auf seine Eckknoten
+  vergröbert, mit der Interpolation der linearen Elemente (Mittenknoten = Mittel der beiden
+  Kantenenden, ungeglättet); die Aggregation beginnt erst auf dieser Ebene. Die Eckebene hat
+  ein Viertel (Quader) bis ein Achtel (Tetraeder) der Unbekannten und den dünnen Operator
+  des linearen Netzes; die Hierarchie wird kleiner (0,64 statt 0,74 × die Matrix) und
+  schneller gebaut. Gilt für C3D10, C3D15, C3D20(R) und die quadratischen 2D-Elemente;
+  Netze fast ohne Mittenknoten (über 80 % Eckknoten) behalten die Aggregate.
+  `PLXS_AMG_CORNERS=0` schaltet es für Messungen ab.
+- Zahlen (alt → neu, Iterationen und Lösezeit ohne Aufbau): Stufenplatte C3D20 1,27 Mio.
+  96 → 41, 36,5 → 14 s (Aufbau 23 → 16 s); Stufenplatte C3D10 0,8 Mio. 46 → 28,
+  6,7 → 3,3 s; Blech 300 × 200 × 4 mit Löchern C3D20 488k 98 → 51 (C3D8 auf demselben Netz
+  49), C3D10 841k 112 → 60; Würfel C3D20 1,2 Mio. 44 → 22; CPS8 203k 39 → 21; CAX8 361k
+  43 → 21. Verschiebungen stimmen auf die geschriebenen Stellen überein.
+- Gehaltene Mittenknoten bleiben auf der Eckebene: an einer gekrümmten Fläche liegt das
+  Mittel der Kantenenden neben der Fläche, die lineare Interpolation eines Gleitens entlang
+  der Fläche drückt den Mittenknoten also gegen das, was ihn hält (Gap-Feder, Feder zur
+  Umgebung, Penalty eines Kontakts), und die Eckebene sperrt. Die Anschlagöse auf
+  GAPUNI-Federn (C3D20 + C3D15, 87k Gleichungen) brauchte damit 170 bis 250 statt 46 bis 76
+  Iterationen. Erkannt wird das algebraisch: die Blöcke der Zeile eines Knotens innerhalb
+  seines Körpers summieren sich zu null, solange nur Elemente an ihm hängen (`HELD` = 5 %
+  des Diagonalblocks); Knoten neben vorgeschriebenen Freiheitsgraden fallen mit darunter.
+  Federn und Gaps machen einen Mittenknoten in `Model::midside_ends` nicht zum Eckknoten.
+- Echte Modelle (alt → neu): Anschlagöse, 24 Lösungen, 1191 → 850 Iterationen; Seilrolle
+  mit Kontakt (C3D10, 238k) je Lösung im Mittel 62 → 52 Iterationen und ein Viertel mehr
+  Lösungen in derselben Zeit; Halter C3D10 591k 160 → 125 Iterationen, 13,7 → 10,0 s,
+  Aufbau 5,6 → 3,6 s. Auch auf der Grafikkarte (lavapipe) geprüft.
+- Bleibt: eine Iteration auf C3D20 ist je Unbekannte weiterhin etwa doppelt so teuer wie
+  auf C3D10 (dichtere Matrix), und der Aufbau der Hierarchie (16 s bei 1,27 Mio.) ist jetzt
+  so teuer wie das Lösen.

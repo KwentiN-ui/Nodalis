@@ -499,7 +499,9 @@ fn with_message(error: Error, f: impl FnOnce(&str) -> String) -> Error {
 /// nodes' positions and bodies, for the solvers (the ordering of the direct one, the
 /// multigrid of the iterative one; see [`plxs_core::Model::node_bodies`]).
 pub fn displacement_unknowns(model: &plxs_core::Model, free: &[u32]) -> Unknowns {
-    Unknowns::from_free(free, 3, &model.nodes.coordinates).with_bodies(&model.node_bodies())
+    Unknowns::from_free(free, 3, &model.nodes.coordinates)
+        .with_bodies(&model.node_bodies())
+        .with_midsides(&model.midside_ends())
 }
 
 pub fn factor_exceeds_memory(

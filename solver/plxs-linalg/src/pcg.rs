@@ -805,16 +805,29 @@ impl PcgSolver {
                 if let Some(&body) = u.body.get(i) {
                     renumbered.body[slot] = body;
                 }
+                if let Some(&midside) = u.midside.get(i) {
+                    renumbered.midside[slot] = midside;
+                }
             }
             return Some(renumbered);
         }
         let nodes = self.padded / 3;
         let bodies_known = u.body.len() == u.node.len();
+        let midsides_known = u.midside.len() == u.node.len();
         let mut padded = Unknowns {
             node: (0..nodes as u32).flat_map(|b| [b, b, b]).collect(),
             component: vec![u8::MAX; self.padded],
             coordinates: vec![[0.0; 3]; self.padded],
             body: vec![0; if bodies_known { self.padded } else { 0 }],
+            midside: vec![[u32::MAX; 2]; if midsides_known { self.padded } else { 0 }],
+        };
+        // The padded numbering has its own nodes: the ends of the edges are renumbered.
+        let block_of: std::collections::HashMap<u32, u32> = if midsides_known {
+            (self.slot_of.iter().enumerate())
+                .map(|(i, &slot)| (u.node[i], slot / 3))
+                .collect()
+        } else {
+            Default::default()
         };
         for (i, &slot) in self.slot_of.iter().enumerate() {
             let slot = slot as usize;
@@ -824,6 +837,11 @@ impl PcgSolver {
                 padded.coordinates[3 * node + c] = u.coordinates[i];
                 if bodies_known {
                     padded.body[3 * node + c] = u.body[i];
+                }
+                if midsides_known && u.midside[i] != [u32::MAX; 2] {
+                    // An end without unknowns is held: it gets a number no node has.
+                    padded.midside[3 * node + c] =
+                        u.midside[i].map(|end| block_of.get(&end).copied().unwrap_or(u32::MAX - 1));
                 }
             }
         }

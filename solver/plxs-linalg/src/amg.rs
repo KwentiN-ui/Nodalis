@@ -16,6 +16,11 @@
 //! precision, the preconditioner only has to be a fixed symmetric positive definite
 //! operator.
 //!
+//! A mesh of quadratic elements is coarsened to its corner nodes first, by the
+//! interpolation of the linear elements on the same corners (a midside node takes the mean
+//! of the ends of its edge), and the aggregation starts on that level, see
+//! [`Amg::build`].
+//!
 //! Sources: Vaněk, Mandel, Brezina, "Algebraic multigrid by smoothed aggregation for
 //! second and fourth order elliptic problems", Computing 56 (1996); the aggregation phases
 //! and the smoothing weight `4/(3 λ_max)` follow that paper. The Chebyshev smoother is the
@@ -48,6 +53,11 @@ pub struct Unknowns {
     /// are not known: then the whole model counts as one. Nodes of different bodies never
     /// share an aggregate of the multigrid (see [`Amg`]).
     pub body: Vec<u32>,
+    /// For the unknowns of a midside node the two end nodes of its element edge (numbered
+    /// as in `node`), `[u32::MAX; 2]` for those of any other node; empty when the mesh is
+    /// not known. The multigrid of a mesh of quadratic elements coarsens to the corner
+    /// nodes first (see [`Amg`]).
+    pub midside: Vec<[u32; 2]>,
 }
 
 impl Unknowns {
@@ -63,7 +73,20 @@ impl Unknowns {
                 .map(|&d| coordinates[(d / per_node) as usize])
                 .collect(),
             body: Vec::new(),
+            midside: Vec::new(),
         }
+    }
+
+    /// The same unknowns, with the ends of the edge of every midside node (`of_node`, by
+    /// the node numbers of [`Self::node`]; `[u32::MAX; 2]` for the other nodes); see
+    /// [`Self::midside`].
+    pub fn with_midsides(mut self, of_node: &[[u32; 2]]) -> Self {
+        self.midside = self
+            .node
+            .iter()
+            .map(|&n| of_node.get(n as usize).copied().unwrap_or([u32::MAX; 2]))
+            .collect();
+        self
     }
 
     /// The same unknowns, with the body of every node (`of_node`, by the node numbers of
@@ -97,6 +120,9 @@ pub struct AmgOptions {
     /// How many near-nullspace vectors the hierarchy may learn from its own slow modes
     /// (adaptive smoothed aggregation), see [`Amg::build`]; 0 turns it off.
     pub adaptive: usize,
+    /// Whether a mesh of quadratic elements is coarsened to its corner nodes first, see
+    /// [`Amg::build`].
+    pub corners: bool,
 }
 
 /// Where the multigrid cycle runs (`PLXS_GPU=off|on`, automatic otherwise).
@@ -151,7 +177,7 @@ impl GpuMode {
 impl Default for AmgOptions {
     /// The defaults, each overridable for measurements by an environment variable
     /// (`PLXS_AMG_STRENGTH`, `PLXS_AMG_DEGREE`, `PLXS_AMG_COARSE`, `PLXS_AMG_LEVELS`,
-    /// `PLXS_AMG_MAX_AGG`).
+    /// `PLXS_AMG_MAX_AGG`, `PLXS_AMG_CORNERS`).
     fn default() -> Self {
         fn env<T: std::str::FromStr>(name: &str, default: T) -> T {
             std::env::var(name)
@@ -167,6 +193,7 @@ impl Default for AmgOptions {
             max_aggregate: env("PLXS_AMG_MAX_AGG", 27),
             gpu: GpuMode::from_environment(),
             adaptive: env("PLXS_AMG_ADAPTIVE", 0),
+            corners: env("PLXS_AMG_CORNERS", 1) != 0,
         }
     }
 }
@@ -285,6 +312,18 @@ impl Amg {
     /// what [`ADAPTIVE_CYCLES`] cycles leave is the slow mode, and when the energy still
     /// contracts by less than [`ADAPTIVE_THRESHOLD`] per cycle that vector joins the
     /// near-nullspace and the hierarchy is built again, up to `options.adaptive` times.
+    ///
+    /// Quadratic elements (`unknowns.midside`): the first coarse level is the corner nodes
+    /// with the interpolation of the linear elements, unsmoothed, and the aggregation
+    /// starts there. Aggregates of the quadratic mesh itself fit it badly, those of the
+    /// 20-node brick worst (the smoother with the block diagonal is weak on it, the
+    /// largest eigenvalue of `D⁻¹ A` is 5.4 against 2.7 for the 10-node tetrahedron): a
+    /// plate with a boss swept into 97 000 bricks, 1.27 million unknowns, took 96
+    /// iterations and takes 41, the same part in tetrahedra 46 and 28, a cube of bricks
+    /// 44 and 22. The corner level has a quarter (bricks) or an eighth (tetrahedra) of the
+    /// unknowns and the sparse operator of the linear mesh, so the hierarchy is no larger
+    /// and is built faster. A midside node that something holds from outside its body's
+    /// elements stays on the corner level as it is (see `corner_prolongator`).
     pub fn build(
         a: &Bsr,
         unknowns: Option<&Unknowns>,
@@ -323,7 +362,19 @@ impl Amg {
                 last = now;
             }
         };
-        let mut amg = Self::assemble(a, &nullspace, bodies.clone(), options, trace, &mut lap)?;
+        let corners = unknowns
+            .filter(|u| options.corners && u.midside.len() == n)
+            .and_then(|u| corner_prolongator(a, u));
+        let corners = corners.as_ref();
+        let mut amg = Self::assemble(
+            a,
+            &nullspace,
+            bodies.clone(),
+            corners,
+            options,
+            trace,
+            &mut lap,
+        )?;
         for round in 0..options.adaptive {
             let Some((vector, factor)) = amg.slow_mode(a, &padding) else {
                 break;
@@ -338,7 +389,15 @@ impl Amg {
                 );
             }
             nullspace.push(&vector);
-            amg = Self::assemble(a, &nullspace, bodies.clone(), options, trace, &mut lap)?;
+            amg = Self::assemble(
+                a,
+                &nullspace,
+                bodies.clone(),
+                corners,
+                options,
+                trace,
+                &mut lap,
+            )?;
         }
         #[cfg(feature = "gpu")]
         {
@@ -429,6 +488,7 @@ impl Amg {
         a: &Bsr,
         nullspace: &Nullspace,
         mut bodies: Option<Vec<u32>>,
+        corners: Option<&Corners>,
         options: AmgOptions,
         trace: bool,
         lap: &mut impl FnMut(&str, usize),
@@ -451,6 +511,41 @@ impl Amg {
             let coarsest = n_l <= options.coarse_size || levels.len() + 1 >= options.max_levels;
             let coarser = if coarsest {
                 None
+            } else if let Some(corners) = corners.filter(|_| levels.is_empty()) {
+                let k = nullspace.k;
+                let size = a_l.br * k;
+                let ns_c = Nullspace {
+                    k,
+                    vectors: (corners.blocks.iter())
+                        .flat_map(|&b| {
+                            let b = b as usize;
+                            nullspace.vectors[b * size..(b + 1) * size].iter().copied()
+                        })
+                        .collect(),
+                };
+                let bodies_c = bodies.as_ref().map(|b| {
+                    corners
+                        .blocks
+                        .iter()
+                        .map(|&c| b[c as usize])
+                        .collect::<Vec<u32>>()
+                });
+                let p = corners.p.clone();
+                let pt = p.transpose();
+                lap("corner prolongator", n_l);
+                let a_c = galerkin(a_l, &p, &pt);
+                lap("galerkin product", n_l);
+                if trace {
+                    eprintln!(
+                        "amg: A {} blocks, P {} blocks, Ac {} x {} blocks",
+                        a_l.blocks(),
+                        p.blocks(),
+                        a_c.brows,
+                        a_c.blocks()
+                    );
+                }
+                nonzeros += p.nnz() * 2 + a_c.nnz();
+                Some((p, pt, a_c, ns_c, bodies_c))
             } else {
                 let aggregates = aggregate(
                     a_l,
@@ -922,6 +1017,117 @@ struct Aggregates {
     of_block: Vec<u32>,
     ptr: Vec<usize>,
     blocks: Vec<u32>,
+}
+
+/// The first coarsening of a mesh of quadratic elements: its corner nodes.
+struct Corners {
+    /// The fine blocks of the corner nodes, ascending: the coarse blocks.
+    blocks: Vec<u32>,
+    /// The interpolation of the linear elements on the same corners: a corner node takes
+    /// its own value, a midside node the mean of the ends of its edge.
+    p: Bsr,
+}
+
+/// A midside node is held from outside when the blocks of its row within its body add up
+/// to more than this fraction of its diagonal block (Frobenius norms).
+const HELD: f64 = 0.05;
+
+/// The corner nodes of `a`'s blocks and the interpolation from them, when enough of the
+/// nodes are midside nodes for the corner level to be worth its while.
+fn corner_prolongator(a: &Bsr, u: &Unknowns) -> Option<Corners> {
+    const NONE: u32 = u32::MAX;
+    let (blocks, br) = (a.brows, a.br);
+    if a.bc != br || blocks == 0 {
+        return None;
+    }
+    let block_of: std::collections::HashMap<u32, u32> =
+        (0..blocks).map(|b| (u.node[b * br], b as u32)).collect();
+    // A midside node that something holds from outside its body's elements (a spring to
+    // the ground, a gap, the penalty of a contact) stays on the corner level as it is:
+    // on a curved face the mean of the ends of its edge lies off the face, so the linear
+    // interpolation of a motion along the face would move the node against what holds
+    // it, and the corner level could not slide at all (a lifting lug on gap springs took
+    // 170 to 250 iterations instead of 46 to 76). The elements of a body resist no
+    // translation, so the blocks of a node's row within its body add up to zero unless
+    // something else holds the node (or a neighbour is prescribed).
+    let size = br * br;
+    let bodies = (u.body.len() == u.node.len()).then_some(&u.body);
+    let held: Vec<bool> = (0..blocks)
+        .into_par_iter()
+        .map(|b| {
+            if u.midside[b * br] == [NONE; 2] {
+                return false;
+            }
+            let (col, val) = a.block_row(b);
+            let mut sum = vec![0.0; size];
+            let mut diagonal = 0.0;
+            for (&c, block) in col.iter().zip(val.chunks_exact(size)) {
+                let c = c as usize;
+                if c == b {
+                    diagonal = block.iter().map(|v| v * v).sum::<f64>();
+                }
+                if bodies.is_none_or(|body| body[c * br] == body[b * br]) {
+                    sum.iter_mut().zip(block).for_each(|(s, v)| *s += v);
+                }
+            }
+            sum.iter().map(|v| v * v).sum::<f64>() > HELD * HELD * diagonal
+        })
+        .collect();
+    let is_corner = |b: usize| u.midside[b * br] == [NONE; 2] || held[b];
+    let mut coarse_of = vec![NONE; blocks];
+    let mut corners = Vec::new();
+    for (b, coarse) in coarse_of.iter_mut().enumerate() {
+        if is_corner(b) {
+            *coarse = corners.len() as u32;
+            corners.push(b as u32);
+        }
+    }
+    if corners.len() * 10 > blocks * 8 {
+        return None;
+    }
+    let mut ptr = Vec::with_capacity(blocks + 1);
+    let mut col = Vec::new();
+    let mut val = Vec::new();
+    ptr.push(0);
+    let identity = |weight: f64, val: &mut Vec<f64>| {
+        for r in 0..br {
+            for c in 0..br {
+                val.push(if r == c { weight } else { 0.0 });
+            }
+        }
+    };
+    for b in 0..blocks {
+        if is_corner(b) {
+            col.push(coarse_of[b]);
+            identity(1.0, &mut val);
+        } else {
+            let mut ends: Vec<u32> = (u.midside[b * br].iter())
+                .filter_map(|end| block_of.get(end))
+                .map(|&e| coarse_of[e as usize])
+                .filter(|&c| c != NONE)
+                .collect();
+            ends.sort_unstable();
+            ends.dedup();
+            for c in ends {
+                col.push(c);
+                identity(0.5, &mut val);
+            }
+        }
+        ptr.push(col.len());
+    }
+    debug_assert_eq!(val.len(), col.len() * size);
+    Some(Corners {
+        p: Bsr {
+            brows: blocks,
+            bcols: corners.len(),
+            br,
+            bc: br,
+            ptr,
+            col,
+            val,
+        },
+        blocks: corners,
+    })
 }
 
 /// Groups the blocks of a level by the three aggregation phases on the graph of strong
@@ -1565,6 +1771,92 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn midside_nodes_interpolate_the_ends_of_their_edges() {
+        // Five nodes in a row, each coupled to the next: corners 10, 30, 50 with the
+        // midside nodes 20 and 40 between them and a midside node 60 whose other end is
+        // held (no unknowns, the number 99 no node has).
+        let nodes = [10u32, 20, 30, 40, 50, 60];
+        let ends = [
+            [u32::MAX; 2],
+            [10, 30],
+            [u32::MAX; 2],
+            [50, 30],
+            [u32::MAX; 2],
+            [50, 99],
+        ];
+        let unknowns = Unknowns {
+            node: nodes.iter().flat_map(|&n| [n, n]).collect(),
+            component: nodes.iter().flat_map(|_| [0, 1]).collect(),
+            coordinates: (0..6).flat_map(|i| [[i as f64, 0.0, 0.0]; 2]).collect(),
+            body: Vec::new(),
+            midside: ends.iter().flat_map(|&e| [e, e]).collect(),
+        };
+        // A chain of springs between neighbours, free at both ends: no translation is
+        // resisted. `ground` is a spring to the ground on one node.
+        let chain = |ground: Option<usize>| {
+            Bsr::build(
+                6,
+                6,
+                2,
+                2,
+                || (),
+                |i, _, acc| {
+                    let neighbours = i.saturating_sub(1)..(i + 2).min(6);
+                    let held = if ground == Some(i) { 5.0 } else { 0.0 };
+                    for j in neighbours.clone() {
+                        let v = if i == j {
+                            (neighbours.len() - 1) as f64 + held
+                        } else {
+                            -1.0
+                        };
+                        acc.block(j as u32).copy_from_slice(&[v, 0.0, 0.0, v]);
+                    }
+                },
+            )
+        };
+        let a = chain(None);
+        let corners = corner_prolongator(&a, &unknowns).unwrap();
+        assert_eq!(corners.blocks, [0, 2, 4]);
+        let p = &corners.p;
+        assert_eq!((p.brows, p.bcols, p.br, p.bc), (6, 3, 2, 2));
+        let row = |i: usize| {
+            let (col, val) = p.block_row(i);
+            (col.to_vec(), val.to_vec())
+        };
+        assert_eq!(row(0), (vec![0], vec![1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(
+            row(1),
+            (vec![0, 1], vec![0.5, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.5])
+        );
+        assert_eq!(
+            row(3),
+            (vec![1, 2], vec![0.5, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.5])
+        );
+        assert_eq!(row(5), (vec![2], vec![0.5, 0.0, 0.0, 0.5]));
+        // A linear function at the corners is the same function at the midside nodes.
+        let coarse = [1.0, 10.0, 3.0, 30.0, 5.0, 50.0];
+        let mut fine = [0.0; 12];
+        p.multiply(&coarse, &mut fine);
+        assert_eq!(
+            fine[..10],
+            [1.0, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 40.0, 5.0, 50.0]
+        );
+
+        // A midside node held by a spring to the ground stays on the corner level.
+        let held = corner_prolongator(&chain(Some(3)), &unknowns).unwrap();
+        assert_eq!(held.blocks, [0, 2, 3, 4]);
+        let (col, val) = held.p.block_row(3);
+        assert_eq!((col, val), (&[2u32][..], &[1.0, 0.0, 0.0, 1.0][..]));
+
+        // A mesh with hardly any midside nodes keeps its aggregates.
+        let mut linear = unknowns.clone();
+        linear.midside = vec![[u32::MAX; 2]; 12];
+        linear.midside[2] = [10, 30];
+        linear.midside[3] = [10, 30];
+        assert!(corner_prolongator(&a, &linear).is_none());
     }
 
     #[test]

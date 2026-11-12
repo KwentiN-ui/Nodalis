@@ -158,6 +158,54 @@ impl Model {
         number
     }
 
+    /// For every node (by index) that is the midside node of an edge of a quadratic
+    /// continuum element the indices of the two nodes at the ends of that edge,
+    /// `[u32::MAX; 2]` for every other node (a node that is a corner of any element counts
+    /// as a corner). The multigrid of the iterative solver coarsens a quadratic mesh to
+    /// its corner nodes first.
+    pub fn midside_ends(&self) -> Vec<[u32; 2]> {
+        const NONE: [u32; 2] = [u32::MAX; 2];
+        let mut ends = vec![NONE; self.nodes.len()];
+        let mut corner = vec![false; self.nodes.len()];
+        for element in &self.elements {
+            // A spring or a gap on a midside node does not make it a corner.
+            if matches!(
+                element.kind.family(),
+                crate::element::ElementFamily::Spring | crate::element::ElementFamily::Gap
+            ) {
+                continue;
+            }
+            let edges = element.kind.midside_edges();
+            let corners = element.nodes.len().saturating_sub(edges.len());
+            let index = |local: usize| {
+                element
+                    .nodes
+                    .get(local)
+                    .and_then(|&id| self.nodes.index(id))
+            };
+            for local in 0..if edges.is_empty() {
+                element.nodes.len()
+            } else {
+                corners
+            } {
+                if let Some(i) = index(local) {
+                    corner[i as usize] = true;
+                }
+            }
+            for (k, &[a, b]) in edges.iter().enumerate() {
+                if let (Some(m), Some(a), Some(b)) = (index(corners + k), index(a), index(b)) {
+                    ends[m as usize] = [a, b];
+                }
+            }
+        }
+        for (ends, corner) in ends.iter_mut().zip(corner) {
+            if corner {
+                *ends = NONE;
+            }
+        }
+        ends
+    }
+
     /// The element ids a reference stands for.
     pub fn elements_of(&self, region: &crate::mesh::ElementRef) -> Vec<ElementId> {
         match region {
@@ -236,6 +284,37 @@ impl Analysis {
 mod tests {
     use super::*;
     use crate::element::ElementType;
+
+    #[test]
+    fn midside_nodes_know_the_ends_of_their_edges() {
+        let mut model = Model::default();
+        for id in 1..=20 {
+            model.nodes.insert(10 * id, [id as f64, 0.0, 0.0]);
+        }
+        // A quadratic tetrahedron (nodes 10 to 100) and a linear one on its midside node
+        // 50 (between 10 and 20), which is a corner therefore.
+        let ids = |range: std::ops::RangeInclusive<u32>| range.map(|i| 10 * i).collect();
+        for (id, kind, nodes) in [
+            (1, ElementType::C3D10, ids(1..=10)),
+            (2, ElementType::C3D4, vec![50, 110, 120, 130]),
+            // A spring to the ground on a midside node leaves it one.
+            (3, ElementType::SPRING1, vec![60]),
+        ] {
+            model.insert_element(Element {
+                id,
+                kind,
+                nodes,
+                section: None,
+            });
+        }
+        let ends = model.midside_ends();
+        const NONE: [u32; 2] = [u32::MAX; 2];
+        // Indices are the ids' order: node 10 is 0, node 60 is 5.
+        assert_eq!(ends[..4], [NONE; 4]);
+        assert_eq!(ends[4], NONE);
+        assert_eq!(ends[5..10], [[1, 2], [2, 0], [0, 3], [1, 3], [2, 3]]);
+        assert!(ends[10..].iter().all(|&e| e == NONE));
+    }
 
     #[test]
     fn bodies_are_the_components_over_the_elements_without_springs() {

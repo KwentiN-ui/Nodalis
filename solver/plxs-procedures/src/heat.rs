@@ -122,6 +122,9 @@ struct HeatRun<'h> {
     mechanical_equations: Equations,
     /// Node positions, for the ordering of the factorization.
     coordinates: Vec<[f64; 3]>,
+    /// The ends of the edge of every midside node, for the multigrid of the iterative
+    /// solver ([`plxs_core::Model::midside_ends`]).
+    midsides: Vec<[u32; 2]>,
     /// Free set and matrix values of the last factorization.
     factorized: Option<(Vec<u32>, Vec<f64>)>,
     assembled: bool,
@@ -193,6 +196,7 @@ impl<'h> HeatRun<'h> {
             equations: Equations::new(p.solver),
             mechanical_equations: Equations::new(p.solver).for_model(ctx.model),
             coordinates: ctx.model.nodes.coordinates.clone(),
+            midsides: ctx.model.midside_ends(),
             factorized: None,
             assembled: false,
             mechanical_spc: None,
@@ -595,7 +599,8 @@ impl<'h> HeatRun<'h> {
             return Ok(());
         }
         let reduced = a.restrict(free);
-        let coordinates = || Unknowns::from_free(free, 1, &self.coordinates);
+        let coordinates =
+            || Unknowns::from_free(free, 1, &self.coordinates).with_midsides(&self.midsides);
         self.equations.prepare(
             &mut self.solver,
             &reduced,
