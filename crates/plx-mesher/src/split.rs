@@ -115,15 +115,34 @@ pub(crate) fn split_by_plane(
             )
             .map_err(|e| fail(format!("OpenCASCADE could not split {name}: {e}")))?;
         let negative = gmsh
-            .boolean_keeping(Boolean::Cut, &[(3, volume)], &[(3, half)], true, false)
+            .boolean_keeping(Boolean::Cut, &[(3, volume)], &[(3, half)], false, false)
             .map_err(|e| fail(format!("OpenCASCADE could not split {name}: {e}")))?;
         let solids = |made: &[Entity]| -> Vec<i32> {
             made.iter().filter(|e| e.0 == 3).map(|e| e.1).collect()
         };
         let (positive, negative) = (solids(&positive), solids(&negative));
-        if !positive.is_empty() && !negative.is_empty() {
-            cut_any = true;
+        // A part whose bounding box only reaches over the plane, e.g. one cut along it
+        // before, lies on one side: OpenCASCADE gives it back whole, under its own tag or a
+        // new one, and nothing on the other side.
+        if positive.is_empty() || negative.is_empty() {
+            let copies: Vec<Entity> = (positive.iter().chain(&negative))
+                .filter(|&&v| v != volume)
+                .map(|&v| (3, v))
+                .collect();
+            if !copies.is_empty() {
+                gmsh.remove(&copies)?;
+            }
+            if keeps(if negative.is_empty() { 1.0 } else { -1.0 }) {
+                record(gmsh, &shape, &name, &mut places)?;
+            } else {
+                gone.extend(shape.entities());
+                used.remove(&name);
+                remove_from(&mut compounds, &name, &[]);
+            }
+            continue;
         }
+        cut_any = true;
+        gmsh.remove(&[(3, volume)])?;
         let mut kept = Vec::new();
         for (pieces, sign) in [(positive, 1.0), (negative, -1.0)] {
             if keeps(sign) {

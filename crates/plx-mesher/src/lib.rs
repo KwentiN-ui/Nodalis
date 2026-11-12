@@ -664,12 +664,101 @@ pub fn tessellate(geometry: &Geometry) -> Result<GeometryDisplay, GmshError> {
         if let Err(error) = gmsh.import_stl() {
             log::warn!("Geometry display incomplete: {error}");
         }
+        let coords = node_coords(gmsh)?;
+        let mut boundaries: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+        for face in gmsh.entities(2)? {
+            let triangles = gmsh.elements(TRI3, face)?.1;
+            boundaries.insert(face, boundary_nodes(&triangles));
+        }
+        let tolerance = diagonal * 1e-6;
         let mut polylines = BTreeMap::new();
         for curve in gmsh.entities(1)? {
-            polylines.insert(curve, curve_polyline(gmsh, curve, deflection)?);
+            // The edge runs through the nodes the triangulation of its faces has along it,
+            // so that the drawn line and the faces agree; the sampling is the fallback.
+            let shared = triangulated_curve(gmsh, curve, &boundaries, &coords, tolerance)
+                .unwrap_or_default();
+            let polyline = if shared.len() >= 2 {
+                shared
+            } else {
+                curve_polyline(gmsh, curve, deflection)?
+            };
+            polylines.insert(curve, polyline);
         }
         display_mesh(gmsh, geometry, &polylines)
     })
+}
+
+/// The nodes on the border of a triangulation: those of the triangle sides that belong to
+/// one triangle only.
+fn boundary_nodes(triangles: &[usize]) -> Vec<usize> {
+    let mut sides: HashMap<(usize, usize), u32> = HashMap::new();
+    for triangle in triangles.as_chunks::<3>().0 {
+        for k in 0..3 {
+            let (a, b) = (triangle[k], triangle[(k + 1) % 3]);
+            *sides.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    let mut nodes: Vec<usize> = sides
+        .into_iter()
+        .filter(|&(_, count)| count == 1)
+        .flat_map(|((a, b), _)| [a, b])
+        .collect();
+    nodes.sort_unstable();
+    nodes.dedup();
+    nodes
+}
+
+/// The points of a curve taken from the border nodes of the faces it bounds, in the order
+/// along the curve, ends included. Empty if the curve is not found among them.
+fn triangulated_curve(
+    gmsh: &Gmsh,
+    curve: i32,
+    boundaries: &BTreeMap<i32, Vec<usize>>,
+    coords: &HashMap<usize, [f64; 3]>,
+    tolerance: f64,
+) -> Result<Vec<[f64; 3]>, GmshError> {
+    let (min, max) = gmsh.parameter_bounds(1, curve)?;
+    let (Some(&t0), Some(&t1)) = (min.first(), max.first()) else {
+        return Ok(Vec::new());
+    };
+    let (lo, hi) = gmsh.entity_bounding_box(1, curve)?;
+    let near =
+        |p: &[f64; 3]| (0..3).all(|k| p[k] >= lo[k] - tolerance && p[k] <= hi[k] + tolerance);
+    let mut found: Vec<(f64, [f64; 3])> = Vec::new();
+    for face in gmsh.adjacencies(1, curve)?.0 {
+        let Some(nodes) = boundaries.get(&face) else {
+            continue;
+        };
+        for tag in nodes {
+            let Some(&point) = coords.get(tag).filter(|p| near(p)) else {
+                continue;
+            };
+            let (closest, parameter) = gmsh.projection(1, curve, point)?;
+            if let Some(&t) = parameter.first()
+                && distance(closest, point) <= tolerance
+            {
+                found.push((t, point));
+            }
+        }
+    }
+    if found.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The ends belong to the curve whether or not a node was found there.
+    let ends = gmsh.values(1, curve, &[t0, t1])?;
+    found.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let epsilon = (t1 - t0).abs() * 1e-9;
+    found.dedup_by(|b, a| (b.0 - a.0).abs() <= epsilon);
+    let mut points: Vec<[f64; 3]> = Vec::with_capacity(found.len() + 2);
+    points.push(ends[0]);
+    points.extend(
+        found
+            .iter()
+            .filter(|(t, _)| *t > t0 + epsilon && *t < t1 - epsilon)
+            .map(|&(_, p)| p),
+    );
+    points.push(ends[1]);
+    Ok(points)
 }
 
 /// How far a display triangulation may stray from the geometry: the distance to it, and the
