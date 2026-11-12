@@ -794,7 +794,7 @@ impl AnalysisWindow {
     /// The state of the cells found now, not as last found: right after a run, the one
     /// found while it ran may still be cached.
     pub fn current_status(&self) -> Option<crate::status::AnalysisStatus> {
-        self.workbench.status()
+        self.workbench.status(None)
     }
 
     /// Geometry > Import, into the model space and units the analysis was made with.
@@ -3869,8 +3869,12 @@ impl Workbench {
         dir.join(crate::analysis::job_name(&self.analysis_name))
     }
 
-    /// The state of the cells of the analysis, see [`crate::status`].
-    pub fn status(&self) -> Option<crate::status::AnalysisStatus> {
+    /// The state of the cells of the analysis, see [`crate::status`]; with the state found
+    /// before, the solution's fingerprints are made in the background if they take a while.
+    pub fn status(
+        &self,
+        previous: Option<&crate::status::AnalysisStatus>,
+    ) -> Option<crate::status::AnalysisStatus> {
         let model = self.model.as_ref()?;
         Some(crate::status::analysis_status(
             model.geometry.as_ref(),
@@ -3880,6 +3884,7 @@ impl Workbench {
             model.bound_results.as_ref(),
             &self.upstream,
             (self.project_run.as_ref()).is_some_and(|r| r.active),
+            previous,
         ))
     }
 
@@ -3891,14 +3896,25 @@ impl Workbench {
         hash.add(&self.revision()?.to_le_bytes());
         hash.add_debug(&self.upstream);
         hash.add_debug(&(self.project_run.as_ref()).is_some_and(|r| r.active));
-        let key = hash.finish();
+        // A state that waits for the fingerprints made in the background is found again
+        // once they are ready: its key counts the fingerprints made so far. That count is
+        // taken before the state is found, so that fingerprints ready meanwhile count.
+        let generation = crate::solve_fingerprint::generation();
+        let key = |pending: bool| {
+            let mut hash = hash;
+            if pending {
+                hash.add(&generation.to_le_bytes());
+            }
+            hash.finish()
+        };
         if let Some((seen, status)) = &self.status
-            && *seen == key
+            && *seen == key(status.pending)
         {
             return Some(status.clone());
         }
-        let status = self.status()?;
-        self.status = Some((key, status.clone()));
+        let previous = self.status.take().map(|(_, status)| status);
+        let status = self.status(previous.as_ref())?;
+        self.status = Some((key(status.pending), status.clone()));
         Some(status)
     }
 

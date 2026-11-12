@@ -60,6 +60,9 @@ pub struct AnalysisStatus {
     /// [`crate::solve_fingerprint::step_inputs`]; empty without results. Kept here so that
     /// what is drawn in every frame does not fingerprint the whole model again.
     pub step_inputs: Vec<u64>,
+    /// Whether the solution and results states are those found before the last change, while
+    /// the fingerprints of the changed model are made in the background.
+    pub pending: bool,
 }
 
 impl AnalysisStatus {
@@ -100,7 +103,10 @@ impl Upstream {
 }
 
 /// The state of each cell of an analysis with this data; `running` while the solver solves it.
-/// `upstream` is what it takes from other blocks that is not ready.
+/// `upstream` is what it takes from other blocks that is not ready. With `previous`, the state
+/// found before, the fingerprints of the solution are made in the background if they take a
+/// while, and its solution and results states stand meanwhile ([`AnalysisStatus::pending`]).
+#[allow(clippy::too_many_arguments)]
 pub fn analysis_status(
     geometry: Option<&Geometry>,
     mesh: &FeMesh,
@@ -109,6 +115,7 @@ pub fn analysis_status(
     results: Option<&BoundResults>,
     upstream: &Upstream,
     running: bool,
+    previous: Option<&AnalysisStatus>,
 ) -> AnalysisStatus {
     let space = fe.properties.space;
     let meshed = mesh.element_count() > 0;
@@ -151,7 +158,32 @@ pub fn analysis_status(
     } else {
         CellState::UpToDate
     };
-    let prints = results.map(|_| crate::solve_fingerprint::fingerprints(mesh, fe));
+    // Lowering a large model for its fingerprints takes seconds: after a change it runs in
+    // the background, and the states found before stand until it is done. Without states
+    // found before there is nothing to show meanwhile.
+    let prints = results.map(|_| match previous {
+        Some(_) => crate::solve_fingerprint::fingerprints_soon(mesh, fe),
+        None => Some(crate::solve_fingerprint::fingerprints(mesh, fe)),
+    });
+    if let (Some(None), Some(previous)) = (&prints, previous) {
+        return AnalysisStatus {
+            geometry: geometry_state,
+            mesh: mesh_state,
+            setup,
+            solution: if running {
+                CellState::Running
+            } else {
+                previous.solution
+            },
+            results: previous.results,
+            stale_parts,
+            stale_sources: upstream.stale_meshes.clone(),
+            stale_results: upstream.stale_results.clone(),
+            step_inputs: previous.step_inputs.clone(),
+            pending: true,
+        };
+    }
+    let prints = prints.flatten();
     let solution = match (results, &prints) {
         _ if running => CellState::Running,
         (Some(results), Some(prints)) => {
@@ -182,6 +214,7 @@ pub fn analysis_status(
         stale_sources: upstream.stale_meshes.clone(),
         stale_results: upstream.stale_results.clone(),
         step_inputs: prints.map(|p| p.steps).unwrap_or_default(),
+        pending: false,
     }
 }
 
@@ -272,6 +305,56 @@ mod tests {
     }
 
     #[test]
+    fn a_change_keeps_the_states_found_before_until_the_background_fingerprints_are_ready() {
+        let mesh = block();
+        let mut fe = FeModel::default();
+        fe.steps.push(Step::new_static("Step-1"));
+        let solved = results(crate::solve_fingerprint::solve_input(&mesh, &fe));
+        let status = |fe: &FeModel, previous: Option<&AnalysisStatus>| {
+            let inputs = BTreeMap::new();
+            let upstream = Upstream::default();
+            analysis_status(
+                None,
+                &mesh,
+                fe,
+                &inputs,
+                Some(&solved),
+                &upstream,
+                false,
+                previous,
+            )
+        };
+        let before = status(&fe, None);
+        assert_eq!(before.solution, CellState::UpToDate);
+        assert!(!before.pending);
+        // A second step changes what the solver computes; the model is lowered for its
+        // fingerprints in the background, and the states found before stand meanwhile.
+        fe.steps.push(Step::new_static("Step-2"));
+        let mut now = status(&fe, Some(&before));
+        let start = std::time::Instant::now();
+        while now.pending {
+            assert_eq!(now.solution, CellState::UpToDate);
+            assert_eq!(now.step_inputs, before.step_inputs);
+            assert!(
+                start.elapsed().as_secs() < 30,
+                "the fingerprints never came"
+            );
+            let generation = crate::solve_fingerprint::generation();
+            while crate::solve_fingerprint::generation() == generation
+                && start.elapsed().as_secs() < 30
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            now = status(&fe, Some(&now));
+        }
+        assert_eq!(now.solution, CellState::OutOfDate);
+        assert_eq!(
+            now.step_inputs,
+            crate::solve_fingerprint::step_inputs(&mesh, &fe)
+        );
+    }
+
+    #[test]
     fn a_changed_load_makes_only_the_solution_out_of_date() {
         let mesh = block();
         let mut fe = FeModel::default();
@@ -285,6 +368,7 @@ mod tests {
             Some(&solved),
             &Upstream::default(),
             false,
+            None,
         );
         assert_eq!(status.geometry, CellState::NotUsed);
         assert_eq!(status.mesh, CellState::UpToDate);
@@ -306,6 +390,7 @@ mod tests {
             Some(&solved),
             &Upstream::default(),
             false,
+            None,
         );
         assert_eq!(status.solution, CellState::UpToDate);
         // Nor does a name: the solver computes the same.
@@ -318,6 +403,7 @@ mod tests {
             Some(&solved),
             &Upstream::default(),
             false,
+            None,
         );
         assert_eq!(status.solution, CellState::UpToDate);
         fe.steps[0].active = false;
@@ -329,6 +415,7 @@ mod tests {
             Some(&solved),
             &Upstream::default(),
             false,
+            None,
         );
         assert_eq!(status.mesh, CellState::UpToDate);
         assert_eq!(status.solution, CellState::OutOfDate);
@@ -365,6 +452,7 @@ mod tests {
             Some(&solved),
             &Upstream::default(),
             false,
+            None,
         );
         assert_eq!(status.mesh, CellState::UpToDate);
         assert_eq!(status.setup, CellState::Missing);
@@ -377,6 +465,7 @@ mod tests {
             Some(&solved),
             &Upstream::default(),
             false,
+            None,
         );
         assert_eq!(status.mesh, CellState::OutOfDate);
         assert_eq!(status.stale_parts, [part]);
@@ -399,6 +488,7 @@ mod tests {
             Some(&solved),
             &Upstream::default(),
             false,
+            None,
         );
         assert!(!status.needs_solve());
         // The block's divisions changed; the analysis still holds the block's old mesh.
@@ -407,7 +497,16 @@ mod tests {
             stale_meshes: stale.to_vec(),
             ..Default::default()
         };
-        let status = analysis_status(None, &mesh, &fe, &inputs, Some(&solved), &upstream, false);
+        let status = analysis_status(
+            None,
+            &mesh,
+            &fe,
+            &inputs,
+            Some(&solved),
+            &upstream,
+            false,
+            None,
+        );
         assert_eq!(status.mesh, CellState::OutOfDate);
         assert_eq!(status.solution, CellState::OutOfDate);
         assert_eq!(status.results, CellState::OutOfDate);
@@ -428,7 +527,16 @@ mod tests {
         };
         assert!(!upstream.is_ready());
         let inputs = BTreeMap::new();
-        let status = analysis_status(None, &mesh, &fe, &inputs, Some(&solved), &upstream, false);
+        let status = analysis_status(
+            None,
+            &mesh,
+            &fe,
+            &inputs,
+            Some(&solved),
+            &upstream,
+            false,
+            None,
+        );
         // The mesh is its own; the solution used results that no longer fit their model.
         assert_eq!(status.mesh, CellState::UpToDate);
         assert_eq!(status.solution, CellState::OutOfDate);
@@ -446,6 +554,7 @@ mod tests {
             None,
             &Upstream::default(),
             false,
+            None,
         );
         assert_eq!(status.geometry, CellState::Missing);
         assert_eq!(status.mesh, CellState::Missing);
@@ -458,6 +567,7 @@ mod tests {
             None,
             &Upstream::default(),
             true,
+            None,
         );
         assert_eq!(running.solution, CellState::Running);
     }
