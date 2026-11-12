@@ -687,3 +687,56 @@ fn signal_amplitudes_read_and_render_back() {
         assert!(read(&cube(wrong)).is_err(), "{wrong}");
     }
 }
+
+#[test]
+fn anisotropic_elasticity_and_orientations_read_and_render_back() {
+    use plxs_core::material::AnisotropicElastic;
+    use plxs_core::section::SectionKind;
+    let steps = "*Step\n*Static\n*Boundary\nFIX, 1, 3\n*End step\n";
+    let text = cube(steps)
+        .replace(
+            "*Elastic\n210000, 0.3\n",
+            "*Elastic, Type=Engineering constants\n3000, 2000, 1000, 0.3, 0.2, 0.25, 800, 600,\n400\n",
+        )
+        .replace(
+            "*Solid section, Elset=EALL, Material=Steel\n",
+            "*Orientation, Name=Turned\n0, 1, 0, -1, 0, 0\n\
+*Solid section, Elset=EALL, Material=Steel, Orientation=Turned\n",
+        );
+    let check = |analysis: &plxs_core::Analysis| {
+        let material = &analysis.model.materials[0];
+        assert!(material.elastic.is_none());
+        assert_eq!(
+            material.anisotropic,
+            Some(AnisotropicElastic::EngineeringConstants([
+                3000.0, 2000.0, 1000.0, 0.3, 0.2, 0.25, 800.0, 600.0, 400.0
+            ]))
+        );
+        let SectionKind::Solid { orientation, .. } = &analysis.model.sections[0].kind else {
+            panic!("no solid section");
+        };
+        assert_eq!(orientation.as_deref(), Some("TURNED"));
+        let axes = analysis
+            .model
+            .orientation("TURNED")
+            .unwrap()
+            .axes()
+            .unwrap();
+        assert_eq!(axes[2], [0.0, 0.0, 1.0]);
+    };
+    let analysis = read(&text).unwrap();
+    check(&analysis);
+    let rendered = super::render(&analysis);
+    check(&read(&rendered).unwrap());
+    let aniso = cube(steps).replace(
+        "*Elastic\n210000, 0.3\n",
+        "*Elastic, Type=Aniso\n1, 0, 1, 0, 0, 1, 0, 0,\n0, 1, 0, 0, 0, 0, 1, 0,\n0, 0, 0, 0, 1\n",
+    );
+    let analysis = read(&aniso).unwrap();
+    assert!(matches!(
+        analysis.model.materials[0].anisotropic,
+        Some(AnisotropicElastic::Anisotropic(_))
+    ));
+    assert!(read(&text.replace("Name=Turned\n0, 1, 0, -1", "Name=Turned\n0, 1, 0, 0")).is_err());
+    assert!(read(&text.replace("Name=Turned", "Name=Turned, System=Cylindrical")).is_err());
+}

@@ -315,7 +315,8 @@ impl FeModel {
             let Some(material) = section.material.and_then(|m| self.material(m)) else {
                 continue;
             };
-            let (Some(rho), Some(elastic)) = (material.density, material.elastic.as_ref()) else {
+            let (Some(rho), Some(elastic)) = (material.density, material.small_strain_elastic())
+            else {
                 continue;
             };
             let nu = elastic.poisson.clamp(-0.99, 0.499);

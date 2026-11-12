@@ -7801,6 +7801,7 @@ mod tests {
             compounds: Vec::new(),
         });
         model.fe.sections.push(plx_model::Section {
+            orientation: None,
             name: "Section-1".into(),
             material: None,
             region: plx_model::Region::Parts(vec!["SOLID-1".into(), "SOLID-2".into()]),

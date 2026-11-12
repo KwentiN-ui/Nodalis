@@ -191,6 +191,7 @@ fn new_kind(index: usize, geometry: &Geometry) -> MeshSetupKind {
             faces: Vec::new(),
             edges: Vec::new(),
             size: geometry.meshing.max_size / 4.0,
+            depth: 0.0,
         },
         2 => MeshSetupKind::TetrahedralGmsh {
             parts: Vec::new(),
@@ -600,7 +601,7 @@ impl MeshItemEditor {
                 let faces = reaches_faces(view, &self.parts.names());
                 parameters_ui(ui, parameters, self.units, faces);
             }
-            MeshSetupKind::LocalMeshSize { size, .. } => {
+            MeshSetupKind::LocalMeshSize { size, depth, .. } => {
                 ui.label("Region");
                 ui.vertical(|ui| {
                     let picked = self.picks.items();
@@ -624,6 +625,15 @@ impl MeshItemEditor {
                 ui.end_row();
                 ui.label("Element size");
                 ui.add(numeric::quantity(size, self.units, Quantity::Length).range(0.0..=f64::MAX));
+                ui.end_row();
+                ui.label("Depth").on_hover_text(
+                    "How deep below the selected faces the element size holds inside the \
+                     solid, for a layer such as the walls of an infill section. 0 refines \
+                     the faces alone.",
+                );
+                ui.add(
+                    numeric::quantity(depth, self.units, Quantity::Length).range(0.0..=f64::MAX),
+                );
                 ui.end_row();
             }
             MeshSetupKind::TetrahedralGmsh {
@@ -868,7 +878,12 @@ impl MeshItemEditor {
                     .levels(1.0, 1.0)
                     .map_err(|e| format!("{e}."))?;
             }
-            MeshSetupKind::LocalMeshSize { faces, edges, size } => {
+            MeshSetupKind::LocalMeshSize {
+                faces,
+                edges,
+                size,
+                depth,
+            } => {
                 let picked = self.picks.items();
                 *faces = (picked.iter())
                     .filter_map(|e| match e {
@@ -887,6 +902,9 @@ impl MeshItemEditor {
                 }
                 if *size <= 0.0 {
                     return Err("The element size must be greater than 0.".into());
+                }
+                if *depth < 0.0 || depth.is_nan() {
+                    return Err("The depth must not be negative.".into());
                 }
             }
         }
@@ -1390,7 +1408,10 @@ mod tests {
         let preview = editor.preview(&view, &edge_hit, 0.5);
         assert!(!preview.lines.is_empty());
         let item = editor.finish().unwrap();
-        let MeshSetupKind::LocalMeshSize { faces, edges, size } = item.kind else {
+        let MeshSetupKind::LocalMeshSize {
+            faces, edges, size, ..
+        } = item.kind
+        else {
             panic!("{item:?}");
         };
         assert_eq!((faces.len(), edges.len()), (1, 1));

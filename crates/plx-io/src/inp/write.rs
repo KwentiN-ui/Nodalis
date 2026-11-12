@@ -624,7 +624,9 @@ fn lower_model_named(
     // degrees of freedom (see [`dofs`]): rigid bodies and remote points, pre-tension cuts,
     // node ties, last springs and contact regions.
     let mut materials = materials(model);
-    let (mut sections, profile_comments, section_owners) = sections(&mut sets, model)?;
+    let mut orientations = Vec::new();
+    let (mut sections, profile_comments, section_owners) =
+        sections(&mut sets, model, &mut materials, &mut orientations)?;
     let mut generated = constraints::Generated::default();
     let (mut constraints, mut constraint_owners) =
         constraints(&mut sets, model, &mut generated, lowering)?;
@@ -737,6 +739,7 @@ fn lower_model_named(
     ir_model.constraints.transforms = transforms(&sets.transforms);
     ir_model.materials = materials;
     ir_model.sections = sections;
+    ir_model.orientations = orientations;
     let mut origins = Origins::default();
     for (i, &section) in section_owners.iter().enumerate() {
         if let Some(item) = origin(ModelItem::Section(section)) {
@@ -1404,9 +1407,12 @@ fn materials(model: &FeModel) -> Vec<ir::material::Material> {
         out.density = (material.density).map(|rho| m::Density {
             rows: constant(rho),
         });
-        // A hyperelastic material replaces the linear elasticity.
-        out.elastic = (material.elastic)
+        // A hyperelastic or anisotropic material replaces the linear elasticity.
+        out.anisotropic = (material.anisotropic.as_ref())
             .filter(|_| material.hyperelastic.is_none())
+            .map(plx_model::Anisotropic::solver);
+        out.elastic = (material.elastic)
+            .filter(|_| material.hyperelastic.is_none() && material.anisotropic.is_none())
             .map(|elastic| m::Elastic {
                 rows: vec![m::ElasticRow {
                     young: elastic.young,
@@ -1476,6 +1482,7 @@ fn add_material(materials: &mut Vec<ir::material::Material>, material: ir::mater
     }
     take!(
         elastic,
+        anisotropic,
         plastic,
         creep,
         expansion,
@@ -1798,7 +1805,25 @@ fn initial_conditions(
     Ok(out)
 }
 
-fn sections(sets: &mut Sets, model: &FeModel) -> Result<SectionsAndProfiles, WriteError> {
+/// The sections; infill sections add the materials of their elements to `materials`,
+/// oriented solid sections their orientations to `orientations`.
+/// The nodes on symmetry planes of the active steps, inside an infill part rather than on its
+/// printed surface.
+fn symmetry_nodes(mesh: &FeMesh, model: &FeModel) -> std::collections::HashSet<NodeId> {
+    (model.steps.iter())
+        .filter(|step| step.active)
+        .flat_map(|step| &step.boundary_conditions)
+        .filter(|bc| bc.active && matches!(bc.kind, BoundaryKind::Symmetry { .. }))
+        .flat_map(|bc| bc.region.nodes(mesh))
+        .collect()
+}
+
+fn sections(
+    sets: &mut Sets,
+    model: &FeModel,
+    materials: &mut Vec<ir::material::Material>,
+    orientations: &mut Vec<ir::section::Orientation>,
+) -> Result<SectionsAndProfiles, WriteError> {
     use ir::section::{Section as IrSection, SectionKind as Kind};
     let mut out = Vec::new();
     let mut comments = Vec::new();
@@ -1811,20 +1836,124 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<SectionsAndProfiles, Wri
                 material: model.name_or_missing(section.material),
             });
         };
+        let base = material;
         let material = ir_name(&name(&material.name));
+        let axes = (model.section_axes(section)).map_err(|reason| WriteError::InvalidSection {
+            item: section.name.clone(),
+            reason,
+        })?;
         match &section.kind {
             SectionKind::Solid => {
                 let set = sets.element_set(&section.name, &section.region)?;
                 // Plane stress and plane strain sections have a thickness.
                 let thickness =
                     (model.properties.space.has_thickness()).then_some(section.thickness);
+                // The axes of an anisotropic material.
+                let orientation = axes.filter(|_| base.anisotropic.is_some()).map(|axes| {
+                    let name = ir_name(&format!("ORIENTATION_{set}"));
+                    orientations.push(ir::section::Orientation {
+                        name: name.clone(),
+                        a: axes[0],
+                        b: axes[1],
+                    });
+                    name
+                });
                 out.push(IrSection {
                     elset: ir_name(&set),
                     kind: Kind::Solid {
                         material,
                         thickness,
+                        orientation,
                     },
                 });
+            }
+            SectionKind::Infill(infill) => {
+                let failed = |reason: String| WriteError::InvalidSection {
+                    item: section.name.clone(),
+                    reason,
+                };
+                let elastic = (base.elastic)
+                    .filter(|_| base.anisotropic.is_none() && base.hyperelastic.is_none())
+                    .ok_or_else(|| {
+                        failed(format!(
+                            "the printed material {} needs isotropic linear elasticity",
+                            base.name
+                        ))
+                    })?;
+                let core_material = (infill.core_material)
+                    .and_then(|m| model.material(m))
+                    .filter(|_| infill.pattern == plx_model::InfillPattern::Custom);
+                let core = match core_material {
+                    Some(core) => Some(match (&core.anisotropic, core.small_strain_elastic()) {
+                        (Some(a), _) => a.matrix().map_err(failed)?,
+                        (None, Some(e)) => plx_model::Anisotropic::Orthotropic(
+                            plx_model::EngineeringConstants::isotropic(e),
+                        )
+                        .matrix()
+                        .map_err(failed)?,
+                        (None, None) => {
+                            return Err(failed(format!(
+                                "the core material {} has no elasticity",
+                                core.name
+                            )));
+                        }
+                    }),
+                    None => None,
+                };
+                let axes = axes.unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+                let (wall, core_matrix) =
+                    (infill.matrices_in(elastic, core, &axes)).map_err(failed)?;
+                let elements = section.region.elements(sets.mesh);
+                if elements.is_empty() {
+                    return Err(empty(&section.name, "elements"));
+                }
+                let inside = symmetry_nodes(sets.mesh, model);
+                let levels = infill::wall_levels(sets.mesh, &elements, infill, axes[2], &inside);
+                let core_density = match core_material {
+                    Some(core) => core.density,
+                    None => base.density.map(|rho| rho * infill.density),
+                };
+                let template = (materials.iter())
+                    .find(|m| m.name == material)
+                    .cloned()
+                    .unwrap_or_default();
+                for (level, ids) in levels {
+                    let share = level as f64 / infill::LEVELS as f64;
+                    let mut d = [[0.0; 6]; 6];
+                    for i in 0..6 {
+                        for j in 0..6 {
+                            d[i][j] = share * wall[i][j] + (1.0 - share) * core_matrix[i][j];
+                        }
+                    }
+                    let set = sets.free_name(
+                        "Internal_Selection",
+                        &format!("{}_Wall{level}", name(&section.name)),
+                    );
+                    sets.element_sets.push((set.clone(), Members::Ids(ids)));
+                    let material_name = ir_name(&format!("Infill_{set}"));
+                    let mut printed = template.clone();
+                    printed.name = material_name.clone();
+                    printed.elastic = None;
+                    printed.anisotropic = Some(
+                        plx_model::Anisotropic::General(Box::new(plx_model::anisotropic_upper(&d)))
+                            .solver(),
+                    );
+                    printed.density = match (base.density, core_density) {
+                        (Some(wall), Some(core)) => Some(ir::material::Density {
+                            rows: constant(share * wall + (1.0 - share) * core),
+                        }),
+                        _ => None,
+                    };
+                    materials.push(printed);
+                    out.push(IrSection {
+                        elset: ir_name(&set),
+                        kind: Kind::Solid {
+                            material: material_name,
+                            thickness: None,
+                            orientation: None,
+                        },
+                    });
+                }
             }
             SectionKind::Truss { area } => {
                 let set = sets.element_set(&section.name, &section.region)?;
@@ -1832,6 +1961,7 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<SectionsAndProfiles, Wri
                     elset: ir_name(&set),
                     kind: Kind::Solid {
                         material,
+                        orientation: None,
                         thickness: Some(*area),
                     },
                 });
@@ -5172,6 +5302,7 @@ fn empty(item: &str, what: &'static str) -> WriteError {
 
 mod constraints;
 mod dofs;
+mod infill;
 mod pre_tension;
 
 pub use dofs::resolved_overlaps;

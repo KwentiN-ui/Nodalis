@@ -83,6 +83,9 @@ pub enum Problem {
     /// variant (C3D8, C3D20, S4, S8, CPS4, ...): reduced integration is several times
     /// faster there.
     ExplicitFullIntegration,
+    /// The elements of an infill section are much larger than its walls or top and bottom
+    /// layers, which the export then smears over the depth of the outer elements.
+    CoarseInfillWalls,
     NoConductivity,
     NoSpecificHeat,
     NoInitialTemperature,
@@ -283,7 +286,8 @@ impl Problem {
             | Problem::NoCreep
             | Problem::UnstableHyperelastic
             | Problem::HyperelasticLinearized
-            | Problem::ExplicitFullIntegration => Severity::Warning,
+            | Problem::ExplicitFullIntegration
+            | Problem::CoarseInfillWalls => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -333,6 +337,7 @@ impl Problem {
             Problem::UnstableHyperelastic => "Hyperelastic material unstable at large strains",
             Problem::HyperelasticLinearized => "Hyperelastic material computed linearly",
             Problem::ExplicitFullIntegration => "Full integration in an explicit step",
+            Problem::CoarseInfillWalls => "Mesh coarser than the infill walls",
             Problem::NoExpansion => "Temperature without thermal expansion",
             Problem::NoSensitivityBase => "No step for the sensitivities",
             Problem::DesignRegionIgnored => "Design region ignored",
@@ -471,6 +476,13 @@ impl Problem {
                  there (Drucker). If the model strains that far, the solver loses \
                  convergence or finds unphysical deformations. Constants fitted to data of \
                  a single test often are unstable in the other modes."
+            }
+            Problem::CoarseInfillWalls => {
+                "An infill section gives every element the share of its depth that lies in \
+                 the printed walls and top and bottom layers. An element much thicker than a \
+                 wall mixes the wall with the core over its whole depth: the stiff skin \
+                 spreads too far inward and is too weak at the surface, which shifts \
+                 bending stiffness and the stresses at the surface."
             }
             Problem::ExplicitFullIntegration => {
                 "An explicit step computes the internal forces of every element in every one \
@@ -983,6 +995,12 @@ impl Problem {
             Problem::UnstableHyperelastic => {
                 "Check the constants, fit them to test data of several modes, or use a \
                  simpler model (Neo-Hooke, Yeoh), which stays stable."
+            }
+            Problem::CoarseInfillWalls => {
+                "Add a Local Mesh Size on the outer faces of the part with an element size \
+                 and a depth of about the wall thickness: the elements are then that small \
+                 in the walls and grow towards the core. Or accept the smeared walls for a \
+                 first estimate."
             }
             Problem::ExplicitFullIntegration => {
                 "Change the element type of the parts to the reduced variant (Mesh settings, \
@@ -2391,14 +2409,62 @@ impl FeModel {
             s.kind.supports_loads() && (s.loads.iter()).any(|l| l.active && l.kind.is_body_force())
         });
         for (i, material) in self.materials.iter().enumerate() {
+            let core_of = |s: &crate::Section| match &s.kind {
+                crate::SectionKind::Infill(infill)
+                    if infill.pattern == crate::InfillPattern::Custom =>
+                {
+                    infill.core_material
+                }
+                _ => None,
+            };
             if !self
                 .sections
                 .iter()
-                .any(|s| s.material == Some(material.id))
+                .any(|s| s.material == Some(material.id) || core_of(s) == Some(material.id))
             {
                 continue;
             }
             let item = ModelItem::Material(i);
+            if let Some(anisotropic) = &material.anisotropic
+                && mechanical
+            {
+                let detail = if let Some(problem) = anisotropic.problem() {
+                    Some(format!("{}: {problem}", material.name))
+                } else if material.plastic.is_some()
+                    || material.creep.is_some()
+                    || material.hyperelastic.is_some()
+                {
+                    Some(format!(
+                        "{} is anisotropic and plastic, creeping or hyperelastic; \
+                         anisotropic elasticity takes none of them",
+                        material.name
+                    ))
+                } else if self.properties.space.is_2d() {
+                    Some(format!(
+                        "{} is anisotropic; anisotropic materials work in 3D models only",
+                        material.name
+                    ))
+                } else {
+                    (self.sections.iter())
+                        .find(|s| {
+                            s.material == Some(material.id)
+                                && s.kind != crate::SectionKind::Solid
+                                && !matches!(s.kind, crate::SectionKind::Infill(_))
+                        })
+                        .map(|s| {
+                            format!(
+                                "{} is anisotropic, but {} is a {} section; anisotropic \
+                                 materials work in solid sections only",
+                                material.name,
+                                s.name,
+                                s.kind.label().to_ascii_lowercase()
+                            )
+                        })
+                };
+                if let Some(detail) = detail {
+                    findings.push(Finding::new(item, Problem::InvalidElastic, detail));
+                }
+            }
             if let Some(hyper) = &material.hyperelastic
                 && mechanical
             {
@@ -2434,7 +2500,10 @@ impl FeModel {
                 }
             }
             match material.elastic.filter(|_| material.hyperelastic.is_none()) {
-                None if mechanical && material.hyperelastic.is_none() => {
+                None if mechanical
+                    && material.hyperelastic.is_none()
+                    && material.anisotropic.is_none() =>
+                {
                     findings.push(Finding::new(
                         item,
                         Problem::NoElastic,
@@ -2454,7 +2523,7 @@ impl FeModel {
                 && mechanical
             {
                 let detail = match plastic.invalid_row() {
-                    _ if material.elastic.is_none() => {
+                    _ if material.elastic.is_none() && material.anisotropic.is_none() => {
                         Some(format!("{} is plastic but not elastic", material.name))
                     }
                     Some(row) => Some(format!(
@@ -2472,7 +2541,7 @@ impl FeModel {
                 && mechanical
             {
                 let detail = match creep.problem() {
-                    _ if material.elastic.is_none() => {
+                    _ if material.elastic.is_none() && material.anisotropic.is_none() => {
                         Some(format!("{} creeps but is not elastic", material.name))
                     }
                     Some(problem) => Some(format!("{}: {problem}", material.name)),
@@ -2624,6 +2693,29 @@ impl FeModel {
                         "{missing} of {} elements of {} without section",
                         part.elements.len(),
                         part.name
+                    ),
+                ));
+            }
+        }
+        for (j, section) in self.sections.iter().enumerate() {
+            let crate::SectionKind::Infill(infill) = &section.kind else {
+                continue;
+            };
+            let Some(size) = infill_element_size(mesh, &section.region.elements(mesh)) else {
+                continue;
+            };
+            let thinnest = [infill.wall_thickness, infill.top_bottom_thickness]
+                .into_iter()
+                .filter(|&t| t > 0.0)
+                .fold(f64::INFINITY, f64::min);
+            if thinnest.is_finite() && size > COARSE_INFILL * thinnest {
+                findings.push(Finding::new(
+                    ModelItem::Section(j),
+                    Problem::CoarseInfillWalls,
+                    format!(
+                        "{}: elements about {:.1} times as large as the thinnest wall",
+                        section.name,
+                        size / thinnest
                     ),
                 ));
             }
@@ -3745,6 +3837,36 @@ impl FeModel {
 /// Whether the nodes of an element have rotations: beams (B31, B32) and shells (S3 to S8R)
 /// have them; trusses, plane and solid elements only displacements. A line element of a
 /// truss section is a truss whatever its type name says; see [`Trusses`].
+/// How many times its thinnest wall the elements of an infill section may be.
+const COARSE_INFILL: f64 = 2.0;
+
+/// The typical size of the solid elements: the median of the mean edge of their bounding
+/// boxes.
+fn infill_element_size(mesh: &FeMesh, elements: &[ElementId]) -> Option<f64> {
+    let mut sizes: Vec<f64> = (elements.iter())
+        .filter_map(|&id| mesh.element(id))
+        .filter(|e| e.shape.family() == plx_mesh::ElementFamily::Solid)
+        .filter_map(|e| {
+            let mut lo = [f64::INFINITY; 3];
+            let mut hi = [f64::NEG_INFINITY; 3];
+            for p in e.nodes.iter().filter_map(|&n| mesh.node(n)) {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+            let size = (0..3).map(|k| hi[k] - lo[k]).sum::<f64>() / 3.0;
+            size.is_finite().then_some(size)
+        })
+        .collect();
+    if sizes.is_empty() {
+        return None;
+    }
+    let mid = sizes.len() / 2;
+    let (_, median, _) = sizes.select_nth_unstable_by(mid, f64::total_cmp);
+    Some(*median)
+}
+
 fn has_rotations(element: &plx_mesh::Element) -> bool {
     match element.shape.family() {
         ElementFamily::Line => element.type_name.to_ascii_uppercase().starts_with('B'),
@@ -4294,6 +4416,7 @@ mod tests {
         FeModel {
             materials: vec![steel],
             sections: vec![Section {
+                orientation: None,
                 name: "Section-1".into(),
                 material: Some(steel_id),
                 region: Region::Parts(mesh.parts.iter().map(|p| p.name.clone()).collect()),
@@ -4337,6 +4460,31 @@ mod tests {
             problems(&check(&model, &mesh)),
             [(ModelItem::Section(0), Problem::MissingReference)]
         );
+    }
+
+    #[test]
+    fn infill_walls_much_thinner_than_the_elements_are_reported() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        // Unit cubes with walls of 0.2: elements five times the wall.
+        model.sections[0].kind = crate::SectionKind::Infill(crate::InfillSection {
+            wall_thickness: 0.2,
+            top_bottom_thickness: 0.6,
+            ..crate::InfillSection::DEFAULT
+        });
+        let findings = check(&model, &mesh);
+        assert_eq!(
+            problems(&findings),
+            [(ModelItem::Section(0), Problem::CoarseInfillWalls)]
+        );
+        assert!(findings[0].detail.contains("5.0 times"), "{findings:?}");
+        // Walls of half an element pass.
+        model.sections[0].kind = crate::SectionKind::Infill(crate::InfillSection {
+            wall_thickness: 0.5,
+            top_bottom_thickness: 0.5,
+            ..crate::InfillSection::DEFAULT
+        });
+        assert_eq!(problems(&check(&model, &mesh)), []);
     }
 
     #[test]

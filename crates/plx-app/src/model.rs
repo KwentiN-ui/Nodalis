@@ -446,6 +446,10 @@ fn shown_sections(import: &mut InpImport, units: UnitSystem) -> InputSections {
             plx_model::SectionKind::Shell { thickness, .. }
             | plx_model::SectionKind::Membrane { thickness, .. } => *thickness *= length,
             plx_model::SectionKind::Truss { area } => *area *= length * length,
+            plx_model::SectionKind::Infill(infill) => {
+                infill.wall_thickness *= length;
+                infill.top_bottom_thickness *= length;
+            }
             plx_model::SectionKind::Beam(_) | plx_model::SectionKind::Solid => {}
         }
         if let plx_model::Region::ElementSet(set) = &section.region
@@ -2564,6 +2568,7 @@ mod tests {
             .model;
         let (first, second) = (model.parts[0].name.clone(), model.parts[1].name.clone());
         model.fe.sections.push(plx_model::Section {
+            orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
             region: plx_model::Region::Parts(vec![first.clone()]),
@@ -3137,6 +3142,7 @@ mod tests {
                 ..Default::default()
             }],
             sections: vec![Section {
+                orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("Steel")),
                 region: Region::Parts(vec!["SOLID-1".into()]),
@@ -3286,6 +3292,7 @@ mod tests {
         });
         let mut model = Model::new(Path::new("plate.inp"), mesh);
         model.fe.sections.push(plx_model::Section {
+            orientation: None,
             name: "Shell_Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
             region: plx_model::Region::Parts(vec!["Plate".into()]),
@@ -3334,6 +3341,7 @@ mod tests {
         });
         let mut model = Model::new(Path::new("beam.inp"), mesh);
         model.fe.sections.push(plx_model::Section {
+            orientation: None,
             name: "Beam_Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
             region: plx_model::Region::Parts(vec!["Beam".into()]),
@@ -3537,6 +3545,7 @@ S
             follower: false,
         });
         let solid = Section {
+            orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
             region: Region::Parts(vec![part]),
@@ -3652,6 +3661,7 @@ S
                 ..Default::default()
             }],
             sections: vec![Section {
+                orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("S235")),
                 region: Region::Parts(names.map(String::from).to_vec()),

@@ -12,6 +12,10 @@ pub struct Material {
     /// Hyperelasticity (`*HYPERELASTIC`); replaces `elastic` where both are given.
     #[serde(default)]
     pub hyperelastic: Option<Hyperelastic>,
+    /// Anisotropic linear elasticity (`*ELASTIC, TYPE=ENGINEERING CONSTANTS`, `ORTHO` or
+    /// `ANISO`); replaces `elastic`, the two are never both given.
+    #[serde(default)]
+    pub anisotropic: Option<AnisotropicElastic>,
     pub plastic: Option<Plastic>,
     pub creep: Option<Creep>,
     pub expansion: Option<Expansion>,
@@ -31,6 +35,20 @@ pub struct ElasticRow {
     pub young: f64,
     pub poisson: f64,
     pub temperature: f64,
+}
+
+/// Anisotropic linear elasticity of one temperature, in the axes of the orientation of the
+/// section (the global axes without one). The constants follow CalculiX's data lines, with
+/// the indices 1, 2, 3 of the material axes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum AnisotropicElastic {
+    /// `TYPE=ENGINEERING CONSTANTS`: `E1, E2, E3, ν12, ν13, ν23, G12, G13, G23`.
+    EngineeringConstants([f64; 9]),
+    /// `TYPE=ORTHO`: `D1111, D1122, D2222, D1133, D2233, D3333, D1212, D1313, D2323`.
+    Orthotropic([f64; 9]),
+    /// `TYPE=ANISO`: `D1111, D1122, D2222, D1133, D2233, D3333, D1112, D2212, D3312, D1212,
+    /// D1113, D2213, D3313, D1213, D1313, D1123, D2223, D3323, D1223, D1323, D2323`.
+    Anisotropic([f64; 21]),
 }
 
 /// An isotropic hyperelastic material (`*HYPERELASTIC`): the strain energy model and its

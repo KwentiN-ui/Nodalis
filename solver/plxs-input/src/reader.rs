@@ -90,7 +90,6 @@ const KNOWN_UNSUPPORTED: &[&str] = &[
     "*NODEOUTPUT",
     "*NODEPRINT",
     "*OBJECTIVE",
-    "*ORIENTATION",
     "*OUTPUT",
     "*PRE-TENSIONSECTION",
     "*RATEDEPENDENT",
@@ -235,6 +234,7 @@ impl Reader {
             "*SURFACE" => self.surface(k, data)?,
             "*MATERIAL" => self.material(k)?,
             "*ELASTIC" => self.elastic(k, data)?,
+            "*ORIENTATION" => self.orientation(k, data)?,
             "*PLASTIC" => self.plastic(k, data)?,
             "*CREEP" => self.creep(k, data)?,
             "*HYPERELASTIC" => self.hyperelastic(k, data)?,
@@ -568,11 +568,46 @@ impl Reader {
 
     fn elastic(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
         k.check_parameters(&["TYPE"])?;
-        if let Some(t) = k.value("TYPE")
-            && t != "ISO"
-            && t != "ISOTROPIC"
-        {
-            return Err(k.error(format!("TYPE={t} is not supported, only ISO")));
+        let count = match k.value("TYPE") {
+            None | Some("ISO" | "ISOTROPIC") => None,
+            Some("ORTHO" | "ORTHOTROPIC" | "ENGINEERING CONSTANTS" | "ENGINEERINGCONSTANTS") => {
+                Some(9)
+            }
+            Some("ANISO" | "ANISOTROPIC") => Some(21),
+            Some(t) => {
+                return Err(k.error(format!(
+                    "TYPE={t} is not supported, only ISO, ORTHO, ENGINEERING CONSTANTS and \
+                     ANISO"
+                )));
+            }
+        };
+        if let Some(count) = count {
+            use plxs_core::material::AnisotropicElastic as A;
+            let mut values = Vec::new();
+            for d in data {
+                values.extend(numbers(k, d)?);
+            }
+            if values.len() < count {
+                return Err(k.error(format!(
+                    "{count} constants expected, {} given",
+                    values.len()
+                )));
+            }
+            // One temperature: the constants and an optional temperature.
+            if values.len() > count + 1 {
+                return Err(k.error("temperature dependent constants are not supported"));
+            }
+            let anisotropic = match k.value("TYPE") {
+                Some("ENGINEERING CONSTANTS" | "ENGINEERINGCONSTANTS") => {
+                    A::EngineeringConstants(std::array::from_fn(|i| values[i]))
+                }
+                Some("ANISO" | "ANISOTROPIC") => A::Anisotropic(std::array::from_fn(|i| values[i])),
+                _ => A::Orthotropic(std::array::from_fn(|i| values[i])),
+            };
+            let material = self.current_material(k)?;
+            material.elastic = None;
+            material.anisotropic = Some(anisotropic);
+            return Ok(());
         }
         let mut rows = Vec::new();
         for d in data {
@@ -593,7 +628,9 @@ impl Reader {
         if rows.is_empty() {
             return Err(k.error("no data"));
         }
-        self.current_material(k)?.elastic = Some(Elastic { rows });
+        let material = self.current_material(k)?;
+        material.elastic = Some(Elastic { rows });
+        material.anisotropic = None;
         Ok(())
     }
 
@@ -744,6 +781,40 @@ impl Reader {
         Ok(rows)
     }
 
+    /// `*ORIENTATION, SYSTEM=RECTANGULAR` (the default): the two points `a` and `b`.
+    fn orientation(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
+        k.check_parameters(&["NAME", "SYSTEM"])?;
+        let Some(name) = k.value("NAME").map(normalized_name) else {
+            return Err(k.error("no NAME given"));
+        };
+        if let Some(system) = k.value("SYSTEM")
+            && system != "RECTANGULAR"
+        {
+            return Err(k.error(format!(
+                "SYSTEM={system} is not supported, only RECTANGULAR"
+            )));
+        }
+        let mut values = Vec::new();
+        for d in data {
+            values.extend(numbers(k, d)?);
+        }
+        if values.len() < 6 {
+            return Err(k.error("the coordinates of the points a and b are needed"));
+        }
+        let orientation = plxs_core::section::Orientation {
+            name,
+            a: [values[0], values[1], values[2]],
+            b: [values[3], values[4], values[5]],
+        };
+        if orientation.axes().is_none() {
+            return Err(k.error("the points a and b must not be parallel or zero"));
+        }
+        let model = self.model();
+        model.orientations.retain(|o| o.name != orientation.name);
+        model.orientations.push(orientation);
+        Ok(())
+    }
+
     // ----- Sections ---------------------------------------------------------------------
 
     fn section_names(&self, k: &Keyword) -> Result<(String, String), Error> {
@@ -758,9 +829,7 @@ impl Reader {
 
     fn solid_section(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
         k.check_parameters(&["ELSET", "MATERIAL", "ORIENTATION"])?;
-        if k.has("ORIENTATION") {
-            return Err(k.error("ORIENTATION is not supported"));
-        }
+        let orientation = k.value("ORIENTATION").map(normalized_name);
         let (elset, material) = self.section_names(k)?;
         let thickness = match data.first() {
             Some(d) => numbers(k, d)?.first().copied(),
@@ -771,6 +840,7 @@ impl Reader {
             kind: SectionKind::Solid {
                 material,
                 thickness,
+                orientation,
             },
         });
         Ok(())

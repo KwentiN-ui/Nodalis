@@ -809,6 +809,7 @@ mod tests {
                 ..Default::default()
             });
             model.sections.push(crate::Section {
+                orientation: None,
                 name: part.into(),
                 material: model.materials.last().map(|m| m.id),
                 region: Region::Parts(vec![part.into()]),

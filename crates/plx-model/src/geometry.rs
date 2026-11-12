@@ -230,12 +230,21 @@ impl Geometry {
         dropped
     }
 
-    /// The local mesh sizes as (faces, edges, size), the sizes divided by the refinement.
-    pub fn local_sizes(&self) -> impl Iterator<Item = (&[i32], &[i32], f64)> {
+    /// The local mesh sizes as (faces, edges, size, depth), the sizes divided by the
+    /// refinement.
+    pub fn local_sizes(&self) -> impl Iterator<Item = (&[i32], &[i32], f64, f64)> {
         self.mesh_items.iter().filter_map(|item| match &item.kind {
-            MeshSetupKind::LocalMeshSize { faces, edges, size } => {
-                Some((faces.as_slice(), edges.as_slice(), self.refined(*size)))
-            }
+            MeshSetupKind::LocalMeshSize {
+                faces,
+                edges,
+                size,
+                depth,
+            } => Some((
+                faces.as_slice(),
+                edges.as_slice(),
+                self.refined(*size),
+                *depth,
+            )),
             _ => None,
         })
     }
@@ -316,6 +325,11 @@ pub enum MeshSetupKind {
         faces: Vec<i32>,
         edges: Vec<i32>,
         size: f64,
+        /// The depth below the faces to which the size holds inside the solid, so that a
+        /// layer of that thickness (the walls of an infill section) gets elements of the
+        /// size; 0 for the faces alone.
+        #[serde(default)]
+        depth: f64,
     },
     /// Gmsh's meshing algorithms for some parts.
     TetrahedralGmsh {
@@ -573,6 +587,7 @@ mod tests {
                         faces: vec![3],
                         edges: vec![],
                         size: 0.5,
+                        depth: 0.0,
                     },
                 },
             ],
@@ -588,12 +603,12 @@ mod tests {
         );
         assert_eq!(geometry.algorithms("SOLID-1"), Default::default());
         let local: Vec<_> = geometry.local_sizes().collect();
-        assert_eq!(local, vec![(&[3][..], &[][..], 0.5)]);
+        assert_eq!(local, vec![(&[3][..], &[][..], 0.5, 0.0)]);
         // A refinement divides every size; the sizes as set stay.
         geometry.refinement = 2.0;
         assert_eq!(geometry.parameters("SOLID-2").max_size, 2.5);
         let local: Vec<_> = geometry.local_sizes().collect();
-        assert_eq!(local, vec![(&[3][..], &[][..], 0.25)]);
+        assert_eq!(local, vec![(&[3][..], &[][..], 0.25, 0.0)]);
         assert_eq!(geometry.meshing.max_size, 5.0);
         geometry.refinement = 1.0;
         geometry.mesh_items.clear();

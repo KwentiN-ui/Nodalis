@@ -1243,6 +1243,7 @@ mod tests {
             names.into_iter().partition(|n| n.starts_with("Pad"));
         for (name, material, parts) in [("Steel", steel, metal), ("Rubber", rubber, pads)] {
             model.sections.push(plx_model::Section {
+                orientation: None,
                 name: name.into(),
                 material: Some(material),
                 region: Region::Parts(parts),
@@ -1360,6 +1361,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            orientation: None,
             name: "Solid_Section-1".into(),
             material: Some(steel),
             region: Region::Parts(vec!["Base".into(), "Block".into(), "Cap".into()]),
@@ -1470,6 +1472,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
             region: Region::Parts(vec!["Column".into()]),
@@ -1542,6 +1545,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
             region: Region::Parts(vec!["Beam".into()]),
@@ -1612,6 +1616,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
             region: Region::Parts(vec!["Beam".into()]),
@@ -1823,6 +1828,7 @@ mod tests {
             }
         }
         model.sections.push(plx_model::Section {
+            orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
             region: Region::Parts(vec!["Pad".into()]),
@@ -2063,6 +2069,7 @@ mod tests {
                         faces: vec![3, 4],
                         edges: vec![7],
                         size: 0.5,
+                        depth: 0.0,
                     },
                 },
                 MeshSetupItem {

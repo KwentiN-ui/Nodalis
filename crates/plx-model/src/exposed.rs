@@ -192,6 +192,11 @@ pub enum Field {
     ScaleX,
     ScaleY,
     ScaleZ,
+    /// The infill density of an infill section, as a fraction.
+    InfillDensity,
+    /// The top and bottom thickness of an infill section (its wall thickness is
+    /// [`Field::Thickness`]).
+    TopBottomThickness,
 }
 
 impl Field {
@@ -253,6 +258,8 @@ impl Field {
             Self::ScaleX => "Factor X",
             Self::ScaleY => "Factor Y",
             Self::ScaleZ => "Factor Z",
+            Self::InfillDensity => "Infill density",
+            Self::TopBottomThickness => "Top/bottom thickness",
         }
     }
 
@@ -262,7 +269,7 @@ impl Field {
     pub const AXIS: [Self; 3] = [Self::AxisX, Self::AxisY, Self::AxisZ];
     pub const NORMAL: [Self; 3] = [Self::NormalX, Self::NormalY, Self::NormalZ];
     pub const SCALE: [Self; 3] = [Self::ScaleX, Self::ScaleY, Self::ScaleZ];
-    pub const ALL: [Self; 55] = [
+    pub const ALL: [Self; 57] = [
         Self::Value,
         Self::X,
         Self::Y,
@@ -318,6 +325,8 @@ impl Field {
         Self::ScaleX,
         Self::ScaleY,
         Self::ScaleZ,
+        Self::InfillDensity,
+        Self::TopBottomThickness,
     ];
 
     /// The component of a vector it names.
@@ -437,6 +446,15 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                     real(&mut section.thickness, Quantity::Length)
                 }
                 (SectionKind::Truss { area }, Field::Area) => real(area, Quantity::Area),
+                (SectionKind::Infill(infill), Field::Thickness) => {
+                    real(&mut infill.wall_thickness, Quantity::Length)
+                }
+                (SectionKind::Infill(infill), Field::TopBottomThickness) => {
+                    real(&mut infill.top_bottom_thickness, Quantity::Length)
+                }
+                (SectionKind::Infill(infill), Field::InfillDensity) => {
+                    Some((Slot::Real(&mut infill.density), ValueKind::Factor))
+                }
                 (
                     SectionKind::Shell { thickness, .. } | SectionKind::Membrane { thickness, .. },
                     Field::Thickness,

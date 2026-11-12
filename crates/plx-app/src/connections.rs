@@ -1770,6 +1770,7 @@ mod tests {
         assert_eq!((plate_top.len(), block_bottom.len()), (1, 1));
 
         model.fe.materials.push(Material {
+            anisotropic: None,
             id: crate::test_ids::named("Steel"),
             name: "Steel".into(),
             density: None,
@@ -1785,6 +1786,7 @@ mod tests {
             hyperelastic: None,
         });
         model.fe.sections.push(Section {
+            orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
             region: Region::Parts(names.clone()),
@@ -1928,6 +1930,7 @@ mod tests {
         assert_eq!((beam_bottom.len(), block_top.len()), (1, 1));
 
         model.fe.materials.push(Material {
+            anisotropic: None,
             id: crate::test_ids::named("Steel"),
             name: "Steel".into(),
             density: None,
@@ -1943,6 +1946,7 @@ mod tests {
             hyperelastic: None,
         });
         model.fe.sections.push(Section {
+            orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
             region: Region::Parts(names.clone()),

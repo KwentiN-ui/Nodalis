@@ -505,8 +505,40 @@ impl Section {
     /// parallel to a beam, or dimensions the solver would reject.
     pub fn kind_problem(&self, fe: &FeModel, mesh: &FeMesh) -> Option<String> {
         let profile = fe.section_profile(&self.kind);
+        if let Err(reason) = fe.section_axes(self) {
+            return Some(reason);
+        }
+        let material = self.material.and_then(|m| fe.material(m));
         match &self.kind {
             SectionKind::Solid => {}
+            SectionKind::Infill(infill) => {
+                if let Some(problem) = infill.problem() {
+                    return Some(problem.into());
+                }
+                if let Some(material) = material
+                    && (material.elastic.is_none()
+                        || material.anisotropic.is_some()
+                        || material.hyperelastic.is_some())
+                {
+                    return Some(format!(
+                        "The printed material {} needs isotropic linear elasticity; the \
+                         section makes it anisotropic itself",
+                        material.name
+                    ));
+                }
+                if infill.pattern == crate::InfillPattern::Custom {
+                    match infill.core_material.and_then(|m| fe.material(m)) {
+                        None => return Some("The custom infill needs a core material".into()),
+                        Some(core) if !core.has_elasticity() || core.hyperelastic.is_some() => {
+                            return Some(format!(
+                                "The core material {} needs linear elasticity",
+                                core.name
+                            ));
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
             SectionKind::Truss { area } => {
                 if !(area.is_finite() && *area > 0.0) {
                     return Some("The cross-section area must be greater than 0".into());
@@ -710,6 +742,7 @@ mod tests {
                 ..Default::default()
             }],
             sections: vec![Section {
+                orientation: None,
                 name: "Section-1".into(),
                 material: Some(steel),
                 region: Region::Parts(vec!["PART-1".into()]),

@@ -2136,6 +2136,7 @@ impl Editor {
             )),
             NewItem::Section => Draft::Section(
                 Section {
+                    orientation: None,
                     name: next_name("Solid_Section", names(&fe.sections, |s| &s.name)),
                     material: fe.materials.first().map(|m| m.id),
                     region: Region::Parts(Vec::new()),
@@ -2971,7 +2972,28 @@ impl Editor {
                 );
                 ui.end_row();
                 let membrane = matches!(section.kind, SectionKind::Membrane { .. });
+                if section.kind.is_solid() && !two_d {
+                    ui.label("Orientation");
+                    crate::pick_item::system_combo(
+                        ui,
+                        "section orientation",
+                        &mut section.orientation,
+                        &model.fe,
+                        200.0,
+                    );
+                    ui.end_row();
+                    ui.label("");
+                    ui.weak(if matches!(section.kind, SectionKind::Infill(_)) {
+                        "Print axes: z the build direction, x the infill angle's zero."
+                    } else {
+                        "x, y, z are the axes 1, 2, 3 of an anisotropic material."
+                    });
+                    ui.end_row();
+                } else {
+                    section.orientation = None;
+                }
                 match &mut section.kind {
+                    SectionKind::Infill(infill) => infill_form(ui, infill, &model.fe, units),
                     SectionKind::Solid => {
                         // Plane stress and plane strain sections have a thickness.
                         if model.fe.properties.space.has_thickness() {
@@ -3998,8 +4020,30 @@ impl Editor {
             if section.material.and_then(|m| fe.material(m)).is_none() {
                 return Err("Please select a material; create one under Materials first.".into());
             }
+            fe.section_axes(section).map_err(|e| format!("{e}."))?;
             match &section.kind {
                 SectionKind::Solid => {}
+                SectionKind::Infill(infill) => {
+                    if let Some(problem) = infill.problem() {
+                        return Err(problem.into());
+                    }
+                    if let Some(material) = section.material.and_then(|m| fe.material(m))
+                        && (material.elastic.is_none()
+                            || material.anisotropic.is_some()
+                            || material.hyperelastic.is_some())
+                    {
+                        return Err(format!(
+                            "The printed material {} needs isotropic linear elasticity; the \
+                             section makes it anisotropic itself.",
+                            material.name
+                        ));
+                    }
+                    if infill.pattern == plx_model::InfillPattern::Custom
+                        && infill.core_material.and_then(|m| fe.material(m)).is_none()
+                    {
+                        return Err("Please select the core material of the custom infill.".into());
+                    }
+                }
                 SectionKind::Truss { area } if !(area.is_finite() && *area > 0.0) => {
                     return Err("The cross-section area must be greater than 0.".into());
                 }
@@ -4059,6 +4103,16 @@ impl Editor {
                     }
                     if material.plastic.is_some() || material.creep.is_some() {
                         return Err("A hyperelastic material cannot be plastic or creep: \
+                                    untick Plasticity and Creep."
+                            .into());
+                    }
+                }
+                if let Some(anisotropic) = &material.anisotropic {
+                    if let Some(problem) = anisotropic.problem() {
+                        return Err(format!("{problem}."));
+                    }
+                    if material.plastic.is_some() || material.creep.is_some() {
+                        return Err("An anisotropic material cannot be plastic or creep: \
                                     untick Plasticity and Creep."
                             .into());
                     }
@@ -5377,16 +5431,18 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     material.expansion = expands.then_some(expansion);
 }
 
-/// The elasticity of the material form: linear (Hooke) or one of the hyperelastic models.
-/// Switching between them keeps the stiffness at small strains.
+/// The elasticity of the material form: linear (Hooke), orthotropic, anisotropic or one of
+/// the hyperelastic models. Switching between them keeps the stiffness at small strains.
 fn elastic_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
-    let mut elastic = material.elastic.is_some() || material.hyperelastic.is_some();
+    use plx_model::{Anisotropic, EngineeringConstants};
+    let mut elastic = material.has_elasticity();
     let was_elastic = elastic;
     ui.checkbox(&mut elastic, "Elasticity");
     ui.end_row();
     if !elastic {
         material.elastic = None;
         material.hyperelastic = None;
+        material.anisotropic = None;
     } else if !was_elastic {
         material.elastic = Some(Elastic {
             young: 0.0,
@@ -5394,18 +5450,64 @@ fn elastic_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
         });
     }
     let model = material.hyperelastic.as_ref().map(|h| h.model);
+    let current = match (&model, &material.anisotropic) {
+        (Some(model), _) => model.label(),
+        (None, Some(Anisotropic::Orthotropic(_))) => "Orthotropic",
+        (None, Some(Anisotropic::General(_))) => "Anisotropic",
+        (None, None) => "Linear elastic",
+    };
+    // The isotropic constants the current choice comes nearest to, for a new choice.
+    let nearest = material.small_strain_elastic().unwrap_or(Elastic {
+        young: 0.0,
+        poisson: 0.0,
+    });
     ui.label("    Model");
     ui.add_enabled_ui(elastic, |ui| {
         egui::ComboBox::from_id_salt("elastic model")
-            .selected_text(model.map_or("Linear elastic", HyperelasticModel::label))
+            .selected_text(current)
             .width(crate::dock::fit_width(ui, 200.0))
             .show_ui(ui, |ui| {
                 if ui
-                    .selectable_label(model.is_none(), "Linear elastic")
+                    .selectable_label(current == "Linear elastic", "Linear elastic")
                     .clicked()
-                    && let Some(hyper) = material.hyperelastic.take()
+                    && current != "Linear elastic"
                 {
-                    material.elastic = Some(hyper.small_strain());
+                    material.hyperelastic = None;
+                    material.anisotropic = None;
+                    material.elastic = Some(nearest);
+                }
+                if ui
+                    .selectable_label(current == "Orthotropic", "Orthotropic")
+                    .on_hover_text("Engineering constants along the material axes 1, 2, 3")
+                    .clicked()
+                    && current != "Orthotropic"
+                {
+                    material.hyperelastic = None;
+                    material.elastic = None;
+                    material.anisotropic = Some(Anisotropic::Orthotropic(
+                        EngineeringConstants::isotropic(nearest),
+                    ));
+                }
+                if ui
+                    .selectable_label(current == "Anisotropic", "Anisotropic")
+                    .on_hover_text("The full stiffness matrix in the material axes 1, 2, 3")
+                    .clicked()
+                    && current != "Anisotropic"
+                {
+                    let mut general = match &material.anisotropic {
+                        Some(a) => a
+                            .matrix()
+                            .map(|d| plx_model::anisotropic_upper(&d))
+                            .unwrap_or_else(|_| Anisotropic::general_of(nearest)),
+                        None => Anisotropic::general_of(nearest),
+                    };
+                    // Computed values, not the user's: five significant digits are plenty.
+                    for value in &mut general {
+                        *value = significant(*value, 5);
+                    }
+                    material.hyperelastic = None;
+                    material.elastic = None;
+                    material.anisotropic = Some(Anisotropic::General(Box::new(general)));
                 }
                 ui.separator();
                 ui.weak("Hyperelastic (rubber)");
@@ -5417,10 +5519,7 @@ fn elastic_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
                         let base = material.hyperelastic.clone().unwrap_or_else(|| {
                             // From linear elasticity: the same shear modulus, at most
                             // nearly incompressible.
-                            let e = material.elastic.unwrap_or(Elastic {
-                                young: 0.0,
-                                poisson: 0.0,
-                            });
+                            let e = nearest;
                             let poisson = if e.young > 0.0 {
                                 e.poisson.clamp(0.0, 0.499)
                             } else {
@@ -5435,13 +5534,73 @@ fn elastic_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
                         });
                         material.hyperelastic = Some(base.with_model(choice));
                         material.elastic = None;
+                        material.anisotropic = None;
                     }
                 }
             });
     });
     ui.end_row();
-    match &mut material.hyperelastic {
-        Some(hyper) => hyperelastic_rows(ui, hyper, units),
+    if let Some(hyper) = &mut material.hyperelastic {
+        hyperelastic_rows(ui, hyper, units);
+        return;
+    }
+    match &mut material.anisotropic {
+        Some(Anisotropic::Orthotropic(c)) => {
+            ui.label("");
+            ui.weak("Axes 1, 2, 3: x, y, z of the section's orientation.");
+            ui.end_row();
+            let moduli: [(&str, &mut f64); 3] = [
+                ("    E1", &mut c.e1),
+                ("    E2", &mut c.e2),
+                ("    E3", &mut c.e3),
+            ];
+            for (label, value) in moduli {
+                ui.label(label);
+                ui.add(numeric::physical(value, units, Quantity::Pressure));
+                ui.end_row();
+            }
+            let ratios: [(&str, &mut f64); 3] = [
+                ("    nu12", &mut c.nu12),
+                ("    nu13", &mut c.nu13),
+                ("    nu23", &mut c.nu23),
+            ];
+            for (label, value) in ratios {
+                ui.label(label);
+                ui.add(
+                    numeric::drag_value(value)
+                        .range(-1.0..=10.0)
+                        .speed(0.01)
+                        .max_decimals(4),
+                );
+                ui.end_row();
+            }
+            let shear: [(&str, &mut f64); 3] = [
+                ("    G12", &mut c.g12),
+                ("    G13", &mut c.g13),
+                ("    G23", &mut c.g23),
+            ];
+            for (label, value) in shear {
+                ui.label(label);
+                ui.add(numeric::physical(value, units, Quantity::Pressure));
+                ui.end_row();
+            }
+            ui.label("");
+            ui.weak("nu_ij: contraction along j under a stress along i.");
+            ui.end_row();
+        }
+        Some(Anisotropic::General(upper)) => {
+            ui.label("");
+            ui.weak("Stiffness D in the axes 1, 2, 3 (engineering shear strains).");
+            ui.end_row();
+            for (row, first) in plx_model::GENERAL_COMPONENTS.iter().enumerate() {
+                for (col, second) in plx_model::GENERAL_COMPONENTS.iter().enumerate().skip(row) {
+                    ui.label(format!("    D{first}{second}"));
+                    let k = plx_model::upper_index(row, col);
+                    ui.add(numeric::physical(&mut upper[k], units, Quantity::Pressure));
+                    ui.end_row();
+                }
+            }
+        }
         None => {
             let mut values = material.elastic.unwrap_or(Elastic {
                 young: 0.0,
@@ -5467,8 +5626,23 @@ fn elastic_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
             });
             ui.end_row();
             material.elastic = elastic.then_some(values);
+            return;
         }
     }
+    if let Some(problem) = material.anisotropic.as_ref().and_then(Anisotropic::problem) {
+        ui.label("");
+        ui.colored_label(crate::style::error(), problem);
+        ui.end_row();
+    }
+}
+
+/// `value` rounded to `digits` significant digits.
+fn significant(value: f64, digits: i32) -> f64 {
+    if value == 0.0 || !value.is_finite() {
+        return value;
+    }
+    let scale = 10f64.powi(digits - 1 - value.abs().log10().floor() as i32);
+    (value * scale).round() / scale
 }
 
 /// The constants of a hyperelastic material, its compressibility, what follows for small
@@ -7538,6 +7712,104 @@ fn optional_time(ui: &mut Ui, value: &mut Option<f64>, derived: f64, units: Unit
     *value = set.then_some(shown_value);
 }
 
+/// The values of an infill section: the walls, the infill and the printed material's
+/// stiffness across the layers.
+fn infill_form(
+    ui: &mut Ui,
+    infill: &mut plx_model::InfillSection,
+    fe: &FeModel,
+    units: UnitSystem,
+) {
+    use plx_model::InfillPattern;
+    ui.label("Wall thickness");
+    expose::field(ui, Field::Thickness, |ui| {
+        ui.add(
+            numeric::quantity(&mut infill.wall_thickness, units, Quantity::Length)
+                .range(0.0..=f64::MAX),
+        )
+    });
+    ui.end_row();
+    ui.label("");
+    ui.weak("Perimeters times extrusion width, e.g. 2 x 0.4 mm.");
+    ui.end_row();
+    ui.label("Top/bottom thickness");
+    expose::field(ui, Field::TopBottomThickness, |ui| {
+        ui.add(
+            numeric::quantity(&mut infill.top_bottom_thickness, units, Quantity::Length)
+                .range(0.0..=f64::MAX),
+        )
+    });
+    ui.end_row();
+    ui.label("");
+    ui.weak("Solid layers times layer height, e.g. 4 x 0.2 mm.");
+    ui.end_row();
+    ui.label("Infill pattern");
+    egui::ComboBox::from_id_salt("infill pattern")
+        .selected_text(infill.pattern.label())
+        .width(crate::dock::fit_width(ui, 200.0))
+        .show_ui(ui, |ui| {
+            for pattern in InfillPattern::ALL {
+                ui.selectable_value(&mut infill.pattern, pattern, pattern.label());
+            }
+        });
+    ui.end_row();
+    if infill.pattern == InfillPattern::Custom {
+        ui.label("Core material");
+        let materials = (fe.materials.iter()).map(|m| (m.id, m.name.as_str()));
+        crate::pick_item::item_combo(
+            ui,
+            "infill core material",
+            &mut infill.core_material,
+            materials,
+            None,
+            200.0,
+        );
+        ui.end_row();
+        ui.label("");
+        ui.weak("Its axes 1, 2, 3 are the print axes; z the build direction.");
+        ui.end_row();
+    } else {
+        ui.label("Infill density");
+        let mut percent = infill.density * 100.0;
+        let changed = expose::field(ui, Field::InfillDensity, |ui| {
+            ui.add(
+                numeric::drag_value(&mut percent)
+                    .range(1.0..=100.0)
+                    .speed(0.5)
+                    .suffix(" %")
+                    .max_decimals(1),
+            )
+        })
+        .changed();
+        if changed {
+            infill.density = percent / 100.0;
+        }
+        ui.end_row();
+        if infill.pattern != InfillPattern::Gyroid {
+            ui.label("Infill angle");
+            ui.add(
+                numeric::drag_value(&mut infill.angle)
+                    .range(-180.0..=180.0)
+                    .speed(1.0)
+                    .suffix(" °")
+                    .max_decimals(2),
+            );
+            ui.end_row();
+        }
+    }
+    ui.label("Layer factor");
+    ui.add(
+        numeric::drag_value(&mut infill.layer_factor)
+            .range(0.05..=1.0)
+            .speed(0.01)
+            .max_decimals(3),
+    );
+    ui.end_row();
+    ui.label("");
+    ui.weak("Stiffness across the layers (along z) relative to in the layer.");
+    ui.end_row();
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -7908,6 +8180,7 @@ mod tests {
             .apply(&mut fe);
         assert_eq!(fe.cross_sections[0].name, "Cross_Section-1");
         fe.sections.push(Section {
+            orientation: None,
             name: "Beam_Section-1".into(),
             material: None,
             region: Region::Parts(Vec::new()),
@@ -8430,6 +8703,7 @@ mod tests {
             fe.materials.push(m);
         }
         let section = |name: &str, material: Option<plx_model::Id>| Section {
+            orientation: None,
             name: name.into(),
             material,
             region: Region::Parts(vec!["A".into()]),
@@ -8482,6 +8756,7 @@ mod tests {
 
         // A section on the set follows its new name.
         model.fe.sections.push(Section {
+            orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
             region: Region::ElementSet("Beam".into()),

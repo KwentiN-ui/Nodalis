@@ -50,6 +50,7 @@ pub fn render_with_parts(analysis: &Analysis, parts: &[String]) -> String {
     }
     mesh(&mut out, model, parts);
     materials(&mut out, model);
+    orientations(&mut out, model);
     sections(&mut out, model);
     constraints(&mut out, model);
     contact(&mut out, model);
@@ -266,6 +267,18 @@ fn materials(out: &mut Out, model: &Model) {
                 out.numbers(&[row.young, row.poisson, row.temperature]);
             }
         }
+        if let Some(anisotropic) = &material.anisotropic {
+            use plxs_core::material::AnisotropicElastic as A;
+            let (kind, values): (&str, &[f64]) = match anisotropic {
+                A::EngineeringConstants(v) => ("Engineering constants", v),
+                A::Orthotropic(v) => ("Ortho", v),
+                A::Anisotropic(v) => ("Aniso", v),
+            };
+            out.keyword(&format!("*Elastic, Type={kind}"));
+            let mut values = values.to_vec();
+            values.push(0.0);
+            out.numbers(&values);
+        }
         if let Some(hyper) = &material.hyperelastic {
             use plxs_core::material::HyperelasticModel as H;
             let model = match hyper.model {
@@ -318,6 +331,17 @@ fn materials(out: &mut Out, model: &Model) {
     }
 }
 
+fn orientations(out: &mut Out, model: &Model) {
+    for orientation in &model.orientations {
+        out.keyword(&format!(
+            "*Orientation, Name={}, System=Rectangular",
+            orientation.name
+        ));
+        let [a, b] = [orientation.a, orientation.b];
+        out.numbers(&[a[0], a[1], a[2], b[0], b[1], b[2]]);
+    }
+}
+
 fn sections(out: &mut Out, model: &Model) {
     for section in &model.sections {
         let elset = &section.elset;
@@ -325,10 +349,13 @@ fn sections(out: &mut Out, model: &Model) {
             SectionKind::Solid {
                 material,
                 thickness,
+                orientation,
             } => {
-                out.keyword(&format!(
-                    "*Solid section, Elset={elset}, Material={material}"
-                ));
+                let mut header = format!("*Solid section, Elset={elset}, Material={material}");
+                if let Some(orientation) = orientation {
+                    let _ = write!(header, ", Orientation={orientation}");
+                }
+                out.keyword(&header);
                 if let Some(thickness) = thickness {
                     out.line(&number(*thickness));
                 }

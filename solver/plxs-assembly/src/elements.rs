@@ -8,7 +8,7 @@ use plxs_core::state::IntegrationPointField;
 use plxs_core::{Element, ElementFamily, ElementType, Error, Model, Result};
 use plxs_elements::{SolidElement, plane, solid};
 use plxs_materials::plane_stress::condense;
-use plxs_materials::{LinearElastic, MaterialLaw, PlaneStress, law_of};
+use plxs_materials::{LinearElastic, MaterialLaw, PlaneStress, law_in_axes};
 
 use rayon::prelude::*;
 
@@ -365,7 +365,33 @@ impl ElementTable {
                     let mat = model
                         .material(name)
                         .ok_or_else(|| Error::undefined("*SOLID SECTION", "material", name))?;
-                    let no_elasticity = mat.elastic.is_none() && mat.hyperelastic.is_none();
+                    let axes = match &section.kind {
+                        SectionKind::Solid {
+                            orientation: Some(orientation),
+                            ..
+                        } => {
+                            let o = model.orientation(orientation).ok_or_else(|| {
+                                Error::undefined("*SOLID SECTION", "orientation", orientation)
+                            })?;
+                            Some(o.axes().ok_or_else(|| {
+                                Error::input(
+                                    "*ORIENTATION",
+                                    format!("orientation {orientation} has parallel axes"),
+                                )
+                            })?)
+                        }
+                        _ => None,
+                    };
+                    if mat.anisotropic.is_some() && (is_plane || section_rule.is_some()) {
+                        return Err(Error::Unsupported(format!(
+                            "material {} is anisotropic: anisotropic elasticity is \
+                             implemented for 3D solid elements only (element {})",
+                            mat.name, element.id
+                        )));
+                    }
+                    let no_elasticity = mat.elastic.is_none()
+                        && mat.hyperelastic.is_none()
+                        && mat.anisotropic.is_none();
                     let elastic = if no_elasticity {
                         missing_elastic.get_or_insert_with(|| mat.name.clone());
                         LinearElastic {
@@ -381,8 +407,8 @@ impl ElementTable {
                             (Box::new(elastic), Box::new(elastic))
                         } else {
                             (
-                                law_of(mat, temperature, false)?,
-                                law_of(mat, temperature, true)?,
+                                law_in_axes(mat, temperature, false, axes.as_ref())?,
+                                law_in_axes(mat, temperature, true, axes.as_ref())?,
                             )
                         };
                     // Plane stress: the thickness stress is zero at every integration
@@ -392,7 +418,7 @@ impl ElementTable {
                         laws.push(Box::new(PlaneStress::new(law)));
                         laws_finite.push(Box::new(PlaneStress::new(law_finite)));
                     } else {
-                        materials.push((elastic, elastic.matrix()));
+                        materials.push((elastic, law.elastic_matrix()));
                         laws.push(law);
                         laws_finite.push(law_finite);
                     }

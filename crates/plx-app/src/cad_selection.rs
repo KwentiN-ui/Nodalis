@@ -586,6 +586,7 @@ mod tests {
 
         model.fe = FeModel {
             materials: vec![Material {
+                anisotropic: None,
                 id: crate::test_ids::named("Steel"),
                 name: "Steel".into(),
                 density: None,
@@ -601,6 +602,7 @@ mod tests {
                 hyperelastic: None,
             }],
             sections: vec![Section {
+                orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("Steel")),
                 region: Region::Parts(vec!["SOLID-1".into()]),
@@ -758,6 +760,7 @@ mod tests {
 
         model.fe = FeModel {
             materials: vec![Material {
+                anisotropic: None,
                 id: crate::test_ids::named("Steel"),
                 name: "Steel".into(),
                 density: None,
@@ -773,6 +776,7 @@ mod tests {
                 hyperelastic: None,
             }],
             sections: vec![Section {
+                orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("Steel")),
                 region: line.clone(),

@@ -793,6 +793,7 @@ mod tests {
                 ..Default::default()
             }],
             sections: vec![Section {
+                orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("S235")),
                 region: Region::Parts(vec!["Solid-1".into()]),
