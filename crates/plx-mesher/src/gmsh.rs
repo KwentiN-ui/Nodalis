@@ -801,6 +801,60 @@ impl Gmsh {
         self.synchronize()
     }
 
+    /// Moves entities of the OpenCASCADE model from the global frame into the frame of a
+    /// rigid map, given as the 3x4 matrix of [`Gmsh::affine_transform`] whose first three
+    /// columns are orthonormal. Unlike the affine map it turns and shifts them, so that
+    /// planes stay planes and circles circles; a spline in their place would be cut into
+    /// coarser splines by every boolean after it.
+    pub fn place(&self, entities: &[(i32, i32)], frame: &[f64; 12]) -> Result<(), GmshError> {
+        let r = |i: usize, j: usize| frame[4 * i + j];
+        // The rotation as a unit quaternion, from the largest of its components.
+        let trace = r(0, 0) + r(1, 1) + r(2, 2);
+        let (w, x, y, z) = if trace > 0.0 {
+            let s = 2.0 * (1.0 + trace).sqrt();
+            (
+                0.25 * s,
+                (r(2, 1) - r(1, 2)) / s,
+                (r(0, 2) - r(2, 0)) / s,
+                (r(1, 0) - r(0, 1)) / s,
+            )
+        } else if r(0, 0) > r(1, 1) && r(0, 0) > r(2, 2) {
+            let s = 2.0 * (1.0 + r(0, 0) - r(1, 1) - r(2, 2)).sqrt();
+            (
+                (r(2, 1) - r(1, 2)) / s,
+                0.25 * s,
+                (r(0, 1) + r(1, 0)) / s,
+                (r(0, 2) + r(2, 0)) / s,
+            )
+        } else if r(1, 1) > r(2, 2) {
+            let s = 2.0 * (1.0 + r(1, 1) - r(0, 0) - r(2, 2)).sqrt();
+            (
+                (r(0, 2) - r(2, 0)) / s,
+                (r(0, 1) + r(1, 0)) / s,
+                0.25 * s,
+                (r(1, 2) + r(2, 1)) / s,
+            )
+        } else {
+            let s = 2.0 * (1.0 + r(2, 2) - r(0, 0) - r(1, 1)).sqrt();
+            (
+                (r(1, 0) - r(0, 1)) / s,
+                (r(0, 2) + r(2, 0)) / s,
+                (r(1, 2) + r(2, 1)) / s,
+                0.25 * s,
+            )
+        };
+        let sine = (x * x + y * y + z * z).sqrt();
+        if sine > 1e-12 {
+            let angle = 2.0 * sine.atan2(w);
+            self.rotate(entities, [0.0; 3], [x / sine, y / sine, z / sine], angle)?;
+        }
+        let shift = [r(0, 3), r(1, 3), r(2, 3)];
+        if shift != [0.0; 3] {
+            self.translate(entities, shift)?;
+        }
+        Ok(())
+    }
+
     /// Applies an affine map to entities of the OpenCASCADE model. Curved shapes become
     /// splines by it, which are close to them only.
     pub fn affine_transform(

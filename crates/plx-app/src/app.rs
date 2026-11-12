@@ -516,18 +516,8 @@ impl AnalysisWindow {
             }
             workbench.symbols_shown = None;
         }
-        let geometry = own;
-        workbench.geometry = match &geometry {
-            Some(geometry) => match plx_mesher::tessellate(geometry) {
-                Ok(display) => Some(Model::geometry_view(&model.path, display)),
-                Err(error) => {
-                    (workbench.output).push(format!("Geometry cannot be displayed: {error}"));
-                    None
-                }
-            },
-            None => None,
-        };
-        model.geometry = geometry;
+        model.geometry = own;
+        workbench.refresh_geometry_view();
         workbench.after_parts_changed();
     }
 
@@ -5762,6 +5752,9 @@ impl Workbench {
             && crate::undo::undo(model)
         {
             self.output.push("Undo".into());
+            if model.history.take_shapes_restored() {
+                self.refresh_geometry_view();
+            }
             self.after_parts_changed();
         }
     }
@@ -5775,8 +5768,28 @@ impl Workbench {
             && crate::undo::redo(model)
         {
             self.output.push("Redo".into());
+            if model.history.take_shapes_restored() {
+                self.refresh_geometry_view();
+            }
             self.after_parts_changed();
         }
+    }
+
+    /// Draws the geometry of the model anew, after its shapes changed.
+    fn refresh_geometry_view(&mut self) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        self.geometry = match &model.geometry {
+            Some(geometry) => match plx_mesher::tessellate(geometry) {
+                Ok(display) => Some(Model::geometry_view(&model.path, display)),
+                Err(error) => {
+                    (self.output).push(format!("Geometry cannot be displayed: {error}"));
+                    None
+                }
+            },
+            None => None,
+        };
     }
 
     fn after_parts_changed(&mut self) {

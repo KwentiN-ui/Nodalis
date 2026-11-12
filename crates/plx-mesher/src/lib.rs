@@ -346,13 +346,7 @@ fn move_into_xy_plane(gmsh: &Gmsh, shapes: &[Entity]) -> Result<Option<f64>, Gms
             top.push((dim, tag));
         }
     }
-    #[rustfmt::skip]
-    let matrix = [
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, -z,
-    ];
-    gmsh.affine_transform(&top, &matrix)?;
+    gmsh.translate(&top, [0.0, 0.0, -z])?;
     Ok(Some(z))
 }
 
