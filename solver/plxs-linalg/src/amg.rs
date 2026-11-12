@@ -1329,7 +1329,8 @@ fn corner_prolongator(a: &Bsr, u: &Unknowns, rotations: bool) -> Option<Corners>
                 } else {
                     // (ω × d)_r = ε_rjk ω_j d_k: column j = c - 3.
                     let j = c - br;
-                    let k = 3 - r - j;
+                    // The third index, for r ≠ j.
+                    let k = 3 - (r + j).min(3);
                     if r == j {
                         0.0
                     } else if (r + 1) % 3 == j {
