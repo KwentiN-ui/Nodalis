@@ -670,12 +670,11 @@ pub fn tessellate(geometry: &Geometry) -> Result<GeometryDisplay, GmshError> {
             let triangles = gmsh.elements(TRI3, face)?.1;
             boundaries.insert(face, boundary_nodes(&triangles));
         }
-        let tolerance = diagonal * 1e-6;
         let mut polylines = BTreeMap::new();
         for curve in gmsh.entities(1)? {
             // The edge runs through the nodes the triangulation of its faces has along it,
             // so that the drawn line and the faces agree; the sampling is the fallback.
-            let shared = triangulated_curve(gmsh, curve, &boundaries, &coords, tolerance)
+            let shared = triangulated_curve(gmsh, curve, &boundaries, &coords, deflection)
                 .unwrap_or_default();
             let polyline = if shared.len() >= 2 {
                 shared
@@ -710,20 +709,29 @@ fn boundary_nodes(triangles: &[usize]) -> Vec<usize> {
 
 /// The points of a curve taken from the border nodes of the faces it bounds, in the order
 /// along the curve, ends included. Empty if the curve is not found among them.
+///
+/// The nodes are placed along the curve by a fine sampling of it rather than by Gmsh's
+/// closest point, whose parameter is undefined for many points lying on the curve.
 fn triangulated_curve(
     gmsh: &Gmsh,
     curve: i32,
     boundaries: &BTreeMap<i32, Vec<usize>>,
     coords: &HashMap<usize, [f64; 3]>,
-    tolerance: f64,
+    deflection: Deflection,
 ) -> Result<Vec<[f64; 3]>, GmshError> {
-    let (min, max) = gmsh.parameter_bounds(1, curve)?;
-    let (Some(&t0), Some(&t1)) = (min.first(), max.first()) else {
+    let fine = Deflection {
+        linear: deflection.linear * 0.1,
+        angular: deflection.angular * 0.25,
+    };
+    let (parameters, samples) = curve_samples(gmsh, curve, fine)?;
+    let (Some(&t0), Some(&t1)) = (parameters.first(), parameters.last()) else {
         return Ok(Vec::new());
     };
+    // A node lies on the curve within the sampling's own deflection; nodes of neighbouring
+    // edges stay much further away except at the shared ends.
+    let reach = 2.0 * fine.linear;
     let (lo, hi) = gmsh.entity_bounding_box(1, curve)?;
-    let near =
-        |p: &[f64; 3]| (0..3).all(|k| p[k] >= lo[k] - tolerance && p[k] <= hi[k] + tolerance);
+    let near = |p: &[f64; 3]| (0..3).all(|k| p[k] >= lo[k] - reach && p[k] <= hi[k] + reach);
     let mut found: Vec<(f64, [f64; 3])> = Vec::new();
     for face in gmsh.adjacencies(1, curve)?.0 {
         let Some(nodes) = boundaries.get(&face) else {
@@ -733,9 +741,8 @@ fn triangulated_curve(
             let Some(&point) = coords.get(tag).filter(|p| near(p)) else {
                 continue;
             };
-            let (closest, parameter) = gmsh.projection(1, curve, point)?;
-            if let Some(&t) = parameter.first()
-                && distance(closest, point) <= tolerance
+            if let Some((t, gap)) = polyline_parameter(&parameters, &samples, point)
+                && gap <= reach
             {
                 found.push((t, point));
             }
@@ -745,20 +752,52 @@ fn triangulated_curve(
         return Ok(Vec::new());
     }
     // The ends belong to the curve whether or not a node was found there.
-    let ends = gmsh.values(1, curve, &[t0, t1])?;
     found.sort_by(|a, b| a.0.total_cmp(&b.0));
     let epsilon = (t1 - t0).abs() * 1e-9;
     found.dedup_by(|b, a| (b.0 - a.0).abs() <= epsilon);
+    let ends = [samples[0], samples[samples.len() - 1]];
     let mut points: Vec<[f64; 3]> = Vec::with_capacity(found.len() + 2);
     points.push(ends[0]);
     points.extend(
         found
             .iter()
-            .filter(|(t, _)| *t > t0 + epsilon && *t < t1 - epsilon)
+            .filter(|(t, p)| {
+                *t > t0 + epsilon
+                    && *t < t1 - epsilon
+                    && distance(*p, ends[0]) > reach
+                    && distance(*p, ends[1]) > reach
+            })
             .map(|&(_, p)| p),
     );
     points.push(ends[1]);
     Ok(points)
+}
+
+/// The curve parameter of the point of a sampled curve closest to `point`, interpolated
+/// along the segment, with the distance to it. None for fewer than two samples.
+fn polyline_parameter(
+    parameters: &[f64],
+    samples: &[[f64; 3]],
+    point: [f64; 3],
+) -> Option<(f64, f64)> {
+    let mut best: Option<(f64, f64)> = None;
+    for i in 0..samples.len().saturating_sub(1) {
+        let (a, b) = (samples[i], samples[i + 1]);
+        let ab = sub(b, a);
+        let length2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+        let ap = sub(point, a);
+        let s = if length2 > 0.0 {
+            ((ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / length2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let foot = [0, 1, 2].map(|k| a[k] + s * ab[k]);
+        let gap = distance(foot, point);
+        if best.is_none_or(|(_, g)| gap < g) {
+            best = Some((parameters[i] + s * (parameters[i + 1] - parameters[i]), gap));
+        }
+    }
+    best
 }
 
 /// How far a display triangulation may stray from the geometry: the distance to it, and the
@@ -775,9 +814,19 @@ fn curve_polyline(
     curve: i32,
     deflection: Deflection,
 ) -> Result<Vec<[f64; 3]>, GmshError> {
+    Ok(curve_samples(gmsh, curve, deflection)?.1)
+}
+
+/// The parameters and points along a curve, split until every segment keeps within the
+/// deflection.
+fn curve_samples(
+    gmsh: &Gmsh,
+    curve: i32,
+    deflection: Deflection,
+) -> Result<(Vec<f64>, Vec<[f64; 3]>), GmshError> {
     let (min, max) = gmsh.parameter_bounds(1, curve)?;
     let (Some(&t0), Some(&t1)) = (min.first(), max.first()) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     // A few segments to begin with, so that a closed curve does not start as one point.
     const START: usize = 8;
@@ -816,7 +865,7 @@ fn curve_polyline(
         parameters = new_parameters;
         points = new_points;
     }
-    Ok(points)
+    Ok((parameters, points))
 }
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
