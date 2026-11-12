@@ -50,6 +50,13 @@ pub struct ReducedPattern {
     /// shells has some 300 million of them): the indices into `T` and the factor follow
     /// from the order.
     general: Landing,
+    /// Per reduced entry the entry of the input it is a copy of, when that is its only
+    /// contribution (`u32::MAX`: none, it is summed from `serial`).
+    gather: Vec<u32>,
+    /// The entries of the input that are summed in their order (all others are copies):
+    /// the general ones and the simple ones that share their reduced entry. Empty when
+    /// `T` only selects the free DOFs; `simple` and `general` are empty then too.
+    serial: Vec<u32>,
 }
 
 impl ReducedPattern {
@@ -81,41 +88,50 @@ impl ReducedPattern {
         let mut out = SparseMatrix::zeros(self.pattern.clone());
         let values = k.values();
         let out_values = out.values_mut();
+        // Entries that are the only contribution to their reduced entry are copied in
+        // parallel; the others are summed in the order of the entries, as a direct
+        // `Tᵀ K T` would (a mechanism's solution can hang on round-off of this size).
+        out_values
+            .par_iter_mut()
+            .zip(self.gather.par_iter())
+            .with_min_len(1 << 12)
+            .for_each(|(v, &s)| {
+                if s != u32::MAX {
+                    *v = values[s as usize];
+                }
+            });
+        if self.serial.is_empty() {
+            return out;
+        }
         let input = &*self.input;
         let col_ptr = input.col_ptr();
+        let row_idx = input.row_idx();
         let t_range = |row: usize| self.t_ptr[row] as usize..self.t_ptr[row + 1] as usize;
-        let inert = |row: usize| self.inert.get(row).copied().unwrap_or(false);
-        for (range, positions) in &self.general {
-            let mut positions = positions.iter();
-            for j in range.clone() {
-                if inert(j) {
-                    continue;
-                }
-                let start = col_ptr[j] as usize;
-                for (offset, &i) in input.column(j).iter().enumerate() {
-                    let entry = start + offset;
-                    let v = values[entry];
-                    let pos = self.simple[entry];
-                    if pos != u32::MAX {
-                        out_values[pos as usize] += v;
+        let mut positions = self.general.iter().flat_map(|(_, p)| p.iter());
+        let mut j = 0usize;
+        for &entry in &self.serial {
+            let entry = entry as usize;
+            while col_ptr[j + 1] as usize <= entry {
+                j += 1;
+            }
+            let v = values[entry];
+            let pos = self.simple[entry];
+            if pos != u32::MAX {
+                out_values[pos as usize] += v;
+                continue;
+            }
+            let i = row_idx[entry] as usize;
+            let diagonal = i == j;
+            for ia in t_range(i) {
+                let a = self.t_col[ia];
+                for ib in t_range(j) {
+                    let b = self.t_col[ib];
+                    if diagonal && a > b {
                         continue;
                     }
-                    if inert(i as usize) {
-                        continue;
-                    }
-                    let diagonal = i as usize == j;
-                    for ia in t_range(i as usize) {
-                        let a = self.t_col[ia];
-                        for ib in t_range(j) {
-                            let b = self.t_col[ib];
-                            if diagonal && a > b {
-                                continue;
-                            }
-                            let factor = if !diagonal && a == b { 2.0 } else { 1.0 };
-                            let pos = *positions.next().expect("a position for every product");
-                            out_values[pos as usize] += (factor * t_val[ia]) * v * t_val[ib];
-                        }
-                    }
+                    let factor = if !diagonal && a == b { 2.0 } else { 1.0 };
+                    let pos = *positions.next().expect("a position for every product");
+                    out_values[pos as usize] += (factor * t_val[ia]) * v * t_val[ib];
                 }
             }
         }
@@ -574,8 +590,22 @@ impl ConstraintSet {
     /// before.
     pub fn reducer(&self, pattern: &Arc<Pattern>) -> ReducedPattern {
         assert_eq!(pattern.dimension(), self.n);
+        if let Some((reduced_pattern, gather)) = self.selected(pattern) {
+            return ReducedPattern {
+                input: pattern.clone(),
+                pattern: Arc::new(reduced_pattern),
+                t_ptr: self.t_ptr.clone(),
+                t_col: self.t_col.clone(),
+                inert: self.inert.clone(),
+                simple: Vec::new(),
+                general: Vec::new(),
+                gather,
+                serial: Vec::new(),
+            };
+        }
         let reduced_pattern = Arc::new(self.reduced_pattern(pattern));
         let (simple, general) = self.landing(pattern, &reduced_pattern);
+        let (gather, serial) = self.split_copies(pattern, &reduced_pattern, &simple, &general);
         ReducedPattern {
             input: pattern.clone(),
             pattern: reduced_pattern,
@@ -584,7 +614,115 @@ impl ConstraintSet {
             inert: self.inert.clone(),
             simple,
             general,
+            gather,
+            serial,
         }
+    }
+
+    /// The copies and the summed entries of [`ReducedPattern`] from the landing of the
+    /// entries of `K`.
+    fn split_copies(
+        &self,
+        pattern: &Pattern,
+        reduced: &Pattern,
+        simple: &[u32],
+        general: &Landing,
+    ) -> (Vec<u32>, Vec<u32>) {
+        let mut count = vec![0u8; reduced.nnz()];
+        let mut bump = |pos: u32| {
+            let c = &mut count[pos as usize];
+            *c = c.saturating_add(1);
+        };
+        simple
+            .iter()
+            .filter(|&&p| p != u32::MAX)
+            .for_each(|&p| bump(p));
+        general
+            .iter()
+            .flat_map(|(_, p)| p.iter())
+            .for_each(|&p| bump(p));
+        let mut gather = vec![u32::MAX; reduced.nnz()];
+        let mut serial = Vec::new();
+        for j in 0..self.n {
+            if self.is_inert(j) {
+                continue;
+            }
+            let start = pattern.col_ptr()[j] as usize;
+            for (offset, &i) in pattern.column(j).iter().enumerate() {
+                let entry = start + offset;
+                let pos = simple[entry];
+                if pos != u32::MAX {
+                    if count[pos as usize] == 1 {
+                        gather[pos as usize] = entry as u32;
+                    } else {
+                        serial.push(entry as u32);
+                    }
+                } else if !self.is_inert(i as usize) {
+                    serial.push(entry as u32);
+                }
+            }
+        }
+        (gather, serial)
+    }
+
+    /// The reduced pattern and the gather of [`ReducedPattern::gather`] when `T` only
+    /// selects the free DOFs in their order (SPCs, no coupling, the usual case): the
+    /// reduction is then the submatrix of the free DOFs, built column by column in
+    /// parallel, and `Tᵀ K T` one copy of each kept entry.
+    fn selected(&self, pattern: &Pattern) -> Option<(Pattern, Vec<u32>)> {
+        if !self.is_selection() || !self.free.windows(2).all(|w| w[0] < w[1]) {
+            return None;
+        }
+        let m = self.reduced;
+        let mut reduced_of = vec![u32::MAX; self.n];
+        for (c, &row) in self.free.iter().enumerate() {
+            if !self.is_inert(row as usize) {
+                reduced_of[row as usize] = c as u32;
+            }
+        }
+        const RANGE: usize = 4096;
+        let parts: Vec<(Vec<u32>, Vec<u32>, Vec<u32>)> = (0..m.div_ceil(RANGE))
+            .into_par_iter()
+            .map(|r| {
+                let mut counts = Vec::new();
+                let (mut rows, mut sources) = (Vec::new(), Vec::new());
+                for c in r * RANGE..((r + 1) * RANGE).min(m) {
+                    let q = self.free[c] as usize;
+                    let first = rows.len();
+                    if reduced_of[q] != u32::MAX {
+                        let start = pattern.col_ptr()[q] as usize;
+                        for (offset, &p) in pattern.column(q).iter().enumerate() {
+                            let a = reduced_of[p as usize];
+                            if a != u32::MAX {
+                                rows.push(a);
+                                sources.push((start + offset) as u32);
+                            }
+                        }
+                    }
+                    // The diagonal of every reduced unknown, also of one no element uses.
+                    if rows.len() == first || *rows.last().unwrap() != c as u32 {
+                        rows.push(c as u32);
+                        sources.push(u32::MAX);
+                    }
+                    counts.push((rows.len() - first) as u32);
+                }
+                (counts, rows, sources)
+            })
+            .collect();
+        let mut col_ptr = Vec::with_capacity(m + 1);
+        col_ptr.push(0u32);
+        for (counts, _, _) in &parts {
+            for &c in counts {
+                col_ptr.push(col_ptr.last().copied().unwrap_or(0) + c);
+            }
+        }
+        let mut row_idx = Vec::with_capacity(col_ptr[m] as usize);
+        let mut gather = Vec::with_capacity(col_ptr[m] as usize);
+        for (_, rows, sources) in &parts {
+            row_idx.extend_from_slice(rows);
+            gather.extend_from_slice(sources);
+        }
+        Some((Pattern::from_compressed(m, col_ptr, row_idx), gather))
     }
 
     /// The pattern of `Tᵀ K T` (upper triangle, with the diagonal of every reduced
@@ -870,6 +1008,95 @@ mod tests {
                 assert!(
                     (r.get(a as u32, b as u32) - expected).abs() < 1e-12,
                     "{a} {b}"
+                );
+            }
+        }
+    }
+
+    /// A banded matrix of `n` DOFs with distinct values, for comparing reductions.
+    fn band(n: usize) -> SparseMatrix {
+        let blocks: Vec<Vec<u32>> = (0..n as u32 - 3).map(|i| (i..i + 4).collect()).collect();
+        let p = Arc::new(Pattern::from_blocks(n, blocks.iter().map(Vec::as_slice)));
+        let mut k = SparseMatrix::zeros(p);
+        for (e, v) in k.values_mut().iter_mut().enumerate() {
+            *v = 1.0 + ((e * 7919) % 101) as f64 / 37.0;
+        }
+        k
+    }
+
+    /// `Tᵀ K T` entry by entry from the rows of `T`, the reference for the fast paths.
+    fn triple_product(set: &ConstraintSet, k: &SparseMatrix) -> Vec<Vec<f64>> {
+        let m = set.reduced_len();
+        let mut out = vec![vec![0.0; m]; m];
+        for i in 0..set.len() {
+            for j in 0..set.len() {
+                let kij = k.get(i as u32, j as u32);
+                if kij == 0.0 || set.is_inert(i) || set.is_inert(j) {
+                    continue;
+                }
+                for (a, ta) in set.t_row(i) {
+                    for (b, tb) in set.t_row(j) {
+                        out[a as usize][b as usize] += ta * kij * tb;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_selection_is_reduced_to_the_submatrix_of_the_free_dofs() {
+        let n = 42;
+        let k = band(n);
+        let mut e = Eliminator::new(n);
+        for (s, dof) in [0u32, 1, 17, 41].into_iter().enumerate() {
+            e.add(&[(dof, 1.0)], &[(s as u32, -1.0)], dof, Policy::Repivot);
+        }
+        let set =
+            ConstraintSet::from_elimination(&e, &[true; 42], &|_| None, Vec::new(), Vec::new());
+        assert!(set.is_selection());
+        let reducer = set.reducer(k.pattern());
+        assert!(reducer.serial.is_empty() && reducer.general.is_empty());
+        let r = set.reduce(&k);
+        assert_eq!(r.dimension(), n - 4);
+        let expected = triple_product(&set, &k);
+        for (a, row) in expected.iter().enumerate() {
+            for (b, &e) in row.iter().enumerate() {
+                assert_eq!(r.get(a as u32, b as u32), e, "{a} {b}");
+            }
+        }
+        // Exactly the entries of the free DOFs: the restriction of the matrix.
+        assert_eq!(r.values(), k.restrict(&set.free).values());
+    }
+
+    #[test]
+    fn copies_and_summed_entries_give_the_whole_reduction() {
+        // Tied DOFs (x10 = x11, x20 = 0.5 x21 + 0.5 x22) and SPCs: most entries are copies,
+        // the rows of the tied DOFs are summed.
+        let n = 42;
+        let k = band(n);
+        let mut e = Eliminator::new(n);
+        e.add(&[(0, 1.0)], &[(0, -1.0)], 0, Policy::Repivot);
+        e.add(&[(10, 1.0), (11, -1.0)], &[], 10, Policy::Repivot);
+        e.add(
+            &[(20, 1.0), (21, -0.5), (22, -0.5)],
+            &[],
+            20,
+            Policy::Repivot,
+        );
+        let set =
+            ConstraintSet::from_elimination(&e, &[true; 42], &|_| None, Vec::new(), Vec::new());
+        let reducer = set.reducer(k.pattern());
+        assert!(!reducer.serial.is_empty());
+        assert!(reducer.gather.iter().any(|&g| g != u32::MAX));
+        let r = set.reduce(&k);
+        let expected = triple_product(&set, &k);
+        for (a, row) in expected.iter().enumerate() {
+            for (b, &e) in row.iter().enumerate() {
+                let got = r.get(a as u32, b as u32);
+                assert!(
+                    (got - e).abs() <= 1e-12 * e.abs().max(1.0),
+                    "{a} {b}: {got} vs {e}"
                 );
             }
         }

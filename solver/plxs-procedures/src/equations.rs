@@ -85,7 +85,10 @@ pub struct Equations {
     /// Automatic and iterative: the prepared matrix with the positions of its unknowns, to
     /// factorize it after all when the iteration fails (ordered by the positions, as the
     /// direct solver is ordered otherwise: without them the factor fills many times more).
-    kept: Option<(SparseMatrix, Vec<[f64; 3]>)>,
+    /// Only the pattern is kept: the values are in the iterative solver's own copy of the
+    /// matrix, which gives them back (a second copy of a large matrix costs hundreds of
+    /// megabytes for a fall-back that is rarely taken).
+    kept: Option<(Arc<Pattern>, Vec<[f64; 3]>)>,
     /// Whether the automatic choice already fell back once (it does not switch back).
     fell_back: bool,
     /// The memory the automatic choice works with, `None`: ask the platform.
@@ -305,7 +308,10 @@ impl Equations {
                     return Ok(());
                 }
                 Err(error) if self.may_fall_back(&error) && b.is_some() => {
-                    let (k, coordinates) = self.kept.take().expect("kept for the fall-back");
+                    let (pattern, coordinates) = self.kept.take().expect("kept for the fall-back");
+                    let k = (self.pcg.as_ref())
+                        .and_then(|pcg| pcg.matrix(pattern))
+                        .expect("the iterative solver holds the prepared matrix");
                     direct.set_coordinates(Some(coordinates));
                     if !self.factor_fits(direct, &k, &error, progress)? {
                         return Err(with_message(error, |m| {
@@ -562,7 +568,7 @@ impl Equations {
             started.elapsed().as_secs_f64()
         )));
         if self.mode == SolverMode::Automatic && !self.fell_back {
-            self.kept = Some((k.clone(), unknowns.coordinates.clone()));
+            self.kept = Some((k.pattern().clone(), unknowns.coordinates.clone()));
         }
         Ok(())
     }

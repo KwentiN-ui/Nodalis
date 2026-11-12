@@ -1658,3 +1658,38 @@ V-Zyklus, behaltene Hierarchie oft zu lange behalten.
 - Bleibt: eine Iteration auf C3D20 ist je Unbekannte weiterhin etwa doppelt so teuer wie
   auf C3D10 (dichtere Matrix), und der Aufbau der Hierarchie (16 s bei 1,27 Mio.) ist jetzt
   so teuer wie das Lösen.
+
+## Stand nach der parallelen Matrix-Pipeline (2026-11-12, Thread "Speed up plxs solver: block matrix, thin walls, solver choice")
+
+Vorschlag B des Architektur-Reviews, erste Stufe: dieselbe Matrix, aber jeder Schritt von
+der Assemblierung bis zum Vorkonditionierer läuft parallel, und die Reduktion kopiert, wo
+sie nur auswählt.
+
+- `Pattern::from_blocks`: je Index die Blöcke, in denen er vorkommt, dann jede Spalte für
+  sich (Markierung je Thread, nur die eindeutigen Zeilen werden sortiert). Ergebnis gleich
+  dem alten Muster.
+- `SparseMatrix::add_blocks`: Positionen je Block parallel, dann Bereiche der Werte je
+  Thread, jeder Bereich nimmt die Blöcke in ihrer Reihenfolge. Jeder Eintrag bekommt also
+  dieselben Summanden in derselben Reihenfolge wie mit `add_block` nacheinander
+  (bitgleich). Genutzt von `assemble_stiffness`, der Masse und der effektiven Matrix der
+  Dynamik; die nichtlineare Assemblierung machte das schon so.
+- `ConstraintSet::reducer`: wählt `T` nur die freien Freiheitsgrade aus (nur Einspannungen,
+  der häufigste Fall), ist das reduzierte Muster die Untermatrix, Spalte für Spalte
+  parallel gebaut, und `Tᵀ K T` ein paralleles Kopieren (`ReducedPattern::gather`). Mit
+  Kopplungen (Ties, Gleichungen, starre Körper) werden die Einträge, die allein auf ihren
+  reduzierten Eintrag fallen, ebenso kopiert; nur die übrigen (`serial`) werden wie bisher
+  der Reihe nach summiert, bitgleich zum direkten Dreifachprodukt.
+- `PcgSolver::analyze_blocked`: Blockmuster, Umnummerierung und Quellindex der Blöcke
+  parallel (nur Cuthill-McKee bleibt seriell, 0,1 s am Bracket).
+- `Equations` hält für den Rückfall auf den Direktlöser nur noch das Muster; die Werte
+  gibt `PcgSolver::matrix` aus der Blockkopie des iterativen Lösers zurück (spart eine
+  Kopie der reduzierten Matrix).
+
+Gemessen am Bracket (591 000 Gl., C3D10, iterativ, 4 Threads, ohne GPU): gesamt
+19,3 → 15,1 s, Muster 1,8 → 0,3 s, Assemblierung 1,8 → 0,9 s, Reduktion 0,9 → 0,2 s,
+Umwandlung für CG 1,7 → 0,4 s, Speicherspitze 2,27 → 1,97 GB, 125 Iterationen wie zuvor,
+Ergebnisse gleich bis auf Rundung (wie zwei Läufe des alten Standes untereinander).
+Lifting Lug (Ties, NLGEOM): Reduktion 3,4 → 2,8 s, dort bestimmen Elementrechnung und
+Lösen die Zeit. Noch offen aus B: durchgehende Blockform ab der Assemblierung und eine
+einmalige Nummerierung; der Direktlöser ordnet bereits auf dem komprimierten Knotengraphen
+(195 000 Knoten statt 591 000 Unbekannte), dort kostet die Dissection selbst 4 s.

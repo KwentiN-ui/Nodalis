@@ -24,26 +24,84 @@ impl Pattern {
     /// blocks that will be added to it (the global DOF numbers of each element). Every pair
     /// of indices in a block is an entry; the diagonal is added for every row.
     pub fn from_blocks<'a>(n: usize, blocks: impl IntoIterator<Item = &'a [u32]>) -> Pattern {
-        // Rows per column, collected then sorted and deduplicated.
-        let mut rows: Vec<Vec<u32>> = (0..n as u32).map(|i| vec![i]).collect();
-        for block in blocks {
-            for &a in block {
-                for &b in block {
-                    if a < b {
-                        rows[b as usize].push(a);
-                    }
-                }
+        let blocks: Vec<&[u32]> = blocks.into_iter().collect();
+        // The blocks every index is in (compressed by index), then every column on its
+        // own, in parallel: the rows of the blocks of the column up to it, marked once.
+        let mut in_ptr = vec![0u32; n + 1];
+        for block in &blocks {
+            for &a in *block {
+                in_ptr[a as usize + 1] += 1;
             }
         }
-        let mut col_ptr = Vec::with_capacity(n + 1);
-        let mut row_idx = Vec::new();
-        col_ptr.push(0);
-        for list in &mut rows {
-            list.sort_unstable();
-            list.dedup();
-            row_idx.extend_from_slice(list);
-            col_ptr.push(row_idx.len() as u32);
+        for i in 0..n {
+            in_ptr[i + 1] += in_ptr[i];
         }
+        let mut next = in_ptr.clone();
+        let mut in_block = vec![0u32; in_ptr[n] as usize];
+        for (b, block) in blocks.iter().enumerate() {
+            for &a in *block {
+                let at = &mut next[a as usize];
+                // An index twice in a block is listed once.
+                if *at > in_ptr[a as usize] && in_block[*at as usize - 1] == b as u32 {
+                    continue;
+                }
+                in_block[*at as usize] = b as u32;
+                *at += 1;
+            }
+        }
+        let in_end = next;
+        let columns = |range: std::ops::Range<usize>, mark: &mut Vec<u32>| {
+            let mut counts = Vec::with_capacity(range.len());
+            let mut rows = Vec::new();
+            for col in range {
+                let first = rows.len();
+                rows.push(col as u32);
+                mark[col] = col as u32;
+                for &b in &in_block[in_ptr[col] as usize..in_end[col] as usize] {
+                    for &a in blocks[b as usize] {
+                        if (a as usize) < col && mark[a as usize] != col as u32 {
+                            mark[a as usize] = col as u32;
+                            rows.push(a);
+                        }
+                    }
+                }
+                rows[first..].sort_unstable();
+                counts.push((rows.len() - first) as u32);
+            }
+            (counts, rows)
+        };
+        const RANGE: usize = 4096;
+        let ranges: Vec<std::ops::Range<usize>> = (0..n.div_ceil(RANGE))
+            .map(|r| r * RANGE..((r + 1) * RANGE).min(n))
+            .collect();
+        let parts: Vec<(Vec<u32>, Vec<u32>)> = if in_block.len() < 1 << 16 {
+            let mut mark = vec![u32::MAX; n];
+            ranges.into_iter().map(|r| columns(r, &mut mark)).collect()
+        } else {
+            ranges
+                .into_par_iter()
+                .map_init(|| vec![u32::MAX; n], |mark, r| columns(r, mark))
+                .collect()
+        };
+        let mut col_ptr = Vec::with_capacity(n + 1);
+        col_ptr.push(0u32);
+        for (counts, _) in &parts {
+            for &c in counts {
+                col_ptr.push(col_ptr.last().copied().unwrap_or(0) + c);
+            }
+        }
+        let mut row_idx = vec![0u32; col_ptr[n] as usize];
+        let mut rest = row_idx.as_mut_slice();
+        let mut slices = Vec::with_capacity(parts.len());
+        for (_, rows) in &parts {
+            let (piece, tail) = rest.split_at_mut(rows.len());
+            slices.push(piece);
+            rest = tail;
+        }
+        slices
+            .into_par_iter()
+            .zip(parts.par_iter())
+            .for_each(|(piece, (_, rows))| piece.copy_from_slice(rows));
         Pattern {
             n,
             col_ptr,
@@ -205,6 +263,55 @@ impl SparseMatrix {
                 self.values[k] += block[a * m + b];
             }
         }
+    }
+
+    /// Adds many dense symmetric blocks (`(dofs, row-major block)`, upper triangles read,
+    /// as [`Self::add_block`]) in parallel: the positions are looked up per block, then
+    /// ranges of the values take the blocks in their order, so every entry gets the same
+    /// sums in the same order as adding the blocks one after the other.
+    pub fn add_blocks(&mut self, blocks: &[(&[u32], &[f64])]) {
+        let total: usize = blocks.iter().map(|(d, _)| d.len() * d.len()).sum();
+        if total < 1 << 14 || rayon::current_num_threads() < 2 {
+            for (dofs, block) in blocks {
+                self.add_block(dofs, block);
+            }
+            return;
+        }
+        let positions: Vec<(Vec<u32>, u32, u32)> = blocks
+            .par_iter()
+            .map(|(dofs, _)| {
+                let mut out = Vec::new();
+                self.block_positions(dofs, &mut out);
+                let (lo, hi) = out
+                    .iter()
+                    .fold((u32::MAX, 0), |(lo, hi), &p| (lo.min(p), hi.max(p)));
+                (out, lo, hi)
+            })
+            .collect();
+        let parts = rayon::current_num_threads();
+        let size = self.values.len().div_ceil(parts).max(1 << 12);
+        self.values
+            .par_chunks_mut(size)
+            .enumerate()
+            .for_each(|(part, chunk)| {
+                let lo = part * size;
+                let hi = lo + chunk.len();
+                for ((dofs, block), (at, first, last)) in blocks.iter().zip(&positions) {
+                    if at.is_empty() || (*last as usize) < lo || *first as usize >= hi {
+                        continue;
+                    }
+                    let m = dofs.len();
+                    let mut at = at.iter();
+                    for a in 0..m {
+                        for &value in &block[a * m + a..(a + 1) * m] {
+                            let p = *at.next().expect("a position per entry") as usize;
+                            if (lo..hi).contains(&p) {
+                                chunk[p - lo] += value;
+                            }
+                        }
+                    }
+                }
+            });
     }
 
     /// `y = A x` for the full symmetric matrix; in parallel when the matrix is large.
@@ -442,6 +549,81 @@ mod tests {
         for (y, e) in y.iter().zip(&expected) {
             assert!((y - e).abs() <= 1e-12 * e.abs().max(1.0), "{y} vs {e}");
         }
+    }
+
+    /// Pseudo-random blocks over `n` indices, some with an index twice.
+    fn random_blocks(n: usize, count: usize, size: usize) -> Vec<Vec<u32>> {
+        let mut h = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            h ^= h << 13;
+            h ^= h >> 7;
+            h ^= h << 17;
+            h
+        };
+        (0..count)
+            .map(|b| {
+                let base = (next() % n as u64) as u32;
+                let mut block: Vec<u32> = (0..size)
+                    .map(|_| (base + (next() % 200) as u32) % n as u32)
+                    .collect();
+                if b % 7 == 0 {
+                    block.push(block[0]);
+                }
+                block
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_parallel_pattern_equals_the_columns_of_the_blocks() {
+        let n = 30_000;
+        let blocks = random_blocks(n, 6000, 30);
+        let mut rows: Vec<Vec<u32>> = vec![Vec::new(); n];
+        for block in &blocks {
+            for &a in block {
+                for &b in block {
+                    rows[b as usize].push(a);
+                }
+            }
+        }
+        let expected = Pattern::from_columns(n, rows);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let got = pool.install(|| Pattern::from_blocks(n, blocks.iter().map(Vec::as_slice)));
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn blocks_added_in_parallel_sum_as_one_after_the_other() {
+        let n = 30_000;
+        let blocks = random_blocks(n, 6000, 30);
+        let pattern = Arc::new(Pattern::from_blocks(n, blocks.iter().map(Vec::as_slice)));
+        let matrices: Vec<Vec<f64>> = (blocks.iter().enumerate())
+            .map(|(b, block)| {
+                let m = block.len();
+                (0..m * m)
+                    .map(|e| ((b * 31 + e * 17) % 1009) as f64 / 7.0 - 50.0)
+                    .collect()
+            })
+            .collect();
+        let mut one_by_one = SparseMatrix::zeros(pattern.clone());
+        for (block, ke) in blocks.iter().zip(&matrices) {
+            one_by_one.add_block(block, ke);
+        }
+        let pairs: Vec<(&[u32], &[f64])> = (blocks.iter())
+            .zip(&matrices)
+            .map(|(b, m)| (b.as_slice(), m.as_slice()))
+            .collect();
+        let mut parallel = SparseMatrix::zeros(pattern);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        pool.install(|| parallel.add_blocks(&pairs));
+        // The same sums in the same order: equal to the last bit.
+        assert_eq!(parallel.values(), one_by_one.values());
     }
 
     #[test]

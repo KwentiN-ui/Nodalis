@@ -868,6 +868,22 @@ impl PcgSolver {
         Some(padded)
     }
 
+    /// The matrix last factorized, on `pattern` (the one analyzed), from the solver's own
+    /// copy of its values; `None` before a factorization or for another pattern.
+    pub fn matrix(&self, pattern: std::sync::Arc<Pattern>) -> Option<SparseMatrix> {
+        if !self.factorized || self.pattern.as_deref() != Some(&*pattern) {
+            return None;
+        }
+        let mut out = SparseMatrix::zeros(pattern);
+        let values = out.values_mut();
+        for (&s, &v) in self.full_src.iter().zip(&self.full.val) {
+            if s != u32::MAX {
+                values[s as usize] = v;
+            }
+        }
+        Some(out)
+    }
+
     /// The vector of the unknowns in the solver's (renumbered, padded) numbering, zero
     /// on the padding.
     fn pad(&self, v: &[f64]) -> Vec<f64> {
@@ -949,7 +965,9 @@ impl PcgSolver {
         self.padded = n;
     }
 
-    /// Blocked storage: the unknowns padded to three per node, in `3 × 3` blocks.
+    /// Blocked storage: the unknowns padded to three per node, in `3 × 3` blocks. Every
+    /// pass but the renumbering runs in parallel (on a model of 600 000 unknowns this
+    /// took 1.7 s serially, as much as the multigrid built on it).
     fn analyze_blocked(&mut self, pattern: &Pattern, unknowns: &Unknowns) {
         let n = pattern.dimension();
         let (ptr, rows) = (pattern.col_ptr(), pattern.row_idx());
@@ -971,68 +989,155 @@ impl PcgSolver {
             }
             node_of.push(*slot);
         }
+        drop(dense);
         let nodes = nodes as usize;
-        // Block columns per block row, from the entries of the upper triangle and their
-        // mirror images.
-        let mut lists: Vec<Vec<u32>> = vec![Vec::new(); nodes];
-        for j in 0..n {
-            let bj = node_of[j];
-            for &i in &rows[ptr[j] as usize..ptr[j + 1] as usize] {
-                let bi = node_of[i as usize];
-                lists[bj as usize].push(bi);
-                if bi != bj {
-                    lists[bi as usize].push(bj);
-                }
+        // The unknowns of every node.
+        let mut own_ptr = vec![0u32; nodes + 1];
+        for &b in &node_of {
+            own_ptr[b as usize + 1] += 1;
+        }
+        for b in 0..nodes {
+            own_ptr[b + 1] += own_ptr[b];
+        }
+        let mut own = vec![0u32; n];
+        let mut next = own_ptr.clone();
+        for (j, &b) in node_of.iter().enumerate() {
+            own[next[b as usize] as usize] = j as u32;
+            next[b as usize] += 1;
+        }
+        drop(next);
+        let own_of = |b: usize| &own[own_ptr[b] as usize..own_ptr[b + 1] as usize];
+        // Per node the nodes of the rows in its columns of the upper triangle, then the
+        // mirror images added: the block columns of every block row.
+        let upper: Vec<Vec<u32>> = (0..nodes)
+            .into_par_iter()
+            .with_min_len(512)
+            .map_init(
+                || vec![u32::MAX; nodes],
+                |mark, b| {
+                    let mut list = Vec::new();
+                    for &j in own_of(b) {
+                        let j = j as usize;
+                        for &i in &rows[ptr[j] as usize..ptr[j + 1] as usize] {
+                            let bi = node_of[i as usize];
+                            if mark[bi as usize] != b as u32 {
+                                mark[bi as usize] = b as u32;
+                                list.push(bi);
+                            }
+                        }
+                    }
+                    list
+                },
+            )
+            .collect();
+        let mut mirror_ptr = vec![0u32; nodes + 1];
+        for list in &upper {
+            for &bi in list {
+                mirror_ptr[bi as usize + 1] += 1;
             }
         }
-        for list in &mut lists {
-            list.sort_unstable();
-            list.dedup();
+        for b in 0..nodes {
+            mirror_ptr[b + 1] += mirror_ptr[b];
         }
+        let mut mirror = vec![0u32; mirror_ptr[nodes] as usize];
+        let mut next = mirror_ptr.clone();
+        for (b, list) in upper.iter().enumerate() {
+            for &bi in list {
+                mirror[next[bi as usize] as usize] = b as u32;
+                next[bi as usize] += 1;
+            }
+        }
+        drop(next);
+        let lists: Vec<Vec<u32>> = upper
+            .into_par_iter()
+            .enumerate()
+            .with_min_len(512)
+            .map(|(b, mut list)| {
+                list.extend_from_slice(&mirror[mirror_ptr[b] as usize..mirror_ptr[b + 1] as usize]);
+                list.sort_unstable();
+                list.dedup();
+                list
+            })
+            .collect();
+        drop(mirror);
         // Nodes renumbered by reverse Cuthill-McKee for the locality of the product.
         let adjacency: Vec<Vec<u32>> = lists
-            .iter()
+            .par_iter()
             .enumerate()
             .map(|(b, list)| list.iter().copied().filter(|&c| c as usize != b).collect())
             .collect();
         let renumbered = reverse_cuthill_mckee(&adjacency);
         drop(adjacency);
-        let node_of: Vec<u32> = node_of.iter().map(|&b| renumbered[b as usize]).collect();
+        let node_of: Vec<u32> = node_of
+            .par_iter()
+            .map(|&b| renumbered[b as usize])
+            .collect();
         let slot_of: Vec<u32> = (0..n)
+            .into_par_iter()
             .map(|i| 3 * node_of[i] + unknowns.component[i] as u32)
             .collect();
-        let mut by_new: Vec<Vec<u32>> = vec![Vec::new(); nodes];
-        for (old, list) in lists.into_iter().enumerate() {
-            let mut list: Vec<u32> = list.into_iter().map(|c| renumbered[c as usize]).collect();
-            list.sort_unstable();
-            by_new[renumbered[old] as usize] = list;
+        let mut old_of = vec![0u32; nodes];
+        for (old, &new) in renumbered.iter().enumerate() {
+            old_of[new as usize] = old as u32;
         }
+        let by_new: Vec<Vec<u32>> = old_of
+            .par_iter()
+            .with_min_len(512)
+            .map(|&old| {
+                let mut list: Vec<u32> = lists[old as usize]
+                    .iter()
+                    .map(|&c| renumbered[c as usize])
+                    .collect();
+                list.sort_unstable();
+                list
+            })
+            .collect();
+        drop(lists);
         let mut bptr = Vec::with_capacity(nodes + 1);
-        let mut bcol = Vec::new();
         bptr.push(0);
         for list in &by_new {
-            bcol.extend_from_slice(list);
-            bptr.push(bcol.len());
+            bptr.push(bptr.last().copied().unwrap_or(0) + list.len());
+        }
+        let mut bcol = vec![0u32; *bptr.last().unwrap_or(&0)];
+        {
+            let mut rest = bcol.as_mut_slice();
+            let mut pieces = Vec::with_capacity(nodes);
+            for list in &by_new {
+                let (piece, tail) = rest.split_at_mut(list.len());
+                pieces.push(piece);
+                rest = tail;
+            }
+            pieces
+                .into_par_iter()
+                .zip(by_new.par_iter())
+                .with_min_len(512)
+                .for_each(|(piece, list)| piece.copy_from_slice(list));
         }
         drop(by_new);
         let blocks = bcol.len();
         let mut val = vec![0.0; 9 * blocks];
-        let mut src = vec![u32::MAX; 9 * blocks];
         let position = |bi: u32, bj: u32| -> usize {
             let (s, e) = (bptr[bi as usize], bptr[bi as usize + 1]);
             s + bcol[s..e].binary_search(&bj).expect("block in the pattern")
         };
-        for j in 0..n {
+        // Where every entry of the blocks comes from: each scalar entry fills one place
+        // and its mirror image another, no two the same, so the columns fill in parallel.
+        let src: Vec<std::sync::atomic::AtomicU32> = (0..9 * blocks)
+            .into_par_iter()
+            .map(|_| std::sync::atomic::AtomicU32::new(u32::MAX))
+            .collect();
+        (0..n).into_par_iter().with_min_len(1024).for_each(|j| {
             let (bj, cj) = (node_of[j], unknowns.component[j] as usize);
             let (start, end) = (ptr[j] as usize, ptr[j + 1] as usize);
             for (k, &row) in rows.iter().enumerate().take(end).skip(start) {
                 let i = row as usize;
                 let (bi, ci) = (node_of[i], unknowns.component[i] as usize);
                 // Row i, column j of the full matrix and its mirror image.
-                src[9 * position(bi, bj) + 3 * ci + cj] = k as u32;
-                src[9 * position(bj, bi) + 3 * cj + ci] = k as u32;
+                src[9 * position(bi, bj) + 3 * ci + cj].store(k as u32, Ordering::Relaxed);
+                src[9 * position(bj, bi) + 3 * cj + ci].store(k as u32, Ordering::Relaxed);
             }
-        }
+        });
+        let src: Vec<u32> = src.into_par_iter().map(|s| s.into_inner()).collect();
         // The padding: unit diagonal entries, coupled with nothing.
         let mut present = vec![false; 3 * nodes];
         for &slot in &slot_of {
@@ -1918,6 +2023,89 @@ mod tests {
             for (x, e) in x.iter().zip(&expected) {
                 assert!((x - e).abs() <= 1e-7 * scale, "n = {n}: {x} vs {e}");
             }
+        }
+    }
+
+    #[test]
+    fn the_blocked_copy_holds_every_entry_and_solves_as_the_direct_solver() {
+        // A grid of nodes with three unknowns each, coupled to their neighbours; some
+        // unknowns held (left out), so that the blocks are padded.
+        let (nx, ny, nz) = (14usize, 12usize, 8usize);
+        let node = |x: usize, y: usize, z: usize| (x * ny + y) * nz + z;
+        let nodes = nx * ny * nz;
+        let coordinates: Vec<[f64; 3]> = (0..nodes)
+            .map(|i| {
+                [
+                    (i / (ny * nz)) as f64,
+                    ((i / nz) % ny) as f64,
+                    (i % nz) as f64,
+                ]
+            })
+            .collect();
+        let free: Vec<u32> = (0..3 * nodes as u32).filter(|d| d % 97 != 5).collect();
+        let index_of: std::collections::HashMap<u32, u32> = free
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| (d, i as u32))
+            .collect();
+        let mut blocks = Vec::new();
+        for x in 0..nx {
+            for y in 0..ny {
+                for z in 0..nz {
+                    for (dx, dy, dz) in [(1, 0, 0), (0, 1, 0), (0, 0, 1)] {
+                        if x + dx < nx && y + dy < ny && z + dz < nz {
+                            let pair = [node(x, y, z), node(x + dx, y + dy, z + dz)];
+                            let block: Vec<u32> = (pair.iter())
+                                .flat_map(|&p| (0..3).map(move |c| 3 * p as u32 + c))
+                                .filter_map(|d| index_of.get(&d).copied())
+                                .collect();
+                            blocks.push(block);
+                        }
+                    }
+                }
+            }
+        }
+        let n = free.len();
+        let pattern = Arc::new(Pattern::from_blocks(n, blocks.iter().map(Vec::as_slice)));
+        let mut a = SparseMatrix::zeros(pattern.clone());
+        for block in &blocks {
+            let m = block.len();
+            let ke: Vec<f64> = (0..m * m)
+                .map(|e| {
+                    if e / m == e % m {
+                        2.0
+                    } else {
+                        -0.2 - 0.01 * ((e % 7) as f64)
+                    }
+                })
+                .collect();
+            let sym: Vec<f64> = (0..m * m)
+                .map(|e| 0.5 * (ke[e] + ke[(e % m) * m + e / m]))
+                .collect();
+            a.add_block(block, &sym);
+        }
+        for i in 0..n as u32 {
+            a.add(i, i, 6.0);
+        }
+        let unknowns = Unknowns::from_free(&free, 3, &coordinates);
+        let mut pcg = PcgSolver::new();
+        pcg.set_unknowns(Some(unknowns));
+        pcg.analyze(a.pattern()).unwrap();
+        assert!(pcg.is_blocked());
+        pcg.factorize(&a).unwrap();
+        let copy = pcg.matrix(pattern.clone()).expect("factorized");
+        assert_eq!(copy.values(), a.values());
+        let b: Vec<f64> = (0..n).map(|i| ((i * 37) % 11) as f64 - 5.0).collect();
+        let mut direct = LdltSolver::new(1);
+        direct.analyze(a.pattern()).unwrap();
+        direct.factorize(&a).unwrap();
+        let mut expected = b.clone();
+        direct.solve(&mut expected).unwrap();
+        let mut x = b;
+        pcg.solve_counted(&mut x).unwrap();
+        let scale = expected.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        for (x, e) in x.iter().zip(&expected) {
+            assert!((x - e).abs() <= 1e-7 * scale, "{x} vs {e}");
         }
     }
 

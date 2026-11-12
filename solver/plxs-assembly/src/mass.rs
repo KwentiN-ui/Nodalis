@@ -31,9 +31,13 @@ where
             .enumerate()
             .map(|(i, entry)| element(chunk * batch + i, entry))
             .collect();
-        for (entry, matrix) in entries.iter().zip(matrices) {
-            out.add_block(&entry.dofs, &matrix?);
-        }
+        let matrices: Vec<Vec<f64>> = matrices.into_iter().collect::<Result<_>>()?;
+        let blocks: Vec<(&[u32], &[f64])> = entries
+            .iter()
+            .zip(&matrices)
+            .map(|(entry, m)| (entry.dofs.as_slice(), m.as_slice()))
+            .collect();
+        out.add_blocks(&blocks);
     }
     Ok(())
 }
