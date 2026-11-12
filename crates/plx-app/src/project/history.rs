@@ -78,6 +78,7 @@ fn same_data(a: Option<&ProjectNode>, b: Option<&ProjectNode>) -> bool {
         (Some(ProjectNode::Note(a)), Some(ProjectNode::Note(b))) => a.text == b.text,
         (Some(ProjectNode::Math(a)), Some(ProjectNode::Math(b))) => a == b,
         (Some(ProjectNode::Switch(a)), Some(ProjectNode::Switch(b))) => a == b,
+        (Some(ProjectNode::Formula(a)), Some(ProjectNode::Formula(b))) => a == b,
         (Some(ProjectNode::Plot(a)), Some(ProjectNode::Plot(b))) => a == b,
         (Some(ProjectNode::Preview(_)), Some(ProjectNode::Preview(_))) => true,
         (Some(ProjectNode::Group(a)), Some(ProjectNode::Group(b))) => {

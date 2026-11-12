@@ -250,7 +250,8 @@ comes below. Outside, link the new pin of the group like any other. Double-click
 an input or output to rename it; once it has no wires left on either side it goes.
 
 The same empty pin marks every block that takes any number of inputs: the choices of a
-Switch block (@math-switch) and the outputs and inputs of a parameter study (@parameter-study).
+Switch block (@math-switch), the inputs of a Formula block (@formula-block) and the outputs and
+inputs of a parameter study (@parameter-study).
 A wire dropped on it adds one more.
 
 Groups only arrange the schematic. A link through a group is the link between the blocks at
@@ -318,7 +319,7 @@ The ribbon tabs of the Project workspace:
     #ui("Rename") for the selected block.],
   [Sources], [Materials (@materials-block), cross-sections, box, rectangle and refined
     meshes (@mesh-block), CAD operations and files.],
-  [Parameters], [Parameters, Math and Switch blocks.],
+  [Parameters], [Parameters, Math, Switch and Formula blocks.],
   [Evaluate], [Measure, parameter study, Campbell and mesh export blocks.],
   [Annotate], [Notes and frames (@frames-notes).],
   [Arrange], [#ui("Duplicate"), #ui("Delete") and #ui("Compact View") for the selected

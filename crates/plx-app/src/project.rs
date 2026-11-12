@@ -36,12 +36,14 @@ use crate::tree::TreeView;
 use crate::tree_icons::StepGlyph;
 use cad::{CAD_LENGTH, CadBlock};
 use deformed::{DEFORM_FACTOR, DEFORM_INCREMENT, DeformedBlock};
+use formula::FormulaEditor;
 use transform::{TransformBlock, TransformEditor};
 use visualize::{MeshPicture, PlotBlock, PlotView, PreviewBlock, PreviewView};
 
 mod assembly;
 mod cad;
 mod deformed;
+mod formula;
 mod frames;
 mod groups;
 mod history;
@@ -79,6 +81,7 @@ enum Kind {
     Note,
     Math,
     Switch,
+    Formula,
     Plot,
     Preview,
     Group,
@@ -112,6 +115,7 @@ impl Kind {
             Self::Note => "note",
             Self::Math => "math block",
             Self::Switch => "switch block",
+            Self::Formula => "formula block",
             Self::Plot => "plot block",
             Self::Preview => "preview block",
             Self::Group => "group",
@@ -175,6 +179,8 @@ enum Block {
     /// A number computed from others, or picked from several.
     Math(NumberBlock),
     Switch(NumberBlock),
+    /// A number or a series computed by a formula of its inputs a, b, c, ...
+    Formula(NumberBlock),
     /// A plot of the numbers and series linked to it.
     Plot(PlotBlock),
     /// What is linked to it: a picture of a mesh, a number or a series.
@@ -203,6 +209,20 @@ struct NumberBlock {
     /// The series value links give its inputs, by index; `None` for one number. Brought by
     /// every sync, not kept in the file.
     series: Vec<Option<Vec<f64>>>,
+    /// Of a Formula block, its formula and the kinds of its inputs; its inputs are its
+    /// values, a, b, c, ... by index.
+    formula: Option<Box<FormulaState>>,
+}
+
+/// The formula of a Formula block, and what follows from it with the kinds of its inputs.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct FormulaState {
+    text: String,
+    /// The kinds of its inputs, by index; `None` while a link has not given one.
+    kinds: Vec<Option<ValueKind>>,
+    /// Why it gives nothing: the formula cannot be read, its units do not go together, or
+    /// its result goes to a number of another unit. Found by every sync.
+    problem: Option<String>,
 }
 
 /// The first element of the path of the rows over the outputs and inputs of a study, which
@@ -220,6 +240,15 @@ impl NumberBlock {
     /// and the value.
     fn inputs(&self, switch: bool) -> Vec<(String, String, Option<ValueKind>, f64)> {
         let value = |i: usize| self.values.get(i).copied().unwrap_or(0.0);
+        if let Some(formula) = &self.formula {
+            return (0..self.values.len())
+                .map(|i| {
+                    let letter = plx_model::formula::input_letter(i).to_string();
+                    let kind = formula.kinds.get(i).copied().flatten();
+                    (letter.clone(), letter, kind, value(i))
+                })
+                .collect();
+        }
         if switch {
             let mut inputs = vec![(
                 INDEX.to_owned(),
@@ -254,6 +283,11 @@ impl NumberBlock {
     fn kind_at(&self, switch: bool, path: &[String]) -> Option<Option<ValueKind>> {
         match path {
             [cell, name] if cell == links::VALUE && name == RESULT => Some(self.kind),
+            // Any letter: a wire dropped on the empty pin makes the next one.
+            [cell, key] if cell == links::PARAMETERS && self.formula.is_some() => {
+                let index = plx_model::formula::input_index(key)?;
+                Some(self.formula.as_ref()?.kinds.get(index).copied().flatten())
+            }
             [cell, key] if cell == links::PARAMETERS => (self.inputs(switch).into_iter())
                 .find(|(k, ..)| k == key)
                 .map(|(_, _, kind, _)| kind),
@@ -269,6 +303,10 @@ impl NumberBlock {
     /// The kinds of A, B and the result, with the one missing found from the other two;
     /// unchanged with an error when they do not fit together.
     fn settle(&mut self) -> Result<(), String> {
+        if self.formula.is_some() {
+            self.settle_formula();
+            return Ok(());
+        }
         let [a, b, result] = self.operation.settle_kinds(self.kinds())?;
         self.operands = [a, b];
         self.kind = result;
@@ -279,6 +317,10 @@ impl NumberBlock {
     /// that follow from it; an error says why it cannot.
     fn with_kind(&self, switch: bool, path: &[String], kind: ValueKind) -> Result<Self, String> {
         let mut block = self.clone();
+        if block.formula.is_some() {
+            block.take_formula_kind(path, kind);
+            return Ok(block);
+        }
         match path {
             [cell, key] if cell == links::PARAMETERS && !switch && self.operation.combines() => {
                 let index = ["a", "b"].iter().position(|k| k == key);
@@ -295,7 +337,9 @@ impl NumberBlock {
 
     /// The number it gives; `None` when it gives a series, see [`Self::series_result`].
     fn result(&self, switch: bool) -> Option<f64> {
-        let value = if switch {
+        let value = if self.formula.is_some() {
+            self.formula_number()
+        } else if switch {
             plx_model::switch(*self.values.first()?, self.values.get(1..)?)
         } else if self.operation.reduces() {
             self.reduced()
@@ -821,6 +865,7 @@ impl Node {
             Block::Note(_) => Kind::Note,
             Block::Math(_) => Kind::Math,
             Block::Switch(_) => Kind::Switch,
+            Block::Formula(_) => Kind::Formula,
             Block::Plot(_) => Kind::Plot,
             Block::Preview(_) => Kind::Preview,
             Block::Group(_) => Kind::Group,
@@ -1024,7 +1069,7 @@ impl Node {
     /// A Math or Switch block, and whether it is a switch.
     fn as_number(&self) -> Option<(&NumberBlock, bool)> {
         match &self.block {
-            Block::Math(n) => Some((n, false)),
+            Block::Math(n) | Block::Formula(n) => Some((n, false)),
             Block::Switch(n) => Some((n, true)),
             _ => None,
         }
@@ -1032,7 +1077,7 @@ impl Node {
 
     fn as_number_mut(&mut self) -> Option<(&mut NumberBlock, bool)> {
         match &mut self.block {
-            Block::Math(n) => Some((n, false)),
+            Block::Math(n) | Block::Formula(n) => Some((n, false)),
             Block::Switch(n) => Some((n, true)),
             _ => None,
         }
@@ -1126,7 +1171,7 @@ impl Node {
             Block::Measure(m) => m.units,
             Block::Study(s) => s.units,
             Block::File(f) => f.units,
-            Block::Math(n) | Block::Switch(n) => n.units,
+            Block::Math(n) | Block::Switch(n) | Block::Formula(n) => n.units,
             Block::Plot(p) => p.units,
             Block::CadOperation(c) => c.units,
             Block::Transform(t) => t.units,
@@ -1361,8 +1406,13 @@ impl Node {
                     operation: math.operation,
                     values: math.values,
                     series: Vec::new(),
+                    formula: None,
                 };
                 Self::new(math.id, math.name, Block::Math(block))
+            }
+            ProjectNode::Formula(formula) => {
+                let block = NumberBlock::formula(formula.units, formula.formula, formula.values);
+                Self::new(formula.id, formula.name, Block::Formula(block))
             }
             ProjectNode::Switch(switch) => {
                 let mut values = vec![switch.index];
@@ -1374,6 +1424,7 @@ impl Node {
                     operation: MathOp::default(),
                     values,
                     series: Vec::new(),
+                    formula: None,
                 };
                 Self::new(switch.id, switch.name, Block::Switch(block))
             }
@@ -1548,6 +1599,14 @@ impl Node {
                 index: switch.values.first().copied().unwrap_or(1.0),
                 choices: switch.values.get(1..).unwrap_or_default().to_vec(),
             }),
+            Block::Formula(formula) => ProjectNode::Formula(file::FormulaBlock {
+                id,
+                name,
+                position,
+                units: formula.units,
+                formula: formula.formula_text().to_owned(),
+                values: formula.values.clone(),
+            }),
             Block::Plot(plot) => ProjectNode::Plot(file::PlotBlock {
                 id,
                 name,
@@ -1665,6 +1724,7 @@ impl Node {
             Block::Note(text) => Block::Note(text.clone()),
             Block::Math(math) => Block::Math(math.clone()),
             Block::Switch(switch) => Block::Switch(switch.clone()),
+            Block::Formula(formula) => Block::Formula(formula.clone()),
             Block::Plot(plot) => Block::Plot(PlotBlock::new(plot.units, plot.kind, plot.bins)),
             Block::Preview(_) => Block::Preview(Box::default()),
             // A group is copied with its blocks, see [`ProjectApp::duplicate_group`].
@@ -1736,6 +1796,7 @@ impl Node {
             | Block::Note(_)
             | Block::Math(_)
             | Block::Switch(_)
+            | Block::Formula(_)
             | Block::Plot(_)
             | Block::Group(_)
             | Block::GroupInput
@@ -2068,6 +2129,9 @@ enum Action {
     /// A new Math or Switch block at the position.
     AddMath(egui::Pos2),
     AddSwitch(egui::Pos2),
+    AddFormula(egui::Pos2),
+    /// The formula of a Formula block was edited.
+    SetFormula(u64, String),
     /// The operation of a Math block, the value of one of the inputs of a Math or Switch
     /// block by key, or the number of choices of a Switch block changed in its block.
     SetOperation(u64, MathOp),
@@ -2140,6 +2204,8 @@ pub struct ProjectApp {
     /// The editor of a CAD operation block.
     cad_editor: Option<CadOperationEditor>,
     transform_editor: Option<TransformEditor>,
+    /// The editor of the formula of a Formula block.
+    formula_editor: Option<FormulaEditor>,
     /// The 3D view of the CAD operation editor, made when it is first opened and kept for
     /// the next.
     cad_viewport: Option<crate::viewport::Viewport>,
@@ -2299,6 +2365,7 @@ impl ProjectApp {
             mesh_block: None,
             cad_editor: None,
             transform_editor: None,
+            formula_editor: None,
             cad_viewport: None,
             parameter_set: None,
             measure_editor: None,
@@ -3196,11 +3263,11 @@ impl ProjectApp {
                     }
                     print.add(format!("{kind:?}").as_bytes());
                 }
-                Block::Math(number) | Block::Switch(number) => {
+                Block::Math(number) | Block::Switch(number) | Block::Formula(number) => {
                     print.add(
                         format!(
-                            "{:?}{:?}{:?}",
-                            number.operation, number.kind, number.operands
+                            "{:?}{:?}{:?}{:?}",
+                            number.operation, number.kind, number.operands, number.formula
                         )
                         .as_bytes(),
                     );
@@ -4565,6 +4632,7 @@ impl ProjectApp {
             }
             // Its numbers are edited in its block.
             Some(Kind::Math | Kind::Switch | Kind::Plot | Kind::Preview) => return,
+            Some(Kind::Formula) => return self.edit_formula(id),
             Some(Kind::Group) => return self.enter_group(id),
             Some(Kind::GroupInput | Kind::GroupOutput) => return,
             None => return,
@@ -4933,6 +5001,9 @@ impl ProjectApp {
         }
         if self.transform_editor.as_ref().is_some_and(|e| e.id == id) {
             self.transform_editor = None;
+        }
+        if self.formula_editor.as_ref().is_some_and(|e| e.id == id) {
+            self.formula_editor = None;
         }
         if self.parameter_set.as_ref().is_some_and(|e| e.id == id) {
             self.parameter_set = None;
@@ -5804,7 +5875,7 @@ impl ProjectApp {
                         bundles.get(&n.id).map_or(&[][..], Vec::as_slice),
                         continuations.get(&n.id),
                     ),
-                    (Kind::Math | Kind::Switch, _) => {
+                    (Kind::Math | Kind::Switch | Kind::Formula, _) => {
                         numbers::number_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
                     }
                     (Kind::Plot, _) => {
@@ -6091,6 +6162,11 @@ impl ProjectApp {
             return self.group_refusal(from, to);
         }
         let slot = visualize::preview_slot(&self.nodes, to.0, from.1)
+            .or_else(|| {
+                groups::is_open(to.1)
+                    .then(|| self.next_formula_input(to.0))
+                    .flatten()
+            })
             .unwrap_or_else(|| self.checked_slot(to.0, to.1));
         refusal(&self.nodes, &self.links, from.0, from.1, to.0, &slot)
     }
@@ -7492,6 +7568,8 @@ impl ProjectApp {
             | Action::RemoveFrame(_)
             | Action::AddMath(_)
             | Action::AddSwitch(_)
+            | Action::AddFormula(_)
+            | Action::SetFormula(..)
             | Action::SetOperation(..)
             | Action::SetNumberInput(..)
             | Action::SetChoices(..)
@@ -7704,6 +7782,10 @@ impl ProjectApp {
             Action::AddSwitch(pos) => {
                 self.add_switch(pos);
             }
+            Action::AddFormula(pos) => {
+                self.add_formula(pos);
+            }
+            Action::SetFormula(id, text) => self.set_formula(id, text),
             Action::SetOperation(id, operation) => self.set_operation(id, operation),
             Action::SetNumberInput(id, key, value) => {
                 if let Some((number, switch)) = self.node(id).and_then(Node::as_number_mut) {
@@ -7711,7 +7793,17 @@ impl ProjectApp {
                 }
                 self.sync_due = true;
             }
-            Action::SetChoices(id, count) => self.set_choices(id, count),
+            Action::SetChoices(id, count) => {
+                if self
+                    .nodes
+                    .iter()
+                    .any(|n| n.id == id && n.kind() == Kind::Formula)
+                {
+                    self.set_formula_inputs(id, count);
+                } else {
+                    self.set_choices(id, count);
+                }
+            }
             Action::AddPlot(pos) => {
                 self.add_plot(pos);
             }
@@ -7737,6 +7829,10 @@ impl ProjectApp {
                     let pin = |node, path| file::GroupPin { node, path };
                     self.link_pins(pin(source, item), pin(target, slot));
                 } else if let Some(slot) = self.new_choice(target, &slot) {
+                    self.link(source, item, target, slot);
+                } else if groups::is_open(&slot)
+                    && let Some(slot) = self.new_formula_input(target)
+                {
                     self.link(source, item, target, slot);
                 } else if let Some(slot) = visualize::preview_slot(&self.nodes, target, &item) {
                     self.keep_one_preview_link(target, &slot);
@@ -8217,6 +8313,7 @@ impl eframe::App for ProjectApp {
         self.mesh_block_window(&ctx);
         self.cad_editor_window(&ctx);
         self.transform_editor_window(&ctx);
+        self.formula_editor_window(&ctx);
         self.parameter_set_window(&ctx);
         self.measure_window(&ctx);
         self.study_window(&ctx);
@@ -8391,6 +8488,8 @@ enum RowWidget {
     Operation,
     Input(usize),
     Choices,
+    /// The formula of a Formula block.
+    Formula,
     /// The kind of plot of a Plot block, and the bins of its histogram.
     PlotType,
     Bins,
@@ -10358,6 +10457,7 @@ enum BlockKind {
     Parameters,
     Math,
     Switch,
+    Formula,
     Measure,
     Study,
     Campbell,
@@ -10382,6 +10482,7 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::Parameters,
         BlockKind::Math,
         BlockKind::Switch,
+        BlockKind::Formula,
         BlockKind::Measure,
         BlockKind::Study,
         BlockKind::Campbell,
@@ -10469,12 +10570,22 @@ impl BlockKind {
                 "Parameters",
                 "Math",
                 "add subtract multiply divide minimum maximum clamp mean average max min \
-                 number formula derived calculate expression series vector element-wise",
+                 number derived calculate series vector element-wise",
                 "Adds a block that computes a number from two others, like Blender's Math \
                  node: add, subtract, multiply or divide, the smaller or the larger, or a value \
                  kept between two limits. With a series at an input it computes value by value, \
                  like NumPy; Max, Min, Max Abs and Mean make one number of a series. For \
                  parameters derived from others, such as a length twice another one.",
+            ),
+            Self::Formula => (
+                "Parameters",
+                "Formula",
+                "formula expression equation function sqrt power sin cos norm magnitude \
+                 numpy series vector element-wise calculate derived",
+                "Adds a block that computes a number or a series by a formula of any number of \
+                 inputs: a wire dropped on its empty pin adds the next input, a, b, c, ... \
+                 Units go through the formula, and series go element by element like NumPy \
+                 arrays; max, min, mean and sum of one series make one number of it.",
             ),
             Self::Switch => (
                 "Parameters",
@@ -10570,6 +10681,7 @@ impl BlockKind {
             Self::Parameters => Action::AddParameters(pos),
             Self::Math => Action::AddMath(pos),
             Self::Switch => Action::AddSwitch(pos),
+            Self::Formula => Action::AddFormula(pos),
             Self::Measure => Action::AddMeasure(pos),
             Self::Study => Action::AddStudy(pos),
             Self::MeshExport => Action::AddMeshExport(pos),
@@ -10701,7 +10813,9 @@ fn header_fill(kind: Kind) -> Option<egui::Color32> {
         Kind::Mesh | Kind::RefineMesh | Kind::DeformedMesh | Kind::File => {
             crate::style::mesh_header()
         }
-        Kind::Parameters | Kind::Math | Kind::Switch => crate::style::parameters_header(),
+        Kind::Parameters | Kind::Math | Kind::Switch | Kind::Formula => {
+            crate::style::parameters_header()
+        }
         Kind::Measure => crate::style::measure_header(),
         Kind::Study | Kind::Campbell => crate::style::study_header(),
         Kind::MeshExport => crate::style::export_header(),
@@ -10768,7 +10882,9 @@ impl Viewer {
             return false;
         };
         match block.kind {
-            Kind::GroupInput | Kind::GroupOutput | Kind::Switch => groups::is_open(path),
+            Kind::GroupInput | Kind::GroupOutput | Kind::Switch | Kind::Formula => {
+                groups::is_open(path)
+            }
             Kind::Study => matches!(path, [cell] if cell == links::OUTPUTS || cell == links::LOOP),
             _ => false,
         }
@@ -10807,6 +10923,23 @@ impl Viewer {
         let Some(block) = self.block(id) else {
             return;
         };
+        // The formula of a Formula block takes the whole row, without a label.
+        if let RowWidget::Formula = widget {
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::hover());
+            let field = egui::Rect::from_min_max(
+                egui::pos2(rect.left() + 8.0, rect.top() + 1.0),
+                egui::pos2(rect.right() - 4.0, rect.bottom() - 1.0),
+            );
+            let mut ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(field)
+                    .id_salt((id, &row.path)),
+            );
+            let tip = row.tip.clone();
+            self.edit_formula_row(&mut ui, id, field, &tip);
+            return;
+        }
         if let RowWidget::ExportPath = widget {
             let mut path = block.export_path.clone();
             let (rect, label) =
@@ -10971,6 +11104,8 @@ impl Viewer {
                 self.edit_number_row(&mut ui, id, row, widget, field, &tip);
                 return;
             }
+            // Drawn above, over the whole row.
+            RowWidget::Formula => return,
             RowWidget::PlotType | RowWidget::Bins => {
                 self.edit_plot_row(&mut ui, id, row, widget, field, &tip);
                 return;
@@ -11132,6 +11267,7 @@ impl Viewer {
             | RowWidget::Operation
             | RowWidget::Input(_)
             | RowWidget::Choices
+            | RowWidget::Formula
             | RowWidget::PlotType
             | RowWidget::Bins => return,
         };
@@ -11309,6 +11445,11 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Switch, ink);
                 icon.on_hover_text("Gives one of several numbers, picked by its index");
             }
+            Kind::Formula => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Formula, ink);
+                icon.on_hover_text("Computes a number or a series by a formula of its inputs");
+            }
             Kind::Plot => {
                 let ink = ui.visuals().text_color();
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Plot, ink);
@@ -11411,6 +11552,7 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Note => "Double-click edits its text.",
             Kind::Math => "Its operation and numbers are edited in the block.",
             Kind::Switch => "Its index and choices are edited in the block.",
+            Kind::Formula => "Double-click edits its formula, with the list of its functions.",
             Kind::Plot => "Its type of plot and its inputs are chosen in the block.",
             Kind::Preview => "Shows the mesh, number or series linked to its row.",
             Kind::Group => {

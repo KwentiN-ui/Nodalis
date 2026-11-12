@@ -94,6 +94,7 @@ pub enum BlockTile {
     Parameters,
     Math,
     Switch,
+    Formula,
     Measure,
     Study,
     Campbell,
@@ -763,6 +764,14 @@ fn build() -> Vec<Command> {
         "Operations",
         Node(NodeIcon::Switch),
         "Places a block that gives one of several numbers, picked by its index.",
+    ));
+    add(place(
+        BlockTile::Formula,
+        "Formula",
+        "Parameters",
+        "Operations",
+        Node(NodeIcon::Formula),
+        "Places a block that computes a number or a series by a formula of its inputs a, b, c.",
     ));
     add(place(
         BlockTile::Measure,
@@ -2455,6 +2464,7 @@ mod tests {
             BlockTile::Parameters,
             BlockTile::Math,
             BlockTile::Switch,
+            BlockTile::Formula,
             BlockTile::Measure,
             BlockTile::Study,
             BlockTile::Campbell,

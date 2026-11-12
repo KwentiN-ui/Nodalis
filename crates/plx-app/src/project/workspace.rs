@@ -22,6 +22,7 @@ impl BlockTile {
             Self::Parameters => BlockKind::Parameters,
             Self::Math => BlockKind::Math,
             Self::Switch => BlockKind::Switch,
+            Self::Formula => BlockKind::Formula,
             Self::Measure => BlockKind::Measure,
             Self::Study => BlockKind::Study,
             Self::Campbell => BlockKind::Campbell,

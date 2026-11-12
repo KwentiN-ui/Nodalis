@@ -32,7 +32,15 @@ fn gives_series_at(nodes: &[Node], links: &[Link], id: u64, item: &[String], dep
     let Some((number, false)) = node.as_number() else {
         return false;
     };
-    if number.operation.reduces() || depth > MAX_DEPTH || item != [links::VALUE, RESULT] {
+    if depth > MAX_DEPTH || item != [links::VALUE, RESULT] {
+        return false;
+    }
+    if number.formula.is_some() {
+        return super::formula::formula_gives_series(number, links, id, &|l| {
+            gives_series_at(nodes, links, l.source, &l.item, depth + 1)
+        });
+    }
+    if number.operation.reduces() {
         return false;
     }
     (links.iter())
@@ -54,6 +62,10 @@ pub(super) fn takes_series(nodes: &[Node], id: u64, slot: &[String]) -> bool {
         return false;
     }
     if let Some((number, false)) = node.as_number() {
+        // Any input of a formula, also the one a wire on its empty pin makes.
+        if number.formula.is_some() {
+            return plx_model::formula::input_index(key).is_some();
+        }
         return number.inputs(false).iter().any(|(k, ..)| k == key);
     }
     if node.as_preview().is_some() {
@@ -228,6 +240,9 @@ impl NumberBlock {
     /// The result of a Math block that computes element by element with a series at an
     /// input: the series, or why the inputs do not go together. `None` for one number.
     pub(super) fn series_result(&self, switch: bool) -> Option<Result<Vec<f64>, String>> {
+        if self.formula.is_some() {
+            return self.formula_series();
+        }
         if switch || self.operation.reduces() || !self.series.iter().any(Option::is_some) {
             return None;
         }

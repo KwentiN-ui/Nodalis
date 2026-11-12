@@ -103,6 +103,7 @@ pub enum ProjectNode {
     Math(MathBlock),
     /// One of several numbers, picked by its index.
     Switch(SwitchBlock),
+    Formula(FormulaBlock),
     /// A plot of the numbers linked to it, drawn in the block.
     Plot(PlotBlock),
     /// What is linked to it, drawn in the block: a mesh, a number or a series.
@@ -138,6 +139,7 @@ impl ProjectNode {
             Self::Note(n) => n.id,
             Self::Math(m) => m.id,
             Self::Switch(s) => s.id,
+            Self::Formula(f) => f.id,
             Self::Plot(p) => p.id,
             Self::Preview(m) => m.id,
             Self::Group(g) => g.id,
@@ -164,6 +166,7 @@ impl ProjectNode {
             Self::Note(n) => &n.name,
             Self::Math(m) => &m.name,
             Self::Switch(s) => &s.name,
+            Self::Formula(f) => &f.name,
             Self::Plot(p) => &p.name,
             Self::Preview(m) => &m.name,
             Self::Group(g) => &g.name,
@@ -191,6 +194,7 @@ impl ProjectNode {
             Self::Note(n) => n.position,
             Self::Math(m) => m.position,
             Self::Switch(s) => s.position,
+            Self::Formula(f) => f.position,
             Self::Plot(p) => p.position,
             Self::Preview(m) => m.position,
             Self::Group(g) => g.position,
@@ -447,6 +451,23 @@ pub struct SwitchBlock {
     /// The choices, in SI units.
     #[serde(default)]
     pub choices: Vec<f64>,
+}
+
+/// A Formula block: computes a number or a series from its inputs a, b, c, ... by a formula
+/// typed by the user, see [`plx_model::formula`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FormulaBlock {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    #[serde(default)]
+    pub formula: String,
+    /// The values of its inputs a, b, c, ... in SI units, for those no link gives.
+    #[serde(default)]
+    pub values: Vec<f64>,
 }
 
 /// A Plot block: draws the numbers and series linked to it in the block, as a line, points
@@ -1852,6 +1873,69 @@ mod tests {
         save_project(std::path::Path::new(&path), &project).unwrap();
     }
 
+    /// Writes a project of a Parameters block and a Formula block that computes the bending
+    /// stress of a cantilever from them, for the user guide's screenshots of the Formula
+    /// block: `PLX_FORMULA_DEMO=path cargo test formula_demo -- --ignored`.
+    #[test]
+    #[ignore]
+    fn formula_demo_project() {
+        use plx_model::{Parameter, Quantity, ValueKind};
+        let Some(path) = std::env::var_os("PLX_FORMULA_DEMO") else {
+            return;
+        };
+        let units = plx_model::UnitSystem::MmTonSC;
+        let length = |name: &str, value| Parameter::new(name, ValueKind::LENGTH, value);
+        let mut project = Project {
+            format: PROJECT_FORMAT,
+            ..Default::default()
+        };
+        project.nodes = vec![
+            ProjectNode::Parameters(ParameterSet {
+                id: 1,
+                name: "Cantilever".into(),
+                position: [0.0, 0.0],
+                units,
+                parameters: vec![
+                    Parameter::new("Force", ValueKind::Quantity(Quantity::Force), 1500.0),
+                    length("Length", 0.4),
+                    length("Width", 0.04),
+                    length("Height", 0.012),
+                ],
+            }),
+            ProjectNode::Formula(FormulaBlock {
+                id: 2,
+                name: "Bending Stress".into(),
+                position: [300.0, -20.0],
+                units,
+                formula: "6 * a * b / (c * d^2)".into(),
+                values: vec![0.0; 4],
+            }),
+            ProjectNode::Formula(FormulaBlock {
+                id: 3,
+                name: "Utilization".into(),
+                position: [580.0, 20.0],
+                units,
+                formula: "a / 235[MPa]".into(),
+                values: vec![0.0],
+            }),
+        ];
+        let link = |source, item: &[&str], target, slot: &[&str]| Link {
+            source,
+            target,
+            item: item.iter().map(|s| s.to_string()).collect(),
+            slot: slot.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        project.links = vec![
+            link(1, &["Value", "Force"], 2, &["Parameters", "a"]),
+            link(1, &["Value", "Length"], 2, &["Parameters", "b"]),
+            link(1, &["Value", "Width"], 2, &["Parameters", "c"]),
+            link(1, &["Value", "Height"], 2, &["Parameters", "d"]),
+            link(2, &["Value", "Result"], 3, &["Parameters", "a"]),
+        ];
+        save_project(std::path::Path::new(&path), &project).unwrap();
+    }
+
     /// Writes a project of a rubber pad (Yeoh) on a fixed base, compressed by 30 % from
     /// the top, for the user guide's screenshots of hyperelastic materials:
     /// `PLX_RUBBER_DEMO=path cargo test rubber_demo -- --ignored`.
@@ -2438,6 +2522,15 @@ mod tests {
             choices: vec![1.0, 2.0, 3.0],
         };
         saved.nodes.push(ProjectNode::Switch(switch.clone()));
+        let formula = FormulaBlock {
+            id: 13,
+            name: "Formula".into(),
+            position: [900.0, 20.0],
+            units: plx_model::UnitSystem::MmTonSC,
+            formula: "sqrt(a^2 + b^2) * 2[mm]".into(),
+            values: vec![3.0, 4.0],
+        };
+        saved.nodes.push(ProjectNode::Formula(formula.clone()));
         saved.frames.push(Frame {
             label: "Sources".into(),
             color: [96, 172, 96],
@@ -2457,11 +2550,12 @@ mod tests {
         assert!(text.contains(&format!("format:{PROJECT_FORMAT}")));
         assert!(!text.contains("analyses:"), "{text}");
         let project = read_project(&path).unwrap();
-        assert_eq!(project.nodes.len(), 11);
-        match (&project.nodes[9], &project.nodes[10]) {
-            (ProjectNode::Math(a), ProjectNode::Switch(b)) => {
+        assert_eq!(project.nodes.len(), 12);
+        match (&project.nodes[9], &project.nodes[10], &project.nodes[11]) {
+            (ProjectNode::Math(a), ProjectNode::Switch(b), ProjectNode::Formula(c)) => {
                 assert_eq!(a, &math);
                 assert_eq!(b, &switch);
+                assert_eq!(c, &formula);
             }
             other => panic!("{other:?}"),
         }
