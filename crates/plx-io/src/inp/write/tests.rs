@@ -12532,6 +12532,73 @@ fn solver_carries_the_load_across_the_bodies_of_a_compound_part() {
     );
 }
 
+/// The shell plate cut in two at x = 50, as a shell split by a plane: two bodies of one
+/// compound part with nodes of their own along the cut, tied edge to edge. It bends as the
+/// whole plate does.
+#[test]
+fn solver_bends_a_shell_plate_of_two_bodies_like_one() {
+    let (whole, _) = shell_plate();
+    let mut mesh = rectangle(0.0, 50.0, 10.0, 10, 2);
+    let right = rectangle(50.0, 50.0, 10.0, 10, 2);
+    let offset = 1000;
+    for (&id, &c) in right.node_ids().iter().zip(right.coords()) {
+        mesh.set_node(id + offset, c);
+    }
+    let mut bodies = vec![plx_mesh::Body {
+        name: "LEFT".into(),
+        elements: mesh.parts[0].elements.clone(),
+    }];
+    let mut elements = Vec::new();
+    for element in right.elements() {
+        mesh.add_element(plx_mesh::Element {
+            id: element.id + offset,
+            nodes: element.nodes.iter().map(|n| n + offset).collect(),
+            ..element.clone()
+        })
+        .unwrap();
+        elements.push(element.id + offset);
+    }
+    bodies.push(plx_mesh::Body {
+        name: "RIGHT".into(),
+        elements,
+    });
+    mesh.parts[0].elements = bodies.iter().flat_map(|b| b.elements.clone()).collect();
+    mesh.parts[0].bodies = bodies;
+    let tip = nodes_at(&mesh, 0, 100.0);
+    let mut model = plane_model(
+        ModelSpace::ThreeD,
+        1.0,
+        vec![(nodes_at(&mesh, 0, 0.0), [Some(0.0); 6])],
+        LoadKind::force([0.0, 0.0, -1.0]),
+        Region::Nodes(tip.clone()),
+    );
+    model.sections[0].kind = SectionKind::Shell {
+        thickness: 2.0,
+        offset: 0.0,
+    };
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("*Tie,").count(), 1, "{text}");
+    let Some(frd) = run_solver("schale-compound", &text) else {
+        return;
+    };
+    let Some(reference) = run_solver("schale", &write_inp(&whole, &shell_plate().1, "").unwrap())
+    else {
+        return;
+    };
+    let mean = |frd: &FrdImport, mesh: &FeMesh| {
+        let tip = nodes_at(mesh, 0, 100.0);
+        tip.iter()
+            .map(|&n| expanded_value(frd, mesh, ("DISP", "U3"), n, false))
+            .sum::<f64>()
+            / tip.len() as f64
+    };
+    let (cut, expected) = (mean(&frd, &mesh), mean(&reference, &whole));
+    assert!(
+        (cut - expected).abs() < 0.02 * expected.abs(),
+        "{cut} != {expected}"
+    );
+}
+
 /// A square bolt 10 x 10 x 40 along z of 8 hexahedra, part BOLT, cut inside its mesh at
 /// z = 20, held at its foot (node set FOOT); and a plate 30 x 30 x 10 a gap of 2 above its
 /// end, part NUT, held on top (node set TOP). The bolt is screwed into the plate's lower

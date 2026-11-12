@@ -685,13 +685,13 @@ impl CadOperationEditor {
                 }
             });
         ui.end_row();
-        ui.label("Solids");
+        ui.label("Parts");
         ui.add_enabled_ui(self.keep == SplitKeep::Both, |ui| {
             ui.checkbox(&mut self.compound, "Keep the pieces as one part")
                 .on_hover_text(
-                    "On: a solid cut in two stays one part of the FE model, a compound part \
-                     of its pieces, which are tied where they were cut. Off: each piece is a \
-                     part of its own.",
+                    "On: a solid or a shell cut in two stays one part of the FE model, a \
+                     compound part of its pieces, which are tied where they were cut. Off: \
+                     each piece is a part of its own.",
                 );
         });
         ui.end_row();
