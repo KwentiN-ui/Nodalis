@@ -173,6 +173,12 @@ impl FeModel {
                 PointDefinition::Global => {}
             }
         }
+        for system in &mut self.coordinate_systems {
+            optional(&mut system.base, visit);
+            if let Some(r) = &mut system.attached {
+                region(r, visit);
+            }
+        }
         for plane in &mut self.planes {
             match &mut plane.source {
                 PlaneSource::PointNormal { point: p, .. } => point(p, visit),

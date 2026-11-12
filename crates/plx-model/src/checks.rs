@@ -83,6 +83,10 @@ pub enum Problem {
     /// variant (C3D8, C3D20, S4, S8, CPS4, ...): reduced integration is several times
     /// faster there.
     ExplicitFullIntegration,
+    /// A displacement boundary condition in a coordinate system that moves with a selection,
+    /// in a step with large deformations: it holds the directions the system has in the
+    /// undeformed model.
+    SupportInMovingSystem,
     /// The elements of an infill section are much larger than its walls or top and bottom
     /// layers, which the export then smears over the depth of the outer elements.
     CoarseInfillWalls,
@@ -287,6 +291,7 @@ impl Problem {
             | Problem::UnstableHyperelastic
             | Problem::HyperelasticLinearized
             | Problem::ExplicitFullIntegration
+            | Problem::SupportInMovingSystem
             | Problem::CoarseInfillWalls => Severity::Warning,
             _ => Severity::Error,
         }
@@ -337,6 +342,7 @@ impl Problem {
             Problem::UnstableHyperelastic => "Hyperelastic material unstable at large strains",
             Problem::HyperelasticLinearized => "Hyperelastic material computed linearly",
             Problem::ExplicitFullIntegration => "Full integration in an explicit step",
+            Problem::SupportInMovingSystem => "Displacement in a moving coordinate system",
             Problem::CoarseInfillWalls => "Mesh coarser than the infill walls",
             Problem::NoExpansion => "Temperature without thermal expansion",
             Problem::NoSensitivityBase => "No step for the sensitivities",
@@ -476,6 +482,11 @@ impl Problem {
                  there (Drucker). If the model strains that far, the solver loses \
                  convergence or finds unphysical deformations. Constants fitted to data of \
                  a single test often are unstable in the other modes."
+            }
+            Problem::SupportInMovingSystem => {
+                "Loads in a coordinate system that moves with a selection turn with it under \
+                 large deformations. Displacement boundary conditions do not: they hold the \
+                 nodes along the directions the system has in the undeformed model."
             }
             Problem::CoarseInfillWalls => {
                 "An infill section gives every element the share of its depth that lies in \
@@ -995,6 +1006,11 @@ impl Problem {
             Problem::UnstableHyperelastic => {
                 "Check the constants, fit them to test data of several modes, or use a \
                  simpler model (Neo-Hooke, Yeoh), which stays stable."
+            }
+            Problem::SupportInMovingSystem => {
+                "Keep the rotations small, or hold the nodes through a reference point with a \
+                 rigid body and give the displacement there, or use a coordinate system fixed \
+                 in space."
             }
             Problem::CoarseInfillWalls => {
                 "Add a Local Mesh Size on the outer faces of the part with an element size \
@@ -2822,6 +2838,20 @@ impl FeModel {
                 }
                 // Directions of a coordinate system of its own hold each node along them.
                 BoundaryKind::Displacement(displacement) if displacement.system.is_some() => {
+                    if self.system_attachment(displacement.system).is_some()
+                        && self.step_nlgeom(&step.kind)
+                    {
+                        findings.push(Finding::new(
+                            ModelItem::BoundaryCondition(s, i),
+                            Problem::SupportInMovingSystem,
+                            format!(
+                                "{}: {} moves with a selection; the boundary condition keeps \
+                                 its directions in the undeformed model",
+                                bc.name,
+                                self.system_name(displacement.system)
+                            ),
+                        ));
+                    }
                     if let Some(system) = self.coordinate_system_or_global(displacement.system) {
                         for node in bc.region.nodes(mesh) {
                             let Some(x) = mesh.node(node) else {
@@ -4437,6 +4467,35 @@ mod tests {
     }
 
     /// A section that does not fit its elements is its own problem, not a missing reference.
+    /// A displacement in a coordinate system that moves with a selection keeps its
+    /// directions in the undeformed model: reported under large deformations only.
+    #[test]
+    fn a_support_in_a_moving_system_is_reported_with_nlgeom() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        let mut system = crate::CoordinateSystem::new("Moving");
+        system.attached = Some(Region::Nodes(vec![2, 3, 6, 7]));
+        let id = system.id;
+        model.coordinate_systems.push(system);
+        let BoundaryKind::Displacement(displacement) =
+            &mut model.steps[0].boundary_conditions[0].kind
+        else {
+            unreachable!()
+        };
+        displacement.system = Some(id);
+        let reported = |model: &FeModel| {
+            (check(model, &mesh).iter()).any(|f| f.problem == Problem::SupportInMovingSystem)
+        };
+        assert!(!reported(&model));
+        let StepKind::Static(settings) = &mut model.steps[0].kind else {
+            unreachable!()
+        };
+        settings.nlgeom = true;
+        assert!(reported(&model));
+        model.coordinate_systems[0].attached = None;
+        assert!(!reported(&model));
+    }
+
     #[test]
     fn a_section_on_the_wrong_elements_is_an_invalid_section() {
         let mesh = cubes(2, true);

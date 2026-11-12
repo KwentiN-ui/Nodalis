@@ -17,7 +17,7 @@ use plx_mesh::NodeId;
 use plx_model::{
     Constraint, CoordinatePlane, CoordinateSystem, CoordinateSystemKind, FeModel, Plane,
     PlaneSource, PointDefinition, PointRef, ReferencePoint, Region, RemoteBehavior, ResultPath,
-    ResultPlane, RigidBody, next_name,
+    ResultPlane, RigidBody, SystemDefinition, next_name,
 };
 use plx_render::SectionValues;
 use plx_results::path::{self, PathPoint};
@@ -203,6 +203,11 @@ impl FeatureDialog {
                     | PointDefinition::BoundingBoxCenter(region),
                 ..
             }) => RegionDraft::from_region(region, FACE_SOURCES, target, &model.mesh),
+            Draft::CoordinateSystem(CoordinateSystem {
+                attached: Some(region),
+                ..
+            }) => RegionDraft::from_region(region, MOVING_SOURCES, target, &model.mesh),
+            Draft::CoordinateSystem(_) => RegionDraft::new(MOVING_SOURCES, target),
             _ => RegionDraft::new(FACE_SOURCES, target),
         };
         // Only the FE model has constraints. A new point couples its faces deformably by
@@ -241,7 +246,8 @@ impl FeatureDialog {
         }
     }
 
-    /// Whether the draft is a reference point at the centre of selected faces.
+    /// Whether the draft is a reference point at the centre of selected faces or a
+    /// coordinate system that moves with a selection.
     fn selects_region(&self) -> bool {
         matches!(
             &self.draft,
@@ -249,18 +255,28 @@ impl FeatureDialog {
                 definition: PointDefinition::CenterOfGravity(_)
                     | PointDefinition::BoundingBoxCenter(_),
                 ..
+            }) | Draft::CoordinateSystem(CoordinateSystem {
+                attached: Some(_),
+                ..
             })
         )
     }
 
-    /// Writes the selection into the reference point's definition.
+    /// Writes the selection into the reference point's definition, or into what the
+    /// coordinate system moves with.
     fn sync_region(&mut self) {
-        if let Draft::ReferencePoint(point) = &mut self.draft {
-            match &mut point.definition {
+        match &mut self.draft {
+            Draft::ReferencePoint(point) => match &mut point.definition {
                 PointDefinition::CenterOfGravity(region)
                 | PointDefinition::BoundingBoxCenter(region) => *region = self.region.region(),
                 _ => {}
+            },
+            Draft::CoordinateSystem(system) => {
+                if let Some(region) = &mut system.attached {
+                    *region = self.region.region();
+                }
             }
+            _ => {}
         }
     }
 
@@ -394,9 +410,26 @@ impl FeatureDialog {
                 }
                 _ => r.position = picked,
             },
-            (Draft::CoordinateSystem(c), Slot::Origin) => c.origin = picked,
-            (Draft::CoordinateSystem(c), Slot::PointX) => c.point_x = picked,
-            (Draft::CoordinateSystem(c), _) => c.point_xy = picked,
+            (Draft::CoordinateSystem(c), slot) => {
+                // Points are given along the axes of the base system.
+                let base = model.fe.coordinate_system_or_global(c.base);
+                let local = base.and_then(|b| b.cartesian_local(picked).ok());
+                if let (
+                    Some(local),
+                    SystemDefinition::ThreePoints {
+                        origin,
+                        point_x,
+                        point_xy,
+                    },
+                ) = (local, &mut c.definition)
+                {
+                    match slot {
+                        Slot::Origin => *origin = local,
+                        Slot::PointX => *point_x = local,
+                        _ => *point_xy = local,
+                    }
+                }
+            }
             (Draft::Path(p), Slot::Start) => p.start = PointRef::Coordinates(picked),
             (Draft::Path(p), _) => p.end = PointRef::Coordinates(picked),
             (Draft::Plane(plane), Slot::PlanePoint(k)) => match &mut plane.source {
@@ -537,42 +570,15 @@ impl FeatureDialog {
             }
             Draft::CoordinateSystem(system) => {
                 name_row(ui, &mut system.name);
-                ui.label("Type");
-                crate::layout::wrapped_row(ui, |ui| {
-                    for kind in CoordinateSystemKind::ALL {
-                        ui.radio_value(&mut system.kind, kind, kind.label());
-                    }
-                });
-                ui.end_row();
-                point_rows(
+                system_rows(
                     ui,
-                    "Origin",
-                    Slot::Origin,
-                    &mut system.origin,
+                    system,
+                    self.index,
+                    model,
+                    &mut self.region,
                     picking,
                     speed,
                 );
-                point_rows(
-                    ui,
-                    "Point on x axis",
-                    Slot::PointX,
-                    &mut system.point_x,
-                    picking,
-                    speed,
-                );
-                point_rows(
-                    ui,
-                    "Point in xy plane",
-                    Slot::PointXy,
-                    &mut system.point_xy,
-                    picking,
-                    speed,
-                );
-                if system.kind == CoordinateSystemKind::Cylindrical {
-                    ui.label("");
-                    ui.weak("The z axis is the cylinder axis; local directions r, theta, z.");
-                    ui.end_row();
-                }
             }
             Draft::Path(path) => {
                 name_row(ui, &mut path.name);
@@ -851,7 +857,12 @@ impl FeatureDialog {
             Draft::CoordinateSystem(c) if c.name.eq_ignore_ascii_case("Global") => {
                 Err("The name Global stands for the global coordinate system.".into())
             }
-            Draft::CoordinateSystem(c) => c.axes().map(|_| ()),
+            Draft::CoordinateSystem(c) => {
+                if c.attached.as_ref().is_some_and(Region::is_empty) {
+                    return Err("Select what the coordinate system moves with.".into());
+                }
+                c.frame(&systems_with(fe, self.index, c)).axes().map(|_| ())
+            }
             Draft::Path(p) => p.samples(fe).map(|_| ()),
             Draft::Plane(p) => p.resolve(fe).map(|_| ()),
             Draft::ResultPlane(p) => match fe.plane(p.plane) {
@@ -939,7 +950,9 @@ impl FeatureDialog {
                 r.position = r.resolve(&model.fe, &model.mesh).ok()?;
                 Some(point_mark(model, &r, true))
             }
-            Draft::CoordinateSystem(c) => system_mark(model, c, true),
+            Draft::CoordinateSystem(c) => {
+                system_mark(model, c, &systems_with(&model.fe, self.index, c), true)
+            }
             Draft::Plane(p) => plane_mark(model, p, true),
             Draft::Path(_) | Draft::ResultPlane(_) => None,
         }
@@ -999,7 +1012,25 @@ pub fn delete(fe: &mut FeModel, item: FeatureItem) -> bool {
     }
     match item.kind {
         FeatureKind::ReferencePoint => remove(&mut fe.reference_points, item.index),
-        FeatureKind::CoordinateSystem => remove(&mut fe.coordinate_systems, item.index),
+        FeatureKind::CoordinateSystem => {
+            // Systems given in the removed one keep their place, given in its base now.
+            if let Some(removed) = fe.coordinate_systems.get(item.index).cloned() {
+                let systems = fe.coordinate_systems.clone();
+                for system in &mut fe.coordinate_systems {
+                    if system.base == Some(removed.id) {
+                        let definition = system.definition.index();
+                        if let Some(placed) = system.placed_in(removed.base, definition, &systems) {
+                            *system = placed;
+                        }
+                        // A system that moved with the removed one keeps moving with the same.
+                        if system.attached.is_none() {
+                            system.attached = removed.attachment(&systems).cloned();
+                        }
+                    }
+                }
+            }
+            remove(&mut fe.coordinate_systems, item.index)
+        }
         FeatureKind::ResultPath => remove(&mut fe.result_paths, item.index),
         FeatureKind::Plane => remove(&mut fe.planes, item.index),
         FeatureKind::ResultPlane => remove(&mut fe.result_planes, item.index),
@@ -1020,7 +1051,8 @@ pub fn marks(
     let systems = (model.fe.coordinate_systems.iter().enumerate())
         .filter(|(i, _)| replaced != is(FeatureKind::CoordinateSystem, *i))
         .filter_map(|(i, c)| {
-            system_mark(model, c, selected == is(FeatureKind::CoordinateSystem, i))
+            let selected = selected == is(FeatureKind::CoordinateSystem, i);
+            system_mark(model, c, &model.fe.coordinate_systems, selected)
         });
     let planes = (model.fe.planes.iter().enumerate())
         .filter(|(i, _)| replaced != is(FeatureKind::Plane, *i))
@@ -1202,15 +1234,233 @@ fn point_mark(model: &Model, point: &ReferencePoint, selected: bool) -> FeatureM
     }
 }
 
-fn system_mark(model: &Model, system: &CoordinateSystem, selected: bool) -> Option<FeatureMark> {
-    let axes = system.axes().ok()?;
+/// A coordinate system as drawn: one that moves follows the shown deformation (or the
+/// motion preview) of what it moves with.
+fn system_mark(
+    model: &Model,
+    system: &CoordinateSystem,
+    systems: &[CoordinateSystem],
+    selected: bool,
+) -> Option<FeatureMark> {
+    let mut frame = system.frame(systems);
+    let attachment = system.attachment(systems);
+    if let Some(region) = attachment {
+        let coords = model.shown_coords();
+        let undeformed = model.mesh.coords();
+        if coords.as_ref() != undeformed {
+            // The exploded view moves parts without deforming them: take the motion from
+            // the coordinates as drawn, relative to the undeformed ones.
+            frame = frame.moved_with(region, &model.mesh, &coords);
+        }
+    }
+    let axes = frame.axes().ok()?;
     Some(FeatureMark::System {
-        origin: model.to_render(system.origin),
+        origin: model.to_render(frame.origin),
         axes: axes.map(|a| glam::DVec3::from(a).as_vec3()),
         name: system.name.clone(),
         selected,
+        moving: attachment.is_some(),
     })
 }
+
+/// The coordinate systems of the model with `draft` in place of the edited one, or added.
+fn systems_with(
+    fe: &FeModel,
+    index: Option<usize>,
+    draft: &CoordinateSystem,
+) -> Vec<CoordinateSystem> {
+    let mut systems = fe.coordinate_systems.clone();
+    match index.and_then(|i| systems.get_mut(i)) {
+        Some(slot) => *slot = draft.clone(),
+        None => systems.push(draft.clone()),
+    }
+    systems
+}
+
+/// Where coordinate systems take what they move with: picked faces, nodes or edges, whole
+/// parts, or sets of the input file.
+const MOVING_SOURCES: &[crate::setup::Source] = crate::setup::NODE_PART_SOURCES;
+
+/// The rows of a coordinate system: its type, the base system it is given in, how it lies
+/// there, and whether it moves with a selection of the model.
+#[allow(clippy::too_many_arguments)]
+fn system_rows(
+    ui: &mut Ui,
+    system: &mut CoordinateSystem,
+    index: Option<usize>,
+    model: &Model,
+    region: &mut RegionDraft,
+    picking: &mut Option<Slot>,
+    speed: Coordinates,
+) {
+    let fe = &model.fe;
+    ui.label("Type");
+    crate::layout::wrapped_row(ui, |ui| {
+        for kind in CoordinateSystemKind::ALL {
+            ui.radio_value(&mut system.kind, kind, kind.label());
+        }
+    });
+    ui.end_row();
+    if system.kind == CoordinateSystemKind::Cylindrical {
+        ui.label("");
+        ui.weak("The z axis is the cylinder axis; local directions r, theta, z.");
+        ui.end_row();
+    }
+
+    // The base system; the system keeps its place when it changes.
+    let systems = systems_with(fe, index, system);
+    let mut base = system.base;
+    ui.label("Base system");
+    egui::ComboBox::from_id_salt("system base")
+        .selected_text(fe.system_name(base))
+        .width(crate::dock::fit_width(ui, 200.0))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut base, None, plx_model::GLOBAL);
+            // Not the system itself nor one given in it, which would make a loop.
+            for other in systems.iter().filter(|o| !system.is_base_of(o, &systems)) {
+                let label = if other.moves(&systems) {
+                    format!("{} (moving)", other.name)
+                } else {
+                    other.name.clone()
+                };
+                ui.selectable_value(&mut base, Some(other.id), label);
+            }
+        });
+    ui.end_row();
+    if base != system.base {
+        let definition = system.definition.index();
+        match system.placed_in(base, definition, &systems) {
+            Some(placed) => *system = placed,
+            None => system.base = base,
+        }
+        *picking = None;
+    }
+
+    // How it lies in the base; it keeps its place when that changes too.
+    let mut definition = system.definition.index();
+    ui.label("Define by");
+    egui::ComboBox::from_id_salt("system definition")
+        .selected_text(SystemDefinition::LABELS[definition])
+        .width(crate::dock::fit_width(ui, 200.0))
+        .show_ui(ui, |ui| {
+            for (k, label) in SystemDefinition::LABELS.into_iter().enumerate() {
+                ui.selectable_value(&mut definition, k, label);
+            }
+        });
+    ui.end_row();
+    if definition != system.definition.index() {
+        let systems = systems_with(fe, index, system);
+        if let Some(placed) = system.placed_in(system.base, definition, &systems) {
+            *system = placed;
+        }
+        *picking = None;
+    }
+    if system.base.is_some() {
+        ui.label("");
+        ui.weak(format!(
+            "Coordinates and turns along the x, y and z axes of {}.",
+            fe.system_name(system.base)
+        ));
+        ui.end_row();
+    }
+    match &mut system.definition {
+        SystemDefinition::ThreePoints {
+            origin,
+            point_x,
+            point_xy,
+        } => {
+            point_rows(ui, "Origin", Slot::Origin, origin, picking, speed);
+            point_rows(ui, "Point on x axis", Slot::PointX, point_x, picking, speed);
+            point_rows(
+                ui,
+                "Point in xy plane",
+                Slot::PointXy,
+                point_xy,
+                picking,
+                speed,
+            );
+        }
+        SystemDefinition::OffsetRotation { offset, angles } => {
+            ui.label(RichText::new("Offset").strong());
+            ui.end_row();
+            coordinate_rows(ui, offset, speed);
+            ui.label(RichText::new("Rotation").strong());
+            ui.end_row();
+            for (k, axis) in ["about x", "about y'", "about z''"].into_iter().enumerate() {
+                ui.label(format!("    {axis}"));
+                ui.add(
+                    numeric::drag_value(&mut angles[k])
+                        .speed(1.0)
+                        .suffix(" deg")
+                        .max_decimals(6),
+                );
+                ui.end_row();
+            }
+            ui.label("");
+            ui.weak("Turned about x first, then about the turned y, then about the turned z.");
+            ui.end_row();
+        }
+    }
+
+    // Fixed in space, or moving with a selection.
+    let mut moves = system.attached.is_some();
+    // Without a selection of its own a system moves with a moving base.
+    let base_moves = (system.base)
+        .and_then(|id| systems.iter().find(|c| c.id == id))
+        .is_some_and(|base| base.moves(&systems));
+    ui.label("Motion");
+    crate::layout::wrapped_row(ui, |ui| {
+        let own = if base_moves {
+            "With base system"
+        } else {
+            "Fixed in space"
+        };
+        ui.radio_value(&mut moves, false, own);
+        ui.radio_value(&mut moves, true, "Moves with selection");
+    });
+    ui.end_row();
+    if moves != system.attached.is_some() {
+        system.attached = moves.then(|| region.region());
+        *picking = None;
+    }
+    if system.attached.is_some() {
+        let active = picking.is_none();
+        if region.ui_labeled(ui, model, "Selection", "system selection", active) {
+            *picking = None;
+        }
+        system.attached = Some(region.region());
+    }
+    let systems = systems_with(fe, index, system);
+    let (text, moving) = match (&system.attached, system.attachment(&systems)) {
+        (Some(_), _) => (
+            "Moves and turns with the selection under large deformations (NLGEOM): loads in \
+             the system turn with it, and results in it are taken in its moved directions."
+                .to_string(),
+            true,
+        ),
+        (None, Some(_)) => (
+            format!(
+                "Moves with its base system {}, which moves with a selection.",
+                fe.system_name(system.base)
+            ),
+            true,
+        ),
+        (None, None) => (
+            "Stays where it is while the model deforms.".to_string(),
+            false,
+        ),
+    };
+    ui.label("");
+    if moving {
+        ui.colored_label(crate::style::lift(MOVING_COLOR), text);
+    } else {
+        ui.weak(text);
+    }
+    ui.end_row();
+}
+
+/// The colour that marks moving coordinate systems in the dialog and the 3D view.
+pub const MOVING_COLOR: Color32 = Color32::from_rgb(255, 150, 0);
 
 /// A path's ends in render coordinates with its name.
 pub fn path_line(model: &Model, path: &ResultPath) -> Option<([Vec3; 2], String)> {
@@ -1282,7 +1532,8 @@ fn reference_point_rows(
         // The point keeps its place; its coordinates change to the new system.
         let at = point.resolve(fe, &model.mesh).unwrap_or(point.position);
         point.position = at;
-        point.definition = match chosen_system.and_then(|c| fe.coordinate_system(c)) {
+        point.definition = match chosen_system.and_then(|c| fe.coordinate_system_or_global(Some(c)))
+        {
             Some(cs) => {
                 let mut local = cs.local(at).unwrap_or([0.0; 3]);
                 if cs.kind == CoordinateSystemKind::Cylindrical {

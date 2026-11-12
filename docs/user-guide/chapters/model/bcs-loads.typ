@@ -298,7 +298,9 @@ force acts.
     body the force turns with the body, at a single node of a beam or shell with its
     rotation. The size of the load stays. A force normal to a lever arm stays normal to it,
     and a force along a slender beam stays along it however far the beam turns. Without
-    #ui("Nlgeom") it acts like a fixed load.],
+    #ui("Nlgeom") it acts like a fixed load. In a coordinate system that moves with a
+    selection (@coordinate-systems) the load turns with that system instead, and the box is
+    replaced by a note.],
 )
 
 The rotation of a region comes from the motion of all its nodes, so a region that deforms a lot

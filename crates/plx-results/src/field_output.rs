@@ -171,6 +171,57 @@ fn component<'a>(increment: &'a Increment, field: &str, component: &str) -> Opti
 
 /// The raw components of a vector or tensor field in local directions given per node; `None`
 /// for a field that is neither. The derived components, magnitudes and invariants, stay.
+/// The rigid motion of a moving coordinate system in an increment: the best fit to the motion
+/// of the nodes of `region` by the increment's displacements. `None` without displacements.
+fn moving_frame(
+    increment: &Increment,
+    mesh: &FeMesh,
+    region: &plx_model::Region,
+) -> Option<plx_model::RigidMotion> {
+    let displacements = increment.displacements()?;
+    let coords: Vec<[f64; 3]> = (mesh.coords().iter().enumerate())
+        .map(|(i, p)| {
+            let u = displacements.get(i).copied().unwrap_or([0.0; 3]);
+            [0, 1, 2].map(|k| p[k] + u[k] as f64)
+        })
+        .collect();
+    let (reference, current) = plx_model::region_positions(region, mesh, &coords);
+    plx_model::RigidMotion::fit(&reference, &current)
+}
+
+/// The directions at the nodes turned with a moving system.
+fn turned_rotations(rotations: &[[[f64; 3]; 3]], turn: &[[f64; 3]; 3]) -> Vec<[[f64; 3]; 3]> {
+    let apply = |v: [f64; 3]| turn.map(|row| (0..3).map(|k| row[k] * v[k]).sum::<f64>());
+    rotations.iter().map(|q| q.map(apply)).collect()
+}
+
+/// The displacements relative to a moving system: the field less the rigid motion of the
+/// system at every node, so that they are taken from where the system carries the node.
+/// `None` for fields other than the displacements.
+fn moved_source(source: &Field, motion: &plx_model::RigidMotion, mesh: &FeMesh) -> Option<Field> {
+    if source.name != "DISP" {
+        return None;
+    }
+    let mut moved = source.clone();
+    let raw: Vec<usize> = (moved.components.iter().enumerate())
+        .filter(|(_, c)| !c.derived)
+        .map(|(i, _)| i)
+        .take(3)
+        .collect();
+    if raw.len() < 3 {
+        return None;
+    }
+    for (n, p) in mesh.coords().iter().enumerate() {
+        let carried = motion.point(*p);
+        for (k, &c) in raw.iter().enumerate() {
+            if let Some(value) = moved.components[c].values.get_mut(n) {
+                *value -= (carried[k] - p[k]) as f32;
+            }
+        }
+    }
+    Some(moved)
+}
+
 fn transformed_field(source: &Field, name: &str, rotations: &[[[f64; 3]; 3]]) -> Option<Field> {
     let kinds: Vec<ComponentKind> = (0..source.components.len())
         .map(|i| component_kind(source, i))
@@ -368,13 +419,29 @@ pub fn compute(
                 .ok_or_else(|| {
                     format!("The coordinate system {coordinate_system} does not exist.")
                 })?;
+            let frame = system.frame(systems);
             // The local directions at every node, as rows of a rotation.
             let rotations = (mesh.coords().iter())
-                .map(|&p| system.directions_at(p))
+                .map(|&p| frame.directions_at(p))
                 .collect::<Result<Vec<_>, _>>()?;
+            let attachment = system.attachment(systems);
             increments
                 .iter()
-                .map(|inc| transformed_field(inc.field(field)?, &output.name, &rotations))
+                .map(|inc| {
+                    let source = inc.field(field)?;
+                    match attachment.and_then(|region| moving_frame(inc, mesh, region)) {
+                        Some(motion) => {
+                            let moved = moved_source(source, &motion, mesh);
+                            let turned = turned_rotations(&rotations, &motion.rotation);
+                            transformed_field(
+                                moved.as_ref().unwrap_or(source),
+                                &output.name,
+                                &turned,
+                            )
+                        }
+                        None => transformed_field(source, &output.name, &rotations),
+                    }
+                })
                 .collect()
         }
         FieldOutputKind::PrincipalDirection { field, which }
@@ -659,8 +726,7 @@ mod tests {
         }];
         // x along global y, y along global -x.
         let mut system = CoordinateSystem::new("CS-1");
-        system.point_x = [0.0, 1.0, 0.0];
-        system.point_xy = [-1.0, 0.0, 0.0];
+        system.set_points([0.0; 3], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]);
         let output = |field: &str, name: &str| FieldOutput {
             name: name.into(),
             kind: FieldOutputKind::CoordinateSystemTransform {
@@ -683,6 +749,48 @@ mod tests {
         assert_eq!(values(&incs[0], "U_CS", "U3"), [3.0; 3]);
         let missing = output("DISP", "X");
         assert!(compute(&missing, &mut incs, &mesh(), &[]).is_err());
+    }
+
+    /// In a system that moves with nodes 1 and 2, displacements are taken relative to the
+    /// system and other results in its turned directions.
+    #[test]
+    fn fields_turn_into_a_moving_coordinate_system() {
+        let stress = [("S11", [10.0; 3]), ("S22", [0.0; 3]), ("S33", [0.0; 3])]
+            .into_iter()
+            .chain([("S12", [0.0; 3]), ("S23", [0.0; 3]), ("S13", [0.0; 3])]);
+        let stress: Vec<(&str, [f32; 3])> = stress.collect();
+        // A quarter turn about z through node 1: (x, 0, 0) goes to (0, x, 0); node 3 is
+        // stretched by 0.5 on top.
+        let disp = [
+            ("U1", [0.0, -1.0, -2.0]),
+            ("U2", [0.0, 1.0, 2.5]),
+            ("U3", [0.0; 3]),
+        ];
+        let mut incs = vec![Increment {
+            nodal_diameter: None,
+            step: 1,
+            increment: 1,
+            kind: AnalysisKind::Static,
+            value: 1.0,
+            fields: vec![raw_field("STRESS", &stress), raw_field("DISP", &disp)],
+        }];
+        let mut system = CoordinateSystem::new("CS-1");
+        system.attached = Some(plx_model::Region::Nodes(vec![1, 2]));
+        let output = |field: &str, name: &str| FieldOutput {
+            name: name.into(),
+            kind: FieldOutputKind::CoordinateSystemTransform {
+                field: field.into(),
+                coordinate_system: "CS-1".into(),
+            },
+        };
+        let systems = [system];
+        compute(&output("STRESS", "S_CS"), &mut incs, &mesh(), &systems).unwrap();
+        compute(&output("DISP", "U_CS"), &mut incs, &mesh(), &systems).unwrap();
+        let close = |a: &[f32], b: [f32; 3]| (0..3).all(|k| (a[k] - b[k]).abs() < 1e-5);
+        assert!(close(values(&incs[0], "S_CS", "S11"), [0.0; 3]));
+        assert!(close(values(&incs[0], "S_CS", "S22"), [10.0; 3]));
+        assert!(close(values(&incs[0], "U_CS", "U1"), [0.0, 0.0, 0.5]));
+        assert!(close(values(&incs[0], "U_CS", "U2"), [0.0; 3]));
     }
 
     fn stress_increment(tensors: [[f32; 6]; 3]) -> Increment {

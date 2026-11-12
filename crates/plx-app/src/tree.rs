@@ -1102,6 +1102,8 @@ struct Tree<'a> {
     part_indices: Vec<usize>,
     /// The type of every step, which gives it its icon and tooltip.
     step_types: Vec<StepGlyph>,
+    /// Coordinate systems that move with a selection, drawn with their own icon.
+    moving_systems: HashSet<usize>,
     /// The items of the container being drawn, which Ctrl and Shift select together.
     siblings: Vec<TreeItem>,
 }
@@ -1558,6 +1560,10 @@ impl Tree<'_> {
             TreeItem::StepGroup(_, "Loads") => TreeIcon::Load,
             TreeItem::StepGroup(_, "Defined Fields") => TreeIcon::DefinedField,
             TreeItem::Group(HOT_SPOTS) => TreeIcon::HotSpot,
+            TreeItem::CoordinateSystem(i) if self.moving_systems.contains(i) => {
+                TreeIcon::MovingCoordinateSystem
+            }
+            TreeItem::CoordinateSystem(_) => TreeIcon::CoordinateSystem,
             _ => dots,
         }
     }
@@ -2084,8 +2090,19 @@ impl Tree<'_> {
                     .map(|(i, r)| (TreeItem::ReferencePoint(i), r.name.as_str()))
                     .collect();
                 tree.container(ui, REFERENCE_POINTS, points);
-                let systems = (fe.coordinate_systems.iter().enumerate())
-                    .map(|(i, c)| (TreeItem::CoordinateSystem(i), c.name.as_str()))
+                // Moving systems are marked by their icon and name.
+                let labels: Vec<String> = (fe.coordinate_systems.iter())
+                    .map(|c| match c.moves(&fe.coordinate_systems) {
+                        true => format!("{} (moving)", c.name),
+                        false => c.name.clone(),
+                    })
+                    .collect();
+                tree.moving_systems = (fe.coordinate_systems.iter().enumerate())
+                    .filter(|(_, c)| c.moves(&fe.coordinate_systems))
+                    .map(|(i, _)| i)
+                    .collect();
+                let systems = (labels.iter().enumerate())
+                    .map(|(i, label)| (TreeItem::CoordinateSystem(i), label.as_str()))
                     .collect();
                 tree.container(ui, COORDINATE_SYSTEMS, systems);
                 let planes = (fe.planes.iter().enumerate())
@@ -2127,6 +2144,7 @@ pub fn show(
         step_names: Vec::new(),
         part_indices: Vec::new(),
         step_types: Vec::new(),
+        moving_systems: HashSet::new(),
         siblings: Vec::new(),
     };
     let expanding = tree.state.expand.clone();

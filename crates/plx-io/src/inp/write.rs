@@ -3549,15 +3549,23 @@ fn component_positions(
         .collect())
 }
 
-/// What a follower load turns with: the rotation of its reference point, or the nodes of
-/// its region (a single beam or shell node turns with its rotations in the solver).
-/// `set` is the node set of the region if it was written already.
+/// What a follower load turns with: the selection its coordinate system moves with, the
+/// rotation of its reference point, or the nodes of its region (a single beam or shell node
+/// turns with its rotations in the solver). `set` is the node set of the region if it was
+/// written already.
 fn follower(
+    model: &FeModel,
     sets: &mut Sets,
     load: &plx_model::Load,
     set: Option<&NodeRef>,
 ) -> Result<Option<ir::step::Follower>, WriteError> {
-    if !load.follower || !load.kind.takes_system() {
+    if !load.kind.takes_system() {
+        return Ok(None);
+    }
+    if let Some(follower) = moving_system_follower(model, sets, load.system)? {
+        return Ok(Some(follower));
+    }
+    if !load.follower {
         return Ok(None);
     }
     Ok(Some(match (load.region.reference_point(), set) {
@@ -3569,6 +3577,21 @@ fn follower(
             ir::step::Follower::Nodes(node_set_ref(&sets.node_set(&load.name, &load.region)?))
         }
     }))
+}
+
+/// A load in a coordinate system that moves with a selection turns with the selection's
+/// nodes; `None` for systems fixed in space.
+fn moving_system_follower(
+    model: &FeModel,
+    sets: &mut Sets,
+    system: Option<plx_model::Id>,
+) -> Result<Option<ir::step::Follower>, WriteError> {
+    let Some(region) = model.system_attachment(system) else {
+        return Ok(None);
+    };
+    let name = model.system_name(system);
+    let set = sets.node_set(&name, region)?;
+    Ok(Some(ir::step::Follower::Nodes(node_set_ref(&set))))
 }
 
 fn set_follower(items: &mut [ir::step::ConcentratedLoad], follower: Option<ir::step::Follower>) {
@@ -4051,7 +4074,7 @@ fn step_block<'f>(
                     }
                 }
                 let set = load.region.reference_point().is_none().then_some(&target);
-                set_follower(&mut items, follower(sets, load, set)?);
+                set_follower(&mut items, follower(model, sets, load, set)?);
                 vec![Card::Cload {
                     op_new: false,
                     items,
@@ -4103,6 +4126,10 @@ fn step_block<'f>(
                         }
                     }
                 }
+                set_follower(
+                    &mut items,
+                    moving_system_follower(model, sets, remote.system)?,
+                );
                 vec![Card::Cload {
                     op_new: false,
                     items,
@@ -4231,7 +4258,10 @@ fn step_block<'f>(
                         }
                     }
                 }
-                set_follower(&mut items, follower(sets, load, region_set.as_ref())?);
+                set_follower(
+                    &mut items,
+                    follower(model, sets, load, region_set.as_ref())?,
+                );
                 vec![Card::Cload {
                     op_new: false,
                     items,

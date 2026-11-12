@@ -750,8 +750,7 @@ fn turned_system(model: &mut FeModel) {
         id: named("Turned"),
         ..plx_model::CoordinateSystem::new("Turned")
     };
-    cs.point_x = [0.0, 1.0, 0.0];
-    cs.point_xy = [-1.0, 0.0, 0.0];
+    cs.set_points([0.0; 3], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]);
     model.coordinate_systems.push(cs);
 }
 
@@ -7794,9 +7793,7 @@ fn a_coordinate_system_gives_the_rotation_axis() {
         id: named("Hub"),
         ..plx_model::CoordinateSystem::new("Hub")
     };
-    hub.origin = [0.0, 5.0, 5.0];
-    hub.point_x = [0.0, 6.0, 5.0];
-    hub.point_xy = [0.0, 5.0, 9.0];
+    hub.set_points([0.0, 5.0, 5.0], [0.0, 6.0, 5.0], [0.0, 5.0, 9.0]);
     model.coordinate_systems.push(hub);
     let StepKind::ComplexFrequency(settings) = &mut model.steps[0].kind else {
         unreachable!()
@@ -12178,8 +12175,7 @@ fn solver_bends_the_beam_by_a_deformable_force_on_a_face_rigid_from_another_step
 fn a_force_in_a_system_of_its_own_is_written_in_global_directions() {
     let mut system = plx_model::CoordinateSystem::new("Turned");
     // x along global y, y along global -x.
-    system.point_x = [0.0, 1.0, 0.0];
-    system.point_xy = [-1.0, 0.0, 0.0];
+    system.set_points([0.0; 3], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]);
     let mut load = tip_force();
     load.region = Region::Nodes(vec![96, 97, 98, 99]);
     load.kind = LoadKind::force([100.0, 0.0, 0.0]);
@@ -12195,9 +12191,7 @@ fn a_force_in_a_system_of_its_own_is_written_in_global_directions() {
     // Radial about the beam axis x through the middle of the section.
     let mut cylinder = plx_model::CoordinateSystem::new("Cylinder");
     cylinder.kind = plx_model::CoordinateSystemKind::Cylindrical;
-    cylinder.origin = [0.0, 5.0, 5.0];
-    cylinder.point_x = [0.0, 6.0, 5.0];
-    cylinder.point_xy = [0.0, 5.0, 6.0];
+    cylinder.set_points([0.0, 5.0, 5.0], [0.0, 6.0, 5.0], [0.0, 5.0, 6.0]);
     load.system = Some(cylinder.id);
     load.follower = false;
     let (mesh, mut model) = cantilever(load);
@@ -12993,6 +12987,84 @@ fn steady_state_demo_project() {
     crate::project::save_project(std::path::Path::new(&path), &project).unwrap();
 }
 
+/// A cantilever whose tip carries a transverse force in a coordinate system that moves with
+/// the tip's nodes, under large deformations; `moving` false leaves the system fixed.
+fn tip_force_in_system(moving: bool) -> (FeMesh, FeModel) {
+    // The nodes of the free end at x = 100.
+    let tip: Vec<NodeId> = (1..=9).map(|k| 11 * k).collect();
+    let mut system = plx_model::CoordinateSystem {
+        id: named("Tip"),
+        ..plx_model::CoordinateSystem::new("Tip")
+    };
+    system.set_points([100.0, 5.0, 5.0], [101.0, 5.0, 5.0], [100.0, 6.0, 5.0]);
+    system.attached = moving.then(|| Region::Nodes(tip.clone()));
+    let mut load = tip_force();
+    load.region = Region::Nodes(tip);
+    load.kind = LoadKind::force([0.0, 0.0, -9000.0]);
+    load.system = Some(system.id);
+    let (mesh, mut model) = cantilever(load);
+    model.coordinate_systems.push(system);
+    if let StepKind::Static(s) = &mut model.steps[0].kind {
+        s.nlgeom = true;
+    }
+    (mesh, model)
+}
+
+/// A load in a coordinate system that moves with a selection turns with the selection's
+/// nodes, without its own follower setting; one fixed in space keeps its direction.
+#[test]
+fn a_force_in_a_moving_system_follows_the_selection() {
+    let (mesh, model) = tip_force_in_system(true);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Nset, Nset=INTERNAL_SELECTION-1_TIP\n"),
+        "{text}"
+    );
+    assert!(text.contains("Follower=INTERNAL_SELECTION-1_TIP"), "{text}");
+    let (mesh, model) = tip_force_in_system(false);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("Follower="), "{text}");
+}
+
+/// The force in the moving system stays perpendicular to the turned tip: the reactions at
+/// the clamp balance the force turned by the tip's rotation, and differ from those of the
+/// same force in a fixed system.
+#[test]
+fn solver_turns_a_force_with_its_moving_system() {
+    let (mesh, model) = tip_force_in_system(true);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let Some(frd) = run_solver("moving-system-force", &text) else {
+        return;
+    };
+    let tip: Vec<NodeId> = (1..=9).map(|k| 11 * k).collect();
+    let reference: Vec<[f64; 3]> = tip.iter().map(|&n| mesh.node(n).unwrap()).collect();
+    let current: Vec<[f64; 3]> = (tip.iter().zip(&reference))
+        .map(|(&n, p)| {
+            let u = ["U1", "U2", "U3"].map(|c| node_value(&frd, "DISP", c, n));
+            [p[0] + u[0], p[1] + u[1], p[2] + u[2]]
+        })
+        .collect();
+    let motion = plx_model::RigidMotion::fit(&reference, &current).unwrap();
+    // The tip turns about y by a good part of a radian.
+    let turned_x = motion.rotation.map(|row| row[0]);
+    assert!(turned_x[2] < -0.15, "{turned_x:?}");
+    let turned_force: [f64; 3] = std::array::from_fn(|i| -9000.0 * motion.rotation[i][2]);
+    let clamp: Vec<NodeId> = (0..9).map(|k| 1 + 11 * k).collect();
+    let reaction: [f64; 3] = ["F1", "F2", "F3"].map(|c| {
+        (clamp.iter())
+            .map(|&n| node_value(&frd, "FORC", c, n))
+            .sum()
+    });
+    for k in 0..3 {
+        assert!(
+            (reaction[k] + turned_force[k]).abs() < 0.01 * 9000.0,
+            "reaction {reaction:?}, turned force {turned_force:?}"
+        );
+    }
+    // A force fixed in space keeps pointing down: no axial reaction.
+    assert!(reaction[0].abs() > 0.1 * 9000.0, "{reaction:?}");
+}
+
 /// The tip deflection of the cantilever (along x, 100 long) with the material and the
 /// orientation of its section given.
 fn tip_deflection(name: &str, edit: impl FnOnce(&mut FeModel)) -> f64 {
@@ -13036,8 +13108,7 @@ fn orthotropic_materials_bend_by_their_modulus_along_the_material_axes() {
     let turned = tip_deflection("aniso-turned", |model| {
         orthotropic(stiff)(model);
         let mut system = plx_model::CoordinateSystem::new("Turned");
-        system.point_x = [0.0, 1.0, 0.0];
-        system.point_xy = [-1.0, 0.0, 0.0];
+        system.set_points([0.0; 3], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]);
         model.sections[0].orientation = Some(system.id);
         model.coordinate_systems.push(system);
     });
