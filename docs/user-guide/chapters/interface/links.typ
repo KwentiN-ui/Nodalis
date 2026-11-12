@@ -122,12 +122,14 @@ The pins on the left of the rows have two shapes, like the sockets of a node edi
   stroke: (x, y) => if y == 0 { (bottom: 0.7pt) } else { (bottom: 0.3pt + luma(200)) },
   inset: (x: 5pt, y: 4pt),
   table.header([*Pin*], [*Takes*]),
-  [Round], [One value: the geometry, the mesh, the whole setup, a single item or the results
+  [Round], [One value: the whole setup, a single item or the results
     of a step. A new wire replaces the old one, and the output pane says so ("Modal no longer
     takes Setup > Materials > Steel from Static").],
   [Tall, rounded], [A collection: the categories of the setup (#ui("Materials"),
     #ui("Sections"), #ui("Steps") and so on). It takes any number of wires, from one analysis
-    or from several, and the items of the target that are its own stay.],
+    or from several, and the items of the target that are its own stay. The #ui("Geometry")
+    and #ui("Mesh") rows of an analysis are collections as well: they put the geometries or
+    meshes of several blocks together into one assembly (@geometry-assembly).],
   [Green square], [The state after a step of another analysis (@state-links).],
 )
 

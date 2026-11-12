@@ -8,6 +8,7 @@ mod defeature;
 mod extrude;
 mod ffi;
 pub mod gmsh;
+mod merge;
 mod operation;
 mod revolve;
 mod split;
@@ -16,6 +17,7 @@ mod step_names;
 mod thicken;
 
 pub use defeature::{Defeatured, defeature, find_blends};
+pub use merge::{MergedGeometry, merge_geometries};
 pub use operation::{apply_cad_operation, apply_operation};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -584,6 +586,53 @@ pub fn scale_geometry(geometry: &Geometry, factor: f64) -> Result<Geometry, Gmsh
     })?;
     let brep = std::fs::read_to_string(&scaled.0)
         .map_err(|e| GmshError::Other(format!("{}: {e}", scaled.0.display())))?;
+    with_signatures(Geometry {
+        brep,
+        ..geometry.clone()
+    })
+}
+
+/// The geometry translated, rotated, mirrored or scaled, with lengths in metres like the
+/// geometry, for the Transform block of the project schematic. Translations, rotations and
+/// mirrors keep the shapes exact; the parts keep their names and the faces, edges and
+/// vertices their tags.
+pub fn transform_geometry(
+    geometry: &Geometry,
+    transform: &plx_mesh::MeshTransform,
+) -> Result<Geometry, GmshError> {
+    use plx_mesh::MeshTransform;
+    if let Some(problem) = transform.problem() {
+        return Err(GmshError::Other(problem.trim_end_matches('.').to_owned()));
+    }
+    let file = TempFile::with_contents("brep", &geometry.brep)?;
+    let moved = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        // Only the shapes no other one bounds are moved; their faces, edges and points go
+        // along.
+        let mut top = Vec::new();
+        for dim in [3, 2, 1, 0] {
+            for tag in gmsh.entities(dim)? {
+                if dim == 3 || gmsh.adjacencies(dim, tag)?.0.is_empty() {
+                    top.push((dim, tag));
+                }
+            }
+        }
+        match *transform {
+            MeshTransform::Translate(by) => gmsh.translate(&top, by)?,
+            MeshTransform::Rotate { point, axis, angle } => {
+                gmsh.rotate(&top, point, axis, angle.to_radians())?
+            }
+            MeshTransform::Mirror { point, normal } => {
+                let d = -(0..3).map(|k| normal[k] * point[k]).sum::<f64>();
+                gmsh.mirror(&top, [normal[0], normal[1], normal[2], d])?
+            }
+            MeshTransform::Scale { center, factors } => gmsh.dilate(&top, center, factors)?,
+        }
+        gmsh.write(&moved.0)
+    })?;
+    let brep = std::fs::read_to_string(&moved.0)
+        .map_err(|e| GmshError::Other(format!("{}: {e}", moved.0.display())))?;
     with_signatures(Geometry {
         brep,
         ..geometry.clone()
