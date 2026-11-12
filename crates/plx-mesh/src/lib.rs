@@ -16,7 +16,7 @@ mod transform;
 pub use cad::{CadEntity, CadMap, display_cad_map};
 pub use contact_search::{
     GeometryFilter, GroupBy, MasterSlaveItem, SearchParameters, SurfaceId, SurfaceKind,
-    find_contact_pairs, surface_faces,
+    facing_faces, find_contact_pairs, surface_faces,
 };
 pub use element::{ElementFamily, ElementShape, FaceTopology};
 pub use line_joints::{LineJoint, find_line_joints};

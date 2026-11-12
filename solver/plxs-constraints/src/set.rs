@@ -2,7 +2,7 @@
 //! rigid bodies and equations written as linear constraints on the primary DOFs), and the
 //! per-step [`ConstraintSet`] that adds the step's SPCs and eliminates everything.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use plxs_core::Result;
 use plxs_core::constraints::RigidBodyNodes;
@@ -605,8 +605,22 @@ impl ModelConstraints {
         }
         let mut repivoted: HashMap<u32, usize> = HashMap::new();
         let mut conflicts: HashMap<u32, usize> = HashMap::new();
+        // DOFs no element uses, e.g. of reference points: equations rather depend on them.
+        // Neither a tie's slave DOF nor one an equation holds before a tie: a tie leaves a
+        // slave DOF held otherwise untied (the cut of a pre-tensioned bolt, whose copied
+        // nodes have no element), and would tie it else.
+        let kept: HashSet<u32> = (self.constraints.iter().chain(&self.cyclic_real))
+            .filter(|c| c.policy == Policy::KeepPrevious)
+            .map(|c| c.preferred)
+            .collect();
+        let loose =
+            |v: u32| !active.get(v as usize).copied().unwrap_or(false) && !kept.contains(&v);
         for c in self.constraints.iter().chain(&self.cyclic_real) {
-            match elimination.add(&c.terms, &[], c.preferred, c.policy) {
+            let equation = !kept.contains(&c.preferred)
+                && (self.labels.get(c.origin as usize)).is_some_and(|l| l.starts_with("*EQUATION"));
+            let loose: Option<&dyn Fn(u32) -> bool> = equation.then_some(&loose as _);
+            let r = elimination.add_preferring(&c.terms, &[], c.preferred, c.policy, loose);
+            match r {
                 Added::Repivoted { .. } => *repivoted.entry(c.origin).or_default() += 1,
                 Added::Conflict => *conflicts.entry(c.origin).or_default() += 1,
                 _ => {}

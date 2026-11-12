@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use plx_mesh::{
     FeMesh, Fnv, GeometryFilter, GroupBy, Part, PartSkin, SearchParameters, extract_part_skin,
-    find_contact_pairs, surface_faces,
+    facing_faces, find_contact_pairs,
 };
 
 use crate::{ContactBehavior, ContactRegion, FeModel, Region};
@@ -117,8 +117,15 @@ impl FeModel {
                 solid_skins: Vec::new(),
             };
             for item in find_contact_pairs(&bodies, &skins, &searched, &parameters) {
-                let master = surface_faces(&bodies, &skins, &item.master);
-                let slave = surface_faces(&bodies, &skins, &item.slave);
+                // Only the faces lying on the other body: the search pairs whole patches.
+                let (master, slave) = facing_faces(
+                    &bodies,
+                    &skins,
+                    &item.master,
+                    &item.slave,
+                    tolerance,
+                    ANGLE_DEG,
+                );
                 if master.is_empty() || slave.is_empty() {
                     continue;
                 }
