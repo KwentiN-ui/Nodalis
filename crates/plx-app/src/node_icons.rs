@@ -52,6 +52,8 @@ pub enum NodeIcon {
     Transform,
     /// A Math block: a plus over a minus.
     Math,
+    /// A Formula block: f of x.
+    Formula,
     /// A Switch block: two inputs and a lever to one of them.
     Switch,
     /// A Plot block: two axes with a curve.
@@ -121,6 +123,12 @@ pub fn paint_scaled(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32
             line(&[p(4.5, 1.5), p(4.5, 7.5)]);
             line(&[p(6.5, 10.5), p(12.5, 10.5)]);
             line(&[p(11.0, 2.0), p(3.0, 12.0)]);
+        }
+        NodeIcon::Formula => {
+            line(&[p(7.5, 1.5), p(5.8, 1.5), p(4.5, 2.8), p(4.5, 12.5)]);
+            line(&[p(2.5, 5.5), p(7.0, 5.5)]);
+            line(&[p(8.5, 7.0), p(12.5, 12.5)]);
+            line(&[p(12.5, 7.0), p(8.5, 12.5)]);
         }
         NodeIcon::Plot => {
             line(&[p(1.5, 1.5), p(1.5, 12.5), p(12.5, 12.5)]);

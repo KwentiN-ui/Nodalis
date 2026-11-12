@@ -31,6 +31,7 @@ mod exposed;
 mod features;
 mod field;
 pub mod fingerprint;
+pub mod formula;
 mod geometry;
 pub mod handover;
 mod history;
@@ -198,8 +199,9 @@ use serde::{Deserialize, Serialize};
 /// 30 read as they are. Format 32 gives coordinate systems a base system, a definition by
 /// three points or by offset and rotation ([`SystemDefinition`]) and a selection they move
 /// with ([`CoordinateSystem::attached`]); formats 21 to 31 read as they are unless they have
-/// coordinate systems.
-pub const PROJECT_FORMAT: u32 = 32;
+/// coordinate systems. Format 33 adds the Formula block of the project schematic; formats 21
+/// to 32 read as they are.
+pub const PROJECT_FORMAT: u32 = 33;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

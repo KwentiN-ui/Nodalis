@@ -604,8 +604,8 @@ names the block it comes from.
 
 A value link carries either one number or a *series*: a list of numbers, like an array of
 NumPy. Two Measure blocks give series (@measure-block): the values of a field at the nodes of
-a region, and the whole history of a step. A series goes only to a Math block or to a Plot
-block (@plot-block); a link of a series to a number that takes one, such as a parameter or a
+a region, and the whole history of a step. A series goes only to a Math or Formula block
+(@formula-block) or to a Plot block (@plot-block); a link of a series to a number that takes one, such as a parameter or a
 column of a study, is refused, and the output pane says so.
 
 A Math block computes with series value by value. A single number goes with every value of the
@@ -616,6 +616,60 @@ number of values and their range, such as "21 values, 0 N to 80000 N", and gives
 #ui("Max"), #ui("Min"), #ui("Max Abs") and #ui("Mean") turn a series back into one number: the
 largest von Mises stress is a Measure block of the field values of STRESS MISES followed by a
 Math block #ui("Max"). Units go with the series as with numbers.
+
+=== Formula <formula-block>
+
+A Formula block computes a number or a series by a formula you type, of as many inputs as it
+needs: the bending stress 6 F L / (b h²) of a cantilever, the magnitude of a vector from its
+components, the utilization of the largest stress of a region. Add it with
+#menu("Parameters", "Formula"), or search it with #key("Shift+A").
+
+#screenshot("schematic-formula.png", [The Formula block Bending Stress computes 6 a b / (c d²)
+  from the force, the length, the width and the height of a cantilever, a stress in MPa. The
+  Formula block Utilization divides it by 235 MPa, a factor without unit])
+
+A new block has no inputs, only an empty pin. Drag the pin of a number or a series to it, and
+it becomes the input #ui("a"); the next one #ui("b"), then #ui("c"), up to #ui("z"), as with
+the inputs of a group (@node-groups). Every input comes from its link: remove the link (right-click
+its pin) and the input goes. The inputs after it move up a letter, in the formula too, and
+where the formula used the removed input it now shows `?`, so it gives no result until you
+link a new input or change the formula. The #ui("Result") row gives the number or the series the formula computes; drag
+its pin on to any number of its kind, another Math or Formula block, a Plot or a Preview block.
+
+The block shows its formula read-only. Click it, or double-click the block, to edit it in its
+window: the formula, the result it gives as you type, the inputs with their kinds and where
+they come from, and below the list of the functions; a click on a function adds it to the
+formula. #ui("OK") applies the formula.
+
+#screenshot("formula-editor.png", [The editor of the Formula block: the formula, what it gives,
+  its inputs and the functions it can call])
+
+#fields(
+  [Operators], [`+ - * /` and `^` (or `**`) for powers, with parentheses. A power binds more
+    than a sign: `-a^2` is −(a²).],
+  [Numbers], [`2.5`, `1e-3`, `pi`, and numbers with a unit in brackets: `5[mm]`, `210[GPa]`,
+    `3[N/mm]`. A number without unit is a factor. Values are in SI units, so `a / 1[mm]` is
+    the number of millimetres in the length a.],
+  [Functions], [`sqrt`, `cbrt`, `abs`, `sign`, `exp`, `ln`, `log10`, `sin`, `cos`, `tan`,
+    `asin`, `acos`, `atan`, `atan2(y, x)`, `floor`, `ceil`, `round`, `clamp(x, low, high)`,
+    and `min`, `max`, `mean`, `sum`, `std` and `norm` of one series or of several values.],
+)
+
+*Units* go through the formula as through a Math block: the inputs take the kinds of the
+numbers linked to them, and the result follows. A product or a quotient combines the units, so
+a force over a length is a stiffness; a power to a number written in the formula raises them,
+`sqrt` halves them (m² gives m), and the result of `asin` or `atan2` is an angle. A sum, a
+difference, `min`, `max` and `clamp` take numbers of one unit, and `exp`, `ln` or `floor` a
+number without unit. A formula whose units do not go together, such as a force plus a length,
+gives no result; the formula in the block turns red and its tooltip says why. So does a formula
+whose result goes to a number of another unit: the link stays while you correct the formula.
+
+*Series* go element by element, as in NumPy (@series): a number goes with every value of a
+series, and series of the same length go value by value. `max`, `min`, `mean`, `sum`, `std`
+and `norm` of a single series make one number of it, so `max(abs(a)) / 235[MPa]` is the
+utilization of the largest stress of a region. Of several values they work element by
+element: `max(a, 0)` keeps the positive values of a series, `norm(a, b, c)` is the magnitude
+of the components a, b and c at every node.
 
 === Exposed parameters <exposed-parameters>
 

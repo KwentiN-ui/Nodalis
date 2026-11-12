@@ -9,6 +9,8 @@ use super::*;
 /// adds and removes choices.
 const OPERATION: &str = "Operation";
 const CHOICES: &str = "Choices";
+/// The row of a Formula block with its formula.
+const FORMULA: &str = "Formula";
 
 /// The most choices a Switch block holds.
 const MAX_CHOICES: usize = 20;
@@ -55,7 +57,21 @@ pub(super) fn number_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Ve
         tip,
     };
     let mut rows = Vec::new();
-    if !switch {
+    let formula = number.formula.is_some();
+    if formula {
+        let mut tip = "The formula of the inputs a, b, c, ...: + - * / ^, numbers with units in \
+                       brackets such as 5[mm], and functions such as sqrt, max, min and mean. \
+                       Click it or double-click the block to edit it, with the list of \
+                       functions."
+            .to_owned();
+        if let Some(problem) = number.formula_problem() {
+            tip.push_str(&format!("\nNo result: {problem}."));
+        }
+        rows.push(Row {
+            widget: Some(RowWidget::Formula),
+            ..row(vec![FORMULA.to_owned()], "Formula".into(), tip)
+        });
+    } else if !switch {
         rows.push(Row {
             widget: Some(RowWidget::Operation),
             ..row(
@@ -73,8 +89,18 @@ pub(super) fn number_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Ve
         let linked_from = (incoming.iter())
             .find(|(slot, _)| *slot == path)
             .map(|(_, source)| source.clone());
-        let what = if key == INDEX {
+        let what = if key == INDEX && !formula {
             "Which choice the block gives, counted from 1".to_owned()
+        } else if formula {
+            match kind {
+                Some(ValueKind::Factor) => {
+                    format!("Input {label} of the formula, a number without unit")
+                }
+                Some(kind) => format!("Input {label} of the formula, a {}", kind.describe()),
+                None => format!(
+                    "Input {label} of the formula: it takes the kind of the number linked to it"
+                ),
+            }
         } else {
             match kind {
                 Some(ValueKind::Factor) => format!("{label}, a factor without unit"),
@@ -97,10 +123,31 @@ pub(super) fn number_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Ve
             ..row(
                 path,
                 label,
-                format!(
-                    "{what}. Type it, or drag the pin of a number here: a parameter, another \
-                     Math or Switch block or an input of a parameter study."
-                ),
+                if formula {
+                    format!(
+                        "{what}. Its link gives it; remove the link to remove the input, and \
+                         the inputs after it move up a letter in the formula."
+                    )
+                } else {
+                    format!(
+                        "{what}. Type it, or drag the pin of a number here: a parameter, \
+                         another Math, Switch or Formula block or an input of a parameter \
+                         study."
+                    )
+                },
+            )
+        });
+    }
+    if formula && number.values.len() < plx_model::formula::MAX_INPUTS {
+        rows.push(Row {
+            input: true,
+            icon: NodeIcon::Link,
+            ..row(
+                vec![links::PARAMETERS.to_owned(), super::groups::OPEN.to_owned()],
+                String::new(),
+                "Drag the pin of a number or a series here to add it as the next input of the \
+                 formula: a, b, c, ..."
+                    .into(),
             )
         });
     }
@@ -126,7 +173,7 @@ pub(super) fn number_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Ve
         });
     }
     let mut tip = "The number the block gives: drag its pin to a parameter of the same kind, to \
-                   another Math or Switch block, or to the Outputs of a parameter study."
+                   another Math, Switch or Formula block, or to the Outputs of a parameter study."
         .to_owned();
     let text = match (number.series_result(switch), number.result(switch)) {
         (Some(Ok(series)), _) => {
@@ -140,6 +187,11 @@ pub(super) fn number_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Ve
         }
         (Some(Err(why)), _) => {
             tip.push_str(&format!("\nNo result: {why}."));
+            "Result: none".into()
+        }
+        (None, None) if number.formula_problem().is_some() => {
+            let problem = number.formula_problem().unwrap_or_default();
+            tip.push_str(&format!("\nNo result: {problem}."));
             "Result: none".into()
         }
         (None, Some(value)) => {
@@ -180,6 +232,7 @@ impl ProjectApp {
                 vec![0.0, 0.0]
             },
             series: Vec::new(),
+            formula: None,
         };
         let (name, block) = if switch {
             (super::block_name("Switch"), Block::Switch(number))
@@ -260,6 +313,12 @@ fn convertible(given: ValueKind, taken: ValueKind) -> bool {
 /// switch.
 type Number = (u64, NumberBlock, bool);
 
+/// Whether the link goes from the result of a Formula block.
+fn from_formula(numbers: &[Number], link: &Link) -> bool {
+    link.item == [links::VALUE, RESULT]
+        && (numbers.iter()).any(|(id, n, _)| *id == link.source && n.formula.is_some())
+}
+
 /// The value links at Math and Switch blocks.
 fn number_links(numbers: &[Number], links: &[Link]) -> Vec<Link> {
     let is_number = |id: u64| numbers.iter().any(|n| n.0 == id);
@@ -294,9 +353,10 @@ fn settle_numbers(
     links: &[Link],
     outside: &dyn Fn(u64, &[String]) -> Option<ValueKind>,
 ) {
-    for (_, number, _) in numbers.iter_mut() {
+    for (id, number, _) in numbers.iter_mut() {
         number.kind = None;
         number.operands = [None; 2];
+        super::formula::open_linked_inputs(number, *id, links);
     }
     let ids: Vec<u64> = numbers.iter().map(|n| n.0).collect();
     let is_number = |id: u64| ids.contains(&id);
@@ -372,11 +432,12 @@ fn settle_numbers(
 /// see [`settle_numbers`]. A link whose ends no longer fit together, after an operation
 /// changed, goes. Whether any kind changed, and whether a link went.
 pub(super) fn refresh_kinds(nodes: &mut [Node], links: &mut Vec<Link>) -> (bool, bool) {
+    let dropped = super::formula::drop_unlinked_inputs(nodes, links);
     let mut numbers: Vec<Number> = (nodes.iter())
         .filter_map(|n| n.as_number().map(|(b, switch)| (n.id, b.clone(), switch)))
         .collect();
     if numbers.is_empty() {
-        return (false, false);
+        return (dropped, false);
     }
     let mut removed = false;
     loop {
@@ -385,7 +446,7 @@ pub(super) fn refresh_kinds(nodes: &mut [Node], links: &mut Vec<Link>) -> (bool,
             value_kind(nodes, id, path)
         });
         let fits = |l: &Link| {
-            if !at_numbers.contains(l) {
+            if !at_numbers.contains(l) || from_formula(&numbers, l) {
                 return true;
             }
             let outside = |id, path: &[String]| value_kind(nodes, id, path);
@@ -402,14 +463,49 @@ pub(super) fn refresh_kinds(nodes: &mut [Node], links: &mut Vec<Link>) -> (bool,
         }
         removed = true;
     }
-    let mut changed = false;
+    // The result of a formula linked to a number of another unit keeps its link, as the
+    // formula is being written, and gives nothing until the units fit.
+    let outside = |id, path: &[String]| value_kind(nodes, id, path);
+    let mut conflicts: Vec<(u64, String)> = Vec::new();
+    for l in number_links(&numbers, links) {
+        if !from_formula(&numbers, &l) {
+            continue;
+        }
+        let given = kind_at(&numbers, &outside, l.source, &l.item);
+        let taken = kind_at(&numbers, &outside, l.target, links::slot(&l));
+        if let (Some(given), Some(taken)) = (given, taken)
+            && !convertible(given, taken)
+            && !conflicts.iter().any(|(id, _)| *id == l.source)
+        {
+            let name = (nodes.iter().find(|n| n.id == l.target)).map_or("", |n| n.name.as_str());
+            conflicts.push((
+                l.source,
+                format!(
+                    "the formula gives a {}, and its Result goes to {} of {name}, a {}",
+                    given.describe(),
+                    parameter_label(nodes, l.target, links::slot(&l)),
+                    taken.describe()
+                ),
+            ));
+        }
+    }
+    for (id, why) in conflicts {
+        if let Some((_, number, _)) = numbers.iter_mut().find(|n| n.0 == id)
+            && let Some(formula) = &mut number.formula
+            && formula.problem.is_none()
+        {
+            formula.problem = Some(why);
+        }
+    }
+    let mut changed = dropped;
     for (id, new, _) in numbers {
         if let Some((old, _)) =
             (nodes.iter_mut().find(|n| n.id == id)).and_then(Node::as_number_mut)
-            && (old.kind, old.operands) != (new.kind, new.operands)
+            && (old.kind, old.operands, &old.formula) != (new.kind, new.operands, &new.formula)
         {
             old.kind = new.kind;
             old.operands = new.operands;
+            old.formula = new.formula;
             changed = true;
         }
     }
