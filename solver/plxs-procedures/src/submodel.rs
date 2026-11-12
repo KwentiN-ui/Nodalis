@@ -5,7 +5,8 @@
 //! element of the global mesh, its natural coordinates found by Newton's method on the
 //! element's isoparametric map, and the global displacements of the last increment of step
 //! `n` are interpolated with the element's shape functions. A node outside the global mesh
-//! takes the element it is closest to in natural coordinates (extrapolation), with a warning.
+//! takes the displacement of the nearest point of the global mesh, with a warning (no
+//! extrapolation: the quadratic shape functions grow quickly beyond their element).
 //!
 //! The global results come from the ASCII `.frd` file named by `INPUT`, relative to the
 //! job's directory; its solid elements (also the expanded ones of shells, beams and plane
@@ -171,57 +172,174 @@ fn outside(family: Family, p: [f64; 3]) -> f64 {
     }
 }
 
-/// Natural coordinates of `x` in an element (Newton on the isoparametric map).
-fn natural(family: Family, coords: &[[f64; 3]], x: [f64; 3]) -> Option<[f64; 3]> {
+/// The nearest point of an element's natural domain to `p`.
+fn project(family: Family, p: [f64; 3]) -> [f64; 3] {
+    match family {
+        Family::Hex8 | Family::Hex20 => p.map(|v| v.clamp(-1.0, 1.0)),
+        Family::Tet4 | Family::Tet10 => {
+            let [a, b, c] = simplex(&[p[0], p[1], p[2]]);
+            [a, b, c]
+        }
+        Family::Wedge6 | Family::Wedge15 => {
+            let [a, b] = simplex(&[p[0], p[1]]);
+            [a, b, p[2].clamp(-1.0, 1.0)]
+        }
+    }
+}
+
+/// Euclidean projection onto `{v >= 0, sum(v) <= 1}`.
+fn simplex<const N: usize>(p: &[f64; N]) -> [f64; N] {
+    let clamped = p.map(|v| v.max(0.0));
+    if clamped.iter().sum::<f64>() <= 1.0 {
+        return clamped;
+    }
+    // Onto the face sum(v) = 1: v = max(p - t, 0) with t chosen so the sum is one.
+    let mut sorted = *p;
+    sorted.sort_by(|a, b| b.total_cmp(a));
+    let mut t = 0.0;
+    let mut sum = 0.0;
+    for (k, v) in sorted.iter().enumerate() {
+        sum += v;
+        let candidate = (sum - 1.0) / (k + 1) as f64;
+        if v - candidate > 0.0 {
+            t = candidate;
+        }
+    }
+    p.map(|v| (v - t).max(0.0))
+}
+
+/// The position of natural coordinates `p` and the Jacobian `dx/dp` there.
+fn map(
+    family: Family,
+    coords: &[[f64; 3]],
+    p: [f64; 3],
+    n: &mut [f64],
+    dn: &mut [[f64; 3]],
+) -> ([f64; 3], [[f64; 3]; 3]) {
+    family.shape(p, n, dn);
+    let mut x = [0.0; 3];
+    let mut j = [[0.0; 3]; 3];
+    for (i, c) in coords.iter().enumerate() {
+        for d in 0..3 {
+            x[d] += n[i] * c[d];
+            for k in 0..3 {
+                j[d][k] += c[d] * dn[i][k];
+            }
+        }
+    }
+    (x, j)
+}
+
+/// Solves `j dp = r` (Cramer's rule), `None` for a singular `j`.
+fn solve3(j: [[f64; 3]; 3], r: [f64; 3]) -> Option<[f64; 3]> {
+    let det3 = |a: [[f64; 3]; 3]| {
+        a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
+            - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
+            + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0])
+    };
+    let det = det3(j);
+    if !det.is_finite() || det.abs() < 1e-300 {
+        return None;
+    }
+    let column = |col: usize| {
+        let mut a = j;
+        for d in 0..3 {
+            a[d][col] = r[d];
+        }
+        det3(a) / det
+    };
+    Some([column(0), column(1), column(2)])
+}
+
+fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+    (0..3).map(|d| (a[d] - b[d]).powi(2)).sum::<f64>().sqrt()
+}
+
+/// The point of an element closest to `x`: its natural coordinates (always inside the
+/// element's domain) and the physical distance to `x` (zero for a point in the element).
+///
+/// Newton's method on the isoparametric map finds the natural coordinates of a point in
+/// the element. A point outside, or one Newton does not converge for, takes the nearest
+/// point of the element instead: Newton steps projected onto the natural domain, each one
+/// halved until it brings the point closer. The displacement is then interpolated at that
+/// point of the element rather than extrapolated with the shape functions beyond their
+/// domain, where those of quadratic elements grow quickly and a node a little outside the
+/// global mesh would take a displacement far from any the global model has.
+fn closest(family: Family, coords: &[[f64; 3]], x: [f64; 3]) -> Option<([f64; 3], f64)> {
     let m = coords.len();
     let mut n = vec![0.0; m];
     let mut dn = vec![[0.0; 3]; m];
-    let mut p = match family {
+    let mut size = 0.0f64;
+    for c in coords {
+        size = size.max(distance(*c, coords[0]));
+    }
+    if size <= 0.0 {
+        return None;
+    }
+    let tolerance = 1e-10 * size;
+    let start = match family {
         Family::Hex8 | Family::Hex20 => [0.0; 3],
         Family::Tet4 | Family::Tet10 => [0.25; 3],
         Family::Wedge6 | Family::Wedge15 => [1.0 / 3.0, 1.0 / 3.0, 0.0],
     };
+
+    // Plain Newton: the point lies in the element when it converges inside the domain.
+    let mut p = start;
     for _ in 0..30 {
-        family.shape(p, &mut n, &mut dn);
-        let mut r = x;
-        let mut j = [[0.0; 3]; 3];
-        for i in 0..m {
-            for d in 0..3 {
-                r[d] -= n[i] * coords[i][d];
-                for k in 0..3 {
-                    j[d][k] += coords[i][d] * dn[i][k];
-                }
+        let (at, j) = map(family, coords, p, &mut n, &mut dn);
+        let r = [x[0] - at[0], x[1] - at[1], x[2] - at[2]];
+        if distance(at, x) < tolerance {
+            if outside(family, p) <= 1e-6 {
+                return Some((project(family, p), 0.0));
             }
+            break;
         }
-        let det = j[0][0] * (j[1][1] * j[2][2] - j[1][2] * j[2][1])
-            - j[0][1] * (j[1][0] * j[2][2] - j[1][2] * j[2][0])
-            + j[0][2] * (j[1][0] * j[2][1] - j[1][1] * j[2][0]);
-        if det.abs() < 1e-300 {
-            return None;
-        }
-        // Cramer's rule for J dp = r.
-        let solve = |col: usize| {
-            let mut a = j;
-            for d in 0..3 {
-                a[d][col] = r[d];
-            }
-            (a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
-                - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
-                + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]))
-                / det
-        };
-        let dp = [solve(0), solve(1), solve(2)];
+        let Some(dp) = solve3(j, r) else { break };
         for k in 0..3 {
             p[k] += dp[k];
         }
-        if dp.iter().map(|v| v.abs()).sum::<f64>() < 1e-12 {
-            return Some(p);
-        }
-        if p.iter().any(|v| !v.is_finite() || v.abs() > 1e3) {
-            return None;
+        if p.iter().any(|v| !v.is_finite() || v.abs() > 10.0) {
+            break;
         }
     }
-    Some(p)
+
+    // Outside (or no convergence): the nearest point of the element.
+    let mut p = start;
+    let (mut at, mut j) = map(family, coords, p, &mut n, &mut dn);
+    let mut d = distance(at, x);
+    for _ in 0..60 {
+        let r = [x[0] - at[0], x[1] - at[1], x[2] - at[2]];
+        // Gauss-Newton direction (the Newton step of the square Jacobian).
+        let Some(dp) = solve3(j, r) else { break };
+        let mut step = 1.0;
+        let mut improved = false;
+        for _ in 0..30 {
+            let trial = project(
+                family,
+                [
+                    p[0] + step * dp[0],
+                    p[1] + step * dp[1],
+                    p[2] + step * dp[2],
+                ],
+            );
+            let (trial_at, trial_j) = map(family, coords, trial, &mut n, &mut dn);
+            let trial_d = distance(trial_at, x);
+            if trial_d < d {
+                let moved = distance(trial, p);
+                p = trial;
+                at = trial_at;
+                j = trial_j;
+                d = trial_d;
+                improved = moved > 1e-12;
+                break;
+            }
+            step *= 0.5;
+        }
+        if !improved || d < tolerance {
+            break;
+        }
+    }
+    Some((p, if d < tolerance { 0.0 } else { d }))
 }
 
 /// Where a submodel node lies in the global mesh: element and shape function values.
@@ -229,12 +347,17 @@ fn natural(family: Family, coords: &[[f64; 3]], x: [f64; 3]) -> Option<[f64; 3]>
 struct Location {
     element: usize,
     weights: Vec<f64>,
-    outside: f64,
+    /// Distance to the global mesh, zero for a point in it.
+    distance: f64,
+    /// Whether the point lies noticeably outside the global mesh (more than a thousandth
+    /// of an element; the `.frd` rounds coordinates to six digits).
+    outside: bool,
 }
 
 impl GlobalResults {
     /// Locates points in the global mesh. Candidates come from a uniform grid of element
-    /// boxes; a point without an element whose box holds it tries all elements.
+    /// boxes. A point in no element of its cell takes the nearest element of the
+    /// neighbouring cells, or of all elements when none is within a cell's size.
     fn locate(&self, points: &[[f64; 3]]) -> Vec<Option<Location>> {
         let boxes: Vec<([f64; 3], [f64; 3])> = self
             .elements
@@ -276,16 +399,31 @@ impl GlobalResults {
         points
             .iter()
             .map(|&x| {
-                let near = grid.get(&(key(x[0]), key(x[1]), key(x[2])));
-                let mut best = self.best_in(near.map_or(&all[..], |v| &v[..]), x);
-                if best.as_ref().is_none_or(|b| b.outside > 1e-6) {
-                    let everywhere = self.best_in(&all, x);
-                    if everywhere
-                        .as_ref()
-                        .is_some_and(|e| best.as_ref().is_none_or(|b| e.outside < b.outside))
-                    {
-                        best = everywhere;
+                let at = [key(x[0]), key(x[1]), key(x[2])];
+                let mut best = grid
+                    .get(&(at[0], at[1], at[2]))
+                    .and_then(|near| self.best_in(near, x));
+                if best.as_ref().is_some_and(|b| b.distance == 0.0) {
+                    return best;
+                }
+                let mut around: Vec<usize> = Vec::new();
+                for i in -1..=1 {
+                    for j in -1..=1 {
+                        for k in -1..=1 {
+                            if let Some(near) = grid.get(&(at[0] + i, at[1] + j, at[2] + k)) {
+                                around.extend(near);
+                            }
+                        }
                     }
+                }
+                around.sort_unstable();
+                around.dedup();
+                best = self.best_in(&around, x);
+                if best.as_ref().is_none_or(|b| b.distance > cell) {
+                    best = self.best_in(&all, x);
+                }
+                if let Some(b) = best.as_mut() {
+                    b.outside = b.distance > 1e-3 * cell;
                 }
                 best
             })
@@ -303,18 +441,18 @@ impl GlobalResults {
             else {
                 continue;
             };
-            let Some(p) = natural(*family, &coords, x) else {
+            let Some((p, distance)) = closest(*family, &coords, x) else {
                 continue;
             };
-            let distance = outside(*family, p);
-            if best.as_ref().is_none_or(|b| distance < b.outside) {
+            if best.as_ref().is_none_or(|b| distance < b.distance) {
                 let mut n = vec![0.0; coords.len()];
                 let mut dn = vec![[0.0; 3]; coords.len()];
                 family.shape(p, &mut n, &mut dn);
                 best = Some(Location {
                     element: e,
                     weights: n,
-                    outside: distance,
+                    distance,
+                    outside: false,
                 });
                 if distance == 0.0 {
                     break;
@@ -362,7 +500,9 @@ impl SubmodelValues {
         })?;
         let global = read_global_frd(&String::from_utf8_lossy(&text))
             .map_err(|e| Error::input("*SUBMODEL", format!("{}: {e}", path.display())))?;
-        let mut outside = 0usize;
+        let mut outside = std::collections::HashSet::new();
+        let mut farthest = 0.0f64;
+        let mut located: HashMap<String, Vec<Option<Location>>> = HashMap::new();
         for (index, boundary) in step.boundaries.iter().enumerate() {
             let Some(global_step) = boundary.submodel_step else {
                 continue;
@@ -391,7 +531,12 @@ impl SubmodelValues {
                 .iter()
                 .map(|&i| model.nodes.coordinates[i as usize])
                 .collect();
-            for (node, location) in nodes.iter().zip(global.locate(&points)) {
+            // The boundary conditions of one region (one per degree of freedom) share
+            // their locations.
+            let locations = located
+                .entry(format!("{:?}", boundary.region))
+                .or_insert_with(|| global.locate(&points));
+            for (node, location) in nodes.iter().zip(locations.iter().cloned()) {
                 let Some(location) = location else {
                     return Err(Error::input(
                         "*SUBMODEL",
@@ -401,8 +546,9 @@ impl SubmodelValues {
                         ),
                     ));
                 };
-                if location.outside > 1e-6 {
-                    outside += 1;
+                if location.outside {
+                    outside.insert(*node);
+                    farthest = farthest.max(location.distance);
                 }
                 let element = &global.elements[location.element].1;
                 let mut u = [0.0; 3];
@@ -415,9 +561,10 @@ impl SubmodelValues {
                 values.insert((index, *node), u);
             }
         }
-        if outside > 0 {
+        if !outside.is_empty() {
             progress.event(ProgressEvent::Warning(format!(
-                "*SUBMODEL: {outside} node(s) lie outside the global mesh; their displacements are extrapolated from the nearest element"
+                "*SUBMODEL: {} node(s) lie outside the global mesh (up to {farthest:.3e} away); they take the displacements of the nearest point of the global mesh",
+                outside.len()
             )));
         }
         Ok(SubmodelValues { values })
@@ -496,8 +643,8 @@ mod tests {
             [2.2, 1.0, 1.3],
             [0.0, 1.0, 1.0],
         ];
-        let p = natural(Family::Hex8, &coords, [1.0, 0.5, 0.5]).unwrap();
-        assert_eq!(outside(Family::Hex8, p), 0.0);
+        let (p, distance) = closest(Family::Hex8, &coords, [1.0, 0.5, 0.5]).unwrap();
+        assert_eq!(distance, 0.0);
         let mut n = vec![0.0; 8];
         let mut dn = vec![[0.0; 3]; 8];
         Family::Hex8.shape(p, &mut n, &mut dn);
@@ -507,9 +654,96 @@ mod tests {
         assert!(
             (x[0] - 1.0).abs() < 1e-12 && (x[1] - 0.5).abs() < 1e-12 && (x[2] - 0.5).abs() < 1e-12
         );
+        // Outside: the nearest point of the face x = 2..2.2 at natural xi = 1.
+        let (p, distance) = closest(Family::Hex8, &coords, [3.0, 0.5, 0.5]).unwrap();
+        assert_eq!(outside(Family::Hex8, p), 0.0);
+        assert!((p[0] - 1.0).abs() < 1e-12);
+        assert!(distance > 0.8 && distance < 1.0, "{distance}");
+    }
+
+    /// A unit cube of one C3D20, its displacement one at a single midside node.
+    fn cube() -> GlobalResults {
+        let corners = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ];
+        let edges = [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
+        ];
+        let mut coords: Vec<[f64; 3]> = corners.to_vec();
+        for (a, b) in edges {
+            let (a, b): ([f64; 3], [f64; 3]) = (corners[a], corners[b]);
+            coords.push([
+                0.5 * (a[0] + b[0]),
+                0.5 * (a[1] + b[1]),
+                0.5 * (a[2] + b[2]),
+            ]);
+        }
+        let mut global = GlobalResults::default();
+        for (i, x) in coords.iter().enumerate() {
+            global.nodes.insert(i as u32 + 1, *x);
+        }
+        global.elements.push((Family::Hex20, (1..=20).collect()));
+        global
+    }
+
+    #[test]
+    fn a_node_outside_the_global_mesh_takes_the_nearest_point_not_an_extrapolation() {
+        let global = cube();
+        // Midside node 10 (between corners 2 and 3, at x = 1, y = 0.5, z = 0) moves.
+        let u = |id: u32| if id == 10 { 1.0 } else { 0.0 };
+        let interpolate = |x: [f64; 3]| {
+            let location = global.locate(&[x])[0].clone().unwrap();
+            let nodes = &global.elements[location.element].1;
+            let value: f64 = nodes
+                .iter()
+                .zip(&location.weights)
+                .map(|(&id, w)| w * u(id))
+                .sum();
+            (value, location.distance)
+        };
+        // In the element: the shape function itself.
+        let (inside, distance) = interpolate([1.0, 0.5, 0.0]);
+        assert_eq!(distance, 0.0);
+        assert!((inside - 1.0).abs() < 1e-12);
+        // Two element lengths beyond the face x = 1 the shape functions would give 3 there;
+        // the nearest point of the mesh is the node itself.
+        let (beyond, distance) = interpolate([3.0, 0.5, 0.0]);
+        assert!((distance - 2.0).abs() < 1e-9, "{distance}");
+        assert!((beyond - 1.0).abs() < 1e-9, "{beyond}");
+        // Just outside an edge, as a node of a curved local surface lies: close to the
+        // value on the edge, nowhere near an extrapolation.
+        let (near, distance) = interpolate([1.01, 0.25, -0.01]);
+        assert!(distance > 0.0 && distance < 0.02);
         assert!(
-            natural(Family::Hex8, &coords, [3.0, 0.5, 0.5])
-                .is_some_and(|p| outside(Family::Hex8, p) > 0.0)
+            global.locate(&[[1.01, 0.25, -0.01]])[0]
+                .as_ref()
+                .unwrap()
+                .outside
         );
+        assert!(
+            !global.locate(&[[1.0 + 1e-7, 0.25, 0.0]])[0]
+                .as_ref()
+                .unwrap()
+                .outside
+        );
+        assert!((near - 0.75).abs() < 1e-9, "{near}");
     }
 }
