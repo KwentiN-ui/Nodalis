@@ -1,7 +1,8 @@
 //! The CAD tools of the Geometry workspace: Defeature, Split by Plane and Split around Hole
 //! applied to the geometry of the analysis right away, in the editor of the CAD Operation
-//! block. Unlike the block they keep no history: the analysis takes the changed geometry as
-//! if it had been imported so, and the selections on it follow the changed shapes.
+//! block. Unlike the block they keep no history of their own: the analysis takes the changed
+//! geometry as if it had been imported so, and the selections on it follow the changed
+//! shapes. Edit > Undo takes the change back.
 
 use super::*;
 use crate::cad_editor::{CadEditorResult, CadOperationEditor};
@@ -107,6 +108,7 @@ impl AnalysisWindow {
         }
         // The selections follow the shapes by their signatures, which the input has.
         if let Some(model) = &mut self.workbench.model {
+            crate::undo::before_shape_change(model);
             model.geometry = Some(input);
         }
         self.take_geometry(Some(geometry), true);
