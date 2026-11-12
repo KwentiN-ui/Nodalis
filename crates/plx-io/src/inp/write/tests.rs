@@ -12581,8 +12581,10 @@ fn solver_bends_a_shell_plate_of_two_bodies_like_one() {
     let Some(frd) = run_solver("schale-compound", &text) else {
         return;
     };
-    let Some(reference) = run_solver("schale", &write_inp(&whole, &shell_plate().1, "").unwrap())
-    else {
+    let Some(reference) = run_solver(
+        "schale-ganz",
+        &write_inp(&whole, &shell_plate().1, "").unwrap(),
+    ) else {
         return;
     };
     let mean = |frd: &FrdImport, mesh: &FeMesh| {
