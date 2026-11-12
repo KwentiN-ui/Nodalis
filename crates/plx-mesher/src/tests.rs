@@ -3255,3 +3255,37 @@ fn defeaturing_a_bracket_by_size_removes_what_is_smaller() {
     // Nothing; the two chamfers; and the outer fillets; and the inner one.
     assert_eq!(removed, [0, 2, 4, 5]);
 }
+
+#[test]
+fn drawn_edges_run_through_the_nodes_of_the_face_triangulation() {
+    if !gmsh_available() {
+        return;
+    }
+    let geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless)
+        .unwrap()
+        .geometry;
+    let display = tessellate(&geometry).unwrap();
+    let mesh = &display.mesh;
+    let key = |p: [f64; 3]| p.map(|c| (c * 1e6).round() as i64);
+    let face_nodes: std::collections::HashSet<[i64; 3]> = mesh
+        .elements()
+        .iter()
+        .filter(|e| matches!(display.entity(e.id), Some(CadEntity::Face(_))))
+        .flat_map(|e| e.nodes.iter().map(|&n| key(mesh.node(n).unwrap())))
+        .collect();
+    let mut checked = 0;
+    for element in mesh.elements() {
+        if !matches!(display.entity(element.id), Some(CadEntity::Edge(_))) {
+            continue;
+        }
+        for &node in &element.nodes {
+            assert!(
+                face_nodes.contains(&key(mesh.node(node).unwrap())),
+                "Edge {:?} has a point off the triangulation",
+                display.entity(element.id)
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0);
+}
