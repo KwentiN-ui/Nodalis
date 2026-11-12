@@ -3294,3 +3294,52 @@ fn geometries_put_together_keep_their_parts_and_entities() {
     let twice = merge_geometries(&[one, blocks]).unwrap();
     assert_eq!(part_names(&twice.geometry).unwrap().len(), 3);
 }
+
+#[test]
+fn transformed_geometry_keeps_parts_and_tags() {
+    if !gmsh_available() {
+        return;
+    }
+    use plx_mesh::MeshTransform;
+    let blocks = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless)
+        .unwrap()
+        .geometry;
+    let moved = transform_geometry(&blocks, &MeshTransform::Translate([100.0, 0.0, 0.0])).unwrap();
+    assert_eq!(part_names(&moved).unwrap(), part_names(&blocks).unwrap());
+    assert_eq!(moved.signatures.len(), blocks.signatures.len());
+    for (a, b) in blocks.signatures.iter().zip(&moved.signatures) {
+        assert_eq!(a.entity, b.entity);
+        assert!((b.centroid[0] - a.centroid[0] - 100.0).abs() < 1e-6);
+        assert!((b.size - a.size).abs() < 1e-6 * a.size.max(1.0));
+    }
+    let turned = MeshTransform::Rotate {
+        point: [0.0; 3],
+        axis: [0.0, 0.0, 1.0],
+        angle: 90.0,
+    };
+    let turned = transform_geometry(&blocks, &turned).unwrap();
+    let mirrored = MeshTransform::Mirror {
+        point: [0.0; 3],
+        normal: [1.0, 0.0, 0.0],
+    };
+    let mirrored = transform_geometry(&blocks, &mirrored).unwrap();
+    let scaled = MeshTransform::Scale {
+        center: [0.0; 3],
+        factors: [2.0; 3],
+    };
+    let scaled = transform_geometry(&blocks, &scaled).unwrap();
+    for g in [&turned, &mirrored, &scaled] {
+        assert_eq!(part_names(g).unwrap().len(), 2);
+    }
+    // A point at (30, 10, 30) of the bar turned to (-10, 30, 30), mirrored to (-30, ...).
+    let reach = |g: &Geometry, k: usize, min: bool| {
+        (g.signatures.iter())
+            .map(|s| if min { s.min[k] } else { s.max[k] })
+            .fold(if min { f64::MAX } else { f64::MIN }, |a, b| {
+                if min { a.min(b) } else { a.max(b) }
+            })
+    };
+    assert!((reach(&turned, 1, false) - 30.0).abs() < 1e-6);
+    assert!((reach(&mirrored, 0, true) + 30.0).abs() < 1e-6);
+    assert!((reach(&scaled, 2, false) - 60.0).abs() < 1e-6);
+}

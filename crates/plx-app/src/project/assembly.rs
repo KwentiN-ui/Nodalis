@@ -1,6 +1,6 @@
 //! The Geometry and Mesh rows of an analysis as collections: the geometries, single parts or
 //! meshes of several links put together into one assembly, like an assembly read from a
-//! file. A part that a CAD operation changed takes the place of the same part of the file
+//! file. A part that a CAD operation or a transform changed takes the place of the same part of the file
 //! linked unchanged, so that the assembly does not have it twice.
 
 use plx_mesher::MergedGeometry;
@@ -61,8 +61,8 @@ impl ProjectApp {
                 found.extend(parts.into_iter().map(|p| (source, p)));
                 (found, false)
             }
-            Kind::CadOperation | Kind::Analysis => {
-                let mut changed = node.kind() == Kind::CadOperation;
+            Kind::CadOperation | Kind::Transform | Kind::Analysis => {
+                let mut changed = node.kind() != Kind::Analysis;
                 for (from, parts) in pieces(&self.links, source) {
                     let (origins, derived) = self.origins(from, parts.as_deref(), depth + 1);
                     found.extend(origins);

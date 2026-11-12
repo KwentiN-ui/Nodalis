@@ -36,6 +36,7 @@ use crate::tree::TreeView;
 use crate::tree_icons::StepGlyph;
 use cad::{CAD_LENGTH, CadBlock};
 use deformed::{DEFORM_FACTOR, DEFORM_INCREMENT, DeformedBlock};
+use transform::{TransformBlock, TransformEditor};
 use visualize::{MeshPicture, PlotBlock, PlotView, PreviewBlock, PreviewView};
 
 mod assembly;
@@ -48,6 +49,7 @@ mod minimap;
 mod numbers;
 mod saving;
 mod series;
+mod transform;
 mod visualize;
 mod workspace;
 
@@ -67,6 +69,7 @@ enum Kind {
     RefineMesh,
     DeformedMesh,
     CadOperation,
+    Transform,
     Parameters,
     Measure,
     Study,
@@ -99,6 +102,7 @@ impl Kind {
             Self::RefineMesh => "refine mesh block",
             Self::DeformedMesh => "deformed mesh block",
             Self::CadOperation => "CAD operation block",
+            Self::Transform => "transform block",
             Self::Parameters => "parameters block",
             Self::Measure => "measure block",
             Self::Study => "parameter study",
@@ -151,6 +155,7 @@ enum Block {
     DeformedMesh(Box<DeformedBlock>),
     /// A fillet, chamfer or push/pull of the geometry linked to it.
     CadOperation(Box<CadBlock>),
+    Transform(Box<TransformBlock>),
     /// Named numbers that value links give to other blocks.
     Parameters(ParametersBlock),
     /// A key figure computed from the results of a step linked to it.
@@ -806,6 +811,7 @@ impl Node {
             Block::RefineMesh(_) => Kind::RefineMesh,
             Block::DeformedMesh(_) => Kind::DeformedMesh,
             Block::CadOperation(_) => Kind::CadOperation,
+            Block::Transform(_) => Kind::Transform,
             Block::Parameters(_) => Kind::Parameters,
             Block::Measure(_) => Kind::Measure,
             Block::Study(_) => Kind::Study,
@@ -905,6 +911,20 @@ impl Node {
     fn as_cad(&self) -> Option<&CadBlock> {
         match &self.block {
             Block::CadOperation(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    fn as_transform(&self) -> Option<&TransformBlock> {
+        match &self.block {
+            Block::Transform(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    fn as_transform_mut(&mut self) -> Option<&mut TransformBlock> {
+        match &mut self.block {
+            Block::Transform(t) => Some(t),
             _ => None,
         }
     }
@@ -1109,6 +1129,7 @@ impl Node {
             Block::Math(n) | Block::Switch(n) => n.units,
             Block::Plot(p) => p.units,
             Block::CadOperation(c) => c.units,
+            Block::Transform(t) => t.units,
             Block::Preview(_)
             | Block::MeshExport(_)
             | Block::Campbell(_)
@@ -1286,6 +1307,10 @@ impl Node {
                     CadBlock::new(block.operation, block.units, block.result, block.made_from);
                 Self::new(block.id, block.name, Block::CadOperation(Box::new(cad)))
             }
+            ProjectNode::Transform(block) => {
+                let transform = TransformBlock::new(block.transform, block.units);
+                Self::new(block.id, block.name, Block::Transform(Box::new(transform)))
+            }
             ProjectNode::Parameters(set) => {
                 let block = ParametersBlock {
                     units: set.units,
@@ -1437,6 +1462,13 @@ impl Node {
                     made_from: c.made_from,
                 }))
             }
+            Block::Transform(t) => ProjectNode::Transform(file::TransformBlock {
+                id,
+                name,
+                position,
+                units: t.units,
+                transform: t.transform,
+            }),
             Block::Parameters(p) => ProjectNode::Parameters(file::ParameterSet {
                 id,
                 name,
@@ -1598,6 +1630,9 @@ impl Node {
                 None,
                 None,
             ))),
+            Block::Transform(t) => {
+                Block::Transform(Box::new(TransformBlock::new(t.transform, t.units)))
+            }
             Block::Parameters(p) => Block::Parameters(ParametersBlock {
                 units: p.units,
                 parameters: p.parameters.clone(),
@@ -1690,6 +1725,7 @@ impl Node {
             Block::RefineMesh(r) => Some(r.model.data()),
             Block::DeformedMesh(d) => d.link_data(),
             Block::CadOperation(c) => c.link_data(),
+            Block::Transform(t) => t.link_data(),
             Block::MeshExport(e) => Some(e.model.data()),
             Block::Preview(p) => Some(p.model.data()),
             Block::File(f) => Some(f.model.data()),
@@ -1967,6 +2003,7 @@ enum Action {
     SetMeasurePoint(u64, &'static str, f64),
     /// A new CAD operation block at the position.
     AddCadOperation(egui::Pos2),
+    AddTransform(egui::Pos2),
     /// A new deformed mesh block at the position.
     AddDeformedMesh(egui::Pos2),
     /// The factor or the increment of a deformed mesh block changed in its block.
@@ -2102,6 +2139,7 @@ pub struct ProjectApp {
     mesh_block: Option<MeshBlockEditor>,
     /// The editor of a CAD operation block.
     cad_editor: Option<CadOperationEditor>,
+    transform_editor: Option<TransformEditor>,
     /// The 3D view of the CAD operation editor, made when it is first opened and kept for
     /// the next.
     cad_viewport: Option<crate::viewport::Viewport>,
@@ -2260,6 +2298,7 @@ impl ProjectApp {
             material_set: None,
             mesh_block: None,
             cad_editor: None,
+            transform_editor: None,
             cad_viewport: None,
             parameter_set: None,
             measure_editor: None,
@@ -4499,6 +4538,7 @@ impl ProjectApp {
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 return self.edit_cad(id);
             }
+            Some(Kind::Transform) => return self.edit_transform(id),
             Some(Kind::Parameters) => return self.edit_parameters(id),
             Some(Kind::Measure) => return self.edit_measure(id),
             Some(Kind::Study) => return self.edit_study(id),
@@ -4890,6 +4930,9 @@ impl ProjectApp {
         }
         if self.cad_editor.as_ref().is_some_and(|e| e.id == id) {
             self.cad_editor = None;
+        }
+        if self.transform_editor.as_ref().is_some_and(|e| e.id == id) {
+            self.transform_editor = None;
         }
         if self.parameter_set.as_ref().is_some_and(|e| e.id == id) {
             self.parameter_set = None;
@@ -5749,6 +5792,10 @@ impl ProjectApp {
                     (Kind::CadOperation, _) => {
                         cad::cad_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
                     }
+                    (Kind::Transform, _) => transform::transform_rows(
+                        n,
+                        incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
+                    ),
                     (Kind::Analysis, Some(status)) => block_rows(
                         status,
                         fe,
@@ -6774,6 +6821,10 @@ impl ProjectApp {
                 cad::take_cad_input(&mut self.nodes, &self.links, target);
                 continue;
             }
+            if (self.nodes.iter()).any(|n| n.id == target && n.kind() == Kind::Transform) {
+                transform::take_transform_input(&mut self.nodes, &self.links, target);
+                continue;
+            }
             let to_target: Vec<Link> = (self.links.iter())
                 .filter(|l| l.target == target)
                 .cloned()
@@ -7414,6 +7465,7 @@ impl ProjectApp {
             | Action::SetCadLength(..)
             | Action::SetMeasurePoint(..)
             | Action::AddCadOperation(_)
+            | Action::AddTransform(_)
             | Action::AddDeformedMesh(_)
             | Action::SetDeformFactor(..)
             | Action::SetDeformIncrement(..)
@@ -7508,6 +7560,9 @@ impl ProjectApp {
             }
             Action::AddCadOperation(pos) => {
                 self.add_cad_operation(pos);
+            }
+            Action::AddTransform(pos) => {
+                self.add_transform(pos);
             }
             Action::AddDeformedMesh(pos) => {
                 self.add_deformed_mesh(pos);
@@ -8161,6 +8216,7 @@ impl eframe::App for ProjectApp {
         self.material_set_window(&ctx);
         self.mesh_block_window(&ctx);
         self.cad_editor_window(&ctx);
+        self.transform_editor_window(&ctx);
         self.parameter_set_window(&ctx);
         self.measure_window(&ctx);
         self.study_window(&ctx);
@@ -8744,8 +8800,8 @@ fn block_rows(
         row.collection = true;
         row.tip.push_str(if row.path[0] == links::GEOMETRY {
             "\nA collection: link the geometries of several blocks, or single parts, to put \
-             them together into one assembly. A part a CAD operation changed takes the \
-             place of the same part linked unchanged."
+             them together into one assembly. A part a CAD operation or a transform changed \
+             takes the place of the same part linked unchanged."
         } else {
             "\nA collection: link the meshes of several blocks to put them together into one \
              assembly, each with its own nodes."
@@ -9064,6 +9120,7 @@ fn stale_meshes(nodes: &[Node], links: &[Link], id: u64) -> Vec<String> {
                 (n.as_deformed()).is_some_and(|d| d.state() != CellState::UpToDate)
             }
             Kind::CadOperation => n.as_cad().is_some_and(|c| c.state() != CellState::UpToDate),
+            Kind::Transform => (n.as_transform()).is_some_and(|t| t.state() == CellState::Failed),
             _ => false,
         })
         .map(|n| n.name.clone())
@@ -10297,6 +10354,7 @@ enum BlockKind {
     RefineMesh,
     DeformedMesh,
     CadOperation,
+    Transform,
     Parameters,
     Math,
     Switch,
@@ -10320,6 +10378,7 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::RefineMesh,
         BlockKind::DeformedMesh,
         BlockKind::CadOperation,
+        BlockKind::Transform,
         BlockKind::Parameters,
         BlockKind::Math,
         BlockKind::Switch,
@@ -10363,7 +10422,7 @@ impl BlockKind {
                 ("Mesh", primitive.label(), keywords, mesh_tip(primitive))
             }
             Self::RefineMesh => (
-                "Mesh",
+                "Modify",
                 "Refine Mesh",
                 "finer coarser factor divisions element size convergence study",
                 "Adds a block that makes the mesh linked to it again, finer or coarser by a \
@@ -10381,8 +10440,17 @@ impl BlockKind {
                  results of a buckle step to it, and its mesh to a nonlinear static analysis, \
                  for a buckling mode as the imperfection.",
             ),
+            Self::Transform => (
+                "Modify",
+                "Transform",
+                "translate move rotate turn mirror reflect scale position place assembly \
+                 geometry mesh",
+                "Adds a block that translates, rotates, mirrors or scales the geometry or the \
+                 mesh linked to it as a whole, and gives it on to analyses: e.g. a part placed \
+                 twice in an assembly, or a mirrored half.",
+            ),
             Self::CadOperation => (
-                "Geometry",
+                "Modify",
                 "CAD Operation",
                 "fillet chamfer round bevel edge radius push pull offset face move thickness \
                  cad geometry modify parametric opencascade",
@@ -10498,6 +10566,7 @@ impl BlockKind {
             Self::RefineMesh => Action::AddRefineMesh(pos),
             Self::DeformedMesh => Action::AddDeformedMesh(pos),
             Self::CadOperation => Action::AddCadOperation(pos),
+            Self::Transform => Action::AddTransform(pos),
             Self::Parameters => Action::AddParameters(pos),
             Self::Math => Action::AddMath(pos),
             Self::Switch => Action::AddSwitch(pos),
@@ -11175,6 +11244,11 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::CadOperation, ink);
                 icon.on_hover_text("Changes the geometry linked to it, e.g. rounds edges");
             }
+            Kind::Transform => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Transform, ink);
+                icon.on_hover_text("Moves, turns, mirrors or scales the geometry or mesh");
+            }
             Kind::Materials => {
                 let ink = ui.visuals().text_color();
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Materials, ink);
@@ -11327,6 +11401,7 @@ impl SnarlViewer<u64> for Viewer {
             Kind::RefineMesh => "Its factor makes the mesh finer or coarser.",
             Kind::DeformedMesh => "Its mode and factor are edited in the block.",
             Kind::CadOperation => "Double-click picks the edges and shows the result.",
+            Kind::Transform => "Double-click edits the transform.",
             Kind::MeshExport => "Double-click chooses the file to write.",
             Kind::Parameters => "Double-click adds, renames or removes parameters.",
             Kind::Measure => "Double-click chooses what it measures.",

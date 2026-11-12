@@ -17,6 +17,7 @@ impl BlockTile {
             Self::RectangleMesh => BlockKind::Mesh(MeshPrimitive::default_rectangle()),
             Self::RefineMesh => BlockKind::RefineMesh,
             Self::CadOperation => BlockKind::CadOperation,
+            Self::Transform => BlockKind::Transform,
             Self::File => BlockKind::File,
             Self::Parameters => BlockKind::Parameters,
             Self::Math => BlockKind::Math,
