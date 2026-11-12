@@ -27,6 +27,19 @@ use crate::equations::{Equations, in_increment};
 use crate::fields::write_increment;
 use crate::{Procedure, ProcedureContext, StepOutcome};
 
+/// Share of the residual limit the linear solve of a Newton iteration aims below.
+const FORCING_SHARE: f64 = 0.1;
+/// Loosest relative tolerance of the linear solve of a Newton iteration.
+const FORCING_LOOSEST: f64 = 1e-3;
+/// Tightest relative tolerance of the linear solve of a Newton iteration.
+const FORCING_TIGHTEST: f64 = 1e-10;
+
+/// Whether the linear solves of the Newton iterations are only as exact as needed
+/// (`PLXS_INEXACT_NEWTON=0` switches back to full accuracy).
+fn inexact_newton() -> bool {
+    std::env::var("PLXS_INEXACT_NEWTON").map_or(true, |v| v != "0")
+}
+
 /// CalculiX's `*CONTROLS` defaults (the manual's section on convergence criteria).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Controls {
@@ -191,7 +204,9 @@ impl Procedure for NonlinearStatic {
         }
         let step = &step;
         let controls = Controls::of_step(step);
-        let mut equations = Equations::new(solver).for_model(ctx.model);
+        let mut equations = Equations::new(solver)
+            .for_model(ctx.model)
+            .keeping_factors();
 
         let period = increments.period();
         if period <= 0.0 {
@@ -1032,6 +1047,14 @@ impl NonlinearStatic {
                 })
                 .unwrap_or_default();
             let solved = if unsymmetric.is_empty() {
+                // Inexact Newton: the correction only has to bring the residual a tenth
+                // below its limit, everything beyond is redone by the next iteration
+                // anyway. Without a force scale the correction decides, solved in full.
+                let forcing = (scale > 0.0 && r_max > 0.0 && inexact_newton()).then(|| {
+                    (FORCING_SHARE * controls.residual * scale / r_max)
+                        .clamp(FORCING_TIGHTEST, FORCING_LOOSEST)
+                });
+                equations.set_tolerance(forcing);
                 let mut dv = residual;
                 let mut sink = crate::equations::FirstOrWarnings {
                     inner: &mut *progress,
