@@ -246,6 +246,44 @@ impl ElementType {
         }
     }
 
+    /// The edges of a quadratic continuum element in the order of its midside nodes, which
+    /// follow its corner nodes: the local numbers of the two corners at the ends of each.
+    /// Empty for linear elements and for structural elements (beams, shells, membranes).
+    pub fn midside_edges(self) -> &'static [[usize; 2]] {
+        use ElementType::*;
+        match self {
+            C3D10 | C3D10T => &[[0, 1], [1, 2], [2, 0], [0, 3], [1, 3], [2, 3]],
+            C3D15 => &[
+                [0, 1],
+                [1, 2],
+                [2, 0],
+                [3, 4],
+                [4, 5],
+                [5, 3],
+                [0, 3],
+                [1, 4],
+                [2, 5],
+            ],
+            C3D20 | C3D20R => &[
+                [0, 1],
+                [1, 2],
+                [2, 3],
+                [3, 0],
+                [4, 5],
+                [5, 6],
+                [6, 7],
+                [7, 4],
+                [0, 4],
+                [1, 5],
+                [2, 6],
+                [3, 7],
+            ],
+            CPS6 | CPE6 | CAX6 => &[[0, 1], [1, 2], [2, 0]],
+            CPS8 | CPS8R | CPE8 | CPE8R | CAX8 | CAX8R => &[[0, 1], [1, 2], [2, 3], [3, 0]],
+            _ => &[],
+        }
+    }
+
     /// Whether the element has midside nodes.
     pub fn is_quadratic(self) -> bool {
         use ElementType::*;

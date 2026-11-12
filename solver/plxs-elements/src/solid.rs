@@ -1130,6 +1130,23 @@ mod tests {
     }
 
     #[test]
+    fn midside_nodes_lie_in_the_middle_of_their_edges() {
+        for kind in all_kinds() {
+            let e = solid(kind).unwrap();
+            let nodes = e.family.node_coordinates();
+            let edges = kind.midside_edges();
+            assert_eq!(e.family.is_quadratic(), !edges.is_empty(), "{kind}");
+            let corners = nodes.len() - edges.len();
+            for (k, &[a, b]) in edges.iter().enumerate() {
+                assert!(a < corners && b < corners, "{kind}");
+                let middle: [f64; 3] = std::array::from_fn(|c| 0.5 * (nodes[a][c] + nodes[b][c]));
+                let off = (nodes[corners + k].iter().zip(middle)).map(|(x, m)| (x - m).abs());
+                assert!(off.fold(0.0, f64::max) < 1e-12, "{kind} edge {k}");
+            }
+        }
+    }
+
+    #[test]
     fn a_folded_element_is_inverted() {
         for kind in all_kinds() {
             let e = solid(kind).unwrap();

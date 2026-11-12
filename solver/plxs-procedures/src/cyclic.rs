@@ -162,6 +162,7 @@ pub(crate) fn cyclic_frequency(
                     .map(|&d| ctx.model.nodes.coordinates[(d as usize % total_dofs) / 3])
                     .collect(),
                 body: Vec::new(),
+                midside: Vec::new(),
             },
             progress,
         )?;
