@@ -30,6 +30,14 @@ use crate::{Pattern, SparseMatrix};
 
 /// The iteration stops when `|r| <= TOLERANCE |b|` (Euclidean norms).
 pub const TOLERANCE: f64 = 1e-12;
+/// A solve that stopped at the relative residual `residual` after `iterations`, as the
+/// iterations a solve to [`TOLERANCE`] would have taken at the same rate: what the
+/// hierarchy is judged by, whatever tolerance each solve was asked for.
+fn to_full_tolerance(iterations: usize, residual: f64) -> usize {
+    let digits = (-residual.log10()).clamp(1.0, 16.0);
+    let full = -TOLERANCE.log10();
+    (iterations as f64 * full / digits).ceil() as usize
+}
 /// `PLXS_AMG_REBUILD=1` rebuilds the hierarchy at every factorization (measurements).
 fn reuse_disabled() -> bool {
     std::env::var("PLXS_AMG_REBUILD").is_ok()
@@ -97,6 +105,8 @@ pub struct PcgSolver {
     shift: f64,
     factorized: bool,
     max_iterations: Option<usize>,
+    /// The relative residual a solve stops at ([`TOLERANCE`] unless set).
+    tolerance: f64,
     /// Whether a solve gives up early when the residual stalls ([`Stall`]): when another
     /// solver stands by.
     give_up_on_stall: bool,
@@ -139,6 +149,7 @@ impl Default for PcgSolver {
             shift: 0.0,
             factorized: false,
             max_iterations: None,
+            tolerance: TOLERANCE,
             give_up_on_stall: false,
             iterations_after_build: AtomicUsize::new(0),
             last_iterations: AtomicUsize::new(0),
@@ -350,6 +361,13 @@ impl PcgSolver {
         self.max_iterations = Some(max);
     }
 
+    /// The relative residual `|r| / |b|` the solves from now on stop at; [`TOLERANCE`] by
+    /// default. A Newton iteration needs far fewer digits of its correction than a linear
+    /// step of its result.
+    pub fn set_tolerance(&mut self, tolerance: f64) {
+        self.tolerance = tolerance.clamp(TOLERANCE, 0.1);
+    }
+
     /// Gives a solve up as soon as the residual stalls ([`Stall`]) instead of iterating
     /// up to the limit: for a caller that has another solver to fall back on.
     pub fn set_give_up_on_stall(&mut self, give_up: bool) {
@@ -420,14 +438,16 @@ impl PcgSolver {
         let mut max_iterations = self
             .max_iterations
             .unwrap_or_else(|| n.clamp(1000, 100_000));
-        let tolerance = loose.map_or(TOLERANCE, |(tolerance, _)| tolerance);
+        let tolerance = loose.map_or(self.tolerance, |(tolerance, _)| tolerance);
         if let Some((_, limit)) = loose {
             max_iterations = limit.max(1);
         } else if self.reused {
             // A kept hierarchy that no longer fits its matrix shows soon: give up early,
             // the caller rebuilds it ([`Self::rebuild_preconditioner`]).
             let after_build = self.iterations_after_build.load(Ordering::Relaxed);
-            max_iterations = max_iterations.min((3 * after_build).max(100));
+            let share = tolerance.log10() / TOLERANCE.log10();
+            let expected = (after_build as f64 * share).ceil() as usize;
+            max_iterations = max_iterations.min((3 * expected).max(100));
         }
         let trace = std::env::var("PLXS_PCG_TRACE").is_ok();
         let cancel = plxs_core::CancelToken::current();
@@ -481,7 +501,7 @@ impl PcgSolver {
             match gpu.solve(
                 &b,
                 &mut x,
-                TOLERANCE,
+                tolerance,
                 max_iterations,
                 &cancelled,
                 &mut |i, r| {
@@ -749,10 +769,10 @@ impl PcgSolver {
         seconds: f64,
     ) -> PcgStats {
         self.unpad(x, rhs);
-        self.last_iterations.store(iterations, Ordering::Relaxed);
+        let full = to_full_tolerance(iterations, residual);
+        self.last_iterations.store(full, Ordering::Relaxed);
         if self.iterations_after_build.load(Ordering::Relaxed) == 0 {
-            self.iterations_after_build
-                .store(iterations, Ordering::Relaxed);
+            self.iterations_after_build.store(full, Ordering::Relaxed);
         }
         if iterations > 0 {
             self.seconds_per_iteration
