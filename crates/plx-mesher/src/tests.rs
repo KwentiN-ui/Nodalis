@@ -1,7 +1,7 @@
 //! These tests need the Gmsh library, see [`gmsh::candidates`]. Without it they pass with a
 //! note, unless `NODALIS_REQUIRE_GMSH` is set, as in the CI.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use plx_model::{Algorithm2d, Algorithm3d, MeshSetupItem, MeshSetupKind, UnitSystem};
 
@@ -3490,4 +3490,59 @@ fn drawn_edges_run_through_the_nodes_of_the_face_triangulation() {
         }
     }
     assert!(checked > 0);
+}
+
+/// The largest distance of a drawn edge segment's middle from its CAD curve, against the
+/// diagonal of the geometry.
+fn edge_stray(path: &Path) -> f64 {
+    let geometry = import_cad(path, UnitSystem::Unitless).unwrap().geometry;
+    let display = tessellate(&geometry).unwrap();
+    let mesh = &display.mesh;
+    let file = TempFile::with_contents("brep", &geometry.brep).unwrap();
+    with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        let (min, max) = gmsh.bounding_box()?;
+        let diagonal = (0..3)
+            .map(|k| (max[k] - min[k]).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let fine = Deflection {
+            linear: diagonal * 1e-6,
+            angular: 0.01,
+        };
+        let mut samples = HashMap::new();
+        let mut worst: f64 = 0.0;
+        for element in mesh.elements() {
+            let Some(CadEntity::Edge(curve)) = display.entity(element.id) else {
+                continue;
+            };
+            if let std::collections::hash_map::Entry::Vacant(entry) = samples.entry(curve) {
+                entry.insert(curve_samples(gmsh, curve, fine)?);
+            }
+            let (parameters, points) = &samples[&curve];
+            let (a, b) = (
+                mesh.node(element.nodes[0]).unwrap(),
+                mesh.node(element.nodes[1]).unwrap(),
+            );
+            let middle = [0, 1, 2].map(|k| 0.5 * (a[k] + b[k]));
+            let (_, gap) = polyline_parameter(parameters, points, middle).unwrap();
+            worst = worst.max(gap / diagonal);
+        }
+        Ok(worst)
+    })
+    .unwrap()
+}
+
+#[test]
+fn drawn_edges_follow_their_curve() {
+    if !gmsh_available() {
+        return;
+    }
+    // The pendulum's round edges were drawn as straight chords across its bores, the
+    // triangulation nodes along them being dropped for a parameter Gmsh left undefined.
+    let stray = edge_stray(&testdata("seilpendel.step"));
+    assert!(
+        stray < 1e-4,
+        "Drawn edges stray {stray} of the diagonal from their curves"
+    );
 }
