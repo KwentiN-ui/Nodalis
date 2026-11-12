@@ -943,7 +943,14 @@ impl LineElements {
             }
         }
         // A node of a truss has translations only; a beam or solid at the same node adds
-        // its rotations back.
+        // its rotations back. Without line sections there are neither.
+        if types.is_empty() {
+            return Ok(Self {
+                types,
+                truss_nodes: BTreeSet::new(),
+                beam_nodes: BTreeSet::new(),
+            });
+        }
         let mut truss_nodes = BTreeSet::new();
         let mut other_nodes = BTreeSet::new();
         let mut beam_nodes = BTreeSet::new();
@@ -1179,10 +1186,15 @@ impl<'a> Sets<'a> {
                 .parts
                 .iter()
                 .find(|p| p.name.eq_ignore_ascii_case(name));
+            // A lookup, as a part's set holds all its elements: searching the part's list for
+            // each one takes seconds on a large mesh.
+            let in_part: std::collections::HashSet<ElementId> = part
+                .map(|p| p.elements.iter().copied().collect())
+                .unwrap_or_default();
             let extra: Vec<ElementId> = ids
                 .iter()
                 .copied()
-                .filter(|id| part.is_none_or(|p| !p.elements.contains(id)))
+                .filter(|id| !in_part.contains(id))
                 .collect();
             if part.is_none() || !extra.is_empty() {
                 sets.element_sets.push((name.clone(), Members::Ids(extra)));

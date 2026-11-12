@@ -1757,6 +1757,7 @@ impl Node {
                 data.results.as_ref(),
                 &analysis.upstream,
                 analysis.solving,
+                analysis.status.as_ref(),
             ));
         }
     }
@@ -2269,6 +2270,9 @@ pub struct ProjectApp {
     /// Whether links have to bring their targets up to date: something changed that they
     /// may take.
     sync_due: bool,
+    /// The count of solution fingerprints made in the background as last seen, see
+    /// [`crate::solve_fingerprint::generation`].
+    fingerprints_seen: u64,
     /// What the user changed in the project window, to undo and redo it.
     history: history::History,
     /// Global results being written for submodels, by the folder they are written to;
@@ -2316,6 +2320,7 @@ impl ProjectApp {
             .ok_or("Nodalis requires the wgpu backend of eframe")?;
         crate::crash_log::watch_gpu(&render_state.device);
         crate::style::apply(&cc.egui_ctx);
+        crate::solve_fingerprint::repaint_with(&cc.egui_ctx);
         (cc.egui_ctx).add_plugin(crate::screenshot::ImmediateCapture::new(
             render_state.clone(),
         ));
@@ -2396,6 +2401,7 @@ impl ProjectApp {
             applied: HashMap::new(),
             merges: HashMap::new(),
             sync_due: true,
+            fingerprints_seen: 0,
             history: Default::default(),
             restoring: HashMap::new(),
             files_checked: None,
@@ -8051,6 +8057,21 @@ impl ProjectApp {
         let mut closing = Vec::new();
         let mut settings = None;
         let mut changed = false;
+        // Closed analyses whose state waits for fingerprints made in the background find it
+        // again once they are ready; open windows do so themselves.
+        let generation = crate::solve_fingerprint::generation();
+        if generation != self.fingerprints_seen {
+            self.fingerprints_seen = generation;
+            for node in &mut self.nodes {
+                let waits = (node.as_analysis()).is_some_and(|a| {
+                    a.window.is_none() && a.status.as_ref().is_some_and(|s| s.pending)
+                });
+                if waits {
+                    node.refresh_closed();
+                    changed = true;
+                }
+            }
+        }
         for node in &mut self.nodes {
             let (id, name) = (node.id, &node.name);
             let Block::Analysis(analysis) = &mut node.block else {
@@ -13957,6 +13978,28 @@ mod tests {
         assert!(refusal(&nodes, &links, 2, &value, 3, &b).is_some());
     }
 
+    /// Finds the state of a closed analysis again, after a change, once the fingerprints made
+    /// in the background are ready.
+    fn refreshed(node: &mut Node) {
+        let start = std::time::Instant::now();
+        loop {
+            let generation = crate::solve_fingerprint::generation();
+            node.refresh_closed();
+            let pending =
+                (node.as_analysis()).is_some_and(|a| a.status.as_ref().is_some_and(|s| s.pending));
+            if !pending {
+                return;
+            }
+            while crate::solve_fingerprint::generation() == generation {
+                assert!(
+                    start.elapsed().as_secs() < 30,
+                    "the fingerprints never came"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    }
+
     #[test]
     fn later_steps_leave_the_results_of_earlier_steps_up_to_date() {
         let mut model = plx_model::FeModel::default();
@@ -13996,13 +14039,13 @@ mod tests {
         if let Some(data) = node.as_analysis_mut().and_then(|a| a.data.as_mut()) {
             data.model.steps[0].name = "Load".into();
         }
-        node.refresh_closed();
+        refreshed(&mut node);
         assert!(!node.out_of_date_for(&link("Load", "Global results")));
         // A changed first step does not.
         if let Some(data) = node.as_analysis_mut().and_then(|a| a.data.as_mut()) {
             data.model.steps[0].active = false;
         }
-        node.refresh_closed();
+        refreshed(&mut node);
         assert!(node.out_of_date_for(&link("Load", "Global results")));
     }
 

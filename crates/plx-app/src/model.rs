@@ -2944,6 +2944,156 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn change_bench() {
+        use std::time::Instant;
+        let Some(path) = std::env::var_os("NODALIS_CHANGE_BENCH") else {
+            return;
+        };
+        let loaded = load(std::path::Path::new(&path), UnitSystem::Unitless).unwrap();
+        let mesh = &loaded.model.mesh;
+        let mut fe = loaded.model.fe.clone();
+        if std::env::var_os("FULL").is_some() {
+            use plx_model::*;
+            let steel = Id::new();
+            fe.materials.push(Material {
+                id: steel,
+                name: "Steel".into(),
+                elastic: Some(Elastic {
+                    young: 210e9,
+                    poisson: 0.3,
+                }),
+                ..Default::default()
+            });
+            fe.sections.push(Section {
+                orientation: None,
+                name: "Section-1".into(),
+                material: Some(steel),
+                region: Region::Parts(mesh.parts.iter().map(|p| p.name.clone()).collect()),
+                thickness: 1.0,
+                kind: SectionKind::Solid,
+            });
+            let faces = |name: &str| match mesh.surfaces.get(name) {
+                Some(plx_mesh::SurfaceDefinition::ElementFaces(f)) => Region::Faces(f.clone()),
+                _ => Region::Faces(Vec::new()),
+            };
+            let names: Vec<String> = mesh.surfaces.keys().cloned().collect();
+            for pair in names.chunks(2) {
+                if let [a, b] = pair {
+                    let mut region = ContactRegion::new(
+                        format!("C-{a}"),
+                        ContactBehavior::Frictional { mu: 0.1 },
+                    );
+                    region.side_a = faces(a);
+                    region.side_b = faces(b);
+                    fe.contact_regions.push(region);
+                }
+            }
+            let mut step = Step::new_static("Step-1");
+            let set = mesh.node_sets.keys().next().cloned().unwrap_or_default();
+            step.boundary_conditions.push(BoundaryCondition {
+                id: Id::new(),
+                distribution: None,
+                name: "Fixed-1".into(),
+                active: true,
+                visible: true,
+                region: Region::NodeSet(set),
+                kind: BoundaryKind::displacement([Some(0.0); 6]),
+                amplitude: None,
+            });
+            step.loads.push(Load {
+                id: Id::new(),
+                distribution: None,
+                name: "Pressure-1".into(),
+                active: true,
+                visible: true,
+                region: faces(&names[0]),
+                kind: LoadKind::Pressure(1.0),
+                amplitude: None,
+                factor_amplitude: None,
+                tables: Default::default(),
+                system: None,
+                follower: false,
+            });
+            fe.steps.push(step);
+            eprintln!("{} contact regions", fe.contact_regions.len());
+        }
+        let fe = &fe;
+        eprintln!(
+            "{} nodes, {} elements",
+            mesh.node_count(),
+            mesh.element_count()
+        );
+        let t = Instant::now();
+        let _ = mesh.fingerprint();
+        eprintln!("mesh.fingerprint {:?}", t.elapsed());
+        let t = Instant::now();
+        let _ = mesh.input_fingerprint();
+        eprintln!("mesh.input_fingerprint {:?}", t.elapsed());
+        let t = Instant::now();
+        let _ = plx_model::fingerprint::solve_input(mesh, fe);
+        eprintln!("quick solve_input {:?}", t.elapsed());
+        for _ in 0..std::env::var("LOOP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+        {
+            let _ = plx_io::inp::lower_unvalidated(mesh, fe, "");
+        }
+        let t = Instant::now();
+        let lowered = plx_io::inp::lower_unvalidated(mesh, fe, "");
+        eprintln!(
+            "lower_unvalidated {:?} ok={:?}",
+            t.elapsed(),
+            lowered.as_ref().err()
+        );
+        if let Ok(lowered) = lowered {
+            let t = Instant::now();
+            let _ = plx_io::fingerprint::fingerprints(&lowered, fe);
+            eprintln!("fingerprints of lowered {:?}", t.elapsed());
+        }
+        let t = Instant::now();
+        let _ = crate::solve_fingerprint::solve_input(mesh, fe);
+        eprintln!("solve_fingerprint::solve_input {:?}", t.elapsed());
+        let t = Instant::now();
+        let _ = crate::solve_fingerprint::solve_input(mesh, fe);
+        eprintln!("solve_fingerprint::solve_input again {:?}", t.elapsed());
+        // The state of an analysis with results after a change: the model is lowered in
+        // the background.
+        let results = plx_io::project::BoundResults {
+            input: Some(crate::solve_fingerprint::solve_input(mesh, fe)),
+            ..Default::default()
+        };
+        let status = |fe: &FeModel, previous: Option<&crate::status::AnalysisStatus>| {
+            crate::status::analysis_status(
+                None,
+                mesh,
+                fe,
+                &Default::default(),
+                Some(&results),
+                &Default::default(),
+                false,
+                previous,
+            )
+        };
+        let before = status(fe, None);
+        let mut changed = fe.clone();
+        changed.steps.push(plx_model::Step::new_static("Changed"));
+        let t = Instant::now();
+        let now = status(&changed, Some(&before));
+        eprintln!(
+            "status after a change {:?} (pending {})",
+            t.elapsed(),
+            now.pending
+        );
+        let generation = crate::solve_fingerprint::generation();
+        while crate::solve_fingerprint::generation() == generation {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        eprintln!("fingerprints ready after {:?}", t.elapsed());
+    }
+
+    #[test]
     fn picking_finds_faces_and_nodes() {
         let model = load(&testdata("kragbalken_c3d8.inp"), UnitSystem::Unitless)
             .unwrap()

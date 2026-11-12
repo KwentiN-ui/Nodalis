@@ -374,6 +374,7 @@ impl BackgroundSolve {
             // The project makes the mesh blocks it takes its mesh from before it starts.
             &Default::default(),
             false,
+            None,
         );
         let parts = match status.mesh {
             CellState::Missing => Some(None),
@@ -608,6 +609,7 @@ mod tests {
             Some(&results),
             &Default::default(),
             false,
+            None,
         );
         assert!(!status.needs_solve(), "{status:?}");
         let mut again = BackgroundSolve::start(
