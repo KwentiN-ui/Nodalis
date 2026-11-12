@@ -1012,6 +1012,21 @@ fn sort_arrow(painter: &egui::Painter, cell: Rect, descending: bool, color: Colo
     painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
 }
 
+/// The plot the tables in `sources` give for the history of `view` as it is now, so a plot
+/// kept in the 3D view follows new results. `None` when the history no longer has the
+/// columns.
+pub fn replot(sources: &[HistoryTable], view: &crate::results::ResultsView) -> Option<XyData> {
+    let kind = view
+        .current_increment()
+        .map_or(AnalysisKind::Static, |i| i.kind);
+    let places = Places {
+        steps: &view.steps,
+        increments: &view.increments,
+    };
+    let all: Vec<&HistoryTable> = sources.iter().collect();
+    plot(&all, &view.history, kind, places).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1379,19 +1394,4 @@ mod tests {
         // Rows outside the other table's chosen rows are gaps.
         assert_eq!(matching_rows(&plot_rows, &other, &[1]), [None, None, None]);
     }
-}
-
-/// The plot the tables in `sources` give for the history of `view` as it is now, so a plot
-/// kept in the 3D view follows new results. `None` when the history no longer has the
-/// columns.
-pub fn replot(sources: &[HistoryTable], view: &crate::results::ResultsView) -> Option<XyData> {
-    let kind = view
-        .current_increment()
-        .map_or(AnalysisKind::Static, |i| i.kind);
-    let places = Places {
-        steps: &view.steps,
-        increments: &view.increments,
-    };
-    let all: Vec<&HistoryTable> = sources.iter().collect();
-    plot(&all, &view.history, kind, places).ok()
 }
