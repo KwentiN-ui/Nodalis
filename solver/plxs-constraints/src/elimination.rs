@@ -686,8 +686,10 @@ impl ConstraintSet {
             .map(|r| {
                 let mut counts = Vec::new();
                 let (mut rows, mut sources) = (Vec::new(), Vec::new());
-                for c in r * RANGE..((r + 1) * RANGE).min(m) {
-                    let q = self.free[c] as usize;
+                let first_column = r * RANGE;
+                let last_column = ((r + 1) * RANGE).min(m);
+                for (c, &q) in (first_column..).zip(&self.free[first_column..last_column]) {
+                    let q = q as usize;
                     let first = rows.len();
                     if reduced_of[q] != u32::MAX {
                         let start = pattern.col_ptr()[q] as usize;
