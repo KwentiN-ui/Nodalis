@@ -153,6 +153,9 @@ pub(crate) struct RegionDraft {
     set: String,
     /// The reference point, or the remote displacement or force whose point the region is.
     point: Option<Id>,
+    /// Set by the confirm button next to "...": the selection is taken over and its window
+    /// closed until "..." is clicked again.
+    locked: bool,
 }
 
 pub(crate) const NODE_SOURCES: &[Source] = &[Source::Selection, Source::NodeSet, Source::Surface];
@@ -219,6 +222,7 @@ impl RegionDraft {
             parts: PartPicks::default(),
             set: String::new(),
             point: None,
+            locked: false,
         }
     }
 
@@ -470,7 +474,7 @@ impl RegionDraft {
 
     /// Whether clicks in the 3D view pick for this region, with the selection window open.
     pub(crate) fn picks(&self) -> bool {
-        matches!(self.source, Source::Selection | Source::Parts)
+        !self.locked && matches!(self.source, Source::Selection | Source::Parts)
     }
 
     /// The selection window next to the dialog `anchor` while this region is picked;
@@ -482,6 +486,9 @@ impl RegionDraft {
         picker: &mut Picker,
         model: &Model,
     ) {
+        if self.locked {
+            return;
+        }
         let can_undo = self.can_undo();
         let action = match self.source {
             Source::Selection => picker.window(ctx, anchor, self.target, can_undo),
@@ -626,12 +633,18 @@ impl RegionDraft {
                 });
             wanted |= self.source != source;
             if self.source != source {
+                self.locked = false;
                 self.prefill(&model.fe, &model.mesh);
             }
             match self.source {
                 Source::Selection => {
                     ui.horizontal(|ui| {
-                        wanted |= pick_button(ui, active);
+                        let picking = active && !self.locked;
+                        if pick_button(ui, picking) {
+                            wanted = true;
+                            self.locked = false;
+                        }
+                        self.locked |= confirm_button(ui, picking);
                         let count = self.count();
                         let geometry = self.geometry.items();
                         let what = match self.target {
@@ -653,7 +666,17 @@ impl RegionDraft {
                     });
                     ui.weak("Choose in the \"Selection\" window what a click selects.");
                 }
-                Source::Parts => wanted |= self.parts.ui(ui, active),
+                Source::Parts => {
+                    let picking = active && !self.locked;
+                    let mut lock = self.locked;
+                    let clicked = self.parts.ui_locking(ui, picking, Some(&mut lock));
+                    // "..." both wants the clicks and opens the window again.
+                    if clicked {
+                        lock = false;
+                    }
+                    self.locked = lock;
+                    wanted |= clicked;
+                }
                 Source::ReferencePoint | Source::RemotePoint => self.point_ui(ui, model),
                 Source::World => {
                     ui.weak("Fixed ground.");
@@ -830,6 +853,28 @@ pub(crate) fn pick_button(ui: &mut Ui, active: bool) -> bool {
     };
     let button = egui::Button::new("...").selected(active);
     ui.add(button).on_hover_text(hint).clicked()
+}
+
+/// The button next to "..." that takes over the selection and closes its window; shown
+/// while the field is being picked. Returns whether it was clicked.
+pub(crate) fn confirm_button(ui: &mut Ui, picking: bool) -> bool {
+    if !picking {
+        return false;
+    }
+    let response = ui
+        .add(egui::Button::new("").min_size(egui::vec2(24.0, 18.0)))
+        .on_hover_text("Take over the selection and close the Selection window");
+    let rect = response.rect.shrink2(egui::vec2(7.0, 4.0));
+    let color = ui.visuals().widgets.inactive.fg_stroke.color;
+    ui.painter().add(egui::Shape::line(
+        vec![
+            egui::pos2(rect.left(), rect.center().y),
+            egui::pos2(rect.left() + rect.width() * 0.4, rect.bottom()),
+            egui::pos2(rect.right(), rect.top()),
+        ],
+        egui::Stroke::new(1.8, color),
+    ));
+    response.clicked()
 }
 
 /// Edges of the outline of the visible parts, the faces of a 2D model.
@@ -7495,6 +7540,16 @@ fn optional_time(ui: &mut Ui, value: &mut Option<f64>, derived: f64, units: Unit
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_locked_region_stops_picking_until_it_is_unlocked() {
+        let mut region = RegionDraft::new(FACE_SOURCES, Target::Faces);
+        assert!(region.picks());
+        region.locked = true;
+        assert!(!region.picks());
+        region.locked = false;
+        assert!(region.picks());
+    }
+
     use super::*;
 
     #[test]

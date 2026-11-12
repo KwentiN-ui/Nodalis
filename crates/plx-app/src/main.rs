@@ -78,6 +78,7 @@ mod results;
 mod ribbon;
 mod save_status;
 mod screenshot;
+mod seams;
 mod section;
 mod selection;
 mod settings;

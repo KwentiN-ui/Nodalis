@@ -759,6 +759,48 @@ impl Gmsh {
         self.synchronize()
     }
 
+    /// Turns entities of the OpenCASCADE model by `angle` radians about the axis through
+    /// `point`; their shapes stay what they are.
+    pub fn rotate(
+        &self,
+        entities: &[(i32, i32)],
+        point: [f64; 3],
+        axis: [f64; 3],
+        angle: f64,
+    ) -> Result<(), GmshError> {
+        let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
+        let ([x, y, z], [ax, ay, az]) = (point, axis);
+        self.call(|e| unsafe {
+            (self.api.occ_rotate)(flat.as_ptr(), flat.len(), x, y, z, ax, ay, az, angle, e);
+        })?;
+        self.synchronize()
+    }
+
+    /// Reflects entities of the OpenCASCADE model at the plane a x + b y + c z + d = 0.
+    pub fn mirror(&self, entities: &[(i32, i32)], plane: [f64; 4]) -> Result<(), GmshError> {
+        let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
+        let [a, b, c, d] = plane;
+        self.call(|e| unsafe {
+            (self.api.occ_mirror)(flat.as_ptr(), flat.len(), a, b, c, d, e);
+        })?;
+        self.synchronize()
+    }
+
+    /// Scales entities of the OpenCASCADE model about `center` by a factor per axis.
+    pub fn dilate(
+        &self,
+        entities: &[(i32, i32)],
+        center: [f64; 3],
+        factors: [f64; 3],
+    ) -> Result<(), GmshError> {
+        let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
+        let ([x, y, z], [a, b, c]) = (center, factors);
+        self.call(|e| unsafe {
+            (self.api.occ_dilate)(flat.as_ptr(), flat.len(), x, y, z, a, b, c, e);
+        })?;
+        self.synchronize()
+    }
+
     /// Applies an affine map to entities of the OpenCASCADE model. Curved shapes become
     /// splines by it, which are close to them only.
     pub fn affine_transform(

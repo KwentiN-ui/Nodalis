@@ -184,8 +184,9 @@ use serde::{Deserialize, Serialize};
 /// Format 28 merges the concentrated, surface and body flux into one total heat flow
 /// ([`LoadKind::Flux`]); formats 21 to 27 read as they are unless a step has one of those
 /// loads. Format 29 adds the defeaturing of the CAD Operation block
-/// ([`CadOperationKind::Defeature`]); formats 21 to 28 read as they are.
-pub const PROJECT_FORMAT: u32 = 29;
+/// ([`CadOperationKind::Defeature`]); formats 21 to 28 read as they are. Format 30 adds the
+/// Transform block of the project schematic; formats 21 to 29 read as they are.
+pub const PROJECT_FORMAT: u32 = 30;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

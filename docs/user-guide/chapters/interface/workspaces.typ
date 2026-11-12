@@ -65,8 +65,8 @@ the room is there.
 #fields(
   [Project], [#ui("File"): file commands, #ui("New Analysis"), and #ui("Open"),
     #ui("Open in New Window"), #ui("Solve"), #ui("Duplicate"), #ui("Delete"), #ui("Rename")
-    for the selected block. #ui("Sources"), #ui("Parameters"), #ui("Evaluate") and
-    #ui("Annotate") add blocks (@place-block). #ui("Arrange") works on the selected blocks and
+    for the selected block. #ui("Sources"), #ui("Modify"), #ui("Parameters"), #ui("Evaluate")
+    and #ui("Annotate") add blocks (@place-block). #ui("Arrange") works on the selected blocks and
     the view of the schematic.],
   [Geometry], [#ui("Geometry"): import, modify (@geometry-modify), mesh setup, meshing and the parts. #ui("View"):
     camera, display, section and exploded view, screenshot, query.],
@@ -206,7 +206,8 @@ Besides the properties panel, Nodalis has three kinds of windows, each with the 
 
 === Placing blocks <place-block>
 
-The tiles on the #ui("Sources"), #ui("Parameters"), #ui("Evaluate") and #ui("Annotate") tabs
+The tiles on the #ui("Sources"), #ui("Modify"), #ui("Parameters"), #ui("Evaluate") and
+#ui("Annotate") tabs
 of the Project workspace add blocks to the schematic. After a click on the tile the block
 hangs at the mouse pointer; a click into the schematic places it there. #key("Esc") or a
 second click on the tile cancels. #ui("New Analysis") works the same way.

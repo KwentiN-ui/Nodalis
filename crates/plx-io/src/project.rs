@@ -82,6 +82,8 @@ pub enum ProjectNode {
     DeformedMesh(Box<DeformedMesh>),
     /// A fillet or chamfer of the geometry linked to it.
     CadOperation(Box<CadOperationBlock>),
+    /// The geometry or mesh linked to it, translated, rotated, mirrored or scaled.
+    Transform(TransformBlock),
     /// Named numbers that value links give to other blocks.
     Parameters(ParameterSet),
     /// A key figure computed from the results of a step.
@@ -126,6 +128,7 @@ impl ProjectNode {
             Self::RefineMesh(r) => r.id,
             Self::DeformedMesh(d) => d.id,
             Self::CadOperation(c) => c.id,
+            Self::Transform(t) => t.id,
             Self::Parameters(p) => p.id,
             Self::Measure(m) => m.id,
             Self::Study(o) => o.id,
@@ -151,6 +154,7 @@ impl ProjectNode {
             Self::RefineMesh(r) => &r.name,
             Self::DeformedMesh(d) => &d.name,
             Self::CadOperation(c) => &c.name,
+            Self::Transform(t) => &t.name,
             Self::Parameters(p) => &p.name,
             Self::Measure(m) => &m.name,
             Self::Study(o) => &o.name,
@@ -177,6 +181,7 @@ impl ProjectNode {
             Self::RefineMesh(r) => r.position,
             Self::DeformedMesh(d) => d.position,
             Self::CadOperation(c) => c.position,
+            Self::Transform(t) => t.position,
             Self::Parameters(p) => p.position,
             Self::Measure(m) => m.position,
             Self::Study(o) => o.position,
@@ -192,6 +197,20 @@ impl ProjectNode {
             Self::GroupInput(g) | Self::GroupOutput(g) => g.position,
         }
     }
+}
+
+/// A block that translates, rotates, mirrors or scales the geometry or the mesh linked to
+/// it and gives the result, made again when the project is opened.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TransformBlock {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The unit system its lengths are in.
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    pub transform: plx_mesh::MeshTransform,
 }
 
 /// A block that applies a CAD operation to the geometry linked to it and gives the result.

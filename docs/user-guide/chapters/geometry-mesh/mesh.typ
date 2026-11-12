@@ -147,7 +147,7 @@ triangles are then joined to quadrilaterals, which is faster and less regular.
   under the cursor or the edge near it, #ui("Part") all faces of a part, #ui("Edge angle")
   the clicked edge and the edges that continue it, #ui("Surface angle") the clicked face and
   the neighbouring faces that meet it at less than the angle, such as the pieces of a split
-  cylinder. A box takes the faces inside it. The default size is a quarter of the maximum
+  cylinder, on into the visible parts that touch it along an edge. A box takes the faces inside it. The default size is a quarter of the maximum
   element size.
 / Tetrahedral Gmsh: chooses the Gmsh algorithms for selected parts. #ui("Surface algorithm"):
   Frontal-Delaunay (default), Delaunay, MeshAdapt or Automatic; on shells and 2D models it

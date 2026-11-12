@@ -59,6 +59,7 @@ impl Workspace {
             Self::Project => &[
                 "File",
                 "Sources",
+                "Modify",
                 "Parameters",
                 "Evaluate",
                 "Annotate",
@@ -88,6 +89,7 @@ pub enum BlockTile {
     RectangleMesh,
     RefineMesh,
     CadOperation,
+    Transform,
     File,
     Parameters,
     Math,
@@ -706,28 +708,37 @@ fn build() -> Vec<Command> {
         "Places a block that meshes a rectangle with quadrilaterals, for 2D analyses.",
     ));
     add(place(
-        BlockTile::RefineMesh,
-        "Refine\nMesh",
-        "Sources",
-        "Mesh",
-        Node(NodeIcon::Mesh),
-        "Places a block that makes a mesh finer or coarser by a factor.",
-    ));
-    add(place(
-        BlockTile::CadOperation,
-        "CAD\nOperation",
-        "Sources",
-        "Geometry",
-        Node(NodeIcon::CadOperation),
-        "Places a block that fillets, chamfers, offsets, splits or defeatures the geometry linked to it.",
-    ));
-    add(place(
         BlockTile::File,
         "File",
         "Sources",
         "Geometry",
         Tool(Icon::Import),
         "Places a block that reads results, a mesh or geometry from a file outside the project.",
+    ));
+    // Blocks that change the geometry or mesh linked to them and give it on.
+    add(place(
+        BlockTile::CadOperation,
+        "CAD\nOperation",
+        "Modify",
+        "Geometry",
+        Node(NodeIcon::CadOperation),
+        "Places a block that fillets, chamfers, offsets, splits or defeatures the geometry linked to it.",
+    ));
+    add(place(
+        BlockTile::RefineMesh,
+        "Refine\nMesh",
+        "Modify",
+        "Mesh",
+        Node(NodeIcon::Mesh),
+        "Places a block that makes a mesh finer or coarser by a factor.",
+    ));
+    add(place(
+        BlockTile::Transform,
+        "Transform",
+        "Modify",
+        "Geometry and Mesh",
+        Node(NodeIcon::Transform),
+        "Places a block that translates, rotates, mirrors or scales the geometry or mesh linked to it.",
     ));
     add(place(
         BlockTile::Parameters,
@@ -2439,6 +2450,7 @@ mod tests {
             BlockTile::RectangleMesh,
             BlockTile::RefineMesh,
             BlockTile::CadOperation,
+            BlockTile::Transform,
             BlockTile::File,
             BlockTile::Parameters,
             BlockTile::Math,

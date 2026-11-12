@@ -5,7 +5,7 @@
 Besides analyses, the project schematic holds *source blocks*: blocks that only give data to
 analyses through links. They have no steps and are not solved, and #ui("Update Project")
 passes them by; the mesh export block at the end of this section takes data instead of giving
-it. Add one with its tile on the #ui("Sources"), #ui("Parameters") or #ui("Evaluate") tab or by double-clicking or right-clicking the background of the schematic;
+it. Add one with its tile on the #ui("Sources"), #ui("Modify"), #ui("Parameters") or #ui("Evaluate") tab or by double-clicking or right-clicking the background of the schematic;
 its header has its own tint, so that it stands apart from the analyses. Its context menu has
 #ui("Edit ..."), #ui("Rename ..."), #ui("Duplicate") and #ui("Delete"); a double-click
 opens its editor in the project window. Deleting a source block removes its links; the
@@ -133,7 +133,7 @@ and their solutions are out of date.
 === Refine Mesh <refine-mesh>
 
 A Refine Mesh block makes the mesh linked to it again, finer or coarser by a factor, and gives
-the new mesh on. Add it with #menu("Sources", "Refine Mesh"), drag the
+the new mesh on. Add it with #menu("Modify", "Refine Mesh"), drag the
 #ui("Mesh") of a mesh block or of an analysis with imported geometry to the pin on the left of
 its #ui("Mesh") row, and drag the pin on the right of that row to the #ui("Mesh") row of the
 analyses that are to use the refined mesh. The mesh it refines stays as it is.
@@ -230,7 +230,7 @@ the geometry has more than one part, the #ui("Geometry") row opens with its arro
 of its own. Linking the #ui("Geometry") row gives the whole file; linking a part gives only
 that part. Link several parts to the #ui("Geometry") row of the same analysis and it takes
 them together, the other parts left out. A part link replaces a link of the whole geometry
-and the other way round, and parts of another block replace those linked before.
+of the same file and the other way round; geometry of other blocks stays (@geometry-assembly).
 
 #screenshot("file-block-parts.png", [Two of the three parts of an assembly go to the analysis])
 
@@ -239,6 +239,36 @@ The geometry without the other parts is made in the background, in the same way 
 analysis meshes and sets up its parts as with any geometry it takes. When the file changes,
 the parts are taken again by their names; a part the file no longer has is reported in the
 output pane, and the analysis keeps the geometry it had.
+
+==== Assemblies from several links <geometry-assembly>
+
+The #ui("Geometry") and #ui("Mesh") rows of an analysis have the tall pin of a collection
+(@links): they take any number of wires and put what comes through them together into one
+assembly. Link the parts of a file that stay as they are and the output of a
+#ui("CAD Operation") that changes one of them, or the geometry of several files, and the
+analysis meshes all parts together, each a part of its own as in an assembly read from one
+file.
+
+#screenshot("geometry-assembly.png", [The file gives its parts, the CAD operation the part it
+  split: the analysis takes the split part in place of the original])
+
+A part that reaches the analysis changed, through a #ui("CAD Operation"), a #ui("Transform")
+(@transform-block) or an analysis it went through, takes the place of the same part of the file linked unchanged: link the whole
+file and the operation on one of its parts, and the part is there once, changed. The output
+pane says which part is replaced ("Assembly takes SOLID-2 changed from CAD Operation in place
+of SOLID-2 of File").
+
+#screenshot("geometry-assembly-parts.png", [The geometry of the analysis: SOLID-1 as in the
+  file, SOLID-2 split in two pieces, tied as a compound part])
+ Two parts of the same name from different blocks are kept
+both, the second named with "-2" appended, which the output pane reports as well. Putting the
+geometries together is done in the background; the analysis is out of date until it is done.
+
+Several meshes linked to the #ui("Mesh") row are put together in the same way, each with its
+own nodes and elements, numbered after those before it. Their parts, sets and surfaces keep
+their names unless an earlier mesh has one of the name. The geometries of the meshes are put
+together too, so that picks on the geometry find their nodes. An analysis takes either
+geometry or meshes: a geometry link replaces its mesh links and the other way round.
 
 #screenshot("file-block.png", [The results of a CalculiX run made elsewhere drive a submodel])
 
@@ -262,7 +292,7 @@ A CAD Operation block changes geometry before it is meshed: it rounds (#ui("Fill
 @split-by-plane), splits the face around a hole into a ring (#ui("Split around Hole"),
 @split-around-hole) or removes fillets and chamfers (#ui("Defeature"), @defeature), of the
 geometry linked to it and gives the changed geometry on.
-Add it with #menu("Sources", "CAD Operation") or from the picker, drag the
+Add it with #menu("Modify", "CAD Operation") or from the picker, drag the
 #ui("Geometry") of a file block, of an analysis with imported geometry or of another CAD
 Operation block to the pin on the left of its #ui("Geometry") row, and drag the pin on the
 right of that row to the #ui("Geometry") row of the analyses that are to use the changed
@@ -426,6 +456,38 @@ that:
 
 #screenshot("cad-fillet-study-plot.png", [The plot of the study: the largest stress over the
   fillet radius])
+
+=== Transform <transform-block>
+
+A Transform block moves the geometry or the mesh linked to it as a whole and gives it on:
+#ui("Translate") by a vector, #ui("Rotate") by an angle about an axis through a point,
+#ui("Mirror") at a plane through a point, or #ui("Scale") about a center by a factor per axis,
+the same transforms as the Transform of mesh parts under FE Model (@mesh-tools). Add it
+with #menu("Modify", "Transform") or from the picker, drag the #ui("Geometry") or the
+#ui("Mesh") of a file block, an analysis, a CAD Operation or another block to the pin on the
+left of the row of that kind, and drag the pin on the right of the same row on to analyses.
+Double-click the block to choose the transform and its numbers; the last row of the block
+says what it does.
+
+#screenshot("ribbon-modify.png", [The #ui("Modify") tab holds the blocks that change the
+  geometry or the mesh linked to them])
+
+Linked to the #ui("Geometry") row of an analysis together with the unmoved geometry
+(@geometry-assembly), it places a second copy of a part, or moves one part of an assembly: a
+part the transform moved takes the place of the same part of the file linked unchanged. With
+meshes it works the same way: the mesh of an analysis and its moved copy linked to the
+#ui("Mesh") row of another analysis give that one both, each with its own nodes.
+
+#screenshot("transform-block.png", [The mesh of Cube taken twice by Together, once moved
+  by 20 mm])
+
+#screenshot("transform-mesh.png", [The mesh of Together: the cube and its moved copy, the
+  second part named SOLID-1-2])
+
+A geometry is moved by OpenCASCADE: translated, rotated and mirrored shapes stay exact, and
+picks on them stay where they were. A moved mesh carries its sets and the geometry it was
+meshed from along; its parts stay as meshed, like parts read from a file. The result is made
+again whenever the input or the transform changes, and when the project is opened.
 
 === Parameters <parameters-block>
 

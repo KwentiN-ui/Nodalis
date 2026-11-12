@@ -48,6 +48,8 @@ pub enum NodeIcon {
     Note,
     /// A CAD operation: a cube with a rounded edge.
     CadOperation,
+    /// A Transform block: a square and an arrow to where it goes.
+    Transform,
     /// A Math block: a plus over a minus.
     Math,
     /// A Switch block: two inputs and a lever to one of them.
@@ -199,6 +201,11 @@ pub fn paint_scaled(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32
                 p(12.5, 9.0),
                 p(9.0, 12.0),
             ]);
+        }
+        NodeIcon::Transform => {
+            closed(&[p(1.5, 7.5), p(6.5, 7.5), p(6.5, 12.5), p(1.5, 12.5)]);
+            line(&[p(5.0, 9.0), p(12.5, 1.5)]);
+            line(&[p(8.0, 1.5), p(12.5, 1.5), p(12.5, 6.0)]);
         }
         NodeIcon::Geometry => {
             closed(&[p(1.5, 4.5), p(9.0, 4.5), p(9.0, 12.0), p(1.5, 12.0)]);
