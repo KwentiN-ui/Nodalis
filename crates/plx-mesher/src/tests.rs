@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use plx_model::{Algorithm2d, Algorithm3d, MeshSetupItem, MeshSetupKind, UnitSystem};
 
+use std::collections::BTreeSet;
+
 use super::*;
 
 // The tests read CAD files without a unit system, in millimetres as they were drawn, so that
@@ -3495,8 +3497,12 @@ fn drawn_edges_run_through_the_nodes_of_the_face_triangulation() {
 /// The largest distance of a drawn edge segment's middle from its CAD curve, against the
 /// diagonal of the geometry.
 fn edge_stray(path: &Path) -> f64 {
-    let geometry = import_cad(path, UnitSystem::Unitless).unwrap().geometry;
-    let display = tessellate(&geometry).unwrap();
+    edge_stray_of(&import_cad(path, UnitSystem::Unitless).unwrap().geometry)
+}
+
+/// [`edge_stray`] of a geometry.
+fn edge_stray_of(geometry: &Geometry) -> f64 {
+    let display = tessellate(geometry).unwrap();
     let mesh = &display.mesh;
     let file = TempFile::with_contents("brep", &geometry.brep).unwrap();
     with_gmsh(|gmsh| {
@@ -3545,4 +3551,51 @@ fn drawn_edges_follow_their_curve() {
         stray < 1e-4,
         "Drawn edges stray {stray} of the diagonal from their curves"
     );
+}
+
+/// A split cuts with a box turned into the plane: turned, not mapped, so that no shape of
+/// the geometry becomes a spline. The splines OpenCASCADE made of the mapped box's faces
+/// came back coarser with every split, until a hole was drawn as a pentagon.
+#[test]
+fn splits_keep_planes_and_circles() {
+    use plx_model::{CadOperationKind::SplitPlane, CoordinatePlane, SplitPlane as Plane};
+    if !gmsh_available() {
+        return;
+    }
+    let kinds = |geometry: &Geometry| -> BTreeSet<String> {
+        (geometry.signatures.iter())
+            .filter(|s| s.entity.dim() > 0)
+            .map(|s| s.kind.clone())
+            .collect()
+    };
+    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless)
+        .unwrap()
+        .geometry;
+    let before = kinds(&geometry);
+    assert!(before.iter().any(|k| k == "Circle"), "{before:?}");
+    // Three times through the hole of 8 mm about (50, 20).
+    let across = plx_model::CadOperation {
+        plane: Plane::Global(CoordinatePlane::Xz),
+        ..split(SplitPlane, 18.0)
+    };
+    for operation in [split(SplitPlane, 50.0), across, split(SplitPlane, 53.0)] {
+        geometry = apply_operation(&geometry, &operation, &[]).unwrap();
+        let after = kinds(&geometry);
+        assert!(
+            after.is_subset(&before),
+            "{after:?} after a split of {before:?}"
+        );
+    }
+    assert!(edge_stray_of(&geometry) < 1e-4);
+}
+
+#[test]
+fn zz_dump() {
+    use plx_model::{CadOperationKind::SplitPlane, CoordinatePlane, SplitPlane as Plane};
+    let mut g = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless).unwrap().geometry;
+    let across = plx_model::CadOperation { plane: Plane::Global(CoordinatePlane::Xz), ..split(SplitPlane, 18.0) };
+    for (i, op) in [split(SplitPlane, 50.0), across, split(SplitPlane, 53.0), split(SplitPlane, 47.0), split(SplitPlane, 45.0)].into_iter().enumerate() {
+        g = apply_operation(&g, &op, &[]).unwrap();
+        std::fs::write(format!("/tmp/claude-0/-home-user/555ba432-d185-51b9-914c-aed35799b95c/scratchpad/{}{i}.brep", std::env::var("TAG").unwrap()), &g.brep).unwrap();
+    }
 }

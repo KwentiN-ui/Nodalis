@@ -242,7 +242,7 @@ fn revolution(
                 e1[1], n[1], e2[1], o[1], //
                 e1[2], n[2], e2[2], o[2],
             ];
-            gmsh.affine_transform(&[(2, rectangle)], &matrix)?;
+            gmsh.place(&[(2, rectangle)], &matrix)?;
             let section: Vec<i32> = (gmsh.intersect(&[(2, rectangle)], &[(3, volume)])?)
                 .into_iter()
                 .filter(|&(d, _)| d == 2)
