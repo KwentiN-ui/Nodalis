@@ -1685,9 +1685,10 @@ sie nur auswählt.
   gibt `PcgSolver::matrix` aus der Blockkopie des iterativen Lösers zurück (spart eine
   Kopie der reduzierten Matrix).
 
-Gemessen am Bracket (591 000 Gl., C3D10, iterativ, 4 Threads, ohne GPU): gesamt
-19,3 → 15,1 s, Muster 1,8 → 0,3 s, Assemblierung 1,8 → 0,9 s, Reduktion 0,9 → 0,2 s,
-Umwandlung für CG 1,7 → 0,4 s, Speicherspitze 2,27 → 1,97 GB, 125 Iterationen wie zuvor,
+Gemessen am Bracket (591 000 Gl., C3D10, iterativ, Toleranz 1e-8, 4 Threads, ohne GPU):
+gesamt 18,7 → 13,5 s, Muster 1,8 → 0,3 s, Assemblierung 1,8 → 0,9 s, Reduktion
+0,9 → 0,2 s, Umwandlung für CG 1,7 → 0,4 s, Speicherspitze 2,47 → 2,17 GB, 82 Iterationen
+wie zuvor,
 Ergebnisse gleich bis auf Rundung (wie zwei Läufe des alten Standes untereinander).
 Lifting Lug (Ties, NLGEOM): Reduktion 3,4 → 2,8 s, dort bestimmen Elementrechnung und
 Lösen die Zeit. Noch offen aus B: durchgehende Blockform ab der Assemblierung und eine
