@@ -61,7 +61,7 @@ pub(crate) fn split_by_plane(
     let mut places = Vec::new();
     let mut cut_any = false;
     let mut half = None;
-    let mut faces_and_edges: Vec<(Shape, String)> = Vec::new();
+    let mut edges: Vec<(Shape, String)> = Vec::new();
     let mut gone: Vec<Entity> = Vec::new();
     for (shape, name) in parts {
         // Where the part lies: on one side, or across.
@@ -88,11 +88,10 @@ pub(crate) fn split_by_plane(
             }
             continue;
         }
-        if shape.dim != 3 {
-            faces_and_edges.push((shape, name));
+        if shape.dim == 1 {
+            edges.push((shape, name));
             continue;
         }
-        let volume = shape.tags[0];
         let half = match half {
             Some(half) => half,
             None => {
@@ -105,29 +104,29 @@ pub(crate) fn split_by_plane(
                 tag
             }
         };
+        // Each side made on its own, so that the pieces share nothing: a solid or a shell
+        // cut in two becomes two parts.
+        let objects: Vec<Entity> = shape.entities().collect();
         let positive = gmsh
-            .boolean_keeping(
-                Boolean::Intersect,
-                &[(3, volume)],
-                &[(3, half)],
-                false,
-                false,
-            )
+            .boolean_keeping(Boolean::Intersect, &objects, &[(3, half)], false, false)
             .map_err(|e| fail(format!("OpenCASCADE could not split {name}: {e}")))?;
         let negative = gmsh
-            .boolean_keeping(Boolean::Cut, &[(3, volume)], &[(3, half)], false, false)
+            .boolean_keeping(Boolean::Cut, &objects, &[(3, half)], false, false)
             .map_err(|e| fail(format!("OpenCASCADE could not split {name}: {e}")))?;
-        let solids = |made: &[Entity]| -> Vec<i32> {
-            made.iter().filter(|e| e.0 == 3).map(|e| e.1).collect()
+        let of_part = |made: &[Entity]| -> Vec<i32> {
+            (made.iter())
+                .filter(|e| e.0 == shape.dim)
+                .map(|e| e.1)
+                .collect()
         };
-        let (positive, negative) = (solids(&positive), solids(&negative));
-        // A part whose bounding box only reaches over the plane, e.g. one cut along it
-        // before, lies on one side: OpenCASCADE gives it back whole, under its own tag or a
-        // new one, and nothing on the other side.
+        let (positive, negative) = (of_part(&positive), of_part(&negative));
+        // A part whose bounding box only reaches over the plane, e.g. a part with a face
+        // cut along a plane before, lies on one side: OpenCASCADE gives it back whole,
+        // under its own tags or new ones, and nothing on the other side.
         if positive.is_empty() || negative.is_empty() {
             let copies: Vec<Entity> = (positive.iter().chain(&negative))
-                .filter(|&&v| v != volume)
-                .map(|&v| (3, v))
+                .filter(|t| !shape.tags.contains(t))
+                .map(|&t| (shape.dim, t))
                 .collect();
             if !copies.is_empty() {
                 gmsh.remove(&copies)?;
@@ -142,13 +141,28 @@ pub(crate) fn split_by_plane(
             continue;
         }
         cut_any = true;
-        gmsh.remove(&[(3, volume)])?;
-        let mut kept = Vec::new();
-        for (pieces, sign) in [(positive, 1.0), (negative, -1.0)] {
+        // The originals, but for those given back unchanged under their own tags.
+        let originals: Vec<Entity> = (shape.tags.iter())
+            .filter(|t| !positive.contains(t) && !negative.contains(t))
+            .map(|&t| (shape.dim, t))
+            .collect();
+        if !originals.is_empty() {
+            gmsh.remove(&originals)?;
+        }
+        // The pieces: each solid, or each set of faces hanging together.
+        let pieces_of = |tags: Vec<i32>| -> Result<Vec<Vec<i32>>, GmshError> {
+            if shape.dim == 3 {
+                Ok(tags.into_iter().map(|t| vec![t]).collect())
+            } else {
+                crate::shells(gmsh, &tags)
+            }
+        };
+        let mut kept: Vec<Vec<i32>> = Vec::new();
+        for (tags, sign) in [(positive, 1.0), (negative, -1.0)] {
             if keeps(sign) {
-                kept.extend(pieces);
-            } else if !pieces.is_empty() {
-                gmsh.remove(&pieces.iter().map(|&v| (3, v)).collect::<Vec<_>>())?;
+                kept.extend(pieces_of(tags)?);
+            } else if !tags.is_empty() {
+                gmsh.remove(&tags.iter().map(|&t| (shape.dim, t)).collect::<Vec<_>>())?;
             }
         }
         used.remove(&name);
@@ -164,8 +178,14 @@ pub(crate) fn split_by_plane(
                 .collect()
         };
         used.extend(names.iter().cloned());
-        for (&volume, piece) in kept.iter().zip(&names) {
-            places.push((3, gmsh.center_of_mass(3, volume)?, piece.clone()));
+        for (piece, name) in kept.iter().zip(&names) {
+            for &tag in piece {
+                places.push((
+                    shape.dim,
+                    gmsh.center_of_mass(shape.dim, tag)?,
+                    name.clone(),
+                ));
+            }
         }
         if names.len() > 1 && operation.compound && input.compound_of(&name).is_none() {
             compounds.push(CompoundPart {
@@ -182,18 +202,18 @@ pub(crate) fn split_by_plane(
     if !gone.is_empty() {
         gmsh.remove(&gone)?;
     }
-    // Faces and edges: cut by a face in the plane, the pieces sharing the cut edges and
-    // points, so that a shell stays one part.
-    if !faces_and_edges.is_empty() {
-        let objects: Vec<Entity> = (faces_and_edges.iter())
+    // Edges: cut by a face in the plane, the pieces sharing the cut points, so that a wire
+    // stays one part.
+    if !edges.is_empty() {
+        let objects: Vec<Entity> = (edges.iter())
             .flat_map(|(shape, _)| shape.entities())
             .collect();
         let sheet = gmsh.add_rectangle([-extent, -extent, 0.0], [2.0 * extent; 2], 0.0)?;
         gmsh.affine_transform(&[(2, sheet)], &frame)?;
         let pieces = fragment_keeping(gmsh, &objects, &[(2, sheet)])
-            .map_err(|e| fail(format!("OpenCASCADE could not split the faces: {e}")))?;
+            .map_err(|e| fail(format!("OpenCASCADE could not split the edges: {e}")))?;
         let mut pieces = pieces.into_iter();
-        for (shape, name) in &faces_and_edges {
+        for (shape, name) in &edges {
             let made: Vec<Entity> = pieces.by_ref().take(shape.tags.len()).flatten().collect();
             if made.len() > shape.tags.len() {
                 cut_any = true;

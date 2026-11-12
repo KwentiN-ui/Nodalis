@@ -119,8 +119,8 @@ context menu of the compound part has #ui("Create Mesh"), a #ui("Name") field wi
   Model workspace the compound is *one* part: sections, loads, boundary conditions and the
   contact detection see one part.
 - Where the pieces touch, the input file ties them, as a bonded contact region does
-  (@contact-regions): the touching faces are found when the input file is written, with the
-  tolerance of a contact detection on the mesh, and written as `*TIE`. The pieces are tied where
+  (@contact-regions), shells edge to edge: the touching faces are found when the input file is
+  written, with the tolerance of a contact detection on the mesh, and written as `*TIE`. The pieces are tied where
   they are: a gap between them within the tolerance, such as the play of a pin in its hole, is
   bridged, not closed, so the nodes stay in place and no element is pulled inside out. These
   ties do not appear in the tree; problems the model check finds on them are shown on the

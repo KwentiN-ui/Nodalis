@@ -2561,29 +2561,77 @@ fn a_split_geometry_splits_again_with_parts_beside_the_plane() {
 }
 
 #[test]
-fn shells_split_by_a_plane_stay_one_part() {
+fn shells_split_by_a_plane_become_a_compound_or_lose_a_side() {
     use plx_model::{CadOperationKind::SplitPlane, SplitKeep};
     if !gmsh_available() {
         return;
     }
     let input = rectangle([0.0; 3], [20.0, 10.0], 0.0);
-    let name = part_names(&input).unwrap();
+    let name = part_names(&input).unwrap().remove(0);
     let both = apply_operation(&input, &split(SplitPlane, 5.0), &[]).unwrap();
-    assert_eq!(part_names(&both).unwrap(), name);
+    let mut pieces = part_names(&both).unwrap();
+    pieces.sort();
+    assert_eq!(pieces, [format!("{name}-1"), format!("{name}-2")]);
+    assert_eq!(both.compounds.len(), 1);
+    assert_eq!(both.compounds[0].name, name);
     let mut areas = face_areas(&both, "Plane");
     areas.sort_by(f64::total_cmp);
     assert_eq!(areas.len(), 2);
     assert!((areas[0] - 50.0).abs() < 1e-6 && (areas[1] - 150.0).abs() < 1e-6);
-    // The pieces share the cut edge: the mesh is one part with nodes in common.
+    // The pieces share nothing: one part of two bodies, tied along the cut.
     let mesh = generate_mesh(&both).unwrap().mesh;
     assert_eq!(mesh.parts.len(), 1);
+    assert_eq!(mesh.parts[0].bodies.len(), 2);
+    let ties = plx_model::FeModel::default().compound_ties(&mesh);
+    assert_eq!(ties.len(), 1);
+    // Each a part of its own.
+    let apart = plx_model::CadOperation {
+        compound: false,
+        ..split(SplitPlane, 5.0)
+    };
+    let apart = apply_operation(&input, &apart, &[]).unwrap();
+    assert!(apart.compounds.is_empty());
+    assert_eq!(generate_mesh(&apart).unwrap().mesh.parts.len(), 2);
     let left = plx_model::CadOperation {
         keep: SplitKeep::Negative,
         ..split(SplitPlane, 5.0)
     };
     let left = apply_operation(&input, &left, &[]).unwrap();
+    assert_eq!(part_names(&left).unwrap(), std::slice::from_ref(&name));
     assert_eq!(face_areas(&left, "Plane").len(), 1);
     assert!((face_areas(&left, "Plane")[0] - 50.0).abs() < 1e-6);
+}
+
+/// A shell of faces hanging together keeps them together on each side of the cut.
+#[test]
+fn a_shell_of_several_faces_splits_into_two_shells() {
+    use plx_model::CadOperationKind::SplitPlane;
+    if !gmsh_available() {
+        return;
+    }
+    // An angle of two faces, 20 x 10 mm each, along x.
+    let input = with_signatures(Geometry {
+        compounds: Vec::new(),
+        ..made_geometry(|gmsh| {
+            let bottom = gmsh.add_rectangle([0.0; 3], [20.0, 10.0], 0.0)?;
+            let side = gmsh.add_rectangle([0.0; 3], [20.0, 10.0], 0.0)?;
+            gmsh.affine_transform(
+                &[(2, side)],
+                &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            )?;
+            gmsh.fragment(&[(2, bottom)], &[(2, side)])?;
+            Ok(())
+        })
+    })
+    .unwrap();
+    assert_eq!(part_names(&input).unwrap().len(), 1);
+    let both = apply_operation(&input, &split(SplitPlane, 5.0), &[]).unwrap();
+    assert_eq!(part_names(&both).unwrap().len(), 2);
+    let faces = (both.signatures.iter()).filter(|s| s.entity.dim() == 2);
+    assert_eq!(faces.count(), 4);
+    let mesh = generate_mesh(&both).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 1);
+    assert_eq!(mesh.parts[0].bodies.len(), 2);
 }
 
 #[test]

@@ -372,15 +372,19 @@ mesh size. Choose the #ui("Plane") in the editor:
 (#ui("+X side")) or the negative one, or for the plane of a face the part #ui("Beyond the cut") or
 the slice #ui("Between face and cut"). Parts wholly on the side that goes are removed.
 
-A solid cut in two becomes two solids. With #ui("Keep the pieces as one part") on, the default,
-they form a compound part (@compound-parts) named like the solid: the FE model still has one
-part, with its section and material, and the pieces are tied where they were cut. Turned off,
-each piece is a part of its own, named after the solid with -1, -2. Faces of shell parts are
-cut into faces that share the cut edge, so a shell stays one part with a common mesh along the
-cut. When the plane runs through no part and both sides are kept, the block reports so.
+A solid cut in two becomes two solids, a shell two shells that share nothing along the cut: in
+the tree they are parts of their own. With #ui("Keep the pieces as one part") on, the default,
+they form a compound part (@compound-parts) named like the solid or shell: the FE model still
+has one part, with its section and material, and the pieces are tied where they were cut, a
+shell's edge to edge. Turned off, each piece is a part of its own, named after the part with -1,
+-2. Line parts are cut into edges that share the cut point and stay one part. When the plane
+runs through no part and both sides are kept, the block reports so.
 
 #screenshot("cad-split-plane.png", [A plate split by the YZ plane at an offset of 70 mm: the
   preview shows the two solids, which stay one part of the FE model])
+
+#screenshot("cad-split-shell.png", [An angle of sheet metal split by the XZ plane at 20 mm: two
+  shells, parts of their own in the tree under the compound part SHELL-1])
 
 ==== Split around Hole <split-around-hole>
 

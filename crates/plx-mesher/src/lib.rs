@@ -940,7 +940,7 @@ impl Shape {
 
 /// The faces grouped into shells: faces that share an edge belong to the same shell. The
 /// shells come in the order of their lowest face tag, their faces in ascending order.
-fn shells(gmsh: &Gmsh, faces: &[i32]) -> Result<Vec<Vec<i32>>, GmshError> {
+pub(crate) fn shells(gmsh: &Gmsh, faces: &[i32]) -> Result<Vec<Vec<i32>>, GmshError> {
     // Each face points at another of its shell, up to the one that stands for the shell.
     let mut parent: BTreeMap<i32, i32> = faces.iter().map(|&f| (f, f)).collect();
     fn root(parent: &BTreeMap<i32, i32>, mut face: i32) -> i32 {
