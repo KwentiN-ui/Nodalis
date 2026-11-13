@@ -516,12 +516,12 @@ fn apply_updates(ctx: &Context<'_>, s: usize, updaters: &[u32], front: &mut [f64
             .map(Mutex::new)
             .collect();
         items.into_par_iter().for_each(|(d, first, m)| {
-            update_item(ctx, d, s, first, m, &locks, LOCK_COLUMNS, rows);
+            update_item(ctx, s, (d, first, m), &locks, LOCK_COLUMNS, rows);
         });
     } else {
         let locks = [Mutex::new(front)];
         for (d, first, m) in items {
-            update_item(ctx, d, s, first, m, &locks, c, rows);
+            update_item(ctx, s, (d, first, m), &locks, c, rows);
         }
     }
 }
@@ -531,10 +531,8 @@ fn apply_updates(ctx: &Context<'_>, s: usize, updaters: &[u32], front: &mut [f64
 /// held as groups of `lock_columns` columns.
 fn update_item(
     ctx: &Context<'_>,
-    d: usize,
     s: usize,
-    first: usize,
-    m: usize,
+    (d, first, m): (usize, usize, usize),
     locks: &[Mutex<&mut [f64]>],
     lock_columns: usize,
     rows_s: usize,
@@ -1156,6 +1154,28 @@ mod tests {
     fn tree_parallel_factorization_handles_indefinite_matrices() {
         // Shifted into the spectrum: negative pivots, no zero ones.
         check(8, -27.3, 4, true);
+    }
+
+    #[test]
+    fn large_fronts_take_their_updates_in_parallel_and_factorize_in_tiles() {
+        // 20³ points: the top separator has 1200 columns, beyond `PARALLEL_NODE` for its
+        // updates and its dense factorization, and more than one step of `TILE`.
+        let threads = 4;
+        let (pattern, _, coordinates) = grid(20, 0.0);
+        let mut solver = LdltSolver::new(threads);
+        solver.set_coordinates(Some(coordinates));
+        solver.analyze(&pattern).unwrap();
+        let tree = solver.tree.as_ref().expect("supernodal");
+        let big = (0..tree.node_work.len())
+            .filter(|&s| {
+                tree.node_work[s] >= super::PARALLEL_NODE
+                    && tree.incoming_work[s] >= super::PARALLEL_NODE
+            })
+            .count();
+        assert!(big > 0, "no large front");
+        drop(solver);
+        check(20, 0.0, threads, false);
+        check(20, 0.0, 16, false);
     }
 
     #[test]

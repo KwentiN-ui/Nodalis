@@ -1050,6 +1050,31 @@ mod tests {
     }
 
     #[test]
+    fn the_parallel_dissection_orders_like_the_sequential_one() {
+        // 27k vertices: the first splits are ordered in parallel.
+        let (nx, ny, nz) = (30, 30, 30);
+        let pattern = grid_pattern(nx, ny, nz, 1);
+        let coordinates = grid_coordinates(nx, ny, nz, 1);
+        assert!(pattern.dimension() >= PARALLEL_VERTICES);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let parallel = pool.install(|| nested_dissection(&pattern, Some(&coordinates)));
+        let graph = Graph::from_pattern(&pattern);
+        let (quotient, members) = graph.compress();
+        assert_eq!(quotient.len(), pattern.dimension());
+        let positions: Vec<[f64; 3]> = members.iter().map(|m| coordinates[m[0] as usize]).collect();
+        let mut sequential = Vec::new();
+        Dissection::new(&quotient, Some(&positions))
+            .order((0..quotient.len() as u32).collect(), &mut sequential);
+        let sequential: Vec<u32> = (sequential.iter())
+            .flat_map(|&v| members[v as usize].iter().copied())
+            .collect();
+        assert_eq!(parallel, sequential);
+    }
+
+    #[test]
     fn keeps_the_dofs_of_a_node_together() {
         let pattern = grid_pattern(6, 6, 6, 3);
         let perm = nested_dissection(&pattern, Some(&grid_coordinates(6, 6, 6, 3)));

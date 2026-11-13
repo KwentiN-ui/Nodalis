@@ -62,7 +62,7 @@ pub struct LdltSolver {
     reused: u32,
     /// Elimination tree and permuted structure for the tree-parallel factorization, when
     /// the symbolic analysis chose the supernodal structure.
-    tree: Option<TreeSymbolic>,
+    pub(crate) tree: Option<TreeSymbolic>,
     /// Scratch buffers of the factorization, reused over refactorizations.
     workspace: Workspace,
     /// When `faer` chooses the supernodal over the simplicial structure.
