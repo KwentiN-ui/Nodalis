@@ -656,18 +656,32 @@ impl Shank {
     }
 
     /// The shank among the faces of a bolt, with its faces: the cylindrical faces about the
-    /// axis of the bolt nearest to it, without the head and the end faces. The axis is the
-    /// direction of the eigenvalue of the sum of `n nᵀ` that stands apart from the other
-    /// two: the cylinder gives two equal ones square to it, the flat faces of the head and
-    /// the ends add to it alone.
+    /// axis of the bolt nearest to it, without the head and the end faces. Flat faces are
+    /// left out first, the ends, the head and the symmetry planes of a half or quarter model;
+    /// a bolt without round faces is taken as it is.
     fn find(faces: &[(ElementId, u8)], mesh: &FeMesh) -> Option<(Shank, Vec<(ElementId, u8)>)> {
-        type Normal = ((ElementId, u8), [f64; 3], [f64; 3]);
-        let normals: Vec<Normal> = (faces.iter())
+        let normals: Vec<FaceNormal> = (faces.iter())
             .filter_map(|&f| Some((f, face_centre(mesh, f)?, face_normal(mesh, f)?)))
             .filter(|(_, _, n)| norm(*n) > 0.0)
             .collect();
+        let curved = without_planes(&normals);
+        Self::find_among(&curved, true, mesh).or_else(|| Self::find_among(&normals, false, mesh))
+    }
+
+    /// [`Self::find`] among these faces. The axis is the direction of the smallest eigenvalue
+    /// of the sum of `n nᵀ` for round faces only; with flat ones, that of the eigenvalue that
+    /// stands apart from the other two: a whole cylinder gives two equal ones square to it,
+    /// flat faces square to the axis add to it alone.
+    fn find_among(
+        normals: &[FaceNormal],
+        round: bool,
+        mesh: &FeMesh,
+    ) -> Option<(Shank, Vec<(ElementId, u8)>)> {
+        if normals.is_empty() {
+            return None;
+        }
         let mut m = [[0.0; 3]; 3];
-        for (_, _, n) in &normals {
+        for (_, _, n) in normals {
             let area = norm(*n);
             for i in 0..3 {
                 for j in 0..3 {
@@ -679,7 +693,7 @@ impl Shank {
         let mut order = [0, 1, 2];
         order.sort_by(|&i, &j| values[i].total_cmp(&values[j]));
         let [low, mid, high] = order.map(|i| values[i]);
-        let guess = vectors[if mid - low >= high - mid {
+        let guess = vectors[if round || mid - low >= high - mid {
             order[0]
         } else {
             order[2]
@@ -786,6 +800,65 @@ impl Shank {
                 .into(),
         })
     }
+}
+
+/// An element face with its centre and its normal, whose length is its area.
+type FaceNormal = ((ElementId, u8), [f64; 3], [f64; 3]);
+
+/// The faces without those of flat faces: faces whose normal others share over an area
+/// wider than about one of them, unlike a column of faces along a cylinder, which lie on a
+/// line.
+fn without_planes(faces: &[FaceNormal]) -> Vec<FaceNormal> {
+    const STEP: f64 = 0.02;
+    let unit = |n: [f64; 3]| n.map(|c| c / norm(n));
+    let cell = |n: [f64; 3]| unit(n).map(|c| (c / STEP).round() as i64);
+    let mut cells: std::collections::HashMap<[i64; 3], Vec<usize>> = Default::default();
+    for (i, (_, _, n)) in faces.iter().enumerate() {
+        cells.entry(cell(*n)).or_default().push(i);
+    }
+    let flat = |&(_, _, n): &FaceNormal| -> bool {
+        let n = unit(n);
+        let [x, y, z] = cell(n);
+        let mut points = Vec::new();
+        let mut area = 0.0;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    for &j in cells.get(&[x + dx, y + dy, z + dz]).into_iter().flatten() {
+                        if dot(unit(faces[j].2), n) > 0.9995 {
+                            points.push(faces[j].1);
+                            area += norm(faces[j].2);
+                        }
+                    }
+                }
+            }
+        }
+        if points.len() < 3 {
+            return false;
+        }
+        // The thickness of the centres in the plane square to the normal: the smaller of
+        // their two spreads there.
+        let k = points.len() as f64;
+        let mean = [0, 1, 2].map(|d| points.iter().map(|p| p[d]).sum::<f64>() / k);
+        let mut m = [[0.0; 3]; 3];
+        for p in &points {
+            let d = [0, 1, 2].map(|i| p[i] - mean[i]);
+            let along = dot(d, n);
+            let d = [0, 1, 2].map(|i| d[i] - along * n[i]);
+            for i in 0..3 {
+                for j in 0..3 {
+                    m[i][j] += d[i] * d[j] / k;
+                }
+            }
+        }
+        let (values, _) = symmetric_eigen(m);
+        let mut values = values;
+        values.sort_by(f64::total_cmp);
+        // The smallest is the normal's own, zero; the middle one the thickness, against the
+        // size of the faces.
+        values[1].max(0.0).sqrt() > 0.25 * (area / k).sqrt()
+    };
+    faces.iter().filter(|f| !flat(f)).copied().collect()
 }
 
 /// The corner nodes of an element face in order, which identify the face on both elements

@@ -11097,6 +11097,13 @@ fn contact_outputs_of_regions_without_contact_elements_are_left_out() {
 /// and a ring of hexahedra, 12 around and 8 along, as part EALL. Both ends are held (node
 /// set FIX at the start, TIP at the end); the bolt is picked by its cylindrical faces.
 fn shank_bolt(preload: f64) -> (FeMesh, FeModel) {
+    shank_sectors(preload, 12, 0)
+}
+
+/// [`shank_bolt`] with only the first `sectors` of its 12 sectors of 30°, 3 for a quarter
+/// model cut along two planes through the axis, and a head of radius 7.5 around its last
+/// `head` layers.
+fn shank_sectors(preload: f64, sectors: usize, head: usize) -> (FeMesh, FeModel) {
     let (around, along, radius, length) = (12, 8, 5.0, 40.0);
     let (tilt, turn) = (0.4_f64, 0.7_f64);
     // The axis z turned about x by `tilt`, then about z by `turn`.
@@ -11111,7 +11118,7 @@ fn shank_bolt(preload: f64) -> (FeMesh, FeModel) {
         );
         [x, y, z]
     };
-    let per_layer = 1 + 2 * around;
+    let per_layer = 1 + 3 * around;
     let node = |layer: usize, ring: usize, i: usize| -> usize {
         1 + layer * per_layer
             + if ring == 0 {
@@ -11124,7 +11131,7 @@ fn shank_bolt(preload: f64) -> (FeMesh, FeModel) {
     for layer in 0..=along {
         let z = length * layer as f64 / along as f64;
         let mut points = vec![(node(layer, 0, 0), [0.0, 0.0, z])];
-        for ring in 1..=2 {
+        for ring in 1..=3 {
             for i in 0..around {
                 let angle = std::f64::consts::TAU * i as f64 / around as f64;
                 let r = radius * ring as f64 / 2.0;
@@ -11141,7 +11148,7 @@ fn shank_bolt(preload: f64) -> (FeMesh, FeModel) {
     let mut shank = Vec::new();
     let mut id = 1;
     for layer in 0..along {
-        for i in 0..around {
+        for i in 0..sectors {
             let (b, t) = (layer, layer + 1);
             let _ = writeln!(
                 wedges,
@@ -11167,12 +11174,31 @@ fn shank_bolt(preload: f64) -> (FeMesh, FeModel) {
                 node(t, 1, i + 1)
             );
             // Face 4 (nodes 2, 6, 7, 3) lies on the cylinder.
-            shank.push((id as ElementId, 4));
+            if layer < along - head {
+                shank.push((id as ElementId, 4));
+            }
             id += 1;
+            if layer >= along - head {
+                let _ = writeln!(
+                    hexes,
+                    "{id}, {}, {}, {}, {}, {}, {}, {}, {}",
+                    node(b, 2, i),
+                    node(b, 3, i),
+                    node(b, 3, i + 1),
+                    node(b, 2, i + 1),
+                    node(t, 2, i),
+                    node(t, 3, i),
+                    node(t, 3, i + 1),
+                    node(t, 2, i + 1)
+                );
+                id += 1;
+            }
         }
     }
+    // The nodes of an end: the head's ring only where there is a head.
     let ends = |layer: usize| -> String {
-        let ids: Vec<String> = (0..per_layer)
+        let rings = if layer == along && head > 0 { 3 } else { 2 };
+        let ids: Vec<String> = (0..1 + rings * around)
             .map(|k| (1 + layer * per_layer + k).to_string())
             .collect();
         ids.join(",\n")
@@ -11261,6 +11287,35 @@ fn a_bolt_picked_by_its_shank_is_cut_across_its_middle() {
         .entries[0];
     for value in &forces.values {
         assert!((value - force).abs() < 1e-3 * force, "{:?}", forces.values);
+    }
+}
+
+/// A quarter model of a bolt with a head, picked as a whole with the faces on its symmetry
+/// planes, is cut across the middle of its quarter shank.
+#[test]
+fn a_quarter_bolt_is_cut_across_its_middle() {
+    let (mesh, mut model) = shank_sectors(250.0, 3, 2);
+    let elements: Vec<ElementId> = mesh.elements().iter().map(|e| e.id).collect();
+    model.bolts[0].surface = Region::Faces(outer_faces(&mesh, elements));
+    let resolved = model.resolve_bolt(&model.bolts[0], &mesh).unwrap();
+    // 3 wedges and 3 hexahedra below the middle.
+    assert_eq!(resolved.cut_faces.len(), 6, "{resolved:?}");
+    let (tilt, turn) = (0.4_f64, 0.7_f64);
+    let expected = [
+        tilt.sin() * turn.sin(),
+        -tilt.sin() * turn.cos(),
+        tilt.cos(),
+    ];
+    let along: f64 = (resolved.shank_axis.iter().zip(expected))
+        .map(|(a, b)| a * b)
+        .sum();
+    assert!((along.abs() - 1.0).abs() < 1e-9, "{resolved:?}");
+    for &(e, f) in &resolved.cut_faces {
+        for n in constraints::face_node_ids(&mesh, e, f) {
+            let p = mesh.node(n).unwrap();
+            let t: f64 = p.iter().zip(expected).map(|(a, b)| a * b).sum();
+            assert!((t - 15.0).abs() < 1e-9, "{t}");
+        }
     }
 }
 
