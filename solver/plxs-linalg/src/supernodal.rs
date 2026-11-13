@@ -30,7 +30,6 @@ use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::ldlt::factor::{
     LdltError, LdltRegularization, cholesky_in_place, cholesky_in_place_scratch,
 };
-use faer::linalg::matmul::triangular::{BlockStructure, matmul as triangular_matmul};
 use faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place;
 use faer::prelude::*;
 use faer::sparse::linalg::cholesky::supernodal::SymbolicSupernodalCholesky;
@@ -253,6 +252,50 @@ struct Context<'a> {
     pool: &'a Workspace,
     /// The run's token, looked at before every supernode.
     cancel: Option<plxs_core::CancelToken>,
+    /// With `PLXS_LDLT_TRACE`: the start of the factorization and the timings of the large
+    /// supernodes (those whose updates run in parallel).
+    trace: Option<(std::time::Instant, Mutex<Vec<LargeNode>>)>,
+    /// Columns and rows of the tiles of [`tiled_front`]; no tiles: `faer`'s parallel
+    /// kernels. `PLXS_FRONT=faer`, `PLXS_FRONT_TILE` and `PLXS_FRONT_ROWS` set them, for
+    /// measurements.
+    tiles: Option<(usize, usize)>,
+    /// [`PARALLEL_NODE`], or `PLXS_PARALLEL_NODE` for measurements.
+    parallel_node: f64,
+}
+
+/// Timings of one large supernode for `PLXS_LDLT_TRACE`, in seconds since the start.
+struct LargeNode {
+    columns: usize,
+    rows: usize,
+    start: f64,
+    updates: f64,
+    front: f64,
+    update_flops: f64,
+    front_flops: f64,
+}
+
+/// Prints the timings of the large supernodes of a factorization (`PLXS_LDLT_TRACE`).
+fn report(clock: std::time::Instant, mut nodes: Vec<LargeNode>) {
+    let total = clock.elapsed().as_secs_f64();
+    let first = nodes.iter().map(|n| n.start).fold(total, f64::min);
+    let updates: f64 = nodes.iter().map(|n| n.updates).sum();
+    let fronts: f64 = nodes.iter().map(|n| n.front).sum();
+    let update_flops: f64 = nodes.iter().map(|n| n.update_flops).sum();
+    let front_flops: f64 = nodes.iter().map(|n| n.front_flops).sum();
+    eprintln!(
+        "ldlt: numeric factorization {total:.2} s; {} large supernodes from {first:.2} s on: \
+         updates {updates:.2} s ({:.1} GFlop/s each), fronts {fronts:.2} s ({:.1} GFlop/s each)",
+        nodes.len(),
+        update_flops / updates.max(1e-9) * 1e-9,
+        front_flops / fronts.max(1e-9) * 1e-9,
+    );
+    nodes.sort_by(|a, b| (b.updates + b.front).total_cmp(&(a.updates + a.front)));
+    for n in nodes.iter().take(8) {
+        eprintln!(
+            "ldlt:   {} x {}: from {:.2} s, updates {:.2} s ({:.2e} flops), front {:.2} s ({:.2e} flops)",
+            n.rows, n.columns, n.start, n.updates, n.update_flops, n.front, n.front_flops
+        );
+    }
 }
 
 /// Why a factorization ended without a factor.
@@ -367,6 +410,24 @@ pub fn factorize<'a>(
         parallel_subtree: (tree.total_work / (16.0 * threads as f64)).max(MIN_PARALLEL_SUBTREE),
         pool: workspace,
         cancel: plxs_core::CancelToken::current(),
+        trace: std::env::var("PLXS_LDLT_TRACE")
+            .is_ok()
+            .then(|| (std::time::Instant::now(), Mutex::new(Vec::new()))),
+        parallel_node: (std::env::var("PLXS_PARALLEL_NODE").ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(PARALLEL_NODE),
+        tiles: (std::env::var("PLXS_FRONT").as_deref() != Ok("faer")).then(|| {
+            let read = |name: &str, default: usize| {
+                (std::env::var(name).ok())
+                    .and_then(|v| v.parse().ok())
+                    .filter(|&v: &usize| v >= 16)
+                    .unwrap_or(default)
+            };
+            (
+                read("PLXS_FRONT_TILE", TILE),
+                read("PLXS_FRONT_ROWS", TILE_ROWS),
+            )
+        }),
     };
     let counts: Vec<usize> = if threads > 1 {
         tree.roots
@@ -379,6 +440,9 @@ pub fn factorize<'a>(
             .map(|&r| subtree(&ctx, r as usize))
             .collect::<Result<_, _>>()?
     };
+    if let Some((clock, nodes)) = ctx.trace {
+        report(clock, nodes.into_inner().unwrap_or_else(|e| e.into_inner()));
+    }
     Ok(counts.into_iter().sum())
 }
 
@@ -434,94 +498,141 @@ fn node(ctx: &Context<'_>, s: usize) -> Result<usize, FactorError> {
         .take()
         .expect("a supernode is factorized once");
     ls_values.fill(0.0);
-    let mut ls = MatMut::from_column_major_slice_mut(&mut *ls_values, c + p, c);
-    for j in 0..c {
-        let col = s_start + j;
-        for k in tree.a_col_ptr[col] as usize..tree.a_col_ptr[col + 1] as usize {
-            let row = tree.a_row[k] as usize;
-            let i = if row < s_end {
-                row - s_start
-            } else {
-                c + pattern
-                    .binary_search(&(row as FactorIndex))
-                    .expect("row in the structure")
-            };
-            ls[(i, j)] += ctx.values[tree.a_src[k] as usize];
-        }
-    }
-
-    // Updates from the descendants. A large supernode is split into column blocks that
-    // take all updates into their own columns in parallel.
-    let updaters = tree.updaters(s);
-    let blocks = if ctx.threads > 1 && tree.incoming_work[s] >= PARALLEL_NODE {
-        (4 * ctx.threads).min(c.div_ceil(32)).max(1)
-    } else {
-        1
-    };
-    if blocks == 1 {
-        for &d in updaters {
-            apply_update(ctx, d as usize, s, 0, ls.rb_mut());
-        }
-    } else {
-        let width = c.div_ceil(blocks);
-        let mut parts = Vec::with_capacity(blocks);
-        let mut rest = ls.rb_mut();
-        let mut first = 0;
-        while first < c {
-            let w = width.min(c - first);
-            let (head, tail) = rest.split_at_col_mut(w);
-            parts.push((first, head));
-            rest = tail;
-            first += w;
-        }
-        parts.into_par_iter().for_each(|(first, part)| {
-            let mut part = part;
-            for &d in updaters {
-                apply_update(ctx, d as usize, s, first, part.rb_mut());
+    {
+        let mut ls = MatMut::from_column_major_slice_mut(&mut *ls_values, c + p, c);
+        for j in 0..c {
+            let col = s_start + j;
+            for k in tree.a_col_ptr[col] as usize..tree.a_col_ptr[col + 1] as usize {
+                let row = tree.a_row[k] as usize;
+                let i = if row < s_end {
+                    row - s_start
+                } else {
+                    c + pattern
+                        .binary_search(&(row as FactorIndex))
+                        .expect("row in the structure")
+                };
+                ls[(i, j)] += ctx.values[tree.a_src[k] as usize];
             }
-        });
+        }
     }
 
-    let node_par = if ctx.par.degree() > 1 && tree.node_work[s] >= PARALLEL_NODE {
+    // Updates from the descendants, those of a large supernode in parallel.
+    let parallel = ctx.threads > 1 && tree.incoming_work[s] >= ctx.parallel_node;
+    let started = std::time::Instant::now();
+    apply_updates(ctx, s, tree.updaters(s), ls_values, parallel);
+    let updated = std::time::Instant::now();
+    let mut ls = MatMut::from_column_major_slice_mut(&mut *ls_values, c + p, c);
+
+    let node_par = if ctx.par.degree() > 1 && tree.node_work[s] >= ctx.parallel_node {
         ctx.par
     } else {
         Par::Seq
     };
     let count = factor_front(ctx, s_start, c, p, ls.rb_mut(), node_par)?;
+    if let Some((clock, nodes)) = ctx.trace.as_ref().filter(|_| parallel) {
+        let record = LargeNode {
+            columns: c,
+            rows: c + p,
+            start: (started - *clock).as_secs_f64(),
+            updates: (updated - started).as_secs_f64(),
+            front: updated.elapsed().as_secs_f64(),
+            update_flops: tree.incoming_work[s],
+            front_flops: tree.node_work[s],
+        };
+        nodes.lock().unwrap_or_else(|e| e.into_inner()).push(record);
+    }
     let shared: &[f64] = ls_values;
     // The factor outlives the factorization; the reference is only read by ancestors.
     let _ = ctx.done[s].set(shared);
     Ok(count)
 }
 
-/// Subtracts the update of the finished descendant `d` from the columns
-/// `first..first + target.ncols()` of supernode `s` (its front `target`).
-fn apply_update(ctx: &Context<'_>, d: usize, s: usize, first: usize, mut target: MatMut<'_, f64>) {
+/// Columns of the front of a large supernode that one lock guards in [`apply_updates`].
+const LOCK_COLUMNS: usize = 32;
+/// Values of the update one task of [`apply_updates`] computes at most (32 MB), and its
+/// fewest and most columns: wide products read a descendant's columns fewer times.
+const ITEM_VALUES: usize = 4 << 20;
+const ITEM_COLUMNS: (usize, usize) = (256, 1024);
+/// Values of the piece of an update that is computed and subtracted at once (2 MB, which
+/// stays in the cache of a desktop processor).
+const ITEM_CHUNK_VALUES: usize = 256 << 10;
+
+/// Subtracts the updates of all descendants `updaters` of supernode `s` from its front
+/// `front` (column-major, `c + p` rows), left-looking: `L_d D_d L_dᵀ` restricted to the rows
+/// of `s`, from the descendants' finished factor columns. Every task computes the update of
+/// one descendant into up to [`ITEM_COLUMNS`] columns of the front (and [`ITEM_VALUES`]
+/// values) with one dense product and subtracts it; with `parallel` the tasks run
+/// concurrently, each column group of [`LOCK_COLUMNS`] under its own lock.
+///
+/// A descendant's columns are thus read once for many columns of the front. The parallel
+/// version split the front into column blocks before, each of which gathered the updates of
+/// every descendant: a descendant's columns were read once per block, and a block holds
+/// only few of its rows, so the products were narrow and bound by the memory bandwidth.
+/// Measured on a model of 562k equations (C3D20, factor 7.5 GB, cloud VM): 115 GB read on
+/// four threads, 243 GB on sixteen (four blocks per thread), now 19 GB on any number; the
+/// factorization took 21 s on four threads and 28 s on sixteen, now 16 s on both. A
+/// desktop with a small cache and slower memory suffered far more: 44 s on eight cores.
+fn apply_updates(ctx: &Context<'_>, s: usize, updaters: &[u32], front: &mut [f64], parallel: bool) {
+    let supernodal = ctx.supernodal;
+    let s_start = supernodal.supernode_begin()[s] as usize;
+    let s_end = supernodal.supernode_end()[s] as usize;
+    let c = s_end - s_start;
+    let rows = c + supernodal.supernode(s).pattern().len();
+    let mut items = Vec::new();
+    for &d in updaters {
+        let d_pattern = supernodal.supernode(d as usize).pattern();
+        let start = d_pattern.partition_point(|&row| (row as usize) < s_start);
+        let m = d_pattern[start..].partition_point(|&row| (row as usize) < s_end);
+        let below = d_pattern.len() - start;
+        let width = (ITEM_VALUES / below.max(1)).clamp(ITEM_COLUMNS.0, ITEM_COLUMNS.1);
+        let mut j0 = 0;
+        while j0 < m {
+            let j1 = (j0 + width).min(m);
+            items.push((d as usize, start + j0, j1 - j0));
+            j0 = j1;
+        }
+    }
+    if parallel {
+        let locks: Vec<Mutex<&mut [f64]>> = (front.chunks_mut(LOCK_COLUMNS * rows))
+            .map(Mutex::new)
+            .collect();
+        items.into_par_iter().for_each(|(d, first, m)| {
+            update_item(ctx, s, (d, first, m), &locks, LOCK_COLUMNS, rows);
+        });
+    } else {
+        let locks = [Mutex::new(front)];
+        for (d, first, m) in items {
+            update_item(ctx, s, (d, first, m), &locks, c, rows);
+        }
+    }
+}
+
+/// One task of [`apply_updates`]: the update of descendant `d` through its pattern rows
+/// `first..first + m` (columns of `s`) and every row below them, into the front of `s`
+/// held as groups of `lock_columns` columns.
+fn update_item(
+    ctx: &Context<'_>,
+    s: usize,
+    (d, first, m): (usize, usize, usize),
+    locks: &[Mutex<&mut [f64]>],
+    lock_columns: usize,
+    rows_s: usize,
+) {
     let supernodal = ctx.supernodal;
     let s_start = supernodal.supernode_begin()[s] as usize;
     let s_end = supernodal.supernode_end()[s] as usize;
     let c = s_end - s_start;
     let s_pattern = supernodal.supernode(s).pattern();
-    let col_lo = (s_start + first) as FactorIndex;
-    let col_hi = (s_start + first + target.ncols()) as FactorIndex;
-
     let d_start = supernodal.supernode_begin()[d] as usize;
     let c_d = supernodal.supernode_end()[d] as usize - d_start;
     let d_pattern = supernodal.supernode(d).pattern();
-    let start = d_pattern.partition_point(|&row| row < col_lo);
-    let m = d_pattern[start..].partition_point(|&row| row < col_hi);
-    if m == 0 {
-        return;
-    }
-    let rows = &d_pattern[start..];
+    let rows = &d_pattern[first..];
     let r = rows.len();
     let ld_values = ctx.done[d].get().expect("descendants are factorized first");
     let ld = MatRef::from_column_major_slice(ld_values, c_d + d_pattern.len(), c_d);
-    let below = ld.subrows(c_d + start, r);
+    let below = ld.subrows(c_d + first, r);
     let mid = below.subrows(0, m);
 
-    // w = D Ld_midᵀ (c_d × m, contiguous), t = Ld_below w (r × m; the upper part of its
-    // top m × m block is not needed).
     let mut w = ctx.pool.take(c_d * m);
     let mut w_mat = MatMut::from_column_major_slice_mut(&mut w, c_d, m);
     w_mat.copy_from(mid.transpose());
@@ -529,35 +640,6 @@ fn apply_update(ctx: &Context<'_>, d: usize, s: usize, first: usize, mut target:
         let dk = ld[(k, k)];
         w_mat.rb_mut().row_mut(k).iter_mut().for_each(|x| *x *= dk);
     }
-    let mut t = ctx.pool.take(r * m);
-    let mut t_mat = MatMut::from_column_major_slice_mut(&mut t, r, m);
-    let par = Par::Seq;
-    {
-        let (t_top, t_bot) = t_mat.rb_mut().split_at_row_mut(m);
-        triangular_matmul(
-            t_top,
-            BlockStructure::TriangularLower,
-            Accum::Replace,
-            mid,
-            BlockStructure::Rectangular,
-            w_mat.rb(),
-            BlockStructure::Rectangular,
-            1.0,
-            par,
-        );
-        if r > m {
-            faer::linalg::matmul::matmul(
-                t_bot,
-                Accum::Replace,
-                below.subrows(m, r - m),
-                w_mat.rb(),
-                1.0,
-                par,
-            );
-        }
-    }
-    ctx.pool.give_back(w);
-
     // Local rows in the front of s: the diagonal block, then the pattern (both sorted, so
     // the pattern positions are found by one forward walk). Consecutive rows that stay
     // consecutive in the front form runs, which are subtracted as slices.
@@ -577,31 +659,55 @@ fn apply_update(ctx: &Context<'_>, d: usize, s: usize, first: usize, mut target:
             _ => runs.push((i, l, 1)),
         }
     }
-    for (j, &row) in rows[..m].iter().enumerate() {
-        let col = row as usize - s_start - first;
-        let column = t_mat
-            .rb()
-            .col(j)
-            .try_as_col_major()
-            .expect("contiguous")
-            .as_slice();
-        let dst = target
-            .rb_mut()
-            .col_mut(col)
-            .try_as_col_major_mut()
-            .expect("contiguous")
-            .as_slice_mut();
-        for &(src, to, len) in &runs {
-            if src + len <= j {
-                continue;
-            }
-            let skip = j.saturating_sub(src);
-            let (src, to, len) = (src + skip, to + skip, len - skip);
-            for (x, v) in dst[to..to + len].iter_mut().zip(&column[src..src + len]) {
-                *x -= v;
+
+    // The update `below · w` in pieces of rows, each subtracted while it is still in the
+    // cache: a whole update of a large descendant (tens of MB) went to the memory and back.
+    let chunk = (ITEM_CHUNK_VALUES / m.max(1)).max(16);
+    let mut t = ctx.pool.take(chunk.min(r) * m);
+    let mut i0 = 0;
+    while i0 < r {
+        let i1 = (i0 + chunk).min(r);
+        let h = i1 - i0;
+        // Columns j > i of a row i hold no update (the upper triangle).
+        let width = m.min(i1);
+        let mut t_mat = MatMut::from_column_major_slice_mut(&mut t[..h * width], h, width);
+        faer::linalg::matmul::matmul(
+            t_mat.rb_mut(),
+            Accum::Replace,
+            below.subrows(i0, h),
+            w_mat.rb().subcols(0, width),
+            1.0,
+            Par::Seq,
+        );
+        let mut j = 0;
+        while j < width {
+            let group = (rows[j] as usize - s_start) / lock_columns;
+            let mut block = locks[group].lock().unwrap_or_else(|e| e.into_inner());
+            while j < width && (rows[j] as usize - s_start) / lock_columns == group {
+                let col = rows[j] as usize - s_start - group * lock_columns;
+                let column = &t[j * h..(j + 1) * h];
+                let dst = &mut block[col * rows_s..(col + 1) * rows_s];
+                // Rows i0.max(j)..i1 of the update, through the runs that reach them.
+                let low = i0.max(j);
+                for &(src, to, len) in &runs {
+                    if src + len <= low || src >= i1 {
+                        continue;
+                    }
+                    let begin = src.max(low);
+                    let end = (src + len).min(i1);
+                    let to = to + (begin - src);
+                    for (x, v) in
+                        (dst[to..to + end - begin].iter_mut()).zip(&column[begin - i0..end - i0])
+                    {
+                        *x -= v;
+                    }
+                }
+                j += 1;
             }
         }
+        i0 = i1;
     }
+    ctx.pool.give_back(w);
     ctx.pool.give_back(t);
 }
 
@@ -615,6 +721,9 @@ fn factor_front(
     mut ls: MatMut<'_, f64>,
     node_par: Par,
 ) -> Result<usize, LdltError> {
+    if let Some((tile, tile_rows)) = ctx.tiles.filter(|_| node_par.degree() > 1) {
+        return tiled_front(ctx, s_start, c, ls, tile, tile_rows);
+    }
     let (mut top, mut bot) = ls.rb_mut().split_at_row_mut(c);
     let s_end = s_start + c;
     let regularization = LdltRegularization {
@@ -661,6 +770,142 @@ fn factor_front(
         ctx.pool.give_back(wt);
     }
     Ok(info.dynamic_regularization_count)
+}
+
+/// Columns of one step of [`tiled_front`].
+const TILE: usize = 256;
+/// Rows of one task of [`tiled_front`].
+const TILE_ROWS: usize = 512;
+
+/// [`factor_front`] of a large front as many small sequential tasks that rayon hands out
+/// as threads become free, right-looking over column blocks of [`TILE`]: the diagonal block
+/// of a step is factorized, the rows below it are solved in row blocks, and the columns to
+/// its right are updated in tiles. `faer`'s parallel dense kernels split their work into
+/// one equal part per thread, so the slowest thread sets the pace: a thread the operating
+/// system takes off its core (more threads than cores, other programs) or a slower core
+/// (hyperthread siblings, efficiency cores) holds up the whole front.
+fn tiled_front(
+    ctx: &Context<'_>,
+    s_start: usize,
+    c: usize,
+    mut ls: MatMut<'_, f64>,
+    tile: usize,
+    tile_rows: usize,
+) -> Result<usize, LdltError> {
+    let rows = ls.nrows();
+    let mut count = 0;
+    let mut k0 = 0;
+    while k0 < c {
+        let k1 = (k0 + tile).min(c);
+        let nb = k1 - k0;
+        let (left, right) = ls.rb_mut().split_at_col_mut(k1);
+        let mut block = left.subcols_mut(k0, nb);
+        // The diagonal block.
+        {
+            let mut diag = block.rb_mut().subrows_mut(k0, nb);
+            let regularization = LdltRegularization {
+                dynamic_regularization_signs: (ctx.regularization.signs)
+                    .map(|signs| &signs[s_start + k0..s_start + k1]),
+                dynamic_regularization_delta: ctx.regularization.delta,
+                dynamic_regularization_epsilon: ctx.regularization.epsilon,
+            };
+            let mut buffer = MemBuffer::new(cholesky_in_place_scratch::<f64>(
+                nb,
+                Par::Seq,
+                Default::default(),
+            ));
+            let info = cholesky_in_place(
+                diag.rb_mut(),
+                regularization,
+                Par::Seq,
+                MemStack::new(&mut buffer),
+                Default::default(),
+            )
+            .map_err(|LdltError::ZeroPivot { index }| LdltError::ZeroPivot {
+                index: index + s_start + k0,
+            })?;
+            count += info.dynamic_regularization_count;
+            for j in 0..nb {
+                for i in 0..j {
+                    diag[(i, j)] = 0.0;
+                }
+            }
+        }
+        if k1 == rows {
+            break;
+        }
+        // The rows below: W = A L⁻ᵀ (kept for the update), L = W D⁻¹.
+        let below = rows - k1;
+        let mut w = ctx.pool.take(below * nb);
+        {
+            let (diag, panel) = block.rb_mut().split_at_row_mut(k1);
+            let diag = diag.rb().subrows(k0, nb);
+            let w_mat = MatMut::from_column_major_slice_mut(&mut w, below, nb);
+            let mut tasks = Vec::new();
+            let (mut panel, mut w_rest) = (panel, w_mat);
+            while panel.nrows() > 0 {
+                let r = tile_rows.min(panel.nrows());
+                let (head, tail) = panel.split_at_row_mut(r);
+                let (w_head, w_tail) = w_rest.split_at_row_mut(r);
+                tasks.push((head, w_head));
+                panel = tail;
+                w_rest = w_tail;
+            }
+            tasks.into_par_iter().for_each(|(mut a, mut w)| {
+                let r = a.nrows();
+                let mut t = ctx.pool.take(nb * r);
+                let mut t_mat = MatMut::from_column_major_slice_mut(&mut t, nb, r);
+                t_mat.copy_from(a.rb().transpose());
+                solve_unit_lower_triangular_in_place(diag, t_mat.rb_mut(), Par::Seq);
+                w.copy_from(t_mat.rb().transpose());
+                for j in 0..nb {
+                    let d = diag[(j, j)].recip();
+                    for i in 0..r {
+                        a[(i, j)] = w[(i, j)] * d;
+                    }
+                }
+                ctx.pool.give_back(t);
+            });
+        }
+        // The columns to the right: A[i, j] -= W[i, :] L[j, :]ᵀ for rows i >= j.
+        if k1 < c {
+            let l = block.rb().subrows(k1, below);
+            let w_mat = MatRef::from_column_major_slice(&w, below, nb);
+            let mut tasks = Vec::new();
+            let mut rest = right.subcols_mut(0, c - k1);
+            let mut j0 = 0;
+            while rest.ncols() > 0 {
+                let wdt = tile.min(rest.ncols());
+                let (head, tail) = rest.split_at_col_mut(wdt);
+                // Rows from the tile's first column down.
+                let (_, mut lower) = head.split_at_row_mut(k1 + j0);
+                let mut i0 = j0;
+                while lower.nrows() > 0 {
+                    let r = tile_rows.min(lower.nrows());
+                    let (piece, tail_rows) = lower.split_at_row_mut(r);
+                    tasks.push((piece, i0, j0));
+                    lower = tail_rows;
+                    i0 += r;
+                }
+                rest = tail;
+                j0 += wdt;
+            }
+            tasks.into_par_iter().for_each(|(dst, i0, j0)| {
+                let (r, wdt) = (dst.nrows(), dst.ncols());
+                faer::linalg::matmul::matmul(
+                    dst,
+                    Accum::Add,
+                    w_mat.subrows(i0, r),
+                    l.subrows(j0, wdt).transpose(),
+                    -1.0,
+                    Par::Seq,
+                );
+            });
+        }
+        ctx.pool.give_back(w);
+        k0 = k1;
+    }
+    Ok(count)
 }
 
 struct SolveContext<'a> {
@@ -992,6 +1237,28 @@ mod tests {
     fn tree_parallel_factorization_handles_indefinite_matrices() {
         // Shifted into the spectrum: negative pivots, no zero ones.
         check(8, -27.3, 4, true);
+    }
+
+    #[test]
+    fn large_fronts_take_their_updates_in_parallel_and_factorize_in_tiles() {
+        // 20³ points: the top separator has 1200 columns, beyond `PARALLEL_NODE` for its
+        // updates and its dense factorization, and more than one step of `TILE`.
+        let threads = 4;
+        let (pattern, _, coordinates) = grid(20, 0.0);
+        let mut solver = LdltSolver::new(threads);
+        solver.set_coordinates(Some(coordinates));
+        solver.analyze(&pattern).unwrap();
+        let tree = solver.tree.as_ref().expect("supernodal");
+        let big = (0..tree.node_work.len())
+            .filter(|&s| {
+                tree.node_work[s] >= super::PARALLEL_NODE
+                    && tree.incoming_work[s] >= super::PARALLEL_NODE
+            })
+            .count();
+        assert!(big > 0, "no large front");
+        drop(solver);
+        check(20, 0.0, threads, false);
+        check(20, 0.0, 16, false);
     }
 
     #[test]

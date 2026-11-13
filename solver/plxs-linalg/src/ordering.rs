@@ -81,10 +81,8 @@ pub fn nested_dissection(pattern: &Pattern, coordinates: Option<&[[f64; 3]]>) ->
             .map(|m| c[m[0] as usize])
             .collect::<Vec<[f64; 3]>>()
     });
-    let mut order = Vec::with_capacity(quotient.len());
-    let mut dissection = Dissection::new(&quotient, coordinates);
     let all: Vec<u32> = (0..quotient.len() as u32).collect();
-    dissection.order(all, &mut order);
+    let order = order_parallel(&quotient, coordinates.as_deref(), all, 0);
     crate::solver::trace(&clock, "dissection: order");
     debug_assert_eq!(order.len(), quotient.len());
     let mut perm = Vec::with_capacity(n);
@@ -236,10 +234,56 @@ struct Split {
     weight: usize,
 }
 
+/// Subgraphs with at least this many vertices have their two sides ordered in parallel.
+const PARALLEL_VERTICES: usize = 20_000;
+
+/// Orders `vertices` of `graph` like [`Dissection::order`], the two sides of every large
+/// split in parallel, each with its own search state; the splits below
+/// [`PARALLEL_VERTICES`] (and the leaves, components and separators) on one thread.
+fn order_parallel(
+    graph: &Graph,
+    coordinates: Option<&[[f64; 3]]>,
+    vertices: Vec<u32>,
+    depth: u32,
+) -> Vec<u32> {
+    let mut dissection = Dissection::new(graph, coordinates);
+    let mut out = Vec::with_capacity(vertices.len());
+    if vertices.len() < PARALLEL_VERTICES || depth > 16 || rayon::current_num_threads() < 2 {
+        dissection.order(vertices, &mut out);
+        return out;
+    }
+    let mut work = Vec::new();
+    dissection.order_one(vertices, &mut out, &mut work);
+    // A split leaves [separator, side B, side A] (done last in, first out).
+    if let [Task::Emit(_), Task::Order(_), Task::Order(_)] = work.as_slice() {
+        let (Some(Task::Order(a)), Some(Task::Order(b)), Some(Task::Emit(separator))) =
+            (work.pop(), work.pop(), work.pop())
+        else {
+            unreachable!("matched above")
+        };
+        let (a, b) = rayon::join(
+            || order_parallel(graph, coordinates, a, depth + 1),
+            || order_parallel(graph, coordinates, b, depth + 1),
+        );
+        out.extend(a);
+        out.extend(b);
+        out.extend(separator);
+        return out;
+    }
+    while let Some(task) = work.pop() {
+        match task {
+            Task::Order(vertices) => dissection.order(vertices, &mut out),
+            Task::Emit(vertices) => out.extend(vertices),
+            Task::Leaf(vertices) => dissection.order_leaf(vertices, &mut out),
+        }
+    }
+    out
+}
+
 struct Dissection<'a> {
     graph: &'a Graph,
     /// Positions of the (quotient) vertices, when known.
-    coordinates: Option<Vec<[f64; 3]>>,
+    coordinates: Option<&'a [[f64; 3]]>,
     /// Generation stamp of the subgraph a vertex belongs to during a search.
     stamp: Vec<u32>,
     generation: u32,
@@ -266,7 +310,7 @@ enum Task {
 }
 
 impl<'a> Dissection<'a> {
-    fn new(graph: &'a Graph, coordinates: Option<Vec<[f64; 3]>>) -> Self {
+    fn new(graph: &'a Graph, coordinates: Option<&'a [[f64; 3]]>) -> Self {
         Self {
             graph,
             coordinates,
@@ -1003,6 +1047,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_parallel_dissection_orders_like_the_sequential_one() {
+        // 27k vertices: the first splits are ordered in parallel.
+        let (nx, ny, nz) = (30, 30, 30);
+        let pattern = grid_pattern(nx, ny, nz, 1);
+        let coordinates = grid_coordinates(nx, ny, nz, 1);
+        assert!(pattern.dimension() >= PARALLEL_VERTICES);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let parallel = pool.install(|| nested_dissection(&pattern, Some(&coordinates)));
+        let graph = Graph::from_pattern(&pattern);
+        let (quotient, members) = graph.compress();
+        assert_eq!(quotient.len(), pattern.dimension());
+        let positions: Vec<[f64; 3]> = members.iter().map(|m| coordinates[m[0] as usize]).collect();
+        let mut sequential = Vec::new();
+        Dissection::new(&quotient, Some(&positions))
+            .order((0..quotient.len() as u32).collect(), &mut sequential);
+        let sequential: Vec<u32> = (sequential.iter())
+            .flat_map(|&v| members[v as usize].iter().copied())
+            .collect();
+        assert_eq!(parallel, sequential);
     }
 
     #[test]
