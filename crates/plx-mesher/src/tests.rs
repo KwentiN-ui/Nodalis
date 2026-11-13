@@ -503,6 +503,7 @@ fn rectangle(origin: [f64; 3], size: [f64; 2], radius: f64) -> Geometry {
     .unwrap();
     Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "rechteck.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
@@ -674,6 +675,7 @@ fn box_and_lines() -> Geometry {
     .unwrap();
     Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "rahmen.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
@@ -710,6 +712,7 @@ fn a_long_thin_round_bar_is_displayed_with_few_triangles() {
     .unwrap();
     let geometry = Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "stab.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::default(),
@@ -1108,6 +1111,7 @@ fn beam_on_block() -> Geometry {
     .unwrap();
     Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "balken.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(40.0),
@@ -1205,6 +1209,7 @@ fn detection_on_geometry_keeps_to_the_faces_that_touch() {
     .unwrap();
     let geometry = Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "bloecke.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(60.0),
@@ -1703,6 +1708,7 @@ fn revolved(origin: [f64; 3], size: [f64; 2], radius: f64, angle: f64) -> Geomet
     .unwrap();
     Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "ring.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
@@ -1875,6 +1881,7 @@ fn plate_and_cube(size: [f64; 3], cube_first: bool) -> Geometry {
     .unwrap();
     with_signatures(Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "platte.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
@@ -1959,6 +1966,7 @@ fn cube() -> Geometry {
     .unwrap();
     with_signatures(Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "wuerfel.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
@@ -2104,6 +2112,7 @@ fn corners_of_flat_faces_are_rounded_and_bevelled() {
     .unwrap();
     let input = with_signatures(Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "quadrate.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
@@ -2218,6 +2227,7 @@ fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
     .unwrap();
     let geometry = Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "seilrolle.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(400.0),
@@ -2362,6 +2372,7 @@ fn cut_block() -> Geometry {
         refinement: 1.0,
         signatures: Vec::new(),
         compounds: Vec::new(),
+        suppressed: Vec::new(),
     })
     .unwrap();
     geometry.compounds.push(plx_model::CompoundPart {
@@ -3163,6 +3174,7 @@ fn rounded_plate() -> Geometry {
     .unwrap();
     let input = with_signatures(Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "platte.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::default(),
@@ -3306,6 +3318,7 @@ fn defeaturing_keeps_the_round_ends_of_slots_and_removes_pocket_corners() {
     .unwrap();
     let input = with_signatures(Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "schlitz.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::default(),
@@ -3399,6 +3412,7 @@ fn bracket() -> Geometry {
     .unwrap();
     with_signatures(Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "winkel.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::default(),
@@ -3649,4 +3663,48 @@ fn splits_keep_planes_and_circles() {
         );
     }
     assert!(edge_stray_of(&geometry) < 1e-4);
+}
+
+#[test]
+fn suppressed_parts_are_left_alone_by_splits_and_cad_operations() {
+    use plx_model::CadOperationKind::{Fillet, SplitPlane};
+    if !gmsh_available() {
+        return;
+    }
+    // Two cubes of 10 mm side by side along y; the plane x = 4 runs through both.
+    let mut input = with_signatures(made_geometry(|gmsh| {
+        gmsh.add_box([0.0; 3], [10.0; 3])?;
+        gmsh.add_box([0.0, 20.0, 0.0], [10.0; 3])?;
+        Ok(())
+    }))
+    .unwrap();
+    let names = part_names(&input).unwrap();
+    let (first, second) = (names[0].clone(), names[1].clone());
+    input.set_suppressed(std::slice::from_ref(&first), true);
+    // A split of all parts cuts the second only.
+    let once = apply_operation(&input, &split(SplitPlane, 4.0), &[]).unwrap();
+    let mut after = part_names(&once).unwrap();
+    after.sort();
+    let mut expected = vec![first.clone(), format!("{second}-1"), format!("{second}-2")];
+    expected.sort();
+    assert_eq!(after, expected);
+    assert!(once.is_suppressed(&first));
+    // Chosen, the suppressed part is not cut either.
+    let chosen = plx_model::CadOperation {
+        parts: vec![first.clone()],
+        ..split(SplitPlane, 4.0)
+    };
+    let error = apply_operation(&input, &chosen, &[]).unwrap_err();
+    assert!(error.to_string().contains("suppressed"), "{error}");
+    // An edge of the suppressed cube cannot be filleted, one of the other can.
+    let edge_in = |y: f64| {
+        (input.signatures.iter())
+            .find(|s| matches!(s.entity, CadEntity::Edge(_)) && (s.centroid[1] - y).abs() < 6.0)
+            .unwrap()
+            .entity
+    };
+    let fillet = |edge| apply_operation(&input, &split(Fillet, 1.0), &[edge]);
+    let error = fillet(edge_in(5.0)).unwrap_err();
+    assert!(error.to_string().contains("suppressed"), "{error}");
+    assert!(fillet(edge_in(25.0)).is_ok());
 }

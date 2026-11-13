@@ -409,6 +409,7 @@ mod tests {
     fn geometry(signatures: Vec<EntitySignature>) -> Geometry {
         Geometry {
             compounds: Vec::new(),
+            suppressed: Vec::new(),
             source: "block.step".into(),
             brep: format!("{signatures:?}"),
             meshing: MeshingParameters::default(),

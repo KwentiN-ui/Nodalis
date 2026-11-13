@@ -58,8 +58,9 @@ not belong to a face become line parts (for beams and trusses). Faces that share
 shell part, as a surface split into several faces in the CAD program. Part names are taken from the
 CAD file where it has names, otherwise they are `SOLID-1`, `SHELL-1`, `LINE-1` and so on.
 
-The context menu of a geometry part has #ui("Create Mesh"), the entries of the compound parts
-(@compound-parts), #ui("Properties ..."), #ui("Hide")/#ui("Show") and #ui("Delete").
+The context menu of a geometry part has #ui("Create Mesh"), #ui("Suppress") (@suppressed-parts),
+the entries of the compound parts (@compound-parts), #ui("Properties ..."),
+#ui("Hide")/#ui("Show") and #ui("Delete").
 Deleting a geometry part keeps a mesh that was already
 created from it.
 
@@ -147,6 +148,33 @@ the meshes of the pieces are very different in size, the tie interpolates betwee
 stresses right at the cut are then less accurate than inside a piece.]
 
 #screenshot("compound-part.png", [A bracket cut into three solids for the mesher, joined into one compound part])
+
+=== Suppressed parts <suppressed-parts>
+
+A suppressed part is left alone by everything that works on the geometry, as if it were not
+there, until it is unsuppressed. This helps with an assembly where only some parts are to be
+meshed or changed now, for example a screw that is meshed later or not at all.
+
+- #ui("Suppress") in the context menu of a part suppresses it, of several selected parts all of
+  them; on a compound part it suppresses its members. #ui("Unsuppress") takes it back, as does a
+  click on the no-entry sign in front of the part, and #ui("Unsuppress All") in the menu of
+  #ui("Parts") unsuppresses every part.
+- In the tree a suppressed part is gray with the no-entry sign instead of its icon, like a
+  deactivated item of the FE model; a compound whose members are all suppressed too. In the 3D
+  view it is drawn as its edges only and a click goes through it. Its check box still shows or
+  hides it.
+- #ui("Mesh All Parts") (also in the mesh setup dialog), #ui("Create Mesh") and the meshing
+  before a solve leave suppressed parts out. A mesh the part already has stays in the FE
+  model as it is and does not count as out of date.
+- #ui("Split by Plane") never cuts a suppressed part, also not when it is selected.
+  #ui("Defeature") finds no fillets on it, and edges or faces of a suppressed part cannot be
+  picked for a fillet, chamfer, push/pull, hole ring or defeaturing.
+- Suppressing is part of the mesh setup of the analysis: #ui("Edit") > #ui("Undo") takes it
+  back, it is saved with the project, and an analysis that takes its geometry from a link keeps
+  its own suppressed parts.
+
+#screenshot("suppressed-parts.png", [SCHRAUBE suppressed: gray with the no-entry sign in the
+  tree and drawn as its edges only, Mesh All Parts meshes the other parts])
 
 === Geometry for 2D models
 

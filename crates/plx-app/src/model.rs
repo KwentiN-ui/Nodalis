@@ -59,6 +59,9 @@ pub struct PartInfo {
     pub contours: bool,
     /// Dimension of the CAD shape of a geometry part: 3 solid, 2 face, 1 edge.
     pub dimension: Option<u8>,
+    /// A suppressed part of the geometry: drawn as its edges only, and not picked in the
+    /// 3D view.
+    pub suppressed: bool,
 }
 
 /// A loaded input file with everything the GUI shows about it.
@@ -772,6 +775,7 @@ impl Model {
                 bounds: None,
                 visible: true,
                 contours: true,
+                suppressed: false,
                 dimension: None,
             });
         }
@@ -836,6 +840,17 @@ impl Model {
             .map(|part| extract_part_skin(&display.mesh, part, 180.0))
             .collect();
         Self::geometry_view_with_skins(path, display, skins)
+    }
+
+    /// Marks the parts of a geometry view that `geometry` suppresses; true if any changed.
+    pub fn mark_suppressed(&mut self, geometry: &Geometry) -> bool {
+        let mut changed = false;
+        for part in &mut self.parts {
+            let suppressed = geometry.is_suppressed(&part.name);
+            changed |= part.suppressed != suppressed;
+            part.suppressed = suppressed;
+        }
+        changed
     }
 
     /// [`Model::geometry_view`] with the skins of the parts already extracted; their faces
@@ -1593,6 +1608,10 @@ impl Model {
         }
         if self.is_geometry {
             mesh.mesh_edges.clear();
+            // A suppressed part is drawn as its edges only.
+            if info.suppressed {
+                mesh.triangles.clear();
+            }
         }
         mesh
     }
@@ -2189,7 +2208,7 @@ impl Model {
         let skin_nodes = &self.skin_lookup().nodes;
         let unit = direction.normalize_or_zero();
         let mut parts: Vec<(f32, usize)> = (self.parts.iter().enumerate())
-            .filter(|(index, info)| info.visible && *index < self.skins.len())
+            .filter(|(index, info)| info.visible && !info.suppressed && *index < self.skins.len())
             .filter_map(|(index, _)| {
                 let nodes = skin_nodes.get(index)?;
                 let (min, max) = (nodes.iter())

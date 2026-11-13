@@ -1169,7 +1169,8 @@ struct WorkerRequest {
 /// The worker's answer in `result.ron`: per part the mesh and Gmsh's warnings.
 type WorkerResult = Result<Vec<(FeMesh, Vec<String>)>, String>;
 
-/// Meshes the named parts, or all with `None`, one after the other.
+/// Meshes the named parts, or all with `None`, one after the other; suppressed parts are
+/// left out.
 fn mesh_parts(geometry: &Geometry, parts: Option<Vec<String>>) -> Result<PartMeshes, String> {
     let parts = match parts {
         // A compound part is meshed as the parts of the geometry it joins.
@@ -1184,6 +1185,10 @@ fn mesh_parts(geometry: &Geometry, parts: Option<Vec<String>>) -> Result<PartMes
         }
         None => plx_mesher::part_names(geometry).map_err(|e| e.to_string())?,
     };
+    // Suppressed parts are left alone, with the mesh they may have.
+    let parts: Vec<String> = (parts.into_iter())
+        .filter(|p| !geometry.is_suppressed(p))
+        .collect();
     let mut meshes = Vec::with_capacity(parts.len());
     for part in parts {
         let mesh = plx_mesher::generate_part_mesh(geometry, &part).map_err(|e| e.to_string())?;
@@ -1384,6 +1389,45 @@ mod tests {
     /// coordinates) at x, y.
     fn hit(view: &Model, x: f32, y: f32) -> Hit {
         view.pick(Vec3::new(x, y, 50.0), Vec3::NEG_Z).unwrap()
+    }
+
+    #[test]
+    fn suppressed_parts_are_not_meshed_nor_picked() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/zwei_bloecke.step");
+        let loaded = match crate::model::load(&path, plx_model::UnitSystem::Unitless) {
+            Ok(loaded) => loaded,
+            Err(error) if std::env::var_os("NODALIS_REQUIRE_GMSH").is_none() => {
+                eprintln!("Gmsh not available, test skipped: {error}");
+                return;
+            }
+            Err(error) => panic!("Gmsh is required: {error}"),
+        };
+        let mut geometry = loaded.model.geometry.unwrap();
+        let mut view = loaded.geometry_view.unwrap();
+        geometry.meshing.max_size = 5.0;
+        geometry.set_suppressed(&["SOLID-1".into()], true);
+        let meshed = mesh_parts(&geometry, None).unwrap();
+        let names: Vec<&str> = (meshed.meshes.iter())
+            .flat_map(|m| m.mesh.parts.iter().map(|p| p.name.as_str()))
+            .collect();
+        assert_eq!(names, ["SOLID-2"]);
+        let asked = mesh_parts(&geometry, Some(vec!["SOLID-1".into()])).unwrap();
+        assert!(asked.meshes.is_empty());
+        // In the view it is drawn as its edges and a click goes through it.
+        assert!(view.mark_suppressed(&geometry));
+        assert!(!view.mark_suppressed(&geometry));
+        let first = view.parts.iter().position(|p| p.name == "SOLID-1").unwrap();
+        assert!(view.parts[first].suppressed);
+        let drawn = view.part_scene_mesh(first).unwrap();
+        assert!(drawn.triangles.is_empty() && !drawn.feature_edges.is_empty());
+        let (min, max) = view.parts[first].bounds.unwrap();
+        let centre = 0.5 * (min + max);
+        let above = Vec3::new(centre.x, centre.y, max.z + 100.0);
+        assert!(
+            view.pick(above, Vec3::NEG_Z)
+                .is_none_or(|hit| hit.part != first)
+        );
     }
 
     #[test]

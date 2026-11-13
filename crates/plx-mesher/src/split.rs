@@ -40,12 +40,17 @@ pub(crate) fn split_by_plane(
 ) -> Result<Split, GmshError> {
     let (point, normal) = cut_plane(gmsh, operation, entities)?;
     let parts = parts(gmsh, input)?;
-    // Only the chosen parts are cut, or all.
-    let chosen = |name: &str| {
+    // Only the chosen parts are cut, or all; never the suppressed ones.
+    let named = |name: &str| {
         operation.parts.is_empty() || (operation.parts.iter()).any(|p| p.eq_ignore_ascii_case(name))
     };
+    let chosen = |name: &str| named(name) && !input.is_suppressed(name);
     if !parts.iter().any(|(_, name)| chosen(name)) {
-        return Err(fail("None of the parts to split is in the geometry"));
+        return Err(fail(if parts.iter().any(|(_, name)| named(name)) {
+            "The parts to split are all suppressed"
+        } else {
+            "None of the parts to split is in the geometry"
+        }));
     }
     let (lo, hi) = gmsh.bounding_box()?;
     let size = distance(lo, hi).max(1e-9);

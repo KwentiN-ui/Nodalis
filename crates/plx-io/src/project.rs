@@ -2229,6 +2229,7 @@ mod tests {
         let path = dir.join("block.ndl");
         let geometry = Geometry {
             compounds: Vec::new(),
+            suppressed: Vec::new(),
             source: "block.step".into(),
             brep: "DBRep_DrawableShape\n\"quoted\" lines\n".into(),
             meshing: MeshingParameters::for_diagonal(100.0),

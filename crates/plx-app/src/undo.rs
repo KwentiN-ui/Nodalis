@@ -29,6 +29,7 @@ struct Meshing {
     parameters: MeshingParameters,
     items: Vec<MeshSetupItem>,
     compounds: Vec<plx_model::CompoundPart>,
+    suppressed: Vec<String>,
 }
 
 impl Meshing {
@@ -37,6 +38,7 @@ impl Meshing {
             parameters: g.meshing,
             items: g.mesh_items.clone(),
             compounds: g.compounds.clone(),
+            suppressed: g.suppressed.clone(),
         })
     }
 }
@@ -239,6 +241,7 @@ fn restore(model: &mut Model, state: State) -> State {
         geometry.meshing = restored.parameters;
         geometry.mesh_items = restored.items;
         geometry.compounds = restored.compounds;
+        geometry.suppressed = restored.suppressed;
     }
     let mesh = match state.mesh {
         Some(mesh) => {
@@ -429,6 +432,7 @@ mod tests {
             refinement: 1.0,
             signatures: Vec::new(),
             compounds: Vec::new(),
+            suppressed: Vec::new(),
         });
         record(&mut model);
         assert!(!model.history.can_undo());
