@@ -91,8 +91,18 @@ the mesh setup and the picks of the FE model follow the faces and edges by where
 the geometry has to be meshed again. A split by plane starts from the YZ plane through the middle
 of the geometry, the other tools from a size of 3 mm.
 
-Unlike the CAD Operation block, the tools keep no history and cannot be undone: change the
-geometry with them once, for example to remove cosmetic fillets before meshing. Use the block in
+#ui("Split by Plane") cuts only the parts selected in the tree when it is opened, compound parts
+selected standing for their members; with nothing selected it cuts every part the plane runs
+through. The editor outlines the selected parts in red, starts from the YZ plane through their
+middle and draws the outline of the plane over them only. The other parts stay as they are, even
+those the plane runs through or that lie wholly on a side that is not kept. Turning off
+#ui("Only the selected parts") in the #ui("Cut") row cuts every part again.
+
+#screenshot("geometry-split-selected.png", [Split by Plane with SOLID-3 selected in the tree: the
+  preview cuts only that bar, the other two stay whole though the YZ plane runs through them])
+
+Unlike the CAD Operation block, the tools keep no history; #ui("Edit") > #ui("Undo") takes the
+last change back (@undo). Change the geometry with them once, for example to remove cosmetic fillets before meshing. Use the block in
 the project when the change is to stay editable, to be varied by a parameter study or to follow a
 new version of the CAD file. An analysis whose geometry comes from a link refuses the tools,
 since the link would bring its geometry back; put a CAD Operation block between the two instead.

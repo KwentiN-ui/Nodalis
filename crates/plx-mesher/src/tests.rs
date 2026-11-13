@@ -2562,6 +2562,68 @@ fn a_split_geometry_splits_again_with_parts_beside_the_plane() {
     assert_eq!(parts, 6);
 }
 
+/// A split of chosen parts leaves the others whole, even those the plane runs through or
+/// whose side is dropped.
+#[test]
+fn a_split_of_chosen_parts_leaves_the_others_whole() {
+    use plx_model::{CadOperationKind::SplitPlane, SplitKeep};
+    if !gmsh_available() {
+        return;
+    }
+    // Two cubes of 10 mm side by side along y; the plane x = 4 runs through both.
+    let input = with_signatures(Geometry {
+        compounds: Vec::new(),
+        ..made_geometry(|gmsh| {
+            gmsh.add_box([0.0; 3], [10.0; 3])?;
+            gmsh.add_box([0.0, 20.0, 0.0], [10.0; 3])?;
+            Ok(())
+        })
+    })
+    .unwrap();
+    let names = part_names(&input).unwrap();
+    assert_eq!(names.len(), 2);
+    let second = names[1].clone();
+    let operation = plx_model::CadOperation {
+        parts: vec![second.clone()],
+        ..split(SplitPlane, 4.0)
+    };
+    let once = apply_operation(&input, &operation, &[]).unwrap();
+    let mut after = part_names(&once).unwrap();
+    after.sort();
+    let mut expected = vec![
+        names[0].clone(),
+        format!("{second}-1"),
+        format!("{second}-2"),
+    ];
+    expected.sort();
+    assert_eq!(after, expected);
+    assert_eq!(once.compounds.len(), 1);
+    assert_eq!(once.compounds[0].name, second);
+    assert!((solid_volume(&once) - 2000.0).abs() < 1e-6);
+    // Dropping a side drops it of the chosen part only.
+    let positive = plx_model::CadOperation {
+        keep: SplitKeep::Positive,
+        ..operation.clone()
+    };
+    let kept = apply_operation(&input, &positive, &[]).unwrap();
+    assert_eq!(part_names(&kept).unwrap().len(), 2);
+    assert!((solid_volume(&kept) - 1600.0).abs() < 1e-6);
+    // A plane beside the chosen part cuts nothing, though it runs through the other one.
+    let beside = plx_model::CadOperation {
+        plane: plx_model::SplitPlane::Global(plx_model::CoordinatePlane::Xz),
+        parts: vec![second.clone()],
+        ..split(SplitPlane, 5.0)
+    };
+    let error = apply_operation(&input, &beside, &[]).unwrap_err();
+    assert!(error.to_string().contains("none of the parts"), "{error}");
+    // A part no longer there.
+    let gone = plx_model::CadOperation {
+        parts: vec!["nothing".into()],
+        ..split(SplitPlane, 4.0)
+    };
+    assert!(apply_operation(&input, &gone, &[]).is_err());
+}
+
 #[test]
 fn shells_split_by_a_plane_become_a_compound_or_lose_a_side() {
     use plx_model::{CadOperationKind::SplitPlane, SplitKeep};

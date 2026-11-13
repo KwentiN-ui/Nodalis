@@ -252,6 +252,10 @@ pub struct CadOperation {
     /// Which faces a defeaturing removes.
     #[serde(default, skip_serializing_if = "is_default")]
     pub faces: DefeatureFaces,
+    /// The names of the parts a split by plane cuts; the others stay as they are. All parts
+    /// when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<String>,
 }
 
 impl Default for CadOperation {
@@ -265,6 +269,7 @@ impl Default for CadOperation {
             keep: SplitKeep::default(),
             compound: true,
             faces: DefeatureFaces::default(),
+            parts: Vec::new(),
         }
     }
 }
@@ -273,9 +278,14 @@ impl CadOperation {
     /// What it acts on, for texts, e.g. "2 edges" or "1 corner".
     pub fn describe_picks(&self) -> String {
         if self.kind == CadOperationKind::SplitPlane {
-            return match self.plane {
+            let plane = match self.plane {
                 SplitPlane::Face if self.entities.is_empty() => "no face picked".to_owned(),
                 plane => plane.label().to_owned(),
+            };
+            return match self.parts.len() {
+                0 => plane,
+                1 => format!("{plane}, 1 part"),
+                n => format!("{plane}, {n} parts"),
             };
         }
         if self.kind == CadOperationKind::Defeature && self.faces == DefeatureFaces::Found {
