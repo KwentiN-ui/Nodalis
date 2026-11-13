@@ -894,9 +894,7 @@ impl ContactModel {
                 for p in 0..pair.points.len() {
                     let beside = pair
                         .closest(p, &current, None)
-                        .is_none_or(|(f, natural, ..)| {
-                            !pair.master[f as usize].contains(natural, 1e-3)
-                        });
+                        .is_none_or(|(f, natural, fp, x)| pair.beside(p, f, natural, &fp, x));
                     if beside {
                         pair.candidates[p].clear();
                     }
@@ -1731,6 +1729,35 @@ impl Pair {
             cutoff: self.cutoff[p],
             corner,
         })
+    }
+
+    /// Whether point `p` lies beside the master surface: its foot point on its closest face
+    /// `f` (natural coordinates `natural`, which the projection clamps to the face) lies on
+    /// the face's border, not on an edge it shares with another master face, and the point
+    /// lies off to the side of it by more than [`BESIDE_TOLERANCE`] typical edge lengths.
+    /// Its distance along the normal of the border face is then no overclosure: a point
+    /// above the rim of a groove lies behind the plane of the flank's last face, though it
+    /// touches nothing. A rope's axis node (offset by its radius) is never beside: it
+    /// touches the border's edge at its radius, see [`Pair::kinematics`].
+    fn beside(
+        &self,
+        p: usize,
+        f: u32,
+        natural: [f64; 2],
+        fp: &geometry::FacePoint,
+        x: [f64; 3],
+    ) -> bool {
+        let face = &self.master[f as usize];
+        if face.is_interior(natural) || self.points[p].offset > 0.0 {
+            return false;
+        }
+        let mut r = sub(x, fp.x);
+        if face.planar.is_some() {
+            r[2] = 0.0;
+        }
+        let along = dot(r, fp.normal);
+        let lateral = geometry::norm(sub(r, scale(fp.normal, along)));
+        lateral > BESIDE_TOLERANCE * self.typical && !self.inner_edge(p, f, &fp.n)
     }
 
     /// Whether the edge or corner of master face `f` that a clamped foot point (shape
