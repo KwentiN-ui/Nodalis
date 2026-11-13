@@ -111,6 +111,8 @@ pub enum Problem {
     /// A bonding contact region at a bolt's cut, such as the shank bonded into its hole:
     /// it holds the shank, and the bolt cannot stretch.
     BoltHeldAtCut,
+    /// The cut through a bolt's shank spreads far along it: the mesh there is too coarse.
+    CoarseBoltCut,
     /// Beams held by pins only, free to turn about the line through them.
     SpinAboutPins,
     HeldOnlyByContact,
@@ -287,6 +289,7 @@ impl Problem {
             | Problem::LockWithoutPreload
             | Problem::BoltWithoutPreload
             | Problem::BoltHeldAtCut
+            | Problem::CoarseBoltCut
             | Problem::NoCreep
             | Problem::UnstableHyperelastic
             | Problem::HyperelasticLinearized
@@ -354,6 +357,7 @@ impl Problem {
             Problem::BoltWithoutPreload => "Bolt without preload",
             Problem::BoltFacesUsedTwice => "Faces of a bolt's cut used twice",
             Problem::BoltHeldAtCut => "Bolt held at its cut",
+            Problem::CoarseBoltCut => "Coarse mesh at the bolt's cut",
             Problem::InvalidCyclicSymmetry => "Invalid cyclic symmetry",
             Problem::VelocityIgnored => "Initial velocity without a Dynamic step",
             Problem::FramesTooFew => "Too few frames for the frequency limit",
@@ -711,6 +715,12 @@ impl Problem {
                 "The bolt joins the two sides of its cut itself. A tie or contact pair on the \
                  same faces binds the nodes a second time: the constraints then conflict, \
                  or the contact does not converge."
+            }
+            Problem::CoarseBoltCut => {
+                "Nodalis cuts the shank along the faces of its elements. Where they are long \
+                 compared with the shank, the cut is a staircase spread far along the shank: \
+                 the elements beside it are stretched by the preload and the stresses near the \
+                 cut are wrong."
             }
             Problem::BoltHeldAtCut => {
                 "A bonded or rough contact region touches the cut of the \
@@ -1184,6 +1194,9 @@ impl Problem {
             Problem::BoltFacesUsedTwice => {
                 "Deactivate or delete the tie or contact pair on the faces of the cut; the bolt \
                  replaces it."
+            }
+            Problem::CoarseBoltCut => {
+                "Mesh the shank finer, with a local mesh size of about a third of its radius."
             }
             Problem::BoltHeldAtCut => {
                 "Make the region frictionless or frictional, so that the shank can slide in \
@@ -2177,13 +2190,25 @@ impl FeModel {
             if invalid.iter().any(|i| i.item == ModelItem::Bolt(b)) {
                 continue;
             }
-            if let Err(reason) = self.resolve_bolt(bolt, mesh) {
-                findings.push(Finding::new(
+            match self.resolve_bolt(bolt, mesh) {
+                Err(reason) => {
+                    findings.push(Finding::new(
+                        ModelItem::Bolt(b),
+                        Problem::InvalidBolt,
+                        format!("{}: {reason}", bolt.name),
+                    ));
+                    continue;
+                }
+                Ok(cut) if cut.coarse() => findings.push(Finding::new(
                     ModelItem::Bolt(b),
-                    Problem::InvalidBolt,
-                    format!("{}: {reason}", bolt.name),
-                ));
-                continue;
+                    Problem::CoarseBoltCut,
+                    format!(
+                        "The cut through {} spreads {:.0} % of the shank's radius along it",
+                        bolt.name,
+                        100.0 * cut.spread / cut.radius
+                    ),
+                )),
+                Ok(_) => {}
             }
             if let Err(reason) = self.resolve_thread(bolt, mesh) {
                 findings.push(Finding::new(
