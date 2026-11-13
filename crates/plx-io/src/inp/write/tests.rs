@@ -10828,6 +10828,8 @@ fn equation(name: &str, text: &str) -> plx_model::Distribution {
         id: named(name),
         name: name.into(),
         kind: plx_model::DistributionKind::Equation(text.into()),
+        system: None,
+        variables: Vec::new(),
     }
 }
 

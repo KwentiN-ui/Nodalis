@@ -443,7 +443,7 @@ impl FeModel {
             }
         }
         for (i, distribution) in self.distributions.iter().enumerate() {
-            if let Some(reason) = distribution.problem() {
+            if let Some(reason) = distribution.problem(&self.coordinate_systems) {
                 invalid.push(Invalid {
                     item: ModelItem::Distribution(i),
                     reason,

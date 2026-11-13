@@ -2933,6 +2933,9 @@ impl Editor {
                 name: fe.steps.get(*s)?.defined_fields.get(index)?.name.clone(),
                 step: step(*s)?,
             },
+            Draft::Distribution(..) => {
+                ItemRef::Distribution(fe.distributions.get(index)?.name.clone())
+            }
             _ => return None,
         })
     }
@@ -2956,6 +2959,10 @@ impl Editor {
             Draft::Material(material) => {
                 model.materials.push(material.clone());
                 ItemRef::Material(material.name.clone())
+            }
+            Draft::Distribution(distribution, _) => {
+                model.distributions.push(distribution.clone());
+                ItemRef::Distribution(distribution.name.clone())
             }
             Draft::Section(section, _) => {
                 model.sections.push(section.clone());
@@ -4293,7 +4300,9 @@ impl Editor {
                 }
             }
             Draft::Amplitude(amplitude, _) => amplitude_dialog::validate(amplitude)?,
-            Draft::Distribution(distribution, _) => distribution_dialog::validate(distribution)?,
+            Draft::Distribution(distribution, _) => {
+                distribution_dialog::validate(distribution, fe)?
+            }
             Draft::FieldOutput(_, output) => output.check_variables()?,
             Draft::HistoryOutput(_, output, region) => {
                 validate_history_output(output, region, fe)?;

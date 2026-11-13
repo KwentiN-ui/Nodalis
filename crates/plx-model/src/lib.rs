@@ -104,7 +104,10 @@ pub use detection::{
     ContactDetection, ContactRule, DetectionFilter, DetectionGeometry, DetectionGrouping,
     DetectionReport, RuleAction, auto_detection_tolerance, auto_geometry_detection_tolerance,
 };
-pub use distribution::{Distribution, DistributionKind, Interpolation, Sampler, parse_points};
+pub use distribution::{
+    COORDINATES, Distribution, DistributionKind, DistributionVariable, Input, Interpolation,
+    Sampler, parse_points,
+};
 pub use dynamic::{Integration, RayleighFit, StableStepEstimate, StepLimit};
 pub use element_type::{PartElementType, element_type_options};
 pub use excitation::{Excitation, Signal, SignalKind, Sweep};
@@ -212,8 +215,10 @@ use serde::{Deserialize, Serialize};
 /// (embedded); formats 21 to 35 read as they are. Format 37 drops the preload of a bolt: its
 /// steps set it ([`BoltChange`]), an adjustment adds to the length at the end of the previous
 /// step; formats 21 to 36 read as they are unless they have bolts. Format 38 adds point
-/// masses ([`PointMass`]); formats 21 to 37 read as they are.
-pub const PROJECT_FORMAT: u32 = 38;
+/// masses ([`PointMass`]); formats 21 to 37 read as they are. Format 39 gives distributions
+/// a coordinate system and named variables ([`Distribution::system`],
+/// [`Distribution::variables`]); formats 21 to 38 read as they are.
+pub const PROJECT_FORMAT: u32 = 39;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
