@@ -56,6 +56,7 @@ pub fn apply_operation(
     let result = TempFile::new("brep");
     let names = with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
+        crate::refuse_suppressed(gmsh, input, entities, kind.picked_noun())?;
         let before = named_places(gmsh, &parts(gmsh, input)?)?;
         // Flat geometry has faces as its largest shapes; their areas take the place of the
         // volumes.
@@ -154,7 +155,10 @@ fn apply_split(
             CadOperationKind::SplitPlane => {
                 crate::split::split_by_plane(gmsh, input, operation, entities)?
             }
-            _ => crate::split::split_around_holes(gmsh, input, operation, entities)?,
+            _ => {
+                crate::refuse_suppressed(gmsh, input, entities, "hole edges")?;
+                crate::split::split_around_holes(gmsh, input, operation, entities)?
+            }
         };
         gmsh.write(&result.0)?;
         gmsh.clear()?;

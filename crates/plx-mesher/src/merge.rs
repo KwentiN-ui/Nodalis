@@ -160,6 +160,7 @@ pub fn merge_geometries(inputs: &[Geometry]) -> Result<MergedGeometry, GmshError
             refinement: first.refinement,
             signatures: new_signatures,
             compounds,
+            suppressed: Vec::new(),
         },
         tags,
         renamed,
@@ -167,7 +168,7 @@ pub fn merge_geometries(inputs: &[Geometry]) -> Result<MergedGeometry, GmshError
 }
 
 /// The entities and all on their boundaries, down to the vertices.
-fn closure(
+pub(crate) fn closure(
     gmsh: &crate::gmsh::Gmsh,
     entities: impl Iterator<Item = Entity>,
 ) -> Result<BTreeSet<plx_mesh::CadEntity>, GmshError> {

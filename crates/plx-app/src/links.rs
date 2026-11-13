@@ -936,6 +936,7 @@ pub fn take_geometry(target: &mut Option<Geometry>, source: Option<Geometry>) ->
                 meshing: own.meshing,
                 mesh_items: own.mesh_items,
                 refinement: own.refinement,
+                suppressed: own.suppressed,
                 ..source
             };
             if let Some(tags) = &tags {
@@ -1760,6 +1761,7 @@ mod tests {
     fn a_geometry_link_takes_the_shapes_and_leaves_the_mesh_setup_to_the_target() {
         let shapes = |brep: &str| Geometry {
             compounds: Vec::new(),
+            suppressed: Vec::new(),
             source: "part.step".into(),
             brep: brep.into(),
             meshing: Default::default(),
@@ -1821,6 +1823,7 @@ mod tests {
         };
         let shapes = |brep: &str, signatures| Geometry {
             compounds: Vec::new(),
+            suppressed: Vec::new(),
             source: "part.step".into(),
             brep: brep.into(),
             meshing: Default::default(),

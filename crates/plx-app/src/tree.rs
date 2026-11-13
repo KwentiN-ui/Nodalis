@@ -385,6 +385,8 @@ pub struct TreeResponse {
     pub merge_parts: bool,
     /// Make, change or dissolve a compound part of the geometry.
     pub compound: Option<CompoundAction>,
+    /// Suppress (`true`) or unsuppress parts of the geometry, by index.
+    pub suppress: Option<(Vec<usize>, bool)>,
     /// Run this contact detection again.
     pub detect: Option<usize>,
     /// The warning sign of an item was clicked: explain its findings.
@@ -943,6 +945,7 @@ pub fn part_menu(
     index: usize,
     visible: bool,
     contours: bool,
+    suppressed: bool,
     view: TreeView,
     selected: &BTreeSet<usize>,
     compounds: &[(String, Vec<usize>)],
@@ -950,8 +953,21 @@ pub fn part_menu(
 ) {
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
     if view == TreeView::Geometry {
-        if ui.button("Create Mesh").clicked() {
+        if ui
+            .add_enabled(!suppressed, egui::Button::new("Create Mesh"))
+            .on_disabled_hover_text("The part is suppressed: unsuppress it to mesh it.")
+            .clicked()
+        {
             response.mesh_part = Some(index);
+        }
+        let label = if suppressed { "Unsuppress" } else { "Suppress" };
+        if ui.button(label).on_hover_text(SUPPRESS_TIP).clicked() {
+            let parts = if selected.contains(&index) {
+                selected.iter().copied().collect()
+            } else {
+                vec![index]
+            };
+            response.suppress = Some((parts, !suppressed));
         }
         ui.separator();
         compound_menu_items(ui, index, selected, compounds, response);
@@ -1049,6 +1065,11 @@ fn compound_menu_items(
         response.compound = Some(CompoundAction::Remove(parts));
     }
 }
+
+/// What suppressing a part of the geometry does, for its tooltips.
+pub const SUPPRESS_TIP: &str = "A suppressed part is left alone by meshing (Mesh All Parts, \
+    solving) and by the CAD tools (splits, Defeature, fillets), as if it were not there, \
+    until it is unsuppressed. A mesh it has already stays. It is drawn as its edges only.";
 
 /// What a compound part is, for its tooltips.
 pub const COMPOUND_TIP: &str = "Joins the parts into one part of the FE model. Each is \
@@ -1280,6 +1301,19 @@ impl Tree<'_> {
                     if ui.button(label).clicked() {
                         (self.response.visibility)
                             .extend(self.part_indices.iter().map(|&i| (i, visible)));
+                    }
+                }
+                let suppressed: Vec<usize> = (self.part_indices.iter().copied())
+                    .filter(|&i| self.inactive.contains(&TreeItem::Part(i)))
+                    .collect();
+                if self.view == TreeView::Geometry && !suppressed.is_empty() {
+                    ui.separator();
+                    if ui
+                        .button("Unsuppress All")
+                        .on_hover_text(SUPPRESS_TIP)
+                        .clicked()
+                    {
+                        self.response.suppress = Some((suppressed, false));
                     }
                 }
             });
@@ -1625,7 +1659,12 @@ impl Tree<'_> {
                 Some(hint) if !inactive => icon_response.on_hover_text(hint),
                 _ => icon_response,
             };
-            if inactive && icon_response.on_hover_text("Activate").clicked() {
+            let wake = if self.view == TreeView::Geometry {
+                "Unsuppress"
+            } else {
+                "Activate"
+            };
+            if inactive && icon_response.on_hover_text(wake).clicked() {
                 self.response.toggle_active = Some(item.clone());
             }
             ui.add_space(3.0);
@@ -1810,6 +1849,12 @@ impl Tree<'_> {
             self.leaf(ui, TreeItem::Group("Parts"), parts);
             return;
         }
+        // Known before the rows, for the menu of Parts.
+        for (index, part) in model.parts.iter().enumerate() {
+            if part.suppressed {
+                self.inactive.insert(TreeItem::Part(index));
+            }
+        }
         let compounds = if self.view == TreeView::Geometry {
             self.state.compounds.clone()
         } else {
@@ -1826,6 +1871,11 @@ impl Tree<'_> {
                 match compound {
                     Some(c) => {
                         let (name, members) = &compounds[c];
+                        let suppressed = (members.iter())
+                            .all(|&m| model.parts.get(m).is_some_and(|p| p.suppressed));
+                        if suppressed && !members.is_empty() {
+                            tree.inactive.insert(TreeItem::Compound(c));
+                        }
                         let label = format!("{name} ({})", members.len());
                         tree.branch(ui, TreeItem::Compound(c), label, true, |tree, ui| {
                             for &member in members {
@@ -1861,8 +1911,14 @@ impl Tree<'_> {
         let Some(part) = model.parts.get_mut(index) else {
             return;
         };
-        let icon = part_icon(part);
         let item = TreeItem::Part(index);
+        // A suppressed part is shown gray with the no-entry sign, like a deactivated item;
+        // a click on the sign unsuppresses it.
+        let icon = if part.suppressed {
+            TreeIcon::Inactive
+        } else {
+            part_icon(part)
+        };
         let (_, response, changed) =
             self.row(ui, None, Some(&mut part.visible), icon, item, &part.name);
         if changed {
@@ -1876,6 +1932,7 @@ impl Tree<'_> {
                 index,
                 part.visible,
                 part.contours,
+                part.suppressed,
                 view,
                 &selected,
                 compounds,
@@ -1892,6 +1949,13 @@ impl Tree<'_> {
         }
         if ui.button("Create Mesh").clicked() {
             self.response.compound = Some(CompoundAction::Mesh(c));
+            ui.close();
+        }
+        let members = (self.state.compounds.get(c)).map_or(Vec::new(), |(_, m)| m.clone());
+        let suppressed = self.inactive.contains(&TreeItem::Compound(c));
+        let label = if suppressed { "Unsuppress" } else { "Suppress" };
+        if ui.button(label).on_hover_text(SUPPRESS_TIP).clicked() {
+            self.response.suppress = Some((members, !suppressed));
             ui.close();
         }
         ui.separator();

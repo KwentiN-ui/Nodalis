@@ -38,6 +38,10 @@ pub struct Geometry {
     /// of the FE model, its bodies tied where they touch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compounds: Vec<CompoundPart>,
+    /// Names of the suppressed parts: meshing and the CAD tools leave them alone, as if
+    /// they were not there, until they are unsuppressed. A mesh they have already stays.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suppressed: Vec<String>,
 }
 
 /// Parts of the geometry joined into one part of the FE model, as the pieces a CAD model
@@ -106,6 +110,26 @@ impl Geometry {
             }
         }
         renamed
+    }
+
+    /// Whether the part `part` is suppressed.
+    pub fn is_suppressed(&self, part: &str) -> bool {
+        names(&self.suppressed, part)
+    }
+
+    /// Suppresses the parts `parts`, or unsuppresses them; true if that changed anything.
+    pub fn set_suppressed(&mut self, parts: &[String], suppressed: bool) -> bool {
+        let before = self.suppressed.len();
+        if suppressed {
+            for part in parts {
+                if !self.is_suppressed(part) {
+                    self.suppressed.push(part.clone());
+                }
+            }
+        } else {
+            self.suppressed.retain(|p| !names(parts, p));
+        }
+        self.suppressed.len() != before
     }
 
     /// Takes parts out of their compounds; compounds left empty go.
@@ -555,6 +579,28 @@ mod tests {
     }
 
     #[test]
+    fn parts_are_suppressed_by_name_once() {
+        let mut geometry = Geometry {
+            source: String::new(),
+            brep: String::new(),
+            meshing: MeshingParameters::default(),
+            mesh_items: Vec::new(),
+            part_names: Vec::new(),
+            refinement: 1.0,
+            signatures: Vec::new(),
+            compounds: Vec::new(),
+            suppressed: Vec::new(),
+        };
+        let parts = ["SOLID-1".to_owned(), "solid-1".to_owned()];
+        assert!(geometry.set_suppressed(&parts, true));
+        assert_eq!(geometry.suppressed, ["SOLID-1"]);
+        assert!(geometry.is_suppressed("Solid-1"));
+        assert!(!geometry.set_suppressed(&parts, true));
+        assert!(geometry.set_suppressed(&["solid-1".into()], false));
+        assert!(!geometry.is_suppressed("SOLID-1"));
+    }
+
+    #[test]
     fn items_override_the_defaults_of_their_parts() {
         let fine = MeshingParameters {
             max_size: 1.0,
@@ -562,6 +608,7 @@ mod tests {
         };
         let mut geometry = Geometry {
             compounds: Vec::new(),
+            suppressed: Vec::new(),
             source: "a.step".into(),
             brep: String::new(),
             meshing: MeshingParameters::for_diagonal(100.0),
@@ -672,6 +719,7 @@ mod tests {
         };
         let mut geometry = Geometry {
             compounds: Vec::new(),
+            suppressed: Vec::new(),
             source: "a.step".into(),
             brep: String::new(),
             meshing: MeshingParameters::default(),

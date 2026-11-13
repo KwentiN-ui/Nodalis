@@ -13346,6 +13346,7 @@ mod tests {
     fn a_refine_mesh_block_divides_the_element_sizes_of_geometry() {
         let geometry = plx_model::Geometry {
             compounds: Vec::new(),
+            suppressed: Vec::new(),
             source: "block.step".into(),
             brep: "shapes".into(),
             meshing: Default::default(),
@@ -14470,6 +14471,7 @@ mod tests {
     fn a_study_counts_how_its_analyses_mesh() {
         let geometry = |brep: &str, max_size: f64| plx_model::Geometry {
             compounds: Vec::new(),
+            suppressed: Vec::new(),
             source: "part.step".into(),
             brep: brep.into(),
             meshing: plx_model::MeshingParameters {

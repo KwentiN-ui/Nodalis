@@ -203,9 +203,11 @@ use serde::{Deserialize, Serialize};
 /// three points or by offset and rotation ([`SystemDefinition`]) and a selection they move
 /// with ([`CoordinateSystem::attached`]); formats 21 to 31 read as they are unless they have
 /// coordinate systems. Format 33 adds the Formula block of the project schematic; formats 21
-/// to 32 read as they are. Format 34 gives a bolt its surface instead of the two sides of a
-/// cut ([`Bolt::surface`]); formats 21 to 33 read as they are unless they have bolts.
-pub const PROJECT_FORMAT: u32 = 34;
+/// to 32 read as they are. Format 34 adds suppressed parts of the geometry
+/// ([`Geometry::suppressed`]); formats 21 to 33 read as they are. Format 35 gives a bolt its
+/// surface instead of the two sides of a cut ([`Bolt::surface`]); formats 21 to 34 read as
+/// they are unless they have bolts.
+pub const PROJECT_FORMAT: u32 = 35;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
