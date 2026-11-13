@@ -142,6 +142,13 @@ confirms, Escape cancels), and #ui("Dissolve"), which makes its parts parts of t
 - Renaming the compound part in the FE Model workspace (#ui("Properties ...")) renames the
   compound too, so the name stays when it is meshed again.
 - A contact detection never creates contact regions between pieces of the same compound.
+- Compound parts can be made of linked parts too (@links): they join meshes and change no
+  shape, so they are part of the analysis' own setup like the mesh setup. They stay when the
+  source changes, as long as their parts are still in the geometry; a part that is gone or
+  renamed there drops out of the compound. Only with a linked #ui("Mesh") they are read-only,
+  because the mesh comes already joined.
+
+#screenshot("linked-compound-part.png", [Two linked parts joined into a compound part in an analysis whose geometry comes from a file block])
 
 #note[The pieces keep their own nodes on the faces they share, as with a bonded contact. Where
 the meshes of the pieces are very different in size, the tie interpolates between them; the

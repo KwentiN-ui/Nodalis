@@ -7654,7 +7654,7 @@ impl ProjectApp {
         match payload {
             Payload::Setup(fe) => links::apply_setup(data.fe, &fe, path),
             Payload::Geometry(geometry) => {
-                if let Some(tags) = links::take_geometry(data.geometry, geometry)
+                if let Some(tags) = links::take_geometry(data.geometry, geometry, true)
                     && let Some(lost) = links::follow_geometry(data.fe, Some(data.mesh), &tags)
                 {
                     let line = format!("{}: {lost}.", node.name);

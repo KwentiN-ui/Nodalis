@@ -927,7 +927,15 @@ pub fn exists(data: Data, path: &[String]) -> bool {
 /// When the shapes changed, Gmsh's tags did with them: the local mesh sizes are renumbered
 /// here, and the returned tags are for the selections on the old shapes, see
 /// [`follow_geometry`].
-pub fn take_geometry(target: &mut Option<Geometry>, source: Option<Geometry>) -> Option<TagMap> {
+///
+/// The compound parts of a geometry link are the target's own too (`own_compounds`), as far
+/// as their parts are still in the shapes; a target with none takes the source's. A mesh link
+/// brings the compounds its mesh was joined with.
+pub fn take_geometry(
+    target: &mut Option<Geometry>,
+    source: Option<Geometry>,
+    own_compounds: bool,
+) -> Option<TagMap> {
     let mut tags = None;
     *target = match (target.take(), source) {
         (Some(own), Some(source)) => {
@@ -941,6 +949,18 @@ pub fn take_geometry(target: &mut Option<Geometry>, source: Option<Geometry>) ->
             };
             if let Some(tags) = &tags {
                 taken.renumber_mesh_items(tags);
+            }
+            if own_compounds {
+                let mut compounds = own.compounds;
+                for compound in &mut compounds {
+                    compound
+                        .parts
+                        .retain(|p| taken.part_names.iter().any(|n| n.eq_ignore_ascii_case(p)));
+                }
+                compounds.retain(|c| !c.parts.is_empty());
+                if !compounds.is_empty() {
+                    taken.compounds = compounds;
+                }
             }
             Some(taken)
         }
@@ -1796,7 +1816,7 @@ mod tests {
         assert_eq!(print(&own), print(&shapes("old")));
         assert_ne!(print(&own), print(&shapes("new")));
         let mut target = Some(own.clone());
-        take_geometry(&mut target, Some(shapes("new")));
+        take_geometry(&mut target, Some(shapes("new")), true);
         let taken = target.unwrap();
         assert_eq!(taken.brep, "new");
         assert_eq!(taken.meshing, own.meshing);
@@ -1804,10 +1824,44 @@ mod tests {
         assert_eq!(taken.refinement, 2.0);
         // Without geometry yet, the target starts from the source's; unlinked, it has none.
         let mut target = None;
-        take_geometry(&mut target, Some(own.clone()));
+        take_geometry(&mut target, Some(own.clone()), true);
         assert_eq!(target.as_ref(), Some(&own));
-        take_geometry(&mut target, None);
+        take_geometry(&mut target, None, true);
         assert_eq!(target, None);
+    }
+
+    #[test]
+    fn compound_parts_are_the_targets_own_over_a_geometry_link() {
+        let named = |parts: &[&str]| Geometry {
+            source: String::new(),
+            brep: String::new(),
+            meshing: Default::default(),
+            mesh_items: Vec::new(),
+            part_names: parts.iter().map(|p| p.to_string()).collect(),
+            refinement: 1.0,
+            signatures: Vec::new(),
+            compounds: Vec::new(),
+            suppressed: Vec::new(),
+        };
+        let compound = |name: &str, parts: &[&str]| plx_model::CompoundPart {
+            name: name.into(),
+            parts: parts.iter().map(|p| p.to_string()).collect(),
+        };
+        let mut own = named(&["A", "B", "C"]);
+        own.compounds = vec![compound("COMPOUND-1", &["A", "B"])];
+        // The source is refreshed; the compound stays, without a part that is gone.
+        let mut source = named(&["A", "C"]);
+        source.compounds = vec![compound("OTHER", &["A", "C"])];
+        let mut target = Some(own.clone());
+        take_geometry(&mut target, Some(source.clone()), true);
+        assert_eq!(
+            target.unwrap().compounds,
+            vec![compound("COMPOUND-1", &["A"])]
+        );
+        // A mesh link brings the compounds its mesh was joined with.
+        let mut target = Some(own.clone());
+        take_geometry(&mut target, Some(source.clone()), false);
+        assert_eq!(target.unwrap().compounds, source.compounds);
     }
 
     #[test]
@@ -1844,7 +1898,7 @@ mod tests {
         let own = shapes("old", vec![face(Face(1), 0.0), face(Face(2), 1.0)]);
         let source = shapes("new", vec![face(Face(7), 0.0), face(Face(8), 5.0)]);
         let mut target = Some(own);
-        let tags = take_geometry(&mut target, Some(source)).unwrap();
+        let tags = take_geometry(&mut target, Some(source), true).unwrap();
         let plx_model::MeshSetupKind::LocalMeshSize { faces, .. } =
             &target.unwrap().mesh_items[0].kind
         else {
