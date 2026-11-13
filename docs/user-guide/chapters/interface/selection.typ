@@ -54,6 +54,10 @@ selects. Drag it by its title bar to another place; it opens there from then on.
   visible parts, or of two bodies of a compound part (@compound-parts), lie on each other, it
   grows on into the neighbour, whether their meshes share nodes or not. One click thus takes
   the whole cut face of a part split into many pieces, e.g. for a symmetry boundary condition.
+  #ui("Edge angle") goes on across the border alike: an edge runs on into the edge of the
+  neighbour that continues it within the angle, where their ends meet, and takes along the edges
+  of the neighbour lying on the edges it reaches. One click thus takes an edge along all pieces
+  of a split part.
   Hidden parts are left out; hide a neighbour to keep the selection on one part.
 / Mesh based (#ui("More")): #ui("Node"), #ui("Element"), #ui("Edge"), #ui("Surface"),
   #ui("Part"), #ui("Edge angle"), #ui("Surface angle") and #ui("ID"). #ui("ID") takes a list such
@@ -65,6 +69,8 @@ selects. Drag it by its title bar to another place; it opens there from then on.
 #screenshot("surface-angle.png", [Surface angle on a shaft selects the three cylindrical faces])
 #screenshot("surface-angle-across-parts.png", [A block cut into twelve parts with meshes that
   do not match: one click with #ui("Surface angle") selects its front face on all six parts])
+#screenshot("edge-angle-across-parts.png", [A beam split into a compound part of three bodies:
+  one click with #ui("Edge angle") selects its lower front edge on all of them])
 
 Modes that do not fit the region are disabled, for example #ui("Node") for a pressure load.
 On the Geometry tab, for mesh setup items such as a Local Mesh Size, the window offers only the

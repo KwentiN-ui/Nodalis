@@ -8,9 +8,8 @@ use crate::numeric;
 
 pub enum MeshBlockResult {
     Open,
-    /// Closed with OK: the parameters, the model space and the unit system they are shown
-    /// in.
-    Ok(MeshPrimitive, ModelSpace, UnitSystem),
+    /// Closed with OK: the parameters and the model space.
+    Ok(MeshPrimitive, ModelSpace),
     Cancel,
 }
 
@@ -20,6 +19,7 @@ pub struct MeshBlockEditor {
     name: String,
     primitive: MeshPrimitive,
     space: ModelSpace,
+    /// The unit system of the project, which the lengths are shown and typed in.
     units: UnitSystem,
     /// Whether the model space may change: not while analyses link the mesh, which have
     /// the block's model space.
@@ -91,8 +91,7 @@ impl MeshBlockEditor {
                         )
                         .clicked()
                     {
-                        result =
-                            MeshBlockResult::Ok(self.primitive.clone(), self.space, self.units);
+                        result = MeshBlockResult::Ok(self.primitive.clone(), self.space);
                     }
                 });
             });
@@ -123,16 +122,6 @@ impl MeshBlockEditor {
             );
             ui.end_row();
         }
-        ui.label("Shown in");
-        egui::ComboBox::from_id_salt("mesh block units")
-            .selected_text(self.units.label())
-            .width(200.0)
-            .show_ui(ui, |ui| {
-                for choice in UnitSystem::ALL {
-                    ui.selectable_value(&mut self.units, choice, choice.label());
-                }
-            });
-        ui.end_row();
         let axes = ["X", "Y", "Z"];
         match &mut self.primitive {
             MeshPrimitive::Box {

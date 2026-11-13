@@ -33,8 +33,6 @@ the block's editor.
 #screenshot("materials-block-editor.png", [The editor of a materials block])
 
 #fields(
-  [Shown in], [The unit system the values are shown and typed in. Like the values of an
-    analysis they are stored in SI units, so each analysis shows them in its own.],
   [New ...], [Defines a new material in the dialog of the FE Model tree (@materials).],
   [Edit ...], [Edits the selected material; a double-click on it does the same.],
   [Delete], [Removes the selected material.],
@@ -54,7 +52,7 @@ A cross-sections block holds beam cross-sections (@cross-sections) in the projec
 materials block holds materials. Add it with #menu("Sources", "Cross-Sections"). Its rows
 are #ui("Cross-Sections") and one row per cross-section, linked to the #ui("Setup") of an
 analysis, or to its #ui("Cross-Sections") row, in the same way; the beam sections of the
-analysis then pick the linked cross-sections. Its editor has #ui("Shown in"), #ui("New ..."),
+analysis then pick the linked cross-sections. Its editor has #ui("New ..."),
 #ui("Edit ..."), #ui("Delete") and #ui("Import from Analysis") as for materials; the dialog of a
 cross-section is that of the FE Model tree, with the sketch and the second moments of area.
 
@@ -80,7 +78,7 @@ space; several analyses can share one mesh block.
 
 Its parameters are rows of the block under #ui("Mesh"), like the inputs of a Blender node:
 #ui("X"), #ui("Y"), #ui("Z") of the corner it starts at and the edge lengths #ui("Lx"),
-#ui("Ly"), #ui("Lz") in the block's units, the numbers of elements #ui("nx"), #ui("ny"),
+#ui("Ly"), #ui("Lz") in the units of the project (@project-units), the numbers of elements #ui("nx"), #ui("ny"),
 #ui("nz") as whole numbers and the #ui("Element") type. Click a field to type a value, or drag
 it; a rectangle has no Z rows. Once a parameter changes, the #ui("Mesh") row shows the mesh out
 of date. The violet pins on the left of the numbers take a value from a Parameters block
@@ -103,7 +101,7 @@ for the mesh it was made on.
   12 x 2 x 2 elements, after the box was made anew with 24 x 4 x 2 elements])
 
 A double-click on the block's name opens all its parameters in a dialog, with what the rows
-leave out: the model space of a rectangle and the units the lengths are shown in.
+leave out: the model space of a rectangle.
 
 #screenshot("mesh-block-editor.png", [The parameters of a box])
 
@@ -111,8 +109,6 @@ leave out: the model space of a rectangle and the units the lengths are shown in
   [Model space], [Rectangle only: plane stress, plane strain or axisymmetric. It is fixed while
     analyses link the mesh, which have the same model space. An axisymmetric rectangle lies at
     X >= 0, as X is the radius.],
-  [Shown in], [The unit system the lengths are shown and typed in; they are stored in SI
-    units.],
   [Origin], [The corner at the smallest coordinates.],
   [Edge lengths], [The size along each axis.],
   [Elements along], [The number of elements along each axis.],
@@ -545,8 +541,6 @@ number keeps its last value.
 A double-click on the block opens its editor:
 
 #fields(
-  [Shown in], [The unit system the values are shown and typed in; they are stored in SI
-    units.],
   [Name], [The name of the parameter, unique in the block. Renaming it keeps its links.],
   [Kind], [#ui("Count") (a whole number of at least one), #ui("Factor") (a number without
     unit) or a physical quantity such as #ui("Length"), #ui("Force"), #ui("Pressure") or
@@ -780,7 +774,6 @@ A double-click on the block opens its editor:
 #fields(
   [Measure], [What it computes: #ui("Field values"), #ui("Value at a node"),
     #ui("Value at a point"), #ui("History output") or #ui("Eigenfrequency").],
-  [Shown in], [The unit system of the value; it is stored in SI units.],
   [Field, Component], [The field and its component as the Results workspace names them:
     STRESS MISES, DISP ALL, NDTEMP T, TOTAL_FORCE RF3 for a history output. With results
     linked, both are lists of what those results have (a name they lack is shown in the
@@ -806,7 +799,7 @@ A double-click on the block opens its editor:
 
 #ui("Value at a point") reads a field where no node may be: at coordinates you give. The
 block gets three rows #ui("X"), #ui("Y") and #ui("Z") between what it measures and its value,
-each a length in the units of the block with an input pin like the inputs of a Math block.
+each a length in the units of the project with an input pin like the inputs of a Math block.
 Type a coordinate in its field, or drag a number to its pin: a parameter of a Parameters
 block, the result of a Math block or an input of a parameter study. A linked coordinate is
 shown in the color of value links and follows its source, so a study that makes a part longer

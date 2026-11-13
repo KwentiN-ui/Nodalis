@@ -4,7 +4,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use glam::Vec3;
+use glam::{DVec3, Vec3};
+
+use crate::seams::{EdgeEnd, edge_twins, meeting_ends};
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 
 use crate::model::{Highlight, Hit, Model};
@@ -24,6 +26,11 @@ pub struct CadIndex {
     segment_edge: HashMap<[NodeId; 2], i32>,
     /// The CAD edges meeting at each CAD vertex.
     vertex_edges: HashMap<i32, Vec<i32>>,
+    /// The CAD edges with an end on an end of each edge, of its part or body or of others,
+    /// and how much the path bends from the one into the other there.
+    edge_meetings: HashMap<i32, Vec<(i32, f64)>>,
+    /// The CAD edges of other parts or bodies lying on each edge, along a stretch at least.
+    edge_twins: HashMap<i32, Vec<i32>>,
 }
 
 impl CadIndex {
@@ -79,29 +86,68 @@ impl CadIndex {
                 vertex_edges.entry(vertex).or_default().push(edge);
             }
         }
+        let point = |id: NodeId| mesh.node(id).map(DVec3::from);
+        let mut ends: Vec<EdgeEnd> = Vec::new();
+        let mut twins: Vec<(i32, Vec<[DVec3; 2]>)> = Vec::new();
+        for (&edge, segments) in &cad.segments {
+            // The ends of an edge are the nodes of only one of its segments.
+            let mut at_node: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+            for &[a, b] in segments {
+                at_node.entry(a).or_default().push(b);
+                at_node.entry(b).or_default().push(a);
+            }
+            for (&node, others) in &at_node {
+                if let [other] = others[..]
+                    && let (Some(at), Some(next)) = (point(node), point(other))
+                {
+                    ends.extend(EdgeEnd::new(edge, at, next));
+                }
+            }
+            let lines = (segments.iter()).filter_map(|&[a, b]| Some([point(a)?, point(b)?]));
+            twins.push((edge, lines.collect()));
+        }
         Self {
             face_of: cad.face_of().into_iter().collect(),
             face_edges,
             edge_vertices,
             segment_edge,
             vertex_edges,
+            edge_meetings: meeting_ends(&ends),
+            edge_twins: edge_twins(twins),
         }
     }
 
     /// The CAD edges reached from `start` across vertices where the edges on both sides bend
-    /// by no more than `angle` radians.
-    fn smooth_edges(&self, mesh: &FeMesh, start: i32, angle: f64) -> BTreeSet<i32> {
+    /// by no more than `angle` radians, on into the other parts and bodies of a compound
+    /// part for whose edges `visible` holds: over ends lying on each other, as they share
+    /// no vertices, and onto the edges lying on the edges reached.
+    fn smooth_edges(
+        &self,
+        mesh: &FeMesh,
+        start: i32,
+        angle: f64,
+        visible: impl Fn(i32) -> bool,
+    ) -> BTreeSet<i32> {
         let mut seen = BTreeSet::from([start]);
         let mut stack = vec![start];
         while let Some(edge) = stack.pop() {
+            let mut next: Vec<i32> = Vec::new();
             for &vertex in self.edge_vertices.get(&edge).into_iter().flatten() {
-                for &next in self.vertex_edges.get(&vertex).into_iter().flatten() {
-                    if !seen.contains(&next)
-                        && bend(mesh, vertex, edge, next).is_some_and(|b| b <= angle)
+                for &other in self.vertex_edges.get(&vertex).into_iter().flatten() {
+                    if !seen.contains(&other)
+                        && bend(mesh, vertex, edge, other).is_some_and(|b| b <= angle)
                     {
-                        seen.insert(next);
-                        stack.push(next);
+                        next.push(other);
                     }
+                }
+            }
+            let meeting = self.edge_meetings.get(&edge).into_iter().flatten();
+            next.extend(meeting.filter(|&&(_, bend)| bend <= angle).map(|&(e, _)| e));
+            next.extend(self.edge_twins.get(&edge).into_iter().flatten());
+            for next in next {
+                if !seen.contains(&next) && visible(next) {
+                    seen.insert(next);
+                    stack.push(next);
                 }
             }
         }
@@ -245,7 +291,14 @@ pub fn pick_edge_angle(
             .min_by(|a, b| a.1.total_cmp(&b.1))?
             .0
     };
-    let edges = index.smooth_edges(&model.mesh, start, angle.to_radians());
+    // An edge belongs to the part of its nodes; hidden parts are left out.
+    let visible = |edge: i32| {
+        let node =
+            (model.mesh.cad.segments.get(&edge)).and_then(|segments| Some(segments.first()?[0]));
+        node.and_then(|n| model.node_part(n))
+            .is_none_or(|p| model.parts.get(p).is_some_and(|info| info.visible))
+    };
+    let edges = index.smooth_edges(&model.mesh, start, angle.to_radians(), visible);
     let entities: BTreeSet<CadEntity> = if target == Target::Surfaces {
         (edges.into_iter())
             .map(CadEntity::Edge)
@@ -436,6 +489,58 @@ mod tests {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata")
             .join(name)
+    }
+
+    #[test]
+    fn edge_angle_goes_on_into_edges_of_other_bodies() {
+        // Edge 1 of one body along x from 0 to 10 in two segments, edge 2 of another body
+        // on from 10 to 20, and edge 3 of that body turning up at 20. The bodies share no
+        // nodes or vertices; edge 4 of the second body lies on the second half of edge 1.
+        let mut mesh = FeMesh::default();
+        let points = [
+            (1, [0.0, 0.0, 0.0]),
+            (2, [5.0, 0.0, 0.0]),
+            (3, [10.0, 0.0, 0.0]),
+            (4, [10.0, 0.0, 0.0]),
+            (5, [20.0, 0.0, 0.0]),
+            (6, [20.0, 10.0, 0.0]),
+            (7, [5.0, 0.0, 0.0]),
+        ];
+        for (id, at) in points {
+            mesh.set_node(id, at);
+        }
+        let cad = &mut mesh.cad;
+        for (vertex, node) in [(1, 1), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7)] {
+            cad.nodes.insert(CadEntity::Vertex(vertex), vec![node]);
+        }
+        let edges: [(i32, Vec<[NodeId; 2]>); 4] = [
+            (1, vec![[1, 2], [2, 3]]),
+            (2, vec![[4, 5]]),
+            (3, vec![[5, 6]]),
+            (4, vec![[7, 4]]),
+        ];
+        for (edge, segments) in edges {
+            let mut nodes: Vec<NodeId> = segments.iter().flatten().copied().collect();
+            nodes.sort_unstable();
+            nodes.dedup();
+            cad.nodes.insert(CadEntity::Edge(edge), nodes);
+            cad.segments.insert(edge, segments);
+        }
+        let index = CadIndex::new(&mesh);
+        let all = |_: i32| true;
+        assert_eq!(
+            index.smooth_edges(&mesh, 1, 30f64.to_radians(), all),
+            BTreeSet::from([1, 2, 4])
+        );
+        assert_eq!(
+            index.smooth_edges(&mesh, 2, 95f64.to_radians(), all),
+            BTreeSet::from([1, 2, 3, 4])
+        );
+        // Not into edges left out, as of hidden parts.
+        assert_eq!(
+            index.smooth_edges(&mesh, 1, 30f64.to_radians(), |e| e == 1),
+            BTreeSet::from([1])
+        );
     }
 
     fn gmsh_available() -> bool {

@@ -20,7 +20,7 @@ temperature gradient for thermal expansion. Create a distribution with
     undeformed model.],
   [Factor =], [The equation. It can use `x`, `y` and `z` along the axes of the coordinate system,
     `r`, the distance from its z axis, and `theta`, the angle about its z axis from its x axis in
-    radians (-pi to pi); lengths are in the length unit of the analysis. With a cylindrical system
+    radians (-pi to pi); lengths are in the length unit of the project. With a cylindrical system
     `r`, `theta` and `z` are its own coordinates; they work in a rectangular system too. Below the
     field the dialog shows the smallest and largest factor at the nodes of the mesh, or, in red,
     what is wrong with the equation, while you type.],
@@ -48,7 +48,7 @@ few examples such as a linear gradient, a bearing load `Max(0, Cos(theta))` or a
 an example replaces the equation with it.
 
 With #ui("Points from file") the factors come from a text file with one point per line:
-`X Y Z factor`, the coordinates in the length unit of the analysis along the axes of the
+`X Y Z factor`, the coordinates in the length unit of the project along the axes of the
 coordinate system (also of a cylindrical one), separated by blanks, tabs,
 commas or semicolons. Lines starting with `#` and lines that hold no four numbers, such as a
 header, are skipped. #ui("Import ...") reads the file into the model, so the project no longer

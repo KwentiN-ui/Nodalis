@@ -59,7 +59,7 @@ pub const COORDINATES: [&str; 5] = ["x", "y", "z", "r", "theta"];
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DistributionKind {
     /// An equation in the [`COORDINATES`] of the distribution's coordinate system, which it
-    /// takes in the length unit of the analysis, and its variables, e.g. `1 - z/h`; a leading
+    /// takes in the length unit of the project, and its variables, e.g. `1 - z/h`; a leading
     /// `=` is allowed.
     Equation(String),
     /// Values at points, as read from a text file of `X Y Z value` rows; the factor between

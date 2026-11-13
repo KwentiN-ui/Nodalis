@@ -52,8 +52,7 @@ Cantilever") and why a link cannot be made:
 
 - the pins are of different types, for example a mesh dropped on the setup;
 - the two blocks have different model spaces ("linked blocks need the same model space"). A
-  different unit system is fine, since every block keeps its values in SI units. Numbers have
-  no model space;
+  Numbers have no model space;
 - the link would go back to an analysis that already comes before the source, and form a
   cycle;
 - the item does not fit the slot, for example a material dropped on the sections, or results
@@ -245,7 +244,7 @@ Drop the results of a step on the #ui("State") row at the top of another block. 
 *Continue from here.* The quickest way to a continuation: drag the pin of a step to empty space
 and pick #ui("Continue from here") from the menu that opens. A new analysis named
 #ui("<source> continued") appears at that place, already continuing from that step, with the model
-space and unit system of the source. Open it and add its steps.
+space of the source. Open it and add its steps.
 
 #screenshot("continue-from-here-menu.png", [Dragging the results of a step to empty space])
 

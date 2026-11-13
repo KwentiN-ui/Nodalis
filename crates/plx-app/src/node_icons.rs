@@ -14,6 +14,8 @@ pub enum NodeIcon {
     Geometry,
     /// The mesh: a grid.
     Mesh,
+    /// A box mesh: a cube with a grid on each of its three visible faces.
+    BoxMesh,
     /// The model setup: sliders.
     Setup,
     /// Features such as reference points: a crosshair.
@@ -226,6 +228,19 @@ pub fn paint_scaled(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32
                 line(&[p(v, 1.5), p(v, 12.5)]);
                 line(&[p(1.5, v), p(12.5, v)]);
             }
+        }
+        NodeIcon::BoxMesh => {
+            // The cube of Geometry split in two along each edge, so that the grid shows on
+            // all three visible faces.
+            closed(&[p(1.5, 4.5), p(9.0, 4.5), p(9.0, 12.0), p(1.5, 12.0)]);
+            line(&[p(1.5, 4.5), p(5.0, 1.5), p(12.5, 1.5), p(9.0, 4.5)]);
+            line(&[p(12.5, 1.5), p(12.5, 9.0), p(9.0, 12.0)]);
+            // Halfway across the width and height: on the front face and on over the top
+            // and right faces.
+            line(&[p(8.75, 1.5), p(5.25, 4.5), p(5.25, 12.0)]);
+            line(&[p(1.5, 8.25), p(9.0, 8.25), p(12.5, 5.25)]);
+            // Halfway through the depth on the top and right faces.
+            line(&[p(3.25, 3.0), p(10.75, 3.0), p(10.75, 10.5)]);
         }
         NodeIcon::Setup => {
             for (y, knob) in [(3.5, 9.0), (7.0, 4.5), (10.5, 8.0)] {

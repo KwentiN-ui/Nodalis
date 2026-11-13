@@ -14,9 +14,10 @@ loads and outputs. Items are created with the tiles of the ribbon tabs #ui("Mesh
 
 #menu("Material", "Model Properties") (or a double-click on #ui("Model") in the tree) shows
 the basic properties of the model. The same dialog opens when an analysis is created
-(@new-analysis); the model space and the unit system are chosen there and fixed from then on.
-The dialog of an existing analysis shows them, but only the model type and the physical
-constants can still be changed. For another model space or unit system, create a new analysis.
+(@new-analysis); the model space is chosen there and fixed from then on. The dialog of an
+existing analysis shows it, but only the model type and the physical constants can still be
+changed. For another model space, create a new analysis. The unit system is that of the
+project (@project-units).
 
 #screenshot("model-properties.png", [Model properties])
 
@@ -52,24 +53,25 @@ dragged there (@submodel). No result file is picked in the dialog.
 
 === Unit system <unit-systems>
 
+The unit system is chosen for the whole project at the bottom right of the project window
+(@project-units); the dialog shows it with its units.
+
 #fields(
-  [Unitless], [No units. Numbers are taken as they are.],
   [m, kg, s, °C], [SI units.],
   [mm, ton, s, °C], [The default. Force in N, stress in MPa, density in t/mm³.],
   [m, ton, s, °C], [Force in kN, stress in kPa.],
   [in, lbf·s²/in, s, °F], [US units. Force in lbf, stress in psi.],
 )
 
-The dialog lists the base and derived units of the chosen system.
+The dialog lists the base and derived units of the system.
 
 *How values are stored.* Nodalis stores every value of the mesh, the geometry and the model in
-SI units (m, kg, s, N, Pa; temperatures in °C), whatever the unit system of the analysis. The
+SI units (m, kg, s, N, Pa; temperatures in °C), whatever the unit system of the project. The
 unit system only decides how values are *shown and typed*: a dialog of an analysis in mm, ton,
 s shows lengths in mm and stresses in MPa, and converts what you type. A value typed with
 another unit is converted too, for example `3 cm` in a length field becomes 30 mm. The input
-file CalculiX gets is therefore always in SI units; results are shown in the unit system of the analysis (legend, scale bar,
-queries, tables). Because of this, analyses of one project may use different unit systems and
-still share meshes, materials and results through links (@links).
+file CalculiX gets is therefore always in SI units; results are shown in the unit system of the
+project (legend, scale bar, queries, tables).
 
 === Physical constants
 

@@ -215,10 +215,12 @@ use serde::{Deserialize, Serialize};
 /// (embedded); formats 21 to 35 read as they are. Format 37 drops the preload of a bolt: its
 /// steps set it ([`BoltChange`]), an adjustment adds to the length at the end of the previous
 /// step; formats 21 to 36 read as they are unless they have bolts. Format 38 adds point
-/// masses ([`PointMass`]); formats 21 to 37 read as they are. Format 39 gives distributions
-/// a coordinate system and named variables ([`Distribution::system`],
-/// [`Distribution::variables`]); formats 21 to 38 read as they are.
-pub const PROJECT_FORMAT: u32 = 39;
+/// masses ([`PointMass`]); formats 21 to 37 read as they are. Format 39 gives the project one
+/// unit system its schematic shows values in, in place of one for each block; formats 21 to
+/// 38 read as they are, in the default units. Format 40 gives distributions a coordinate
+/// system and named variables ([`Distribution::system`], [`Distribution::variables`]);
+/// formats 21 to 39 read as they are.
+pub const PROJECT_FORMAT: u32 = 40;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

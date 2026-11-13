@@ -33,6 +33,10 @@ pub struct Project {
     /// The blocks shown compact: only their header and the rows with a wire.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compact: Vec<u64>,
+    /// The unit system the project shows and takes its values in. Only what is shown changes
+    /// with it: every value is stored in SI units ([`plx_model::STORED`]).
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
 }
 
 impl Default for Project {
@@ -43,6 +47,7 @@ impl Default for Project {
             links: Vec::new(),
             frames: Vec::new(),
             compact: Vec::new(),
+            units: plx_model::UnitSystem::default(),
         }
     }
 }
@@ -211,9 +216,6 @@ pub struct TransformBlock {
     pub name: String,
     #[serde(default)]
     pub position: [f32; 2],
-    /// The unit system its lengths are in.
-    #[serde(default)]
-    pub units: plx_model::UnitSystem,
     pub transform: plx_mesh::MeshTransform,
 }
 
@@ -224,9 +226,6 @@ pub struct CadOperationBlock {
     pub name: String,
     #[serde(default)]
     pub position: [f32; 2],
-    /// The unit system its length is shown and typed in.
-    #[serde(default)]
-    pub units: plx_model::UnitSystem,
     pub operation: plx_model::CadOperation,
     /// The geometry as last made, kept so that the project opens and meshes without making
     /// it again.
@@ -248,9 +247,6 @@ pub struct MeshBlock {
     pub position: [f32; 2],
     /// The model space of the analyses that link it.
     pub space: plx_model::ModelSpace,
-    /// The unit system its parameters are shown in; they are stored in SI units.
-    #[serde(default)]
-    pub units: plx_model::UnitSystem,
     pub primitive: plx_model::MeshPrimitive,
     /// The mesh as last made.
     #[serde(default)]
@@ -333,9 +329,6 @@ pub struct MeasureBlock {
     pub name: String,
     #[serde(default)]
     pub position: [f32; 2],
-    /// The unit system its value is shown in; it is stored in SI units.
-    #[serde(default)]
-    pub units: plx_model::UnitSystem,
     pub kind: plx_model::MeasureKind,
     /// The value as last computed, and the fingerprint of the results and the definition it
     /// was computed from: out of date once that differs.
@@ -359,9 +352,6 @@ pub struct StudyBlock {
     pub name: String,
     #[serde(default)]
     pub position: [f32; 2],
-    /// The unit system its inputs are shown in; they are stored in SI units.
-    #[serde(default)]
-    pub units: plx_model::UnitSystem,
     #[serde(default)]
     pub table: plx_model::StudyTable,
 }
@@ -374,9 +364,6 @@ pub struct ParameterSet {
     pub name: String,
     #[serde(default)]
     pub position: [f32; 2],
-    /// The unit system its lengths are shown in; they are stored in SI units.
-    #[serde(default)]
-    pub units: plx_model::UnitSystem,
     pub parameters: Vec<plx_model::Parameter>,
 }
 
@@ -509,9 +496,6 @@ pub struct MathBlock {
     pub name: String,
     #[serde(default)]
     pub position: [f32; 2],
-    /// The unit system the block shows its numbers in.
-    #[serde(default)]
-    pub units: plx_model::UnitSystem,
     #[serde(default)]
     pub operation: plx_model::MathOp,
     /// What its numbers are; `None` until a link gives it the kind of the other end. Of a
@@ -533,8 +517,6 @@ pub struct SwitchBlock {
     pub name: String,
     #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
-    pub units: plx_model::UnitSystem,
     /// What its choices are; `None` until a link gives it the kind of the other end.
     #[serde(default)]
     pub kind: Option<plx_model::ValueKind>,
@@ -554,8 +536,6 @@ pub struct FormulaBlock {
     #[serde(default)]
     pub position: [f32; 2],
     #[serde(default)]
-    pub units: plx_model::UnitSystem,
-    #[serde(default)]
     pub formula: String,
     /// The values of its inputs a, b, c, ... in SI units, for those no link gives.
     #[serde(default)]
@@ -570,8 +550,6 @@ pub struct PlotBlock {
     pub name: String,
     #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
-    pub units: plx_model::UnitSystem,
     #[serde(default)]
     pub kind: plx_model::PlotKind,
     /// The bins of a histogram.
@@ -716,10 +694,6 @@ pub struct MaterialSet {
     pub name: String,
     #[serde(default)]
     pub position: [f32; 2],
-    /// The unit system its values are shown in; they are stored in SI units like those of an
-    /// analysis.
-    #[serde(default)]
-    pub units: plx_model::UnitSystem,
     #[serde(default)]
     pub materials: Vec<plx_model::Material>,
     /// Fields of the materials exposed as parameters, which value links set.
@@ -734,9 +708,6 @@ pub struct CrossSectionSet {
     pub name: String,
     #[serde(default)]
     pub position: [f32; 2],
-    /// The unit system its dimensions are shown in; they are stored in SI units.
-    #[serde(default)]
-    pub units: plx_model::UnitSystem,
     #[serde(default)]
     pub cross_sections: Vec<plx_model::CrossSection>,
     /// Dimensions of the cross-sections exposed as parameters, which value links set.
@@ -1868,7 +1839,6 @@ mod tests {
                 id,
                 name: name.into(),
                 position,
-                units: plx_model::UnitSystem::MmTonSC,
                 kind,
                 ..Default::default()
             })
@@ -1878,7 +1848,6 @@ mod tests {
                 id,
                 name: name.into(),
                 position,
-                units: plx_model::UnitSystem::MmTonSC,
                 operation,
                 values,
                 ..Default::default()
@@ -1889,7 +1858,6 @@ mod tests {
                 id,
                 name: name.into(),
                 position,
-                units: plx_model::UnitSystem::MmTonSC,
                 kind,
                 bins: 12,
             })
@@ -1978,10 +1946,10 @@ mod tests {
         let Some(path) = std::env::var_os("PLX_FORMULA_DEMO") else {
             return;
         };
-        let units = plx_model::UnitSystem::MmTonSC;
         let length = |name: &str, value| Parameter::new(name, ValueKind::LENGTH, value);
         let mut project = Project {
             format: PROJECT_FORMAT,
+            units: plx_model::UnitSystem::MmTonSC,
             ..Default::default()
         };
         project.nodes = vec![
@@ -1989,7 +1957,6 @@ mod tests {
                 id: 1,
                 name: "Cantilever".into(),
                 position: [0.0, 0.0],
-                units,
                 parameters: vec![
                     Parameter::new("Force", ValueKind::Quantity(Quantity::Force), 1500.0),
                     length("Length", 0.4),
@@ -2001,7 +1968,6 @@ mod tests {
                 id: 2,
                 name: "Bending Stress".into(),
                 position: [300.0, -20.0],
-                units,
                 formula: "6 * a * b / (c * d^2)".into(),
                 values: vec![0.0; 4],
             }),
@@ -2009,7 +1975,6 @@ mod tests {
                 id: 3,
                 name: "Utilization".into(),
                 position: [580.0, 20.0],
-                units,
                 formula: "a / 235[MPa]".into(),
                 values: vec![0.0],
             }),
@@ -2449,7 +2414,6 @@ mod tests {
             id: 4,
             name: "Cross-Sections".into(),
             position: [10.0, 200.0],
-            units: plx_model::UnitSystem::MmTonSC,
             cross_sections: vec![plx_model::CrossSection {
                 id: plx_model::Id::new(),
                 name: "Tube".into(),
@@ -2487,7 +2451,6 @@ mod tests {
             id: 3,
             name: "Materials".into(),
             position: [10.0, 400.0],
-            units: plx_model::UnitSystem::MKgSC,
             materials: vec![Material {
                 name: "Steel".into(),
                 density: Some(7850.0),
@@ -2511,7 +2474,6 @@ mod tests {
             name: "Box".into(),
             position: [0.0, 0.0],
             space,
-            units: plx_model::UnitSystem::MmTonSC,
             mesh: primitive.generate(space, "Box"),
             generated: Some(primitive.fingerprint(space)),
             primitive: primitive.clone(),
@@ -2531,7 +2493,6 @@ mod tests {
             id: 6,
             name: "Parameters".into(),
             position: [0.0, 250.0],
-            units: plx_model::UnitSystem::MmTonSC,
             parameters: vec![plx_model::Parameter::new(
                 "length",
                 plx_model::ValueKind::LENGTH,
@@ -2599,7 +2560,6 @@ mod tests {
             id: 11,
             name: "Math".into(),
             position: [700.0, 20.0],
-            units: plx_model::UnitSystem::MmTonSC,
             operation: plx_model::MathOp::Multiply,
             kind: Some(plx_model::ValueKind::LENGTH),
             operands: [
@@ -2613,7 +2573,6 @@ mod tests {
             id: 12,
             name: "Switch".into(),
             position: [800.0, 20.0],
-            units: plx_model::UnitSystem::MmTonSC,
             kind: None,
             index: 2.0,
             choices: vec![1.0, 2.0, 3.0],
@@ -2623,7 +2582,6 @@ mod tests {
             id: 13,
             name: "Formula".into(),
             position: [900.0, 20.0],
-            units: plx_model::UnitSystem::MmTonSC,
             formula: "sqrt(a^2 + b^2) * 2[mm]".into(),
             values: vec![3.0, 4.0],
         };
@@ -2634,6 +2592,7 @@ mod tests {
             nodes: vec![3, 9],
         });
         saved.compact = vec![1, 9];
+        saved.units = plx_model::UnitSystem::InLbSF;
         saved.links.push(Link {
             source: 3,
             target: 1,
@@ -2648,6 +2607,7 @@ mod tests {
         assert!(!text.contains("analyses:"), "{text}");
         let project = read_project(&path).unwrap();
         assert_eq!(project.nodes.len(), 12);
+        assert_eq!(project.units, plx_model::UnitSystem::InLbSF);
         match (&project.nodes[9], &project.nodes[10], &project.nodes[11]) {
             (ProjectNode::Math(a), ProjectNode::Switch(b), ProjectNode::Formula(c)) => {
                 assert_eq!(a, &math);
