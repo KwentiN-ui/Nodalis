@@ -45,7 +45,7 @@ pub struct RibbonState {
 
 impl RibbonState {
     pub fn tab(&self, workspace: Workspace) -> &'static str {
-        (self.tabs.get(&workspace).copied()).unwrap_or(workspace.tabs()[0])
+        (self.tabs.get(&workspace).copied()).unwrap_or(workspace.default_tab())
     }
 
     pub fn set_tab(&mut self, workspace: Workspace, tab: &'static str) {
