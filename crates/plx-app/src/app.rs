@@ -5474,6 +5474,9 @@ impl Workbench {
         }
         // All in one go: each pass builds the whole mesh anew.
         let mesh = plx_mesher::delete_mesh_parts(&model.mesh, &names);
+        // The selections that picked the parts simply lose them. Both changes happen in one
+        // frame, so one undo brings back the mesh and the selections.
+        model.fe.remove_parts_from_regions(&names);
         model.set_mesh(mesh);
         self.output.push(deleted_message(&names));
         self.after_parts_changed();
