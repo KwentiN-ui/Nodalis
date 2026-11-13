@@ -23,7 +23,6 @@ const SUPERSAMPLE: usize = 2;
 /// A Plot block: what it draws and what links give its inputs.
 #[derive(Clone)]
 pub(super) struct PlotBlock {
-    pub units: UnitSystem,
     pub kind: PlotKind,
     pub bins: u32,
     /// The numbers links give its inputs, by key, each a series; one number is a series of
@@ -32,9 +31,8 @@ pub(super) struct PlotBlock {
 }
 
 impl PlotBlock {
-    pub(super) fn new(units: UnitSystem, kind: PlotKind, bins: u32) -> Self {
+    pub(super) fn new(kind: PlotKind, bins: u32) -> Self {
         Self {
-            units,
             kind,
             bins: bins.clamp(1, MAX_BINS),
             inputs: BTreeMap::new(),
@@ -344,7 +342,7 @@ impl ProjectApp {
     pub(super) fn add_plot(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
         let name = "Plot".to_string();
-        let block = PlotBlock::new(self.settings.new_model.units, PlotKind::default(), 10);
+        let block = PlotBlock::new(PlotKind::default(), 10);
         self.nodes
             .push(Node::new(id, name.clone(), Block::Plot(block)));
         self.graph.insert_node(position, id);
@@ -427,7 +425,7 @@ impl ProjectApp {
                         && matches!(links::slot(l), [c, k] if c == links::PARAMETERS && k == key)
                 })?;
                 let kind = self.given_kind(link.source, &link.item);
-                let (scale, unit) = shown_scale(kind, plot.units);
+                let (scale, unit) = shown_scale(kind, self.units);
                 let shown = values.iter().map(|v| v * scale).collect();
                 let mut label = self.given_label(link.source, &link.item);
                 if link.item.get(1).is_some_and(|n| n == series::TIME) {
@@ -463,7 +461,7 @@ impl ProjectApp {
             values,
             series: preview.series,
             kind: self.given_kind(link.source, &link.item),
-            units: self.settings.new_model.units,
+            units: self.units,
             source,
         })
     }
@@ -1481,7 +1479,7 @@ mod tests {
 
     #[test]
     fn a_plot_takes_its_bins_from_a_link() {
-        let mut plot = PlotBlock::new(UnitSystem::default(), PlotKind::Histogram, 10);
+        let mut plot = PlotBlock::new(PlotKind::Histogram, 10);
         assert!(plot.takes_series("values") && !plot.takes_series(BINS));
         let given = BTreeMap::from([
             ("values".to_owned(), vec![1.0, 2.0]),

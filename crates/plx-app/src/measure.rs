@@ -372,7 +372,7 @@ pub fn shown(kind: &MeasureKind, value: f64, units: UnitSystem) -> String {
 
 pub enum MeasureEditorResult {
     Open,
-    Ok(MeasureKind, UnitSystem),
+    Ok(MeasureKind),
     Cancel,
 }
 
@@ -381,7 +381,6 @@ pub struct MeasureEditor {
     pub id: u64,
     name: String,
     kind: MeasureKind,
-    units: UnitSystem,
     /// The node sets of the mesh of the results linked to it, to pick from.
     node_sets: Vec<String>,
     /// The fields and components of the results linked to it, to pick from.
@@ -402,7 +401,6 @@ impl MeasureEditor {
         id: u64,
         name: &str,
         kind: MeasureKind,
-        units: UnitSystem,
         node_sets: Vec<String>,
         offered: Option<Receiver<Result<Offered, String>>>,
     ) -> Self {
@@ -410,7 +408,6 @@ impl MeasureEditor {
             id,
             name: name.to_owned(),
             kind,
-            units,
             node_sets,
             choices: offered.map_or(Choices::Typed, Choices::Reading),
         }
@@ -479,7 +476,7 @@ impl MeasureEditor {
                         result = MeasureEditorResult::Cancel;
                     }
                     if ui.button("OK").clicked() {
-                        result = MeasureEditorResult::Ok(self.kind.clone(), self.units);
+                        result = MeasureEditorResult::Ok(self.kind.clone());
                     }
                 });
             });
@@ -501,16 +498,6 @@ impl MeasureEditor {
                     if ui.selectable_label(label == current, label).clicked() && label != current {
                         self.kind = choice;
                     }
-                }
-            });
-        ui.end_row();
-        ui.label("Shown in");
-        egui::ComboBox::from_id_salt("measure units")
-            .selected_text(self.units.label())
-            .width(200.0)
-            .show_ui(ui, |ui| {
-                for choice in UnitSystem::ALL {
-                    ui.selectable_value(&mut self.units, choice, choice.label());
                 }
             });
         ui.end_row();

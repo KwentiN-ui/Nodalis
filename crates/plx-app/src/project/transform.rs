@@ -19,7 +19,6 @@ pub(super) struct TransformBlock {
     /// The geometry or mesh as moved, given on through links.
     pub(super) model: LinkedModel,
     pub(super) transform: MeshTransform,
-    pub(super) units: UnitSystem,
     /// What the link brings, with its fingerprint; `None` without a link.
     input: Option<(u64, Input)>,
     /// Fingerprint of the input and the transform the result was made from, or why making it
@@ -34,11 +33,10 @@ enum Input {
 }
 
 impl TransformBlock {
-    pub(super) fn new(transform: MeshTransform, units: UnitSystem) -> Self {
+    pub(super) fn new(transform: MeshTransform) -> Self {
         Self {
             model: LinkedModel::default(),
             transform,
-            units,
             input: None,
             made: None,
         }
@@ -110,11 +108,10 @@ impl TransformBlock {
         }
     }
 
-    /// The transform in words, with its lengths in the block's units.
-    fn describe(&self) -> String {
-        let length =
-            |v: f64| numeric::format_physical(self.units.shown(v, plx_model::Quantity::Length));
-        let unit = self.units.unit(plx_model::Quantity::Length);
+    /// The transform in words, with its lengths in `units`.
+    fn describe(&self, units: UnitSystem) -> String {
+        let length = |v: f64| numeric::format_physical(units.shown(v, plx_model::Quantity::Length));
+        let unit = units.unit(plx_model::Quantity::Length);
         let vector = |v: [f64; 3]| {
             format!(
                 "({}, {}, {}) {unit}",
@@ -395,7 +392,11 @@ pub(super) fn given(all: &[Link], id: u64) -> Option<&'static str> {
 
 /// The rows of a transform block: the one pin that takes a geometry or a mesh and gives it
 /// moved, with its state, and what it does.
-pub(super) fn transform_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
+pub(super) fn transform_rows(
+    node: &Node,
+    incoming: &[(Vec<String>, String)],
+    units: UnitSystem,
+) -> Vec<Row> {
     let Some(block) = node.as_transform() else {
         return Vec::new();
     };
@@ -456,7 +457,7 @@ pub(super) fn transform_rows(node: &Node, incoming: &[(Vec<String>, String)]) ->
         widget: None,
         tip: format!(
             "{}.\nDouble-click the block to choose translate, rotate, mirror or scale.",
-            block.describe()
+            block.describe(units)
         ),
         path: vec![TRANSFORM_ROW.to_owned()],
     });
@@ -562,7 +563,7 @@ impl ProjectApp {
     pub(super) fn add_transform(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
         let name = block_name("Transform");
-        let block = TransformBlock::new(MeshTransform::Translate([0.0; 3]), UnitSystem::default());
+        let block = TransformBlock::new(MeshTransform::Translate([0.0; 3]));
         self.nodes.push(Node::new(
             id,
             name.clone(),
@@ -697,15 +698,12 @@ mod tests {
 
     #[test]
     fn a_transform_block_moves_the_mesh_linked_to_it() {
-        let block = TransformBlock::new(
-            MeshTransform::Translate([0.0, 0.0, 2.0]),
-            UnitSystem::default(),
-        );
+        let block = TransformBlock::new(MeshTransform::Translate([0.0, 0.0, 2.0]));
         let mut nodes = vec![
             tet_analysis(1),
             Node::new(2, "Transform".into(), Block::Transform(Box::new(block))),
         ];
-        let rows = transform_rows(&nodes[1], &[]);
+        let rows = transform_rows(&nodes[1], &[], UnitSystem::default());
         assert!(rows.iter().all(|r| r.state.is_none() && !r.output));
         assert_eq!(rows[0].text, "Geometry or Mesh");
         assert_eq!(rows[1].text, "Translate");
@@ -729,7 +727,11 @@ mod tests {
         assert_eq!(data.mesh.node(4), Some([0.0, 0.0, 3.0]));
         assert_eq!(data.mesh.parts[0].name, "TET");
         // The one pin gives the mesh on, as a mesh.
-        let rows = transform_rows(&nodes[1], &[(mesh.to_vec(), "Tet".to_owned())]);
+        let rows = transform_rows(
+            &nodes[1],
+            &[(mesh.to_vec(), "Tet".to_owned())],
+            UnitSystem::default(),
+        );
         assert_eq!(rows[0].text, "Mesh");
         assert!(rows[0].output);
         assert_eq!(rows[0].path, mesh);

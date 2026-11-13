@@ -706,7 +706,7 @@ fn build() -> Vec<Command> {
         "Box\nMesh",
         "Sources",
         "Mesh",
-        Node(NodeIcon::Mesh),
+        Node(NodeIcon::BoxMesh),
         "Places a block that meshes a box with hexahedra, for 3D analyses.",
     ));
     add(place(

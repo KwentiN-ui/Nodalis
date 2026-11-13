@@ -18,7 +18,6 @@ pub(super) struct CadBlock {
     /// The geometry the link of its Geometry row brings; set by [`CadBlock::set_input`].
     input: Option<Geometry>,
     pub(super) operation: CadOperation,
-    pub(super) units: UnitSystem,
     /// Fingerprint of the input and operation the result was made from, see
     /// [`CadOperation::fingerprint`].
     pub(super) made_from: Option<u64>,
@@ -32,7 +31,6 @@ pub(super) struct CadBlock {
 impl CadBlock {
     pub(super) fn new(
         operation: CadOperation,
-        units: UnitSystem,
         result: Option<Geometry>,
         made_from: Option<u64>,
     ) -> Self {
@@ -43,7 +41,6 @@ impl CadBlock {
             },
             input: None,
             operation,
-            units,
             made_from,
             failed: None,
             wanted_memo: std::cell::Cell::new(None),

@@ -1,5 +1,6 @@
 //! Equations of derived outputs and distributions in NCalc's syntax:
-//! `=STRESS.MISES / 235`, with the arithmetic and comparison operators, `? :`, and functions
+//! `=STRESS.MISES / 235`, with the arithmetic and comparison operators, `^` for powers,
+//! `? :`, and functions
 //! such as `Sqrt`, `Max` or `If`. Results are referred to as `FIELD.COMPONENT`; a name
 //! containing characters an identifier cannot hold, like `Limit-1.RATIO`, is written in
 //! brackets: `[Limit-1.RATIO]`.
@@ -37,6 +38,7 @@ enum Op {
     Ne,
     And,
     Or,
+    Pow,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -92,6 +94,35 @@ impl Function {
         ("If", Function::If, 3..=3),
     ];
 }
+
+/// The functions an equation can call, as `(signature, what it gives)`, for the GUI.
+pub const FUNCTIONS: [(&str, &str); 22] = [
+    ("If(c, a, b)", "a where the condition c holds, else b"),
+    ("Min(a, b)", "The smaller of a and b"),
+    ("Max(a, b)", "The larger of a and b"),
+    ("Abs(x)", "Magnitude of x"),
+    ("Sign(x)", "-1, 0 or 1 by the sign of x"),
+    ("Sqrt(x)", "Square root"),
+    ("Pow(x, y)", "x to the power y, the same as x^y"),
+    ("Exp(x)", "e to the power x"),
+    ("Ln(x)", "Natural logarithm"),
+    ("Log10(x)", "Logarithm to base 10"),
+    ("Log(x, b)", "Logarithm of x to base b"),
+    ("Sin(x)", "Sine of an angle in radians"),
+    ("Cos(x)", "Cosine of an angle in radians"),
+    ("Tan(x)", "Tangent of an angle in radians"),
+    ("Asin(x)", "Arc sine, in radians"),
+    ("Acos(x)", "Arc cosine, in radians"),
+    ("Atan(x)", "Arc tangent, in radians"),
+    ("Floor(x)", "The next whole number below x"),
+    ("Ceiling(x)", "The next whole number above x"),
+    ("Round(x, n)", "x rounded to n decimals (n may be left out)"),
+    ("Truncate(x)", "x without its decimals"),
+    (
+        "IEEERemainder(x, y)",
+        "Remainder of x / y to the nearest multiple",
+    ),
+];
 
 fn truth(value: f64) -> bool {
     value != 0.0 && !value.is_nan()
@@ -167,6 +198,7 @@ fn eval(expr: &Expr, values: &[f64]) -> f64 {
                 Op::Ge => flag(a >= b),
                 Op::Eq => flag(a == b),
                 Op::Ne => flag(a != b),
+                Op::Pow => a.powf(b),
                 Op::And | Op::Or => flag(truth(b)),
             }
         }
@@ -367,7 +399,14 @@ impl Parser {
         if self.eat("!") || self.eat_word("not") {
             return Ok(Expr::Not(Box::new(self.unary()?)));
         }
-        self.primary()
+        let base = self.primary()?;
+        // A power binds closer than a sign before it, -x^2 is -(x^2), and goes from the
+        // right, 2^3^2 is 2^9.
+        if self.eat("^") || self.eat("**") {
+            let exponent = self.unary()?;
+            return Ok(Expr::Binary(Op::Pow, Box::new(base), Box::new(exponent)));
+        }
+        Ok(base)
     }
 
     fn variable(&mut self, name: String) -> Expr {
@@ -507,6 +546,26 @@ mod tests {
 
     fn value(text: &str) -> f64 {
         Equation::parse(text).unwrap().evaluate(&[])
+    }
+
+    #[test]
+    fn powers_bind_closest_and_go_from_the_right() {
+        assert_eq!(value("2^3"), 8.0);
+        assert_eq!(value("2**3"), 8.0);
+        assert_eq!(value("-2^2"), -4.0);
+        assert_eq!(value("2^3^2"), 512.0);
+        assert_eq!(value("3 * 2^2 + 1"), 13.0);
+        assert_eq!(value("2^-1"), 0.5);
+        assert_eq!(value("If(2^2 > 3, 1, 0)"), 1.0);
+    }
+
+    #[test]
+    fn listed_functions_exist() {
+        for (signature, _) in FUNCTIONS {
+            let name = &signature[..signature.find('(').unwrap()];
+            let error = Equation::parse(&format!("{name}()")).unwrap_err();
+            assert!(!error.contains("Unknown function"), "{name}: {error}");
+        }
     }
 
     #[test]

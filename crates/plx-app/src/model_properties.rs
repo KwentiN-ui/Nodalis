@@ -92,30 +92,25 @@ impl ModelPropertiesDialog {
             });
             group(ui, "Model Type", |ui| model_type(ui, draft));
             group(ui, "Unit System", |ui| {
-                egui::Frame::new()
-                    .fill(crate::style::window())
-                    .stroke(egui::Stroke::new(1.0, crate::style::border()))
-                    .inner_margin(4)
-                    .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        for units in UnitSystem::ALL {
-                            let selected = draft.units == units;
-                            let label = egui::Button::selectable(selected, units.label());
-                            let clicked = ui.add_enabled(!fixed || selected, label).clicked();
-                            if clicked && !fixed {
-                                draft.units = units;
-                            }
-                        }
-                    });
+                ui.label(draft.units.label());
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(
+                            "The unit system of the project, chosen at the bottom right of \
+                             the project window. The analysis shows its values and reads \
+                             files without units in it; they are stored in SI units.",
+                        )
+                        .weak(),
+                    )
+                    .wrap(),
+                );
             });
             group(ui, "Units", |ui| units_table(ui, draft.units));
             group(ui, "Physical Constants", |ui| constants(ui, draft));
             let note = if fixed {
-                "The model space and the unit system are set when the analysis is made."
+                "The model space is set when the analysis is made."
             } else {
-                "The model space and the unit system cannot be changed once the analysis \
-                     is made. The unit system only says in which units the analysis shows \
-                     and reads its values; they are stored in SI units."
+                "The model space cannot be changed once the analysis is made."
             };
             ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap());
             if let Some(error) = &error {

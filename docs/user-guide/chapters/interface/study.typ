@@ -42,8 +42,6 @@ columns and the table of the design points:
 #screenshot("study-editor.png", [Three design points solved: the stress grows with the force])
 
 #fields(
-  [Shown in], [The unit system the inputs are shown and entered in. The outputs are shown in
-    the units of their Measure blocks.],
   [P1, O1 ...], [The columns, with the kind of each input. A double-click on a name renames
     it; #ui("Remove") removes the column and its links.],
   [Point], [The design points; the current one is marked.],

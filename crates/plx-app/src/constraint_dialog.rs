@@ -655,9 +655,6 @@ fn spring_rows(
     hint(ui, &text);
 }
 
-/// The relative degrees of freedom of a joint, in its frame.
-const JOINT_DOFS: [&str; 6] = ["Ux", "Uy", "Uz", "URx", "URy", "URz"];
-
 /// The two ends of a joint, its kind and, for a general joint, the free degrees of
 /// freedom, how a selection follows its point, and the joint frame.
 fn joint_rows(ui: &mut Ui, model: &Model, joint: &mut Joint, pair: &mut MasterSlave) {
@@ -682,9 +679,14 @@ fn joint_rows(ui: &mut Ui, model: &Model, joint: &mut Joint, pair: &mut MasterSl
         });
     ui.end_row();
     let dofs = fe.properties.space.remote_dofs();
+    // The relative degrees of freedom of the joint, along the axes of its frame, which is
+    // rectangular also in a cylindrical coordinate system.
+    let directions = crate::setup::Directions::RECTANGULAR;
+    let joint_dofs = directions.dofs();
     if joint.kind == JointKind::General {
         for &d in dofs {
-            ui.label(JOINT_DOFS[d]);
+            ui.label(joint_dofs[d])
+                .on_hover_text(directions.describe(d));
             ui.horizontal(|ui| {
                 ui.radio_value(&mut joint.free[d], false, "Fixed");
                 ui.radio_value(&mut joint.free[d], true, "Free");
@@ -695,7 +697,7 @@ fn joint_rows(ui: &mut Ui, model: &Model, joint: &mut Joint, pair: &mut MasterSl
         let free = joint.free_dofs();
         let names: Vec<&str> = (dofs.iter())
             .filter(|&&d| free[d])
-            .map(|&d| JOINT_DOFS[d])
+            .map(|&d| joint_dofs[d])
             .collect();
         ui.label("Free");
         ui.label(if names.is_empty() {

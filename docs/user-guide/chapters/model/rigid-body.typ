@@ -58,9 +58,9 @@ Boundary conditions and loads can act on a reference point instead of on nodes: 
 #ui("Reference Point") as the region in their dialogs. The point must drive an active rigid
 body or point mass (@point-mass), otherwise the model check (@model-check) reports "Reference point without rigid body".
 
-- A #ui("Displacement/Rotation") boundary condition on the point holds or moves the whole body; `UR1`, `UR2`, `UR3` turn it about the point.
+- A #ui("Displacement/Rotation") boundary condition on the point holds or moves the whole body; `RX`, `RY`, `RZ` turn it about the point.
 - A #ui("Force") on the point pulls the whole body with the given force.
-- A #ui("Moment") load (`M1`, `M2`, `M3`, written as `*CLOAD` on the rotational degrees of
+- A #ui("Moment") load (`MX`, `MY`, `MZ`, written as `*CLOAD` on the rotational degrees of
   freedom 4 to 6) turns the body about the point. Moments can also act on nodes of beams or
   shells, which have rotations of their own, and need a 3D model.
 
