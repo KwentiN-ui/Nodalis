@@ -402,6 +402,17 @@ impl RegionDraft {
         }
     }
 
+    /// The picked geometry entities that have no mesh any more, or are not in the changed
+    /// geometry. Empty unless the mesh was created from geometry.
+    fn missing_entities(&self, mesh: &FeMesh) -> BTreeSet<CadEntity> {
+        if mesh.cad.is_empty() {
+            return BTreeSet::new();
+        }
+        (self.geometry.items().into_iter())
+            .filter(|&e| e.is_lost() || !mesh.cad.contains(e))
+            .collect()
+    }
+
     pub(crate) fn clear(&mut self) {
         self.nodes.clear();
         self.faces.clear();
@@ -665,6 +676,17 @@ impl RegionDraft {
                         }
                         if ui.button("Clear Selection").clicked() {
                             self.clear();
+                        }
+                        let missing = self.missing_entities(&model.mesh);
+                        if !missing.is_empty()
+                            && ui
+                                .button(format!("Clear Missing ({})", missing.len()))
+                                .on_hover_text(
+                                    "Remove the geometry entities that have no mesh (any more)",
+                                )
+                                .clicked()
+                        {
+                            self.geometry.push(Operation::Subtract, missing);
                         }
                     });
                     ui.weak("Choose in the \"Selection\" window what a click selects.");
@@ -8004,6 +8026,24 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn clear_missing_drops_unmeshed_geometry_and_can_be_undone() {
+        use plx_mesh::CadEntity::{Edge, Face};
+        let mut mesh = FeMesh::default();
+        mesh.cad.nodes.insert(Face(1), vec![1]);
+        let region = Region::Geometry([Face(1), Face(2), Edge(3)].into_iter().collect());
+        let mut draft = RegionDraft::from_region(&region, SOLID_SOURCES, Target::Faces, &mesh);
+        let missing = draft.missing_entities(&mesh);
+        assert_eq!(missing, [Face(2), Edge(3)].into_iter().collect());
+        draft.geometry.push(Operation::Subtract, missing);
+        assert_eq!(draft.geometry.items(), [Face(1)].into_iter().collect());
+        assert!(draft.missing_entities(&mesh).is_empty());
+        draft.geometry.undo();
+        assert_eq!(draft.geometry.items().len(), 3);
+        // A mesh without geometry has nothing to compare with.
+        assert!(draft.missing_entities(&FeMesh::default()).is_empty());
+    }
 
     #[test]
     fn submodel_rows_name_the_global_results_and_what_is_wrong_with_them() {

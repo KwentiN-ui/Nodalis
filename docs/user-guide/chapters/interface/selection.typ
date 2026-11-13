@@ -11,7 +11,10 @@ Each dialog with a region has a #ui("Region") field. Its combo box chooses where
 comes from; the choices depend on the item:
 
 / Selection in the 3D view: picked nodes, element faces, edges, parts or CAD faces. The field shows
-  what is selected ("12 element faces") and has a #ui("Clear Selection") button.
+  what is selected ("12 element faces") and has a #ui("Clear Selection") button. When the selection holds CAD entities that have no mesh
+  (any more), e.g. because you deleted the mesh of that part, #ui("Clear Missing (n)") appears
+  next to it and removes just those entities; the Model Check reports them as "geometry entities
+  are not meshed". #ui("Undo") in the #ui("Selection") window brings them back.
 / Parts: whole parts, picked in the 3D view.
 / Node Set, Element Set, Surface: sets and surfaces of an imported `.inp` mesh, or ones you
   defined yourself (@mesh-sets).
