@@ -104,6 +104,7 @@ mod tree;
 mod tree_icons;
 mod tree_rows;
 mod undo;
+mod units_menu;
 mod update;
 mod value_table;
 mod viewport;

@@ -83,6 +83,8 @@ pub enum Request {
     Campbell,
     /// Close the analysis shown in the project window: its data goes back to the project.
     Close,
+    /// Make this the unit system of the project, which the analyses follow.
+    SetUnits(UnitSystem),
 }
 
 struct Workbench {
@@ -957,15 +959,17 @@ impl AnalysisWindow {
             let idle = self.workbench.recording.is_none();
             ui.add_enabled_ui(idle, |ui| self.workbench.output_tabs(ui));
             ui.separator();
-            // Nodalis shows the unit system of the model at the right.
+            // The unit system of the project, which the model follows, and its model space at
+            // the right; the units change there as in the project window.
             if let Some(model) = &self.workbench.model {
-                let properties = &model.fe.properties;
+                let (units, space) = (model.fe.properties.units, model.fe.properties.space);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!(
-                        "Unit system: {}   Model space: {}",
-                        properties.units.label(),
-                        properties.space.label()
-                    ));
+                    let busy = self.busy().map(|why| format!("Not while {why}."));
+                    if let Some(units) = crate::units_menu::button(ui, units, busy.as_deref()) {
+                        self.workbench.requests.push(Request::SetUnits(units));
+                    }
+                    ui.separator();
+                    ui.label(format!("Model space: {}", space.label()));
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         cancel = self.status_text(ui);
                     });
