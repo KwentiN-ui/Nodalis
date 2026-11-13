@@ -8159,4 +8159,65 @@ mod tests {
         assert!(name("zwei wörter").is_err());
         assert!(name("").is_err());
     }
+
+    /// A local mesh size on a face of one of two bodies touches that body only: the other
+    /// keeps its mesh as up to date.
+    #[test]
+    fn a_local_mesh_size_leaves_the_other_part_up_to_date() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/zwei_bloecke.step");
+        let loaded = match crate::model::load(&path, plx_model::UnitSystem::Unitless) {
+            Ok(loaded) => loaded,
+            Err(error) if std::env::var_os("NODALIS_REQUIRE_GMSH").is_none() => {
+                eprintln!("Gmsh not available, test skipped: {error}");
+                return;
+            }
+            Err(error) => panic!("Gmsh is required: {error}"),
+        };
+        let before = loaded.model.geometry.unwrap();
+        let view = loaded.geometry_view.unwrap();
+        let space = plx_model::ModelSpace::default();
+        // A face only the second body has.
+        let second = view.parts.iter().position(|p| p.name == "SOLID-2").unwrap();
+        let first_faces: std::collections::BTreeSet<i32> = (view.mesh.parts[1 - second].elements)
+            .iter()
+            .filter_map(|&id| match view.cad_entity(id) {
+                Some(plx_mesh::CadEntity::Face(tag)) => Some(tag),
+                _ => None,
+            })
+            .collect();
+        let face = (view.mesh.parts[second].elements.iter())
+            .find_map(|&id| match view.cad_entity(id) {
+                Some(plx_mesh::CadEntity::Face(tag)) if !first_faces.contains(&tag) => Some(tag),
+                _ => None,
+            })
+            .unwrap();
+        let item = plx_model::MeshSetupItem {
+            name: "Local_Mesh_Size-1".into(),
+            kind: plx_model::MeshSetupKind::LocalMeshSize {
+                faces: vec![face],
+                edges: Vec::new(),
+                size: 1.0,
+                depth: 1.0,
+            },
+        };
+        let affected = local_size_parts(&view, Some(&item));
+        assert_eq!(affected, ["SOLID-2"]);
+
+        let mut now = before.clone();
+        now.mesh_items.push(item);
+        let mut inputs = std::collections::BTreeMap::new();
+        for part in ["SOLID-1", "SOLID-2"] {
+            let made = plx_model::fingerprint::mesh_input(&before, space, part);
+            inputs.insert(part.to_owned(), made);
+        }
+        keep_up_to_date(space, &before, &now, &affected, &mut inputs);
+        let current = |part: &str| plx_model::fingerprint::mesh_input(&now, space, part);
+        assert_eq!(inputs["SOLID-1"], current("SOLID-1"));
+        assert_ne!(inputs["SOLID-2"], current("SOLID-2"));
+        // A part that was out of date before stays so.
+        let mut inputs = std::collections::BTreeMap::from([("SOLID-1".to_owned(), 7)]);
+        keep_up_to_date(space, &before, &now, &affected, &mut inputs);
+        assert_eq!(inputs["SOLID-1"], 7);
+    }
 }
