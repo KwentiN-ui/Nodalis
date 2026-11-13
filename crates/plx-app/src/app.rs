@@ -131,6 +131,8 @@ struct Workbench {
     dialog: Option<TreeItem>,
     /// Name typed in the properties window of a part, with why it cannot be taken.
     part_name: (String, Option<String>),
+    /// Rename dialog of a compound part: its index and the name typed so far.
+    compound_rename: Option<(usize, String)>,
     /// Element types of the part in the properties window, as the user picks them.
     part_types: Vec<String>,
     /// Part the open context menu of the 3D view belongs to.
@@ -327,6 +329,7 @@ impl AnalysisWindow {
                 tree: TreeState::default(),
                 dialog: None,
                 part_name: Default::default(),
+                compound_rename: None,
                 part_types: Vec::new(),
                 menu_part: None,
                 tree_view: TreeView::FeModel,
@@ -1711,6 +1714,7 @@ impl AnalysisWindow {
             .screenshot
             .update(&ctx, view, &mut workbench.output);
         self.workbench.properties_window(&ctx);
+        self.workbench.compound_rename_window(&ctx);
         self.workbench.editor_window(&ctx);
         self.workbench.update_motion_preview(&ctx);
         self.workbench.update_cyclic_preview();
@@ -5550,6 +5554,12 @@ impl Workbench {
         };
         let before = geometry.compounds.clone();
         let line = match action {
+            CompoundAction::StartRename(c) => {
+                if let Some(compound) = geometry.compounds.get(c) {
+                    self.compound_rename = Some((c, compound.name.clone()));
+                }
+                return;
+            }
             CompoundAction::Mesh(c) => {
                 if let Some(compound) = geometry.compounds.get(c) {
                     let name = compound.name.clone();
@@ -6776,6 +6786,46 @@ impl Workbench {
         if new != self.settings {
             self.settings = new;
             self.update_contour();
+        }
+    }
+
+    /// Small dialog to rename a compound part: Enter renames, Escape cancels.
+    fn compound_rename_window(&mut self, ctx: &egui::Context) {
+        let Some((c, typed)) = self.compound_rename.as_mut() else {
+            return;
+        };
+        let c = *c;
+        let (mut accept, mut cancel) = (false, false);
+        egui::Window::new("Rename Compound Part")
+            .id(crate::ids::window(ctx, "compound rename window"))
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    let edit = ui.add(egui::TextEdit::singleline(typed).desired_width(200.0));
+                    if ui.memory(|m| m.focused().is_none()) {
+                        edit.request_focus();
+                    }
+                    if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        accept = true;
+                    }
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    accept |= ui.button("OK").clicked();
+                    cancel |= ui.button("Cancel").clicked();
+                });
+            });
+        cancel |= ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        if accept {
+            if let Some((_, typed)) = self.compound_rename.take() {
+                self.compound_action(ctx, tree::CompoundAction::Rename(c, typed));
+            }
+        } else if cancel {
+            self.compound_rename = None;
         }
     }
 

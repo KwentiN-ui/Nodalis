@@ -122,8 +122,8 @@ into one part of the FE model again:
 The compound part appears in the Geometry tree like a folder, named `COMPOUND-1` and so on, with
 the parts it joins under it. The context menu of a part offers #ui("Add to Compound") with a
 submenu of the compound parts, and #ui("Remove from Compound") for a part that is in one. The
-context menu of the compound part has #ui("Create Mesh"), a #ui("Name") field with
-#ui("Rename"), and #ui("Dissolve"), which makes its parts parts of their own again.
+context menu of the compound part has #ui("Create Mesh"), #ui("Rename..."), which asks for the new name in a small dialog (Enter
+confirms, Escape cancels), and #ui("Dissolve"), which makes its parts parts of their own again.
 
 - Each part of a compound is meshed on its own, with its own mesh setup, as before. In the FE
   Model workspace the compound is *one* part: sections, loads, boundary conditions and the
