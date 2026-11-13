@@ -12,9 +12,10 @@ use super::ProjectApp;
 
 /// The unit systems the project offers: all but Unitless, which would show the SI values
 /// without their units.
-pub(super) const CHOICES: [UnitSystem; 4] = [
+pub(super) const CHOICES: [UnitSystem; 5] = [
     UnitSystem::MKgSC,
     UnitSystem::MmTonSC,
+    UnitSystem::MmKgSC,
     UnitSystem::MTonSC,
     UnitSystem::InLbSF,
 ];
@@ -45,7 +46,8 @@ pub(super) fn summary(units: UnitSystem) -> String {
 }
 
 impl ProjectApp {
-    /// The menu button of the unit system, at the right end of the status bar.
+    /// The menu button of the unit system, at the right end of the status bar: a text like
+    /// the others there, framed only while the pointer is on it.
     pub(super) fn units_menu(&mut self, ui: &mut egui::Ui) {
         let busy = (self.nodes.iter())
             .filter_map(|n| Some((n, n.as_analysis()?.window.as_ref()?.busy()?)))
@@ -54,7 +56,9 @@ impl ProjectApp {
         let mut chosen = None;
         let current = self.units;
         let button = ui.add_enabled_ui(busy.is_none(), |ui| {
-            ui.menu_button(format!("Units: {}", current.label()), |ui| {
+            let text = format!("Units: {}", current.label());
+            let button = egui::Button::new(text).frame_when_inactive(false);
+            egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 for choice in CHOICES {
                     let response = ui
@@ -73,7 +77,7 @@ impl ProjectApp {
              what is shown.\n{}",
             summary(current)
         );
-        let response = button.inner.response;
+        let response = button.inner.0;
         match busy {
             Some(why) => response.on_disabled_hover_text(why),
             None => response.on_hover_text(tip),

@@ -59,6 +59,7 @@ The unit system is chosen for the whole project at the bottom right of the proje
 #fields(
   [m, kg, s, °C], [SI units.],
   [mm, ton, s, °C], [The default. Force in N, stress in MPa, density in t/mm³.],
+  [mm, kg, s, °C], [Force in mN, stress in kPa, density in kg/mm³, energy in µJ.],
   [m, ton, s, °C], [Force in kN, stress in kPa.],
   [in, lbf·s²/in, s, °F], [US units. Force in lbf, stress in psi.],
 )
