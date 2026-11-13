@@ -652,7 +652,7 @@ impl RegionDraft {
             }
             match self.source {
                 Source::Selection => {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         let picking = active && !self.locked;
                         if pick_button(ui, picking) {
                             wanted = true;
@@ -680,7 +680,10 @@ impl RegionDraft {
                         let missing = self.missing_entities(&model.mesh);
                         if !missing.is_empty()
                             && ui
-                                .button(format!("Clear Missing ({})", missing.len()))
+                                .add(
+                                    egui::Button::new(format!("Clear Missing ({})", missing.len()))
+                                        .wrap_mode(egui::TextWrapMode::Extend),
+                                )
                                 .on_hover_text(
                                     "Remove the geometry entities that have no mesh (any more)",
                                 )

@@ -29,6 +29,8 @@ The window stays open when a new item's dialog opens; when you edit an item that
 selection, the selection starts locked so that a click cannot overwrite it by accident. All dialogs with a region field
 behave this way, for parts as well as for picked nodes, faces and edges.
 
+#screenshot("clear-missing.png", [A region whose geometry selection holds a face of a deleted mesh: #ui("Clear Missing (1)") removes it])
+
 #screenshot("region-confirm.png", [A region with the confirm button next to #ui("..."), while the selection window is open])
 
 === Selection window <selection-window>
