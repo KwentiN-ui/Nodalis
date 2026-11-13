@@ -380,10 +380,11 @@ pub struct ParameterSet {
     pub parameters: Vec<plx_model::Parameter>,
 }
 
-/// A block that reads a file outside the project for analyses to link: geometry (STEP,
-/// IGES, BREP, STL), a mesh (`.inp`) or the results of each step of a results file (`.frd`).
-/// It keeps only the path: the file is read again when the project is opened and whenever
-/// it changes.
+/// A block that reads a file for analyses to link: geometry (STEP, IGES, BREP, STL), a mesh
+/// (`.inp`) or the results of each step of a results file (`.frd`). An external file is kept
+/// by its path only and read again when the project is opened and whenever it changes; an
+/// embedded one is kept in the project, [`FileSource::embedded`], and the path only names
+/// where it was taken from.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FileSource {
     pub id: u64,
@@ -396,6 +397,97 @@ pub struct FileSource {
     /// The unit system the numbers of an input file and the lengths of geometry are in.
     #[serde(default)]
     pub units: plx_model::UnitSystem,
+    /// The content of the file kept in the project; `None` for an external file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedded: Option<EmbeddedFile>,
+}
+
+/// The content of a file kept in the project by a file block, see [`FileSource::embedded`]:
+/// packed as a [`BoundFile`], shared so that the copies undo keeps cost nothing.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EmbeddedFile {
+    /// Fingerprint of the content, which tells a changed content.
+    pub print: u64,
+    pub file: std::sync::Arc<BoundFile>,
+}
+
+impl PartialEq for EmbeddedFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.print == other.print
+            && (std::sync::Arc::ptr_eq(&self.file, &other.file) || self.file == other.file)
+    }
+}
+
+impl EmbeddedFile {
+    /// Packs the content of a file named `name`.
+    pub fn pack(name: &str, content: &[u8]) -> Result<Self, std::io::Error> {
+        let mut print = plx_mesh::Fnv::new();
+        print.add_str(name);
+        print.add(content);
+        // Level 3, as for bound results: a third of the time of the default level.
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(3));
+        encoder.write_all(content)?;
+        let file = BoundFile {
+            name: name.to_owned(),
+            size: content.len() as u64,
+            data: BASE64.encode(encoder.finish()?),
+        };
+        Ok(Self {
+            print: print.finish(),
+            file: std::sync::Arc::new(file),
+        })
+    }
+
+    /// Reads the file at `path` and packs it under its file name.
+    pub fn read(path: &Path) -> Result<Self, ProjectError> {
+        let io = |source| ProjectError::Io {
+            path: path.to_owned(),
+            source,
+        };
+        let content = std::fs::read(path).map_err(io)?;
+        Self::pack(&file_name(path).unwrap_or_default(), &content).map_err(io)
+    }
+
+    /// The file name it was taken from.
+    pub fn name(&self) -> &str {
+        &self.file.name
+    }
+
+    /// Size of the file itself.
+    pub fn size(&self) -> u64 {
+        self.file.size
+    }
+
+    /// The content of the file.
+    pub fn content(&self) -> Result<Vec<u8>, ProjectError> {
+        let mut content = Vec::with_capacity(self.file.size as usize);
+        let compressed = BASE64
+            .decode(&self.file.data)
+            .map_err(|e| ProjectError::Format {
+                path: PathBuf::from(&self.file.name),
+                message: format!("embedded file: {e}"),
+            })?;
+        DeflateDecoder::new(compressed.as_slice())
+            .read_to_end(&mut content)
+            .map_err(|e| ProjectError::Format {
+                path: PathBuf::from(&self.file.name),
+                message: format!("embedded file: {e}"),
+            })?;
+        Ok(content)
+    }
+
+    /// Writes the content to `path`, creating its folder.
+    pub fn write(&self, path: &Path) -> Result<(), ProjectError> {
+        let io = |source| ProjectError::Io {
+            path: path.to_owned(),
+            source,
+        };
+        let content = self.content()?;
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir).map_err(io)?;
+        }
+        std::fs::write(path, content).map_err(io)
+    }
 }
 
 /// A note in the project schematic: a text for the reader, which gives and takes nothing.
@@ -2489,6 +2581,7 @@ mod tests {
             position: [500.0, 20.0],
             path: "results/global.frd".into(),
             units: plx_model::UnitSystem::MmTonSC,
+            embedded: Some(EmbeddedFile::pack("global.frd", b"    1C\n 9999\n").unwrap()),
         };
         saved.nodes.push(ProjectNode::File(file.clone()));
         let note = Note {
@@ -2560,7 +2653,12 @@ mod tests {
             other => panic!("{other:?}"),
         }
         match &project.nodes[7] {
-            ProjectNode::File(read) => assert_eq!(read, &file),
+            ProjectNode::File(read) => {
+                assert_eq!(read, &file);
+                let embedded = read.embedded.as_ref().unwrap();
+                assert_eq!(embedded.content().unwrap(), b"    1C\n 9999\n");
+                assert_eq!(embedded.size(), 13);
+            }
             other => panic!("{other:?}"),
         }
         match &project.nodes[8] {

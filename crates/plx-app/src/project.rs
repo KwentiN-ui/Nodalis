@@ -628,6 +628,12 @@ struct FileBlock {
     error: Option<String>,
     /// The file being read on a worker thread, with its fingerprint.
     reading: Option<(u64, Receiver<Result<FileRead, String>>)>,
+    /// The content of the file kept in the project; `None` while the file is external, read
+    /// from its path.
+    embedded: Option<file::EmbeddedFile>,
+    /// The file being taken into the project on a worker thread, with the path it is taken
+    /// from, which becomes the block's once it is in.
+    embedding: Option<(String, Receiver<Result<file::EmbeddedFile, String>>)>,
 }
 
 /// What a worker read from the file of a file block.
@@ -820,9 +826,17 @@ impl Node {
         Self::new(id, name, Block::MeshExport(Box::new(block)))
     }
 
-    /// A file block reading `path`, in `units`.
-    fn file_block(id: u64, name: String, path: String, units: UnitSystem) -> Self {
+    /// A file block reading `path`, in `units`, or the copy of it `embedded` in the project.
+    fn file_block(
+        id: u64,
+        name: String,
+        path: String,
+        units: UnitSystem,
+        embedded: Option<file::EmbeddedFile>,
+    ) -> Self {
         let block = FileBlock {
+            embedded,
+            embedding: None,
             model: LinkedModel::default(),
             path,
             units,
@@ -1241,8 +1255,15 @@ impl Node {
         let Some(file) = self.as_file() else {
             return CellState::Missing;
         };
-        if file.reading.is_some() {
+        if file.reading.is_some() || file.embedding.is_some() {
             return CellState::Running;
+        }
+        if let Some(embedded) = &file.embedded {
+            return match file.read {
+                _ if file.error.is_some() => CellState::Failed,
+                Some(read) if read == embedded.print => CellState::UpToDate,
+                _ => CellState::OutOfDate,
+            };
         }
         let print = file_print(&export_file(&file.path, base));
         match print {
@@ -1386,7 +1407,7 @@ impl Node {
                 Self::new(block.id, block.name, Block::Study(Box::new(study)))
             }
             ProjectNode::MeshExport(e) => Self::mesh_export(e.id, e.name, e.path, e.written),
-            ProjectNode::File(f) => Self::file_block(f.id, f.name, f.path, f.units),
+            ProjectNode::File(f) => Self::file_block(f.id, f.name, f.path, f.units, f.embedded),
             ProjectNode::Campbell(block) => {
                 let block = *block;
                 let window = CampbellWindow::saved(
@@ -1553,13 +1574,14 @@ impl Node {
                 path: e.path.clone(),
                 written: e.written,
             }),
-            // It keeps only the path: the file is read again.
+            // It keeps the path, and the content of an embedded file: the file is read again.
             Block::File(f) => ProjectNode::File(file::FileSource {
                 id,
                 name,
                 position,
                 path: f.path.clone(),
                 units: f.units,
+                embedded: f.embedded.clone(),
             }),
             // It keeps no model: the link brings it again.
             Block::Campbell(c) => {
@@ -1715,7 +1737,16 @@ impl Node {
             Block::MeshExport(e) => {
                 return Some(Self::mesh_export(id, name, e.path.clone(), None));
             }
-            Block::File(f) => return Some(Self::file_block(id, name, f.path.clone(), f.units)),
+            Block::File(f) => {
+                let embedded = f.embedded.clone();
+                return Some(Self::file_block(
+                    id,
+                    name,
+                    f.path.clone(),
+                    f.units,
+                    embedded,
+                ));
+            }
             Block::Campbell(c) => {
                 let setup = c.window.as_ref()?.setup().clone();
                 let window = CampbellWindow::saved(setup, Vec::new(), None, None);
@@ -2032,6 +2063,9 @@ enum Action {
     AddFile(egui::Pos2),
     /// Read the file of a file block again.
     ReadFile(u64),
+    /// Make the file of a file block external, read from its path, or keep it in the
+    /// project.
+    SetExternal(u64, bool),
     /// The file a mesh export block writes to was edited in its block.
     SetExportPath(u64, String),
     /// Write the file of a mesh export block now.
@@ -3922,8 +3956,13 @@ impl ProjectApp {
         let id = self.next_id();
         let name = block_name("File");
         let units = self.settings.new_model.units;
-        self.nodes
-            .push(Node::file_block(id, name.clone(), String::new(), units));
+        self.nodes.push(Node::file_block(
+            id,
+            name.clone(),
+            String::new(),
+            units,
+            None,
+        ));
         self.graph.insert_node(position, id);
         self.output.push(format!(
             "{name} created: choose a results file (.frd), an input file (.inp) or geometry \
@@ -3974,8 +4013,16 @@ impl ProjectApp {
         self.set_source_path(id, shown);
     }
 
-    /// Lets a file block read another file.
+    /// Lets a file block read another file; an embedded one takes the other file in.
     fn set_source_path(&mut self, id: u64, path: String) {
+        let found = self.nodes.iter().find(|n| n.id == id);
+        if found
+            .and_then(Node::as_file)
+            .is_some_and(|f| f.embedded.is_some())
+        {
+            self.embed_file(id, path);
+            return;
+        }
         if let Some(file) = self.node(id).and_then(Node::as_file_mut) {
             file.path = path;
             file.forget();
@@ -3986,18 +4033,109 @@ impl ProjectApp {
         self.files_checked = None;
     }
 
+    /// Takes the file at `path` into the project for a file block, on a worker thread; what
+    /// it held so far stays until the file is in.
+    fn embed_file(&mut self, id: u64, path: String) {
+        let base = self.export_base();
+        let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) else {
+            return;
+        };
+        let name = node.name.clone();
+        let Some(file) = node.as_file_mut() else {
+            return;
+        };
+        if path.trim().is_empty() {
+            self.output
+                .push(format!("{name}: choose a file first, then embed it."));
+            return;
+        }
+        let source = export_file(&path, base.as_deref());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(file::EmbeddedFile::read(&source).map_err(|e| e.to_string()));
+        });
+        file.embedding = Some((path, receiver));
+        self.files_checked = None;
+    }
+
+    /// Makes the file of a file block external, read from its path, or embedded, kept in
+    /// the project. A file made external that is not at its path is written there from the
+    /// embedded copy.
+    fn set_external(&mut self, id: u64, external: bool) {
+        let base = self.export_base();
+        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+            return;
+        };
+        let name = node.name.clone();
+        let Some(file) = node.as_file() else {
+            return;
+        };
+        if !external {
+            if file.embedded.is_none() && file.embedding.is_none() {
+                let path = file.path.clone();
+                self.embed_file(id, path);
+            }
+            return;
+        }
+        if file.embedding.is_some() {
+            // Not taken in yet: it stays as it was.
+            if let Some(file) = self.node(id).and_then(Node::as_file_mut) {
+                file.embedding = None;
+            }
+            return;
+        }
+        let Some(embedded) = file.embedded.clone() else {
+            return;
+        };
+        let path = export_file(&file.path, base.as_deref());
+        if file.path.trim().is_empty() {
+            self.output.push(format!(
+                "{name}: the embedded file has no path to be written to; choose one first."
+            ));
+            return;
+        }
+        if !path.is_file() {
+            match embedded.write(&path) {
+                Ok(()) => self.output.push(format!(
+                    "{name}: the embedded copy was written to {}",
+                    path.display()
+                )),
+                Err(why) => {
+                    self.output.push(format!(
+                        "{name}: stays embedded, as the copy could not be written: {why}"
+                    ));
+                    return;
+                }
+            }
+        }
+        if let Some(file) = self.node(id).and_then(Node::as_file_mut) {
+            file.embedded = None;
+            file.read = None;
+            file.error = None;
+        }
+        self.files_checked = None;
+    }
+
+    /// The folder the embedded files of file blocks are written to, to be read from there.
+    fn embedded_dir(&self) -> PathBuf {
+        self.settings.solver.work_dir().join("embedded")
+    }
+
     /// Reads the files of the file blocks again where they changed, on worker threads, and
     /// takes what they read; the links bring it to the analyses.
     fn refresh_files(&mut self, ctx: &egui::Context) {
         let base = self.export_base();
+        let embedded_dir = self.embedded_dir();
         let look = (self.files_checked).is_none_or(|t| t.elapsed() >= FILE_CHECK_INTERVAL);
         if look {
             self.files_checked = Some(Instant::now());
         }
         let mut lines = Vec::new();
         let mut changed = false;
+        let mut taken = Vec::new();
         for node in &mut self.nodes {
             let name = node.name.clone();
+            let id = node.id;
             let Some(file) = node.as_file_mut() else {
                 continue;
             };
@@ -4037,6 +4175,38 @@ impl ProjectApp {
             if file.making_subsets() {
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
+            if let Some((path, receiver)) = &file.embedding {
+                match receiver.try_recv() {
+                    // Taken in after the loop, as a change that can be undone.
+                    Ok(Ok(embedded)) => taken.push((id, path.clone(), embedded)),
+                    Ok(Err(why)) => lines.push(format!("{name}: not embedded: {why}")),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        ctx.request_repaint_after(Duration::from_millis(100));
+                        continue;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        lines.push(format!("{name}: not embedded: reading it failed"));
+                    }
+                }
+                file.embedding = None;
+                changed = true;
+            }
+            // An embedded file is written out once and read from there.
+            if let Some(embedded) = &file.embedded {
+                if file.read == Some(embedded.print) {
+                    continue;
+                }
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let (units, repaint) = (file.units, ctx.clone());
+                let (embedded, dir) = (embedded.clone(), embedded_dir.clone());
+                let print = embedded.print;
+                std::thread::spawn(move || {
+                    let _ = sender.send(read_embedded(&embedded, &dir, units));
+                    repaint.request_repaint();
+                });
+                file.reading = Some((print, receiver));
+                continue;
+            }
             if !look || file.path.trim().is_empty() {
                 continue;
             }
@@ -4061,6 +4231,27 @@ impl ProjectApp {
                     });
                     file.reading = Some((print, receiver));
                 }
+            }
+        }
+        if !taken.is_empty() {
+            self.checkpoint(&[]);
+        }
+        for (id, path, embedded) in taken {
+            let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) else {
+                continue;
+            };
+            lines.push(format!(
+                "{}: {} embedded in the project ({}, {} as stored)",
+                node.name,
+                embedded.name(),
+                crate::app::file_size(embedded.size()),
+                crate::app::file_size(embedded.file.data.len() as u64),
+            ));
+            if let Some(file) = node.as_file_mut() {
+                file.path = path;
+                file.embedded = Some(embedded);
+                file.read = None;
+                file.error = None;
             }
         }
         // Looked at again soon, for files changed outside.
@@ -5929,6 +6120,8 @@ impl ProjectApp {
                         .or(n.as_file().map(|f| &f.path))
                         .cloned()
                         .unwrap_or_default(),
+                    embedded: (n.as_file())
+                        .is_some_and(|f| f.embedded.is_some() || f.embedding.is_some()),
                     kind: n.kind(),
                     space: n.space().unwrap_or_default(),
                     has_space: n.space().is_some(),
@@ -7111,7 +7304,10 @@ impl ProjectApp {
                 // A copy named after the file as it was read, so that a changed file makes
                 // the target out of date.
                 let base = self.export_base();
-                let original = export_file(&file.path, base.as_deref());
+                let original = match &file.embedded {
+                    Some(embedded) => embedded_file(embedded, &self.embedded_dir()),
+                    None => export_file(&file.path, base.as_deref()),
+                };
                 let name = original.file_name()?.to_owned();
                 let dir = (self.settings.solver.work_dir())
                     .join(crate::analysis::job_name(&self.project_name()))
@@ -7587,6 +7783,7 @@ impl ProjectApp {
             | Action::AddMeasure(_)
             | Action::AddStudy(_)
             | Action::SetExportPath(..)
+            | Action::SetExternal(..)
             | Action::SetPrimitive(..)
             | Action::ResetStudy(_)
             | Action::SetParameter(..)
@@ -7730,8 +7927,16 @@ impl ProjectApp {
             Action::AddFile(pos) => {
                 self.add_file(pos);
             }
+            Action::SetExternal(id, external) => self.set_external(id, external),
             Action::ReadFile(id) => {
-                if let Some(file) = self.node(id).and_then(Node::as_file_mut) {
+                // An embedded file is taken in again from its path.
+                if let Some(file) = (self.nodes.iter().find(|n| n.id == id))
+                    .and_then(Node::as_file)
+                    .filter(|f| f.embedded.is_some())
+                {
+                    let path = file.path.clone();
+                    self.embed_file(id, path);
+                } else if let Some(file) = self.node(id).and_then(Node::as_file_mut) {
                     file.read = None;
                     file.error = None;
                 }
@@ -8528,6 +8733,8 @@ enum RowWidget {
     Exposed(u32),
     /// The file a mesh export block writes to.
     ExportPath,
+    /// Whether the file of a file block is external, read from its path, or embedded.
+    External,
     /// The operation of a Math block, one of the inputs of a Math or Switch block by index,
     /// and the number of choices of a Switch block.
     Operation,
@@ -8592,6 +8799,8 @@ struct BlockView {
     units: UnitSystem,
     /// What a mesh export block writes to.
     export_path: String,
+    /// Of a file block, whether its file is kept in the project, or being taken in.
+    embedded: bool,
     /// The text of a note.
     note: String,
     /// Whether it shows only its header and the rows with a wire, and is in a frame.
@@ -9846,6 +10055,39 @@ fn file_print(path: &Path) -> Option<u64> {
     Some(hash.finish())
 }
 
+/// Where an embedded file is written to be read: in a folder of its fingerprint under `dir`,
+/// with its own name, which tells what it holds.
+fn embedded_file(embedded: &file::EmbeddedFile, dir: &Path) -> PathBuf {
+    let name = match embedded.name() {
+        "" => "file",
+        name => name,
+    };
+    dir.join(format!("{:016x}", embedded.print)).join(name)
+}
+
+/// Reads an embedded file: writes it under `dir` unless it is there, then reads it as
+/// [`read_source`] does, telling it by its name instead of the path it was written to.
+fn read_embedded(
+    embedded: &file::EmbeddedFile,
+    dir: &Path,
+    units: UnitSystem,
+) -> Result<FileRead, String> {
+    let path = embedded_file(embedded, dir);
+    let written = std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == embedded.size());
+    if !written {
+        embedded.write(&path).map_err(|e| e.to_string())?;
+    }
+    let shown = path.display().to_string();
+    let named = |text: String| text.replace(&shown, &format!("the embedded {}", embedded.name()));
+    match read_source(&path, units) {
+        Ok(mut read) => {
+            read.summary = named(read.summary);
+            Ok(read)
+        }
+        Err(why) => Err(named(why)),
+    }
+}
+
 /// Reads the file of a file block: CAD geometry with lengths in `units`, the mesh of an input
 /// file whose numbers are in `units`, or the mesh and steps of a results file.
 fn read_source(path: &Path, units: UnitSystem) -> Result<FileRead, String> {
@@ -9969,8 +10211,24 @@ fn file_rows(node: &Node, base: Option<&Path>) -> Vec<Row> {
         CellState::Missing => "the file is missing".to_owned(),
         CellState::Running => "being read".to_owned(),
         CellState::Failed => format!("not read: {}", file.error.as_deref().unwrap_or("")),
+        CellState::OutOfDate if file.embedded.is_some() => "being read".to_owned(),
         CellState::OutOfDate => "the file changed and is read again".to_owned(),
+        _ if file.embedded.is_some() => "read from the copy in the project".to_owned(),
         _ => "read".to_owned(),
+    };
+    let path_tip = match &file.embedded {
+        Some(embedded) => format!(
+            "The file the copy kept in the project was taken from: {} ({}). The project \
+             reads the copy, wherever it is opened; Read Again takes the file in anew from \
+             this path, Choose File takes in another one.",
+            embedded.name(),
+            crate::app::file_size(embedded.size())
+        ),
+        None => "The file to read: CalculiX results (.frd), a CalculiX input file (.inp) or \
+                 geometry (STEP, IGES, BREP, STL). A relative path starts at the folder of \
+                 the project file. It is read again whenever it changes. Double-click the \
+                 block to choose it."
+            .to_owned(),
     };
     let mut path_row = row(
         vec![PARAMETERS.to_owned(), "File".to_owned()],
@@ -9978,12 +10236,30 @@ fn file_rows(node: &Node, base: Option<&Path>) -> Vec<Row> {
         NodeIcon::Export,
         None,
         false,
-        "The file to read: CalculiX results (.frd), a CalculiX input file (.inp) or geometry \
-         (STEP, IGES, BREP, STL). A relative path starts at the folder of the project file. \
-         It is read again whenever it changes. Double-click the block to choose it."
-            .to_owned(),
+        path_tip,
     );
     path_row.widget = Some(RowWidget::ExportPath);
+    let mut external_tip = "On: the project keeps only the path of the file and reads it \
+         from there, again whenever it changes. Off: the project keeps a copy of the file, \
+         compressed, and reads it on any computer and system without the file; the file \
+         itself is no longer looked at. Turned on again, the copy is written to the path \
+         unless a file is there."
+        .to_owned();
+    if let Some(embedded) = &file.embedded {
+        external_tip.push_str(&format!(
+            " The copy takes {} in the project.",
+            crate::app::file_size(embedded.file.data.len() as u64)
+        ));
+    }
+    let mut external_row = row(
+        vec![PARAMETERS.to_owned(), "External".to_owned()],
+        "External".to_owned(),
+        NodeIcon::Export,
+        None,
+        false,
+        external_tip,
+    );
+    external_row.widget = Some(RowWidget::External);
     let ready = state == CellState::UpToDate;
     let mut rows = Vec::new();
     match FileKind::of(&file.path) {
@@ -10078,6 +10354,7 @@ fn file_rows(node: &Node, base: Option<&Path>) -> Vec<Row> {
         None => {}
     }
     rows.push(path_row);
+    rows.push(external_row);
     rows
 }
 
@@ -10997,8 +11274,41 @@ impl Viewer {
             self.edit_formula_row(&mut ui, id, field, &tip);
             return;
         }
+        if let RowWidget::External = widget {
+            let mut external = !block.embedded;
+            let (rect, label) =
+                ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::hover());
+            ui.painter().text(
+                egui::pos2(rect.left() + 30.0, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                &row.text,
+                egui::TextStyle::Body.resolve(ui.style()),
+                ui.visuals().text_color(),
+            );
+            label.on_hover_text(&row.tip);
+            let field = egui::Rect::from_min_max(
+                egui::pos2(rect.right() - 4.0 - ROW_HEIGHT, rect.top() + 1.0),
+                egui::pos2(rect.right() - 4.0, rect.bottom() - 1.0),
+            );
+            let mut ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(field)
+                    .id_salt((id, &row.path)),
+            );
+            if ui
+                .checkbox(&mut external, "")
+                .on_hover_text(&row.tip)
+                .changed()
+            {
+                self.actions.push(Action::SetExternal(id, external));
+            }
+            return;
+        }
         if let RowWidget::ExportPath = widget {
             let mut path = block.export_path.clone();
+            // The path of an embedded file only tells where it came from: Choose File and
+            // Read Again change what is kept.
+            let embedded = block.kind == Kind::File && block.embedded;
             let (rect, label) =
                 ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::hover());
             ui.painter().text(
@@ -11021,7 +11331,9 @@ impl Viewer {
             let response = ui
                 .add_sized(
                     field.size(),
-                    egui::TextEdit::singleline(&mut path).hint_text("folder/mesh.inp"),
+                    egui::TextEdit::singleline(&mut path)
+                        .hint_text("folder/mesh.inp")
+                        .interactive(!embedded),
                 )
                 .on_hover_text(&row.tip);
             if response.changed() {
@@ -11271,7 +11583,10 @@ impl Viewer {
                 }
                 return;
             }
-            RowWidget::Param(_) | RowWidget::Element | RowWidget::ExportPath => {}
+            RowWidget::Param(_)
+            | RowWidget::Element
+            | RowWidget::ExportPath
+            | RowWidget::External => {}
         }
         let Some(mut primitive) = block_primitive else {
             return;
@@ -11281,7 +11596,7 @@ impl Viewer {
             ui.disable();
         }
         let response = match widget {
-            RowWidget::ExportPath => return,
+            RowWidget::ExportPath | RowWidget::External => return,
             RowWidget::Param(param) => match primitive.slot(param.key) {
                 Some(ParamSlot::Length(value)) => {
                     let drag = crate::numeric::quantity(value, units, Quantity::Length);
@@ -14271,7 +14586,8 @@ mod tests {
         assert_eq!(read.model.fe.steps[0].name, "Step-1");
         assert!(read.model.mesh.node_count() > 0);
         let path = frd.to_string_lossy().into_owned();
-        let mut node = Node::file_block(1, "File".into(), path.clone(), UnitSystem::default());
+        let mut node =
+            Node::file_block(1, "File".into(), path.clone(), UnitSystem::default(), None);
         assert_eq!(node.file_state(None), CellState::OutOfDate, "not read yet");
         let file = node.as_file_mut().unwrap();
         (file.model, file.steps, file.space) = (read.model, read.steps, read.space);
@@ -14306,6 +14622,66 @@ mod tests {
     }
 
     #[test]
+    fn an_embedded_file_is_read_from_its_copy_without_the_file() {
+        let frd = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/kragbalken_c3d8.frd");
+        let dir = std::env::temp_dir().join(format!("nodalis-embedded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // The file is taken in, then gone: the project still has it.
+        let original = dir.join("elsewhere").join("global.frd");
+        std::fs::create_dir_all(original.parent().unwrap()).unwrap();
+        std::fs::copy(&frd, &original).unwrap();
+        let embedded = file::EmbeddedFile::read(&original).unwrap();
+        std::fs::remove_file(&original).unwrap();
+        assert_eq!(embedded.name(), "global.frd");
+        assert!(
+            embedded.file.data.len() < embedded.size() as usize,
+            "compressed"
+        );
+        let path = original.to_string_lossy().into_owned();
+        let mut node = Node::file_block(1, "File".into(), path, UnitSystem::default(), None);
+        node.as_file_mut().unwrap().embedded = Some(embedded.clone());
+        assert_eq!(node.file_state(None), CellState::OutOfDate, "not read yet");
+        let cache = dir.join("cache");
+        let read = read_embedded(&embedded, &cache, UnitSystem::default()).unwrap();
+        assert_eq!(read.steps, [("Step-1".to_owned(), 1)]);
+        assert!(
+            read.summary.contains("the embedded global.frd"),
+            "{}",
+            read.summary
+        );
+        assert!(embedded_file(&embedded, &cache).is_file());
+        let file = node.as_file_mut().unwrap();
+        (file.model, file.steps, file.space) = (read.model, read.steps, read.space);
+        file.read = Some(embedded.print);
+        assert_eq!(node.file_state(None), CellState::UpToDate);
+        // The project file keeps the copy, which undo shares.
+        match node.written([0.0; 2]) {
+            Some(ProjectNode::File(written)) => {
+                let kept = written.embedded.unwrap();
+                assert!(std::sync::Arc::ptr_eq(&kept.file, &embedded.file));
+            }
+            other => panic!("{other:?}"),
+        }
+        // The External row is off, and the path only tells where the copy came from.
+        let rows = file_rows(&node, None);
+        let external = rows.iter().find(|r| r.text == "External").unwrap();
+        assert!(matches!(external.widget, Some(RowWidget::External)));
+        let results = rows.iter().find(|r| r.path == ["Results"]).unwrap();
+        assert!(
+            results.tip.contains("copy in the project"),
+            "{}",
+            results.tip
+        );
+        // Written out again, it is the file it was.
+        embedded.write(&original).unwrap();
+        assert_eq!(
+            std::fs::read(&original).unwrap(),
+            std::fs::read(&frd).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_parts_of_a_geometry_file_link_one_by_one() {
         match plx_mesher::self_test() {
             Ok(_) => {}
@@ -14319,7 +14695,7 @@ mod tests {
         let read = read_source(&step, UnitSystem::default()).unwrap();
         assert_eq!(read.parts.len(), 2, "{:?}", read.parts);
         let path = step.to_string_lossy().into_owned();
-        let mut node = Node::file_block(1, "File".into(), path, UnitSystem::default());
+        let mut node = Node::file_block(1, "File".into(), path, UnitSystem::default(), None);
         let file = node.as_file_mut().unwrap();
         (file.model, file.parts) = (read.model, read.parts.clone());
         file.read = file_print(&step);

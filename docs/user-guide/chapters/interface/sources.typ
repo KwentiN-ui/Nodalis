@@ -212,7 +212,7 @@ Deformed Mesh block does the same from the schematic (@mesh-export).
 
 === File <file-block>
 
-A file block reads a file from outside the project and gives what it holds to analyses: the
+A file block reads a file and gives what it holds to analyses: the
 results of a CalculiX run (`.frd`), the mesh of a CalculiX input file (`.inp`) or geometry
 (STEP, IGES, BREP, STL). Add it with #menu("Sources", "File") or from the picker; a
 dialog asks for the file at once. Its rows depend on the file:
@@ -283,6 +283,25 @@ again with the new data. The file is never written to; deleting the block leaves
 
 #limitation[Results of a file serve as global results of submodels only. Eigenmodes of a
 frequency step cannot be linked, as the `.frd` file does not hold them.]
+
+==== Keeping the file in the project <file-block-embedded>
+
+By default the file stays outside: the project keeps only its path and reads the file again
+whenever it changes. A project opened on another computer or system then needs the file at
+the same place. Turn off #ui("External") on the block to keep a copy of the file in the
+project file instead: the project reads the copy wherever it is opened, and the file itself is
+no longer looked at. The output pane reports the size of the copy; it is compressed, but a
+large STEP or results file makes the project file larger by about that much, and saving takes
+longer.
+
+#screenshot("file-block-embedded.png", [A geometry file kept in the project: #ui("External") is off])
+
+The #ui("File") row of an embedded file shows where the copy came from and can no longer be
+edited. #ui("Read Again") in the context menu takes the file in anew from that path, for
+example after the CAD model changed; #ui("Choose File ...") takes in another file. Either keeps
+the old copy when the file cannot be read. Turning #ui("External") on again goes back to the
+path; when no file is there, the copy is written to it first, so a project received from
+someone else gives its files back. Undo brings back the copy as it was.
 
 === CAD Operation <cad-operation-block>
 
