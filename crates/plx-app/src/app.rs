@@ -7984,6 +7984,40 @@ pub(crate) fn note_solver_findings(analysis: &mut Analysis, findings: &[plx_mode
     }
 }
 
+/// The parts that hold the faces and edges a local mesh size names, none for another item.
+fn local_size_parts(view: &Model, item: Option<&plx_model::MeshSetupItem>) -> Vec<String> {
+    let Some(plx_model::MeshSetupKind::LocalMeshSize { faces, edges, .. }) = item.map(|i| &i.kind)
+    else {
+        return Vec::new();
+    };
+    crate::meshing::parts_of_entities(
+        view,
+        &faces.iter().copied().collect(),
+        &edges.iter().copied().collect(),
+    )
+}
+
+/// After a mesh setup item changed from `before` to `now`: the parts it does not affect are
+/// as up to date as they were, so their recorded mesh inputs follow the geometry.
+fn keep_up_to_date(
+    space: plx_model::ModelSpace,
+    before: &plx_model::Geometry,
+    now: &plx_model::Geometry,
+    affected: &[String],
+    inputs: &mut std::collections::BTreeMap<String, u64>,
+) {
+    let affected: std::collections::BTreeSet<String> = (affected.iter())
+        .flat_map(|p| now.parts_of_fe_part(p))
+        .collect();
+    for (part, input) in inputs.iter_mut() {
+        if !affected.contains(part)
+            && *input == plx_model::fingerprint::mesh_input(before, space, part)
+        {
+            *input = plx_model::fingerprint::mesh_input(now, space, part);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8124,39 +8158,5 @@ mod tests {
         assert!(name("SOLID-1").is_err());
         assert!(name("zwei wörter").is_err());
         assert!(name("").is_err());
-    }
-}
-
-/// The parts that hold the faces and edges a local mesh size names, none for another item.
-fn local_size_parts(view: &Model, item: Option<&plx_model::MeshSetupItem>) -> Vec<String> {
-    let Some(plx_model::MeshSetupKind::LocalMeshSize { faces, edges, .. }) = item.map(|i| &i.kind)
-    else {
-        return Vec::new();
-    };
-    crate::meshing::parts_of_entities(
-        view,
-        &faces.iter().copied().collect(),
-        &edges.iter().copied().collect(),
-    )
-}
-
-/// After a mesh setup item changed from `before` to `now`: the parts it does not affect are
-/// as up to date as they were, so their recorded mesh inputs follow the geometry.
-fn keep_up_to_date(
-    space: plx_model::ModelSpace,
-    before: &plx_model::Geometry,
-    now: &plx_model::Geometry,
-    affected: &[String],
-    inputs: &mut std::collections::BTreeMap<String, u64>,
-) {
-    let affected: std::collections::BTreeSet<String> = (affected.iter())
-        .flat_map(|p| now.parts_of_fe_part(p))
-        .collect();
-    for (part, input) in inputs.iter_mut() {
-        if !affected.contains(part)
-            && *input == plx_model::fingerprint::mesh_input(before, space, part)
-        {
-            *input = plx_model::fingerprint::mesh_input(now, space, part);
-        }
     }
 }
