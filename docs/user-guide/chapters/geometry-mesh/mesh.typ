@@ -251,6 +251,17 @@ Mesh item with automatic source faces sets them. A Local Mesh Size on an end or 
 the cells below it, on a wall or an edge the quadrilaterals along it and the layers through
 its height. Faces, edges and vertices of the geometry stay selectable on the mesh.
 
+Some parts are a stack along more than one direction, a plain block or bar along all three.
+nodalis then takes the direction with the fewest steps and, of those, the one with the
+smallest ends: a bar is swept along its length from a mesh of its cross-section, the way the
+neighbouring parts of a round bar cut into a core and sectors are swept too. Should the
+quasi-structured algorithm leave elements far coarser than the max. element size, the cells
+are meshed with Frontal-Delaunay and recombined instead, and a warning says so.
+
+#screenshot("core-bar-mesh.png", [A round bar cut into a square core and four sectors,
+  meshed with hexahedra: the core is swept along the bar like the sectors, with the element
+  size asked for.])
+
 A part is no stack as soon as one face is neither an end nor a wall: a chamfer, a fillet
 between a step and a wall, a hole across the direction or a conical seat. Such parts are tried
 as a plain extrusion and as a body of revolution and get tetrahedra otherwise. Splitting the

@@ -1837,6 +1837,30 @@ const QUASI_STRUCTURED_LIMIT: f64 = 20_000.0;
 /// square has 1, a quadrilateral folded over 0 or less.
 const DISTORTED_QUAD: f64 = 0.1;
 
+/// An element along a curve longer than this many max element sizes means the mesher did
+/// not follow the sizes: local sizes and curvature only ever make elements smaller.
+const COARSE_CURVE: f64 = 3.0;
+
+/// Whether a curve of the faces got elements far longer than the max element size: the
+/// quasi-structured algorithm does that at times, e.g. on a long face meshed alone among
+/// other entities, and leaves square elements that look well shaped but are far too coarse.
+fn too_coarse(gmsh: &Gmsh, faces: &[i32], max_size: f64) -> Result<bool, GmshError> {
+    let mut curves = BTreeSet::new();
+    for &face in faces {
+        curves.extend(gmsh.adjacencies(2, face)?.1.into_iter().map(i32::abs));
+    }
+    for curve in curves {
+        let mut count = 0;
+        for (gmsh_type, nodes) in [(LINE2, 2), (LINE3, 3)] {
+            count += gmsh.elements(gmsh_type, curve)?.1.len() / nodes;
+        }
+        if count > 0 && gmsh.mass(1, curve)? / count as f64 > COARSE_CURVE * max_size {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The smallest scaled Jacobian at a corner of the quadrilaterals on the faces, `None`
 /// without quadrilaterals.
 fn worst_quad(gmsh: &Gmsh, faces: &[i32], order: i32) -> Result<Option<f64>, GmshError> {
@@ -1872,9 +1896,10 @@ fn worst_quad(gmsh: &Gmsh, faces: &[i32], order: i32) -> Result<Option<f64>, Gms
 }
 
 /// Meshes the faces left in the Gmsh model after the options and the local mesh sizes. The quasi-structured algorithm is
-/// watched: where it is expected to take too long, fails or leaves a badly distorted
-/// quadrilateral, the faces are meshed with Frontal-Delaunay and recombined instead, unless
-/// that comes out worse. The notes say so, for the user.
+/// watched: where it is expected to take too long, fails, leaves a badly distorted
+/// quadrilateral or elements far coarser than asked for, the faces are meshed with
+/// Frontal-Delaunay and recombined instead, unless a distorted mesh comes out worse that
+/// way. The notes say so, for the user.
 fn generate_faces(
     gmsh: &Gmsh,
     options: &mut MeshOptions,
@@ -1927,7 +1952,8 @@ fn generate_faces(
         Ok(()) => worst_quad(gmsh, faces, options.order)?,
         Err(_) => None,
     };
-    if first.is_ok() && quality.is_some_and(|q| q >= DISTORTED_QUAD) {
+    let coarse = first.is_ok() && too_coarse(gmsh, faces, options.max_size)?;
+    if first.is_ok() && !coarse && quality.is_some_and(|q| q >= DISTORTED_QUAD) {
         return Ok(());
     }
     let structured = options.algorithms.0;
@@ -1936,11 +1962,20 @@ fn generate_faces(
     run(options)??;
     let recombined = worst_quad(gmsh, faces, options.order)?;
     match (first, quality) {
-        (Ok(()), Some(quality)) if recombined.is_none_or(|r| r < quality) => {
+        (Ok(()), Some(quality)) if !coarse && recombined.is_none_or(|r| r < quality) => {
             // The other algorithm is no better: back to the quasi-structured mesh.
             options.algorithms.0 = structured;
             gmsh.clear_mesh()?;
             run(options)?
+        }
+        (Ok(()), _) if coarse => {
+            notes.push(
+                "The quasi-structured algorithm left elements far coarser than the max \
+                 element size: the faces are meshed with Frontal-Delaunay and recombined \
+                 instead."
+                    .into(),
+            );
+            Ok(())
         }
         (Ok(()), _) => {
             notes.push(
