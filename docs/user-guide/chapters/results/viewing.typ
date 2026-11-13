@@ -70,7 +70,7 @@ material of its own, and they carry no results of their own.
   into a menu])
 
 The result controls are tiles on the #ui("Display") tab of the Results workspace, in three
-groups. A tile with an arrow shows its current value under its name and opens a panel to change
+groups; the workspace opens on this tab until you pick another one. A tile with an arrow shows its current value under its name and opens a panel to change
 it; the other tiles act at once and show pressed while their option is on.
 
 #fields(

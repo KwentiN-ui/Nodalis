@@ -77,6 +77,15 @@ impl Workspace {
             Self::Results => &["File", "Evaluate", "Display"],
         }
     }
+
+    /// The ribbon tab the workspace opens on until another one is chosen: Display in the
+    /// Results workspace, where the shown results are set, the first tab elsewhere.
+    pub fn default_tab(self) -> &'static str {
+        match self {
+            Self::Results => "Display",
+            _ => self.tabs()[0],
+        }
+    }
 }
 
 /// A kind of block a tile of the project's ribbon places in the schematic.
@@ -2396,6 +2405,19 @@ mod tests {
                     w.title()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn results_open_on_the_display_tab() {
+        assert_eq!(Workspace::Results.default_tab(), "Display");
+        for w in [
+            Workspace::Project,
+            Workspace::Geometry,
+            Workspace::FeModel,
+            Workspace::Results,
+        ] {
+            assert!(w.tabs().contains(&w.default_tab()));
         }
     }
 
