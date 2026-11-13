@@ -9,12 +9,13 @@ each row is a *design point*, a set of input values with the outputs they gave.
 
 Add one with #menu("Evaluate", "Parameter Study"), then link its columns:
 
-+ Drag the empty pin below its #ui("Inputs") to a number the study varies: a parameter exposed by
++ Drag the empty pin on the left below its #ui("Inputs") to a number the study varies: a parameter exposed by
   an analysis (@exposed-parameters), a number of a mesh block, the #ui("Factor") of a Refine
   Mesh block (@refine-mesh) or an input of a Math or Switch block (@math-switch). The link makes an input column named after that number, of its
   kind (a force, a length ...), with its value as it is now. The wire is violet and dashed and
-  runs below the blocks, as it leads back to the blocks before the study. One column can give
-  its value to several numbers: drag the pin of its row to each. Quicker for an exposed parameter:
+  runs below the blocks, as it leads back to the blocks before the study: it starts at the left
+  pin of the input. One column can give its value to several numbers: drag the left pin of its
+  row to each. Quicker for an exposed parameter:
   right-click its row and pick the study under #ui("Add to Study").
 + Drag the value pin of a Measure block (@measure-block) to the empty pin below its
   #ui("Outputs"). As in Blender, an empty pin, a ring without fill, stands for the next
@@ -83,6 +84,18 @@ the window.
 
 #screenshot("study-numbers.png", [A thousand points of a study over a Math block, evaluated
   in 16 ms with the pointer outside the window])
+
+=== Plotting the columns in the schematic <study-vectors>
+
+The right pin of each input and output row gives the values of that column at all design
+points, in the order of the table: drag it to the #ui("X") or #ui("Y") of a Plot block
+(@plot-block) to draw an output over an input next to the study, or to a Math or Formula block
+to compute with the whole column. A point without a value gives no number there, so the
+values of two columns stay paired; the plot leaves such points out. The plot follows the
+table: it changes as points are solved, added or removed.
+
+#screenshot("study-vectors.png", [The input Length and the output Area of a study drawn
+  against each other by a Plot block])
 
 === Filling and importing points <study-fill>
 

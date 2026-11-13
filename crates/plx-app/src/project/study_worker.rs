@@ -326,4 +326,34 @@ mod tests {
         assert_eq!(study.evaluate(&[5.0]), vec![Some(10.0), Some(7.0)]);
         assert_eq!(study.evaluate(&[0.25]), vec![Some(0.5), Some(7.0)]);
     }
+
+    #[test]
+    fn the_columns_of_a_study_give_their_values_at_all_points() {
+        let mut table = plx_model::StudyTable::default();
+        table.add_input("Length", Some(ValueKind::LENGTH), 0.01);
+        table.add_output("Area");
+        table.add_point();
+        table.set_input(1, 0, 0.02);
+        table.points[0].outputs = vec![Some(1e-4)];
+        let value = |name: &str| vec![links::VALUE.to_owned(), name.to_owned()];
+        assert_eq!(
+            series::study_values(&table, &value("Length")),
+            Some(vec![0.01, 0.02])
+        );
+        // A point without its output gives no number, so the columns stay paired.
+        let area = series::study_values(&table, &value("Area")).unwrap();
+        assert_eq!(area[0], 1e-4);
+        assert!(area[1].is_nan());
+        assert_eq!(series::study_values(&table, &value("Force")), None);
+        // The rows of the columns give their values on the right; the inputs give to the
+        // numbers they vary on the left.
+        let input = vec![links::LOOP.to_owned(), "Length".to_owned()];
+        assert_eq!(given_path(Kind::Study, &input), value("Length"));
+        assert!(is_loop_pin(Kind::Study, &input));
+        assert!(is_loop_pin(Kind::Study, &[links::LOOP.to_owned()]));
+        let output = vec![links::OUTPUTS.to_owned(), "Area".to_owned()];
+        assert_eq!(given_path(Kind::Study, &output), value("Area"));
+        assert!(!is_loop_pin(Kind::Study, &output));
+        assert_eq!(given_path(Kind::Math, &input), input);
+    }
 }

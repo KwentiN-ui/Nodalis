@@ -1269,6 +1269,17 @@ where
                     );
                 }
             }
+            (Some(NewWires::In(in_pins)), Some(AnyPin::In(to))) => {
+                for in_pin in in_pins {
+                    if in_pin != to {
+                        viewer.connect_inputs(
+                            &InPin::new(snarl, in_pin),
+                            &InPin::new(snarl, to),
+                            snarl,
+                        );
+                    }
+                }
+            }
             (Some(NewWires::Out(out_pins)), Some(AnyPin::In(in_pin))) => {
                 for out_pin in out_pins {
                     viewer.connect(

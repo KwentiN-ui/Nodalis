@@ -392,6 +392,30 @@ impl ProjectApp {
 
     /// What a Plot block draws: its inputs in its units, each named after the block that
     /// gives it.
+    /// The kind of the number or series `item` of the block `source` gives: of an output
+    /// column of a study, that of the number the column reads.
+    pub(super) fn given_kind(&self, source: u64, item: &[String]) -> Option<ValueKind> {
+        let study = (self.nodes.iter().find(|n| n.id == source)).and_then(Node::as_study);
+        if let (Some(study), [_, name]) = (study, item)
+            && study.table.input(name).is_none()
+        {
+            let link = self.output_link(source, name)?;
+            return value_kind(&self.nodes, link.source, &link.item);
+        }
+        value_kind(&self.nodes, source, item)
+    }
+
+    /// What a plot or preview calls the number or series `item` of the block `source`: the
+    /// name of the block, of a column for a study.
+    pub(super) fn given_label(&self, source: u64, item: &[String]) -> String {
+        let study =
+            (self.nodes.iter().find(|n| n.id == source)).is_some_and(|n| n.as_study().is_some());
+        match item {
+            [_, name] if study => name.clone(),
+            _ => self.name_of(source),
+        }
+    }
+
     pub(super) fn plot_view(&self, node: &Node) -> Option<PlotView> {
         let plot = node.as_plot()?;
         let inputs = (plot.kind.inputs().iter())
@@ -402,10 +426,10 @@ impl ProjectApp {
                     l.target == node.id
                         && matches!(links::slot(l), [c, k] if c == links::PARAMETERS && k == key)
                 })?;
-                let kind = value_kind(&self.nodes, link.source, &link.item);
+                let kind = self.given_kind(link.source, &link.item);
                 let (scale, unit) = shown_scale(kind, plot.units);
                 let shown = values.iter().map(|v| v * scale).collect();
-                let mut label = self.name_of(link.source);
+                let mut label = self.given_label(link.source, &link.item);
                 if link.item.get(1).is_some_and(|n| n == series::TIME) {
                     label.push_str(" Time");
                 }
@@ -431,14 +455,14 @@ impl ProjectApp {
             l.target == node.id
                 && matches!(links::slot(l), [c, k] if c == links::PARAMETERS && k == PREVIEW_VALUE)
         })?;
-        let mut source = self.name_of(link.source);
+        let mut source = self.given_label(link.source, &link.item);
         if link.item.get(1).is_some_and(|n| n == series::TIME) {
             source.push_str(" Time");
         }
         Some(PreviewView {
             values,
             series: preview.series,
-            kind: value_kind(&self.nodes, link.source, &link.item),
+            kind: self.given_kind(link.source, &link.item),
             units: self.settings.new_model.units,
             source,
         })

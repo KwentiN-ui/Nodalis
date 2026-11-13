@@ -3055,6 +3055,12 @@ impl ProjectApp {
             _ => {}
         }
         let column_link = |link: &Link, input: bool, name: &str| {
+            // The values of the column over all points, from the right pin of its row.
+            if link.source == id
+                && matches!(link.item.as_slice(), [c, n] if c == links::VALUE && n == name)
+            {
+                return true;
+            }
             if input {
                 link.source == id
                     && matches!(link.item.as_slice(), [c, n] if c == links::LOOP && n == name)
@@ -3066,7 +3072,9 @@ impl ProjectApp {
         if let Some((input, old, new)) = renamed {
             for link in &mut self.links {
                 if column_link(link, input, &old) {
-                    if input {
+                    // The feedback of an input and the values of either kind of column
+                    // go by the name in their item.
+                    if input || (link.source == id && link.item[0] == links::VALUE) {
                         link.item[1] = new.clone();
                     } else {
                         link.slot[1] = new.clone();
@@ -3444,13 +3452,15 @@ impl ProjectApp {
                 });
             rows.push(Row {
                 input: true,
+                output: true,
                 linked_from,
                 ..row(
                     path,
                     format!("{}{value}", column.name),
                     1,
                     NodeIcon::Results,
-                    "An output column; its value at the current point.",
+                    "An output column; its value at the current point. The pin on the right \
+                     gives its values at all points, for a Plot block.",
                 )
             });
         }
@@ -3470,9 +3480,9 @@ impl ProjectApp {
             format!("Inputs ({})", table.inputs.len()),
             0,
             NodeIcon::Setup,
-            "The numbers it varies: drag the empty pin below them to an exposed parameter of \
-             an analysis, a number of a mesh block or the Factor of a Refine Mesh block to \
-             add a column. The wires are dashed, as they lead back.",
+            "The numbers it varies: drag the empty pin on the left below them to an exposed \
+             parameter of an analysis, a number of a mesh block or the Factor of a Refine Mesh \
+             block to add a column. The wires are dashed, as they lead back.",
         ));
         for (i, column) in table.inputs.iter().enumerate() {
             let value =
@@ -3483,19 +3493,21 @@ impl ProjectApp {
                     }
                 });
             rows.push(Row {
+                input: true,
                 output: true,
                 ..row(
                     vec![links::LOOP.to_owned(), column.name.clone()],
                     format!("{}{value}", column.name),
                     1,
                     NodeIcon::Setup,
-                    "An input column; its value at the current point. Drag its pin to more \
-                     numbers to give them the same value.",
+                    "An input column; its value at the current point. Drag its left pin to more \
+                     numbers to give them the same value; the pin on the right gives its values \
+                     at all points, for a Plot block.",
                 )
             });
         }
         rows.push(Row {
-            output: true,
+            input: true,
             ..row(
                 vec![links::LOOP.to_owned()],
                 String::new(),
@@ -6389,21 +6401,36 @@ impl ProjectApp {
             return HashMap::new();
         };
         let mut verdicts = HashMap::new();
+        // A wire from the inputs of a study goes to the left pins of numbers, as one from a
+        // right pin does.
+        let from_loop = !drag.output
+            && (blocks.iter().find(|b| b.id == drag.id))
+                .is_some_and(|b| is_loop_pin(b.kind, &drag.path));
         for block in blocks {
             for row in &block.rows {
-                let other = if drag.output { row.input } else { row.output };
+                let loop_pin = is_loop_pin(block.kind, &row.path);
+                let other = if drag.output || from_loop {
+                    row.input && !loop_pin
+                } else {
+                    row.output
+                };
                 if !other {
                     continue;
                 }
+                let output = !drag.output && !from_loop;
                 let key = PinKey {
                     id: block.id,
-                    path: row.path.clone(),
-                    output: !drag.output,
+                    path: if output {
+                        given_path(block.kind, &row.path)
+                    } else {
+                        row.path.clone()
+                    },
+                    output,
                 };
-                let why = if drag.output {
+                let why = if drag.output || from_loop {
                     self.verdict((drag.id, &drag.path), (block.id, &row.path))
                 } else {
-                    self.verdict((block.id, &row.path), (drag.id, &drag.path))
+                    self.verdict((block.id, &key.path), (drag.id, &drag.path))
                 };
                 verdicts.insert(key, why);
             }
@@ -6451,6 +6478,14 @@ impl ProjectApp {
     /// The rows the wires of the links end at: block and row of the source, block and row
     /// of the target.
     fn wired_rows(&self, blocks: &[BlockView]) -> Vec<((u64, usize), (u64, usize))> {
+        (self.wired_links(blocks).into_iter())
+            .map(|(from, to, _)| (from, to))
+            .collect()
+    }
+
+    /// [`Self::wired_rows`], each with whether it is the feedback of a study, which starts
+    /// at a left pin and has no wire of the schematic: [`draw_feedback`] draws it.
+    fn wired_links(&self, blocks: &[BlockView]) -> Vec<WiredLink> {
         let block = |id: u64| blocks.iter().find(|b| b.id == id);
         let mut wired = Vec::new();
         for link in &self.links {
@@ -6471,8 +6506,20 @@ impl ProjectApp {
                 } else {
                     vec![(links::output_path(link), links::slot(link).to_vec())]
                 };
+            let feedback = links::is_feedback(link);
             for (output, input) in paths {
-                let output = shown_row(&source.rows, &output);
+                // The feedback of a study starts at the left pin of its input column, other
+                // links at the right pin of the row that gives them.
+                let output = if feedback {
+                    shown_row(&source.rows, &output)
+                } else {
+                    (source.rows.iter().enumerate())
+                        .filter(|(_, row)| {
+                            links::covers(&given_path(source.kind, &row.path), &output)
+                        })
+                        .max_by_key(|(_, row)| row.path.len())
+                        .map(|(index, _)| index)
+                };
                 // The global results of a submodel end at its Global results row while the
                 // input of the step is not shown.
                 let input = match shown_row(&target.rows, &input) {
@@ -6484,7 +6531,7 @@ impl ProjectApp {
                     row => row,
                 };
                 if let (Some(output), Some(input)) = (output, input) {
-                    wired.push(((link.source, output), (link.target, input)));
+                    wired.push(((link.source, output), (link.target, input), feedback));
                 }
             }
         }
@@ -6497,7 +6544,7 @@ impl ProjectApp {
                 shown_row(&source.rows, &from.path),
                 shown_row(&target.rows, &to.path),
             ) {
-                wired.push(((from.node, output), (to.node, input)));
+                wired.push(((from.node, output), (to.node, input), false));
             }
         }
         wired
@@ -6505,7 +6552,10 @@ impl ProjectApp {
 
     fn sync_wires(&mut self, blocks: &[BlockView]) {
         let mut wanted = std::collections::HashSet::new();
-        for ((source, output), (target, input)) in self.wired_rows(blocks) {
+        for ((source, output), (target, input), feedback) in self.wired_links(blocks) {
+            if feedback {
+                continue;
+            }
             if let (Some(from), Some(to)) = (self.graph_node(source), self.graph_node(target)) {
                 wanted.insert((
                     egui_snarl::OutPinId { node: from, output },
@@ -10033,6 +10083,12 @@ fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
         };
     }
     match path {
+        // The values of a column of a study: of the kind of an input; an output takes the kind
+        // of what gives it, see [`ProjectApp::given_kind`].
+        [cell, name] if cell == links::VALUE && node.as_study().is_some() => {
+            let table = &node.as_study()?.table;
+            table.inputs[table.input(name)?].kind
+        }
         [cell, name] if cell == links::VALUE => (node.as_parameters()?.parameters.iter())
             .find(|p| &p.name == name)
             .map(|p| p.kind),
@@ -11284,7 +11340,9 @@ impl Viewer {
             path: path.to_vec(),
             output,
         };
-        if self.drag.as_ref().is_some_and(|d| d.output != output) {
+        // The pins the wire being dragged can go to have a verdict: those of the other side,
+        // and the left pins of numbers for a wire from the inputs of a study.
+        if self.drag.as_ref().is_some_and(|d| *d != key) {
             pin.fits = self.verdicts.get(&key).map(Option::is_none);
         }
         pin.key = Some(key);
@@ -11728,6 +11786,19 @@ impl Viewer {
         if primitive != before {
             self.actions.push(Action::SetPrimitive(id, primitive));
         }
+    }
+
+    /// What the right pin of the row `path` of the block `id` gives, see [`given_path`].
+    fn given(&self, id: u64, path: &[String]) -> Vec<String> {
+        match self.block(id) {
+            Some(block) => given_path(block.kind, path),
+            None => path.to_vec(),
+        }
+    }
+
+    /// Whether the left pin of the row gives the inputs of a study, see [`is_loop_pin`].
+    fn loop_pin(&self, id: u64, path: &[String]) -> bool {
+        self.block(id).is_some_and(|b| is_loop_pin(b.kind, path))
     }
 
     fn row(&self, snarl: &Snarl<u64>, node: NodeId, index: usize) -> Option<(u64, &Row)> {
@@ -12186,8 +12257,27 @@ impl SnarlViewer<u64> for Viewer {
             self.actions.push(Action::Open(id, workspace_of(&row.path)));
         }
         let color = wire_color(&self.pin_type(id, &row.path));
+        let loop_pin = (self.block(id)).is_some_and(|b| is_loop_pin(b.kind, &row.path));
         if row.input && self.is_open_pin(id, &row.path) {
             self.typed(BlockPin::single(open_pin()), id, &row.path, false)
+        } else if loop_pin && row.input {
+            // An input of a study: its dashed wires start here and lead back to the left.
+            let info = PinInfo::circle().with_fill(color).with_wire_color(color);
+            let looped =
+                (self.feedback.iter()).any(|(study, item, ..)| *study == id && *item == row.path);
+            let shown = if looped {
+                BlockPin::anchored(info, feedback_start(id, &row.path))
+            } else {
+                BlockPin::single(info)
+            };
+            self.typed(shown, id, &row.path, false)
+        } else if row.input
+            && (self.feedback.iter()).any(|(_, _, target, slot)| *target == id && *slot == row.path)
+        {
+            // A number a study varies: the dashed wire of the study ends here.
+            let info = PinInfo::circle().with_fill(color).with_wire_color(color);
+            let pin = BlockPin::anchored(info, feedback_end(id, &row.path));
+            self.typed(pin, id, &row.path, false)
         } else if row.path.first().is_some_and(|c| c == links::STATE) {
             let pin = BlockPin::single(PinInfo::square().with_fill(color).with_wire_color(color));
             self.typed(pin, id, &row.path, false)
@@ -12227,25 +12317,13 @@ impl SnarlViewer<u64> for Viewer {
     ) -> impl egui_snarl::ui::SnarlPin + 'static {
         ui.allocate_exact_size(egui::vec2(0.0, ROW_HEIGHT), egui::Sense::hover());
         match self.row(snarl, pin.id.node, pin.id.output) {
-            Some((id, row))
-                if row.output
-                    && row.path.first().is_some_and(|c| c == links::LOOP)
-                    && !self.is_open_pin(id, &row.path) =>
-            {
-                let color = wire_color(&row.path);
-                let info = PinInfo::circle().with_fill(color).with_wire_color(color);
-                let shown = if pin.remotes.is_empty() {
-                    BlockPin::single(info)
-                } else {
-                    BlockPin::anchored(info, feedback_start(id, &row.path))
-                };
-                self.typed(shown, id, &row.path, true)
-            }
             Some((id, row)) if row.output && self.is_open_pin(id, &row.path) => {
                 self.typed(BlockPin::single(open_pin()), id, &row.path, true)
             }
             Some((id, row)) if row.output => {
-                let color = wire_color(&self.pin_type(id, &row.path));
+                let kind = self.block(id).map_or(Kind::Note, |b| b.kind);
+                let given = given_path(kind, &row.path);
+                let color = wire_color(&self.pin_type(id, &given));
                 // A wire takes the mixed colour of its two pins, so the results pin of a step
                 // whose wires all go to a State row gives them the green of a state link.
                 let state = vec![links::STATE.to_owned()];
@@ -12257,7 +12335,7 @@ impl SnarlViewer<u64> for Viewer {
                 let wire = if continues { wire_color(&state) } else { color };
                 let shown =
                     BlockPin::single(PinInfo::circle().with_fill(color).with_wire_color(wire));
-                self.typed(shown, id, &row.path, true)
+                self.typed(shown, id, &given, true)
             }
             _ => BlockPin::single(hidden_pin()),
         }
@@ -12393,6 +12471,25 @@ impl SnarlViewer<u64> for Viewer {
         if let (Some((source, item)), Some((target, slot))) = (source, target)
             && item.output
             && slot.input
+            && !self.loop_pin(target, &slot.path)
+        {
+            self.actions.push(Action::Link {
+                source,
+                item: self.given(source, &item.path),
+                target,
+                slot: slot.path.clone(),
+            });
+        }
+    }
+
+    // A wire from the inputs of a study, whose pins are on the left, to a number.
+    fn connect_inputs(&mut self, from: &InPin, to: &InPin, snarl: &mut Snarl<u64>) {
+        let source = self.row(snarl, from.id.node, from.id.input);
+        let target = self.row(snarl, to.id.node, to.id.input);
+        if let (Some((source, item)), Some((target, slot))) = (source, target)
+            && self.loop_pin(source, &item.path)
+            && slot.input
+            && !self.loop_pin(target, &slot.path)
         {
             self.actions.push(Action::Link {
                 source,
@@ -12408,7 +12505,7 @@ impl SnarlViewer<u64> for Viewer {
         let target = self.row(snarl, to.id.node, to.id.input);
         if let (Some((source, item)), Some((target, slot))) = (source, target) {
             self.actions.push(Action::Unlink {
-                source: Some((source, item.path.clone())),
+                source: Some((source, self.given(source, &item.path))),
                 target: Some((target, slot.path.clone())),
             });
         }
@@ -12417,13 +12514,23 @@ impl SnarlViewer<u64> for Viewer {
     fn drop_outputs(&mut self, pin: &OutPin, snarl: &mut Snarl<u64>) {
         if let Some((source, item)) = self.row(snarl, pin.id.node, pin.id.output) {
             self.actions.push(Action::Unlink {
-                source: Some((source, item.path.clone())),
+                source: Some((source, self.given(source, &item.path))),
                 target: None,
             });
         }
     }
 
     fn drop_inputs(&mut self, pin: &InPin, snarl: &mut Snarl<u64>) {
+        // The inputs of a study give from their left pins.
+        if let Some((source, item)) = self.row(snarl, pin.id.node, pin.id.input)
+            && self.loop_pin(source, &item.path)
+        {
+            self.actions.push(Action::Unlink {
+                source: Some((source, item.path.clone())),
+                target: None,
+            });
+            return;
+        }
         if let Some((target, slot)) = self.row(snarl, pin.id.node, pin.id.input) {
             self.actions.push(Action::Unlink {
                 source: None,
@@ -12764,6 +12871,28 @@ impl BlockPin {
 }
 
 /// Where the pin of an input of a study is kept, see [`BlockPin::anchor`].
+/// The rows a link is wired between, see [`ProjectApp::wired_links`]: block and row of the
+/// source, block and row of the target, and whether it is the feedback of a study.
+type WiredLink = ((u64, usize), (u64, usize), bool);
+
+/// The path of what the right pin of a row gives: the values of a column of a study over all
+/// its points for the rows of its columns, else the path of the row.
+fn given_path(kind: Kind, path: &[String]) -> Vec<String> {
+    match path {
+        [cell, name] if kind == Kind::Study && (cell == links::LOOP || cell == links::OUTPUTS) => {
+            vec![links::VALUE.to_owned(), name.clone()]
+        }
+        _ => path.to_vec(),
+    }
+}
+
+/// Whether the left pin of a row gives the inputs of a study to the numbers it varies: the
+/// rows of its input columns and the empty pin below them. Its wires lead back, so they start
+/// on the left.
+fn is_loop_pin(kind: Kind, path: &[String]) -> bool {
+    kind == Kind::Study && path.first().is_some_and(|c| c == links::LOOP)
+}
+
 fn feedback_start(study: u64, item: &[String]) -> egui::Id {
     egui::Id::new(("study input pin", study, item))
 }
@@ -12774,7 +12903,7 @@ fn feedback_end(target: u64, slot: &[String]) -> egui::Id {
 }
 
 /// Draws the feedback wires of loops dashed, between the pins drawn in this pass: from the
-/// input of the study out to the right, below the blocks in its way back to the left and into
+/// left pin of the input of the study, below the blocks in its way back to the left and into
 /// the parameter, so that the loop reads as one.
 fn draw_feedback(
     ctx: &egui::Context,
@@ -12797,7 +12926,7 @@ fn draw_feedback(
         };
         // Several loops run below one another.
         let gap = 30.0 + 14.0 * index as f32;
-        let (out, back) = (from.x + 24.0, to.x - 24.0);
+        let (out, back) = (from.x - 24.0, to.x - 24.0);
         let below = feedback_level(
             from.y.max(to.y) + gap,
             back.min(out)..=back.max(out),
