@@ -106,6 +106,24 @@ impl Default for Controls {
 /// status still changes and the residual falls.
 const CONTACT_ITERATIONS: u32 = 4;
 
+/// The largest residual relative to the force scale of its DOF, in units of the average
+/// force `scale`: a residual where the DOF's own elements carry `local` forces above the
+/// average counts `scale / local` of its size.
+fn weighted_residual(residual: &[f64], local: &[f64], scale: f64) -> f64 {
+    residual
+        .iter()
+        .zip(local)
+        .map(|(r, l)| {
+            let own = l.abs();
+            if own > scale && scale > 0.0 {
+                r.abs() * scale / own
+            } else {
+                r.abs()
+            }
+        })
+        .fold(0.0_f64, f64::max)
+}
+
 /// Whether the residual still falls: the smallest of the last four iterations is below
 /// half the smallest of the four before.
 fn contact_settling(residuals: &[f64]) -> bool {
@@ -826,6 +844,8 @@ impl NonlinearStatic {
                     k.add_block(&element.dofs, &element.ke);
                     for (&dof, f) in element.dofs.iter().zip(&element.fe) {
                         output.f_int[dof as usize] += f;
+                        output.dof_flux[dof as usize] += f.abs();
+                        output.dof_count[dof as usize] += 1;
                     }
                 }
                 status.extend(evaluation.status_key());
@@ -871,6 +891,17 @@ impl NonlinearStatic {
             let residual = set.reduce_rhs(&residual_full);
             ctx.profile.add(Phase::Reduction, started);
             let r_max = residual.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            // The residual a DOF may keep scales with the forces on it, not below the
+            // model's average force: a rope or a beam carries its whole tension through a
+            // few nodes, far above the average nodal force of the solids around, which
+            // falls with the square of their element size. Against the average alone the
+            // rope's nodes had to be balanced the more exactly the finer the solids were
+            // meshed. `weighted` is the largest residual relative to its DOF's scale, in
+            // units of the average force.
+            let weighted = {
+                let local: Vec<f64> = (0..total_dofs).map(|d| output.local_force(d)).collect();
+                weighted_residual(&residual, &set.reduce_rhs(&local), scale)
+            };
             // An inverted element of a hyperelastic material has no stress (NaN, which the
             // maximum above skips): the increment is cut back before the tangent is
             // factorized.
@@ -886,7 +917,7 @@ impl NonlinearStatic {
                 .zip(&u_start)
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0_f64, f64::max);
-            residuals.push(r_max);
+            residuals.push(weighted);
 
             if iteration > 0 {
                 ctx.cvg.push(CvgRow {
@@ -910,8 +941,8 @@ impl NonlinearStatic {
                     };
                     tolerance * scale
                 });
-                let residual_ok = residual_limit.is_none_or(|limit| r_max <= limit);
-                let linear = !zero_flux && r_max <= controls.residual_linear * scale;
+                let residual_ok = residual_limit.is_none_or(|limit| weighted <= limit);
+                let linear = !zero_flux && weighted <= controls.residual_linear * scale;
                 let correction_ok = if zero_flux {
                     last_correction <= controls.correction_zero_flux * du_max || du_max == 0.0
                 } else {
@@ -930,7 +961,7 @@ impl NonlinearStatic {
                     step: ctx.step_number,
                     increment,
                     iteration,
-                    residual: r_max,
+                    residual: weighted,
                     correction: last_correction,
                     residual_limit,
                     correction_limit: Some(
@@ -1155,5 +1186,20 @@ impl NonlinearStatic {
                 ctx.constraints.project_rigid(&mut u, held);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::weighted_residual;
+
+    #[test]
+    fn a_residual_counts_against_the_forces_on_its_own_dof() {
+        // Average force 1. A solid DOF (local 0.8) keeps its residual of 0.004; a rope DOF
+        // carrying 1e4 may keep 1e4 times the residual (40 counts 0.004).
+        let weighted = weighted_residual(&[0.004, 40.0], &[0.8, 1e4], 1.0);
+        assert!((weighted - 0.004).abs() < 1e-12, "{weighted}");
+        // Without a force scale the residual itself.
+        assert_eq!(weighted_residual(&[2.0], &[5.0], 0.0), 2.0);
     }
 }
