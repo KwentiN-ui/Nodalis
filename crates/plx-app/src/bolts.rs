@@ -1,31 +1,29 @@
-//! The bolt dialog: the two faces of the cut through the shank, the thread, the preload,
-//! and what the bolt does in each step. Everything else (which side is cut, the tie between
-//! the halves, the bolt faces tied to the thread, the contact regions it replaces) is derived
-//! and shown as "Exported as".
+//! The bolt dialog: the surface of the bolt, the thread it is screwed into, the preload,
+//! and what the bolt does in each step. Everything else (the shank, the cut across it, the
+//! bolt faces tied to the thread) is derived and shown as "Exported as".
 
 use egui::{RichText, Ui};
 use plx_model::{Bolt, BoltAction, FeModel, Id, Preload, Quantity, Region};
 
-use crate::contacts::{MasterSlave, Side};
 use crate::model::{Highlight, Model};
 use crate::numeric;
 use crate::selection::Target;
-use crate::setup::{FACE_SOURCES, RegionDraft, region_highlight};
+use crate::setup::{FACE_SOURCES, RegionDraft};
 
-/// The regions of a bolt while they are edited: the sides of the cut as master and slave,
-/// and the thread, and which of them clicks in the 3D view pick.
+/// The regions of a bolt while they are edited, and which of them clicks in the 3D view
+/// pick.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoltSides {
-    pub cut: MasterSlave,
+    pub surface: RegionDraft,
     pub thread: RegionDraft,
-    /// The thread is picked, not a side of the cut.
+    /// The thread is picked, not the surface of the bolt.
     pub on_thread: bool,
 }
 
 impl BoltSides {
     pub fn new(faces: Target) -> Self {
         Self {
-            cut: MasterSlave::new(faces),
+            surface: RegionDraft::new(FACE_SOURCES, faces),
             thread: RegionDraft::new(FACE_SOURCES, faces),
             on_thread: false,
         }
@@ -33,7 +31,7 @@ impl BoltSides {
 
     pub fn of(bolt: &Bolt, faces: Target, mesh: &plx_mesh::FeMesh) -> Self {
         Self {
-            cut: MasterSlave::from_regions(&bolt.side_a, &bolt.side_b, faces, mesh),
+            surface: RegionDraft::from_region(&bolt.surface, FACE_SOURCES, faces, mesh),
             thread: RegionDraft::from_region(&bolt.thread, FACE_SOURCES, faces, mesh),
             on_thread: false,
         }
@@ -43,7 +41,7 @@ impl BoltSides {
         if self.on_thread {
             &self.thread
         } else {
-            self.cut.current()
+            &self.surface
         }
     }
 
@@ -51,44 +49,28 @@ impl BoltSides {
         if self.on_thread {
             &mut self.thread
         } else {
-            self.cut.current_mut()
+            &mut self.surface
         }
     }
 
-    /// Side A, side B and the thread.
-    pub fn regions(&self) -> (Region, Region, Region) {
-        let (a, b) = self.cut.regions();
-        (a, b, self.thread.region())
+    /// The surface of the bolt and the thread.
+    pub fn regions(&self) -> (Region, Region) {
+        (self.surface.region(), self.thread.region())
     }
 
-    /// The sides of the cut as master and slave, the thread with the slave.
+    /// The bolt in the primary highlight colour, the thread in the secondary one.
     pub fn highlight(&self, model: &Model) -> Highlight {
-        bolt_highlight(
-            model,
-            &self.cut.master.region(),
-            &self.cut.slave.region(),
-            &self.thread.region(),
-        )
+        bolt_highlight(model, &self.surface.region(), &self.thread.region())
     }
 
     fn ui(&mut self, ui: &mut Ui, model: &Model) {
-        let picking = |side| !self.on_thread && self.cut.side == side;
-        let (a, b) = (picking(Side::Master), picking(Side::Slave));
-        if self
-            .cut
-            .master
-            .ui_labeled(ui, model, "Side A region", "master", a)
-        {
-            (self.cut.side, self.on_thread) = (Side::Master, false);
-        }
-        if self
-            .cut
-            .slave
-            .ui_labeled(ui, model, "Side B region", "slave", b)
-        {
-            (self.cut.side, self.on_thread) = (Side::Slave, false);
-        }
         let on_thread = self.on_thread;
+        if self
+            .surface
+            .ui_labeled(ui, model, "Bolt surface region", "bolt surface", !on_thread)
+        {
+            self.on_thread = false;
+        }
         if self
             .thread
             .ui_labeled(ui, model, "Thread region", "thread", on_thread)
@@ -98,15 +80,9 @@ impl BoltSides {
     }
 }
 
-/// The sides of a bolt's cut in the primary and secondary highlight colours, the thread in
-/// the secondary one.
-pub fn bolt_highlight(model: &Model, a: &Region, b: &Region, thread: &Region) -> Highlight {
-    let mut highlight = crate::contacts::master_slave_highlight(model, a, b);
-    let thread = region_highlight(model, thread);
-    highlight.secondary_faces.extend(thread.faces);
-    highlight.secondary_lines.extend(thread.lines);
-    highlight.nodes.extend(thread.nodes);
-    highlight
+/// The bolt in the primary highlight colour, the thread in the secondary one.
+pub fn bolt_highlight(model: &Model, surface: &Region, thread: &Region) -> Highlight {
+    crate::contacts::master_slave_highlight(model, surface, thread)
 }
 
 /// What the bolt does in one step in the dialog: the action (`None` automatic) and the
@@ -144,18 +120,17 @@ pub fn bolt_form(
 ) {
     let units = model.fe.properties.units;
     sides.ui(ui, model);
-    (bolt.side_a, bolt.side_b, bolt.thread) = sides.regions();
+    (bolt.surface, bolt.thread) = sides.regions();
     ui.label("");
     // The width of the second column before the steps' grid widens it, for the texts.
     let text_width = ui.available_width();
     ui.add(
         egui::Label::new(
             RichText::new(
-                "The faces on the two sides of the cut through the shank, or only the \
-                 cylindrical face of the shank as side A: Nodalis then cuts the bolt across \
-                 its middle. The thread is optional: the bore of the tapped hole or the nut, \
-                 which Nodalis ties to the faces of the bolt in it, on one side of the cut, \
-                 also across a gap.",
+                "The bolt surface: the cylindrical face of the shank, or the whole bolt with \
+                 its head. The thread: the bore of the tapped hole or of the nut. Nodalis \
+                 ties the bolt to the thread, also across a gap, and cuts the shank across \
+                 the middle of its free part.",
             )
             .weak(),
         )
@@ -192,7 +167,7 @@ pub fn bolt_form(
     ui.end_row();
     let mut given = bolt.axis.is_some();
     ui.label("Axis");
-    ui.checkbox(&mut given, "Given (otherwise the normal of the cut)");
+    ui.checkbox(&mut given, "Given (otherwise the axis of the shank)");
     ui.end_row();
     let mut values = bolt.axis.unwrap_or([0.0, 0.0, 1.0]);
     if given {
@@ -336,10 +311,10 @@ fn amplitude_choice(
         .on_hover_text("The amplitude the preload or the shortening follows in the step.");
 }
 
-/// What the bolt becomes in the input file, in words: how its sides are joined and the
-/// contact regions it replaces.
+/// What the bolt becomes in the input file, in words: where it is cut and how it is tied to
+/// the thread.
 fn exported_as(model: &Model, bolt: &Bolt) -> String {
-    let mut fe = model.fe.clone();
+    let fe = &model.fe;
     let resolved = match fe.resolve_bolt(bolt, &model.mesh) {
         Ok(resolved) => resolved,
         Err(reason) => return format!("Not exported: {reason}."),
@@ -358,7 +333,10 @@ fn exported_as(model: &Model, bolt: &Bolt) -> String {
                 let units = model.fe.properties.units;
                 format!(
                     ", across a gap of {} {}",
-                    numeric::format_physical(units.shown(thread.gap, Quantity::Length)),
+                    numeric::format_physical(crate::results::round_significant(
+                        units.shown(thread.gap, Quantity::Length),
+                        3
+                    )),
                     units.unit(Quantity::Length)
                 )
             } else {
@@ -367,21 +345,6 @@ fn exported_as(model: &Model, bolt: &Bolt) -> String {
         )),
         Ok(None) => {}
         Err(reason) => text.push_str(&format!("\nThread not exported: {reason}.")),
-    }
-    // The regions this bolt replaces, as if it were in the model already.
-    fe.bolts = vec![Bolt {
-        active: true,
-        ..bolt.clone()
-    }];
-    let replaced: Vec<&str> = (fe.replaced_contact_regions(&model.mesh).keys())
-        .map(|&r| model.fe.contact_regions[r].name.as_str())
-        .collect();
-    if !replaced.is_empty() {
-        text.push_str(&format!(
-            "\nReplaces the contact region{} {}.",
-            if replaced.len() == 1 { "" } else { "s" },
-            replaced.join(", ")
-        ));
     }
     text
 }
@@ -423,16 +386,10 @@ pub fn set_step_actions(fe: &mut FeModel, bolt: Id, steps: &[BoltStep]) {
     }
 }
 
-/// A bolt needs side A; side B may stay empty for a cut inside a mesh or a picked shank.
+/// A bolt needs its surface; without a thread the user joins it there himself.
 pub fn validate_bolt(sides: &BoltSides) -> Result<(), String> {
-    let empty = match sides.regions().0 {
-        plx_model::Region::Faces(faces) => faces.is_empty(),
-        plx_model::Region::Geometry(entities) => entities.is_empty(),
-        plx_model::Region::Surface(name) => name.is_empty(),
-        _ => false,
-    };
-    if empty {
-        return Err("Please pick the faces of side A of the cut.".into());
+    if sides.surface.region().is_empty() {
+        return Err("Please pick the surface of the bolt.".into());
     }
     Ok(())
 }

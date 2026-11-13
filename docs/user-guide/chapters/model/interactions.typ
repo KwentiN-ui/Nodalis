@@ -537,34 +537,32 @@ export leaves it out.
 
 === Bolts <bolts>
 
-A bolt joins the two sides of a cut through a bolt shank and tightens them with a preload.
-Create it with #menu("Connections", "Bolt") or #ui("Create Bolt ...") in the context
-menu of #ui("Connections"); it is listed under #ui("Connections") #sym.arrow.r #ui("Bolts").
-You pick the faces on the two sides of the cut and give the preload, Nodalis works out the
-rest. Optionally you also pick the internal thread the bolt is screwed into, and Nodalis joins
-the bolt to it.
+A bolt tightens a bolt or screw with a preload. Create it with #menu("Connections", "Bolt")
+or #ui("Create Bolt ...") in the context menu of #ui("Connections"); it is listed under
+#ui("Connections") #sym.arrow.r #ui("Bolts"). You pick two regions, the surface of the bolt and
+the thread it is screwed into, and give the preload; Nodalis cuts the bolt and works out the
+rest. The bolt is not cut in the CAD geometry.
 
-#screenshot("bolt-dialog.png", [A bolt between two parts. The bonded contact region the contact
-  detection found on the cut is replaced by the bolt and shown greyed out in the tree])
+#screenshot("bolt-dialog.png", [A screw through a plate into a tapped block: the whole screw is
+  the bolt surface, the bore of the block the thread])
 
 #fields(
-  [Side A, Side B], [The faces on the two sides of the cut. For a bolt split into two parts in
-    the CAD geometry these are the two cut faces, for a bolt meshed in one piece the element
-    faces on one side of the cut (side B stays empty). For a bolt that is not cut at all, pick
-    only the cylindrical face of its shank as side A, see below.],
-  [Thread], [Optional: the faces of the internal thread of the nut or of the part the bolt is
-    screwed into, e.g. the bore of a tapped hole, see below. Empty, join the bolt there with
-    a contact region or a joint yourself.],
-  [Preload by], [#ui("Force") pulls the two sides together with the preload, #ui("Shortening")
-    shortens the bolt by a length.],
-  [Axis], [The direction of the bolt axis. Unticked, Nodalis uses the normal of the cut;
+  [Bolt surface region], [Faces of the bolt: the cylindrical face of its shank, or the whole
+    bolt with its head, in one click with #ui("Part") in the #ui("Selection") window. Nodalis
+    finds the shank among them, the faces about its axis nearest to it, and leaves out the
+    head and the end faces.],
+  [Thread region], [The faces of the internal thread of the nut or of the part the bolt is
+    screwed into, e.g. the bore of a tapped hole, see below. Left empty, join the bolt there
+    with a contact region or a joint yourself.],
+  [Preload by], [#ui("Force") pulls the bolt together with the preload, #ui("Shortening")
+    shortens it by a length.],
+  [Axis], [The direction of the bolt axis. Unticked, Nodalis uses the axis of the shank;
     #ui("Given") takes the components #ui("X"), #ui("Y"), #ui("Z").],
   [Steps], [What the bolt does in each step that takes loads and, for a load or an
     adjustment, the #ui("Amplitude") it follows over the step (@amplitudes); #ui("Default")
     is the step's ramp.],
-  [Exported as], [How Nodalis writes the bolt for CalculiX: where it cuts the mesh, whether it
-    ties the two halves, how many faces of the bolt it ties to the thread and which contact
-    regions the bolt replaces.],
+  [Exported as], [How Nodalis writes the bolt for CalculiX: where it cuts the shank and how
+    many faces of the bolt it ties to the thread.],
 )
 
 ==== Steps of a bolt
@@ -587,7 +585,7 @@ To feed a screw by a given length, as when it is tightened to pull a part, choos
 
 ==== Thread
 
-The thread need not be modelled. Pick the faces of the internal thread as #ui("Thread"),
+The thread need not be modelled. Pick the faces of the internal thread as #ui("Thread region"),
 usually the bore of the tapped hole, blind or through: Nodalis ties to it the faces of the bolt
 inside it, the shank over the length it is screwed in. For a screw simplified to a cylinder
 that stops short of the part it is screwed into, pick the face of that part opposite its end
@@ -597,25 +595,13 @@ the cut. The tie keeps the faces where they are and bridges a gap between them, 
 flows from the bolt into the part without a contact or joint of your own. The thread must belong
 to another part than the bolt, or another body of a compound part (@compound-parts).
 
-With a thread, a shank picked by its cylindrical face is cut across the middle of its free
-part, the longer piece of the face beside the length in the thread, not across the middle of
-the whole face. #ui("Exported as") says how many faces of the bolt are tied and across which
-gap.
+==== Where Nodalis cuts
 
-#screenshot("bolt-thread.png", [A screw through a tapped ring: the bore of the ring is the thread
-  (32 faces), the shank in it is tied to it, and the cut lies on the free part of the shank below])
-
-==== Picking the shank
-
-A bolt does not need to be cut in the CAD geometry: pick the cylindrical face of the free
-shank, between head and nut, as #ui("Side A") and leave #ui("Side B") empty. Nodalis finds
-the axis of the shank from the face and cuts the bolt across the middle of the face. The cut
+Nodalis cuts the shank across the middle of its free part: the longer piece of the shank
+beside the length in the thread, or the middle of the whole shank without a thread. The cut
 follows the element faces of the mesh, like a staircase in a tetrahedral mesh, so the bolt
-needs no new mesh; the preload acts along the axis. #ui("Exported as") says when the shank was
-recognised. Hide the clamped parts (@view) to reach the shank in the 3D view.
-
-#screenshot("bolt-shank.png", [Only the shank of an uncut bolt picked: Nodalis cuts it across
-  its middle])
+needs no new mesh; the preload acts along the axis of the shank. #ui("Exported as") says where
+the bolt is cut. Hide the clamped parts (@view) to reach the bolt in the 3D view.
 
 The bolt must be one part of its own, at least where the shank is. Its contact with the hole
 must let the shank slide: the contact detection usually finds the head, the nut and the shank
@@ -624,21 +610,12 @@ region holds it at its cut; make that region frictional or frictionless.
 
 ==== What Nodalis writes
 
-When the two sides share their nodes (one mesh through the cut), Nodalis cuts the mesh between
-them. For two parts it cuts the side with the finer mesh and ties its nodes to the other side;
-the sides cannot slide against each other. The preload is the first degree of freedom of a new
-node per bolt (`*CLOAD` for a force, `*BOUNDARY` for a shortening or a lock). Nodalis
-separates every element on the cut side, also one that touches the cut with only an edge or a
-corner, so a tetrahedral mesh needs no layer of wedge elements at the cut, as CalculiX's
-`*PRE-TENSION SECTION` would.
-
-The contact detection (@contact-detection) usually finds the two cut faces as a bonded contact
-region. A tie or contact on the cut next to the bolt would hold the halves together and keep
-CalculiX from converging, so the bolt replaces every contact region that lies on its cut: such
-a region is greyed out in the tree with #ui("(replaced by ...)") and left out of the input
-file. Contacts of the head and the nut with the clamped parts stay as they are; the model check
-warns when a bonded or rough region holds the bolt at its cut, and when two bolts or a bolt and
-a tie share faces.
+The preload is the first degree of freedom of a new node per bolt (`*CLOAD` for a force,
+`*BOUNDARY` for a shortening or a lock). Nodalis separates every element on one side of the
+cut, also one that touches the cut with only an edge or a corner, so a tetrahedral mesh needs
+no layer of wedge elements at the cut, as CalculiX's `*PRE-TENSION SECTION` would. The model
+check warns when a bonded or rough region holds the bolt at its cut, and when two bolts or a
+bolt and a tie share faces.
 
 After the run the bolt force (`RF1`) and the shortening (`U1`) of every bolt are in the history
 results under the bolt's name in capitals, spaces written as underscores (`BOLT_M10`), in each

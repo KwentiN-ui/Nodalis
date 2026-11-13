@@ -1493,8 +1493,8 @@ impl FeModel {
         if self.bolts.is_empty() {
             return self.check_connections(mesh, mesh_check);
         }
-        // Bolts are checked as the pre-tension loads and ties they become, with the contact
-        // regions they replace switched off; what is found on those belongs to the bolt.
+        // Bolts are checked as the pre-tension loads and ties they become; what is found on
+        // those belongs to the bolt.
         let (lowered, origin) = self.lower_bolts(mesh);
         let mut findings = lowered.check_connections(mesh, mesh_check);
         for finding in &mut findings {
@@ -1502,7 +1502,7 @@ impl FeModel {
                 finding.item = ModelItem::Bolt(bolt);
             }
         }
-        self.check_bolts(mesh, &origin, &mut findings);
+        self.check_bolts(mesh, &mut findings);
         findings.sort_by_key(|f| f.severity());
         findings
     }
@@ -2160,12 +2160,7 @@ impl FeModel {
 
     /// What only the bolts themselves tell: references, cuts that cannot be made, missing
     /// preloads, and other connections on their cut.
-    fn check_bolts(
-        &self,
-        mesh: &FeMesh,
-        lowered: &crate::LoweredBolts,
-        findings: &mut Vec<Finding>,
-    ) {
+    fn check_bolts(&self, mesh: &FeMesh, findings: &mut Vec<Finding>) {
         let invalid = self.invalid_items(mesh);
         for item in invalid
             .iter()
@@ -2231,12 +2226,12 @@ impl FeModel {
                     ));
                 }
             }
-            for (r, region) in self.contact_regions.iter().enumerate() {
+            for region in &self.contact_regions {
                 let holds = matches!(
                     region.behavior,
                     crate::ContactBehavior::Bonded | crate::ContactBehavior::Rough
                 );
-                if !region.active || !holds || lowered.replaced.contains_key(&r) {
+                if !region.active || !holds {
                     continue;
                 }
                 let touches = region.regions().into_iter().any(|side| {
