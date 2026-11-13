@@ -1,6 +1,7 @@
 //! The "Create Transformation" dialog of the results tool bar: available types on the
 //! left, the active transformations on the right, the properties of the selected one below.
 
+use crate::clicks::TolerantDoubleClick as _;
 use std::collections::BTreeSet;
 
 use egui::{RichText, Ui};
@@ -438,7 +439,7 @@ impl TransformationDialog {
                         if row.clicked() {
                             self.available = Some(entry);
                         }
-                        if row.double_clicked() {
+                        if row.double_clicked_tolerant() {
                             add = true;
                         }
                     }

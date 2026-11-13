@@ -23,6 +23,7 @@ mod cad_editor;
 mod cad_selection;
 mod campbell;
 mod checklist;
+mod clicks;
 mod color_scale_dialog;
 mod command;
 mod connections;

@@ -3,6 +3,7 @@
 //! a whole. It edits them with the dialogs of the FE Model tree and copies them from an
 //! analysis, materials also from the material library.
 
+use crate::clicks::TolerantDoubleClick as _;
 use std::path::Path;
 
 use plx_mesh::FeMesh;
@@ -334,7 +335,7 @@ impl MaterialSetEditor {
             if row.clicked() {
                 self.selected = Some(index);
             }
-            if row.double_clicked() {
+            if row.double_clicked_tolerant() {
                 edit = Some(index);
             }
         }

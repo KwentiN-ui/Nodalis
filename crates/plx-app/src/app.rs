@@ -1,3 +1,4 @@
+use crate::clicks::TolerantDoubleClick as _;
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -7857,7 +7858,7 @@ fn problems_list(
                             .gamma_multiply(0.3),
                     );
                 }
-                if row.double_clicked() {
+                if row.double_clicked_tolerant() {
                     picked = Some((finding.clone(), true));
                 } else if row.clicked() {
                     picked = Some((finding.clone(), false));

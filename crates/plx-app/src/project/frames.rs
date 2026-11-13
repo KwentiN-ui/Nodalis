@@ -146,7 +146,7 @@ impl Viewer {
                 self.actions
                     .push(Action::MoveFrame(index, response.drag_delta()));
             }
-            if response.double_clicked() {
+            if response.double_clicked_tolerant() {
                 let on_label = (response.interact_pointer_pos())
                     .is_some_and(|p| p.y < rect.top() + FRAME_LABEL);
                 if on_label {
