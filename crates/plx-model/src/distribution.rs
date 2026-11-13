@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::coordinate_system::{CoordinateSystem, Frame};
 use crate::equation::Equation;
 use crate::units::{Quantity, UnitSystem};
 
@@ -15,12 +16,51 @@ pub struct Distribution {
     pub id: crate::Id,
     pub name: String,
     pub kind: DistributionKind,
+    /// The coordinate system the equation takes its coordinates in and the points are given
+    /// in; `None` for the global one. A moving system counts where it is in the undeformed
+    /// model.
+    #[serde(default)]
+    pub system: Option<crate::Id>,
+    /// Named numbers the equation can use, each of which can be exposed as a parameter.
+    #[serde(default)]
+    pub variables: Vec<DistributionVariable>,
 }
+
+/// A named number of a distribution's equation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DistributionVariable {
+    /// Stays the same when the variable is renamed, for the exposed parameter of it.
+    pub key: u32,
+    pub name: String,
+    pub value: f64,
+}
+
+impl DistributionVariable {
+    /// A variable of the value 1 to add to `variables`, with a name and key they do not
+    /// have: p1, p2, ...
+    pub fn next(variables: &[Self]) -> Self {
+        let key = variables.iter().map(|v| v.key + 1).max().unwrap_or(1);
+        let name = (variables.len() + 1..)
+            .map(|n| format!("p{n}"))
+            .find(|name| !variables.iter().any(|v| &v.name == name))
+            .expect("a free name");
+        Self {
+            key,
+            name,
+            value: 1.0,
+        }
+    }
+}
+
+/// The coordinates an equation can use besides the variables: along the axes of the
+/// coordinate system, and the radius and angle (radians) about its z axis.
+pub const COORDINATES: [&str; 5] = ["x", "y", "z", "r", "theta"];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DistributionKind {
-    /// An equation in the coordinates `x`, `y` and `z`, which it takes in the length unit of
-    /// the analysis, e.g. `=1 - z/200`.
+    /// An equation in the [`COORDINATES`] of the distribution's coordinate system, which it
+    /// takes in the length unit of the project, and its variables, e.g. `1 - z/h`; a leading
+    /// `=` is allowed.
     Equation(String),
     /// Values at points, as read from a text file of `X Y Z value` rows; the factor between
     /// the points is interpolated.
@@ -65,31 +105,107 @@ impl Distribution {
         Self {
             id: crate::Id::new(),
             name: name.into(),
-            kind: DistributionKind::Equation("=1".into()),
+            kind: DistributionKind::Equation("1".into()),
+            system: None,
+            variables: Vec::new(),
         }
     }
 
+    /// Adds a variable of the value 1 with a free name and key.
+    pub fn add_variable(&mut self) -> &mut DistributionVariable {
+        let variable = DistributionVariable::next(&self.variables);
+        self.variables.push(variable);
+        self.variables.last_mut().expect("just pushed")
+    }
+
+    pub fn variable(&self, key: u32) -> Option<&DistributionVariable> {
+        self.variables.iter().find(|v| v.key == key)
+    }
+
+    /// Why the names of the variables cannot be used, if they cannot.
+    pub fn variables_problem(&self) -> Option<String> {
+        for (i, variable) in self.variables.iter().enumerate() {
+            let name = &variable.name;
+            let mut chars = name.chars();
+            let valid = chars
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !valid {
+                return Some(format!(
+                    "The variable name '{name}' is not valid: use letters, digits and _, \
+                     starting with a letter."
+                ));
+            }
+            let lower = name.to_ascii_lowercase();
+            if COORDINATES.contains(&lower.as_str())
+                || ["pi", "true", "false"].contains(&lower.as_str())
+            {
+                return Some(format!(
+                    "The name '{name}' is taken by the equation itself."
+                ));
+            }
+            if self.variables[..i].iter().any(|v| &v.name == name) {
+                return Some(format!("There are two variables named '{name}'."));
+            }
+            if !variable.value.is_finite() {
+                return Some(format!("The variable '{name}' is not a number."));
+            }
+        }
+        None
+    }
+
     /// The factor at positions given in meters; `units` are the analysis' units, whose
-    /// length unit the equation takes its coordinates in. Fails when the equation is
-    /// invalid or there are no points.
-    pub fn sampler(&self, units: UnitSystem) -> Result<Sampler, String> {
+    /// length unit the equation takes its coordinates in, `systems` the coordinate systems
+    /// of the model. Fails when the equation is invalid, there are no points or the
+    /// coordinate system is missing.
+    pub fn sampler(
+        &self,
+        units: UnitSystem,
+        systems: &[CoordinateSystem],
+    ) -> Result<Sampler, String> {
+        let frame = match self.system {
+            None => Frame::global_system(),
+            Some(id) => {
+                let system = (systems.iter().find(|s| s.id == id))
+                    .ok_or("The coordinate system of the distribution does not exist.")?;
+                let frame = system.frame(systems);
+                frame
+                    .axes()
+                    .map_err(|e| format!("Coordinate system {}: {e}", system.name))?;
+                frame
+            }
+        };
         match &self.kind {
             DistributionKind::Equation(text) => {
+                if let Some(problem) = self.variables_problem() {
+                    return Err(problem);
+                }
                 let equation = Equation::parse(text)?;
-                let axes = (equation.variables().iter())
-                    .map(|v| match v.to_ascii_lowercase().as_str() {
-                        "x" => Ok(0),
-                        "y" => Ok(1),
-                        "z" => Ok(2),
-                        _ => Err(format!(
-                            "Unknown variable '{v}'; the equation can use x, y and z."
-                        )),
+                let inputs = (equation.variables().iter())
+                    .map(|v| {
+                        if let Some(variable) = self.variables.iter().find(|w| &w.name == v) {
+                            return Ok(Input::Constant(variable.value));
+                        }
+                        let lower = v.to_ascii_lowercase();
+                        match COORDINATES.iter().position(|c| *c == lower) {
+                            Some(i) => Ok(Input::Coordinate(i)),
+                            None => {
+                                let mut names: Vec<&str> = COORDINATES.to_vec();
+                                names.extend(self.variables.iter().map(|v| v.name.as_str()));
+                                Err(format!(
+                                    "Unknown variable '{v}'; the equation can use {}.",
+                                    names.join(", ")
+                                ))
+                            }
+                        }
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Sampler::Equation {
                     equation,
-                    axes,
+                    inputs,
                     units,
+                    frame,
                 })
             }
             DistributionKind::Points {
@@ -106,15 +222,26 @@ impl Distribution {
                 Ok(Sampler::Points {
                     tree: KdTree::new(points),
                     interpolation: *interpolation,
+                    frame,
                 })
             }
         }
     }
 
-    /// Why the distribution cannot be evaluated, if it cannot.
-    pub fn problem(&self) -> Option<String> {
-        self.sampler(UnitSystem::default()).err()
+    /// Why the distribution cannot be evaluated with the coordinate systems `systems`, if
+    /// it cannot.
+    pub fn problem(&self, systems: &[CoordinateSystem]) -> Option<String> {
+        self.sampler(UnitSystem::default(), systems).err()
     }
+}
+
+/// What a name of an equation stands for.
+#[derive(Clone, Copy, Debug)]
+pub enum Input {
+    /// One of [`COORDINATES`] by its place.
+    Coordinate(usize),
+    /// The value of a variable.
+    Constant(f64),
 }
 
 /// A distribution ready to give its factor at positions.
@@ -122,13 +249,17 @@ impl Distribution {
 pub enum Sampler {
     Equation {
         equation: Equation,
-        /// Coordinate axis of each variable of the equation.
-        axes: Vec<usize>,
+        /// What each variable of the equation stands for.
+        inputs: Vec<Input>,
         units: UnitSystem,
+        /// The coordinate system the coordinates are taken in.
+        frame: Frame,
     },
     Points {
+        /// The points with their positions along the axes of `frame`.
         tree: KdTree,
         interpolation: Interpolation,
+        frame: Frame,
     },
 }
 
@@ -138,32 +269,44 @@ impl Sampler {
         match self {
             Sampler::Equation {
                 equation,
-                axes,
+                inputs,
                 units,
+                frame,
             } => {
-                let values: Vec<f64> = (axes.iter())
-                    .map(|&a| units.shown(position[a], Quantity::Length))
+                let local = frame.cartesian_local(position).unwrap_or([f64::NAN; 3]);
+                let length = |v: f64| units.shown(v, Quantity::Length);
+                let values: Vec<f64> = (inputs.iter())
+                    .map(|input| match *input {
+                        Input::Constant(value) => value,
+                        Input::Coordinate(i @ 0..=2) => length(local[i]),
+                        Input::Coordinate(3) => length(local[0].hypot(local[1])),
+                        Input::Coordinate(_) => local[1].atan2(local[0]),
+                    })
                     .collect();
                 equation.evaluate(&values)
             }
             Sampler::Points {
                 tree,
                 interpolation,
-            } => match interpolation {
-                Interpolation::ClosestPoint => tree
-                    .nearest(position, 1)
-                    .first()
-                    .map_or(0.0, |&(_, value)| value),
-                Interpolation::Shepard => {
-                    let nearest = tree.nearest(position, SHEPARD_POINTS);
-                    if let Some(&(_, value)) = nearest.iter().find(|(d2, _)| *d2 == 0.0) {
-                        return value;
+                frame,
+            } => {
+                let position = frame.cartesian_local(position).unwrap_or([f64::NAN; 3]);
+                match interpolation {
+                    Interpolation::ClosestPoint => tree
+                        .nearest(position, 1)
+                        .first()
+                        .map_or(0.0, |&(_, value)| value),
+                    Interpolation::Shepard => {
+                        let nearest = tree.nearest(position, SHEPARD_POINTS);
+                        if let Some(&(_, value)) = nearest.iter().find(|(d2, _)| *d2 == 0.0) {
+                            return value;
+                        }
+                        let (sum, weights) = (nearest.iter())
+                            .fold((0.0, 0.0), |(s, w), &(d2, v)| (s + v / d2, w + 1.0 / d2));
+                        if weights > 0.0 { sum / weights } else { 0.0 }
                     }
-                    let (sum, weights) = (nearest.iter())
-                        .fold((0.0, 0.0), |(s, w), &(d2, v)| (s + v / d2, w + 1.0 / d2));
-                    if weights > 0.0 { sum / weights } else { 0.0 }
                 }
-            },
+            }
         }
     }
 
@@ -297,6 +440,8 @@ mod tests {
                 points,
                 interpolation,
             },
+            system: None,
+            variables: Vec::new(),
         }
     }
 
@@ -304,10 +449,10 @@ mod tests {
     fn equation_takes_coordinates_in_the_length_unit_of_the_analysis() {
         let mut distribution = Distribution::new("Depth");
         distribution.kind = DistributionKind::Equation("=1 - z/200 + 0*X".into());
-        let sampler = distribution.sampler(UnitSystem::MmTonSC).unwrap();
+        let sampler = distribution.sampler(UnitSystem::MmTonSC, &[]).unwrap();
         // 0.1 m = 100 mm
         assert!((sampler.factor([0.0, 0.0, 0.1]) - 0.5).abs() < 1e-12);
-        let sampler = distribution.sampler(UnitSystem::MKgSC).unwrap();
+        let sampler = distribution.sampler(UnitSystem::MKgSC, &[]).unwrap();
         assert!((sampler.factor([0.0, 0.0, 100.0]) - 0.5).abs() < 1e-12);
     }
 
@@ -315,10 +460,10 @@ mod tests {
     fn equation_with_other_variables_is_refused() {
         let mut distribution = Distribution::new("D");
         distribution.kind = DistributionKind::Equation("=x + STRESS.MISES".into());
-        assert!(distribution.problem().unwrap().contains("STRESS.MISES"));
+        assert!(distribution.problem(&[]).unwrap().contains("STRESS.MISES"));
         distribution.kind = DistributionKind::Equation("=x +".into());
-        assert!(distribution.problem().is_some());
-        assert!(Distribution::new("D").problem().is_none());
+        assert!(distribution.problem(&[]).is_some());
+        assert!(Distribution::new("D").problem(&[]).is_none());
     }
 
     #[test]
@@ -330,7 +475,7 @@ mod tests {
             })
             .collect();
         let distribution = points(cloud.clone(), Interpolation::ClosestPoint);
-        let sampler = distribution.sampler(UnitSystem::default()).unwrap();
+        let sampler = distribution.sampler(UnitSystem::default(), &[]).unwrap();
         for i in 0..200 {
             let t = i as f64 * 0.11;
             let p = [t.cos() * 0.9, (t * 1.7).sin(), (t * 0.3).cos()];
@@ -346,7 +491,7 @@ mod tests {
             vec![[0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 3.0]],
             Interpolation::Shepard,
         );
-        let sampler = distribution.sampler(UnitSystem::default()).unwrap();
+        let sampler = distribution.sampler(UnitSystem::default(), &[]).unwrap();
         assert_eq!(sampler.factor([1.0, 0.0, 0.0]), 3.0);
         assert!((sampler.factor([0.5, 0.0, 0.0]) - 2.0).abs() < 1e-12);
         let quarter = sampler.factor([0.25, 0.0, 0.0]);
@@ -358,12 +503,106 @@ mod tests {
         let sampler = Distribution::new("Half");
         let mut sampler = sampler;
         sampler.kind = DistributionKind::Equation("=0.5".into());
-        let sampler = sampler.sampler(UnitSystem::InLbSF).unwrap();
+        let sampler = sampler.sampler(UnitSystem::InLbSF, &[]).unwrap();
         let units = UnitSystem::InLbSF;
         let stored = units.stored(100.0, Quantity::Temperature);
         let scaled = sampler.scale(stored, Quantity::Temperature, units, [0.0; 3]);
         assert!((units.shown(scaled, Quantity::Temperature) - 50.0).abs() < 1e-9);
         assert_eq!(sampler.scale(4.0, Quantity::Pressure, units, [0.0; 3]), 2.0);
+    }
+
+    /// A cylindrical system at (0.1, 0, 0) m whose z axis is the global x axis.
+    fn cylinder() -> CoordinateSystem {
+        CoordinateSystem::from_points("Axis", [0.1, 0.0, 0.0], [0.1, 1.0, 0.0], [0.1, 0.0, 1.0])
+    }
+
+    #[test]
+    fn equation_takes_coordinates_in_its_coordinate_system() {
+        let mut system = cylinder();
+        system.kind = crate::CoordinateSystemKind::Cylindrical;
+        let mut distribution = Distribution::new("Ring");
+        distribution.system = Some(system.id);
+        distribution.kind = DistributionKind::Equation("=r + 1000*z + 0*x".into());
+        let systems = [system];
+        let sampler = distribution.sampler(UnitSystem::MmTonSC, &systems).unwrap();
+        // 30 mm from the axis, 20 mm along it
+        let f = sampler.factor([0.12, 0.0, 0.03]);
+        assert!((f - (30.0 + 1000.0 * 20.0)).abs() < 1e-9, "{f}");
+        // Local y is global z: theta is 90 degrees there.
+        distribution.kind = DistributionKind::Equation("=theta".into());
+        let sampler = distribution.sampler(UnitSystem::MmTonSC, &systems).unwrap();
+        let theta = sampler.factor([0.5, 0.0, 0.03]);
+        assert!(
+            (theta - std::f64::consts::FRAC_PI_2).abs() < 1e-12,
+            "{theta}"
+        );
+        // Points are along the axes of the system.
+        distribution.kind = DistributionKind::Points {
+            source: String::new(),
+            points: vec![[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.05, 2.0]],
+            interpolation: Interpolation::ClosestPoint,
+        };
+        let sampler = distribution.sampler(UnitSystem::MmTonSC, &systems).unwrap();
+        assert_eq!(sampler.factor([0.15, 0.0, 0.0]), 2.0);
+        assert_eq!(sampler.factor([0.1, 0.01, 0.0]), 1.0);
+        // A missing system cannot be evaluated.
+        assert!(
+            distribution
+                .problem(&[])
+                .unwrap()
+                .contains("coordinate system")
+        );
+    }
+
+    #[test]
+    fn equation_uses_named_variables() {
+        let mut distribution = Distribution::new("Wedge");
+        distribution.add_variable().value = 4.0;
+        distribution.add_variable().name = "h".into();
+        distribution.variables[1].value = 200.0;
+        assert_eq!(distribution.variables[0].name, "p1");
+        distribution.kind = DistributionKind::Equation("=p1 * (1 - z/h)".into());
+        let sampler = distribution.sampler(UnitSystem::MmTonSC, &[]).unwrap();
+        assert!((sampler.factor([0.0, 0.0, 0.1]) - 2.0).abs() < 1e-12);
+        for bad in ["theta", "2h", "p1", "", "Pi"] {
+            distribution.variables[1].name = bad.into();
+            assert!(distribution.problem(&[]).is_some(), "{bad}");
+        }
+        distribution.variables[1].name = "h".into();
+        distribution.kind = DistributionKind::Equation("=p1 * q".into());
+        let problem = distribution.problem(&[]).unwrap();
+        assert!(
+            problem.contains("'q'") && problem.contains("p1, h"),
+            "{problem}"
+        );
+    }
+
+    #[test]
+    fn variables_can_be_exposed_and_set() {
+        use crate::{Field, ItemRef, ValuePath};
+        let mut fe = crate::FeModel::default();
+        let mut distribution = Distribution::new("Wedge");
+        distribution.add_variable();
+        let key = distribution.add_variable().key;
+        distribution.variables[1].name = "h".into();
+        fe.distributions.push(distribution);
+        let item = ItemRef::Distribution("Wedge".into());
+        assert_eq!(
+            fe.exposable(&item),
+            [Field::Variable(1), Field::Variable(key)]
+        );
+        let path = ValuePath::new(item.clone(), Field::Variable(key));
+        let exposed = fe.expose(path.clone());
+        assert_eq!(fe.exposed(exposed).unwrap().name, "Wedge h");
+        assert!(fe.set_value(&path, 250.0));
+        assert_eq!(fe.distributions[0].variables[1].value, 250.0);
+        assert_eq!(fe.value_at(&path), Some(250.0));
+        // Renaming the variable keeps the parameter; renaming the distribution moves it.
+        fe.distributions[0].variables[1].name = "height".into();
+        assert_eq!(fe.value_at(&path), Some(250.0));
+        fe.distributions[0].name = "Ramp".into();
+        fe.rename_exposed(&item, "Ramp");
+        assert_eq!(fe.value_at(&fe.exposed(exposed).unwrap().path), Some(250.0));
     }
 
     #[test]

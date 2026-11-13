@@ -133,6 +133,9 @@ pub fn item_of(fe: &FeModel, item: &plx_model::ItemRef) -> Option<TreeItem> {
         ItemRef::MeshOperation(name) => {
             TreeItem::MeshOperation((fe.mesh_operations.iter()).position(|o| &o.name == name)?)
         }
+        ItemRef::Distribution(name) => {
+            TreeItem::Distribution((fe.distributions.iter()).position(|d| &d.name == name)?)
+        }
     })
 }
 

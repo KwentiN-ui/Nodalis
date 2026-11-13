@@ -33,6 +33,8 @@ pub enum ItemRef {
     InitialCondition(String),
     /// A mesh operation of Mesh > Mesh Operations, such as a transform.
     MeshOperation(String),
+    /// A distribution, whose variables can be exposed.
+    Distribution(String),
 }
 
 impl ItemRef {
@@ -46,7 +48,8 @@ impl ItemRef {
             | Self::CrossSection(name)
             | Self::Step(name)
             | Self::InitialCondition(name)
-            | Self::MeshOperation(name) => name,
+            | Self::MeshOperation(name)
+            | Self::Distribution(name) => name,
         }
     }
 
@@ -62,6 +65,7 @@ impl ItemRef {
             Self::Step(_) => "Step",
             Self::InitialCondition(_) => "Initial condition",
             Self::MeshOperation(_) => "Mesh operation",
+            Self::Distribution(_) => "Distribution",
         }
     }
 
@@ -77,7 +81,8 @@ impl ItemRef {
             | Self::CrossSection(name)
             | Self::Step(name)
             | Self::InitialCondition(name)
-            | Self::MeshOperation(name) => new.clone_into(name),
+            | Self::MeshOperation(name)
+            | Self::Distribution(name) => new.clone_into(name),
         }
         item
     }
@@ -197,6 +202,8 @@ pub enum Field {
     /// The top and bottom thickness of an infill section (its wall thickness is
     /// [`Field::Thickness`]).
     TopBottomThickness,
+    /// A named variable of a distribution, by its key ([`crate::DistributionVariable::key`]).
+    Variable(u32),
 }
 
 impl Field {
@@ -260,6 +267,7 @@ impl Field {
             Self::ScaleZ => "Factor Z",
             Self::InfillDensity => "Infill density",
             Self::TopBottomThickness => "Top/bottom thickness",
+            Self::Variable(_) => "Variable",
         }
     }
 
@@ -541,6 +549,15 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 MeshOperationKind::Transform(transform) => transform_slot(transform, field),
             }
         }
+        // The variables are numbers of the equation, in the units the equation takes them.
+        ItemRef::Distribution(name) => {
+            let Field::Variable(key) = field else {
+                return None;
+            };
+            let distribution = fe.distributions.iter_mut().find(|d| &d.name == name)?;
+            let variable = distribution.variables.iter_mut().find(|v| v.key == key)?;
+            Some((Slot::Real(&mut variable.value), ValueKind::Factor))
+        }
     }
 }
 
@@ -692,6 +709,9 @@ impl FeModel {
                     .find(|o| &o.name == name)?
                     .clone(),
             ),
+            ItemRef::Distribution(name) => fe
+                .distributions
+                .push(self.distribution_named(name)?.clone()),
         }
         Some(fe)
     }
@@ -769,7 +789,10 @@ impl FeModel {
         let Some(mut fe) = self.item_copy(item) else {
             return Vec::new();
         };
-        (Field::ALL.into_iter())
+        let variables = (fe.distributions.iter())
+            .flat_map(|d| d.variables.iter().map(|v| Field::Variable(v.key)))
+            .collect::<Vec<_>>();
+        (Field::ALL.into_iter().chain(variables))
             .filter(|&field| slot_mut(&mut fe, &ValuePath::new(item.clone(), field)).is_some())
             .collect()
     }
@@ -781,7 +804,16 @@ impl FeModel {
             return exposed.key;
         }
         let key = self.exposed.iter().map(|e| e.key + 1).max().unwrap_or(1);
-        let base = path.default_name();
+        let base = match (&path.item, path.field) {
+            // "Pressure map p1"
+            (ItemRef::Distribution(name), Field::Variable(key)) => {
+                match self.distribution_named(name).and_then(|d| d.variable(key)) {
+                    Some(variable) => format!("{name} {}", variable.name),
+                    None => path.default_name(),
+                }
+            }
+            _ => path.default_name(),
+        };
         let mut name = base.clone();
         let mut n = 2;
         while self.exposed.iter().any(|e| e.name == name) {
