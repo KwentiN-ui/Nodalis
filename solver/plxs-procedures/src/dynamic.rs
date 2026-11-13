@@ -881,9 +881,12 @@ pub(crate) fn initial_acceleration_matrix(
             Ok(ke.iter().zip(&me).map(|(k, m)| c_k * k + c_m * m).collect())
         })
         .collect();
-    for (entry, block) in table.entries.iter().zip(blocks) {
-        out.add_block(&entry.dofs, &block?);
-    }
+    let blocks: Vec<Vec<f64>> = blocks.into_iter().collect::<Result<_>>()?;
+    let pairs: Vec<(&[u32], &[f64])> = (table.entries.iter())
+        .zip(&blocks)
+        .map(|(entry, b)| (entry.dofs.as_slice(), b.as_slice()))
+        .collect();
+    out.add_blocks(&pairs);
     for block in &table.linear_blocks {
         let scaled: Vec<f64> = block.stiffness.iter().map(|v| c_k * v).collect();
         out.add_block(&block.dofs, &scaled);

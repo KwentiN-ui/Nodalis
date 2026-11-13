@@ -22,7 +22,8 @@ pub fn build_pattern(table: &ElementTable) -> Arc<Pattern> {
 }
 
 /// Assembles `K` from the element stiffness matrices: the elements are computed in
-/// parallel batches (bounded memory), each batch is scattered into the matrix sequentially.
+/// parallel batches (bounded memory), each batch is scattered into the matrix in parallel
+/// ranges of its values (the same sums in the same order as one block after the other).
 pub fn assemble_stiffness(table: &ElementTable, model: &Model, k: &mut SparseMatrix) {
     k.fill_zero();
     // Batches of about 64 MB of element matrices.
@@ -44,9 +45,12 @@ pub fn assemble_stiffness(table: &ElementTable, model: &Model, k: &mut SparseMat
                 ke
             })
             .collect();
-        for (entry, ke) in entries.iter().zip(&matrices) {
-            k.add_block(&entry.dofs, ke);
-        }
+        let blocks: Vec<(&[u32], &[f64])> = entries
+            .iter()
+            .zip(&matrices)
+            .map(|(entry, ke)| (entry.dofs.as_slice(), ke.as_slice()))
+            .collect();
+        k.add_blocks(&blocks);
     }
     for block in &table.linear_blocks {
         k.add_block(&block.dofs, &block.stiffness);

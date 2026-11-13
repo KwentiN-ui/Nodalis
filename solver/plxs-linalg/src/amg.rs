@@ -123,6 +123,9 @@ pub struct AmgOptions {
     /// Whether a mesh of quadratic elements is coarsened to its corner nodes first, see
     /// [`Amg::build`].
     pub corners: bool,
+    /// Whether a region where the cycle is slow gets a direct solve of its own, see
+    /// [`crate::patch`] (`PLXS_AMG_PATCH`).
+    pub patch: bool,
 }
 
 /// Where the multigrid cycle runs (`PLXS_GPU=off|on`, automatic otherwise).
@@ -194,6 +197,7 @@ impl Default for AmgOptions {
             gpu: GpuMode::from_environment(),
             adaptive: env("PLXS_AMG_ADAPTIVE", 0),
             corners: env("PLXS_AMG_CORNERS", 1) != 0,
+            patch: env("PLXS_AMG_PATCH", 1) != 0,
         }
     }
 }
@@ -281,6 +285,11 @@ pub struct Amg {
     gpu: Option<Box<crate::gpu::GpuCycle>>,
     /// Why the cycle runs on the processor although the card was considered (or failed).
     cpu_reason: Mutex<Option<String>>,
+    /// The direct solve of the region where the cycle is slow, see [`crate::patch`]
+    /// (only on the processor); found by the first solve, see [`Self::set_patch`].
+    patch: std::sync::RwLock<Option<crate::patch::Patch>>,
+    /// Whether a solve looked for the slow region already.
+    patch_tried: std::sync::atomic::AtomicBool,
     /// Why the conjugate gradients stay on the processor although the cycle runs on the
     /// card.
     #[cfg(feature = "gpu")]
@@ -428,20 +437,45 @@ impl Amg {
     /// energy contraction of the last cycle; `None` when the hierarchy contracts the
     /// energy by at least [`ADAPTIVE_THRESHOLD`] per cycle.
     fn slow_mode(&self, a: &Bsr, padding: &[bool]) -> Option<(Vec<f64>, f64)> {
+        let (mut x, factor) = self.test_error(a, padding, None, ADAPTIVE_CYCLES)?;
+        if factor < ADAPTIVE_THRESHOLD {
+            return None;
+        }
+        let n = x.len();
+        let scale = x.iter().map(|v| v * v).sum::<f64>().sqrt() / (n as f64).sqrt();
+        if scale == 0.0 || !scale.is_finite() {
+            return None;
+        }
+        x.iter_mut().for_each(|v| *v /= scale);
+        Some((x, factor))
+    }
+
+    /// The error left of a random one after `cycles` cycles of the stationary iteration
+    /// on `A x = 0`, with the energy contraction of the last cycle; `None` for a single
+    /// level or when the cycle fails.
+    pub(crate) fn test_error(
+        &self,
+        a: &Bsr,
+        padding: &[bool],
+        start: Option<Vec<f64>>,
+        cycles: usize,
+    ) -> Option<(Vec<f64>, f64)> {
         let n = a.rows();
         if n == 0 || self.levels.len() == 1 {
             return None;
         }
-        // A deterministic pseudo-random start, zero on the padding.
-        let mut x: Vec<f64> = (0..n)
-            .map(|i| {
-                let h = (i as u64)
-                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                    .rotate_left(23)
-                    ^ 0xD1B5_4A32_D192_ED03;
-                (h >> 11) as f64 / (1u64 << 53) as f64 - 0.5
-            })
-            .collect();
+        // A deterministic pseudo-random start unless given, zero on the padding.
+        let mut x: Vec<f64> = start.filter(|s| s.len() == n).unwrap_or_else(|| {
+            (0..n)
+                .map(|i| {
+                    let h = (i as u64)
+                        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                        .rotate_left(23)
+                        ^ 0xD1B5_4A32_D192_ED03;
+                    (h >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+                })
+                .collect()
+        });
         if padding.len() == n {
             x.iter_mut().zip(padding).for_each(|(x, &p)| {
                 if p {
@@ -453,7 +487,7 @@ impl Amg {
         let mut z = vec![0.0; n];
         let mut energy_before = 0.0;
         let mut factor = 1.0;
-        for cycle in 0..ADAPTIVE_CYCLES {
+        for cycle in 0..cycles {
             a.multiply(&x, &mut ax);
             let energy: f64 = x.iter().zip(&ax).map(|(x, y)| x * y).sum();
             if !energy.is_finite() || energy <= 0.0 {
@@ -472,14 +506,6 @@ impl Amg {
             }
             x.iter_mut().zip(&z).for_each(|(x, z)| *x -= z);
         }
-        if factor < ADAPTIVE_THRESHOLD {
-            return None;
-        }
-        let scale = x.iter().map(|v| v * v).sum::<f64>().sqrt() / (n as f64).sqrt();
-        if scale == 0.0 || !scale.is_finite() {
-            return None;
-        }
-        x.iter_mut().for_each(|v| *v /= scale);
         Some((x, factor))
     }
 
@@ -667,6 +693,8 @@ impl Amg {
             #[cfg(feature = "gpu")]
             gpu: None,
             cpu_reason: Mutex::new(None),
+            patch: Default::default(),
+            patch_tried: Default::default(),
             #[cfg(feature = "gpu")]
             cg_note: Mutex::new(None),
         })
@@ -688,6 +716,12 @@ impl Amg {
         level.lambda_max = largest_eigenvalue(a, &inv_chol);
         level.inv_diag = inv_diag.iter().map(|&d| d as f32).collect();
         convert(&a.val, &mut self.fine.val);
+        let patch = self.patch.get_mut().unwrap_or_else(|e| e.into_inner());
+        if let Some(p) = patch.as_mut()
+            && p.refresh(a).is_err()
+        {
+            *patch = None;
+        }
         #[cfg(feature = "gpu")]
         if let Some(gpu) = self.gpu.as_mut() {
             let level = &self.levels[0];
@@ -753,6 +787,31 @@ impl Amg {
         self.nonzeros
     }
 
+    /// Unknowns of the direct solve of the slow region, when there is one.
+    pub fn patch_size(&self) -> Option<usize> {
+        let patch = self.patch.read().unwrap_or_else(|e| e.into_inner());
+        patch.as_ref().map(|p| p.len())
+    }
+
+    /// Whether the cycle may still get a patch: on the processor, allowed by the options
+    /// and not looked for yet. Marks it as looked for.
+    pub(crate) fn wants_patch(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        if self.gpu.is_some() {
+            return false;
+        }
+        self.options.patch
+            && self.levels.len() > 1
+            && !self
+                .patch_tried
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Gives the finest level's cycle the direct solve of a slow region.
+    pub(crate) fn set_patch(&self, patch: crate::patch::Patch) {
+        *self.patch.write().unwrap_or_else(|e| e.into_inner()) = Some(patch);
+    }
+
     /// Sizes of the levels, finest first.
     pub fn sizes(&self) -> Vec<usize> {
         self.levels.iter().map(|l| l.n).collect()
@@ -808,11 +867,19 @@ impl Amg {
             true,
         );
         a.residual(&this.b, &this.x, &mut this.r);
+        let guard = (l == 0).then(|| self.patch.read().unwrap_or_else(|e| e.into_inner()));
+        let patch = guard.as_ref().and_then(|g| g.as_ref());
+        if let Some(patch) = patch {
+            patch.correct_residual(a, &mut this.x, &mut this.r)?;
+        }
         let next = &mut rest[0];
         pt.multiply(&this.r, &mut next.b);
         self.cycle(l + 1, rest)?;
         p.multiply(&rest[0].x, &mut this.t);
         add(&mut this.x, &this.t);
+        if let Some(patch) = patch {
+            patch.correct(a, &this.b, &mut this.x)?;
+        }
         smooth(
             level.lambda_max,
             self.options.degree,
@@ -1724,6 +1791,88 @@ mod tests {
         };
         let body = (0..n as u32).map(|i| i / m as u32).collect();
         (a, body)
+    }
+
+    /// A grounded chain of `n` nodes (3 × 3 blocks), positive definite.
+    fn grounded_chain(n: usize) -> Bsr {
+        let mut ptr = vec![0usize];
+        let mut col = Vec::new();
+        let mut val = Vec::new();
+        for i in 0..n {
+            for j in i.saturating_sub(1)..(i + 2).min(n) {
+                col.push(j as u32);
+                let mut block = [0.0; 9];
+                for c in 0..3 {
+                    block[4 * c] = if i == j {
+                        let links = (i > 0) as usize + (i + 1 < n) as usize;
+                        links as f64 * (1.0 + c as f64) + 1e-3
+                    } else {
+                        -(1.0 + c as f64)
+                    };
+                }
+                val.extend_from_slice(&block);
+            }
+            ptr.push(col.len());
+        }
+        Bsr {
+            brows: n,
+            bcols: n,
+            br: 3,
+            bc: 3,
+            ptr,
+            col,
+            val,
+        }
+    }
+
+    #[test]
+    fn a_local_error_makes_a_patch_of_its_nodes_and_their_ring() {
+        let a = grounded_chain(400);
+        let mut error = vec![1e-4; a.rows()];
+        for b in 100..106 {
+            for c in 0..3 {
+                error[3 * b + c] = 1.0;
+            }
+        }
+        let patch = crate::patch::Patch::find(&a, &error, None, false)
+            .unwrap()
+            .expect("a local error");
+        assert_eq!(patch.len(), 3 * 8);
+        // Spread over the whole chain: no patch.
+        let spread = vec![1.0; a.rows()];
+        assert!(
+            crate::patch::Patch::find(&a, &spread, None, false)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_cycle_with_a_patch_stays_symmetric() {
+        let a = grounded_chain(3000);
+        let amg = Amg::build(&a, None, &[], AmgOptions::default()).unwrap();
+        assert!(amg.levels() > 1);
+        let mut error = vec![0.0; a.rows()];
+        error[3 * 1500..3 * 1520].iter_mut().for_each(|v| *v = 1.0);
+        let patch = crate::patch::Patch::find(&a, &error, None, false)
+            .unwrap()
+            .unwrap();
+        amg.set_patch(patch);
+        let x: Vec<f64> = (0..a.rows())
+            .map(|i| ((i * 37) % 11) as f64 - 5.0)
+            .collect();
+        let y: Vec<f64> = (0..a.rows()).map(|i| ((i * 13) % 7) as f64 - 3.0).collect();
+        let (mut mx, mut my) = (vec![0.0; a.rows()], vec![0.0; a.rows()]);
+        amg.apply(&x, &mut mx).unwrap();
+        amg.apply(&y, &mut my).unwrap();
+        let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+        let (xy, yx) = (dot(&my, &x), dot(&mx, &y));
+        assert!(
+            (xy - yx).abs() <= 1e-4 * xy.abs().max(yx.abs()),
+            "{xy} vs {yx}"
+        );
+        // Positive: the patch adds a correction, it never takes energy away.
+        assert!(dot(&mx, &x) > 0.0);
     }
 
     #[test]

@@ -1658,3 +1658,99 @@ V-Zyklus, behaltene Hierarchie oft zu lange behalten.
 - Bleibt: eine Iteration auf C3D20 ist je Unbekannte weiterhin etwa doppelt so teuer wie
   auf C3D10 (dichtere Matrix), und der Aufbau der Hierarchie (16 s bei 1,27 Mio.) ist jetzt
   so teuer wie das Lösen.
+
+## Stand nach der parallelen Matrix-Pipeline (2026-11-12, Thread "Speed up plxs solver: block matrix, thin walls, solver choice")
+
+Vorschlag B des Architektur-Reviews, erste Stufe: dieselbe Matrix, aber jeder Schritt von
+der Assemblierung bis zum Vorkonditionierer läuft parallel, und die Reduktion kopiert, wo
+sie nur auswählt.
+
+- `Pattern::from_blocks`: je Index die Blöcke, in denen er vorkommt, dann jede Spalte für
+  sich (Markierung je Thread, nur die eindeutigen Zeilen werden sortiert). Ergebnis gleich
+  dem alten Muster.
+- `SparseMatrix::add_blocks`: Positionen je Block parallel, dann Bereiche der Werte je
+  Thread, jeder Bereich nimmt die Blöcke in ihrer Reihenfolge. Jeder Eintrag bekommt also
+  dieselben Summanden in derselben Reihenfolge wie mit `add_block` nacheinander
+  (bitgleich). Genutzt von `assemble_stiffness`, der Masse und der effektiven Matrix der
+  Dynamik; die nichtlineare Assemblierung machte das schon so.
+- `ConstraintSet::reducer`: wählt `T` nur die freien Freiheitsgrade aus (nur Einspannungen,
+  der häufigste Fall), ist das reduzierte Muster die Untermatrix, Spalte für Spalte
+  parallel gebaut, und `Tᵀ K T` ein paralleles Kopieren (`ReducedPattern::gather`). Mit
+  Kopplungen (Ties, Gleichungen, starre Körper) werden die Einträge, die allein auf ihren
+  reduzierten Eintrag fallen, ebenso kopiert; nur die übrigen (`serial`) werden wie bisher
+  der Reihe nach summiert, bitgleich zum direkten Dreifachprodukt.
+- `PcgSolver::analyze_blocked`: Blockmuster, Umnummerierung und Quellindex der Blöcke
+  parallel (nur Cuthill-McKee bleibt seriell, 0,1 s am Bracket).
+- `Equations` hält für den Rückfall auf den Direktlöser nur noch das Muster; die Werte
+  gibt `PcgSolver::matrix` aus der Blockkopie des iterativen Lösers zurück (spart eine
+  Kopie der reduzierten Matrix).
+
+Gemessen am Bracket (591 000 Gl., C3D10, iterativ, Toleranz 1e-8, 4 Threads, ohne GPU):
+gesamt 18,7 → 13,5 s, Muster 1,8 → 0,3 s, Assemblierung 1,8 → 0,9 s, Reduktion
+0,9 → 0,2 s, Umwandlung für CG 1,7 → 0,4 s, Speicherspitze 2,47 → 2,17 GB, 82 Iterationen
+wie zuvor,
+Ergebnisse gleich bis auf Rundung (wie zwei Läufe des alten Standes untereinander).
+Lifting Lug (Ties, NLGEOM): Reduktion 3,4 → 2,8 s, dort bestimmen Elementrechnung und
+Lösen die Zeit. Noch offen aus B: durchgehende Blockform ab der Assemblierung und eine
+einmalige Nummerierung; der Direktlöser ordnet bereits auf dem komprimierten Knotengraphen
+(195 000 Knoten statt 591 000 Unbekannte), dort kostet die Dissection selbst 4 s.
+
+## Stand nach den lokalen Direktlösungen im Mehrgitter (2026-11-12, Thread "Speed up plxs solver: block matrix, thin walls, solver choice")
+
+Vorschlag C2 des Architektur-Reviews (`plxs-linalg/src/patch.rs`): Wo das
+Aggregations-Mehrgitter hängt (schlanke Stege, dünne Rippen), sitzt der langsame Fehler
+in wenigen Knoten. Dieser Bereich wird im V-Zyklus der feinsten Stufe zusätzlich direkt
+gelöst.
+
+- Gesucht wird nur, wenn eine Lösung es braucht: Sagt die Rate nach `CHECK_AT` (12)
+  Iterationen mehr als `SLOW_ITERATIONS` (40) voraus, laufen Zyklen der stationären
+  Iteration auf einem Zufallsfehler mit rechter Seite null (`TEST_ROUNDS`, 12, dann je 4,
+  solange die Kontraktion je Zyklus noch wächst). Die Knoten, die 97 % des Restfehlers
+  tragen, plus ein Nachbarring bilden den Bereich, wenn es höchstens 3 % der Knoten und
+  höchstens 60 000 Unbekannte sind. Ein über das Teil verteilter Fehler (Platte mit einer
+  Schicht) bekommt keinen Bereich, das ist Sache von C1.
+- Der Bereich wird mit dem `LdltSolver` faktorisiert und wirkt multiplikativ auf beiden
+  Seiten der Grobkorrektur (Glätten, Bereich auf dem Residuum, das lokal nachgeführt wird,
+  Grobkorrektur, Bereich auf dem Residuum seiner Zeilen, Glätten). Damit bleibt der
+  Vorkonditionierer symmetrisch, und beide Schritte berühren nur den Bereich und seine
+  Nachbarn.
+- Danach beginnt CG neu vom erreichten Iterat (ohne Deflation in dieser Lösung). Spätere
+  Lösungen mit derselben Hierarchie (Newton) behalten den Bereich, `Amg::refresh`
+  faktorisiert ihn neu. Nur auf dem Prozessor (ein V-Zyklus auf der Grafikkarte bekommt
+  keinen Bereich), `PLXS_AMG_PATCH=0` schaltet ab.
+
+Gemessen (4 Threads, ohne GPU, Toleranz 1e-8): Bracket 591 000 Gl. 82 → 27 Iterationen,
+Lösen 7,4 → 3,7 s (davon 0,9 s Suche), gesamt 14,3 → 10,3 s, Ergebnisse innerhalb der
+Toleranz (Verschiebung rel. 1e-8). Ohne Wirkung und ohne Kosten, weil nicht ausgelöst:
+Würfel C3D10 670 000 Gl. (17 Iterationen), Platten mit einer und zwei Schichten (63 und
+73), Balken C3D10 und C3D20R, Lifting Lug (Newton-Lösungen mit loser Toleranz).
+
+## Stand nach der Solverwahl aus Kostenschätzung (2026-11-12, Thread "Speed up plxs solver: block matrix, thin walls, solver choice")
+
+Vorschlag D des Architektur-Reviews: Die automatische Wahl (`Equations`, Modus
+Automatic) beginnt auf großen Systemen aus Translationen weiter iterativ, prüft aber
+nach `PROBE_AT` (30) Iterationen, ob sich das lohnt.
+
+- Die Vorhersage nimmt die kleinsten Residuen je Iteration und misst die Rate über die
+  zweite Hälfte der bisherigen Iterationen (`predicted_iterations` in `pcg.rs`). Die
+  ersten Residuen liegen auf steifen dünnen Teilen weit über dem Start (Streifen: Faktor
+  10⁵ nach der ersten Iteration) und würden die Rate verfälschen. Dieselbe Vorhersage
+  löst auch die Suche nach dem langsamen Bereich (C2) aus.
+- Sagt sie mehr als `PROBE_SUSPICIOUS` (120) Iterationen voraus, bricht die Lösung ab
+  (`PcgSolver::set_probe`, `take_probe`) und `Equations::weigh_probe` rechnet die
+  symbolische Analyse des Direktlösers: Zeit der Faktorisierung aus deren Gleitkomma-
+  operationen (`FACTOR_FLOPS_PER_THREAD`, 25e9 je Thread) und dem Speicher des Faktors
+  (`TOUCH_BYTES_PER_SECOND`, 1,4 GB/s), gegen die restlichen Iterationen mal der Zeit je
+  Iteration bisher. Ist der Direktlöser billiger und passt der Faktor in den Speicher,
+  übernimmt er für den Rest der Rechnung (wie beim Rückfall), sonst geht die Iteration
+  ohne Probe neu los. Die Abwägung läuft einmal je `Equations` und steht als Info im
+  Monitor.
+- Nur in der automatischen Wahl ohne vorherigen Rückfall; ausdrücklich iterativ oder
+  direkt gewählte Löser und lose Lösungen (Newton, GMRES) bleiben unberührt. Die Zeit der
+  Analyse (Ordnung) ist zum Zeitpunkt der Abwägung schon bezahlt und zählt nicht mit.
+
+Gemessen (4 Threads, ohne GPU): Streifen 442 000 Gl. (vorhergesagt 246 Iterationen,
+20,5 s; direkt geschätzt 1,3 s) gesamt 14,1 → 11,7 s; Streifen 167 000 Gl. 3,8 → 3,9 s
+(gewechselt, die Analyse mit 1,3 s frisst den Gewinn). Nicht ausgelöst: Bracket (27
+Iterationen mit C2), Würfel (17), Platten mit einer und zwei Schichten (63, 73), Balken
+(21).

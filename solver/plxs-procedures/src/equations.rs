@@ -71,6 +71,16 @@ pub const KEPT_FACTOR_ITERATIONS: usize = 20;
 /// procedure asked for no tolerance: as good as the direct solve they stand in for.
 pub const KEPT_FACTOR_TOLERANCE: f64 = 1e-10;
 
+/// The pace of the factorization in the estimate of the automatic choice, floating point
+/// operations per second and thread (measured with 4 threads: a bracket of 591 000
+/// equations, 1.05e12 operations, 9.3 s, about 28 billion per thread; a strip of 167 000,
+/// 1.3e10 operations, 0.21 s, about 16 billion).
+pub const FACTOR_FLOPS_PER_THREAD: f64 = 25e9;
+
+/// The pace at which the factor's memory is taken (written once), bytes per second
+/// (4.2 GB in 3 s in the cloud container).
+pub const TOUCH_BYTES_PER_SECOND: f64 = 1.4e9;
+
 /// Without a way to ask the platform for its free memory, the automatic choice assumes
 /// this much.
 const ASSUMED_MEMORY: u64 = 8 << 30;
@@ -85,7 +95,10 @@ pub struct Equations {
     /// Automatic and iterative: the prepared matrix with the positions of its unknowns, to
     /// factorize it after all when the iteration fails (ordered by the positions, as the
     /// direct solver is ordered otherwise: without them the factor fills many times more).
-    kept: Option<(SparseMatrix, Vec<[f64; 3]>)>,
+    /// Only the pattern is kept: the values are in the iterative solver's own copy of the
+    /// matrix, which gives them back (a second copy of a large matrix costs hundreds of
+    /// megabytes for a fall-back that is rarely taken).
+    kept: Option<(Arc<Pattern>, Vec<[f64; 3]>)>,
     /// Whether the automatic choice already fell back once (it does not switch back).
     fell_back: bool,
     /// The memory the automatic choice works with, `None`: ask the platform.
@@ -107,6 +120,8 @@ pub struct Equations {
     stale: Option<SparseMatrix>,
     /// Whether the next prepared matrix is factorized whatever the factor at hand.
     refresh: bool,
+    /// Whether a slow iteration was weighed against the direct solver already (once).
+    probed: bool,
 }
 
 impl Equations {
@@ -130,6 +145,7 @@ impl Equations {
             factored: None,
             stale: None,
             refresh: false,
+            probed: false,
         }
     }
 
@@ -238,8 +254,9 @@ impl Equations {
                 direct.set_coordinates(Some(unknowns.coordinates.clone()));
                 direct.analyze(k.pattern())?;
                 progress.event(ProgressEvent::Info(format!(
-                    "factor: {} nonzeros, ordered in {:.2} s",
+                    "factor: {} nonzeros, {:.2e} flops, ordered in {:.2} s",
                     direct.factor_nonzeros().unwrap_or(0),
+                    direct.factor_flops().unwrap_or(0.0),
                     started.elapsed().as_secs_f64()
                 )));
             }
@@ -285,7 +302,30 @@ impl Equations {
             pcg.set_tolerance(self.tolerance.unwrap_or(plxs_linalg::pcg::TOLERANCE));
             // The right-hand side, for a second attempt (the solve works in place).
             let b = (self.kept.is_some() || pcg.is_reused()).then(|| rhs.to_vec());
+            // The automatic choice weighs a slow iteration against the direct solver once
+            // (see `weigh_probe`).
+            pcg.set_probe(
+                self.mode == SolverMode::Automatic
+                    && !self.fell_back
+                    && !self.probed
+                    && self.kept.is_some(),
+            );
             let mut result = pcg.solve_counted(rhs);
+            if result.is_err()
+                && let Some(probe) = pcg.take_probe()
+            {
+                self.probed = true;
+                let b = b.as_ref().expect("kept for the second attempt");
+                rhs.copy_from_slice(b);
+                if self.weigh_probe(direct, probe, progress)? {
+                    // Solved directly below.
+                    return self.solve_after_switch(direct, rhs, started, progress);
+                }
+                let pcg = self.pcg.as_mut().expect("prepared");
+                pcg.set_probe(false);
+                result = pcg.solve_counted(rhs);
+            }
+            let pcg = self.pcg.as_mut().expect("prepared");
             if result.is_err() && pcg.is_reused() {
                 // The hierarchy kept from the previous factorization does not fit this
                 // matrix after all: build it anew and try once more.
@@ -305,7 +345,10 @@ impl Equations {
                     return Ok(());
                 }
                 Err(error) if self.may_fall_back(&error) && b.is_some() => {
-                    let (k, coordinates) = self.kept.take().expect("kept for the fall-back");
+                    let (pattern, coordinates) = self.kept.take().expect("kept for the fall-back");
+                    let k = (self.pcg.as_ref())
+                        .and_then(|pcg| pcg.matrix(pattern))
+                        .expect("the iterative solver holds the prepared matrix");
                     direct.set_coordinates(Some(coordinates));
                     if !self.factor_fits(direct, &k, &error, progress)? {
                         return Err(with_message(error, |m| {
@@ -464,6 +507,78 @@ impl Equations {
         Ok(true)
     }
 
+    /// Weighs the rest of a slow iteration (`probe`) against the direct solver: the
+    /// symbolic analysis tells the factor's memory and floating point operations, from
+    /// which [`FACTOR_FLOPS_PER_THREAD`] and [`TOUCH_BYTES_PER_SECOND`] estimate the time
+    /// of the factorization; the iteration would take its predicted iterations at its
+    /// pace so far. Switches to the direct solver (and factorizes) when that is cheaper
+    /// and the factor fits; `true` then.
+    fn weigh_probe(
+        &mut self,
+        direct: &mut LdltSolver,
+        probe: plxs_linalg::PcgProbe,
+        progress: &mut dyn Progress,
+    ) -> Result<bool> {
+        let Some((pattern, coordinates)) = self.kept.clone() else {
+            return Ok(false);
+        };
+        let started = std::time::Instant::now();
+        direct.set_coordinates(Some(coordinates));
+        let bytes = direct.estimate_factor_bytes(&pattern)?;
+        let flops = direct.factor_flops().unwrap_or(0.0);
+        let threads = rayon::current_num_threads().max(1) as f64;
+        let direct_seconds =
+            flops / (FACTOR_FLOPS_PER_THREAD * threads) + bytes as f64 / TOUCH_BYTES_PER_SECOND;
+        let iterative_seconds = probe.predicted as f64 * probe.seconds_per_iteration;
+        let need = bytes.saturating_add(bytes / 4);
+        let available = self
+            .available
+            .or_else(plxs_linalg::available_memory)
+            .unwrap_or(ASSUMED_MEMORY);
+        let fits = (need as f64) <= MEMORY_SHARE * available as f64;
+        let switch = fits && direct_seconds < iterative_seconds;
+        progress.event(ProgressEvent::Info(format!(
+            "automatic equation solver: the iteration would take about {} iterations, \
+             {iterative_seconds:.1} s; the direct solver about {direct_seconds:.1} s with a \
+             factor of {:.1} GB{} (analyzed in {:.2} s); solving {}",
+            probe.predicted,
+            need as f64 / 1e9,
+            if fits {
+                ""
+            } else {
+                ", more than fits into the memory"
+            },
+            started.elapsed().as_secs_f64(),
+            if switch { "directly" } else { "iteratively on" }
+        )));
+        if !switch {
+            return Ok(false);
+        }
+        let k = (self.pcg.as_ref())
+            .and_then(|pcg| pcg.matrix(pattern))
+            .expect("the iterative solver holds the prepared matrix");
+        self.switch(false);
+        direct.analyze(k.pattern())?;
+        direct.factorize(&k)?;
+        Ok(true)
+    }
+
+    /// The direct solve of `rhs` right after the switch of [`Self::weigh_probe`].
+    fn solve_after_switch(
+        &mut self,
+        direct: &mut LdltSolver,
+        rhs: &mut [f64],
+        started: std::time::Instant,
+        progress: &mut dyn Progress,
+    ) -> Result<()> {
+        direct.solve(rhs)?;
+        progress.event(ProgressEvent::Info(format!(
+            "solved in {:.2} s",
+            started.elapsed().as_secs_f64()
+        )));
+        Ok(())
+    }
+
     /// Whether the factor of `k` fits into the memory, for a fall-back from the iterative
     /// solver after `error`; tells the monitor when it does not. `direct` has its
     /// coordinates.
@@ -562,7 +677,7 @@ impl Equations {
             started.elapsed().as_secs_f64()
         )));
         if self.mode == SolverMode::Automatic && !self.fell_back {
-            self.kept = Some((k.clone(), unknowns.coordinates.clone()));
+            self.kept = Some((k.pattern().clone(), unknowns.coordinates.clone()));
         }
         Ok(())
     }
