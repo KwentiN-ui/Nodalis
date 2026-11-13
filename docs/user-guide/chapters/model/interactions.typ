@@ -600,8 +600,12 @@ to another part than the bolt, or another body of a compound part (@compound-par
 Nodalis cuts the shank across the middle of its free part: the longer piece of the shank
 beside the length in the thread, or the middle of the whole shank without a thread. The cut
 follows the element faces of the mesh, like a staircase in a tetrahedral mesh, so the bolt
-needs no new mesh; the preload acts along the axis of the shank. #ui("Exported as") says where
-the bolt is cut. Hide the clamped parts (@view) to reach the bolt in the 3D view.
+needs no new mesh; the preload acts along the axis of the shank. Near the middle Nodalis takes
+the flattest such cut. Where the elements are long compared with the shank, the cut still
+spreads far along it and the elements beside it are stretched by the preload: the model check
+warns, mesh the shank finer then (a local mesh size of about a third of its radius).
+#ui("Exported as") says where the bolt is cut. Half and quarter models work too: pick the bolt
+with its faces on the symmetry planes and give the share of the preload of that model. Hide the clamped parts (@view) to reach the bolt in the 3D view.
 
 The bolt must be one part of its own, at least where the shank is. Its contact with the hole
 must let the shank slide: the contact detection usually finds the head, the nut and the shank

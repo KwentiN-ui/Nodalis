@@ -319,7 +319,19 @@ fn exported_as(model: &Model, bolt: &Bolt) -> String {
         Ok(resolved) => resolved,
         Err(reason) => return format!("Not exported: {reason}."),
     };
-    let mut text = resolved.why;
+    let mut text = resolved.why.clone();
+    if resolved.coarse() {
+        let units = model.fe.properties.units;
+        text.push_str(&format!(
+            " The elements there are coarse: the cut spreads {} {} along the shank, mesh it \
+             finer.",
+            numeric::format_physical(crate::results::round_significant(
+                units.shown(resolved.spread, Quantity::Length),
+                3
+            )),
+            units.unit(Quantity::Length)
+        ));
+    }
     match fe.resolve_thread(bolt, &model.mesh) {
         Ok(Some(thread)) => text.push_str(&format!(
             "\nThe thread is tied to {} face{} of the bolt where they are{}.",

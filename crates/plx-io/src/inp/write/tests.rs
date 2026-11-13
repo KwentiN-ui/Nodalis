@@ -11300,6 +11300,7 @@ fn a_quarter_bolt_is_cut_across_its_middle() {
     let resolved = model.resolve_bolt(&model.bolts[0], &mesh).unwrap();
     // 3 wedges and 3 hexahedra below the middle.
     assert_eq!(resolved.cut_faces.len(), 6, "{resolved:?}");
+    assert!(!resolved.coarse(), "{resolved:?}");
     let (tilt, turn) = (0.4_f64, 0.7_f64);
     let expected = [
         tilt.sin() * turn.sin(),

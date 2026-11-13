@@ -136,6 +136,10 @@ pub struct ResolvedBolt {
     /// The axis of the shank, along the outward normal of the cut faces; the direction of
     /// the preload unless the bolt gives one.
     pub shank_axis: [f64; 3],
+    /// How far the cut faces spread along the axis: their thickness as a staircase.
+    pub spread: f64,
+    /// The radius of the shank.
+    pub radius: f64,
     /// Why, in words, for the dialog.
     pub why: String,
 }
@@ -172,6 +176,14 @@ impl LoweredBolts {
             }
             _ => None,
         }
+    }
+}
+
+impl ResolvedBolt {
+    /// The cut spreads along the axis by more than the radius of the shank: the elements
+    /// there are too coarse for a cut across it.
+    pub fn coarse(&self) -> bool {
+        self.spread > self.radius
     }
 }
 
@@ -233,8 +245,8 @@ impl FeModel {
                 }),
             _ => None,
         };
-        let middle = match engaged {
-            None => 0.5 * (shank.start + shank.end),
+        let (from, to) = match engaged {
+            None => (shank.start, shank.end),
             Some((lo, hi)) => {
                 let below = (shank.start, lo.min(shank.end));
                 let above = (hi.max(shank.start), shank.end);
@@ -246,10 +258,28 @@ impl FeModel {
                 if to <= from {
                     return Err("the thread takes the whole shank: no free part to cut".into());
                 }
-                0.5 * (from + to)
+                (from, to)
             }
         };
-        shank.cut(&shank_faces, mesh, middle)
+        // Across the middle of the free part, or nearby where the element faces of a coarse
+        // mesh make a flatter cut: the one that spreads least along the axis, the middle
+        // unless another is clearly flatter.
+        let middle = 0.5 * (from + to);
+        let mut best = shank.cut(&shank_faces, mesh, middle);
+        let mut flatness = best.as_ref().map_or(f64::INFINITY, |b| b.spread);
+        for k in 1..=10 {
+            let offset = 0.03 * k as f64 * (to - from);
+            for at in [middle - offset, middle + offset] {
+                if let Ok(cut) = shank.cut(&shank_faces, mesh, at)
+                    && cut.spread < 0.8 * flatness
+                    && flatness - cut.spread > 1e-6 * (to - from)
+                {
+                    flatness = cut.spread;
+                    best = Ok(cut);
+                }
+            }
+        }
+        best
     }
 
     /// How the bolt is joined to its internal thread: the outer faces of the bolt nearest to
@@ -793,7 +823,16 @@ impl Shank {
         }
         // The cut faces are the upper faces of the elements below the middle: the preload
         // pulls along their outward normal, the axis.
+        let (lo, hi) = (cut_faces.iter())
+            .flat_map(|&f| face_nodes(mesh, f))
+            .filter_map(|n| mesh.node(n))
+            .map(|p| dot(p, self.axis))
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), t| {
+                (lo.min(t), hi.max(t))
+            });
         Ok(ResolvedBolt {
+            spread: hi - lo,
+            radius: self.radius,
             cut_faces,
             shank_axis: self.axis,
             why: "The mesh is cut across the free part of the shank, along the element faces."
