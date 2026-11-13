@@ -138,7 +138,11 @@ fn add_menu(
     let mut added = None;
     let text_id = ui.id().with((id, "pattern"));
     let mut picked_added = false;
-    ui.menu_button(label, |ui| {
+    // Stays open while text is typed: the default closes on every click inside, which
+    // ends the text field's focus.
+    let config = egui::containers::menu::MenuConfig::new()
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    egui::containers::menu::MenuButton::new(label).config(config).ui(ui, |ui| {
         ui.set_min_width(220.0);
         ui.label("Name pattern")
             .on_hover_text("* stands for any text, ? for one character; without them, names containing the text match. Case is ignored.");

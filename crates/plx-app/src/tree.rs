@@ -176,8 +176,6 @@ pub struct TreeState {
     /// The compound parts of the geometry with the parts they join, by index, for the
     /// Geometry tree.
     pub compounds: Vec<(String, Vec<usize>)>,
-    /// The name being typed for a compound part in its menu, by index.
-    compound_name: Option<(usize, String)>,
 }
 
 impl TreeState {
@@ -404,6 +402,8 @@ pub enum CompoundAction {
     Add(usize, Vec<usize>),
     /// Take parts out of their compound parts.
     Remove(Vec<usize>),
+    /// Ask for a new name of the compound part in a dialog.
+    StartRename(usize),
     Rename(usize, String),
     /// The parts of the compound part become parts of their own again.
     Dissolve(usize),
@@ -1889,31 +1889,16 @@ impl Tree<'_> {
     /// The menu of a compound part of the geometry.
     fn compound_menu(&mut self, ui: &mut Ui, c: usize) {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-        let Some((name, _)) = self.state.compounds.get(c).cloned() else {
+        if self.state.compounds.get(c).is_none() {
             return;
-        };
+        }
         if ui.button("Create Mesh").clicked() {
             self.response.compound = Some(CompoundAction::Mesh(c));
             ui.close();
         }
         ui.separator();
-        let typed = match &mut self.state.compound_name {
-            Some((i, typed)) if *i == c => typed,
-            other => &mut other.insert((c, name.clone())).1,
-        };
-        let mut rename = false;
-        ui.horizontal(|ui| {
-            ui.label("Name");
-            let edit = ui.add(egui::TextEdit::singleline(typed).desired_width(140.0));
-            rename = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("Rename").clicked() {
-                rename = true;
-            }
-        });
-        if rename {
-            let typed = typed.clone();
-            self.state.compound_name = None;
-            self.response.compound = Some(CompoundAction::Rename(c, typed));
+        if ui.button("Rename...").clicked() {
+            self.response.compound = Some(CompoundAction::StartRename(c));
             ui.close();
         }
         ui.separator();
