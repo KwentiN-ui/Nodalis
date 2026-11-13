@@ -291,6 +291,31 @@ pub(super) fn shown_series(series: &[f64], kind: Option<ValueKind>, units: UnitS
     }
 }
 
+/// The values of the column `item`, `["Value", name]`, of a study at all its points, in the
+/// order of the table: the inputs as given, the outputs as they came out, not a number where
+/// a point gave none, so that the values of two columns stay paired point by point.
+pub(super) fn study_values(table: &plx_model::StudyTable, item: &[String]) -> Option<Vec<f64>> {
+    let [cell, name] = item else {
+        return None;
+    };
+    if cell != links::VALUE {
+        return None;
+    }
+    if let Some(column) = table.input(name) {
+        return Some(
+            (table.points.iter())
+                .map(|p| p.inputs.get(column).copied().unwrap_or(f64::NAN))
+                .collect(),
+        );
+    }
+    let column = table.outputs.iter().position(|c| &c.name == name)?;
+    Some(
+        (table.points.iter())
+            .map(|p| p.outputs.get(column).copied().flatten().unwrap_or(f64::NAN))
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,29 +459,4 @@ mod tests {
         assert_eq!(max.series_result(false), None);
         assert_eq!(max.result(false), Some(5.0));
     }
-}
-
-/// The values of the column `item`, `["Value", name]`, of a study at all its points, in the
-/// order of the table: the inputs as given, the outputs as they came out, not a number where
-/// a point gave none, so that the values of two columns stay paired point by point.
-pub(super) fn study_values(table: &plx_model::StudyTable, item: &[String]) -> Option<Vec<f64>> {
-    let [cell, name] = item else {
-        return None;
-    };
-    if cell != links::VALUE {
-        return None;
-    }
-    if let Some(column) = table.input(name) {
-        return Some(
-            (table.points.iter())
-                .map(|p| p.inputs.get(column).copied().unwrap_or(f64::NAN))
-                .collect(),
-        );
-    }
-    let column = table.outputs.iter().position(|c| &c.name == name)?;
-    Some(
-        (table.points.iter())
-            .map(|p| p.outputs.get(column).copied().flatten().unwrap_or(f64::NAN))
-            .collect(),
-    )
 }
