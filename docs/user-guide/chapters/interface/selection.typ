@@ -11,7 +11,10 @@ Each dialog with a region has a #ui("Region") field. Its combo box chooses where
 comes from; the choices depend on the item:
 
 / Selection in the 3D view: picked nodes, element faces, edges, parts or CAD faces. The field shows
-  what is selected ("12 element faces") and has a #ui("Clear Selection") button.
+  what is selected ("12 element faces") and has a #ui("Clear Selection") button. When the selection holds CAD entities that have no mesh
+  (any more), e.g. because you deleted the mesh of that part, #ui("Clear Missing (n)") appears
+  next to it and removes just those entities; the Model Check reports them as "geometry entities
+  are not meshed". #ui("Undo") in the #ui("Selection") window brings them back.
 / Parts: whole parts, picked in the 3D view.
 / Node Set, Element Set, Surface: sets and surfaces of an imported `.inp` mesh, or ones you
   defined yourself (@mesh-sets).
@@ -25,6 +28,8 @@ window and clicks in the 3D view no longer change the region. Click #ui("...") a
 The window stays open when a new item's dialog opens; when you edit an item that already has a
 selection, the selection starts locked so that a click cannot overwrite it by accident. All dialogs with a region field
 behave this way, for parts as well as for picked nodes, faces and edges.
+
+#screenshot("clear-missing.png", [A region whose geometry selection holds a face of a deleted mesh: #ui("Clear Missing (1)") removes it])
 
 #screenshot("region-confirm.png", [A region with the confirm button next to #ui("..."), while the selection window is open])
 

@@ -478,13 +478,12 @@ pub fn status_tabs(
     clicked
 }
 
-/// A hand on a mouse jitters: egui's 6 px between press and release, and 0.3 s between two
-/// clicks, drop many double clicks (tree rows, blocks). Windows allows 0.5 s.
+/// A hand on a mouse jitters: egui's 6 px between press and release drop many double clicks.
+/// The delay between two clicks stays at egui's 0.3 s: a longer one makes egui count every click
+/// after a double click as a triple click (`double_clicked` is then false for good, as long as the
+/// clicking goes on); the tree allows slower double clicks by itself.
 pub fn click_tolerance(ctx: &egui::Context) {
-    ctx.options_mut(|o| {
-        o.input_options.max_click_dist = 10.0;
-        o.input_options.max_double_click_delay = 0.5;
-    });
+    ctx.options_mut(|o| o.input_options.max_click_dist = 10.0);
 }
 
 #[cfg(test)]
@@ -529,5 +528,51 @@ mod tests {
             super::INTERACT_HEIGHT,
             "INTERACT_HEIGHT no longer covers the text"
         );
+    }
+}
+
+#[cfg(test)]
+mod click_tests {
+    /// Double clicks one after the other on a plain widget: each pair must be a double click.
+    #[test]
+    fn double_clicks_in_a_row_stay_double_clicks() {
+        let ctx = egui::Context::default();
+        super::click_tolerance(&ctx);
+        let time = std::cell::Cell::new(1.0);
+        let pos = egui::pos2(20.0, 20.0);
+        let frame = |events: Vec<egui::Event>| {
+            time.set(time.get() + 0.05);
+            let input = egui::RawInput {
+                time: Some(time.get()),
+                events,
+                ..Default::default()
+            };
+            let mut double = false;
+            let mut out = ctx.run_ui(input, |ui| {
+                let r = ui.allocate_response(egui::vec2(100.0, 100.0), egui::Sense::click());
+                double = r.double_clicked();
+            });
+            out.textures_delta.clear();
+            double
+        };
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![egui::Event::PointerMoved(pos)]);
+        for pair in 0..6 {
+            frame(vec![button(true)]);
+            frame(vec![button(false)]);
+            frame(vec![]);
+            frame(vec![button(true)]);
+            let double = frame(vec![button(false)]);
+            assert!(double, "pair {pair}");
+            // Half a second to a second later, the next try: with a longer double click delay
+            // egui counts it as a triple click.
+            time.set(time.get() + 0.7);
+            frame(vec![]);
+        }
     }
 }
