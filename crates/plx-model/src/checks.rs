@@ -3361,7 +3361,18 @@ impl FeModel {
             }
         };
         let axis = |d: usize| std::array::from_fn(|i| if i == d { 1.0 } else { 0.0 });
+        // The export leaves the slave nodes of cyclic symmetries out of the boundary
+        // conditions: they follow the master side.
+        let mut cyclic_slaves: HashSet<NodeId> = HashSet::new();
+        for tie in (self.ties.iter()).filter(|t| t.active && t.cyclic.is_some()) {
+            let master: HashSet<NodeId> = tie.master.nodes(mesh).into_iter().collect();
+            cyclic_slaves
+                .extend((tie.slave.nodes(mesh).into_iter()).filter(|n| !master.contains(n)));
+        }
         for &(node, dof) in fixed.keys() {
+            if cyclic_slaves.contains(&node) {
+                continue;
+            }
             if dof < 3 {
                 support(node, axis(dof), false);
             } else if dof < 6
@@ -3372,6 +3383,9 @@ impl FeModel {
             }
         }
         for &(node, direction, rotation) in skewed {
+            if cyclic_slaves.contains(&node) {
+                continue;
+            }
             let rotates = space == ModelSpace::ThreeD
                 && (mesh.node_index(node)).is_some_and(|i| trusses.rotational[i]);
             if !rotation || rotates {
@@ -3582,6 +3596,43 @@ impl FeModel {
             let (a, b) = (pieces(&tie.master), pieces(&tie.slave));
             join(&mut ties, &a, &b);
             join(&mut contacts, &a, &b);
+            // A cyclic symmetry makes the slave side move like the master side turned by one
+            // sector, `u_s = R u_m`: of the rigid motions it lets only those through that look
+            // the same in every sector, the displacement along the axis and the turn about it.
+            let Some(Ok(rotation)) = tie.cyclic_rotation(mesh) else {
+                continue;
+            };
+            if space != ModelSpace::ThreeD {
+                continue;
+            }
+            let inverse = rotation.transpose();
+            let origin = (tie.cyclic.as_ref())
+                .map_or(glam::DVec3::ZERO, |c| glam::DVec3::from(c.axis_point));
+            let center_v = glam::DVec3::from(center);
+            for node in tie.slave.nodes(mesh) {
+                let (Some(piece), Some(x)) = (check.piece_of(mesh, node), mesh.node(node)) else {
+                    continue;
+                };
+                let slave = glam::DVec3::from(x);
+                let master = origin + inverse * (slave - origin);
+                let (r_s, r_m) = ((slave - center_v) / size, (master - center_v) / size);
+                let gram = &mut grams[piece as usize];
+                for i in 0..3 {
+                    let mut row = rigid_row(space, r_s.to_array(), axis(i));
+                    for j in 0..3 {
+                        let turned = rigid_row(space, r_m.to_array(), axis(j));
+                        let weight = rotation.col(j)[i];
+                        for (value, t) in row.iter_mut().zip(turned) {
+                            *value -= weight * t;
+                        }
+                    }
+                    for a in 0..6 {
+                        for b in 0..6 {
+                            gram[a][b] += row[a] * row[b];
+                        }
+                    }
+                }
+            }
         }
         for pair in self.contact_pairs.iter().filter(|c| c.active) {
             let (a, b) = (pieces(&pair.master), pieces(&pair.slave));
@@ -4721,6 +4772,101 @@ mod tests {
             f.nodal_diameters = Some([0, 4]);
         }
         assert_eq!(cyclic(&model), []);
+    }
+
+    /// A cyclic symmetry holds a sector like the whole ring: in every rigid motion but the
+    /// displacement along the axis and the turn about it.
+    #[test]
+    fn a_cyclic_symmetry_holds_a_sector_but_along_and_about_its_axis() {
+        // A quarter of a ring about the z axis: the master side in the xz plane, the slave
+        // side in the yz plane.
+        let mut mesh = FeMesh::default();
+        for (id, [x, y, z]) in [
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 1.0],
+            [2.0, 0.0, 1.0],
+            [0.0, 2.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            mesh.set_node(id as u32 + 1, [x, y, z]);
+        }
+        mesh.add_element(Element {
+            id: 1,
+            type_name: "C3D8".into(),
+            shape: ElementShape::Hex8,
+            nodes: (1..=8).collect(),
+        })
+        .unwrap();
+        mesh.parts.push(Part {
+            bodies: Vec::new(),
+            name: "SECTOR".into(),
+            elements: vec![1],
+        });
+        let mut model = model(&mesh);
+        model.steps[0].loads[0].region = Region::Nodes(vec![7]);
+        let mut tie = crate::Tie::new("Tie-1");
+        tie.master = Region::Nodes(vec![1, 2, 5, 6]);
+        tie.slave = Region::Nodes(vec![3, 4, 7, 8]);
+        tie.cyclic = Some(crate::CyclicSymmetry::default());
+        model.ties.push(tie);
+        let held = |model: &mut FeModel, nodes: Vec<NodeId>, dofs: [Option<f64>; 6]| {
+            let bc = &mut model.steps[0].boundary_conditions[0];
+            bc.region = Region::Nodes(nodes);
+            bc.kind = BoundaryKind::displacement(dofs);
+        };
+        let rigid = |model: &FeModel| -> Vec<String> {
+            (check(model, &mesh).into_iter())
+                .filter(|f| f.problem == Problem::RigidBodyMotion)
+                .map(|f| f.detail)
+                .collect()
+        };
+        // Held along the axis on the master side: the sector still turns about the axis.
+        let axial = [None, None, Some(0.0), None, None, None];
+        held(&mut model, vec![1, 2], axial);
+        let found = rigid(&model);
+        assert!(
+            !found.is_empty() && found.iter().all(|f| f.ends_with(": rotation about Z free")),
+            "{found:?}"
+        );
+        // Turned the other way round, the master side on the yz plane, it is the same.
+        let swap = |model: &mut FeModel| {
+            let tie = &mut model.ties[0];
+            std::mem::swap(&mut tie.master, &mut tie.slave);
+        };
+        swap(&mut model);
+        assert_eq!(rigid(&model), found);
+        swap(&mut model);
+        // Without the cyclic symmetry it also slides and tilts.
+        model.ties[0].cyclic = None;
+        let found = rigid(&model);
+        assert!(
+            !found.is_empty() && !found.iter().any(|f| f.ends_with(": rotation about Z free")),
+            "{found:?}"
+        );
+        // Held tangentially as well at one node, the cyclic sector is held.
+        model.ties[0].cyclic = Some(crate::CyclicSymmetry::default());
+        held(
+            &mut model,
+            vec![2],
+            [None, Some(0.0), Some(0.0), None, None, None],
+        );
+        let mut bc = model.steps[0].boundary_conditions[0].clone();
+        bc.id = crate::Id::new();
+        bc.region = Region::Nodes(vec![1]);
+        bc.kind = BoundaryKind::displacement(axial);
+        model.steps[0].boundary_conditions.push(bc);
+        assert_eq!(rigid(&model), Vec::<String>::new());
+        // A support on the slave side is left out of the input file: it does not hold.
+        model.steps[0].boundary_conditions[0].region = Region::Nodes(vec![3]);
+        model.steps[0].boundary_conditions[0].kind =
+            BoundaryKind::displacement([Some(0.0), None, None, None, None, None]);
+        assert!(!rigid(&model).is_empty());
     }
 
     #[test]
