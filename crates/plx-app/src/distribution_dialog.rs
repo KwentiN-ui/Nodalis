@@ -4,7 +4,7 @@
 
 use egui::Ui;
 use plx_model::{
-    Distribution, DistributionKind, FeModel, Field, Interpolation, Quantity, parse_points,
+    Distribution, DistributionKind, FeModel, Field, Interpolation, LengthUnit, parse_points,
 };
 
 use crate::model::Model;
@@ -266,8 +266,6 @@ pub fn distribution_rows(
     view: &mut DistributionView,
     model: &Model,
 ) {
-    let units = model.fe.properties.units;
-    let length = units.unit(Quantity::Length);
     ui.label("Type");
     let by_equation = matches!(distribution.kind, DistributionKind::Equation(_));
     crate::layout::wrapped_row(ui, |ui| {
@@ -298,6 +296,35 @@ pub fn distribution_rows(
         200.0,
     );
     ui.end_row();
+    ui.label("Length unit");
+    let before = distribution.length;
+    egui::ComboBox::from_id_salt("distribution length unit")
+        .selected_text(before.label())
+        .width(crate::dock::fit_width(ui, 80.0))
+        .show_ui(ui, |ui| {
+            for option in LengthUnit::ALL {
+                ui.selectable_value(&mut distribution.length, option, option.label());
+            }
+        })
+        .response
+        .on_hover_text(
+            "The unit the equation takes x, y, z and r in and the points file gives its \
+             coordinates in. It belongs to the distribution: changing the project's units \
+             leaves the factors as they are.",
+        );
+    ui.end_row();
+    // The numbers of the file stay, now read in the new unit.
+    if distribution.length != before
+        && let DistributionKind::Points { points, .. } = &mut distribution.kind
+    {
+        for point in points.iter_mut() {
+            for coordinate in &mut point[..3] {
+                *coordinate = distribution.length.to_meters(before.of_meters(*coordinate));
+            }
+        }
+    }
+    let length = distribution.length.label();
+    let distribution_length = distribution.length;
     if fe.system_attachment(distribution.system).is_some() {
         ui.label("");
         ui.colored_label(
@@ -369,7 +396,7 @@ pub fn distribution_rows(
                         .pick_file()
                 {
                     let read = std::fs::read_to_string(&path).map_err(|e| e.to_string());
-                    match read.and_then(|text| parse_points(&text, units)) {
+                    match read.and_then(|text| parse_points(&text, distribution_length)) {
                         Ok(read) => {
                             *points = read;
                             *source = (path.file_name())
@@ -483,7 +510,7 @@ fn variable_rows(ui: &mut Ui, variables: &mut Vec<plx_model::DistributionVariabl
 
 /// The factors at the nodes of the mesh, with the smallest and largest.
 fn factor_range(distribution: &Distribution, model: &Model) -> FactorRange {
-    let sampler = distribution.sampler(model.fe.properties.units, &model.fe.coordinate_systems)?;
+    let sampler = distribution.sampler(&model.fe.coordinate_systems)?;
     let factors: Vec<f64> = (model.mesh.coords().iter())
         .map(|&p| sampler.factor(p))
         .collect();

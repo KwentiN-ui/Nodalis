@@ -1764,7 +1764,7 @@ fn distribution(
             distribution: id.to_string(),
         });
     };
-    (distribution.sampler(model.properties.units, &model.coordinate_systems))
+    (distribution.sampler(&model.coordinate_systems))
         .map(Some)
         .map_err(|reason| WriteError::InvalidDistribution {
             item: item.to_owned(),

@@ -20,6 +20,55 @@ pub enum UnitSystem {
     MmKgSC,
 }
 
+/// A unit of length on its own, for values that keep their unit when the project's unit
+/// system changes, like the coordinates of a distribution's equation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LengthUnit {
+    Meter,
+    #[default]
+    Millimeter,
+    Inch,
+}
+
+impl LengthUnit {
+    pub const ALL: [LengthUnit; 3] = [LengthUnit::Meter, LengthUnit::Millimeter, LengthUnit::Inch];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LengthUnit::Meter => "m",
+            LengthUnit::Millimeter => "mm",
+            LengthUnit::Inch => "in",
+        }
+    }
+
+    /// A length in meters in this unit.
+    pub fn of_meters(self, meters: f64) -> f64 {
+        meters / self.meters()
+    }
+
+    /// A length in this unit in meters.
+    pub fn to_meters(self, value: f64) -> f64 {
+        value * self.meters()
+    }
+
+    fn meters(self) -> f64 {
+        match self {
+            LengthUnit::Meter => 1.0,
+            LengthUnit::Millimeter => 1e-3,
+            LengthUnit::Inch => 0.0254,
+        }
+    }
+
+    /// The length unit of a unit system; meters without units, as lengths are stored.
+    pub fn of(units: UnitSystem) -> Self {
+        match units {
+            UnitSystem::Unitless | UnitSystem::MKgSC | UnitSystem::MTonSC => LengthUnit::Meter,
+            UnitSystem::MmTonSC | UnitSystem::MmKgSC => LengthUnit::Millimeter,
+            UnitSystem::InLbSF => LengthUnit::Inch,
+        }
+    }
+}
+
 /// Kinds of quantities the unit system names a unit for.
 pub const BASE_QUANTITIES: [Quantity; 5] = [
     Quantity::Length,

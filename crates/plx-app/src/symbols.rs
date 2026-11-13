@@ -208,9 +208,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
         // region, and the arrows or balls it scales.
         let sampler = (item.distribution)
             .and_then(|id| model.fe.distribution(id))
-            .and_then(|d| {
-                (d.sampler(model.fe.properties.units, &model.fe.coordinate_systems)).ok()
-            });
+            .and_then(|d| d.sampler(&model.fe.coordinate_systems).ok());
         let scaled = |points: &[DVec3]| -> Option<(Vec<f64>, f64, Vec<usize>)> {
             let sampler = sampler.as_ref()?;
             let factors: Vec<f64> = points.iter().map(|&p| sampler.factor(p.into())).collect();

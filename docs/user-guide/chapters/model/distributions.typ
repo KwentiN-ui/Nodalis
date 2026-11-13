@@ -18,9 +18,14 @@ temperature gradient for thermal expansion. Create a distribution with
     file are given in: #ui("Global") or one of the coordinate systems of the model
     (@coordinate-systems). A system that moves with a selection counts where it is in the
     undeformed model.],
+  [Length unit], [The unit the equation takes `x`, `y`, `z` and `r` in and the points of a file
+    give their coordinates in: m, mm or in. A new distribution starts with the length unit of the
+    project. The unit belongs to the distribution, so changing the project's units later leaves
+    its factors as they are. Changing it for a point file reads the numbers of the file again in
+    the new unit.],
   [Factor =], [The equation. It can use `x`, `y` and `z` along the axes of the coordinate system,
     `r`, the distance from its z axis, and `theta`, the angle about its z axis from its x axis in
-    radians (-pi to pi); lengths are in the length unit of the project. With a cylindrical system
+    radians (-pi to pi); lengths are in the length unit above. With a cylindrical system
     `r`, `theta` and `z` are its own coordinates; they work in a rectangular system too. Below the
     field the dialog shows the smallest and largest factor at the nodes of the mesh, or, in red,
     what is wrong with the equation, while you type.],
@@ -54,11 +59,19 @@ temperature boundary condition that uses a distribution show it too: each arrow 
 large as the factor where it is, relative to the largest one over the region; a negative factor
 turns a pressure arrow around, where the factor is zero there is none.
 
+The factor is a plain number: the unit comes from the value of the pressure or temperature
+that uses it. For a hydrostatic pressure `rho * g * (h - z)` with `rho` = 1000 (kg/m³), `g` =
+9.81 (m/s²) and the length unit m the factor is the pressure in Pa, so the pressure's value is
+`1 Pa`.
+
+#screenshot("distribution-length-unit.png", [A hydrostatic pressure in meters in a project in
+  millimeters: the factor is the pressure in Pa, from 0 at the water level to 7848 at its foot])
+
 #screenshot("distribution-preview.png", [The factor in colours over the mesh and the arrows of a
   pressure that uses the distribution, scaled by it])
 
 With #ui("Points from file") the factors come from a text file with one point per line:
-`X Y Z factor`, the coordinates in the length unit of the project along the axes of the
+`X Y Z factor`, the coordinates in the length unit of the distribution along the axes of the
 coordinate system (also of a cylindrical one), separated by blanks, tabs,
 commas or semicolons. Lines starting with `#` and lines that hold no four numbers, such as a
 header, are skipped. #ui("Import ...") reads the file into the model, so the project no longer

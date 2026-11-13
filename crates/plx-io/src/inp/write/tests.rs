@@ -10869,6 +10869,7 @@ fn a_name_from_the_definition_follows_the_type() {
     assert_eq!(region.name, format!("Frictional{rest}"));
 }
 
+/// An equation in meters, as the cantilever's coordinates are given.
 fn equation(name: &str, text: &str) -> plx_model::Distribution {
     plx_model::Distribution {
         id: named(name),
@@ -10876,6 +10877,7 @@ fn equation(name: &str, text: &str) -> plx_model::Distribution {
         kind: plx_model::DistributionKind::Equation(text.into()),
         system: None,
         variables: Vec::new(),
+        length: plx_model::LengthUnit::Meter,
     }
 }
 
