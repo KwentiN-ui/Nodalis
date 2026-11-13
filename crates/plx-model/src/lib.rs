@@ -153,7 +153,7 @@ pub use signature::{EntitySignature, TagMap, match_entities};
 pub use solver_diagnostics::{Origins, diagnose_solver_check};
 pub use study::{DesignPoint, FillMode, FillRule, PointRun, PointState, StudyColumn, StudyTable};
 pub use symmetry::{BeamsOnPlane, SymmetryError, SymmetryPlane, symmetry_dofs, symmetry_plane};
-pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, STORED, UnitSystem};
+pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, LengthUnit, Quantity, STORED, UnitSystem};
 pub use validity::{Invalid, ModelItem};
 
 use std::path::{Path, PathBuf};
@@ -219,8 +219,10 @@ use serde::{Deserialize, Serialize};
 /// unit system its schematic shows values in, in place of one for each block; formats 21 to
 /// 38 read as they are, in the default units. Format 40 gives distributions a coordinate
 /// system and named variables ([`Distribution::system`], [`Distribution::variables`]);
-/// formats 21 to 39 read as they are.
-pub const PROJECT_FORMAT: u32 = 40;
+/// formats 21 to 39 read as they are. Format 41 gives a distribution its own length unit
+/// ([`Distribution::length`]), so that changing the project's units leaves its factors as
+/// they are; formats 21 to 40 read as they are, in millimeters.
+pub const PROJECT_FORMAT: u32 = 41;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

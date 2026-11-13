@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::coordinate_system::{CoordinateSystem, Frame};
 use crate::equation::Equation;
-use crate::units::{Quantity, UnitSystem};
+use crate::units::{LengthUnit, Quantity, UnitSystem};
 
 /// A factor over the model, given by an equation or by points with a value each.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -24,6 +24,11 @@ pub struct Distribution {
     /// Named numbers the equation can use, each of which can be exposed as a parameter.
     #[serde(default)]
     pub variables: Vec<DistributionVariable>,
+    /// The unit the equation takes its coordinates in and the points file gives them in. It
+    /// belongs to the distribution, so that changing the project's units does not change the
+    /// factors.
+    #[serde(default)]
+    pub length: LengthUnit,
 }
 
 /// A named number of a distribution's equation.
@@ -108,6 +113,7 @@ impl Distribution {
             kind: DistributionKind::Equation("1".into()),
             system: None,
             variables: Vec::new(),
+            length: LengthUnit::default(),
         }
     }
 
@@ -155,15 +161,10 @@ impl Distribution {
         None
     }
 
-    /// The factor at positions given in meters; `units` are the analysis' units, whose
-    /// length unit the equation takes its coordinates in, `systems` the coordinate systems
-    /// of the model. Fails when the equation is invalid, there are no points or the
-    /// coordinate system is missing.
-    pub fn sampler(
-        &self,
-        units: UnitSystem,
-        systems: &[CoordinateSystem],
-    ) -> Result<Sampler, String> {
+    /// The factor at positions given in meters; `systems` are the coordinate systems of the
+    /// model. The equation takes its coordinates in [`Self::length`]. Fails when the
+    /// equation is invalid, there are no points or the coordinate system is missing.
+    pub fn sampler(&self, systems: &[CoordinateSystem]) -> Result<Sampler, String> {
         let frame = match self.system {
             None => Frame::global_system(),
             Some(id) => {
@@ -204,7 +205,7 @@ impl Distribution {
                 Ok(Sampler::Equation {
                     equation,
                     inputs,
-                    units,
+                    length: self.length,
                     frame,
                 })
             }
@@ -231,7 +232,7 @@ impl Distribution {
     /// Why the distribution cannot be evaluated with the coordinate systems `systems`, if
     /// it cannot.
     pub fn problem(&self, systems: &[CoordinateSystem]) -> Option<String> {
-        self.sampler(UnitSystem::default(), systems).err()
+        self.sampler(systems).err()
     }
 }
 
@@ -251,7 +252,8 @@ pub enum Sampler {
         equation: Equation,
         /// What each variable of the equation stands for.
         inputs: Vec<Input>,
-        units: UnitSystem,
+        /// The unit of the coordinates.
+        length: LengthUnit,
         /// The coordinate system the coordinates are taken in.
         frame: Frame,
     },
@@ -270,11 +272,11 @@ impl Sampler {
             Sampler::Equation {
                 equation,
                 inputs,
-                units,
+                length: unit,
                 frame,
             } => {
                 let local = frame.cartesian_local(position).unwrap_or([f64::NAN; 3]);
-                let length = |v: f64| units.shown(v, Quantity::Length);
+                let length = |v: f64| unit.of_meters(v);
                 let values: Vec<f64> = (inputs.iter())
                     .map(|input| match *input {
                         Input::Constant(value) => value,
@@ -394,11 +396,11 @@ impl KdTree {
     }
 }
 
-/// Reads points from text with an `X Y Z value` row per point, the coordinates in the
-/// length unit of `units`. Columns may be separated by blanks, tabs, commas or semicolons;
+/// Reads points from text with an `X Y Z value` row per point, the coordinates in
+/// `length`. Columns may be separated by blanks, tabs, commas or semicolons;
 /// lines starting with `#` and lines that hold no four numbers, like a header, are skipped.
 /// Returns the points with their positions in meters, or why there are none.
-pub fn parse_points(text: &str, units: UnitSystem) -> Result<Vec<[f64; 4]>, String> {
+pub fn parse_points(text: &str, unit: LengthUnit) -> Result<Vec<[f64; 4]>, String> {
     let mut points = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -413,7 +415,7 @@ pub fn parse_points(text: &str, units: UnitSystem) -> Result<Vec<[f64; 4]>, Stri
         let Some(numbers) = numbers.filter(|n| n.len() >= 4) else {
             continue;
         };
-        let length = |v: f64| units.stored(v, Quantity::Length);
+        let length = |v: f64| unit.to_meters(v);
         points.push([
             length(numbers[0]),
             length(numbers[1]),
@@ -442,17 +444,19 @@ mod tests {
             },
             system: None,
             variables: Vec::new(),
+            length: LengthUnit::Millimeter,
         }
     }
 
     #[test]
-    fn equation_takes_coordinates_in_the_length_unit_of_the_analysis() {
+    fn equation_takes_coordinates_in_the_length_unit_of_the_distribution() {
         let mut distribution = Distribution::new("Depth");
         distribution.kind = DistributionKind::Equation("=1 - z/200 + 0*X".into());
-        let sampler = distribution.sampler(UnitSystem::MmTonSC, &[]).unwrap();
+        let sampler = distribution.sampler(&[]).unwrap();
         // 0.1 m = 100 mm
         assert!((sampler.factor([0.0, 0.0, 0.1]) - 0.5).abs() < 1e-12);
-        let sampler = distribution.sampler(UnitSystem::MKgSC, &[]).unwrap();
+        distribution.length = LengthUnit::Meter;
+        let sampler = distribution.sampler(&[]).unwrap();
         assert!((sampler.factor([0.0, 0.0, 100.0]) - 0.5).abs() < 1e-12);
     }
 
@@ -475,7 +479,7 @@ mod tests {
             })
             .collect();
         let distribution = points(cloud.clone(), Interpolation::ClosestPoint);
-        let sampler = distribution.sampler(UnitSystem::default(), &[]).unwrap();
+        let sampler = distribution.sampler(&[]).unwrap();
         for i in 0..200 {
             let t = i as f64 * 0.11;
             let p = [t.cos() * 0.9, (t * 1.7).sin(), (t * 0.3).cos()];
@@ -491,7 +495,7 @@ mod tests {
             vec![[0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 3.0]],
             Interpolation::Shepard,
         );
-        let sampler = distribution.sampler(UnitSystem::default(), &[]).unwrap();
+        let sampler = distribution.sampler(&[]).unwrap();
         assert_eq!(sampler.factor([1.0, 0.0, 0.0]), 3.0);
         assert!((sampler.factor([0.5, 0.0, 0.0]) - 2.0).abs() < 1e-12);
         let quarter = sampler.factor([0.25, 0.0, 0.0]);
@@ -503,7 +507,7 @@ mod tests {
         let sampler = Distribution::new("Half");
         let mut sampler = sampler;
         sampler.kind = DistributionKind::Equation("=0.5".into());
-        let sampler = sampler.sampler(UnitSystem::InLbSF, &[]).unwrap();
+        let sampler = sampler.sampler(&[]).unwrap();
         let units = UnitSystem::InLbSF;
         let stored = units.stored(100.0, Quantity::Temperature);
         let scaled = sampler.scale(stored, Quantity::Temperature, units, [0.0; 3]);
@@ -524,13 +528,13 @@ mod tests {
         distribution.system = Some(system.id);
         distribution.kind = DistributionKind::Equation("=r + 1000*z + 0*x".into());
         let systems = [system];
-        let sampler = distribution.sampler(UnitSystem::MmTonSC, &systems).unwrap();
+        let sampler = distribution.sampler(&systems).unwrap();
         // 30 mm from the axis, 20 mm along it
         let f = sampler.factor([0.12, 0.0, 0.03]);
         assert!((f - (30.0 + 1000.0 * 20.0)).abs() < 1e-9, "{f}");
         // Local y is global z: theta is 90 degrees there.
         distribution.kind = DistributionKind::Equation("=theta".into());
-        let sampler = distribution.sampler(UnitSystem::MmTonSC, &systems).unwrap();
+        let sampler = distribution.sampler(&systems).unwrap();
         let theta = sampler.factor([0.5, 0.0, 0.03]);
         assert!(
             (theta - std::f64::consts::FRAC_PI_2).abs() < 1e-12,
@@ -542,7 +546,7 @@ mod tests {
             points: vec![[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.05, 2.0]],
             interpolation: Interpolation::ClosestPoint,
         };
-        let sampler = distribution.sampler(UnitSystem::MmTonSC, &systems).unwrap();
+        let sampler = distribution.sampler(&systems).unwrap();
         assert_eq!(sampler.factor([0.15, 0.0, 0.0]), 2.0);
         assert_eq!(sampler.factor([0.1, 0.01, 0.0]), 1.0);
         // A missing system cannot be evaluated.
@@ -562,7 +566,7 @@ mod tests {
         distribution.variables[1].value = 200.0;
         assert_eq!(distribution.variables[0].name, "p1");
         distribution.kind = DistributionKind::Equation("=p1 * (1 - z/h)".into());
-        let sampler = distribution.sampler(UnitSystem::MmTonSC, &[]).unwrap();
+        let sampler = distribution.sampler(&[]).unwrap();
         assert!((sampler.factor([0.0, 0.0, 0.1]) - 2.0).abs() < 1e-12);
         for bad in ["theta", "2h", "p1", "", "Pi"] {
             distribution.variables[1].name = bad.into();
@@ -608,7 +612,7 @@ mod tests {
     #[test]
     fn reads_points_in_the_length_unit_of_the_analysis() {
         let text = "# pressure map\nX Y Z P\n0 0 0 1\n1000,0,0,2\n\n10;20;30;3.5\n";
-        let points = parse_points(text, UnitSystem::MmTonSC).unwrap();
+        let points = parse_points(text, LengthUnit::Millimeter).unwrap();
         assert_eq!(
             points,
             [
@@ -617,6 +621,6 @@ mod tests {
                 [0.01, 0.02, 0.03, 3.5]
             ]
         );
-        assert!(parse_points("Hello\n1 2 3", UnitSystem::MmTonSC).is_err());
+        assert!(parse_points("Hello\n1 2 3", LengthUnit::Millimeter).is_err());
     }
 }

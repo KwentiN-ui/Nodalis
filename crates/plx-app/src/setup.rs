@@ -2609,7 +2609,9 @@ impl Editor {
             }
             NewItem::Distribution => {
                 let name = next_name("Distribution", names(&fe.distributions, |d| &d.name));
-                Draft::Distribution(Distribution::new(name), DistributionView::default())
+                let mut distribution = Distribution::new(name);
+                distribution.length = plx_model::LengthUnit::of(fe.properties.units);
+                Draft::Distribution(distribution, DistributionView::default())
             }
             NewItem::ResultFieldOutput
             | NewItem::ResultHistoryOutput
