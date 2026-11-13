@@ -12,7 +12,7 @@ step active, and pick the type #ui("Excitation (impulse, sine, chirp)").
   with the plot of the signal over the step])
 
 #fields(
-  [FX, FY, FZ], [The peak force (`FR`, `FTheta`, `FZ` in a cylindrical system). The signal swings between it and its negative (an impulse
+  [FX, FY, FZ], [The peak force (#ui("F radial"), #ui("F tangential"), #ui("F axial") in a cylindrical system). The signal swings between it and its negative (an impulse
     only reaches it). It acts on faces, edges or points like a #ui("Force")
     (@force-region), with #ui("Apply to all nodes individually") at every node.],
   [Signal], [#ui("Impulse"), #ui("Sine") or #ui("Chirp"), see below. Switching keeps the

@@ -14,7 +14,7 @@ plates (rotations).
 #fields(
   [Displacement/Rotation], [Prescribed values for the ticked components `X`, `Y`, `Z`
     (length) and `RX`, `RY`, `RZ` (angle in radians). In a cylindrical
-    #ui("Coordinate system") they are named `R`, `Theta`, `Z` and `RR`, `RTheta`, `RZ`
+    #ui("Coordinate system") they are named #ui("Radial"), #ui("Tangential"), #ui("Axial") and #ui("Rot. radial"), #ui("Rot. tangential"), #ui("Rot. axial")
     instead (radial, tangential, axial); the names follow the chosen system at once. In the
     input file and the results they are the components 1, 2, 3 (`U1` to `UR3`). Unticked components are free. A new
     one holds all components at zero, a fixed support. Leave the rotations of a face free and
@@ -54,7 +54,7 @@ a beam end on a hinge, a shaft end turned by an angle, a bolt hole held in place
 turns about it. The line below #ui("Behavior") always says which of the two the input file gets.
 
 #screenshot("bc-cylindrical-directions.png", [Components of a support in a cylindrical
-  system: `R`, `Theta`, `Z` and the rotations `RR`, `RTheta`, `RZ`])
+  system: Radial, Tangential, Axial and the rotations about these directions])
 
 #screenshot("displacement-hinge.png", [End face of a beam held in `X` to `Z` and in the twist
   `RX`, free to turn about `RY` and `RZ`: a rigid point at its centre, about which it turns])
@@ -64,7 +64,7 @@ turns about it. The line below #ui("Behavior") always says which of the two the 
     every node directly. #ui("Rigid") and #ui("Deformable") always use a point.],
   [Coordinate system], [The directions of the components (and of the coordinates below):
     #ui("Global") or a coordinate system under #ui("Features") (@features). In a cylindrical
-    system the components are radial (`R`), tangential (`Theta`) and axial (`Z`), and the dialog
+    system the components are radial, tangential and axial, and the dialog
     names them so as soon as the system is chosen. Held at each node, the directions
     are those at the node (a `*TRANSFORM` of the nodes); held at a point, those at the point.
     The cones and plates in the 3D view point along the axes of the system, in a cylindrical
@@ -308,8 +308,8 @@ entered as the total: multiply it by the area or the volume of the region. In ax
 A #ui("Force"), an #ui("Excitation") and a #ui("Moment") take their components in a
 #ui("Coordinate system") of the features (@features), like a displacement does; the
 default is the global one. In a rectangular system `FX` to `FZ` act along its x, y and z axes;
-in a cylindrical one the dialog names them `FR`, `FTheta`, `FZ` (and the moments `MR`,
-`MTheta`, `MZ`): radial, tangential and axial at every node, so a force on a ring of
+in a cylindrical one the dialog names them #ui("F radial"), #ui("F tangential"), #ui("F axial") (and the moments
+#ui("M radial") to #ui("M axial")): radial, tangential and axial at every node, so a force on a ring of
 faces can push outward all around or twist it. The arrows in the 3D view point the way the
 force acts.
 
@@ -348,8 +348,8 @@ and the coupling when the input file is written.
   a solid beam: the arrows at the point with lines to the face])
 
 #fields(
-  [FX, FY, FZ], [Force at the point, in the directions of the coordinate system (`FR`,
-    `FTheta`, `FZ` in a cylindrical one). In plane models `FX` and `FY`, in axisymmetric models on the full circumference.],
+  [FX, FY, FZ], [Force at the point, in the directions of the coordinate system (#ui("F radial"),
+    #ui("F tangential"), #ui("F axial") in a cylindrical one). In plane models `FX` and `FY`, in axisymmetric models on the full circumference.],
   [MX, MY, MZ], [Moment about the axes of the coordinate system through the point. Plane
     models take `MZ`, axisymmetric models none.],
   [Behavior], [#ui("Rigid") (default): the selection keeps its shape and follows the point as a

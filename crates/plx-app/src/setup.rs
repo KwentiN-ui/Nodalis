@@ -1611,7 +1611,7 @@ fn direction_rows(
         .is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
     if cylindrical {
         ui.label("");
-        ui.weak("R, Theta, Z are the radial, tangential and axial directions at every node.");
+        ui.weak("Radial, tangential and axial are the directions at every node.");
         ui.end_row();
     }
     if fe.system_attachment(*system).is_some() {
@@ -2047,7 +2047,7 @@ fn submodel_source_lines(
 }
 
 /// The names of the directions of a coordinate system in dialogs: X, Y, Z of a rectangular
-/// system, R, Theta, Z (radial, tangential, axial) of a cylindrical one. Only for display:
+/// system, Radial, Tangential, Axial of a cylindrical one. Only for display:
 /// the model keeps the components 1, 2, 3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Directions {
@@ -2068,7 +2068,14 @@ impl Directions {
     /// The displacements along the three directions and the rotations about them.
     pub(crate) fn dofs(self) -> [&'static str; 6] {
         if self.cylindrical {
-            ["R", "Theta", "Z", "RR", "RTheta", "RZ"]
+            [
+                "Radial",
+                "Tangential",
+                "Axial",
+                "Rot. radial",
+                "Rot. tangential",
+                "Rot. axial",
+            ]
         } else {
             ["X", "Y", "Z", "RX", "RY", "RZ"]
         }
@@ -2077,7 +2084,7 @@ impl Directions {
     /// The force components along the three directions.
     pub(crate) fn forces(self) -> [&'static str; 3] {
         if self.cylindrical {
-            ["FR", "FTheta", "FZ"]
+            ["F radial", "F tangential", "F axial"]
         } else {
             ["FX", "FY", "FZ"]
         }
@@ -2086,7 +2093,7 @@ impl Directions {
     /// The moment components about the three directions.
     pub(crate) fn moments(self) -> [&'static str; 3] {
         if self.cylindrical {
-            ["MR", "MTheta", "MZ"]
+            ["M radial", "M tangential", "M axial"]
         } else {
             ["MX", "MY", "MZ"]
         }
