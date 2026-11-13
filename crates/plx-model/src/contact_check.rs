@@ -46,7 +46,7 @@ pub struct ContactCheck {
     pub tolerance: f64,
     /// The smallest gap of the nodes that do not touch.
     pub min_gap: Option<f64>,
-    /// The largest gap of the nodes that touch, and the deepest overlap.
+    /// The largest gap of the nodes that touch, and the deepest overlap of all nodes.
     pub max_gap: Option<f64>,
     pub max_penetration: Option<f64>,
     /// The elements that moving the slave nodes on to the master side at the start (the
@@ -344,14 +344,51 @@ impl FeModel {
         };
         // Rope nodes stay on their axis, the radius off the master.
         let adjust = resolved.adjusts() && offset == 0.0;
-        check(mesh, master, slave, tolerance, offset, adjust)
+        check(mesh, master, slave, tolerance, offset, adjust, None)
     }
+
+    /// How many elements moving the slave nodes of `region` on to its master side at the
+    /// start would turn inside out, were it adjusted to touch as `resolved` says; 0 for a
+    /// region not adjusted. `elements_of` lists the elements of each node.
+    pub(crate) fn folded_by_adjusting(
+        mesh: &FeMesh,
+        region: &ContactRegion,
+        resolved: &Resolved,
+        elements_of: &HashMap<NodeId, Vec<ElementId>>,
+    ) -> usize {
+        if !resolved.adjusts() || resolved.node_to_surface {
+            return 0;
+        }
+        let (master, slave) = if resolved.a_is_master {
+            (&region.side_a, &region.side_b)
+        } else {
+            (&region.side_b, &region.side_a)
+        };
+        let Some(tolerance) =
+            (resolved.tolerance()).or(resolved.mesh_size.map(|h| crate::TOLERANCE_FACTOR * h))
+        else {
+            return 0;
+        };
+        check(mesh, master, slave, tolerance, 0.0, true, Some(elements_of))
+            .map_or(0, |c| c.folded.len())
+    }
+}
+
+/// The elements of each node of the mesh.
+pub(crate) fn elements_of_nodes(mesh: &FeMesh) -> HashMap<NodeId, Vec<ElementId>> {
+    let mut map: HashMap<NodeId, Vec<ElementId>> = HashMap::new();
+    for element in mesh.elements() {
+        for &n in &element.nodes {
+            map.entry(n).or_default().push(element.id);
+        }
+    }
+    map
 }
 
 /// The check of the slave nodes against the master faces; `offset` is subtracted from each
 /// distance, the radius of a rope whose axis the nodes are on. With `adjust` the slave nodes
 /// within the tolerance are moved on to the master as the solver moves them, to find the
-/// elements that turns inside out.
+/// elements that turns inside out, among those `elements_of` lists for the nodes if given.
 fn check(
     mesh: &FeMesh,
     master: &Region,
@@ -359,6 +396,7 @@ fn check(
     tolerance: f64,
     offset: f64,
     adjust: bool,
+    elements_of: Option<&HashMap<NodeId, Vec<ElementId>>>,
 ) -> Option<ContactCheck> {
     let faces = master.faces(mesh);
     let nodes = slave.nodes(mesh);
@@ -383,22 +421,28 @@ fn check(
         let Some((d, q)) = master.closest(p, radius).map(|(d, q)| (d - offset, q)) else {
             continue;
         };
-        if d <= tolerance {
+        if d < 0.0 {
+            check.max_penetration = Some(check.max_penetration.map_or(-d, |m| m.max(-d)));
+        }
+        // The solver ties and moves the nodes within the tolerance either way, as it
+        // measures the distance without a side: a node further behind the master, often
+        // only beside the edge of a curved side, stays where it is.
+        if d.abs() <= tolerance {
             check.touching += 1;
             if adjust {
                 moved.insert(n, q);
             }
-            if d < 0.0 {
-                check.max_penetration = Some(check.max_penetration.map_or(-d, |m| m.max(-d)));
-            } else {
+            if d >= 0.0 {
                 check.max_gap = Some(check.max_gap.map_or(d, |m| m.max(d)));
             }
         } else {
             near = true;
-            check.min_gap = Some(check.min_gap.map_or(d, |m| m.min(d)));
+            if d > 0.0 {
+                check.min_gap = Some(check.min_gap.map_or(d, |m| m.min(d)));
+            }
         }
     }
-    check.folded = folded(mesh, &moved);
+    check.folded = folded(mesh, &moved, elements_of);
     check.status = if check.touching == check.slave_nodes {
         ContactStatus::Closed
     } else if check.touching > 0 {
@@ -428,13 +472,31 @@ pub(crate) fn distances(mesh: &FeMesh, faces: &[(ElementId, u8)], points: &[Poin
         .collect()
 }
 
-/// The elements sound in the mesh that the nodes moved to `moved` turn inside out or fold.
-fn folded(mesh: &FeMesh, moved: &BTreeMap<NodeId, Point>) -> Vec<ElementId> {
+/// The elements sound in the mesh that the nodes moved to `moved` turn inside out or fold;
+/// `elements_of`, the elements of each node, spares looking through all elements.
+fn folded(
+    mesh: &FeMesh,
+    moved: &BTreeMap<NodeId, Point>,
+    elements_of: Option<&HashMap<NodeId, Vec<ElementId>>>,
+) -> Vec<ElementId> {
     if moved.is_empty() {
         return Vec::new();
     }
-    (mesh.elements().iter())
-        .filter(|e| e.nodes.iter().any(|n| moved.contains_key(n)))
+    let candidates: Vec<&plx_mesh::Element> = match elements_of {
+        Some(map) => {
+            let ids: std::collections::BTreeSet<ElementId> = (moved.keys())
+                .filter_map(|n| map.get(n))
+                .flatten()
+                .copied()
+                .collect();
+            ids.into_iter().filter_map(|id| mesh.element(id)).collect()
+        }
+        None => (mesh.elements().iter())
+            .filter(|e| e.nodes.iter().any(|n| moved.contains_key(n)))
+            .collect(),
+    };
+    candidates
+        .into_iter()
         .filter(|e| e.min_jacobian(mesh).is_some_and(|j| j > 0.0))
         .filter(|e| {
             let at = |n: NodeId| moved.get(&n).copied().or_else(|| mesh.node(n));
@@ -501,10 +563,30 @@ mod tests {
 
     #[test]
     fn an_adjustment_across_more_than_the_elements_folds_them() {
-        let (mesh, region) = overlapping_cubes(1.2);
+        let (mesh, mut region) = overlapping_cubes(1.2);
+        region.settings.interface = Some(InterfaceTreatment::AdjustToTouch);
         let model = FeModel::default();
         let check = model.check_contact(&region, &mesh).unwrap();
         assert_eq!(check.folded.len(), 1);
+    }
+
+    #[test]
+    fn auto_ties_as_is_where_adjusting_would_fold_elements() {
+        let model = FeModel::default();
+        let (mesh, region) = overlapping_cubes(1.2);
+        let resolved = model.resolve_contact(&region, &mesh);
+        assert!(!resolved.adjusts());
+        assert!(
+            resolved
+                .why
+                .iter()
+                .any(|w| w.starts_with("Initial gap: as is"))
+        );
+        let check = model.check_contact(&region, &mesh).unwrap();
+        assert!(check.folded.is_empty());
+        // A small overlap is still adjusted.
+        let (mesh, region) = overlapping_cubes(0.1);
+        assert!(model.resolve_contact(&region, &mesh).adjusts());
     }
 
     #[test]

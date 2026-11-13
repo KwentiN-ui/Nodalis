@@ -199,6 +199,9 @@ impl ContactBehavior {
     }
 }
 
+/// The reason of a contact pair adjusted to touch.
+const ADJUSTED: &str = "Adjusted to touch at the start";
+
 /// Friction coefficient of rough contact.
 pub const ROUGH_FRICTION: f64 = 10.0;
 
@@ -442,6 +445,22 @@ impl Resolved {
         }
     }
 
+    /// Ties the sides where they are instead of adjusting them to touch, as moving the slave
+    /// nodes would turn `folded` elements inside out.
+    fn tie_as_is(&mut self, folded: usize) {
+        match &mut self.kind {
+            ResolvedKind::Tie { adjust, .. } => *adjust = false,
+            ResolvedKind::Pair { adjust, .. } => *adjust = None,
+            ResolvedKind::NoSeparation { .. } => return,
+        }
+        self.why.retain(|w| w != ADJUSTED);
+        self.why.push(format!(
+            "Initial gap: as is, the sides are tied across the gap; adjusting them to touch \
+             would turn {folded} element{} inside out",
+            if folded == 1 { "" } else { "s" }
+        ));
+    }
+
     /// Whether slave nodes are moved onto the master at the start.
     pub fn adjusts(&self) -> bool {
         match &self.kind {
@@ -532,6 +551,8 @@ struct Properties {
     /// The distance each detection that found regions with an automatic tolerance searched
     /// within, by its id.
     detections: HashMap<Id, f64>,
+    /// The elements of each node, built when a region first needs them.
+    elements_of: std::cell::OnceCell<HashMap<NodeId, Vec<ElementId>>>,
 }
 
 /// What the derivation needs to know about the model.
@@ -741,6 +762,7 @@ impl FeModel {
             young: self.young_of_elements(mesh),
             conductivity: self.material_of_elements(mesh, |m| m.conductivity),
             detections,
+            elements_of: std::cell::OnceCell::new(),
         }
     }
 
@@ -820,7 +842,19 @@ impl FeModel {
             history_outputs: &self.history_outputs,
             detected_within,
         };
-        resolve(region, &a, &b, &model)
+        let mut resolved = resolve(region, &a, &b, &model);
+        // Auto adjusts a bonded region to touch, unless the gap is about as wide as the
+        // elements (a pin with play in its hole): moving the slave nodes across it would turn
+        // their elements inside out, so the sides are tied where they are.
+        if region.behavior == ContactBehavior::Bonded && region.settings.interface.is_none() {
+            let elements_of = (properties.elements_of)
+                .get_or_init(|| crate::contact_check::elements_of_nodes(mesh));
+            let folded = Self::folded_by_adjusting(mesh, region, &resolved, elements_of);
+            if folded > 0 {
+                resolved.tie_as_is(folded);
+            }
+        }
+        resolved
     }
 
     /// The model with its contact regions replaced by the ties, surface interactions and
@@ -1277,7 +1311,7 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
         });
         let adjust = adjust_to_touch.then(|| tolerance.unwrap_or(0.0));
         if adjust_to_touch {
-            why.push("Adjusted to touch at the start".into());
+            why.push(ADJUSTED.into());
         }
         // The solver takes a clearance for face-to-face penalty contact only.
         let clearance = match offset {

@@ -225,10 +225,14 @@ shows the derived value in brackets; choosing something else overrides it for th
     so that small gaps from meshing are closed. #ui("As is") keeps the mesh. #ui("Offset")
     sets the distance of the sides wherever they face each other, whatever the mesh: negative
     for an interference fit, such as a shaft pressed into a hub (`*CLEARANCE`, surface to
-    surface contacts only). Auto adjusts bonded regions and keeps the others as they are. Where
-    the sides are apart by about the size of the elements, moving the nodes would turn elements
-    inside out: the model check reports this as #ui("Adjustment folds elements") at the region,
-    with the elements; choose #ui("As is") there.],
+    surface contacts only). Auto adjusts bonded regions and keeps the others as they are,
+    except where the sides are apart by about the size of the elements, e.g. a pin with play in
+    its hole: moving the nodes there would turn elements inside out, so Auto ties the sides as
+    they are, across the gap, and says so in the reasons. A bonded region the contact detection
+    found therefore passes the model check without changes. Only #ui("Adjust to touch")
+    chosen by hand can still fold elements; the model check reports this as
+    #ui("Adjustment folds elements") at the region, with the elements: choose #ui("Auto") or
+    #ui("As is") there.],
   [Tolerance], [Distance within which the sides count as touching: tied by a tie, held by no
     separation, closed by the adjustment. Auto is a quarter of the slave mesh size, for a
     region a detection found at least the distance the detection searched within.],
@@ -241,6 +245,10 @@ shows the derived value in brackets; choosing something else overrides it for th
 
 #screenshot("contact-offset-dialog.png", [The advanced settings of a frictional region with an
   offset of -0.01 mm: the sides press into each other by 0.01 mm like an interference fit])
+
+#screenshot("contact-gap-as-is.png", [A bonded region the detection found between a finely
+  meshed pin and its hole with 0.5 of play: #ui("Auto") ties the sides as they are, as moving
+  the pin's nodes across the gap would turn 124 of its elements inside out])
 
 #ui("No Separation") is written without contact iterations: one equation per slave node within
 the tolerance holds it to the master side normal to the surface, while it slides freely along

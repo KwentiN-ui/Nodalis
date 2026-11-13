@@ -777,11 +777,12 @@ impl Problem {
                  out."
             }
             Problem::AdjustFoldsElements => {
-                "With Adjust to touch the solver moves every slave node within the tolerance \
-                 on to the master side before it starts. Where the sides are apart by about \
-                 the size of the elements, e.g. a pin with play in its hole or a gap left in \
-                 the CAD geometry, the moved nodes pull their elements inside out, and the \
-                 run aborts. The elements named are those the move folds."
+                "With Adjust to touch chosen, the solver moves every slave node within the \
+                 tolerance on to the master side before it starts. Where the sides are apart \
+                 by about the size of the elements, e.g. a pin with play in its hole or a gap \
+                 left in the CAD geometry, the moved nodes pull their elements inside out, \
+                 and the run aborts. Auto ties such sides as they are instead. The elements \
+                 named are those the move folds."
             }
             Problem::ContactRegionOpen => {
                 "No node of the slave side lies within the tolerance of the master side in \
@@ -1206,7 +1207,7 @@ impl Problem {
                  deactivate the step."
             }
             Problem::AdjustFoldsElements => {
-                "Set Initial gap to As is in the region's advanced settings: the \
+                "Set Initial gap to Auto or As is in the region's advanced settings: the \
                  sides are then tied where they are, across the gap. Or pick only faces that \
                  touch, make the Tolerance smaller than the gap, or close the gap in the \
                  geometry."
