@@ -168,7 +168,11 @@ impl ProjectApp {
             own_windows,
             active: self.active,
             active_name,
-            title: self.project_name(),
+            // A star marks changes that are not saved, as in the title of the window.
+            title: match self.has_unsaved_changes() {
+                true => format!("{}*", self.project_name()),
+                false => self.project_name(),
+            },
             pill: self.pill(),
             update: self.updater.indicator_tip(),
             can_undo,
@@ -350,7 +354,7 @@ impl ProjectApp {
         let selected = self.selected.clone();
         let first = selected.first().copied();
         match cmd {
-            Cmd::NewProject => self.new_project(),
+            Cmd::NewProject => self.ask_new_project(ctx),
             Cmd::OpenProject => self.open_dialog(ctx),
             Cmd::SaveProject => self.save(false),
             Cmd::SaveProjectAs => self.save(true),
@@ -511,7 +515,7 @@ impl ribbon::Host for ProjectHost<'_> {
         if cmd == Cmd::OpenRecent
             && let Some(path) = self.0.recent_panel(ui)
         {
-            self.0.open(&ui.ctx().clone(), path);
+            self.0.ask_open(&ui.ctx().clone(), path);
         }
     }
 }

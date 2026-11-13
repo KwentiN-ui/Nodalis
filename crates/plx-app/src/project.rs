@@ -54,6 +54,7 @@ mod saving;
 mod series;
 mod study_worker;
 mod transform;
+mod unsaved;
 mod visualize;
 mod workspace;
 
@@ -2290,6 +2291,7 @@ pub struct ProjectApp {
     recent: Vec<PathBuf>,
     /// The save running on a worker thread, and what autosave needs to know.
     saver: saving::Saver,
+    unsaved: unsaved::Unsaved,
     /// Analyses Update Project still has to solve, in order, and those it solves.
     update_queue: VecDeque<u64>,
     updating: Vec<u64>,
@@ -2431,6 +2433,7 @@ impl ProjectApp {
             opening: None,
             recent: cc.storage.map(stored_recent).unwrap_or_default(),
             saver: Default::default(),
+            unsaved: Default::default(),
             update_queue: VecDeque::new(),
             updating: Vec::new(),
             shown_title: String::new(),
@@ -5064,7 +5067,7 @@ impl ProjectApp {
             .add_filter("Nodalis project (*.ndl)", &["ndl", "NDL"])
             .pick_file();
         if let Some(path) = picked {
-            self.open(ctx, path);
+            self.ask_open(ctx, path);
         }
     }
 
@@ -5963,7 +5966,7 @@ impl ProjectApp {
         {
             ui.menu_button("File", |ui| {
                 if ui.button("New Project").clicked() {
-                    self.new_project();
+                    self.ask_new_project(ui.ctx());
                 }
                 let open = egui::Button::new("Open …").shortcut_text("Ctrl+O");
                 if ui.add_enabled(self.opening.is_none(), open).clicked() {
@@ -5977,7 +5980,7 @@ impl ProjectApp {
                         .on_hover_text(tip);
                 });
                 if let Some(path) = picked {
-                    self.open(ui.ctx(), path);
+                    self.ask_open(ui.ctx(), path);
                     ui.close();
                 }
                 let save = egui::Button::new("Save").shortcut_text("Ctrl+S");
@@ -8500,7 +8503,7 @@ impl ProjectApp {
             match request {
                 Request::Save(save_as) => self.save(save_as),
                 Request::SaveWithoutResults => self.save_without_results(),
-                Request::OpenProject(path) => self.open(ctx, path),
+                Request::OpenProject(path) => self.ask_open(ctx, path),
                 Request::SolveChain(force) => {
                     if force {
                         self.forced.insert(id);
@@ -8600,6 +8603,7 @@ impl eframe::App for ProjectApp {
         crate::style::sync(&ctx);
         self.poll_opening();
         self.poll_saving(&ctx);
+        self.watch_close(&ctx);
         self.check_active();
         if crate::crash_log::take_device_lost() {
             self.output.push(
@@ -8613,7 +8617,8 @@ impl eframe::App for ProjectApp {
             ));
         }
         let project = self.in_project;
-        let title = format!("{} - Nodalis", self.project_name());
+        let mark = if self.has_unsaved_changes() { "*" } else { "" };
+        let title = format!("{}{mark} - Nodalis", self.project_name());
         if title != self.shown_title {
             self.shown_title = title.clone();
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
@@ -8655,7 +8660,7 @@ impl eframe::App for ProjectApp {
                 .collect()
         });
         if let Some(path) = dropped.into_iter().next() {
-            self.open(&ctx, path);
+            self.ask_open(&ctx, path);
         }
         self.app_bar(ui);
         // The analysis shown here, in Geometry, FE Model or Results.
@@ -8678,6 +8683,7 @@ impl eframe::App for ProjectApp {
         self.campbell_windows(&ctx);
         self.new_analysis_window(&ctx);
         self.settings_window(&ctx);
+        self.unsaved_window(&ctx);
         self.updater.show(&ctx, &mut self.output);
         self.sync_links(&ctx);
         if self.update_after_sync && !self.sync_due {

@@ -114,6 +114,16 @@ impl ProjectApp {
         self.history.edits + self.saver.window_edits
     }
 
+    /// Whether the project has changes since it was last saved or opened.
+    pub(super) fn edits_unsaved(&self) -> bool {
+        self.edits() != self.saver.saved_edits
+    }
+
+    /// Whether a save runs or waits for the one running.
+    pub(super) fn is_saving(&self) -> bool {
+        self.saver.running.is_some() || self.saver.queued.is_some()
+    }
+
     /// The project was opened or made anew: nothing to save yet.
     pub(super) fn forget_edits(&mut self) {
         self.saver.saved_edits = self.edits();
@@ -187,9 +197,7 @@ impl ProjectApp {
     /// closes the window once the saves are done if that was asked for. Called every frame.
     pub(super) fn poll_saving(&mut self, ctx: &egui::Context) {
         // A close of the window while saving waits for the file.
-        if ctx.input(|i| i.viewport().close_requested())
-            && (self.saver.running.is_some() || self.saver.queued.is_some())
-        {
+        if ctx.input(|i| i.viewport().close_requested()) && self.is_saving() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if !self.saver.close_after {
                 self.output
@@ -233,8 +241,7 @@ impl ProjectApp {
 
     /// Notes when the project got changes that are not saved.
     fn note_edits(&mut self) {
-        let dirty = self.edits() != self.saver.saved_edits;
-        if !dirty {
+        if !self.edits_unsaved() {
             self.saver.dirty_since = None;
         } else if self.saver.dirty_since.is_none() {
             self.saver.dirty_since = Some(Instant::now());
