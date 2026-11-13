@@ -66,7 +66,9 @@ turns about it. The line below #ui("Behavior") always says which of the two the 
     #ui("Global") or a coordinate system under #ui("Features") (@features). In a cylindrical
     system the components are radial (`R`), tangential (`Theta`) and axial (`Z`), and the dialog
     names them so as soon as the system is chosen. Held at each node, the directions
-    are those at the node (a `*TRANSFORM` of the nodes); held at a point, those at the point.],
+    are those at the node (a `*TRANSFORM` of the nodes); held at a point, those at the point.
+    The cones and plates in the 3D view point along the axes of the system, in a cylindrical
+    one at nodes spread over the selection.],
   [Location], [Only with a point. #ui("Centroid") puts the point at the area-weighted centre of
     the selected faces (of the edges in 2D, the mean of the nodes when no faces are selected).
     #ui("Coordinates") puts it anywhere, given in the coordinate system; switching starts from
@@ -74,6 +76,10 @@ turns about it. The line below #ui("Behavior") always says which of the two the 
   [Pinball region], [Only with a point. When ticked, only the selected nodes within this
     distance of the point follow it. Ticking it starts with the distance of the farthest node.],
 )
+
+#screenshot("displacement-local-system.png", [The two cut faces of a pipe segment, each held
+  normal to itself (`U3`) and in its rotations in a coordinate system turned with the face:
+  the cones and plates follow the axes of the systems])
 
 #ui("Automatic") holds each node directly
 
@@ -131,8 +137,15 @@ angle Theta of a cylindrical system is the one number that cannot be exposed.
 - A node can belong to only one rigid body or point: do not let the selection overlap that of
   another displacement on a point or a rigid body constraint (@rigid-body). The model check
   (@model-check) reports "Nodes in several rigid bodies or remote points" otherwise.
-- A coordinate system of its own at each node turns everything else on those nodes too, like
-  a skewed symmetry plane (@symmetry); keep other supports and point loads off them.
+- The solver reads every support of a node in one coordinate system only. Where supports in
+  different systems meet, such as at the edge between two cut faces of a pipe segment held
+  normal to themselves, or between such a face and one held in global directions, the input
+  file gives these nodes a system of their own in which every held direction is an axis, and
+  each support holds the matching axis there. Directions that are not perpendicular to each
+  other can only be combined when they are held at zero; otherwise writing the input file
+  stops with a message naming the boundary conditions. Point loads on nodes held in a
+  coordinate system of their own act in the directions of that system, as on a skewed
+  symmetry plane (@symmetry): keep them off such nodes.
 - Ansys features that are left out: the #ui("Beam") behavior and the augmented Lagrange
   formulation (Nodalis always writes exact constraints). Tabular values per component are
   available (@value-tables).
