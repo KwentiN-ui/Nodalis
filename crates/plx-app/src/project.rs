@@ -2312,7 +2312,7 @@ impl ProjectApp {
         crate::results::set_significant_digits(settings.post.digits);
         crate::style::set_theme(&cc.egui_ctx, settings.graphics.theme);
         plx_mesher::set_library_path(settings.gmsh.library());
-        let units = settings.new_model.units;
+        let units = units::first(settings.new_model.units);
         let mut app = Self {
             render_state,
             settings,
@@ -4966,7 +4966,7 @@ impl ProjectApp {
         self.links.clear();
         self.frames.clear();
         self.compact.clear();
-        self.units = self.settings.new_model.units;
+        self.units = units::first(self.settings.new_model.units);
         self.level.clear();
         self.frame_label = None;
         self.applied.clear();

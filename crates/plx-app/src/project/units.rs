@@ -19,6 +19,15 @@ pub(super) const CHOICES: [UnitSystem; 4] = [
     UnitSystem::InLbSF,
 ];
 
+/// The unit system a new project starts in: the one chosen last, if the project offers it.
+pub(super) fn first(last: UnitSystem) -> UnitSystem {
+    if CHOICES.contains(&last) {
+        last
+    } else {
+        UnitSystem::default()
+    }
+}
+
 /// A few units of the system, to tell it in a tooltip.
 pub(super) fn summary(units: UnitSystem) -> String {
     let unit = |q| units.unit(q);
@@ -130,5 +139,24 @@ impl ProjectApp {
                 data.model.properties.units = units;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_project_starts_in_the_units_chosen_last_unless_unitless() {
+        assert_eq!(first(UnitSystem::InLbSF), UnitSystem::InLbSF);
+        assert_eq!(first(UnitSystem::Unitless), UnitSystem::default());
+        assert!(CHOICES.iter().all(|u| u.has_units()));
+    }
+
+    #[test]
+    fn the_summary_names_the_main_units() {
+        let text = summary(UnitSystem::MmTonSC);
+        assert!(text.contains("Length mm"), "{text}");
+        assert!(text.contains("stress MPa"), "{text}");
     }
 }

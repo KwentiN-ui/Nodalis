@@ -92,7 +92,7 @@ fn same_data(a: Option<&ProjectNode>, b: Option<&ProjectNode>) -> bool {
 
 /// A change that can be undone: the project before it, with the blocks it deleted.
 struct Change {
-    before: Snapshot,
+    before: Box<Snapshot>,
     removed: Vec<Node>,
 }
 
@@ -241,7 +241,10 @@ impl ProjectApp {
             let removed = std::mem::take(&mut self.history.removed);
             let now = self.snapshot(&[]);
             if !removed.is_empty() || !before.same(&now) {
-                self.history.push(Change { before, removed });
+                self.history.push(Change {
+                    before: Box::new(before),
+                    removed,
+                });
                 self.history.positions = self.positions();
                 return;
             }
@@ -264,7 +267,7 @@ impl ProjectApp {
                 }
             }
             self.history.push(Change {
-                before,
+                before: Box::new(before),
                 removed: Vec::new(),
             });
         }
@@ -414,7 +417,7 @@ impl ProjectApp {
         // Blocks brought back stay in the groups the change kept them in.
         self.known = self.nodes.iter().map(|n| n.id).collect();
         Ok(Change {
-            before: after,
+            before: Box::new(after),
             removed,
         })
     }
