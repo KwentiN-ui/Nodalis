@@ -32,7 +32,9 @@ column; #ui("Remove") in the editor removes a column and its links.
   parameter])
 
 #screenshot("study-block.png", [The study varies the exposed force of the analysis Static
-  (dashed wire) and reads the largest stress of its results through Max Stress])
+  (dashed wire from the left pin of its input) and reads the largest stress of its results
+  through Stresses and Max Stress; the Plot block draws the stress over the force from the
+  right pins of the columns])
 
 A double-click on the block (or #ui("Edit") in its context menu) opens its editor, with the
 columns and the table of the design points:
