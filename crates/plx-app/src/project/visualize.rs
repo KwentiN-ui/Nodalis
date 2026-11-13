@@ -146,30 +146,34 @@ pub(super) fn plot_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<
     rows
 }
 
-/// The input of a Preview block before anything is linked to it: a mesh or a number goes to
-/// it.
+/// The input of a Preview block before anything is linked to it: a geometry, a mesh or a
+/// number goes to it.
 pub(super) const PREVIEW_INPUT: &str = "Input";
 /// The key of the number or series a Preview block shows.
 pub(super) const PREVIEW_VALUE: &str = "Input";
 
-/// The row a link to the Preview block `target` goes to: the Mesh row for a mesh, the value
-/// row for anything else. `None` if `target` is no Preview block.
+/// The row a link to the Preview block `target` goes to: the Mesh row for a mesh, the
+/// Geometry row for a geometry or a part of one, the value row for anything else. `None` if `target` is no Preview block.
 pub(super) fn preview_slot(nodes: &[Node], target: u64, item: &[String]) -> Option<Vec<String>> {
     nodes.iter().find(|n| n.id == target)?.as_preview()?;
     let mesh = [links::MESH.to_owned()];
+    let geometry = [links::GEOMETRY.to_owned()];
     Some(if links::compatible(item, &mesh) {
         mesh.to_vec()
+    } else if links::compatible(item, &geometry) {
+        geometry.to_vec()
     } else {
         vec![links::PARAMETERS.to_owned(), PREVIEW_VALUE.to_owned()]
     })
 }
 
-/// The row of a Preview block: the mesh or number it shows, or its open input.
+/// The row of a Preview block: the geometry, mesh or number it shows, or its open input.
 pub(super) fn preview_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
     let Some(preview) = node.as_preview() else {
         return Vec::new();
     };
     let mesh = [links::MESH.to_owned()];
+    let geometry = [links::GEOMETRY.to_owned()];
     let value = [links::PARAMETERS.to_owned(), PREVIEW_VALUE.to_owned()];
     let from = |path: &[String]| {
         (incoming.iter())
@@ -187,6 +191,29 @@ pub(super) fn preview_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> V
             mesh.to_vec(),
             links::MESH.to_owned(),
             NodeIcon::Mesh,
+            Some(source),
+            tip,
+        )
+    } else if let Some(source) = from(&geometry) {
+        let tip = match &preview.model.geometry {
+            Some(g) => {
+                let parts = g.part_names.len();
+                let mut tip = format!("Geometry: {}", g.source);
+                if parts > 0 {
+                    tip.push_str(&format!(", {parts} parts"));
+                }
+                tip.push_str(
+                    ", its faces and edges as the Geometry workspace shows them, seen from the \
+                     side the views of the analysis call isometric.",
+                );
+                tip
+            }
+            None => "Geometry: not taken yet.".to_owned(),
+        };
+        (
+            geometry.to_vec(),
+            links::GEOMETRY.to_owned(),
+            NodeIcon::Geometry,
             Some(source),
             tip,
         )
@@ -209,7 +236,8 @@ pub(super) fn preview_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> V
             PREVIEW_INPUT.to_owned(),
             NodeIcon::Picture,
             None,
-            "Input: drag a mesh, a number or a series here to see it.".to_owned(),
+            "Input: drag a geometry, a part of one, a mesh, a number or a series here to see it."
+                .to_owned(),
         )
     };
     vec![Row {
@@ -266,14 +294,49 @@ pub(super) struct PreviewView {
     pub source: String,
 }
 
-/// The picture of the mesh of a Preview block, made on a worker thread whenever its mesh changes.
+/// The picture of the mesh or the geometry of a Preview block, made on a worker thread
+/// whenever it changes.
 #[derive(Default)]
 pub(super) struct MeshPicture {
-    /// The fingerprint of the mesh the texture shows.
+    /// The fingerprint of the mesh or geometry the texture shows.
     key: u64,
     texture: Option<egui::TextureHandle>,
-    /// The fingerprint of the mesh being drawn and where its picture comes.
-    drawing: Option<(u64, Receiver<egui::ColorImage>)>,
+    /// Why the geometry it shows could not be drawn.
+    failed: Option<String>,
+    /// The fingerprint of what is being drawn and where its picture comes.
+    drawing: Option<(u64, Receiver<Result<egui::ColorImage, String>>)>,
+}
+
+/// What a Preview block draws a picture of: the mesh or the geometry the link to it brings.
+pub(super) enum Shape<'a> {
+    Mesh(&'a plx_mesh::FeMesh),
+    Geometry(&'a plx_model::Geometry),
+}
+
+impl Shape<'_> {
+    /// A fingerprint cheap enough for every frame.
+    fn key(&self) -> u64 {
+        match self {
+            Self::Mesh(mesh) => mesh_key(mesh),
+            Self::Geometry(geometry) => geometry_key(geometry),
+        }
+    }
+}
+
+/// The shape a Preview block draws, by the link to it: `None` while it takes none, or the
+/// link has brought nothing yet.
+pub(super) fn preview_shape<'a>(node: &'a Node, all: &[Link]) -> Option<Shape<'a>> {
+    let preview = node.as_preview()?;
+    let link = (all.iter()).find(|l| {
+        l.target == node.id
+            && (l.item.first()).is_some_and(|c| c == links::MESH || c == links::GEOMETRY)
+    })?;
+    if link.item[0] == links::MESH {
+        let mesh = &preview.model.mesh;
+        (mesh.element_count() > 0).then_some(Shape::Mesh(mesh))
+    } else {
+        preview.model.geometry.as_ref().map(Shape::Geometry)
+    }
 }
 
 impl ProjectApp {
@@ -300,7 +363,7 @@ impl ProjectApp {
             .push(Node::new(id, name.clone(), Block::Preview(Box::default())));
         self.graph.insert_node(position, id);
         self.output.push(format!(
-            "{name} created: drag a mesh, a number or a series to its Input row."
+            "{name} created: drag a geometry, a mesh, a number or a series to its Input row."
         ));
         id
     }
@@ -394,8 +457,8 @@ impl ProjectApp {
         }
     }
 
-    /// Brings the pictures of the Preview blocks up to date: a mesh that changed is
-    /// drawn anew on a worker thread, a picture that came is loaded as a texture.
+    /// Brings the pictures of the Preview blocks up to date: a mesh or a geometry that
+    /// changed is drawn anew on a worker thread, a picture that came is loaded as a texture.
     pub(super) fn refresh_pictures(&mut self, ctx: &egui::Context) {
         let ids: BTreeSet<u64> = (self.nodes.iter())
             .filter(|n| n.as_preview().is_some())
@@ -403,18 +466,31 @@ impl ProjectApp {
             .collect();
         self.pictures.retain(|id, _| ids.contains(id));
         for node in &self.nodes {
-            let Some(preview) = node.as_preview() else {
+            if node.as_preview().is_none() {
                 continue;
-            };
-            let mesh = &preview.model.mesh;
-            let key = mesh_key(mesh);
+            }
+            let shape = preview_shape(node, &self.links);
+            // Nothing to draw: the key of no shape.
+            let key = shape.as_ref().map_or(0, Shape::key);
             let picture = self.pictures.entry(node.id).or_default();
             if let Some((drawn, receiver)) = &picture.drawing {
                 match receiver.try_recv() {
-                    Ok(image) => {
-                        let name = format!("mesh preview {}", node.id);
-                        picture.texture =
-                            Some(ctx.load_texture(name, image, egui::TextureOptions::LINEAR));
+                    Ok(made) => {
+                        match made {
+                            Ok(image) => {
+                                let name = format!("mesh preview {}", node.id);
+                                picture.texture = Some(ctx.load_texture(
+                                    name,
+                                    image,
+                                    egui::TextureOptions::LINEAR,
+                                ));
+                                picture.failed = None;
+                            }
+                            Err(why) => {
+                                picture.texture = None;
+                                picture.failed = Some(why);
+                            }
+                        }
                         picture.key = *drawn;
                         picture.drawing = None;
                     }
@@ -426,27 +502,49 @@ impl ProjectApp {
             if key == picture.key || drawing == Some(key) {
                 continue;
             }
-            if mesh.element_count() == 0 {
-                picture.texture = None;
-                picture.key = key;
-                continue;
-            }
-            let mesh = mesh.clone();
-            // A mesh in the x-y plane is seen from the front, as a 2D analysis shows it.
-            let plane = mesh
-                .bounds()
-                .is_some_and(|(low, high)| high[2] - low[2] <= 0.0);
+            let size = [
+                PICTURE.x as usize * PIXELS_PER_POINT,
+                PICTURE.y as usize * PIXELS_PER_POINT,
+            ];
             let (sender, receiver) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let size = [
-                    PICTURE.x as usize * PIXELS_PER_POINT,
-                    PICTURE.y as usize * PIXELS_PER_POINT,
-                ];
-                let _ = sender.send(draw_mesh(&mesh, plane, size));
-            });
+            match shape {
+                None => {
+                    picture.texture = None;
+                    picture.failed = None;
+                    picture.key = key;
+                    picture.drawing = None;
+                    continue;
+                }
+                Some(Shape::Mesh(mesh)) => {
+                    let mesh = mesh.clone();
+                    // A mesh in the x-y plane is seen from the front, as a 2D analysis
+                    // shows it.
+                    let plane = mesh
+                        .bounds()
+                        .is_some_and(|(low, high)| high[2] - low[2] <= 0.0);
+                    std::thread::spawn(move || {
+                        let _ = sender.send(Ok(draw_mesh(&mesh, plane, size)));
+                    });
+                }
+                Some(Shape::Geometry(geometry)) => {
+                    let geometry = geometry.clone();
+                    // Triangulated as the Geometry workspace does, which takes Gmsh.
+                    std::thread::spawn(move || {
+                        let made = plx_mesher::tessellate(&geometry)
+                            .map(|display| draw_geometry(&display, &geometry.suppressed, size))
+                            .map_err(|e| e.to_string());
+                        let _ = sender.send(made);
+                    });
+                }
+            }
             picture.drawing = Some((key, receiver));
             ctx.request_repaint();
         }
+    }
+
+    /// Why the geometry of a Preview block could not be drawn, if it could not.
+    pub(super) fn picture_failure(&self, id: u64) -> Option<String> {
+        self.pictures.get(&id).and_then(|p| p.failed.clone())
     }
 
     /// The texture of the picture of the mesh of a Preview block, once drawn.
@@ -490,6 +588,21 @@ fn mesh_key(mesh: &plx_mesh::FeMesh) -> u64 {
     print.finish()
 }
 
+/// A fingerprint of a geometry cheap enough for every frame: the length of its BREP and a
+/// sample of it, its parts' names and which are suppressed.
+fn geometry_key(geometry: &plx_model::Geometry) -> u64 {
+    let mut print = plx_mesh::Fnv::new();
+    print.add_str("geometry");
+    let brep = geometry.brep.as_bytes();
+    print.add(&brep.len().to_le_bytes());
+    let step = (brep.len() / 4096).max(1);
+    let sample: Vec<u8> = brep.iter().step_by(step).copied().collect();
+    print.add(&sample);
+    print.add_debug(&geometry.part_names);
+    print.add_debug(&geometry.suppressed);
+    print.finish()
+}
+
 /// A picture of the outer faces of a mesh of `size` pixels on a transparent background, each
 /// part in its colour with its feature edges: seen along the space diagonal with Y up like
 /// the isometric view of an analysis, a plane mesh from the front.
@@ -497,6 +610,45 @@ pub(super) fn draw_mesh(
     mesh: &plx_mesh::FeMesh,
     plane: bool,
     size: [usize; 2],
+) -> egui::ColorImage {
+    draw_shapes(mesh, plane, size, None)
+}
+
+/// A picture of a geometry as the Geometry workspace shows it, from its display: the faces
+/// of each part in its colour, a suppressed part grey, the CAD edges dark, the edges outside
+/// any face in the colour of their part. Seen like [`draw_mesh`].
+pub(super) fn draw_geometry(
+    display: &plx_mesher::GeometryDisplay,
+    suppressed: &[String],
+    size: [usize; 2],
+) -> egui::ColorImage {
+    let mesh = &display.mesh;
+    let plane = mesh
+        .bounds()
+        .is_some_and(|(low, high)| high[2] - low[2] <= 0.0);
+    let parts = (mesh.parts.iter().enumerate())
+        .map(|(index, part)| GeometryPart {
+            wire: display.part_dimensions.get(index) == Some(&1),
+            suppressed: suppressed.contains(&part.name),
+        })
+        .collect::<Vec<_>>();
+    draw_shapes(mesh, plane, size, Some(&parts))
+}
+
+/// How a part of a geometry is drawn.
+struct GeometryPart {
+    /// Edges only, outside any face: drawn in the colour of the part.
+    wire: bool,
+    suppressed: bool,
+}
+
+/// [`draw_mesh`], or with `geometry` the display mesh of a geometry: its line elements are
+/// the CAD edges, and its triangles show no feature edges of their own.
+fn draw_shapes(
+    mesh: &plx_mesh::FeMesh,
+    plane: bool,
+    size: [usize; 2],
+    geometry: Option<&[GeometryPart]>,
 ) -> egui::ColorImage {
     let [width, height] = size.map(|s| s * SUPERSAMPLE);
     // The axes of the screen and the direction towards the viewer.
@@ -567,7 +719,12 @@ pub(super) fn draw_mesh(
     let depth_span = (high[2] - low[2]).max(1e-12);
     let mut depth = vec![f64::NEG_INFINITY; width * height];
     for (index, skin) in skins.iter().enumerate() {
-        let color = plx_render::part_color(index);
+        let part = geometry.and_then(|parts| parts.get(index));
+        let color = if part.is_some_and(|p| p.suppressed) {
+            [0.42, 0.42, 0.44]
+        } else {
+            plx_render::part_color(index)
+        };
         for face in &skin.faces {
             let corners: Vec<[f64; 3]> = (face.corners.iter())
                 .filter_map(|&c| screen.get(c).copied())
@@ -588,7 +745,8 @@ pub(super) fn draw_mesh(
         // Edges darker than the faces, the outline of the surface patches only.
         let ink = [0.08, 0.08, 0.09, 1.0];
         let bias = 0.01 * depth_span;
-        for edge in skin.edges.iter().filter(|e| e.feature) {
+        let feature = geometry.is_none();
+        for edge in skin.edges.iter().filter(|e| feature && e.feature) {
             if let (Some(&a), Some(&b)) = (screen.get(edge.a), screen.get(edge.b)) {
                 draw_line(
                     &mut pixels,
@@ -602,7 +760,12 @@ pub(super) fn draw_mesh(
                 );
             }
         }
-        let line_color = [color[0], color[1], color[2], 1.0];
+        // The CAD edges of a geometry bound its faces, dark like the feature edges of a
+        // mesh; beams of a mesh and edges outside any face are drawn in their colour.
+        let (line_color, line_bias, thickness) = match part {
+            Some(part) if !part.wire => (ink, bias, 1.0),
+            _ => ([color[0], color[1], color[2], 1.0], f64::INFINITY, 2.5),
+        };
         for &[a, b] in &skin.lines {
             if let (Some(&a), Some(&b)) = (screen.get(a), screen.get(b)) {
                 draw_line(
@@ -612,8 +775,8 @@ pub(super) fn draw_mesh(
                     height,
                     [to_pixel(a), to_pixel(b)],
                     line_color,
-                    f64::INFINITY,
-                    2.5,
+                    line_bias,
+                    thickness,
                 );
             }
         }
@@ -947,7 +1110,9 @@ impl Viewer {
         &self,
         ui: &mut egui::Ui,
         texture: Option<egui::TextureId>,
-        has_mesh: bool,
+        linked: bool,
+        shape: bool,
+        failed: Option<&str>,
         view: Option<&PreviewView>,
     ) {
         let (rect, _) = ui.allocate_exact_size(PICTURE, egui::Sense::hover());
@@ -959,19 +1124,26 @@ impl Viewer {
             return;
         }
         match texture {
-            Some(texture) if has_mesh => {
+            Some(texture) if shape => {
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                 painter.image(texture, rect, uv, egui::Color32::WHITE);
             }
             _ => {
+                let text = match failed {
+                    Some(_) if shape => "Cannot draw the geometry",
+                    _ if shape => "Drawing ...",
+                    _ if linked => "Nothing to show yet",
+                    _ => "Link something to see it here",
+                };
+                let response =
+                    ui.interact(rect, ui.id().with("preview failure"), egui::Sense::hover());
+                if let Some(why) = failed.filter(|_| shape) {
+                    response.on_hover_text(why);
+                }
                 painter.text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    if has_mesh {
-                        "Drawing ..."
-                    } else {
-                        "Link a mesh, a number or a series"
-                    },
+                    text,
                     egui::FontId::proportional(11.0),
                     faint,
                 );
@@ -1133,6 +1305,137 @@ mod tests {
         assert_eq!(alpha(0, 0), 0, "the corner stays transparent");
         let plane = draw_mesh(&mesh, true, [100, 60]);
         assert_eq!(plane.pixels[30 * 100 + 50].a(), 255);
+    }
+
+    #[test]
+    fn a_preview_takes_a_geometry_and_draws_its_faces_and_edges() {
+        let analysis = |id: u64, geometry: Option<plx_model::Geometry>| {
+            let data = file::ProjectAnalysis {
+                id,
+                name: "Bracket".into(),
+                position: [0.0; 2],
+                geometry,
+                mesh: Default::default(),
+                model: Default::default(),
+                mesh_inputs: BTreeMap::new(),
+                results: None,
+            };
+            Node::analysis(id, "Bracket".into(), data)
+        };
+        let geometry = plx_model::Geometry {
+            source: "bracket.step".into(),
+            brep: "DBRep_DrawableShape".into(),
+            meshing: Default::default(),
+            mesh_items: Vec::new(),
+            part_names: Vec::new(),
+            refinement: 1.0,
+            signatures: Vec::new(),
+            compounds: Vec::new(),
+            suppressed: Vec::new(),
+        };
+        let mut preview = Node::new(2, "Preview".into(), Block::Preview(Box::default()));
+        let nodes = vec![analysis(1, Some(geometry.clone())), preview_clone(&preview)];
+        // A geometry or a part of it goes to the Geometry row, a mesh to the Mesh row.
+        let whole = [links::GEOMETRY.to_owned()];
+        let part = [links::GEOMETRY.to_owned(), "BOLT".to_owned()];
+        let mesh = [links::MESH.to_owned()];
+        assert_eq!(preview_slot(&nodes, 2, &whole), Some(whole.to_vec()));
+        assert_eq!(preview_slot(&nodes, 2, &part), Some(whole.to_vec()));
+        assert_eq!(preview_slot(&nodes, 2, &mesh), Some(mesh.to_vec()));
+        assert_eq!(preview_slot(&nodes, 1, &whole), None);
+        let slot = preview_slot(&nodes, 2, &whole).unwrap();
+        assert!(refusal(&nodes, &[], 1, &whole, 2, &slot).is_none());
+        // The row says what it shows once linked.
+        let rows = preview_rows(&preview, &[(whole.to_vec(), "Bracket".to_owned())]);
+        assert_eq!(rows[0].text, links::GEOMETRY);
+        assert_eq!(rows[0].path, whole);
+        // It draws the geometry the link brought, and nothing before.
+        let link = Link {
+            source: 1,
+            target: 2,
+            item: whole.to_vec(),
+            ..Default::default()
+        };
+        let links = [link];
+        assert!(preview_shape(&preview, &links).is_none());
+        if let Block::Preview(block) = &mut preview.block {
+            block.model.geometry = Some(geometry);
+        }
+        assert!(matches!(
+            preview_shape(&preview, &links),
+            Some(Shape::Geometry(g)) if g.source == "bracket.step"
+        ));
+        // A mesh it took before is not drawn while the geometry is linked.
+        assert!(preview_shape(&preview, &[]).is_none());
+    }
+
+    fn preview_clone(node: &Node) -> Node {
+        Node::new(node.id, node.name.clone(), Block::Preview(Box::default()))
+    }
+
+    #[test]
+    fn a_geometry_is_drawn_with_dark_edges() {
+        // A square face of two triangles bounded by four edges, and a wire of its own.
+        let mut mesh = plx_mesh::FeMesh::default();
+        let points = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        for (i, p) in points.iter().enumerate() {
+            mesh.set_node(i as u32 + 1, *p);
+            mesh.set_node(i as u32 + 11, *p);
+        }
+        let mut element = |id: u32, shape, nodes: Vec<u32>| {
+            mesh.add_element(plx_mesh::Element {
+                id,
+                type_name: if shape == plx_mesh::ElementShape::Tri3 {
+                    "S3"
+                } else {
+                    "B31"
+                }
+                .into(),
+                shape,
+                nodes,
+            })
+            .unwrap();
+        };
+        element(1, plx_mesh::ElementShape::Tri3, vec![1, 2, 3]);
+        element(2, plx_mesh::ElementShape::Tri3, vec![1, 3, 4]);
+        for (k, (a, b)) in [(11, 12), (12, 13), (13, 14), (14, 11)].iter().enumerate() {
+            element(3 + k as u32, plx_mesh::ElementShape::Line2, vec![*a, *b]);
+        }
+        mesh.parts
+            .push(plx_mesh::Part::new("PLATE", vec![1, 2, 3, 4, 5, 6]));
+        let display = plx_mesher::GeometryDisplay {
+            mesh,
+            entities: Vec::new(),
+            part_dimensions: vec![2],
+            solids: 0,
+            faces: 1,
+            edges: 4,
+            topology: Default::default(),
+        };
+        let image = draw_geometry(&display, &[], [100, 100]);
+        let pixel = |x: usize, y: usize| image.pixels[y * 100 + x];
+        let face = pixel(50, 50);
+        assert_eq!(face.a(), 255, "the middle shows the face");
+        let color = plx_render::part_color(0);
+        assert!(face.r() > 100 || face.g() > 100 || face.b() > 100);
+        assert!((face.r() as f32 / 255.0 - color[0]).abs() < 0.05);
+        // The edge along the bottom of the face is dark over it, the margin transparent.
+        let light = |p: egui::Color32| p.r() as u32 + p.g() as u32 + p.b() as u32;
+        let dark = (80..100).any(|y| {
+            let p = pixel(50, y);
+            p.a() > 0 && light(p) * 10 < light(face) * 3
+        });
+        assert!(dark, "the edges are drawn dark");
+        assert_eq!(pixel(0, 0).a(), 0);
+        // A suppressed part is grey.
+        let grey = draw_geometry(&display, &["PLATE".to_owned()], [100, 100]);
+        let p = grey.pixels[50 * 100 + 50];
+        assert!(p.r().abs_diff(p.g()) < 8 && p.g().abs_diff(p.b()) < 12);
     }
 
     #[test]

@@ -868,6 +868,12 @@ schematic shows it without opening anything. Before a link the row is called #ui
 it takes the name of what it shows:
 
 #fields(
+  [Geometry], [A small picture of the geometry as the Geometry workspace shows it: drag the
+    #ui("Geometry") of a File block, an analysis, a CAD operation or a Transform block there,
+    or one part of a file. The faces have the colors of their parts with the CAD edges
+    dark, a suppressed part is grey; it is seen along the diagonal like the isometric view, a
+    flat 2D geometry from the front. The geometry is triangulated in the background whenever
+    it changes; if that fails, the block says so and its tooltip tells why.],
   [Mesh], [A small picture of the mesh: drag the #ui("Mesh") of an analysis or of a mesh
     block there. The parts have the colors of the analysis, seen along the diagonal like the
     isometric view; a 2D mesh is seen from the front. The picture is drawn anew in the
@@ -883,3 +889,7 @@ Until the analysis is solved, a linked number shows #ui("No value yet").
 #screenshot("preview-block.png", [Two Preview blocks: Deflection shows the series of the tip
   deflection over the step with its statistics, Peak Stress the maximum stress that the Max
   block gives])
+
+#screenshot("preview-geometry.png", [Preview blocks showing geometry: Bracket the STEP file
+  as read, Rotated the same geometry after a Transform block turned it by 90 degrees about Z,
+  Stepped Plate a second file])
