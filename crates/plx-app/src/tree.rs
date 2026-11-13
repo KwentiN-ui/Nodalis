@@ -2976,4 +2976,33 @@ mod tests {
         h.click(pos + egui::vec2(8.0, 0.0));
         assert_eq!(h.opened, [TreeItem::Material(0)]);
     }
+
+    #[test]
+    fn double_clicks_in_a_row_open_every_time() {
+        let mut found = None;
+        for (x, y) in (20..300)
+            .step_by(4)
+            .flat_map(|y| (30..140).step_by(6).map(move |x| (x, y)))
+        {
+            let pos = egui::pos2(x as f32, y as f32);
+            let mut h = Harness::new();
+            h.click(pos);
+            if h.state.selected == Some((TreeView::FeModel, TreeItem::Material(0))) {
+                found = Some(pos);
+                break;
+            }
+        }
+        let pos = found.expect("material row found");
+        let mut h = Harness::new();
+        for pair in 0..6 {
+            h.opened.clear();
+            h.click(pos);
+            h.time += 0.1;
+            h.frame(vec![]);
+            h.click(pos);
+            assert_eq!(h.opened, [TreeItem::Material(0)], "pair {pair}");
+            h.time += 0.1;
+            h.frame(vec![]);
+        }
+    }
 }
