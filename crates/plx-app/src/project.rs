@@ -9543,6 +9543,10 @@ fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
     let Some(block) = node.as_mesh() else {
         return Vec::new();
     };
+    let icon = match block.primitive {
+        MeshPrimitive::Box { .. } => NodeIcon::BoxMesh,
+        MeshPrimitive::Rectangle { .. } => NodeIcon::Mesh,
+    };
     let mesh = Some(&block.model.mesh);
     let count = mesh.map_or(0, plx_mesh::FeMesh::element_count);
     let element = (mesh.and_then(|m| m.elements().first())).map_or("", |e| e.type_name.as_str());
@@ -9566,7 +9570,7 @@ fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
         path: vec![links::MESH.to_owned()],
         text: links::MESH.to_owned(),
         depth: 0,
-        icon: NodeIcon::Mesh,
+        icon,
         state: Some(state),
         expander: None,
         input: false,
@@ -9584,7 +9588,7 @@ fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
         Row {
             text: text.to_owned(),
             depth: 0,
-            icon: NodeIcon::Mesh,
+            icon,
             state: None,
             expander: None,
             // A number of another block can give it its value.
