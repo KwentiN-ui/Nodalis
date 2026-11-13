@@ -6403,13 +6403,25 @@ impl Workbench {
             let Some(view) = &mut model.results else {
                 continue;
             };
-            if view.coordinate_systems == model.fe.coordinate_systems {
-                continue;
+            let systems_changed = view.coordinate_systems != model.fe.coordinate_systems;
+            if systems_changed {
+                let systems = model.fe.coordinate_systems.clone();
+                let warnings = view.set_coordinate_systems(systems, &model.mesh);
+                self.output.extend(warnings);
+                self.results_changed = true;
             }
-            let systems = model.fe.coordinate_systems.clone();
-            let warnings = view.set_coordinate_systems(systems, &model.mesh);
-            self.output.extend(warnings);
-            self.results_changed = true;
+            // The results that the steps' field outputs want in a coordinate system; the
+            // steps are those of the analysis, the results keep only its features.
+            let steps = match &self.model {
+                Some(project) if model.fe.steps.is_empty() => &project.fe.steps,
+                _ => &model.fe.steps,
+            };
+            let wanted = view.wanted_output_systems(steps, &model.fe.coordinate_systems);
+            if wanted != view.output_systems || (systems_changed && !wanted.is_empty()) {
+                let warnings = view.set_output_systems(wanted, &model.mesh);
+                self.output.extend(warnings);
+                self.results_changed = true;
+            }
         }
     }
 

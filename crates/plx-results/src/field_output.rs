@@ -219,7 +219,88 @@ fn moved_source(source: &Field, motion: &plx_model::RigidMotion, mesh: &FeMesh) 
             }
         }
     }
+    // The magnitude of the relative displacements.
+    if moved.components.iter().filter(|c| !c.derived).count() == 3 {
+        crate::add_derived_components(&mut moved);
+    }
     Some(moved)
+}
+
+/// The local directions of `system` at every node, as rows of a rotation.
+fn system_rotations(
+    system: &CoordinateSystem,
+    systems: &[CoordinateSystem],
+    mesh: &FeMesh,
+) -> Result<Vec<[[f64; 3]; 3]>, String> {
+    let frame = system.frame(systems);
+    (mesh.coords().iter())
+        .map(|&p| frame.directions_at(p))
+        .collect()
+}
+
+/// The field `field` of the increment in the system of `rotations`, named `name`; a system
+/// attached to a selection moves with it. `None` without the field or for a scalar one.
+fn in_system(
+    increment: &Increment,
+    field: &str,
+    name: &str,
+    rotations: &[[[f64; 3]; 3]],
+    attachment: Option<&plx_model::Region>,
+    mesh: &FeMesh,
+) -> Option<Field> {
+    let source = increment.field(field)?;
+    match attachment.and_then(|region| moving_frame(increment, mesh, region)) {
+        Some(motion) => {
+            let moved = moved_source(source, &motion, mesh);
+            let turned = turned_rotations(rotations, &motion.rotation);
+            transformed_field(moved.as_ref().unwrap_or(source), name, &turned)
+        }
+        None => transformed_field(source, name, rotations),
+    }
+}
+
+/// The vector and tensor results a field output of a step may show in another coordinate
+/// system.
+pub const SYSTEM_FIELDS: [&str; 13] = [
+    "DISP", "DISPI", "FORC", "FORCI", "VELO", "ACCE", "STRESS", "STRESSI", "TOSTRAIN", "TOSTRAII",
+    "MESTRAIN", "ZZSTR", "FLUX",
+];
+
+/// The name of the copy of the result `field` in the coordinate system `system`, e.g.
+/// `DISP_CS_1`: letters, digits and underscores, so that equations can use it.
+pub fn system_field_name(field: &str, system: &str) -> String {
+    let system: String = (system.chars())
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("{field}_{system}")
+}
+
+/// Adds to the increments `indices` the copy of the field `field` in `system`, named by
+/// [`system_field_name`], replacing an earlier one. Returns whether an increment got it.
+pub fn add_system_field(
+    field: &str,
+    system: &CoordinateSystem,
+    systems: &[CoordinateSystem],
+    increments: &mut [Increment],
+    indices: &[usize],
+    mesh: &FeMesh,
+) -> Result<bool, String> {
+    let name = system_field_name(field, &system.name);
+    let rotations = system_rotations(system, systems, mesh)?;
+    let attachment = system.attachment(systems);
+    let mut added = false;
+    for &i in indices {
+        let Some(increment) = increments.get_mut(i) else {
+            continue;
+        };
+        let Some(copy) = in_system(increment, field, &name, &rotations, attachment, mesh) else {
+            continue;
+        };
+        increment.fields.retain(|f| f.name != name);
+        increment.fields.push(copy);
+        added = true;
+    }
+    Ok(added)
 }
 
 fn transformed_field(source: &Field, name: &str, rotations: &[[[f64; 3]; 3]]) -> Option<Field> {
@@ -419,29 +500,10 @@ pub fn compute(
                 .ok_or_else(|| {
                     format!("The coordinate system {coordinate_system} does not exist.")
                 })?;
-            let frame = system.frame(systems);
-            // The local directions at every node, as rows of a rotation.
-            let rotations = (mesh.coords().iter())
-                .map(|&p| frame.directions_at(p))
-                .collect::<Result<Vec<_>, _>>()?;
+            let rotations = system_rotations(system, systems, mesh)?;
             let attachment = system.attachment(systems);
-            increments
-                .iter()
-                .map(|inc| {
-                    let source = inc.field(field)?;
-                    match attachment.and_then(|region| moving_frame(inc, mesh, region)) {
-                        Some(motion) => {
-                            let moved = moved_source(source, &motion, mesh);
-                            let turned = turned_rotations(&rotations, &motion.rotation);
-                            transformed_field(
-                                moved.as_ref().unwrap_or(source),
-                                &output.name,
-                                &turned,
-                            )
-                        }
-                        None => transformed_field(source, &output.name, &rotations),
-                    }
-                })
+            (increments.iter())
+                .map(|inc| in_system(inc, field, &output.name, &rotations, attachment, mesh))
                 .collect()
         }
         FieldOutputKind::PrincipalDirection { field, which }
@@ -791,6 +853,8 @@ mod tests {
         assert!(close(values(&incs[0], "S_CS", "S22"), [10.0; 3]));
         assert!(close(values(&incs[0], "U_CS", "U1"), [0.0, 0.0, 0.5]));
         assert!(close(values(&incs[0], "U_CS", "U2"), [0.0; 3]));
+        // The magnitude is that of the relative displacements too.
+        assert!(close(values(&incs[0], "U_CS", "ALL"), [0.0, 0.0, 0.5]));
     }
 
     fn stress_increment(tensors: [[f32; 6]; 3]) -> Increment {

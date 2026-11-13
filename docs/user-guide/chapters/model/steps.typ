@@ -344,31 +344,45 @@ A static step over a creep time in which materials with a creep law creep (`*VIS
 
 === Field outputs <step-field-outputs>
 
-Field outputs control what the solver writes to the results as `*NODE FILE`,
-`*EL FILE` and `*CONTACT FILE`. A new step gets a node and an element field output whose
-variables depend on the step type. Frequency, complex frequency and buckle steps take none:
-their results are the normalized mode shapes (@mode-shapes), so the tree shows no
-#ui("Field Outputs") under such a step and #ui("Field Output") on the #ui("Steps") tab does not
-add one to it. Create more with #ui("Field Output") on the #ui("Steps") tab; it
-goes into the active step (@active-step). Edit one with a double-click. Hovering over
-a variable shows what it is.
+Field outputs control which results the solver writes. A new step gets a node and an
+element field output whose results depend on the step type. Frequency, complex frequency and
+buckle steps take none: their results are the normalized mode shapes (@mode-shapes), so the
+tree shows no #ui("Field Outputs") under such a step and #ui("Field Output") on the
+#ui("Steps") tab does not add one to it. Create more with #ui("Field Output") on the
+#ui("Steps") tab; it goes into the active step (@active-step). Edit one with a double-click.
+Hovering over a result shows what it is.
 
 #fields(
   [Type], [#ui("Node Output"), #ui("Element Output") or #ui("Contact Output"); chosen when the
     output is created.],
-  [Variables], [Node: `RF U PU V NT PNT RFL SEN` (`SEN` in sensitivity steps only). Element: `S PHS E ME PEEQ ENER HFL ERR HER ZZS SDV`;
-    `ERR` and `HER` exclude `ZZS`. Contact: `CDIS CSTR CELS PCON`.],
-  [Last iterations], [#ui("On") writes every iteration of the last increment, to find out why a
-    solution diverges.],
-  [Contact elements], [#ui("On") writes the contact elements to a `.cel` file.],
-  [Output (2D/3D)], [Element outputs; the node outputs of the step follow them. #ui("Default")
-    and #ui("3D") write shells and beams in the 3D form CalculiX expands them to, #ui("2D") at
-    their own nodes, where the stresses of shells lack the bending.],
-  [Global], [Node and element outputs. #ui("No") writes the results in the local coordinate
-    systems.],
+  [Results], [Checked by name, in groups. Node: displacements, reaction forces, velocities,
+    accelerations, temperatures, reaction heat flows, amplitude and phase of displacements and
+    temperatures, design sensitivities (sensitivity steps only). Element: stresses, strains,
+    equivalent plastic strain, strain energy density, material state variables, improved
+    stresses and error estimates (the improved stresses exclude the error estimates), heat
+    flux, amplitude and phase of stresses. Contact: gap and slip, pressure and shear, energy,
+    amplitude and phase.],
+  [Coordinate system], [Node and element outputs. #ui("Global"), or a coordinate system
+    (@coordinate-systems) in which the displacements, forces, velocities, accelerations,
+    stresses, strains and heat fluxes of the output are shown as well: the results of the
+    step get a copy named after the field and the system, such as `DISP_CS_1` for the
+    displacements in #ui("CS-1"), next to the global field. Scalars such as temperatures stay
+    as they are. In a moving system the copy turns with its selection in every increment and
+    the displacements are taken relative to the system. The copy follows when the system or
+    the output is edited, without solving again.],
+  [Shells and beams], [Element outputs; the node outputs of the step follow them.
+    #ui("Default") and #ui("On the expanded solid (3D)") write shells and beams in the 3D form
+    the solver expands them to, #ui("On the mid-surface (2D)") at their own nodes, where the
+    stresses of shells lack the bending.],
+  [Diagnostics], [#ui("Every iteration of the last increment") writes each iteration of the
+    last increment, to find out why a solution diverges. #ui("Contact elements") writes the
+    contact elements to a `.cel` file.],
 )
 
-#screenshot("field-output-dialog.png", [Creating an element field output])
+#screenshot("field-output-dialog.png", [A node field output that also shows its displacements in a coordinate system])
+
+#screenshot("field-output-system-results.png", [The displacements of the lever relative to the
+  moving system at its end: `DISP_Lever_End` next to the global `DISP`])
 
 Like boundary conditions, field outputs can be deactivated and deleted from their context menu.
 A deactivated field output is left out of the input file.

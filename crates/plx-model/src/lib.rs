@@ -110,7 +110,10 @@ pub use exposed::{Exposed, Field, ItemRef, ValuePath};
 pub use features::{
     GLOBAL, Plane, PlaneSource, PointDefinition, PointRef, ReferencePoint, ResultPath, ResultPlane,
 };
-pub use field::{FieldOutput, OutputDimension, OutputKind, output_variable_description};
+pub use field::{
+    FieldOutput, OutputDimension, OutputKind, output_variable_description, output_variable_field,
+    output_variable_label,
+};
 pub use geometry::{
     Algorithm2d, Algorithm3d, CompoundPart, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem,
     MeshSetupKind, MeshingParameters, Recombination, ThickenShellMesh,

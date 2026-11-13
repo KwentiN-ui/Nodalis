@@ -5125,7 +5125,9 @@ fn field_output(output: &FieldOutput, dimension: OutputDimension, every: u32) ->
             OutputDimension::TwoD => ir::step::OutputDimension::TwoD,
             OutputDimension::ThreeD => ir::step::OutputDimension::ThreeD,
         },
-        global: contact || output.global,
+        // A field output's coordinate system is applied to the results when they are
+        // shown, so that it may move; the solver writes global results.
+        global: true,
         section_forces: false,
         time_points: None,
     };
