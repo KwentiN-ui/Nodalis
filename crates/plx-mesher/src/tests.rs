@@ -2539,6 +2539,50 @@ fn solids_split_by_a_plane_become_a_compound_or_lose_a_side() {
     assert!((solid_volume(&rest) - 700.0).abs() < 1e-6);
 }
 
+/// A plane tilted about an axis through the point its offset gives cuts along the slope.
+#[test]
+fn a_tilted_plane_cuts_a_corner_off() {
+    use plx_model::{CadOperationKind::SplitPlane, SplitKeep};
+    if !gmsh_available() {
+        return;
+    }
+    let input = cube();
+    // The YZ plane at x = 5 turned 45 degrees about z: the plane x + y = 5, below it a
+    // prism of 12.5 * 10.
+    let corner = plx_model::CadOperation {
+        keep: SplitKeep::Negative,
+        tilt_axis: 2,
+        tilt_angle: 45.0,
+        ..split(SplitPlane, 5.0)
+    };
+    let cut = apply_operation(&input, &corner, &[]).unwrap();
+    assert!(
+        (solid_volume(&cut) - 125.0).abs() < 1e-6,
+        "{}",
+        solid_volume(&cut)
+    );
+    // Turned about y the same way: x - z = 5, the prism on the positive side.
+    let about_y = plx_model::CadOperation {
+        keep: SplitKeep::Positive,
+        tilt_axis: 1,
+        ..corner.clone()
+    };
+    let cut = apply_operation(&input, &about_y, &[]).unwrap();
+    assert!(
+        (solid_volume(&cut) - 125.0).abs() < 1e-6,
+        "{}",
+        solid_volume(&cut)
+    );
+    // Both sides: the whole cube in two pieces.
+    let both = plx_model::CadOperation {
+        keep: SplitKeep::Both,
+        ..corner
+    };
+    let cut = apply_operation(&input, &both, &[]).unwrap();
+    assert_eq!(part_names(&cut).unwrap().len(), 2);
+    assert!((solid_volume(&cut) - 1000.0).abs() < 1e-6);
+}
+
 /// The faces an earlier split cut have bounding boxes far larger than they are, so that
 /// a part beside the plane of the next split seems to lie across it: OpenCASCADE gives
 /// such a part back whole, and it must stay as it is.

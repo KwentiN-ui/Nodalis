@@ -51,6 +51,9 @@ pub struct CadOperationEditor {
     /// The parts selected when the split was opened, and whether it cuts only them.
     parts: Vec<String>,
     only_parts: bool,
+    /// The global axis a split plane is tilted about and the angle in degrees.
+    tilt_axis: usize,
+    tilt_angle: f64,
     /// Which faces a defeaturing removes.
     faces: DefeatureFaces,
     /// The fillets and chamfers found in the input for a defeaturing, with the size they
@@ -118,6 +121,8 @@ impl CadOperationEditor {
             compound: operation.compound,
             parts: operation.parts.clone(),
             only_parts: !operation.parts.is_empty(),
+            tilt_axis: operation.tilt_axis.min(2),
+            tilt_angle: operation.tilt_angle,
             faces: operation.faces,
             found: None,
             note: None,
@@ -128,6 +133,11 @@ impl CadOperationEditor {
             scene_due: true,
             fit_due: true,
         };
+        // Turning a plane about its own normal leaves it as it is: an axis lying in it.
+        let axes = editor.plane.tilt_axes();
+        if !axes.contains(&editor.tilt_axis) {
+            editor.tilt_axis = axes[0];
+        }
         editor.update_highlight();
         editor
     }
@@ -162,6 +172,8 @@ impl CadOperationEditor {
             compound: self.compound,
             faces: self.faces,
             parts: self.split_parts().to_vec(),
+            tilt_axis: self.tilt_axis,
+            tilt_angle: self.tilt_angle,
         }
     }
 
@@ -537,7 +549,8 @@ impl CadOperationEditor {
                         self.split_scope()
                     ),
                     CadOperationKind::SplitPlane => format!(
-                        "{} The outline shows where; the offset moves the plane along its axis.",
+                        "{} The outline shows where; the offset moves the plane along its axis, \
+                         the tilt turns it about an axis through that point.",
                         self.split_scope()
                     ),
                     CadOperationKind::HoleRing => "Click the circular edges of holes on planar \
@@ -718,7 +731,48 @@ impl CadOperationEditor {
         if self.plane != before {
             self.picks.clear();
             self.update_highlight();
+            // Turning a plane about its own normal leaves it as it is.
+            let axes = self.plane.tilt_axes();
+            if !axes.contains(&self.tilt_axis) {
+                self.tilt_axis = axes[0];
+            }
         }
+        ui.end_row();
+        ui.label("Tilt");
+        ui.horizontal(|ui| {
+            let mut changed = false;
+            changed |= ui
+                .add(
+                    crate::numeric::drag_value(&mut self.tilt_angle)
+                        .speed(1.0)
+                        .suffix(" deg")
+                        .max_decimals(6),
+                )
+                .on_hover_text(
+                    "The angle the plane is turned by about the axis, right-handed; 0 leaves \
+                     it as chosen.",
+                )
+                .changed();
+            ui.label("about");
+            egui::ComboBox::from_id_salt("split tilt axis")
+                .width(40.0)
+                .selected_text(AXIS_NAMES[self.tilt_axis])
+                .show_ui(ui, |ui| {
+                    for k in self.plane.tilt_axes() {
+                        changed |= ui
+                            .selectable_value(&mut self.tilt_axis, k, AXIS_NAMES[k])
+                            .changed();
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "The global axis the plane is turned about, through the point of the \
+                     plane the offset gives.",
+                );
+            if changed {
+                self.scene_due = true;
+            }
+        });
         ui.end_row();
         ui.label("Keep");
         egui::ComboBox::from_id_salt("split keep")
@@ -792,15 +846,13 @@ impl CadOperationEditor {
         ui.end_row();
     }
 
-    /// The outline of a global plane over the input, as edges in the view.
+    /// The outline of a global plane over the input, as edges in the view: a rectangle in
+    /// the plane a little larger than the geometry, or the parts it cuts.
     fn plane_outline(&self) -> Vec<[glam::Vec3; 2]> {
         if self.kind != CadOperationKind::SplitPlane {
             return Vec::new();
         }
         let (Some(axis), Some(view)) = (self.plane.axis(), self.view.as_ref()) else {
-            return Vec::new();
-        };
-        let Some(k) = axis.iter().position(|&a| a == 1.0) else {
             return Vec::new();
         };
         let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
@@ -825,26 +877,67 @@ impl CadOperationEditor {
         if !lo.iter().chain(&hi).all(|x| x.is_finite()) {
             return Vec::new();
         }
-        // A little larger than the geometry, at the offset.
-        let (a, b) = ((k + 1) % 3, (k + 2) % 3);
-        let margin = |j: usize| 0.1 * (hi[j] - lo[j]).max(1e-9);
-        let corner = |u: f64, v: f64| {
-            let mut p = [0.0; 3];
-            p[k] = self.value;
-            p[a] = u;
-            p[b] = v;
-            view.to_render(p)
-        };
-        let (u0, u1) = (lo[a] - margin(a), hi[a] + margin(a));
-        let (v0, v1) = (lo[b] - margin(b), hi[b] + margin(b));
-        let c = [
-            corner(u0, v0),
-            corner(u1, v0),
-            corner(u1, v1),
-            corner(u0, v1),
-        ];
+        let rect = tilted_rectangle(
+            axis,
+            self.value,
+            self.tilt_axis,
+            if self.tilt_angle.is_finite() {
+                self.tilt_angle
+            } else {
+                0.0
+            },
+            lo,
+            hi,
+        );
+        let c = rect.map(|p| view.to_render(p));
         vec![[c[0], c[1]], [c[1], c[2]], [c[2], c[3]], [c[3], c[0]]]
     }
+}
+
+const AXIS_NAMES: [&str; 3] = ["X", "Y", "Z"];
+
+/// The corners of a rectangle in the global plane normal to `axis` at `offset`, tilted by
+/// `degrees` about the global axis `tilt_axis` through the point `axis * offset`, which covers
+/// the box `lo`..`hi` with a margin of a tenth of its size: the outline of a split plane.
+fn tilted_rectangle(
+    axis: [f64; 3],
+    offset: f64,
+    tilt_axis: usize,
+    degrees: f64,
+    lo: [f64; 3],
+    hi: [f64; 3],
+) -> [[f64; 3]; 4] {
+    let dot = |a: [f64; 3], b: [f64; 3]| (0..3).map(|k| a[k] * b[k]).sum::<f64>();
+    let turn = |v: [f64; 3]| plx_model::tilted_normal(v, tilt_axis, degrees);
+    let k = axis.iter().position(|&a| a == 1.0).unwrap_or(0);
+    let unit = |j: usize| {
+        let mut e = [0.0; 3];
+        e[j] = 1.0;
+        e
+    };
+    // The in-plane directions of the untilted plane, turned with it.
+    let (u, v) = (turn(unit((k + 1) % 3)), turn(unit((k + 2) % 3)));
+    let origin = axis.map(|a| a * offset);
+    // The extent of the box along u and v.
+    let corners = (0..8).map(|i| [0, 1, 2].map(|j| if i >> j & 1 == 0 { lo[j] } else { hi[j] }));
+    let (mut u0, mut u1, mut v0, mut v1) = (
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for p in corners {
+        let d = [0, 1, 2].map(|j| p[j] - origin[j]);
+        let (a, b) = (dot(d, u), dot(d, v));
+        u0 = u0.min(a);
+        u1 = u1.max(a);
+        v0 = v0.min(b);
+        v1 = v1.max(b);
+    }
+    let (mu, mv) = (0.1 * (u1 - u0).max(1e-9), 0.1 * (v1 - v0).max(1e-9));
+    let (u0, u1, v0, v1) = (u0 - mu, u1 + mu, v0 - mv, v1 + mv);
+    let at = |a: f64, b: f64| [0, 1, 2].map(|j| origin[j] + a * u[j] + b * v[j]);
+    [at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)]
 }
 
 fn capitalised(text: &str) -> String {
@@ -852,4 +945,24 @@ fn capitalised(text: &str) -> String {
     chars
         .next()
         .map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tilted_rectangle;
+
+    #[test]
+    fn the_outline_of_a_tilted_plane_turns_with_it() {
+        let (lo, hi) = ([0.0; 3], [10.0; 3]);
+        // The YZ plane at x = 5 as it is: x = 5 everywhere, a tenth larger than the box.
+        let flat = tilted_rectangle([1.0, 0.0, 0.0], 5.0, 2, 0.0, lo, hi);
+        assert!(flat.iter().all(|p| (p[0] - 5.0).abs() < 1e-12));
+        assert!((flat[0][1] + 1.0).abs() < 1e-12 && (flat[2][1] - 11.0).abs() < 1e-12);
+        // Turned 90 degrees about z it becomes the XZ plane through (5, 0, 0).
+        let turned = tilted_rectangle([1.0, 0.0, 0.0], 5.0, 2, 90.0, lo, hi);
+        assert!(turned.iter().all(|p| p[1].abs() < 1e-9));
+        // 45 degrees: every corner on x + y = 5.
+        let slope = tilted_rectangle([1.0, 0.0, 0.0], 5.0, 2, 45.0, lo, hi);
+        assert!(slope.iter().all(|p| (p[0] + p[1] - 5.0).abs() < 1e-9));
+    }
 }

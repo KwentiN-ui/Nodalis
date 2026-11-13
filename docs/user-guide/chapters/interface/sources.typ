@@ -387,8 +387,17 @@ mesh size. Choose the #ui("Plane") in the editor:
 - #ui("Plane of a face"): click a planar face; the cut lies parallel to it, the #ui("Offset")
   into the part.
 
+#ui("Tilt") turns the plane by an angle in degrees about a global axis, right-handed, through the
+point the #ui("Offset") gives: for the YZ plane at an offset of 50 mm, 30 deg about Z turns it
+about the line x = 50 mm, y = 0 parallel to z. A global plane offers the two axes lying in it, the
+plane of a face all three. The outline in the editor turns with it; 0 deg leaves the plane as
+chosen.
+
+#screenshot("cad-split-tilted.png", [The YZ plane tilted 30 deg about Z: the outline follows the
+  slanted cut])
+
 #ui("Keep") chooses what stays: #ui("Both sides"), or only the side along the positive axis
-(#ui("+X side")) or the negative one, or for the plane of a face the part #ui("Beyond the cut") or
+(#ui("+X side"), the side the tilted normal points to) or the negative one, or for the plane of a face the part #ui("Beyond the cut") or
 the slice #ui("Between face and cut"). Parts wholly on the side that goes are removed.
 
 A solid cut in two becomes two solids, a shell two shells that share nothing along the cut: in

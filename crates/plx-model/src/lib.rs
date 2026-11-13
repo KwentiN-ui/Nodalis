@@ -67,7 +67,9 @@ mod validity;
 
 pub use amplitude::{Amplitude, AmplitudeTime, ValueTable, no_tables};
 pub use bolt::{Bolt, BoltAction, BoltChange, LoweredBolts, Preload, ResolvedBolt, ResolvedThread};
-pub use cad_operation::{CadOperation, CadOperationKind, DefeatureFaces, SplitKeep, SplitPlane};
+pub use cad_operation::{
+    CadOperation, CadOperationKind, DefeatureFaces, SplitKeep, SplitPlane, tilted_normal,
+};
 pub use checks::{
     Finding, MeshCheck, Problem, Severity, diagnose_solver_output, diagnose_solver_warnings,
 };
