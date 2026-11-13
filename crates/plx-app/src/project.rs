@@ -3628,8 +3628,13 @@ impl ProjectApp {
             }
             Some(_) if !run.updating => {
                 ctx.request_repaint();
-                // The inputs went to their numbers; then the update.
-                if !self.sync_due {
+                // The inputs went to their numbers; then the update, once the analyses know
+                // whether the new numbers make them out of date: while their fingerprints are
+                // made in the background they keep the state of the point before, and the
+                // update would take them as solved.
+                let pending =
+                    (self.nodes.iter()).any(|n| n.current_status().is_some_and(|s| s.pending));
+                if !self.sync_due && !pending {
                     if let Some(run) = &mut self.looping {
                         run.updating = true;
                     }
@@ -3643,7 +3648,11 @@ impl ProjectApp {
                     && self.updating.is_empty()
                     && self.measuring.is_empty()
                     && !self.deforming()
-                    && !self.restoring.values().any(Option::is_some);
+                    && !self.restoring.values().any(Option::is_some)
+                    // A solve that ended in this frame changed results that the links have
+                    // not passed on yet: the measures and the numbers after them still show
+                    // those of the point before.
+                    && self.freshness() == self.synced_freshness;
                 if !idle {
                     ctx.request_repaint_after(Duration::from_millis(50));
                     return;
