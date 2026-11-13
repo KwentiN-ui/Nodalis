@@ -6151,9 +6151,9 @@ impl ProjectApp {
                     number: n.as_number().map(|(b, switch)| (b.clone(), switch)),
                     plot: self.plot_view(n),
                     picture: self.picture(n.id),
-                    has_mesh: n
-                        .as_preview()
-                        .is_some_and(|p| p.model.mesh.element_count() > 0),
+                    has_shape: visualize::preview_shape(n, &self.links).is_some(),
+                    preview_linked: self.links.iter().any(|l| l.target == n.id),
+                    picture_failure: self.picture_failure(n.id),
                     preview: self.preview_view(n),
                     framed: frames::frame_of(&self.frames, n.id).is_some(),
                     chain,
@@ -8826,10 +8826,12 @@ struct BlockView {
     number: Option<(NumberBlock, bool)>,
     /// What a Plot block draws.
     plot: Option<PlotView>,
-    /// Of a Preview block, the picture of its mesh once drawn, whether it has one, and the
-    /// numbers it shows.
+    /// Of a Preview block, the picture of its mesh or geometry once drawn, whether anything
+    /// is linked to it, whether it has a mesh or geometry, why the geometry could not be drawn, and the numbers it shows.
     picture: Option<egui::TextureId>,
-    has_mesh: bool,
+    has_shape: bool,
+    preview_linked: bool,
+    picture_failure: Option<String>,
     preview: Option<PreviewView>,
     /// The mark of the step chain at the rows of steps, by row path.
     chain: HashMap<Vec<String>, ChainMark>,
@@ -11870,7 +11872,7 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Preview => {
                 let ink = ui.visuals().text_color();
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Picture, ink);
-                icon.on_hover_text("Shows the mesh, number or series linked to it");
+                icon.on_hover_text("Shows the geometry, mesh, number or series linked to it");
             }
             Kind::Group => {
                 let ink = ui.visuals().text_color();
@@ -11966,7 +11968,7 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Switch => "Its index and choices are edited in the block.",
             Kind::Formula => "Double-click edits its formula, with the list of its functions.",
             Kind::Plot => "Its type of plot and its inputs are chosen in the block.",
-            Kind::Preview => "Shows the mesh, number or series linked to its row.",
+            Kind::Preview => "Shows the geometry, mesh, number or series linked to its row.",
             Kind::Group => {
                 "Double-click or Tab opens the group; Ctrl+Tab or the path at the top left \
                  goes back out."
@@ -12262,9 +12264,14 @@ impl SnarlViewer<u64> for Viewer {
                     self.show_plot(ui, view);
                 }
             }
-            Kind::Preview => {
-                self.show_preview(ui, block.picture, block.has_mesh, block.preview.as_ref())
-            }
+            Kind::Preview => self.show_preview(
+                ui,
+                block.picture,
+                block.preview_linked,
+                block.has_shape,
+                block.picture_failure.as_deref(),
+                block.preview.as_ref(),
+            ),
             _ => {}
         }
     }
