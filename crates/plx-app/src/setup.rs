@@ -3965,7 +3965,7 @@ impl Editor {
                 ui.end_row();
             }
             Draft::FieldOutput(_, output) => {
-                field_output_form(ui, output, &taken, self.index.is_none());
+                field_output_form(ui, model, output, &taken, self.index.is_none());
             }
             Draft::HistoryOutput(_, output, region) => {
                 history_output_form(ui, model, output, region, &taken);
@@ -5250,81 +5250,93 @@ fn point_hint(region: &Region, fe: &FeModel, mesh: &FeMesh) -> Option<&'static s
     })
 }
 
-/// The field output dialog: the kind, chosen only for a new output, the variables
-/// and the options of `*NODE FILE`, `*EL FILE` and `*CONTACT FILE`.
-fn field_output_form(ui: &mut Ui, output: &mut FieldOutput, taken: &[&str], new: bool) {
+/// The field output dialog: the kind, chosen only for a new output, the results by their
+/// names in groups, the coordinate system they are also shown in and the options of the
+/// solver's output.
+fn field_output_form(
+    ui: &mut Ui,
+    model: &Model,
+    output: &mut FieldOutput,
+    taken: &[&str],
+    new: bool,
+) {
     name_row(ui, &mut output.name);
     ui.label("Type");
-    ui.horizontal(|ui| {
-        for kind in OutputKind::ALL {
-            let selected = kind == output.kind;
-            let radio = ui.add_enabled(
-                new || selected,
-                egui::RadioButton::new(selected, kind.label()),
-            );
-            if radio.clicked() && !selected {
-                rename_default(&mut output.name, output.kind.prefix(), kind.prefix(), taken);
-                output.variables = (kind.default_variables().iter())
-                    .map(|v| v.to_string())
-                    .collect();
-                output.kind = kind;
-            }
-        }
-    });
-    ui.end_row();
-    ui.label("Variables");
-    // Fixed rows: wrapping inside the grid overlaps the next row.
-    ui.vertical(|ui| {
-        for row in output.kind.choices().chunks(7) {
-            ui.horizontal(|ui| {
-                for &variable in row {
-                    let mut on = output.variables.iter().any(|v| v == variable);
-                    let checkbox = ui
-                        .checkbox(&mut on, variable)
-                        .on_hover_text(plx_model::output_variable_description(variable));
-                    if checkbox.changed() {
-                        output.variables.retain(|v| v != variable);
-                        if on {
-                            output.variables.push(variable.to_string());
-                        }
-                        output.normalize_variables();
-                    }
+    if new {
+        ui.horizontal(|ui| {
+            for kind in OutputKind::ALL {
+                let selected = kind == output.kind;
+                if ui.radio(selected, kind.label()).clicked() && !selected {
+                    rename_default(&mut output.name, output.kind.prefix(), kind.prefix(), taken);
+                    output.variables = (kind.default_variables().iter())
+                        .map(|v| v.to_string())
+                        .collect();
+                    output.kind = kind;
                 }
-            });
-        }
-    });
+            }
+        });
+    } else {
+        ui.label(output.kind.label());
+    }
     ui.end_row();
-    let on_off = |ui: &mut Ui, value: &mut bool, id: &str, labels: [&str; 2], hint: &str| {
-        egui::ComboBox::from_id_salt(id)
-            .selected_text(if *value { labels[0] } else { labels[1] })
-            .width(crate::dock::fit_width(ui, 200.0))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(value, true, labels[0]);
-                ui.selectable_value(value, false, labels[1]);
-            })
-            .response
-            .on_hover_text(hint);
+    // The results in groups, one per line: fixed rows, as wrapping inside the grid overlaps
+    // the next row.
+    for (heading, variables) in output.kind.groups() {
+        ui.label(*heading);
+        ui.vertical(|ui| {
+            for &variable in *variables {
+                let mut on = output.variables.iter().any(|v| v == variable);
+                let label = plx_model::output_variable_label(variable);
+                let checkbox = ui
+                    .checkbox(&mut on, label)
+                    .on_hover_text(plx_model::output_variable_description(variable));
+                if checkbox.changed() {
+                    output.variables.retain(|v| v != variable);
+                    if on {
+                        output.variables.push(variable.to_string());
+                    }
+                    output.normalize_variables();
+                }
+            }
+        });
         ui.end_row();
-    };
-    ui.label("Last iterations");
-    on_off(
-        ui,
-        &mut output.last_iterations,
-        "field last iterations",
-        ["On", "Off"],
-        "Writes every iteration of the last increment; useful for finding out why a \
-         solution diverges.",
-    );
-    ui.label("Contact elements");
-    on_off(
-        ui,
-        &mut output.contact_elements,
-        "field contact elements",
-        ["On", "Off"],
-        "Writes the contact elements into a file with the .cel extension.",
-    );
+    }
+    if output.kind.takes_system() {
+        ui.label("Coordinate system");
+        crate::pick_item::system_combo(
+            ui,
+            "field output system",
+            &mut output.system,
+            &model.fe,
+            200.0,
+        );
+        ui.end_row();
+        let system =
+            (output.system).and_then(|id| model.fe.coordinate_systems.iter().find(|c| c.id == id));
+        let hint = match system {
+            None if model.fe.coordinate_systems.is_empty() => {
+                "The results are global. Create a coordinate system to see displacements, \
+                 stresses and other vectors and tensors in it as well."
+                    .to_string()
+            }
+            None => "The results are global.".to_string(),
+            Some(system) => format!(
+                "Displacements, stresses and other vectors and tensors are also shown in \
+                 {}, e.g. as {}.{}",
+                system.name,
+                plx_results::field_output::system_field_name("DISP", &system.name),
+                match system.moves(&model.fe.coordinate_systems) {
+                    true => " The system turns with its selection in every increment.",
+                    false => "",
+                }
+            ),
+        };
+        ui.label("");
+        ui.add(egui::Label::new(egui::RichText::new(hint).weak()).wrap());
+        ui.end_row();
+    }
     if output.kind == OutputKind::Element {
-        ui.label("Output (2D/3D)");
+        ui.label("Shells and beams");
         egui::ComboBox::from_id_salt("field output dimension")
             .selected_text(output.dimension.label())
             .width(crate::dock::fit_width(ui, 200.0))
@@ -5340,16 +5352,20 @@ fn field_output_form(ui: &mut Ui, output: &mut FieldOutput, taken: &[&str], new:
             );
         ui.end_row();
     }
-    if output.kind != OutputKind::Contact {
-        ui.label("Global");
-        on_off(
-            ui,
-            &mut output.global,
-            "field global",
-            ["Yes", "No"],
-            "Whether the results are written in the global or in the local coordinate systems.",
+    ui.label("Diagnostics");
+    ui.vertical(|ui| {
+        ui.checkbox(
+            &mut output.last_iterations,
+            "Every iteration of the last increment",
+        )
+        .on_hover_text(
+            "Writes the results of every iteration of the last increment, for finding \
+                 out why a solution diverges.",
         );
-    }
+        ui.checkbox(&mut output.contact_elements, "Contact elements")
+            .on_hover_text("Writes the contact elements into a file with the .cel extension.");
+    });
+    ui.end_row();
 }
 
 fn validate_history_output(

@@ -137,7 +137,8 @@ fn field_outputs_are_written_with_their_options() {
     let (mesh, mut model) = cantilever(tip_force());
     let outputs = &mut model.steps[0].field_outputs;
     outputs[0].last_iterations = true;
-    outputs[0].global = false;
+    // The solver writes global results; the system is applied when they are shown.
+    outputs[0].system = Some(plx_model::Id::new());
     outputs[1].contact_elements = true;
     outputs[1].dimension = OutputDimension::ThreeD;
     outputs[1].variables = vec!["S".into(), "ERR".into()];
@@ -153,7 +154,7 @@ fn field_outputs_are_written_with_their_options() {
     // The node output follows the element output's form; the deactivated one is left out.
     assert!(
         text.contains(
-            "*Node file, Last iterations, Output=3D, Global=No\nRF, U\n\
+            "*Node file, Last iterations, Output=3D\nRF, U\n\
              *El file, Contact elements, Output=3D\nS, ERR\n\
              *Contact file\nCDIS, CSTR\n*End step\n"
         ),
@@ -166,7 +167,6 @@ fn solver_accepts_the_options_of_field_outputs() {
     let (mesh, mut model) = cantilever(tip_force());
     let outputs = &mut model.steps[0].field_outputs;
     outputs[0].last_iterations = true;
-    outputs[0].global = false;
     outputs[1].dimension = OutputDimension::ThreeD;
     outputs[1].variables.push("ERR".into());
     let Some(frd) = run_solver("feldausgabe", &write_inp(&mesh, &model, "").unwrap()) else {
