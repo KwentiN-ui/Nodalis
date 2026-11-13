@@ -14,8 +14,10 @@ use crate::model::Model;
 pub struct DistributionView {
     /// Why the last file could not be read.
     import_error: Option<String>,
-    /// The range of the factor over the mesh nodes, for the distribution it was found for.
+    /// The factors at the mesh nodes, for the distribution they were found for.
     range: Option<(Distribution, FactorRange)>,
+    /// The factors are not shown in colours over the mesh.
+    hide_colors: bool,
     /// Where the text cursor of the equation was last, in characters: what the help
     /// inserts goes there.
     cursor: Option<usize>,
@@ -39,13 +41,29 @@ fn place_cursor(ui: &Ui, id: egui::Id, at: usize) {
     ui.ctx().memory_mut(|m| m.request_focus(id));
 }
 
-/// The factor over the mesh, or why there is none, in red.
-fn range_label(ui: &mut Ui, view: &DistributionView) {
+/// The factor over the mesh, or why there is none, in red; and whether the mesh shows it in
+/// colours.
+fn range_label(ui: &mut Ui, view: &mut DistributionView) {
+    ui.vertical(|ui| {
+        range_text(ui, view);
+        if matches!(view.range, Some((_, Ok(_)))) {
+            let mut show = !view.hide_colors;
+            ui.checkbox(&mut show, "Show in colors on the mesh")
+                .on_hover_text(
+                    "Colours the mesh by the factor at the nodes while the dialog is open, \
+                     with a legend in the 3D view.",
+                );
+            view.hide_colors = !show;
+        }
+    });
+}
+
+fn range_text(ui: &mut Ui, view: &DistributionView) {
     match view.range.as_ref().map(|(_, range)| range) {
-        Some(Ok((min, max))) if min == max => {
+        Some(Ok(Factors { min, max, .. })) if min == max => {
             ui.label(format!("Factor over the mesh: {}", short(*min)))
         }
-        Some(Ok((min, max))) => ui.label(format!(
+        Some(Ok(Factors { min, max, .. })) => ui.label(format!(
             "Factor over the mesh: {} to {}",
             short(*min),
             short(*max)
@@ -207,8 +225,39 @@ const EXAMPLES: [(&str, &str); 7] = [
     ("Exp(-(r/10)^2)", "Bell about the z axis, 10 {length} wide"),
 ];
 
-/// The smallest and largest factor at the mesh nodes, or why there are none.
-type FactorRange = Result<(f64, f64), String>;
+/// The factors at the mesh nodes, or why there are none.
+type FactorRange = Result<Factors, String>;
+
+/// The factors of a distribution at the mesh nodes.
+#[derive(Clone, Debug, PartialEq)]
+struct Factors {
+    min: f64,
+    max: f64,
+    /// The factor at each node, by node index.
+    at_nodes: std::sync::Arc<Vec<f32>>,
+}
+
+impl DistributionView {
+    /// The factors at the nodes, to colour the mesh by, while the dialog shows them.
+    pub fn preview(
+        &self,
+        distribution: &Distribution,
+        model: &Model,
+    ) -> Option<crate::model::DistributionPreview> {
+        if self.hide_colors {
+            return None;
+        }
+        let (found, Ok(factors)) = self.range.as_ref()? else {
+            return None;
+        };
+        // Factors of a mesh that changed since do not fit it.
+        (same_factors(found, distribution) && factors.at_nodes.len() == model.mesh.coords().len())
+            .then(|| crate::model::DistributionPreview {
+                name: distribution.name.clone(),
+                factors: factors.at_nodes.clone(),
+            })
+    }
+}
 
 /// The rows of the dialog, in the item form's grid.
 pub fn distribution_rows(
@@ -432,21 +481,30 @@ fn variable_rows(ui: &mut Ui, variables: &mut Vec<plx_model::DistributionVariabl
     ui.end_row();
 }
 
-/// The smallest and largest factor at the nodes of the mesh.
+/// The factors at the nodes of the mesh, with the smallest and largest.
 fn factor_range(distribution: &Distribution, model: &Model) -> FactorRange {
     let sampler = distribution.sampler(model.fe.properties.units, &model.fe.coordinate_systems)?;
-    let (min, max) = (model.mesh.coords().iter())
+    let factors: Vec<f64> = (model.mesh.coords().iter())
         .map(|&p| sampler.factor(p))
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), f| {
-            (lo.min(f), hi.max(f))
-        });
-    if min.is_nan() || max.is_nan() {
-        return Err("The factor is not a number at some nodes.".into());
-    }
-    if min > max {
+        .collect();
+    if factors.is_empty() {
         return Err("The model has no mesh yet.".into());
     }
-    Ok((min, max))
+    if factors.iter().any(|f| !f.is_finite()) {
+        return Err(
+            "The factor is not a number at some nodes, such as where it divides \
+                    by zero."
+                .into(),
+        );
+    }
+    let (min, max) = (factors.iter()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &f| {
+        (lo.min(f), hi.max(f))
+    });
+    Ok(Factors {
+        min,
+        max,
+        at_nodes: std::sync::Arc::new(factors.iter().map(|&f| f as f32).collect()),
+    })
 }
 
 fn short(value: f64) -> String {

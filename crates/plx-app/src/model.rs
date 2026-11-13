@@ -131,6 +131,8 @@ pub struct Model {
     /// The whole part a cyclic symmetry tie dialog's sector stands for, drawn as the
     /// wireframe of the other sectors.
     pub cyclic_preview: Option<CyclicPreview>,
+    /// The factors of a distribution at the nodes while its dialog shows them in colours.
+    pub distribution_preview: Option<DistributionPreview>,
     /// Node indices of each part and the part of each node, built when first needed.
     part_nodes: std::sync::OnceLock<PartNodes>,
     /// Nodes and elements of each part's skin, built when first needed.
@@ -321,6 +323,37 @@ impl Highlight {
         self.nodes.extend(other.nodes);
         self.lines.extend(other.lines);
         self.secondary_lines.extend(other.secondary_lines);
+    }
+}
+
+/// A distribution shown in colours over the mesh while its dialog is open.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DistributionPreview {
+    pub name: String,
+    /// The factor at each node, by node index.
+    pub factors: std::sync::Arc<Vec<f32>>,
+}
+
+impl DistributionPreview {
+    /// The legend of the colours, of `levels` bands of the default colour scale.
+    pub fn legend(&self, levels: u32) -> crate::results::Legend {
+        let finite = self.factors.iter().copied().filter(|f| f.is_finite());
+        let (min, max) = finite.fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), f| {
+            (lo.min(f), hi.max(f))
+        });
+        let (min, max) = if min <= max { (min, max) } else { (0.0, 0.0) };
+        let scale = plx_model::ColorScale {
+            levels,
+            ..Default::default()
+        };
+        crate::results::Legend {
+            title: format!("Distribution: {}\nFactor", self.name),
+            min,
+            max,
+            colors: plx_render::contour::band_colors(&scale),
+            below: None,
+            above: None,
+        }
     }
 }
 
@@ -810,6 +843,7 @@ impl Model {
             query_annotations: Vec::new(),
             motion: None,
             cyclic_preview: None,
+            distribution_preview: None,
             part_nodes: Default::default(),
             skin_lookup: Default::default(),
             seams: Default::default(),
@@ -1375,6 +1409,9 @@ impl Model {
             if let (Some(values), Some(legend)) = (view.shown_values(), view.legend()) {
                 scalars = Some(legend.normalize(&values));
             }
+        } else if let Some(preview) = &self.distribution_preview {
+            let legend = preview.legend(plx_render::contour::DEFAULT_LEVELS);
+            scalars = Some(legend.normalize(&preview.factors));
         }
         (coords, scalars, deformed)
     }

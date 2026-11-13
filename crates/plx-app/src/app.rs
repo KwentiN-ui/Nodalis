@@ -1724,6 +1724,7 @@ impl AnalysisWindow {
         self.workbench.editor_window(&ctx);
         self.workbench.update_motion_preview(&ctx);
         self.workbench.update_cyclic_preview();
+        self.workbench.update_distribution_preview();
         self.workbench.confirm_delete_window(&ctx);
         self.workbench.confirm_remove_results(&ctx);
         self.workbench.toast(&ctx);
@@ -6042,6 +6043,18 @@ impl Workbench {
         }
     }
 
+    /// A distribution dialog shows its factors in colours over the mesh.
+    fn update_distribution_preview(&mut self) {
+        let Some(model) = &mut self.model else {
+            return;
+        };
+        let preview = (self.editor.as_ref()).and_then(|e| e.distribution_preview(model));
+        if model.distribution_preview != preview {
+            model.distribution_preview = preview;
+            self.results_changed |= self.tree_view == TreeView::FeModel;
+        }
+    }
+
     /// A cyclic symmetry tie dialog draws the other sectors of its part in the 3D view.
     fn update_cyclic_preview(&mut self) {
         let Some(model) = &mut self.model else {
@@ -6229,6 +6242,7 @@ impl Workbench {
                     kind,
                     region,
                     system: None,
+                    distribution: None,
                     selected: is_selected,
                 });
             }
@@ -6256,6 +6270,7 @@ impl Workbench {
                     kind: symbols::Kind::Boundary(bc.kind.clone()),
                     region: bc.region.clone(),
                     system: None,
+                    distribution: bc.distribution,
                     selected,
                 });
             }
@@ -6267,6 +6282,7 @@ impl Workbench {
                     kind: symbols::Kind::Load(load.kind.clone()),
                     region: load.region.clone(),
                     system: load.system,
+                    distribution: load.distribution,
                     selected,
                 });
             }
@@ -7489,7 +7505,11 @@ impl Workbench {
                 .map_or(model.fe.properties.units, |m| m.fe.properties.units),
         };
         let axis = self.axis_line(model);
-        let legend = view.and_then(ResultsView::legend);
+        // A distribution dialog colours the FE model by the factor.
+        let preview = (model.distribution_preview.as_ref())
+            .filter(|_| view.is_none())
+            .map(|p| p.legend(self.settings.post.levels));
+        let legend = view.and_then(ResultsView::legend).or(preview);
         self.viewport.options.contour =
             (legend.as_ref()).map(|legend| plx_render::ContourPalette::new(&legend.palette()));
         self.viewport.options.lic = view.and_then(crate::lic::display);
