@@ -70,6 +70,25 @@ pub fn physical(value: &mut f64, units: UnitSystem, of: Quantity) -> egui::DragV
     quantity(value, units, of).speed(0.0)
 }
 
+/// A [`physical`] field that can be dragged: a drag changes the value by a share of itself
+/// (half a percent per pixel), so it works at any magnitude, from a 1 ms impulse to a 30 s
+/// start. At zero, `fallback` (in stored units) gives the step per pixel. Typing is not
+/// changed, so a typed value is kept exactly.
+pub fn scaled(
+    value: &mut f64,
+    units: UnitSystem,
+    of: Quantity,
+    fallback: f64,
+) -> egui::DragValue<'_> {
+    let size = if *value != 0.0 && value.is_finite() {
+        value.abs()
+    } else {
+        fallback.abs()
+    };
+    let speed = units.shown(size, of) * 0.005;
+    quantity(value, units, of).speed(speed)
+}
+
 /// A number field of a fixed size, such as in a block of the project schematic, where
 /// [`format_physical`] may not fit with the unit: shown with as many significant digits as
 /// fit, the unit always whole, and the full value in the tooltip, before `tip`. Only the
