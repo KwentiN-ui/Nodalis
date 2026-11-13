@@ -26,8 +26,27 @@ Geometry, FE Model and Results workspaces it has these entries; importing is on 
   [Close Analysis], [Closes the analysis; it stays in the project.],
 )
 
-#note[Nodalis does not ask about unsaved changes. Save regularly, or switch on autosave in the
-  settings (@settings-saving). Changes of the model can be undone (@undo).]
+=== Unsaved changes <unsaved-changes>
+
+A star after the project name, in the app bar and in the title of the window, shows that the
+project has changes that are not saved; a new project that has blocks but was never saved counts
+as well. Before such a project is left, Nodalis asks what to do with them: when you close the
+window or choose #menu("File", "Exit"), and before #ui("New Project"), #ui("Open"),
+#ui("Open Recent") or a dropped `.ndl` file replace it.
+
+#fields(
+  [Save], [Saves the project (#key("Enter")), then goes on once the file is written. A project
+    that was never saved asks for a file first; if you cancel that, the project stays open.],
+  [Discard], [Goes on without saving: the changes are lost.],
+  [Cancel], [Keeps the project open as it is (#key("Escape")).],
+)
+
+#screenshot("unsaved-changes.png", [The question before Nodalis closes a project with unsaved
+  changes])
+
+Opening an analysis or looking at its results is no change. Undo and redo are changes of their
+own, so undoing every change still counts as unsaved. Switch on autosave in the settings to save
+by itself (@settings-saving); changes of the model can be undone (@undo).
 
 === Saving in the background <save-background>
 
