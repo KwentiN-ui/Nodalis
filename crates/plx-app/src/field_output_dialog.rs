@@ -730,11 +730,15 @@ fn source_rows(
             .find(|(f, _)| f == field)
             .map_or(&[][..], |(_, c)| c.as_slice());
         let response = egui::ComboBox::from_id_salt("field output component")
-            .selected_text(component.as_str())
+            .selected_text(plx_results::names::global_component_label(field, component))
             .width(crate::dock::fit_width(ui, 180.0))
             .show_ui(ui, |ui| {
                 for name in components {
-                    ui.selectable_value(component, name.clone(), name);
+                    ui.selectable_value(
+                        component,
+                        name.clone(),
+                        plx_results::names::global_component_label(field, name),
+                    );
                 }
             });
         response.response.clicked()
@@ -746,7 +750,14 @@ fn insert_menu(ui: &mut Ui, fields: &[(String, Vec<String>)], equation: &mut Str
     for (field, components) in fields {
         ui.menu_button(field, |ui| {
             for component in components {
-                if ui.button(component).clicked() {
+                // The shown name with the one the equation takes, e.g. `UX (U1)`.
+                let shown = plx_results::names::global_component_label(field, component);
+                let text = if shown == *component {
+                    shown
+                } else {
+                    format!("{shown} ({component})")
+                };
+                if ui.button(text).clicked() {
                     let name = if field.contains(|c: char| !c.is_alphanumeric() && c != '_') {
                         format!("[{field}.{component}]")
                     } else {

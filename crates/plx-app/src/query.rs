@@ -966,7 +966,8 @@ fn node_lines(model: &Model, node: NodeId) -> Vec<String> {
         }
         if let Some((value, unit)) = field_value(model, node) {
             let name = view.current().map_or(String::new(), |(field, component)| {
-                format!("{}, {}:", field.name, component.name)
+                let shown = view.component_label(&field.name, &component.name);
+                format!("{}, {shown}:", field.name)
             });
             lines.push(row("Field value", &unit, &name, &[value]));
         }
@@ -1028,7 +1029,8 @@ fn nodes_lines(model: &Model, nodes: &[NodeId]) -> Vec<String> {
         && let Some(extremes) = field_extremes(model, nodes)
     {
         let unit = field_unit(&field.name, &component.name, view.units).unwrap_or_default();
-        let name = format!("{}, {}:", field.name, component.name);
+        let shown = view.component_label(&field.name, &component.name);
+        let name = format!("{}, {shown}:", field.name);
         let ((min, min_id), (max, max_id)) = extremes;
         lines.push(row("Field min", &unit, &name, &[format_value(min)]));
         lines.push(row("  at node", "", "id:", &[min_id.to_string()]));

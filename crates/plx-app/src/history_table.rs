@@ -224,7 +224,10 @@ impl Columns<'_> {
         let title = self.title(column);
         // A total is named like its component already.
         if many && column >= FIXED_COLUMNS && title != self.component.name {
-            format!("{} {title}", self.component.name)
+            format!(
+                "{} {title}",
+                plx_results::names::global_component_label(self.field, &self.component.name)
+            )
         } else {
             title.to_string()
         }
@@ -504,7 +507,9 @@ impl HistoryTable {
         let mut close = false;
         let title = format!(
             "History Output: {}.{}.{}",
-            table.set.name, table.field, table.component.name
+            table.set.name,
+            table.field,
+            plx_results::names::global_component_label(table.field, &table.component.name)
         );
         let window = egui::Window::new(title)
             .id(id)
@@ -923,7 +928,10 @@ pub fn plot(
         }
     }
     let title = (chosen.iter())
-        .map(|(_, c)| format!("{}.{}.{}", c.set.name, c.field, c.component.name))
+        .map(|(_, c)| {
+            let component = plx_results::names::global_component_label(c.field, &c.component.name);
+            format!("{}.{}.{component}", c.set.name, c.field)
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let mut data = XyData {
@@ -1073,7 +1081,7 @@ mod tests {
         let data = table
             .plot(&sets, AnalysisKind::Static, no_places())
             .unwrap();
-        assert_eq!(data.title, "NH_OUTPUT-1.DISPLACEMENTS.U3");
+        assert_eq!(data.title, "NH_OUTPUT-1.DISPLACEMENTS.UZ");
         assert_eq!(data.x_label, "41");
         assert_eq!(data.x, [-1.0, -2.0, -4.0]);
         assert_eq!(data.curves, [("Time".to_string(), vec![0.25, 0.5, 1.0])]);
@@ -1329,17 +1337,17 @@ mod tests {
             ]
         );
         let data = plot(&tables, &sets, AnalysisKind::Static, no_places()).unwrap();
-        assert_eq!(data.x_label, "U3 41");
+        assert_eq!(data.x_label, "UZ 41");
         assert_eq!(data.x, [-1.0, -2.0, -4.0]);
         assert_eq!(data.curves.len(), 1);
-        assert_eq!(data.curves[0].0, "RF3 41");
+        assert_eq!(data.curves[0].0, "RFZ 41");
         // Increment 2 has no force: a gap.
         let y = &data.curves[0].1;
         assert_eq!((y[0], y[2]), (10.0, 40.0));
         assert!(y[1].is_nan());
         assert_eq!(
             data.title,
-            "NH_OUTPUT-1.DISPLACEMENTS.U3, NH_OUTPUT-2.FORCES.RF3"
+            "NH_OUTPUT-1.DISPLACEMENTS.UZ, NH_OUTPUT-2.FORCES.RFZ"
         );
         // The force chosen first is the x axis; the displacements follow the force's rows.
         let mut displacements = HistoryTable::new(0, 0, 0);
@@ -1355,8 +1363,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(data.x, [10.0, 40.0]);
-        assert_eq!(data.curves[0], ("U3 41".to_string(), vec![-1.0, -4.0]));
-        assert_eq!(data.curves[1].0, "U3 62");
+        assert_eq!(data.curves[0], ("UZ 41".to_string(), vec![-1.0, -4.0]));
+        assert_eq!(data.curves[1].0, "UZ 62");
         // A total named like its component is not named twice.
         sets[1].fields[0].components[0].entries[0].name = "RF3".into();
         let data = plot(

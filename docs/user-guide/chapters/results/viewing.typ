@@ -18,25 +18,42 @@ When results are opened, Nodalis shows the Results workspace with the last incre
 / Model: the mesh of the results with its parts and sets, and the features (reference points,
   coordinate systems, planes) used for result evaluation.
 / Field Outputs: the fields of the result file with their components. Click a component to show
-  it. Names follow the CalculiX result file (`U1`, `S11`, ...). Nodalis adds the displacement magnitude `ALL`,
-  `MISES`, `TRESCA`, the principal stresses and the signed maximum absolute principal stress.
+  it. Components of vectors and tensors are named by their directions: `UX`, `UY`, `UZ` of
+  `DISP`, `SXX` to `SXZ` of `STRESS`, `RFX` of reaction forces. Nodalis adds the displacement
+  magnitude `ALL`, `MISES`, `TRESCA`, the principal stresses and the signed maximum absolute
+  principal stress (@component-names).
 / History Outputs: values from the `.dat` file and history outputs you create (@history-outputs).
 / Hot Spot Stresses, Paths, Plane Results: evaluations described in the following sections.
+
+=== Component names <component-names>
+
+The result file numbers the components: `U1` to `U3`, `S11` to `S13`. The tree, the legend, the
+node query, path plots and the history tables show them by their directions instead, in the
+global system `UX`, `UY`, `UZ` and `SXX`, `SYY`, `SZZ`, `SXY`, `SYZ`, `SXZ`. A copy of a field
+in a coordinate system (a field output with a #ui("Coordinate system"), @step-field-outputs, or a
+#ui("Coordinate System Transformation"), @derived-fields) takes the directions of that system:
+in a cylindrical one `U radial`, `U tangential`, `U axial` and the stresses `SRR`, `STT`, `SAA`,
+`SRT`, `STA`, `SRA` (R radial, T tangential, A axial). The tooltip of a component says what it
+is and its name in equations, which keep the numbered names: `=Abs([STRESS.S11]) / 235` is
+the stress shown as `SXX`.
+
+#screenshot("results-component-names.png", [Displacements and stresses in a cylindrical system:
+  `DISP_Cylinder` with `U radial`, `STRESS_Cylinder` with `SRR` to `SRA`])
 
 === Results of 2D models <results-2d>
 
 A 2D model (plane stress, plane strain, axisymmetric, @model-properties) lies in the X-Y plane,
 so its displacements, velocities, accelerations and forces have no Z component and its stresses
 and strains no shear out of the plane. The built-in solver does not keep these components: the
-result file is smaller, and the results tree lists only what the model computes, such as `U1`
-and `U2` of `DISP` and `S11`, `S22`, `S33`, `S12` of `STRESS`. The same holds for the history
+result file is smaller, and the results tree lists only what the model computes, such as `UX`
+and `UY` of `DISP` and `SXX`, `SYY`, `SZZ`, `SXY` of `STRESS`. The same holds for the history
 outputs.
 
 A component is left out only where it is zero in every increment. Components that carry values
 in 2D stay:
 
-- `S33` and `E33` of an axisymmetric model are the hoop stress and strain.
-- `S33` of a plane strain model is the stress across the thickness; its `E33` is zero and left
+- `SZZ` and `EZZ` of an axisymmetric model are the hoop stress and strain.
+- `SZZ` of a plane strain model is the stress across the thickness; its `EZZ` is zero and left
   out.
 - `E33` of a plane stress model is the thickness strain. `S33`, `S13` and `S23` of plane
   stress are zero at every integration point (the thickness strain is found there so that the
@@ -283,7 +300,7 @@ the modes: the eigenvalue (frequency or buckling factor) and the shape of each m
 and normalized so that its largest displacement is 1. A mode shape has no size of its own, so
 its stresses, strains and forces would tell nothing; the built-in solver does not compute or
 keep them, and these steps take no field outputs. A mode shows the single field #ui("MODE")
-with the components `U1`, `U2`, `U3` and their magnitude `ALL`, without a unit; a complex
+with the components `UX`, `UY`, `UZ` and their magnitude `ALL`, without a unit; a complex
 mode also has #ui("PMODE") with the magnitudes and phase angles that make it whirl.
 
 Modes are scaled apart from the other steps: while a mode is shown, the #ui("Deformation") tile
