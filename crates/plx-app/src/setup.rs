@@ -2425,10 +2425,16 @@ impl Editor {
             }
             NewItem::Bolt => {
                 let name = next_name("Bolt", names(&fe.bolts, |b| &b.name));
+                // A new bolt is loaded in the first step that takes a preload, the steps
+                // after it lock it.
+                let mut steps = vec![crate::bolts::BoltStep::default(); fe.steps.len()];
+                if let Some(first) = (0..fe.steps.len()).find(|&s| fe.takes_bolt_action(s)) {
+                    steps[first].action = plx_model::BoltAction::Load(0.0);
+                }
                 Draft::Bolt(
                     plx_model::Bolt::new(name),
                     crate::bolts::BoltSides::new(contact_target(fe)),
-                    vec![Default::default(); fe.steps.len()],
+                    steps,
                     Default::default(),
                 )
             }

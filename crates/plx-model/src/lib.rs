@@ -66,7 +66,7 @@ pub use tables::{StepTable, TableOwner};
 mod validity;
 
 pub use amplitude::{Amplitude, AmplitudeTime, ValueTable, no_tables};
-pub use bolt::{Bolt, BoltAction, BoltChange, LoweredBolts, Preload, ResolvedBolt, ResolvedThread};
+pub use bolt::{Bolt, BoltAction, BoltChange, LoweredBolts, ResolvedBolt, ResolvedThread};
 pub use cad_operation::{
     CadOperation, CadOperationKind, DefeatureFaces, SplitKeep, SplitPlane, tilted_normal,
 };
@@ -209,8 +209,10 @@ use serde::{Deserialize, Serialize};
 /// ([`Geometry::suppressed`]); formats 21 to 33 read as they are. Format 35 gives a bolt its
 /// surface instead of the two sides of a cut ([`Bolt::surface`]); formats 21 to 34 read as
 /// they are unless they have bolts. Format 36 lets a File block keep its file in the project
-/// (embedded); formats 21 to 35 read as they are.
-pub const PROJECT_FORMAT: u32 = 36;
+/// (embedded); formats 21 to 35 read as they are. Format 37 drops the preload of a bolt: its
+/// steps set it ([`BoltChange`]), an adjustment adds to the length at the end of the previous
+/// step; formats 21 to 36 read as they are unless they have bolts.
+pub const PROJECT_FORMAT: u32 = 37;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2335,7 +2337,8 @@ pub enum LoadKind {
     /// the force pulling the two sides together, or the shortening when `by_displacement`.
     /// The shortening counts from the start of the analysis, so 0 loosens the bolt; `lock`
     /// keeps the length the bolt had at the end of the previous step instead
-    /// (`*BOUNDARY, FIXED`), and the value is not used.
+    /// (`*BOUNDARY, FIXED`); with `by_displacement` as well the bolt is shortened by the value
+    /// beyond that length.
     PreTension {
         value: f64,
         by_displacement: bool,

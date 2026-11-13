@@ -3,7 +3,7 @@
 //! bolt faces tied to the thread) is derived and shown as "Exported as".
 
 use egui::{RichText, Ui};
-use plx_model::{Bolt, BoltAction, FeModel, Id, Preload, Quantity, Region};
+use plx_model::{Bolt, BoltAction, FeModel, Id, Quantity, Region};
 
 use crate::model::{Highlight, Model};
 use crate::numeric;
@@ -85,12 +85,21 @@ pub fn bolt_highlight(model: &Model, surface: &Region, thread: &Region) -> Highl
     crate::contacts::master_slave_highlight(model, surface, thread)
 }
 
-/// What the bolt does in one step in the dialog: the action (`None` automatic) and the
+/// What the bolt does in one step in the dialog: the action (a lock unless given) and the
 /// amplitude of its load or adjustment.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoltStep {
-    pub action: Option<BoltAction>,
+    pub action: BoltAction,
     pub amplitude: Option<Id>,
+}
+
+impl Default for BoltStep {
+    fn default() -> Self {
+        Self {
+            action: BoltAction::Lock,
+            amplitude: None,
+        }
+    }
 }
 
 /// What the dialog keeps besides the bolt: the derivation of the bolt as last edited,
@@ -137,34 +146,6 @@ pub fn bolt_form(
         .wrap(),
     );
     ui.end_row();
-    ui.label("Preload by");
-    crate::layout::wrapped_row(ui, |ui| {
-        let value = bolt.preload.value();
-        if ui
-            .radio(matches!(bolt.preload, Preload::Force(_)), "Force")
-            .clicked()
-        {
-            bolt.preload = Preload::Force(value);
-        }
-        if ui
-            .radio(matches!(bolt.preload, Preload::Shortening(_)), "Shortening")
-            .clicked()
-        {
-            bolt.preload = Preload::Shortening(value);
-        }
-    });
-    ui.end_row();
-    match &mut bolt.preload {
-        Preload::Force(value) => {
-            ui.label("Preload");
-            ui.add(numeric::quantity(value, units, Quantity::Force).speed(1.0));
-        }
-        Preload::Shortening(value) => {
-            ui.label("Shortening");
-            ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.001));
-        }
-    }
-    ui.end_row();
     let mut given = bolt.axis.is_some();
     ui.label("Axis");
     ui.checkbox(&mut given, "Given (otherwise the axis of the shank)");
@@ -182,13 +163,14 @@ pub fn bolt_form(
     ui.color_edit_button_srgb(&mut bolt.color);
     ui.end_row();
     ui.label("Steps").on_hover_text(
-        "Auto preloads the bolt in the first step that takes forces and locks it at its \
-         length in the steps after it.",
+        "What the bolt does in each step. A step without an action locks the bolt at its \
+         length at the end of the previous step; an adjustment shortens it beyond that \
+         length, so adjustments of the steps add up.",
     );
     egui::Grid::new("bolt steps")
-        .num_columns(3)
+        .num_columns(2)
         .spacing([8.0, 4.0])
-        .show(ui, |ui| step_rows(ui, &model.fe, bolt, steps, units));
+        .show(ui, |ui| step_rows(ui, &model.fe, steps, units));
     ui.end_row();
     ui.label("Exported as");
     let text = view.exported(model, bolt).to_owned();
@@ -199,48 +181,33 @@ pub fn bolt_form(
     ui.end_row();
 }
 
-/// One row per step: its name, the action, the value of a load or adjustment and the
-/// amplitude it follows.
-fn step_rows(
-    ui: &mut Ui,
-    fe: &FeModel,
-    bolt: &Bolt,
-    steps: &mut [BoltStep],
-    units: plx_model::UnitSystem,
-) {
+/// One row per step with its name and the action, below it rows for the value of a load or
+/// adjustment and the amplitude it follows.
+fn step_rows(ui: &mut Ui, fe: &FeModel, steps: &mut [BoltStep], units: plx_model::UnitSystem) {
     for (s, (step, row)) in fe.steps.iter().zip(steps.iter_mut()).enumerate() {
         ui.label(&step.name);
-        let Some(auto) = fe.auto_bolt_action(bolt, s) else {
+        if !fe.takes_bolt_action(s) {
             ui.weak("No preload in this step");
-            ui.label("");
             ui.end_row();
             continue;
-        };
+        }
         let action = &mut row.action;
-        let describe = |a: BoltAction| a.name();
-        let selected = match action {
-            None => format!("Auto ({})", describe(auto)),
-            Some(a) => describe(*a).to_owned(),
-        };
         egui::ComboBox::from_id_salt(("bolt action", s))
-            .selected_text(selected)
-            .width(165.0)
+            .selected_text(action.name())
+            .width(120.0)
             .show_ui(ui, |ui| {
-                if ui
-                    .selectable_label(action.is_none(), format!("Auto ({})", describe(auto)))
-                    .clicked()
-                {
-                    *action = None;
-                }
-                let value = match (*action).unwrap_or(auto) {
+                // A value entered for a load or an adjustment stays when switching between
+                // the two.
+                let value = match *action {
                     BoltAction::Load(v) | BoltAction::Adjust(v) => v,
-                    _ => bolt.preload.value(),
+                    _ => 0.0,
                 };
                 let choices = [
                     (BoltAction::Load(value), "Pulled by a force."),
                     (
                         BoltAction::Adjust(value),
-                        "Shortened by a length since the start of the analysis.",
+                        "Shortened by a length beyond its length at the end of the previous \
+                         step.",
                     ),
                     (
                         BoltAction::Lock,
@@ -249,40 +216,33 @@ fn step_rows(
                     (BoltAction::Open, "Loose: no preload."),
                 ];
                 for (choice, hint) in choices {
-                    let current = action.is_some_and(|a| a.name() == choice.name());
                     if ui
-                        .selectable_label(current, choice.name())
+                        .selectable_label(action.name() == choice.name(), choice.name())
                         .on_hover_text(hint)
                         .clicked()
                     {
-                        *action = Some(choice);
+                        *action = choice;
                     }
                 }
             });
+        ui.end_row();
+        // The value and the amplitude of a load or an adjustment, in rows of their own; a
+        // lock or an open bolt has neither.
         match action {
-            Some(BoltAction::Load(value)) => {
+            BoltAction::Load(value) => {
+                ui.weak("    Force");
                 ui.add(numeric::quantity(value, units, Quantity::Force).speed(1.0));
             }
-            Some(BoltAction::Adjust(value)) => {
+            BoltAction::Adjust(value) => {
+                ui.weak("    Shortening");
                 ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.001));
             }
-            _ => {
-                ui.label("");
-            }
+            _ => continue,
         }
         ui.end_row();
-        // The amplitude of a load or an adjustment, in a row of its own below; a lock or an
-        // open bolt has no value to follow one.
-        let ramps = matches!(
-            (*action).unwrap_or(auto),
-            BoltAction::Load(_) | BoltAction::Adjust(_)
-        );
-        if ramps {
-            ui.weak("    Amplitude");
-            amplitude_choice(ui, ("bolt amplitude", s), &mut row.amplitude, fe);
-            ui.label("");
-            ui.end_row();
-        }
+        ui.weak("    Amplitude");
+        amplitude_choice(ui, ("bolt amplitude", s), &mut row.amplitude, fe);
+        ui.end_row();
     }
 }
 
@@ -299,7 +259,7 @@ fn amplitude_choice(
     };
     egui::ComboBox::from_id_salt(id)
         .selected_text(text)
-        .width(165.0)
+        .width(120.0)
         .show_ui(ui, |ui| {
             ui.selectable_value(amplitude, None, "Default")
                 .on_hover_text("The step's ramp.");
@@ -368,7 +328,7 @@ pub fn step_actions(fe: &FeModel, bolt: Id) -> Vec<BoltStep> {
             (step.bolt_changes.iter())
                 .find(|c| c.bolt == bolt)
                 .map(|c| BoltStep {
-                    action: (!c.auto).then_some(c.action),
+                    action: c.action,
                     amplitude: c.amplitude,
                 })
                 .unwrap_or_default()
@@ -376,14 +336,14 @@ pub fn step_actions(fe: &FeModel, bolt: Id) -> Vec<BoltStep> {
         .collect()
 }
 
-/// Stores the steps of the dialog with the bolt: a change for each step that has its own
-/// action or an amplitude.
+/// Stores the steps of the dialog with the bolt: a change for each step that does not just
+/// lock it.
 pub fn set_step_actions(fe: &mut FeModel, bolt: Id, steps: &[BoltStep]) {
     for step in fe.steps.iter_mut() {
         step.bolt_changes.retain(|c| c.bolt != bolt);
     }
     for (s, row) in steps.iter().enumerate() {
-        if row.action.is_none() && row.amplitude.is_none() {
+        if *row == BoltStep::default() {
             continue;
         }
         let Some(step) = fe.steps.get_mut(s) else {
@@ -391,8 +351,7 @@ pub fn set_step_actions(fe: &mut FeModel, bolt: Id, steps: &[BoltStep]) {
         };
         step.bolt_changes.push(plx_model::BoltChange {
             bolt,
-            action: row.action.unwrap_or(BoltAction::Open),
-            auto: row.action.is_none(),
+            action: row.action,
             amplitude: row.amplitude,
         });
     }
