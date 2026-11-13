@@ -12,10 +12,11 @@ use crate::numeric;
 /// The most points of the signal plot.
 const PLOT_POINTS: usize = 4000;
 
-/// The rows of an excitation in a step of length `duration`.
+/// The rows of an excitation in a step of length `duration`, its components named `labels`.
 pub fn excitation_rows(
     ui: &mut Ui,
     excitation: &mut Excitation,
+    labels: [&str; 3],
     duration: f64,
     two_d: bool,
     units: UnitSystem,
@@ -24,7 +25,7 @@ pub fn excitation_rows(
     if two_d {
         excitation.value[2] = 0.0;
     }
-    let labels = ["F1", "F2", "F3"].into_iter().zip(Field::VECTOR);
+    let labels = labels.into_iter().zip(Field::VECTOR);
     for (value, (label, field)) in excitation.value.iter_mut().zip(labels).take(count) {
         ui.label(label)
             .on_hover_text("Peak force: the signal swings between it and its negative.");
