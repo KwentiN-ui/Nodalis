@@ -329,11 +329,13 @@ impl LdltSolver {
                 ),
             )
         })?;
-        // The allocation is mapped lazily; writing it once here takes its page faults in one
-        // thread. Taken by the threads of the factorization at once they cost several times
-        // more (the kernel serializes them; measured in the cloud VM: 1.9 GB of factor 1.1 s
-        // here against about 3 s inside the parallel factorization).
-        self.values.resize(len, 0.0);
+        // The allocation is mapped lazily; writing it once here takes its page faults
+        // before the factorization, whose threads met them at random places (measured in the
+        // cloud VM: 1.9 GB of factor 1.1 s here against about 3 s inside the parallel
+        // factorization). Written by all threads in large pieces, which costs less than one
+        // thread: a factor of 7.5 GB on four threads 2.4 s against 6.4 s.
+        use rayon::prelude::*;
+        self.values.par_extend(rayon::iter::repeat_n(0.0, len));
         self.allocated = true;
         Ok(())
     }
