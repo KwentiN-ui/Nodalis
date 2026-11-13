@@ -3,6 +3,7 @@
 //! [`StudyEdit`]s, which the project window applies, so that the table follows a run while
 //! the editor is open.
 
+use crate::clicks::TolerantDoubleClick as _;
 use plx_model::{FillMode, FillRule, PointState, UnitSystem, ValueKind};
 
 use crate::numeric::format_physical;
@@ -746,7 +747,7 @@ impl StudyEditor {
                             let label = ui.add(egui::Label::new(name).sense(egui::Sense::click()));
                             if label
                                 .on_hover_text("Double-click to rename")
-                                .double_clicked()
+                                .double_clicked_tolerant()
                             {
                                 self.renaming = Some((is_input, at, name.clone()));
                             }

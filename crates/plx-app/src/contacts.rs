@@ -3,6 +3,7 @@
 //! field's "..." button is pressed; in 2D models the surfaces are element edges. The master
 //! shows in the primary, the slave in the secondary highlight colour.
 
+use crate::clicks::TolerantDoubleClick as _;
 use egui::{RichText, Ui};
 use plx_mesh::FeMesh;
 use plx_model::{
@@ -557,7 +558,7 @@ fn model_lists(ui: &mut Ui, interaction: &mut SurfaceInteraction, view: &mut Int
                         view.available = Some(i);
                         view.focus = None;
                     }
-                    if row.double_clicked() {
+                    if row.double_clicked_tolerant() {
                         add = true;
                     }
                 }

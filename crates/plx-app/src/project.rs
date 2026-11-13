@@ -2,6 +2,7 @@
 //! blocks of a node graph, each with the state of its cells. An analysis opens in a window of
 //! its own, the [`AnalysisWindow`], which looks like the classic main window.
 
+use crate::clicks::TolerantDoubleClick as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
@@ -5792,7 +5793,7 @@ impl ProjectApp {
                                     if label.clicked() {
                                         pick = Some(row.id);
                                     }
-                                    if label.double_clicked() {
+                                    if label.double_clicked_tolerant() {
                                         open_analysis = Some(row.id);
                                     }
                                     ui.label(&row.state);
@@ -6260,7 +6261,7 @@ impl ProjectApp {
         // The response lies on the zoomed and panned layer of the schematic, so its pointer
         // position is in the schematic; the picker needs the one on the screen.
         if self.placing.is_none()
-            && (response.double_clicked() || response.secondary_clicked())
+            && (response.double_clicked_tolerant() || response.secondary_clicked())
             && let Some(screen) = ui.ctx().input(|i| i.pointer.interact_pos())
         {
             let graph = viewer.to_global.inverse() * screen;
@@ -11924,20 +11925,19 @@ impl SnarlViewer<u64> for Viewer {
         // The schematic is zoomed and panned: the pointer is brought into its space first.
         let layer = ui.layer_id();
         let ctx = ui.ctx();
-        let bar_double = ctx.input(|i| {
-            i.pointer
-                .button_double_clicked(egui::PointerButton::Primary)
-        }) && ctx.pointer_interact_pos().is_some_and(|screen| {
-            let local = ctx
-                .layer_transform_to_global(layer)
-                .map_or(screen, |t| t.inverse() * screen);
-            // Not through a window or menu over the schematic.
-            ctx.layer_id_at(screen)
-                .is_none_or(|l| l.order == egui::Order::Background)
-                && bar.contains(local)
-                && ui.clip_rect().contains(local)
-        });
-        if label.double_clicked() || bar_double {
+        let bar_double = ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary))
+            && ctx.pointer_interact_pos().is_some_and(|screen| {
+                let local = ctx
+                    .layer_transform_to_global(layer)
+                    .map_or(screen, |t| t.inverse() * screen);
+                // Not through a window or menu over the schematic.
+                ctx.layer_id_at(screen)
+                    .is_none_or(|l| l.order == egui::Order::Background)
+                    && bar.contains(local)
+                    && ui.clip_rect().contains(local)
+                    && crate::clicks::pair(ctx, egui::Id::new(("block bar", id)), screen)
+            });
+        if label.double_clicked_tolerant() || bar_double {
             // A compact block opens to show its rows first, as in Blender.
             self.actions.push(if compact {
                 Action::Compact(vec![id])
@@ -12143,12 +12143,12 @@ impl SnarlViewer<u64> for Viewer {
             tip.push_str("\nRight-click a pin to remove its links.");
         }
         let response = response.on_hover_text(tip);
-        if toggled || (row.expander.is_some() && response.double_clicked()) {
+        if toggled || (row.expander.is_some() && response.double_clicked_tolerant()) {
             self.actions.push(Action::Toggle(id, row.path.clone()));
-        } else if response.double_clicked() && groups::socket_of(&row.path).is_some() {
+        } else if response.double_clicked_tolerant() && groups::socket_of(&row.path).is_some() {
             self.actions
                 .push(Action::RenameSocket(id, row.path.clone()));
-        } else if response.double_clicked() {
+        } else if response.double_clicked_tolerant() {
             self.actions.push(Action::Open(id, workspace_of(&row.path)));
         }
         let color = wire_color(&self.pin_type(id, &row.path));

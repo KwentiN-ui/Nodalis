@@ -3,6 +3,7 @@
 //! overridden one setting at a time. Side A shows in the primary, side B in the secondary
 //! highlight colour.
 
+use crate::clicks::TolerantDoubleClick as _;
 use egui::{RichText, Ui};
 use plx_model::{
     BondedMethod, ContactBehavior, ContactCheck, ContactDefaults, ContactDetection, ContactMethod,
@@ -1433,7 +1434,7 @@ pub fn worksheet(
                                         tree.select_item(view, item.clone());
                                     }
                                 }
-                                if response.double_clicked() {
+                                if response.double_clicked_tolerant() {
                                     tree.reveal = true;
                                 }
                                 let detection =
