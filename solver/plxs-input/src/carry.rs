@@ -291,14 +291,21 @@ pub(crate) fn replace_distributed(
             touched.insert((element, id));
         }
     }
-    if touched.is_empty() {
+    let named = new.iter().any(|l| elements_of(sets, &l.region).is_none());
+    if touched.is_empty() && !named {
         return warnings;
     }
     let mut kept = Vec::with_capacity(carried.len());
     for load in carried.drain(..) {
         let id = key_id(key(&load.kind), &mut keys);
         let Some(elements) = elements_of(sets, &load.region) else {
-            kept.push(load);
+            // A load on the name of point masses (no element set) is replaced by a new one
+            // of the same kind on the same name.
+            let replaced =
+                (new.iter()).any(|n| n.region == load.region && key(&n.kind) == key(&load.kind));
+            if !replaced {
+                kept.push(load);
+            }
             continue;
         };
         let hit = elements

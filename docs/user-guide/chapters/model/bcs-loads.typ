@@ -9,15 +9,18 @@ the types the step accepts. In the 3D view, supports are drawn as cones (transla
 plates (rotations).
 
 #screenshot("boundary-condition.png", [Support holding a face in all directions])
-#screenshot("bc-2d-reference-point.png", [`UR3` on the reference point of a plane model])
+#screenshot("bc-2d-reference-point.png", [`RZ` (`UR3`) on the reference point of a plane model])
 
 #fields(
-  [Displacement/Rotation], [Prescribed values for the ticked components `U1`, `U2`, `U3`
-    (length) and `UR1`, `UR2`, `UR3` (angle in radians). Unticked components are free. A new
+  [Displacement/Rotation], [Prescribed values for the ticked components `X`, `Y`, `Z`
+    (length) and `RX`, `RY`, `RZ` (angle in radians). In a cylindrical
+    #ui("Coordinate system") they are named #ui("Radial"), #ui("Tangential"), #ui("Axial") and #ui("Rot. radial"), #ui("Rot. tangential"), #ui("Rot. axial")
+    instead (radial, tangential, axial); the names follow the chosen system at once. In the
+    input file and the results they are the components 1, 2, 3 (`U1` to `UR3`). Unticked components are free. A new
     one holds all components at zero, a fixed support. Leave the rotations of a face free and
     it turns like a hinge, also on solids, whose nodes have no rotations of their own
-    (@displacement-behavior). In plane stress and plane strain models `U1`, `U2` and `UR3`
-    are shown, in axisymmetric models `U1` and `U2`. On a beam node give all three rotations
+    (@displacement-behavior). In plane stress and plane strain models `X`, `Y` and `RZ`
+    are shown, in axisymmetric models `X` and `Y`. On a beam node give all three rotations
     (a clamp) or none (a pin): CalculiX holds all of them as soon as one is given, and in
     Nlgeom steps such a node mostly stops the step from converging, so the model check warns
     "Beam rotations partly held". On a reference point of a rigid body (@rigid-body) the
@@ -26,7 +29,7 @@ plates (rotations).
     #ui("Distribution") (@distributions) makes it vary over the region.],
   [Submodel], [Displacements taken from the global model (static steps; offered only when the model type in the
     model properties is #ui("Submodel"),
-    @submodel). The check boxes select the displacements U1 to U3; the step of the global
+    @submodel). The check boxes select the global displacements X to Z; the step of the global
     results is the one linked to the #ui("Global results") row. The dialog names that step,
     its analysis and the field outputs that write its displacements, and shows in red when
     nothing usable is linked (@submodel). The global results hold no
@@ -44,22 +47,28 @@ a displacement can also follow a table of its own over the step time (@value-tab
 === Behavior: nodes or a point <displacement-behavior>
 
 What a #ui("Displacement/Rotation") does depends on what is selected. Nodes of solid and 2D
-elements have displacements only. Holding all nodes of a face in `U1` to `U3` therefore also
+elements have displacements only. Holding all nodes of a face in `X` to `Z` therefore also
 keeps the face from turning, whatever the rotations say. To let a face turn, Nodalis holds a
 point at its centre instead, and the face follows the point, as Ansys' remote displacement does:
 a beam end on a hinge, a shaft end turned by an angle, a bolt hole held in place while the part
 turns about it. The line below #ui("Behavior") always says which of the two the input file gets.
 
-#screenshot("displacement-hinge.png", [End face of a beam held in `U1` to `U3` and in the twist
-  `UR1`, free to turn about `UR2` and `UR3`: a rigid point at its centre, about which it turns])
+#screenshot("bc-cylindrical-directions.png", [Components of a support in a cylindrical
+  system: Radial, Tangential, Axial and the rotations about these directions])
+
+#screenshot("displacement-hinge.png", [End face of a beam held in `X` to `Z` and in the twist
+  `RX`, free to turn about `RY` and `RZ`: a rigid point at its centre, about which it turns])
 
 #fields(
   [Behavior], [#ui("Automatic") (default) chooses as described below. #ui("Each node") holds
     every node directly. #ui("Rigid") and #ui("Deformable") always use a point.],
   [Coordinate system], [The directions of the components (and of the coordinates below):
     #ui("Global") or a coordinate system under #ui("Features") (@features). In a cylindrical
-    system `U1` is radial, `U2` tangential and `U3` axial. Held at each node, the directions
-    are those at the node (a `*TRANSFORM` of the nodes); held at a point, those at the point.],
+    system the components are radial, tangential and axial, and the dialog
+    names them so as soon as the system is chosen. Held at each node, the directions
+    are those at the node (a `*TRANSFORM` of the nodes); held at a point, those at the point.
+    The cones and plates in the 3D view point along the axes of the system, in a cylindrical
+    one at nodes spread over the selection.],
   [Location], [Only with a point. #ui("Centroid") puts the point at the area-weighted centre of
     the selected faces (of the edges in 2D, the mean of the nodes when no faces are selected).
     #ui("Coordinates") puts it anywhere, given in the coordinate system; switching starts from
@@ -68,18 +77,22 @@ turns about it. The line below #ui("Behavior") always says which of the two the 
     distance of the point follow it. Ticking it starts with the distance of the farthest node.],
 )
 
+#screenshot("displacement-local-system.png", [The two cut faces of a pipe segment, each held
+  normal to itself (`U3`) and in its rotations in a coordinate system turned with the face:
+  the cones and plates follow the axes of the systems])
+
 #ui("Automatic") holds each node directly
 
 - on a reference point (its rigid body follows it), on a single node, and in axisymmetric
   models, which have no rotations,
 - when all nodes have rotations of their own (beams and shells): an edge of a shell held in
-  `U1` to `U3` with free rotations is a line hinge,
+  `X` to `Z` with free rotations is a line hinge,
 - when all rotations are ticked and zero (`UR3` in plane models): a clamp, or a roller with
-  only `U3` ticked.
+  only `Z` ticked.
 
 Otherwise, for a face or edge of solids or 2D elements whose rotations are free or turned, it
-uses a #ui("Rigid") point at the centre. So a face with `U1` to `U3` ticked and the rotations
-free is a hinge about its centre, and a face with only `U3` ticked and free rotations may also
+uses a #ui("Rigid") point at the centre. So a face with `X` to `Z` ticked and the rotations
+free is a hinge about its centre, and a face with only `Z` ticked and free rotations may also
 tilt. A rotation exposed as a parameter counts as turned, so a study never switches between the
 two. Setting a location or a pinball region asks for a point as well.
 
@@ -124,8 +137,15 @@ angle Theta of a cylindrical system is the one number that cannot be exposed.
 - A node can belong to only one rigid body or point: do not let the selection overlap that of
   another displacement on a point or a rigid body constraint (@rigid-body). The model check
   (@model-check) reports "Nodes in several rigid bodies or remote points" otherwise.
-- A coordinate system of its own at each node turns everything else on those nodes too, like
-  a skewed symmetry plane (@symmetry); keep other supports and point loads off them.
+- The solver reads every support of a node in one coordinate system only. Where supports in
+  different systems meet, such as at the edge between two cut faces of a pipe segment held
+  normal to themselves, or between such a face and one held in global directions, the input
+  file gives these nodes a system of their own in which every held direction is an axis, and
+  each support holds the matching axis there. Directions that are not perpendicular to each
+  other can only be combined when they are held at zero; otherwise writing the input file
+  stops with a message naming the boundary conditions. Point loads on nodes held in a
+  coordinate system of their own act in the directions of that system, as on a skewed
+  symmetry plane (@symmetry): keep them off such nodes.
 - Ansys features that are left out: the #ui("Beam") behavior and the augmented Lagrange
   formulation (Nodalis always writes exact constraints). Tabular values per component are
   available (@value-tables).
@@ -145,23 +165,23 @@ values, the amplitude or the region show while it plays.
 Only the nodes of the region move; the rest of the mesh stays in place, so the elements next to
 the region stretch. The motion is exaggerated so that the largest displacement is a quarter of
 the model size; the dialog shows the current time of the amplitude and this scale. Rotations
-(`UR1` to `UR3`) are not shown. Components with a table (@value-tables) move along their table,
+(`RX` to `RZ`) are not shown. Components with a table (@value-tables) move along their table,
 so the preview also shows a motion in several directions at once.
 
 === Value tables <value-tables>
 
-Instead of a fixed value, every component of a displacement (`U1` to `UR3`) and of a force,
+Instead of a fixed value, every component of a displacement (`X` to `RZ`) and of a force,
 moment or pressure can follow a table of values over the step time. The small #ui("T") button
 right of the value opens the table in a window of its own. The first click starts a table that
 ramps from zero to the value at the end of the step; edit, add or paste rows there (two columns,
 time and value, for example from a spreadsheet). The value field then shows the number of
 points, and a click on it opens the table again. #ui("Remove Table") goes back to the fixed value.
 
-#screenshot("value-table.png", [`U1` and `U2` of one boundary condition, each with its own table])
+#screenshot("value-table.png", [`X` and `Y` of one boundary condition, each with its own table])
 
 This describes a combined motion with one boundary condition: for example the tip of a lever
 pressed down by 0.8 mm in the first second and then moved 4 mm to the side while it rises to
-0.8 mm, with the tables `U1`: (0, 0), (1, 0), (2, 4) and `U2`: (0, 0), (1, -0.8), (2, 0.8). In
+0.8 mm, with the tables `X`: (0, 0), (1, 0), (2, 4) and `Y`: (0, 0), (1, -0.8), (2, 0.8). In
 CalculiX a boundary condition has one amplitude for all its components, so such a motion needs a
 boundary condition per direction; the Nodalis solver takes a curve per component.
 
@@ -187,22 +207,23 @@ step. A frequency step takes no loads.
 #screenshot("selection.png", [Force on the end face of a plate])
 
 #fields(
-  [Force], [The default load: a *total* force `F1`, `F2`, `F3` on whatever the region holds,
+  [Force], [The default load: a *total* force `FX`, `FY`, `FZ` on whatever the region holds,
     faces, edges or points (@force-region). When the input file is written it is distributed
     to the nodes (`*CLOAD`). With #ui("Apply to all nodes individually") the whole force acts
     at every node of the region instead, as a concentrated force in CalculiX; it is off by
     default.],
-  [Excitation], [A force `F1` to `F3` that follows a signal (impulse, sine, chirp) to shake
+  [Excitation], [A force `FX` to `FZ` that follows a signal (impulse, sine, chirp) to shake
     the structure in a Dynamic step (@excitation).],
-  [Remote Force], [Force `F1` to `F3` and moment `M1` to `M3` at a point that the selected
+  [Remote Force], [Force `FX` to `FZ` and moment `MX` to `MZ` at a point that the selected
     faces, edges or points follow, rigidly or on average, as Ansys' remote force does
     (@remote-force). The way to put a moment on faces of solids.],
-  [Moment], [`M1`, `M2`, `M3` at the reference point of a rigid body (@rigid-body) or at every
+  [Moment], [`MX`, `MY`, `MZ` at the reference point of a rigid body (@rigid-body) or at every
     node of beams and shells, which have rotations. 3D models only.],
   [Pressure], [Pressure on faces; positive values push into the material (`*DLOAD`). A
     #ui("Distribution") (@distributions) makes it vary over the faces, e.g. with depth.],
   [Gravity], [Body force on the mass of whole parts or element sets (`*DLOAD`, `GRAV`); the materials need
-    a density. #ui("Definition") #ui("Standard Gravity") (default) takes only a
+    a density. Point masses carried by the region are pulled too, the dialog names them; the
+    region #ui("Point Mass") pulls one point mass alone (@point-mass). #ui("Definition") #ui("Standard Gravity") (default) takes only a
     #ui("Direction") along an axis (`+X` to `-Z`, in plane models only `X` and `Y`; default
     `-Z`, or `-Y` in plane models) with the standard acceleration of 9.80665 m/s² in every unit
     system. #ui("User Defined") takes the acceleration vector `g1` to `g3` (`g1`, `g2` in plane
@@ -287,8 +308,9 @@ entered as the total: multiply it by the area or the volume of the region. In ax
 
 A #ui("Force"), an #ui("Excitation") and a #ui("Moment") take their components in a
 #ui("Coordinate system") of the features (@features), like a displacement does; the
-default is the global one. In a rectangular system `F1` to `F3` act along its x, y and z axes;
-in a cylindrical one they are radial, tangential and axial at every node, so a force on a ring of
+default is the global one. In a rectangular system `FX` to `FZ` act along its x, y and z axes;
+in a cylindrical one the dialog names them #ui("F radial"), #ui("F tangential"), #ui("F axial") (and the moments
+#ui("M radial") to #ui("M axial")): radial, tangential and axial at every node, so a force on a ring of
 faces can push outward all around or twist it. The arrows in the 3D view point the way the
 force acts.
 
@@ -323,14 +345,14 @@ flange, the force of a lever acting at its pin, a load on a bracket at the posit
 that is not modelled. Pick faces, edges or points like for a #ui("Force"); Nodalis adds the point
 and the coupling when the input file is written.
 
-#screenshot("remote-force.png", [Remote force with `F2` and a torque `M1` on the end face of
+#screenshot("remote-force.png", [Remote force with `FY` and a torque `MX` on the end face of
   a solid beam: the arrows at the point with lines to the face])
 
 #fields(
-  [F1, F2, F3], [Force at the point, in the directions of the coordinate system. In plane
-    models `F1` and `F2`, in axisymmetric models on the full circumference.],
-  [M1, M2, M3], [Moment about the axes of the coordinate system through the point. Plane
-    models take `M3`, axisymmetric models none.],
+  [FX, FY, FZ], [Force at the point, in the directions of the coordinate system (#ui("F radial"),
+    #ui("F tangential"), #ui("F axial") in a cylindrical one). In plane models `FX` and `FY`, in axisymmetric models on the full circumference.],
+  [MX, MY, MZ], [Moment about the axes of the coordinate system through the point. Plane
+    models take `MZ`, axisymmetric models none.],
   [Behavior], [#ui("Rigid") (default): the selection keeps its shape and follows the point as a
     rigid body (`*RIGID BODY`), which stiffens it. #ui("Deformable"): the point moves with the
     area-weighted mean of the selection, which may deform (`*EQUATION`s, RBE3); the face takes

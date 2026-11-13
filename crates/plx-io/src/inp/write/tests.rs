@@ -979,6 +979,52 @@ fn solver_holds_each_node_in_its_coordinate_system() {
     }
 }
 
+/// Nodes held in two coordinate systems get one of their own in which both hold their
+/// directions: a face held along global x and z by one boundary condition and along y,
+/// the x axis of a turned system, by another is clamped. A node set takes one system only:
+/// the turned one of the second set would also turn the directions of the first.
+#[test]
+fn solver_holds_nodes_shared_by_two_coordinate_systems() {
+    let force = Load {
+        region: Region::Nodes(vec![99]),
+        kind: LoadKind::force([100.0, 0.0, 0.0]),
+        ..tip_force()
+    };
+    let (mesh, mut model) = analysis("kragbalken_c3d8.inp", force);
+    turned_system(&mut model);
+    let mut global = Displacement::new([Some(0.0), None, Some(0.0), None, None, None]);
+    global.behavior = Behavior::EachNode;
+    let mut turned = Displacement::new([Some(0.0), None, None, None, None, None]);
+    turned.behavior = Behavior::EachNode;
+    turned.system = Some(named("Turned"));
+    let step = &mut model.steps[0];
+    step.boundary_conditions[0].kind = BoundaryKind::Displacement(global);
+    let mut second = step.boundary_conditions[0].clone();
+    second.id = plx_model::Id::new();
+    second.name = "Turned-1".into();
+    second.kind = BoundaryKind::Displacement(turned);
+    step.boundary_conditions.push(second);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // The global system has the turned x (global y) as an axis: the nodes are held in it,
+    // which overrides the turned system of the second set.
+    assert!(
+        text.contains(
+            "*Transform, Nset=INTERNAL_SELECTION-1_NODE_SYSTEM, Type=R\n1, 0, 0, 0, 1, 0\n"
+        ),
+        "{text}"
+    );
+    let Some(frd) = run_solver("two-systems", &text) else {
+        return;
+    };
+    let root = mesh.node_sets["FIX"].clone();
+    for id in root {
+        let u = ["U1", "U2", "U3"].map(|c| node_value(&frd, "DISP", c, id));
+        assert!(u.iter().all(|u| u.abs() < 1e-9), "{id}: {u:?}");
+    }
+    let tip = node_value(&frd, "DISP", "U1", 99);
+    assert!(tip > 0.0 && tip < 1e-2, "{tip}");
+}
+
 /// A face of solids held in its translations and free to turn becomes a hinge about its
 /// centre; held in all directions it is clamped node by node. Nodes that another boundary
 /// condition holds directly stay out of the point.
@@ -10828,6 +10874,8 @@ fn equation(name: &str, text: &str) -> plx_model::Distribution {
         id: named(name),
         name: name.into(),
         kind: plx_model::DistributionKind::Equation(text.into()),
+        system: None,
+        variables: Vec::new(),
     }
 }
 
@@ -13366,7 +13414,8 @@ fn a_point_mass_couples_its_region_and_sits_on_its_point() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains(&format!(
-            "*Point mass, Node={}, Rotation node={rotation}, Elset={elset}\n0.5, 7, 1, 2, 0, 0, 0\n",
+            "*Point mass, Node={}, Rotation node={rotation}, Elset={elset}, \
+             Name=INTERNAL_MASS-1_RP-1\n0.5, 7, 1, 2, 0, 0, 0\n",
             mass.node
         )),
         "{text}"
@@ -13459,6 +13508,58 @@ fn solver_swings_and_weighs_a_cantilever_with_a_tip_mass() {
             "{f} Hz vs {expected} Hz"
         );
     }
+}
+
+/// Gravity on the reference point of a point mass pulls the mass alone, without the weight
+/// of the beam; on the part it pulls both. The model names the masses each load pulls.
+#[test]
+fn solver_pulls_a_point_mass_alone_by_gravity_on_its_point() {
+    let beam = 7.85e-9 * 100.0 * 100.0;
+    let mass = 10.0 * beam;
+    let (mesh, mut model) = tip_mass(mass, None);
+    let mut gravity = body_load(LoadKind::Gravity([0.0, 0.0, -9810.0]));
+    let on_part = model.point_masses_pulled(&gravity.region, &mesh).len();
+    assert_eq!(on_part, 1);
+    gravity.region = Region::ReferencePoint(named("RP-1"));
+    assert_eq!(model.point_masses_pulled(&gravity.region, &mesh).len(), 1);
+    model.steps[0].loads.push(gravity.clone());
+    model.steps[0].field_outputs = ccx_eigen_outputs(&StepKind::Static(Default::default()));
+    assert!(
+        model.invalid_items(&mesh).is_empty(),
+        "{:?}",
+        model.invalid_items(&mesh)
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains(", Name=INTERNAL_MASS-1_RP-1\n"), "{text}");
+    assert!(
+        text.contains("INTERNAL_MASS-1_RP-1, GRAV, 9810, 0, 0, -1"),
+        "{text}"
+    );
+    // Without the point mass the load has nothing to pull.
+    let mut alone = model.clone();
+    alone.constraints.clear();
+    let invalid = alone.invalid_items(&mesh);
+    assert!(
+        invalid
+            .iter()
+            .any(|i| i.reason.contains("No active point mass")),
+        "{invalid:?}"
+    );
+    let Some(frd) = run_solver("point_mass_gravity_alone", &text) else {
+        return;
+    };
+    let increment = (frd.increments.iter())
+        .rfind(|i| i.kind != plx_results::AnalysisKind::Frequency)
+        .unwrap();
+    let forces = increment.field("FORC").unwrap().component("F3").unwrap();
+    let reaction: f64 = (fixed_nodes(&mesh).iter())
+        .map(|&n| f64::from(forces.values[frd.mesh.node_index(n).unwrap()]))
+        .sum();
+    let expected = mass * 9810.0;
+    assert!(
+        (reaction - expected).abs() < 1e-3 * expected,
+        "{reaction} vs {expected}"
+    );
 }
 
 /// A rotary inertia about the axis of the cantilever, given about the z axis of a turned

@@ -568,16 +568,40 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     });
                 }
             }
+            // Cones and plates along the axes of the boundary condition's coordinate
+            // system at the centre of the region; in a cylindrical system the directions
+            // change over the region: at nodes spread over it.
             Kind::Boundary(ref kind) => {
-                let held: [bool; 6] = match *kind {
-                    BoundaryKind::Displacement(ref displacement) => {
-                        displacement.values.map(|v| v.is_some())
-                    }
-                    BoundaryKind::Temperature(_) => [false; 6],
-                    BoundaryKind::Submodel { dofs, .. } => dofs,
+                let (held, system): ([bool; 6], _) = match *kind {
+                    BoundaryKind::Displacement(ref displacement) => (
+                        displacement.values.map(|v| v.is_some()),
+                        displacement.system,
+                    ),
+                    BoundaryKind::Temperature(_) => ([false; 6], None),
+                    BoundaryKind::Submodel { dofs, .. } => (dofs, None),
                     BoundaryKind::Symmetry { .. } => unreachable!("drawn above"),
                 };
-                if let Some(center) = region_center(model, &item.region, &visible) {
+                let frame = system.and_then(|id| model.fe.coordinate_system_or_global(Some(id)));
+                let points = if frame
+                    .as_ref()
+                    .is_some_and(|f| f.kind == plx_model::CoordinateSystemKind::Cylindrical)
+                {
+                    let points = node_points(model, &item.region, &visible);
+                    sample(&points, DIVISIONS)
+                        .into_iter()
+                        .map(|i| points[i])
+                        .collect()
+                } else {
+                    Vec::from_iter(region_center(model, &item.region, &visible))
+                };
+                for point in points {
+                    let axes = match &frame {
+                        Some(frame) => match frame.directions_at(point.into()) {
+                            Ok(axes) => axes.map(DVec3::from),
+                            Err(_) => continue,
+                        },
+                        None => DVec3::AXES,
+                    };
                     for (axis, &held) in held.iter().enumerate() {
                         let shape = if axis < 3 {
                             SymbolShape::Cone
@@ -585,7 +609,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                             SymbolShape::RotationLock
                         };
                         if held {
-                            add(center, DVec3::AXES[axis % 3], shape);
+                            add(point, axes[axis % 3], shape);
                         }
                     }
                 }
@@ -1117,6 +1141,63 @@ mod tests {
         // The spring's wire ends just before the point.
         let wire = spring_wire(Vec3::X);
         assert!((wire.last().unwrap().x / ARROW_SIZE + 0.05).abs() < 1e-5);
+    }
+
+    #[test]
+    fn supports_follow_the_axes_of_their_coordinate_system() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/kragbalken_c3d8.inp");
+        let mesh = plx_io::inp::read_inp(&path).unwrap().mesh;
+        let mut model = Model::new(&path, mesh);
+        // Local x along global y, local y along -x.
+        let turned = plx_model::CoordinateSystem::from_points(
+            "turned",
+            [0.0; 3],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+        );
+        // The cylinder axis along the beam (global x) through its middle.
+        let mut cylinder = plx_model::CoordinateSystem::from_points(
+            "cylinder",
+            [0.0, 5.0, 5.0],
+            [0.0, 6.0, 5.0],
+            [0.0, 5.0, 6.0],
+        );
+        cylinder.kind = plx_model::CoordinateSystemKind::Cylindrical;
+        let (turned_id, cylinder_id) = (turned.id, cylinder.id);
+        model.fe.coordinate_systems.extend([turned, cylinder]);
+        let support = |system| {
+            let mut displacement =
+                plx_model::Displacement::new([Some(0.0), None, None, None, None, None]);
+            displacement.system = system;
+            displacement.behavior = plx_model::Behavior::EachNode;
+            Item {
+                kind: Kind::Boundary(BoundaryKind::Displacement(displacement)),
+                region: Region::Surface("TIP".into()),
+                system: None,
+                selected: false,
+            }
+        };
+        let global = build(&model, &[support(None)]);
+        assert_eq!(global.len(), 1);
+        assert!(global[0].direction.x > 0.99);
+        let turned = build(&model, &[support(Some(turned_id))]);
+        assert_eq!(turned.len(), 1);
+        assert!(turned[0].direction.y > 0.99, "{}", turned[0].direction);
+        // Radial cones at nodes spread over the end face, pointing away from the axis.
+        let radial = build(&model, &[support(Some(cylinder_id))]);
+        assert!(radial.len() > 1);
+        for symbol in &radial {
+            let at = symbol.position + model.origin().as_vec3();
+            let out = (Vec3::new(0.0, at.y - 5.0, at.z - 5.0)).normalize_or_zero();
+            if out != Vec3::ZERO {
+                assert!(
+                    symbol.direction.dot(out) > 0.99,
+                    "{} at {at}",
+                    symbol.direction
+                );
+            }
+        }
     }
 
     #[test]

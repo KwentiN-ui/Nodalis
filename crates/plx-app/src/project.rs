@@ -2312,7 +2312,7 @@ impl ProjectApp {
         crate::results::set_significant_digits(settings.post.digits);
         crate::style::set_theme(&cc.egui_ctx, settings.graphics.theme);
         plx_mesher::set_library_path(settings.gmsh.library());
-        let units = units::first(settings.new_model.units);
+        let units = crate::units_menu::first(settings.new_model.units);
         let mut app = Self {
             render_state,
             settings,
@@ -4966,7 +4966,7 @@ impl ProjectApp {
         self.links.clear();
         self.frames.clear();
         self.compact.clear();
-        self.units = units::first(self.settings.new_model.units);
+        self.units = crate::units_menu::first(self.settings.new_model.units);
         self.level.clear();
         self.frame_label = None;
         self.applied.clear();
@@ -8447,6 +8447,7 @@ impl ProjectApp {
                     }
                 }
                 Request::Campbell => self.open_campbell_of(ctx, id),
+                Request::SetUnits(units) => self.set_units(ctx, units),
                 Request::Close => {
                     if self.close_window(id) && self.active == Some(id) {
                         self.in_project = true;
@@ -13809,7 +13810,7 @@ mod tests {
         let space = ModelSpace::ThreeD;
         let mesh_inputs = BTreeMap::from([(
             "SOLID-1".to_owned(),
-            plx_model::fingerprint::mesh_input(&geometry, space, "SOLID-1"),
+            plx_model::fingerprint::mesh_input(&geometry, &[], space, "SOLID-1"),
         )]);
         let mut model = plx_model::FeModel::default();
         model.properties.space = space;

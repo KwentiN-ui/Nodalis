@@ -139,7 +139,7 @@ its own at the joint, rigidly (#ui("Rigid"), the selection keeps its shape) or o
   [Slider], [Sliding along z without turning.],
   [Spherical], [A ball joint: all rotations free, no sliding.],
   [Planar], [Sliding in the x-y plane and turning about z.],
-  [General], [Each of #ui("Ux"), #ui("Uy"), #ui("Uz"), #ui("URx"), #ui("URy"), #ui("URz")
+  [General], [Each of #ui("X"), #ui("Y"), #ui("Z"), #ui("RX"), #ui("RY"), #ui("RZ")
     #ui("Fixed") or #ui("Free").],
 )
 
@@ -162,7 +162,7 @@ The dialog shows the global #ui("Axis direction") it finds. The x axis of the fr
 direction of the coordinate system turned normal to the axis. The axis is taken in the
 starting position and then turns with #ui("End 1"): with #ui("Large deformations") in a
 Static or Dynamic step a hinge stays a hinge however far its parts turn or bend, as in a
-mechanism. In a plane model a joint holds #ui("Ux"), #ui("Uy") and #ui("URz") only, so a
+mechanism. In a plane model a joint holds #ui("X"), #ui("Y") and #ui("RZ") only, so a
 revolute joint is a hinge normal to the model plane.
 
 The 3D view draws a joint as lines from both ends to a ball at the joint, with an arrow for

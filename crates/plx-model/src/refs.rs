@@ -179,6 +179,9 @@ impl FeModel {
                 region(r, visit);
             }
         }
+        for distribution in &mut self.distributions {
+            optional(&mut distribution.system, visit);
+        }
         for plane in &mut self.planes {
             match &mut plane.source {
                 PlaneSource::PointNormal { point: p, .. } => point(p, visit),

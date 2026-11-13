@@ -104,7 +104,10 @@ pub use detection::{
     ContactDetection, ContactRule, DetectionFilter, DetectionGeometry, DetectionGrouping,
     DetectionReport, RuleAction, auto_detection_tolerance, auto_geometry_detection_tolerance,
 };
-pub use distribution::{Distribution, DistributionKind, Interpolation, Sampler, parse_points};
+pub use distribution::{
+    COORDINATES, Distribution, DistributionKind, DistributionVariable, Input, Interpolation,
+    Sampler, parse_points,
+};
 pub use dynamic::{Integration, RayleighFit, StableStepEstimate, StepLimit};
 pub use element_type::{PartElementType, element_type_options};
 pub use excitation::{Excitation, Signal, SignalKind, Sweep};
@@ -118,7 +121,7 @@ pub use field::{
 };
 pub use geometry::{
     Algorithm2d, Algorithm3d, CompoundPart, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem,
-    MeshSetupKind, MeshingParameters, Recombination, ThickenShellMesh,
+    MeshSetupKind, MeshingParameters, PeriodicFaces, Recombination, ThickenShellMesh,
 };
 pub use handover::Handover;
 pub use history::{HistoryKind, HistoryOutput, Totals};
@@ -214,8 +217,10 @@ use serde::{Deserialize, Serialize};
 /// step; formats 21 to 36 read as they are unless they have bolts. Format 38 adds point
 /// masses ([`PointMass`]); formats 21 to 37 read as they are. Format 39 gives the project one
 /// unit system its schematic shows values in, in place of one for each block; formats 21 to
-/// 38 read as they are, in the default units.
-pub const PROJECT_FORMAT: u32 = 39;
+/// 38 read as they are, in the default units. Format 40 gives distributions a coordinate
+/// system and named variables ([`Distribution::system`], [`Distribution::variables`]);
+/// formats 21 to 39 read as they are.
+pub const PROJECT_FORMAT: u32 = 40;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -306,6 +311,34 @@ impl FeModel {
     /// by nodal diameter.
     pub fn cyclic_tie(&self) -> Option<&Tie> {
         (self.ties.iter()).find(|t| t.active && t.cyclic.is_some())
+    }
+
+    /// The cut faces of the active cyclic symmetry ties picked on the geometry, whose meshes
+    /// the mesher makes match ([`PeriodicFaces`]).
+    pub fn matching_faces(&self) -> Vec<PeriodicFaces> {
+        let faces = |region: &Region| -> Vec<i32> {
+            match region {
+                Region::Geometry(entities) => (entities.iter())
+                    .filter_map(|e| match e {
+                        CadEntity::Face(face) => Some(*face),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+        (self.ties.iter())
+            .filter(|t| t.active)
+            .filter_map(|t| {
+                let cyclic = t.cyclic.clone()?;
+                let (master, slave) = (faces(&t.master), faces(&t.slave));
+                (!master.is_empty() && !slave.is_empty()).then_some(PeriodicFaces {
+                    master,
+                    slave,
+                    cyclic,
+                })
+            })
+            .collect()
     }
 
     /// Every region of the model: of sections, constraints, contact pairs, boundary

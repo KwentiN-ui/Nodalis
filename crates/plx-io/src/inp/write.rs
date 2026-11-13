@@ -619,6 +619,7 @@ fn lower_model_named(
     held.retain(|n, _| !cyclic_slaves.contains(n));
     sets.dofs = dofs::Dofs::new(held);
     sets.dofs.mark_nodes(cyclic_slaves.iter().copied());
+    sets.node_frames = node_frames::node_frames(model, mesh, |n| cyclic_slaves.contains(&n))?;
     // Regions are resolved first, in the order of the input file that the names of their
     // sets follow. The constraints come in their order of precedence for the dependent
     // degrees of freedom (see [`dofs`]): rigid bodies and remote points, pre-tension cuts,
@@ -736,6 +737,23 @@ fn lower_model_named(
         ir_model.sets.surfaces.insert(ir_name(name), surface);
     }
     ir_model.physical = physical_constants(model);
+    // Nodes held in different systems take a system of their own, defined last so that
+    // it wins over those of the boundary conditions' sets.
+    let mut node_frames: Vec<(node_frames::Axes, Vec<NodeId>)> = Vec::new();
+    for (&node, axes) in &sets.node_frames {
+        match node_frames.iter_mut().find(|(a, _)| a == axes) {
+            Some((_, nodes)) => nodes.push(node),
+            None => node_frames.push((*axes, vec![node])),
+        }
+    }
+    for (axes, nodes) in node_frames {
+        let set = sets.free_name("Internal_Selection", "Node_System");
+        ir_model
+            .sets
+            .add_nodes(&ir_name(&set), nodes.iter().copied());
+        sets.transforms
+            .push((set, Transform::Rectangular(axes[0], axes[1])));
+    }
     ir_model.constraints.transforms = transforms(&sets.transforms);
     ir_model.materials = materials;
     ir_model.sections = sections;
@@ -1123,6 +1141,9 @@ struct Sets<'a> {
     /// Reference and rotation node of each reference point an active rigid body is driven
     /// by, and the node set holding the reference node once something refers to it.
     reference_nodes: BTreeMap<Id, ReferenceNodes>,
+    /// The name (`*POINT MASS, NAME=`) of the point masses on each reference point, by which
+    /// a gravity or centrifugal load on the point pulls them alone.
+    point_mass_names: BTreeMap<Id, String>,
     /// Reference and rotation node of the point of each displacement written with a point,
     /// with its region; boundary conditions with the same region and point share it.
     remote_points: Vec<(Region, plx_model::Displacement, [NodeId; 2])>,
@@ -1136,6 +1157,9 @@ struct Sets<'a> {
     transforms: Vec<(String, Transform)>,
     /// Nodes of line, shell and membrane elements, see [`rigid_body`].
     expanded: BTreeSet<NodeId>,
+    /// Nodes that boundary conditions hold in different coordinate systems, with the
+    /// system each gets, see [`node_frames`].
+    node_frames: BTreeMap<NodeId, node_frames::Axes>,
     /// The dependent degrees of freedom of all MPCs so far.
     dofs: dofs::Dofs,
 }
@@ -1171,6 +1195,7 @@ impl<'a> Sets<'a> {
             shortened: Vec::new(),
             surface_sets: BTreeMap::new(),
             reference_nodes: BTreeMap::new(),
+            point_mass_names: BTreeMap::new(),
             remote_points: Vec::new(),
             remote_names: BTreeMap::new(),
             pre_tension_nodes: BTreeMap::new(),
@@ -1179,6 +1204,7 @@ impl<'a> Sets<'a> {
             submodel_sets: Vec::new(),
             transforms: Vec::new(),
             expanded: plx_model::expanded_nodes(mesh),
+            node_frames: BTreeMap::new(),
             dofs: dofs::Dofs::default(),
         };
         for (name, ids) in &mesh.node_sets {
@@ -1290,6 +1316,19 @@ impl<'a> Sets<'a> {
         let set = self.free_name("Internal_Selection", &name(item));
         self.element_sets.push((set.clone(), members));
         Ok(set)
+    }
+
+    /// The target of a gravity or centrifugal load: the element set of its region, or the
+    /// name of the point masses on its reference point.
+    fn body_load_set(&mut self, item: &str, region: &Region) -> Result<String, WriteError> {
+        match region {
+            Region::ReferencePoint(point) => (self.point_mass_names.get(point).cloned())
+                .ok_or_else(|| WriteError::InvalidLoad {
+                    item: item.to_string(),
+                    reason: "no point mass sits on the reference point".into(),
+                }),
+            _ => self.element_set(item, region),
+        }
     }
 
     /// The nodes of the rigid body a reference point drives.
@@ -1725,7 +1764,7 @@ fn distribution(
             distribution: id.to_string(),
         });
     };
-    (distribution.sampler(model.properties.units))
+    (distribution.sampler(model.properties.units, &model.coordinate_systems))
         .map(Some)
         .map_err(|reason| WriteError::InvalidDistribution {
             item: item.to_owned(),
@@ -2316,11 +2355,6 @@ fn constraints(
             )?,
             None => sets.reference_nodes(&mass.name, mass.reference_point)?,
         };
-        let point = model.reference_point(mass.reference_point);
-        let carrier = match point.and_then(|_| model.rigid_body_of(mass.reference_point)) {
-            Some(body) => &body.region,
-            None => &mass.region,
-        };
         let inertia = match &mass.inertia {
             Some(inertia) => {
                 let tensor = if model.properties.space.is_2d() {
@@ -2341,23 +2375,29 @@ fn constraints(
             None => None,
         };
         // The elements that carry the mass, for the gravity and centrifugal loads on them.
-        let carried: BTreeSet<NodeId> = carrier.nodes(sets.mesh).into_iter().collect();
-        let elements: Vec<ElementId> = (sets.mesh.elements().iter())
-            .filter(|e| e.nodes.iter().any(|n| carried.contains(n)))
-            .map(|e| e.id)
-            .collect();
+        let elements = model.point_mass_carriers(mass, sets.mesh);
         let elset = (!elements.is_empty()).then(|| {
             let set = sets.free_name("Internal_Selection", &name(&mass.name));
             sets.element_sets
                 .push((set.clone(), Members::Ids(elements)));
             ir_name(&set)
         });
+        let label = name(&nodes.name);
+        let named = match sets.point_mass_names.get(&mass.reference_point) {
+            Some(named) => named.clone(),
+            None => {
+                let named = sets.free_name("Internal_Mass", &label);
+                (sets.point_mass_names).insert(mass.reference_point, named.clone());
+                named
+            }
+        };
         owners.resize(items.len(), None);
         items.push(ConstraintItem::PointMass(ir::PointMass {
             node: nodes.reference,
             mass: mass.mass,
             inertia,
             elset,
+            name: Some(ir_name(&named)),
         }));
         owners.push(Some(ModelItem::Constraint(index)));
     }
@@ -3955,6 +3995,59 @@ fn step_block<'f>(
             BoundaryKind::Temperature(_) => distribution(model, &bc.name, &bc.distribution)?,
             _ => None,
         };
+        // Nodes held in different systems take the boundary condition in their own system,
+        // node by node; the set keeps the others.
+        let mut region = std::borrow::Cow::Borrowed(&bc.region);
+        if !sets.node_frames.is_empty() && distributed.is_none() {
+            let invalid = |reason: String| WriteError::InvalidBoundary {
+                item: bc.name.clone(),
+                reason,
+            };
+            let form = formulation(model, sets.mesh, &step.name, &bc.name);
+            let hold = node_frames::hold(model, sets.mesh, bc, form, dofs).map_err(invalid)?;
+            if let Some(hold) = hold.filter(|h| !h.submodel) {
+                let (own, rest): (Vec<NodeId>, Vec<NodeId>) = (bc.region.nodes(sets.mesh))
+                    .into_iter()
+                    .filter(|n| !cyclic_slaves.contains(n))
+                    .partition(|n| sets.node_frames.contains_key(n));
+                if !own.is_empty() {
+                    let reference = bc.amplitude.filter(|_| bc.kind.takes_amplitude());
+                    let amplitude = amplitude_parameter(amplitudes, &bc.name, &reference)?;
+                    let dof_amplitudes = match &bc.kind {
+                        BoundaryKind::Displacement(displacement) => {
+                            displacement_values(step, bc, displacement, &amplitude).1
+                        }
+                        _ => std::array::from_fn(|_| amplitude.clone()),
+                    };
+                    let mut items = Vec::new();
+                    for node in own {
+                        let point = sets.mesh.node(node).unwrap_or_default();
+                        let at = hold
+                            .at_node(point, &sets.node_frames[&node])
+                            .map_err(invalid)?;
+                        let values = at.map(|v| v.map(|(value, _)| value));
+                        let node_amplitudes = std::array::from_fn(|j| {
+                            at[j].and_then(|(_, d)| dof_amplitudes[d].clone())
+                        });
+                        items.extend(displacement_boundaries(
+                            &NodeRef::Node(node),
+                            None,
+                            &values,
+                            dofs,
+                            &node_amplitudes,
+                        ));
+                    }
+                    boundaries.push(Card::Boundary {
+                        op_new: false,
+                        items,
+                    });
+                    if rest.is_empty() {
+                        continue;
+                    }
+                    region = std::borrow::Cow::Owned(Region::Nodes(rest));
+                }
+            }
+        }
         let set = if let Some(sampler) = &distributed {
             let nodes: Vec<NodeId> = (bc.region.nodes(sets.mesh).into_iter())
                 .filter(|n| !cyclic_slaves.contains(n))
@@ -3976,14 +4069,14 @@ fn step_block<'f>(
             });
             continue;
         } else if cyclic_slaves.is_empty() {
-            sets.node_set(&bc.name, &bc.region)?
+            sets.node_set(&bc.name, &region)?
         } else {
-            let nodes = bc.region.nodes(sets.mesh);
+            let nodes = region.nodes(sets.mesh);
             if nodes.iter().any(|n| cyclic_slaves.contains(n)) {
                 let free = nodes.into_iter().filter(|n| !cyclic_slaves.contains(n));
                 sets.node_set(&bc.name, &Region::Nodes(free.collect()))?
             } else {
-                sets.node_set(&bc.name, &bc.region)?
+                sets.node_set(&bc.name, &region)?
             }
         };
         let target = node_set_ref(&set);
@@ -4480,7 +4573,7 @@ fn step_block<'f>(
             // Gravity: the size of the acceleration and its direction.
             LoadKind::Gravity(_) | LoadKind::StandardGravity(_) => {
                 let acceleration = load.kind.gravity_vector().unwrap_or_default();
-                let set = sets.element_set(&load.name, &load.region)?;
+                let set = sets.body_load_set(&load.name, &load.region)?;
                 let Some((size, direction)) = unit_vector(acceleration) else {
                     return Err(WriteError::InvalidLoad {
                         item: load.name.clone(),
@@ -4499,7 +4592,7 @@ fn step_block<'f>(
             // Centrifugal load: the square of the rotational speed, a point on
             // the axis and the axis direction.
             LoadKind::Centrifugal { point, axis, speed } => {
-                let set = sets.element_set(&load.name, &load.region)?;
+                let set = sets.body_load_set(&load.name, &load.region)?;
                 let Some((_, direction)) = unit_vector(axis) else {
                     return Err(WriteError::InvalidLoad {
                         item: load.name.clone(),
@@ -5464,6 +5557,7 @@ fn empty(item: &str, what: &'static str) -> WriteError {
 mod constraints;
 mod dofs;
 mod infill;
+mod node_frames;
 mod pre_tension;
 
 pub use dofs::resolved_overlaps;

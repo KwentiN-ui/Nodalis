@@ -6,86 +6,35 @@
 //! the analysis window reads, and an open window reads its analysis again once it changes,
 //! so that its results are shown in the new units too.
 
-use plx_model::{Quantity, UnitSystem};
+use plx_model::UnitSystem;
 
 use super::ProjectApp;
 
-/// The unit systems the project offers: all but Unitless, which would show the SI values
-/// without their units.
-pub(super) const CHOICES: [UnitSystem; 4] = [
-    UnitSystem::MKgSC,
-    UnitSystem::MmTonSC,
-    UnitSystem::MTonSC,
-    UnitSystem::InLbSF,
-];
-
-/// The unit system a new project starts in: the one chosen last, if the project offers it.
-pub(super) fn first(last: UnitSystem) -> UnitSystem {
-    if CHOICES.contains(&last) {
-        last
-    } else {
-        UnitSystem::default()
-    }
-}
-
-/// A few units of the system, to tell it in a tooltip.
-pub(super) fn summary(units: UnitSystem) -> String {
-    let unit = |q| units.unit(q);
-    format!(
-        "Length {}, mass {}, time {}, temperature {}\nForce {}, moment {}, stress {}, density {}",
-        unit(Quantity::Length),
-        unit(Quantity::Mass),
-        unit(Quantity::Time),
-        unit(Quantity::Temperature),
-        unit(Quantity::Force),
-        unit(Quantity::Moment),
-        unit(Quantity::Pressure),
-        unit(Quantity::Density),
-    )
-}
-
 impl ProjectApp {
-    /// The menu button of the unit system, at the right end of the status bar.
+    /// The menu button of the unit system at the right end of the status bar.
     pub(super) fn units_menu(&mut self, ui: &mut egui::Ui) {
-        let busy = (self.nodes.iter())
-            .filter_map(|n| Some((n, n.as_analysis()?.window.as_ref()?.busy()?)))
-            .map(|(n, why)| format!("{} cannot change its units while {why}.", n.name))
-            .next();
-        let mut chosen = None;
-        let current = self.units;
-        let button = ui.add_enabled_ui(busy.is_none(), |ui| {
-            ui.menu_button(format!("Units: {}", current.label()), |ui| {
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                for choice in CHOICES {
-                    let response = ui
-                        .selectable_label(choice == current, choice.label())
-                        .on_hover_text(summary(choice));
-                    if response.clicked() {
-                        chosen = Some(choice);
-                        ui.close();
-                    }
-                }
-            })
-        });
-        let tip = format!(
-            "The unit system the blocks and the analyses of the project show values in and \
-             take them typed. Values are stored in SI units: another unit system changes only \
-             what is shown.\n{}",
-            summary(current)
-        );
-        let response = button.inner.response;
-        match busy {
-            Some(why) => response.on_disabled_hover_text(why),
-            None => response.on_hover_text(tip),
-        };
-        if let Some(units) = chosen {
+        let busy = self.units_busy();
+        if let Some(units) = crate::units_menu::button(ui, self.units, busy.as_deref()) {
             self.set_units(ui.ctx(), units);
         }
+    }
+
+    /// Why the unit system cannot change now: an open analysis is busy, and would lose
+    /// what it works on when it reads its analysis again.
+    fn units_busy(&self) -> Option<String> {
+        (self.nodes.iter())
+            .filter_map(|n| Some((n, n.as_analysis()?.window.as_ref()?.busy()?)))
+            .map(|(n, why)| format!("{} cannot change its units while {why}.", n.name))
+            .next()
     }
 
     /// Makes `units` the unit system of the project, as a change that can be undone.
     pub(super) fn set_units(&mut self, ctx: &egui::Context, units: UnitSystem) {
         if units == self.units {
+            return;
+        }
+        if let Some(why) = self.units_busy() {
+            self.output.push(format!("Unit system not changed: {why}"));
             return;
         }
         self.checkpoint(&[]);
@@ -139,24 +88,5 @@ impl ProjectApp {
                 data.model.properties.units = units;
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_new_project_starts_in_the_units_chosen_last_unless_unitless() {
-        assert_eq!(first(UnitSystem::InLbSF), UnitSystem::InLbSF);
-        assert_eq!(first(UnitSystem::Unitless), UnitSystem::default());
-        assert!(CHOICES.iter().all(|u| u.has_units()));
-    }
-
-    #[test]
-    fn the_summary_names_the_main_units() {
-        let text = summary(UnitSystem::MmTonSC);
-        assert!(text.contains("Length mm"), "{text}");
-        assert!(text.contains("stress MPa"), "{text}");
     }
 }

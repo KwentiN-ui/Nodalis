@@ -16,6 +16,8 @@ pub enum UnitSystem {
     MmTonSC,
     MTonSC,
     InLbSF,
+    /// Millimetre and kilogram: forces in mN, stresses in kPa.
+    MmKgSC,
 }
 
 /// Kinds of quantities the unit system names a unit for.
@@ -306,10 +308,11 @@ pub const STORED: UnitSystem = UnitSystem::MKgSC;
 
 impl UnitSystem {
     /// In the order of the list.
-    pub const ALL: [UnitSystem; 5] = [
+    pub const ALL: [UnitSystem; 6] = [
         UnitSystem::Unitless,
         UnitSystem::MKgSC,
         UnitSystem::MmTonSC,
+        UnitSystem::MmKgSC,
         UnitSystem::MTonSC,
         UnitSystem::InLbSF,
     ];
@@ -320,6 +323,7 @@ impl UnitSystem {
             UnitSystem::Unitless => "Unitless",
             UnitSystem::MKgSC => "m, kg, s, °C",
             UnitSystem::MmTonSC => "mm, ton, s, °C",
+            UnitSystem::MmKgSC => "mm, kg, s, °C",
             UnitSystem::MTonSC => "m, ton, s, °C",
             UnitSystem::InLbSF => "in, lbf·s²/in, s, °F",
         }
@@ -342,42 +346,61 @@ impl UnitSystem {
     /// The unit of a quantity, as shown next to values; empty without units.
     pub fn unit(self, quantity: Quantity) -> &'static str {
         use Quantity::*;
-        // Units of m-kg, mm-t, m-t and in-lbf.
-        let [si, mm, m_t, inch] = match quantity {
-            Length => ["m", "mm", "m", "in"],
-            Angle => ["rad"; 4],
-            Mass => ["kg", "t", "t", "lbf·s²/in"],
-            Time => ["s"; 4],
-            Temperature => ["°C", "°C", "°C", "°F"],
-            Area => ["m²", "mm²", "m²", "in²"],
-            SecondMomentOfArea => ["m^4", "mm^4", "m^4", "in^4"],
-            Volume => ["m³", "mm³", "m³", "in³"],
-            Velocity => ["m/s", "mm/s", "m/s", "in/s"],
-            RotationalSpeed => ["rad/s"; 4],
-            Acceleration => ["m/s²", "mm/s²", "m/s²", "in/s²"],
-            Force => ["N", "N", "kN", "lbf"],
-            ForcePerLength => ["N/m", "N/mm", "kN/m", "lbf/in"],
-            Moment => ["N·m", "N·mm", "kN·m", "lbf·in"],
-            Pressure => ["Pa", "MPa", "kPa", "psi"],
+        // Units of m-kg, mm-t, m-t, in-lbf and mm-kg.
+        let [si, mm, m_t, inch, mm_kg] = match quantity {
+            Length => ["m", "mm", "m", "in", "mm"],
+            Angle => ["rad"; 5],
+            Mass => ["kg", "t", "t", "lbf·s²/in", "kg"],
+            Time => ["s"; 5],
+            Temperature => ["°C", "°C", "°C", "°F", "°C"],
+            Area => ["m²", "mm²", "m²", "in²", "mm²"],
+            SecondMomentOfArea => ["m^4", "mm^4", "m^4", "in^4", "mm^4"],
+            Volume => ["m³", "mm³", "m³", "in³", "mm³"],
+            Velocity => ["m/s", "mm/s", "m/s", "in/s", "mm/s"],
+            RotationalSpeed => ["rad/s"; 5],
+            Acceleration => ["m/s²", "mm/s²", "m/s²", "in/s²", "mm/s²"],
+            Force => ["N", "N", "kN", "lbf", "mN"],
+            ForcePerLength => ["N/m", "N/mm", "kN/m", "lbf/in", "mN/mm"],
+            Moment => ["N·m", "N·mm", "kN·m", "lbf·in", "mN·mm"],
+            Pressure => ["Pa", "MPa", "kPa", "psi", "kPa"],
             // The fourth power has no Latin-1 character, which the GUI font sticks to.
-            Density => ["kg/m³", "t/mm³", "t/m³", "lbf·s²/in^4"],
-            MomentOfInertia => ["kg·m²", "t·mm²", "t·m²", "lbf·s²·in"],
-            Energy => ["J", "mJ", "kJ", "lbf·in"],
-            Power => ["W", "mW", "kW", "lbf·in/s"],
-            Frequency => ["Hz"; 4],
-            ForcePerVolume => ["N/m³", "N/mm³", "kN/m³", "lbf/in³"],
-            HeatTransferCoefficient => ["W/(m²·°C)", "mW/(mm²·°C)", "kW/(m²·°C)", "lbf/(in·s·°F)"],
-            TemperatureDifference => ["°C", "°C", "°C", "°F"],
-            ThermalConductivity => ["W/(m·°C)", "mW/(mm·°C)", "kW/(m·°C)", "lbf/(s·°F)"],
-            SpecificHeat => ["J/(kg·°C)", "mJ/(t·°C)", "kJ/(t·°C)", "in²/(s²·°F)"],
-            ThermalExpansion => ["1/°C", "1/°C", "1/°C", "1/°F"],
-            HeatFlux => ["W/m²", "mW/mm²", "kW/m²", "lbf/(in·s)"],
-            PowerPerVolume => ["W/m³", "mW/mm³", "kW/m³", "lbf/(in²·s)"],
+            Density => ["kg/m³", "t/mm³", "t/m³", "lbf·s²/in^4", "kg/mm³"],
+            MomentOfInertia => ["kg·m²", "t·mm²", "t·m²", "lbf·s²·in", "kg·mm²"],
+            Energy => ["J", "mJ", "kJ", "lbf·in", "µJ"],
+            Power => ["W", "mW", "kW", "lbf·in/s", "µW"],
+            Frequency => ["Hz"; 5],
+            ForcePerVolume => ["N/m³", "N/mm³", "kN/m³", "lbf/in³", "mN/mm³"],
+            HeatTransferCoefficient => [
+                "W/(m²·°C)",
+                "mW/(mm²·°C)",
+                "kW/(m²·°C)",
+                "lbf/(in·s·°F)",
+                "µW/(mm²·°C)",
+            ],
+            TemperatureDifference => ["°C", "°C", "°C", "°F", "°C"],
+            ThermalConductivity => [
+                "W/(m·°C)",
+                "mW/(mm·°C)",
+                "kW/(m·°C)",
+                "lbf/(s·°F)",
+                "µW/(mm·°C)",
+            ],
+            SpecificHeat => [
+                "J/(kg·°C)",
+                "mJ/(t·°C)",
+                "kJ/(t·°C)",
+                "in²/(s²·°F)",
+                "µJ/(kg·°C)",
+            ],
+            ThermalExpansion => ["1/°C", "1/°C", "1/°C", "1/°F", "1/°C"],
+            HeatFlux => ["W/m²", "mW/mm²", "kW/m²", "lbf/(in·s)", "µW/mm²"],
+            PowerPerVolume => ["W/m³", "mW/mm³", "kW/m³", "lbf/(in²·s)", "µW/mm³"],
             StefanBoltzmann => [
                 "W/(m²·K^4)",
                 "mW/(mm²·K^4)",
                 "kW/(m²·K^4)",
                 "lbf/(in·s·°F^4)",
+                "µW/(mm²·K^4)",
             ],
         };
         match self {
@@ -386,6 +409,7 @@ impl UnitSystem {
             UnitSystem::MmTonSC => mm,
             UnitSystem::MTonSC => m_t,
             UnitSystem::InLbSF => inch,
+            UnitSystem::MmKgSC => mm_kg,
         }
     }
 
@@ -397,6 +421,7 @@ impl UnitSystem {
             UnitSystem::MKgSC => Some([1.0, 1.0, 1.0, 1.0]),
             UnitSystem::MmTonSC => Some([1e-3, 1e3, 1.0, 1.0]),
             UnitSystem::MTonSC => Some([1.0, 1e3, 1.0, 1.0]),
+            UnitSystem::MmKgSC => Some([1e-3, 1.0, 1.0, 1.0]),
             UnitSystem::InLbSF => Some([INCH, POUND_FORCE / INCH, 1.0, 5.0 / 9.0]),
         }
     }
@@ -958,6 +983,36 @@ mod tests {
     }
 
     #[track_caller]
+    #[test]
+    fn every_unit_shown_reads_back_as_one_unit_of_its_system() {
+        for units in UnitSystem::ALL.into_iter().filter(|u| u.has_units()) {
+            for quantity in Quantity::ALL {
+                let unit = units.unit(quantity);
+                let parsed = parse_unit(unit).unwrap_or_else(|e| panic!("{unit}: {e}"));
+                assert_eq!(parsed.dimension, quantity.dimension(), "{unit}");
+                let factor = units.si_factor(quantity).unwrap();
+                assert!(
+                    (parsed.factor / factor - 1.0).abs() < 1e-9,
+                    "{} {unit}: {} != {factor}",
+                    units.label(),
+                    parsed.factor
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn millimetre_and_kilogram_give_millinewton_and_kilopascal() {
+        use Quantity::*;
+        let units = UnitSystem::MmKgSC;
+        assert!((units.shown(1.0, Force) - 1000.0).abs() < 1e-9);
+        assert!((units.shown(1e6, Pressure) - 1000.0).abs() < 1e-9);
+        assert!((units.shown(7850.0, Density) - 7.85e-6).abs() < 1e-18);
+        assert!((units.shown(0.1, Length) - 100.0).abs() < 1e-9);
+        parses(units, "210 GPa", Pressure, 2.1e8);
+        parses(units, "1 N", Force, 1000.0);
+    }
+
     fn parses(units: UnitSystem, text: &str, quantity: Quantity, expected: f64) {
         let value = units.parse_value(text, quantity).unwrap();
         assert!(close(value, expected), "{text}: {value} != {expected}");

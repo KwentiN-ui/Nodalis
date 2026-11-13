@@ -83,6 +83,8 @@ pub enum Request {
     Campbell,
     /// Close the analysis shown in the project window: its data goes back to the project.
     Close,
+    /// Make this the unit system of the project, which the analyses follow.
+    SetUnits(UnitSystem),
 }
 
 struct Workbench {
@@ -957,15 +959,17 @@ impl AnalysisWindow {
             let idle = self.workbench.recording.is_none();
             ui.add_enabled_ui(idle, |ui| self.workbench.output_tabs(ui));
             ui.separator();
-            // Nodalis shows the unit system of the model at the right.
+            // The unit system of the project, which the model follows, and its model space at
+            // the right; the units change there as in the project window.
             if let Some(model) = &self.workbench.model {
-                let properties = &model.fe.properties;
+                let (units, space) = (model.fe.properties.units, model.fe.properties.space);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!(
-                        "Unit system: {}   Model space: {}",
-                        properties.units.label(),
-                        properties.space.label()
-                    ));
+                    let busy = self.busy().map(|why| format!("Not while {why}."));
+                    if let Some(units) = crate::units_menu::button(ui, units, busy.as_deref()) {
+                        self.workbench.requests.push(Request::SetUnits(units));
+                    }
+                    ui.separator();
+                    ui.label(format!("Model space: {}", space.label()));
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         cancel = self.status_text(ui);
                     });
@@ -1210,7 +1214,8 @@ pub(crate) fn merge_part_meshes(
         model.fe.apply_mesh_operations(&mut part.mesh);
         // What each part is meshed from, to tell when its mesh is out of date.
         for p in &part.mesh.parts {
-            let input = plx_model::fingerprint::mesh_input(geometry, space, &p.name);
+            let matching = model.fe.matching_faces();
+            let input = plx_model::fingerprint::mesh_input(geometry, &matching, space, &p.name);
             model.mesh_inputs.insert(p.name.clone(), input);
         }
         for warning in &part.warnings {
@@ -3593,6 +3598,7 @@ impl Workbench {
                 {
                     keep_up_to_date(
                         model.fe.properties.space,
+                        &model.fe.matching_faces(),
                         &before,
                         now,
                         &affected,
@@ -3653,7 +3659,10 @@ impl Workbench {
             None => geometry.source.clone(),
         };
         self.output.push(format!("Meshing {what} …"));
-        self.meshing = Some(MeshingJob::start(geometry, parts, ctx));
+        let matching = (self.model.as_ref())
+            .map(|m| m.fe.matching_faces())
+            .unwrap_or_default();
+        self.meshing = Some(MeshingJob::start(geometry, matching, parts, ctx));
         self.mesh_failure.clear();
     }
 
@@ -8012,6 +8021,7 @@ fn local_size_parts(view: &Model, item: Option<&plx_model::MeshSetupItem>) -> Ve
 /// as up to date as they were, so their recorded mesh inputs follow the geometry.
 fn keep_up_to_date(
     space: plx_model::ModelSpace,
+    matching: &[plx_model::PeriodicFaces],
     before: &plx_model::Geometry,
     now: &plx_model::Geometry,
     affected: &[String],
@@ -8022,9 +8032,9 @@ fn keep_up_to_date(
         .collect();
     for (part, input) in inputs.iter_mut() {
         if !affected.contains(part)
-            && *input == plx_model::fingerprint::mesh_input(before, space, part)
+            && *input == plx_model::fingerprint::mesh_input(before, matching, space, part)
         {
-            *input = plx_model::fingerprint::mesh_input(now, space, part);
+            *input = plx_model::fingerprint::mesh_input(now, matching, space, part);
         }
     }
 }
@@ -8219,16 +8229,16 @@ mod tests {
         now.mesh_items.push(item);
         let mut inputs = std::collections::BTreeMap::new();
         for part in ["SOLID-1", "SOLID-2"] {
-            let made = plx_model::fingerprint::mesh_input(&before, space, part);
+            let made = plx_model::fingerprint::mesh_input(&before, &[], space, part);
             inputs.insert(part.to_owned(), made);
         }
-        keep_up_to_date(space, &before, &now, &affected, &mut inputs);
-        let current = |part: &str| plx_model::fingerprint::mesh_input(&now, space, part);
+        keep_up_to_date(space, &[], &before, &now, &affected, &mut inputs);
+        let current = |part: &str| plx_model::fingerprint::mesh_input(&now, &[], space, part);
         assert_eq!(inputs["SOLID-1"], current("SOLID-1"));
         assert_ne!(inputs["SOLID-2"], current("SOLID-2"));
         // A part that was out of date before stays so.
         let mut inputs = std::collections::BTreeMap::from([("SOLID-1".to_owned(), 7)]);
-        keep_up_to_date(space, &before, &now, &affected, &mut inputs);
+        keep_up_to_date(space, &[], &before, &now, &affected, &mut inputs);
         assert_eq!(inputs["SOLID-1"], 7);
     }
 }

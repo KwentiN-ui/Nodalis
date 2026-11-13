@@ -116,6 +116,9 @@ pub(crate) enum Source {
     /// The point of a remote displacement boundary condition, offered among the reference
     /// points.
     RemotePoint,
+    /// The point masses on a reference point, for a gravity or centrifugal load that pulls
+    /// them alone: [`Region::ReferencePoint`] of the point.
+    PointMass,
     /// Fixed ground, the end of a spring that has no region. A draft with it stands for no
     /// region: its [`RegionDraft::region`] is empty, callers ask [`RegionDraft::is_world`].
     World,
@@ -130,6 +133,7 @@ impl Source {
             Source::ElementSet => "Element Set",
             Source::Surface => "Surface",
             Source::ReferencePoint | Source::RemotePoint => "Reference Point",
+            Source::PointMass => "Point Mass",
             Source::World => "World",
         }
     }
@@ -196,7 +200,8 @@ pub(crate) const SPRING_END_SOURCES: &[Source] = &[
 ];
 /// Solid elements: whole parts, element sets or the elements of picked faces.
 pub(crate) const SOLID_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet, Source::Selection];
-pub(crate) const ELEMENT_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet];
+pub(crate) const ELEMENT_SOURCES: &[Source] =
+    &[Source::Parts, Source::ElementSet, Source::PointMass];
 /// Nodes or elements of a user-defined set: picked, or of whole parts.
 pub(crate) const SET_SOURCES: &[Source] = &[Source::Selection, Source::Parts];
 /// Element faces of a user-defined surface.
@@ -271,7 +276,11 @@ impl RegionDraft {
                 draft.set = set.clone();
             }
             Region::ReferencePoint(point) => {
-                draft.source = Source::ReferencePoint;
+                draft.source = if sources.contains(&Source::ReferencePoint) {
+                    Source::ReferencePoint
+                } else {
+                    Source::PointMass
+                };
                 draft.point = Some(*point);
             }
             Region::RemotePoint(point) => {
@@ -308,7 +317,10 @@ impl RegionDraft {
                 Region::NodeSet(_) => sources.contains(&Source::NodeSet),
                 Region::ElementSet(_) => sources.contains(&Source::ElementSet),
                 Region::Surface(_) => sources.contains(&Source::Surface),
-                Region::ReferencePoint(_) => sources.contains(&Source::ReferencePoint),
+                Region::ReferencePoint(_) => {
+                    sources.contains(&Source::ReferencePoint)
+                        || sources.contains(&Source::PointMass)
+                }
                 Region::RemotePoint(_) => sources.contains(&Source::RemotePoint),
             };
         if kept {
@@ -337,7 +349,7 @@ impl RegionDraft {
             Source::ElementSet => Region::ElementSet(self.set.clone()),
             Source::Surface => Region::Surface(self.set.clone()),
             // Without a point chosen the region is empty, see `is_empty`.
-            Source::ReferencePoint => {
+            Source::ReferencePoint | Source::PointMass => {
                 (self.point).map_or(Region::Nodes(Vec::new()), Region::ReferencePoint)
             }
             Source::RemotePoint => {
@@ -366,7 +378,9 @@ impl RegionDraft {
                 Target::Lines => self.edges.items().is_empty(),
             },
             Source::Parts => self.parts.is_empty(),
-            Source::ReferencePoint | Source::RemotePoint => self.point.is_none(),
+            Source::ReferencePoint | Source::RemotePoint | Source::PointMass => {
+                self.point.is_none()
+            }
             Source::World => false,
             _ => self.set.is_empty(),
         }
@@ -706,6 +720,7 @@ impl RegionDraft {
                     wanted |= clicked;
                 }
                 Source::ReferencePoint | Source::RemotePoint => self.point_ui(ui, model),
+                Source::PointMass => self.point_mass_ui(ui, model),
                 Source::World => {
                     ui.weak("Fixed ground.");
                 }
@@ -752,6 +767,12 @@ impl RegionDraft {
                     }
                 }
             }
+            Source::PointMass => {
+                let masses = point_masses(fe);
+                if !(masses.iter()).any(|&(point, _)| self.point == Some(point)) {
+                    self.point = masses.first().map(|&(point, _)| point);
+                }
+            }
             Source::NodeSet | Source::ElementSet | Source::Surface => {
                 let mut names: Vec<&String> = match self.source {
                     Source::NodeSet => mesh.node_sets.keys().collect(),
@@ -764,6 +785,33 @@ impl RegionDraft {
             }
             _ => {}
         }
+    }
+
+    /// The point masses, listed by name and kept by their reference point.
+    fn point_mass_ui(&mut self, ui: &mut Ui, model: &Model) {
+        let masses = point_masses(&model.fe);
+        if masses.is_empty() {
+            ui.weak("The model has no point masses (Connections > Constraint).");
+        }
+        let selected = (masses.iter())
+            .filter(|&&(point, _)| self.point == Some(point))
+            .map(|&(_, name)| name)
+            .collect::<Vec<_>>()
+            .join(", ");
+        egui::ComboBox::from_id_salt("region point mass")
+            .selected_text(selected)
+            .width(crate::dock::fit_width(ui, 200.0))
+            .show_ui(ui, |ui| {
+                for &(point, name) in &masses {
+                    if ui
+                        .selectable_label(self.point == Some(point), name)
+                        .clicked()
+                    {
+                        self.point = Some(point);
+                    }
+                }
+            });
+        ui.weak("Pulls the point mass alone, not the elements that carry it.");
     }
 
     /// The reference points, and where the region takes them the points of the remote
@@ -989,7 +1037,8 @@ fn remote_force_rows(
 ) {
     let space = model.fe.properties.space;
     let dofs = space.remote_dofs();
-    let force_labels = ["F1", "F2", "F3"].into_iter().zip(Field::VECTOR);
+    let directions = Directions::of(&model.fe, remote.system);
+    let force_labels = directions.forces().into_iter().zip(Field::VECTOR);
     for (k, (value, (label, field))) in remote.force.iter_mut().zip(force_labels).enumerate() {
         if !dofs.contains(&k) {
             continue;
@@ -1000,7 +1049,7 @@ fn remote_force_rows(
         });
         ui.end_row();
     }
-    let moment_labels = ["M1", "M2", "M3"].into_iter().zip(Field::ROTATION);
+    let moment_labels = directions.moments().into_iter().zip(Field::ROTATION);
     for (k, (value, (label, field))) in remote.moment.iter_mut().zip(moment_labels).enumerate() {
         if !dofs.contains(&(k + 3)) {
             continue;
@@ -1160,7 +1209,9 @@ fn moving_rows(ui: &mut Ui, moving: &mut MovingLoad, fe: &FeModel, two_d: bool, 
                 if !two_d {
                     ui.strong("Across");
                 }
-                for label in ["F1", "F2", "F3"].iter().take(if two_d { 2 } else { 3 }) {
+                // The wheel forces act in global directions.
+                let forces = Directions::RECTANGULAR.forces();
+                for label in forces.iter().take(if two_d { 2 } else { 3 }) {
                     ui.strong(*label);
                 }
                 ui.label("");
@@ -1608,7 +1659,7 @@ fn direction_rows(
         .is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
     if cylindrical {
         ui.label("");
-        ui.weak("Components 1, 2, 3 are radial, tangential and axial at every node.");
+        ui.weak("Radial, tangential and axial are the directions at every node.");
         ui.end_row();
     }
     if fe.system_attachment(*system).is_some() {
@@ -1936,7 +1987,8 @@ fn submodel_rows(
 ) {
     // Nodes of 2D models only move in the x-y plane.
     let count = if two_d { 2 } else { 3 };
-    for (held, label) in dofs.iter_mut().zip(DOF_LABELS).take(count) {
+    let labels = Directions::RECTANGULAR.dofs();
+    for (held, label) in dofs.iter_mut().zip(labels).take(count) {
         ui.label("");
         ui.checkbox(held, label);
         ui.end_row();
@@ -2042,7 +2094,83 @@ fn submodel_source_lines(
     lines
 }
 
-const DOF_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
+/// The names of the directions of a coordinate system in dialogs: X, Y, Z of a rectangular
+/// system, Radial, Tangential, Axial of a cylindrical one. Only for display:
+/// the model keeps the components 1, 2, 3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Directions {
+    cylindrical: bool,
+}
+
+impl Directions {
+    /// The directions of a rectangular system, such as the global one.
+    pub(crate) const RECTANGULAR: Self = Self { cylindrical: false };
+
+    /// The directions of the system `system` of the model, the global one for `None`.
+    pub(crate) fn of(fe: &FeModel, system: Option<Id>) -> Self {
+        let cylindrical = (system.and_then(|id| fe.coordinate_system(id)))
+            .is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
+        Self { cylindrical }
+    }
+
+    /// The displacements along the three directions and the rotations about them.
+    pub(crate) fn dofs(self) -> [&'static str; 6] {
+        if self.cylindrical {
+            [
+                "Radial",
+                "Tangential",
+                "Axial",
+                "Rot. radial",
+                "Rot. tangential",
+                "Rot. axial",
+            ]
+        } else {
+            ["X", "Y", "Z", "RX", "RY", "RZ"]
+        }
+    }
+
+    /// The force components along the three directions.
+    pub(crate) fn forces(self) -> [&'static str; 3] {
+        if self.cylindrical {
+            ["F radial", "F tangential", "F axial"]
+        } else {
+            ["FX", "FY", "FZ"]
+        }
+    }
+
+    /// The moment components about the three directions.
+    pub(crate) fn moments(self) -> [&'static str; 3] {
+        if self.cylindrical {
+            ["M radial", "M tangential", "M axial"]
+        } else {
+            ["MX", "MY", "MZ"]
+        }
+    }
+
+    /// What the degree of freedom `dof` (0 to 5) means, for a tooltip.
+    pub(crate) fn describe(self, dof: usize) -> &'static str {
+        let names = if self.cylindrical {
+            [
+                "Radial, away from the axis of the system",
+                "Tangential, around the axis of the system",
+                "Axial, along the axis of the system",
+                "Rotation about the radial direction",
+                "Rotation about the tangential direction",
+                "Rotation about the axis of the system",
+            ]
+        } else {
+            [
+                "Along x",
+                "Along y",
+                "Along z",
+                "Rotation about x",
+                "Rotation about y",
+                "Rotation about z",
+            ]
+        };
+        names[dof.min(5)]
+    }
+}
 
 /// The load kinds of the dialog, the force first: label, default name and the kind with zero
 /// values.
@@ -2933,6 +3061,9 @@ impl Editor {
                 name: fe.steps.get(*s)?.defined_fields.get(index)?.name.clone(),
                 step: step(*s)?,
             },
+            Draft::Distribution(..) => {
+                ItemRef::Distribution(fe.distributions.get(index)?.name.clone())
+            }
             _ => return None,
         })
     }
@@ -2956,6 +3087,10 @@ impl Editor {
             Draft::Material(material) => {
                 model.materials.push(material.clone());
                 ItemRef::Material(material.name.clone())
+            }
+            Draft::Distribution(distribution, _) => {
+                model.distributions.push(distribution.clone());
+                ItemRef::Distribution(distribution.name.clone())
             }
             Draft::Section(section, _) => {
                 model.sections.push(section.clone());
@@ -3313,10 +3448,12 @@ impl Editor {
                 let period = step_kind.map_or(1.0, StepKind::period);
                 let bc_name = bc.name.clone();
                 if let BoundaryKind::Displacement(displacement) = &mut bc.kind {
+                    let directions = Directions::of(&model.fe, displacement.system);
                     for i in dofs {
-                        let (value, label) = (&mut displacement.values[i], DOF_LABELS[i]);
+                        let (value, label) = (&mut displacement.values[i], directions.dofs()[i]);
                         let mut set = value.is_some();
-                        ui.checkbox(&mut set, label);
+                        ui.checkbox(&mut set, label)
+                            .on_hover_text(directions.describe(i));
                         let mut number = value.unwrap_or(0.0);
                         // Displacements are lengths, rotations angles in radian.
                         let quantity = if i < 3 {
@@ -3495,7 +3632,7 @@ impl Editor {
                                 ui,
                                 moment,
                                 &mut load.tables,
-                                &["M1", "M2", "M3"],
+                                &Directions::of(&model.fe, load.system).moments(),
                                 &Field::VECTOR,
                                 Quantity::Moment,
                                 &load_name,
@@ -3533,7 +3670,7 @@ impl Editor {
                             ui,
                             &mut value[..count],
                             &mut load.tables,
-                            &["F1", "F2", "F3"],
+                            &Directions::of(&model.fe, load.system).forces(),
                             &Field::VECTOR,
                             Quantity::Force,
                             &load_name,
@@ -3559,8 +3696,9 @@ impl Editor {
                         remote_force_rows(ui, remote, &region.region(), model, units);
                     }
                     LoadKind::Excitation(excitation) => {
+                        let labels = Directions::of(&model.fe, load.system).forces();
                         crate::excitation_rows::excitation_rows(
-                            ui, excitation, period, two_d, units,
+                            ui, excitation, labels, period, two_d, units,
                         );
                         revolution_hint(ui, axisymmetric);
                         let nlgeom = step_kind.is_some_and(|k| model.fe.step_nlgeom(k));
@@ -3700,6 +3838,7 @@ impl Editor {
                             }
                             _ => {}
                         }
+                        pulled_masses_row(ui, &region.region(), model);
                     }
                     LoadKind::Centrifugal { point, axis, speed } => {
                         ui.label("Rotational speed");
@@ -3743,6 +3882,7 @@ impl Editor {
                             "The solver takes the square of the speed; the materials need a density.",
                         );
                         ui.end_row();
+                        pulled_masses_row(ui, &region.region(), model);
                     }
                     LoadKind::Moving(moving) => moving_rows(ui, moving, &model.fe, two_d, units),
                     LoadKind::Radiation { sink, emissivity } => {
@@ -4293,7 +4433,9 @@ impl Editor {
                 }
             }
             Draft::Amplitude(amplitude, _) => amplitude_dialog::validate(amplitude)?,
-            Draft::Distribution(distribution, _) => distribution_dialog::validate(distribution)?,
+            Draft::Distribution(distribution, _) => {
+                distribution_dialog::validate(distribution, fe)?
+            }
             Draft::FieldOutput(_, output) => output.check_variables()?,
             Draft::HistoryOutput(_, output, region) => {
                 validate_history_output(output, region, fe)?;
@@ -8010,6 +8152,37 @@ fn infill_form(
     ui.end_row();
 }
 
+/// The active point masses of the model with their reference points.
+fn point_masses(fe: &FeModel) -> Vec<(Id, &str)> {
+    (fe.constraints.iter())
+        .filter_map(|c| match c {
+            Constraint::PointMass(mass) if mass.active => {
+                Some((mass.reference_point, mass.name.as_str()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The row naming the point masses a gravity or centrifugal load on `region` pulls along.
+fn pulled_masses_row(ui: &mut Ui, region: &Region, model: &Model) {
+    if matches!(region, Region::ReferencePoint(_)) {
+        return;
+    }
+    let pulled = model.fe.point_masses_pulled(region, &model.mesh);
+    if pulled.is_empty() {
+        return;
+    }
+    let names: Vec<&str> = pulled.iter().map(|m| m.name.as_str()).collect();
+    ui.label("");
+    ui.weak(format!(
+        "Also pulls the point mass{} {}, carried by the region.",
+        if names.len() == 1 { "" } else { "es" },
+        names.join(", ")
+    ));
+    ui.end_row();
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -9085,5 +9258,30 @@ mod tests {
         mesh.element_sets.remove("Cantilever");
         model.set_mesh(mesh);
         assert_eq!(model.mesh.element_sets["Cantilever"].len(), elements);
+    }
+
+    #[test]
+    fn a_body_load_takes_a_point_mass_by_its_reference_point() {
+        let mesh = FeMesh::default();
+        let point = plx_model::Id::new();
+        let region = Region::ReferencePoint(point);
+        let draft = RegionDraft::from_region(&region, ELEMENT_SOURCES, Target::Faces, &mesh);
+        assert_eq!(draft.source, Source::PointMass);
+        assert_eq!(draft.region(), region);
+        // A force keeps the point as a reference point.
+        let (force, dropped) = draft.converted(SUPPORT_SOURCES, Target::Nodes, &mesh);
+        assert!(!dropped);
+        assert_eq!(force.source, Source::ReferencePoint);
+        let mut fe = FeModel::default();
+        let mut mass = plx_model::PointMass::new("Motor", point);
+        fe.constraints.push(Constraint::PointMass(mass.clone()));
+        let mut empty = RegionDraft::new(ELEMENT_SOURCES, Target::Faces);
+        empty.source = Source::PointMass;
+        empty.prefill(&fe, &mesh);
+        assert_eq!(empty.region(), region);
+        // An inactive one is not offered.
+        mass.active = false;
+        fe.constraints = vec![Constraint::PointMass(mass)];
+        assert!(point_masses(&fe).is_empty());
     }
 }

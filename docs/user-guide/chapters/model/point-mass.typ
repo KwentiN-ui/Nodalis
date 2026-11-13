@@ -32,10 +32,18 @@ point at the centre of the region.
 )
 
 The mass takes part wherever the solver works with masses: frequency steps, implicit and
-explicit dynamic steps, and the modal procedures built on the frequencies. A #ui("Gravity") or
-#ui("Centrifugal") load (@loads) pulls the point mass too when its region holds elements of
-the region the mass is coupled to; the centrifugal force acts at the undeformed position of the
-point. A static step without these loads is not affected by the mass.
+explicit dynamic steps, and the modal procedures built on the frequencies. A static step is
+affected only by gravity and centrifugal loads (@loads), in one of two ways:
+
+- *With the parts.* A load on parts or element sets pulls the point mass too when the region
+  holds elements the mass is coupled to (the elements of its region, or of the rigid body on
+  its point); the dialog lists the point masses the load pulls along.
+- *Alone.* With #ui("Region") #ui("Point Mass") the load pulls only the chosen point mass, not
+  the elements that carry it, e.g. to give a motor its weight without that of the bracket.
+
+The centrifugal force acts at the undeformed position of the point.
+
+#screenshot("gravity-point-mass.png", [Gravity on the point mass alone])
 
 The tensor must have no negative principal moment, the model check reports it otherwise. The
 inertia of a body about one axis only (e.g. a flywheel about its shaft) may be given alone.
@@ -44,7 +52,8 @@ ball at its reference point, with lines from its region as for a rigid body.
 
 The point couples its region like a rigid body: boundary conditions, loads and history outputs
 on the reference point work as described in @rigid-body. Written as
-`*POINT MASS, NODE=..., ROTATION NODE=..., ELSET=...` with the mass and the tensor about the
+`*POINT MASS, NODE=..., ROTATION NODE=..., ELSET=..., NAME=...` with the mass and the tensor about the
 global axes, `I11, I22, I33, I12, I13, I23`, on the reference and the rotation node of the
 coupling (a plxs keyword, CalculiX has none for the rotary inertia); `ELSET` holds the elements
-of the coupled nodes, for the gravity and centrifugal loads.
+of the coupled nodes, for the gravity and centrifugal loads on them. `NAME` names the point
+masses of a reference point for a gravity or centrifugal load on them alone.

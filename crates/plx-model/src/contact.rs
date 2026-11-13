@@ -585,6 +585,34 @@ impl CyclicSymmetry {
         Ok(m.cross(s).dot(axis).atan2(m.dot(s)).abs())
     }
 
+    /// The rotation that carries the master side on to the slave side: by one sector about
+    /// the axis, turned the way the slave side lies from the master side.
+    pub fn sector_rotation(
+        &self,
+        master: &[[f64; 3]],
+        slave: &[[f64; 3]],
+    ) -> Result<glam::DMat3, String> {
+        let sectors = self.sectors(master, slave)?;
+        let axis = glam::DVec3::from(self.axis_direction).normalize();
+        let angle = std::f64::consts::TAU / f64::from(sectors);
+        let turned = |sign: f64| glam::DMat3::from_axis_angle(axis, sign * angle);
+        // The sign is the one that brings the master side's direction closest to the slave's.
+        let point = glam::DVec3::from(self.axis_point);
+        let mean = |points: &[[f64; 3]]| -> glam::DVec3 {
+            (points.iter())
+                .map(|p| glam::DVec3::from(*p) - point)
+                .sum::<glam::DVec3>()
+                / points.len() as f64
+        };
+        let (m, s) = (mean(master), mean(slave));
+        let miss = |r: glam::DMat3| (r * m - s).length();
+        Ok(if miss(turned(1.0)) <= miss(turned(-1.0)) {
+            turned(1.0)
+        } else {
+            turned(-1.0)
+        })
+    }
+
     /// The number of sectors in 360 degrees for the cut faces `master` and `slave` (`N=`).
     pub fn sectors(&self, master: &[[f64; 3]], slave: &[[f64; 3]]) -> Result<u32, String> {
         let angle = self.sector_angle(master, slave)?;
@@ -629,6 +657,18 @@ impl Tie {
                 .collect()
         };
         Some(cyclic.sectors(&points(&self.master), &points(&self.slave)))
+    }
+
+    /// The rotation about the axis of a cyclic symmetry tie that carries its master side on
+    /// to its slave side; `None` for an ordinary tie.
+    pub fn cyclic_rotation(&self, mesh: &plx_mesh::FeMesh) -> Option<Result<glam::DMat3, String>> {
+        let cyclic = self.cyclic.as_ref()?;
+        let points = |region: &Region| -> Vec<[f64; 3]> {
+            (region.nodes(mesh).into_iter())
+                .filter_map(|n| mesh.node(n))
+                .collect()
+        };
+        Some(cyclic.sector_rotation(&points(&self.master), &points(&self.slave)))
     }
 
     /// Turns the tie around, as [`ContactPair::swap_master_slave`].

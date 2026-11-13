@@ -10,6 +10,7 @@ mod ffi;
 pub mod gmsh;
 mod merge;
 mod operation;
+mod periodic;
 mod revolve;
 mod split;
 mod stacked;
@@ -27,7 +28,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub use plx_mesh::CadEntity;
 use plx_mesh::{CadMap, Element, ElementId, ElementShape, FeMesh, NodeId, Part, SurfaceDefinition};
 use plx_model::{
-    Algorithm2d, Algorithm3d, EntitySignature, Geometry, MeshingParameters, TagMap, UnitSystem,
+    Algorithm2d, Algorithm3d, EntitySignature, Geometry, MeshingParameters, PeriodicFaces, TagMap,
+    UnitSystem,
 };
 
 use gmsh::{Gmsh, with_gmsh};
@@ -1360,6 +1362,16 @@ fn free_faces(gmsh: &Gmsh) -> Result<Vec<i32>, GmshError> {
 /// Meshes one part with tetrahedra after its meshing parameters, Gmsh algorithms and local
 /// mesh sizes. The mesh holds the one part; its numbers count from 1, see [`merge_part`].
 pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMesh, GmshError> {
+    generate_part_mesh_matching(geometry, part, &[])
+}
+
+/// [`generate_part_mesh`] with the cut faces of cyclic symmetries meshed alike, see
+/// [`PeriodicFaces`]: the faces of the part that one sector's rotation takes on to each other.
+pub fn generate_part_mesh_matching(
+    geometry: &Geometry,
+    part: &str,
+    matching: &[PeriodicFaces],
+) -> Result<GeneratedMesh, GmshError> {
     let setup = geometry.parameters(part);
     if !(setup.max_size > 0.0 && setup.min_size >= 0.0) {
         return Err(GmshError::Other(format!(
@@ -1390,10 +1402,10 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
                 };
                 let result = match way {
                     Sweep::Stacked => {
-                        stacked::stacked_part_mesh(gmsh, geometry, part, volume, extrude)?
+                        stacked::stacked_part_mesh(gmsh, geometry, part, volume, extrude, matching)?
                     }
                     Sweep::Extruded => {
-                        extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude)?
+                        extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude, matching)?
                     }
                     Sweep::Revolved => revolve::revolve_part_mesh(gmsh, geometry, part, volume)?,
                 };
@@ -1436,7 +1448,7 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
             gmsh.remove(&others)?;
         }
         if let Some(extrude) = chosen {
-            return extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude)?
+            return extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude, matching)?
                 .map_err(GmshError::Other);
         }
         let mut options = MeshOptions::of_part(geometry, part);
@@ -1447,6 +1459,9 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
         options.apply(gmsh)?;
         let faces: BTreeSet<i32> = gmsh.adjacencies(3, volume)?.1.into_iter().collect();
         size_fields(gmsh, &local_sizes(gmsh, geometry, &faces)?, 1.0)?;
+        let rotations = periodic::rotations(gmsh, matching)?;
+        let faces_list: Vec<i32> = faces.iter().copied().collect();
+        periodic::match_rotated(gmsh, 2, &faces_list, &rotations)?;
         gmsh.generate(3)?;
         let order = options.order;
         let mesh = solid_mesh(gmsh, order, &[(volume, part.to_string())])?;

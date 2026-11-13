@@ -30,7 +30,7 @@ active, and pick the type #ui("Moving Load").
   [Contact patch length, width], [Size of the rectangle each wheel presses on. The wheel force
     is spread evenly over the faces inside it.],
   [Wheels], [One row per wheel: its offset #ui("Along") and #ui("Across") the path from the
-    reference point and its force `F1`, `F2`, `F3` in *global* directions. #ui("Add wheel")
+    reference point and its force `FX`, `FY`, `FZ` in *global* directions. #ui("Add wheel")
     appends a row, #ui("Mirror") adds the wheels mirrored about the reference point, which
     turns one wheel at +2100 into a symmetric pair at ±2100.],
 )
