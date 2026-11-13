@@ -31,6 +31,16 @@ pub fn pair(ctx: &Context, key: Id, pos: Pos2) -> bool {
     let double = last.is_some_and(|(at, p)| {
         now - at <= DOUBLE_CLICK_SECONDS && p.distance(pos) <= DOUBLE_CLICK_DISTANCE
     });
+    // `RUST_LOG=nodalis::clicks=debug` shows each counted click, to see why a double click
+    // fails on a machine: the frame time between the clicks and the distance.
+    log::debug!(
+        "click on {key:?} at {pos:?}, frame {frame}, {}",
+        last.map_or("no click before".to_owned(), |(at, p)| format!(
+            "{:.3} s and {:.1} pt after the last one",
+            now - at,
+            p.distance(pos)
+        ))
+    );
     ctx.data_mut(|d| {
         if double {
             d.remove::<Last>(key);
@@ -59,6 +69,10 @@ impl TolerantDoubleClick for Response {
             self.ctx
                 .data_mut(|d| d.remove::<Last>(self.id.with("double")));
         }
+        log::debug!(
+            "double click: egui {}, counted {counted}",
+            self.double_clicked()
+        );
         counted || self.double_clicked()
     }
 }
