@@ -3708,3 +3708,81 @@ fn suppressed_parts_are_left_alone_by_splits_and_cad_operations() {
     assert!(error.to_string().contains("suppressed"), "{error}");
     assert!(fillet(edge_in(25.0)).is_ok());
 }
+
+/// A pin with play in the hole of a plate, both quadratic tetrahedra: the bonded region the
+/// contact detection finds between them passes the model check, tied across the gap, while
+/// adjusting the pin's nodes to touch would turn its elements inside out.
+#[test]
+fn a_detected_bonded_pin_with_play_passes_the_model_check() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = made_geometry(|gmsh| {
+        let plate = gmsh.add_box([0.0; 3], [40.0, 30.0, 5.0])?;
+        let hole = gmsh.add_cylinder([15.0, 15.0, -1.0], [0.0, 0.0, 7.0], 5.0)?;
+        gmsh.boolean(crate::gmsh::Boolean::Cut, &[(3, plate)], &[(3, hole)], true)?;
+        // The pin, 0.5 mm smaller in radius than the hole and standing out on both sides.
+        gmsh.add_cylinder([15.0, 15.0, -5.0], [0.0, 0.0, 15.0], 4.5)?;
+        Ok(())
+    });
+    geometry.meshing = MeshingParameters::for_diagonal(60.0);
+    geometry.meshing.max_size = 3.0;
+    geometry.meshing.second_order = true;
+    // The pin meshed finer than the plate: the search distance spans several of its
+    // elements.
+    let pin = part_names(&geometry).unwrap().remove(1);
+    let mut parameters = geometry.meshing;
+    parameters.max_size = 0.5;
+    geometry.mesh_items.push(MeshSetupItem {
+        name: "Fine".into(),
+        kind: MeshSetupKind::MeshingParameters {
+            parts: vec![pin],
+            parameters,
+        },
+    });
+    let display = tessellate(&geometry).unwrap();
+    let skins: Vec<_> = (display.mesh.parts.iter())
+        .map(|part| {
+            let mut skin = plx_mesh::extract_part_skin(&display.mesh, part, 180.0);
+            for face in &mut skin.faces {
+                let id = display.mesh.elements()[face.element].id;
+                if let Some(CadEntity::Face(tag)) = display.entity(id) {
+                    face.region = tag as usize;
+                }
+            }
+            skin
+        })
+        .collect();
+    let mut model = plx_model::FeModel::default();
+    // A search distance of a large assembly, of which pin and plate are a detail.
+    let mut search = plx_model::ContactDetection::new("Contacts");
+    search.tolerance = Some(1.2);
+    model.contact_detections.push(search);
+    let detection = plx_model::DetectionGeometry {
+        mesh: &display.mesh,
+        skins: &skins,
+        entities: &display.entities,
+        face_edges: &display.topology.face_edges,
+        part_dimensions: &display.part_dimensions,
+        compounds: &[],
+    };
+    let visible = vec![true; display.mesh.parts.len()];
+    let report = model
+        .detect_contacts_on_geometry(0, &detection, &visible)
+        .unwrap();
+    assert_eq!(report.added, 1, "{:#?}", model.contact_regions);
+    let mesh = generate_mesh(&geometry).unwrap().mesh;
+    let check = plx_model::MeshCheck::new(&mesh, model.properties.space);
+    let folds = |model: &plx_model::FeModel| {
+        (model.check(&mesh, &check).into_iter())
+            .filter(|f| f.problem == plx_model::Problem::AdjustFoldsElements)
+            .count()
+    };
+    assert_eq!(folds(&model), 0);
+    let resolved = model.resolve_contact(&model.contact_regions[0], &mesh);
+    assert!(!resolved.adjusts(), "{:?}", resolved.why);
+    // Adjusted to touch as chosen, the pin folds.
+    model.contact_regions[0].settings.interface =
+        Some(plx_model::InterfaceTreatment::AdjustToTouch);
+    assert_eq!(folds(&model), 1);
+}
