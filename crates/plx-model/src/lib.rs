@@ -206,8 +206,9 @@ use serde::{Deserialize, Serialize};
 /// to 32 read as they are. Format 34 adds suppressed parts of the geometry
 /// ([`Geometry::suppressed`]); formats 21 to 33 read as they are. Format 35 gives a bolt its
 /// surface instead of the two sides of a cut ([`Bolt::surface`]); formats 21 to 34 read as
-/// they are unless they have bolts.
-pub const PROJECT_FORMAT: u32 = 35;
+/// they are unless they have bolts. Format 36 lets a File block keep its file in the project
+/// (embedded); formats 21 to 35 read as they are.
+pub const PROJECT_FORMAT: u32 = 36;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

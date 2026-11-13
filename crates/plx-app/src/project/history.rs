@@ -72,7 +72,7 @@ fn same_data(a: Option<&ProjectNode>, b: Option<&ProjectNode>) -> bool {
         (Some(ProjectNode::Study(a)), Some(ProjectNode::Study(b))) => a == b,
         (Some(ProjectNode::MeshExport(a)), Some(ProjectNode::MeshExport(b))) => a.path == b.path,
         (Some(ProjectNode::File(a)), Some(ProjectNode::File(b))) => {
-            a.path == b.path && a.units == b.units
+            a.path == b.path && a.units == b.units && a.embedded == b.embedded
         }
         (Some(ProjectNode::Campbell(a)), Some(ProjectNode::Campbell(b))) => a.setup == b.setup,
         (Some(ProjectNode::Note(a)), Some(ProjectNode::Note(b))) => a.text == b.text,
