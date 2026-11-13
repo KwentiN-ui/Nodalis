@@ -540,7 +540,7 @@ mod click_tests {
         super::click_tolerance(&ctx);
         let time = std::cell::Cell::new(1.0);
         let pos = egui::pos2(20.0, 20.0);
-        let mut frame = |events: Vec<egui::Event>| {
+        let frame = |events: Vec<egui::Event>| {
             time.set(time.get() + 0.05);
             let input = egui::RawInput {
                 time: Some(time.get()),
