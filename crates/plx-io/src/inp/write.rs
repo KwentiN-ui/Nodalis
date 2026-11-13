@@ -2010,9 +2010,10 @@ fn sections(
                 for (normal, drawn, set, half) in
                     beam_groups(sets, section, &profile, &halved_beams)?
                 {
-                    // A halved section is no profile of the model: read back, it is a
-                    // general one of its values.
-                    if !profile.is_native() && !half {
+                    // A halved section keeps the comment of its whole profile: the solver
+                    // reads the values below it, the results draw the beam whole, as the
+                    // model shows it.
+                    if !profile.is_native() {
                         comments.push((ir_name(&set), profile_comment(&profile, drawn)));
                     }
                     out.push(IrSection {
@@ -3055,7 +3056,13 @@ fn contact_pairs(
                 interaction: model.name_or_missing(pair.interaction),
             });
         };
-        let master = sets.surface(&pair.name, "Master", &pair.master)?;
+        // Faces on a symmetry plane are the cut of the half model, no surface to touch.
+        let master_region = model.without_symmetry_faces(sets.mesh, &pair.master);
+        let master = sets.surface(
+            &pair.name,
+            "Master",
+            master_region.as_ref().unwrap_or(&pair.master),
+        )?;
         // Beams and ropes as the slave side touch with their nodes, at the radius of a rope
         // profile from the axis: a node surface of node-to-surface contact.
         let lines = pair.slave.is_lines(sets.mesh);
@@ -3068,7 +3075,12 @@ fn contact_pairs(
             }
             sets.node_surface(&pair.name, "Slave", &pair.slave)?
         } else {
-            sets.surface(&pair.name, "Slave", &pair.slave)?
+            let slave_region = model.without_symmetry_faces(sets.mesh, &pair.slave);
+            sets.surface(
+                &pair.name,
+                "Slave",
+                slave_region.as_ref().unwrap_or(&pair.slave),
+            )?
         };
         let kind = match pair.method {
             ContactMethod::NodeToSurface => c::ContactKind::NodeToSurface,

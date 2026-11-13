@@ -5373,8 +5373,15 @@ fn beams_on_a_symmetry_plane_get_half_their_section() {
     assert!(full_text.contains(&general(1.0)), "{full_text}");
     assert!(half_text.contains(&general(0.5)), "{half_text}");
     assert!(!half_text.contains(&general(1.0)), "{half_text}");
-    // A halved section is no profile of the model: it has no profile comment.
-    assert!(!half_text.contains("** Profile: Rope"), "{half_text}");
+    // The results draw a halved rope whole: its section keeps the profile comment, and
+    // read back it is the rope again.
+    assert!(half_text.contains("** Profile: Rope"), "{half_text}");
+    let import = read_inp_str(&half_text, None).unwrap();
+    assert!(
+        (import.cross_sections.iter()).any(|c| matches!(c.profile, BeamProfile::Rope { .. })),
+        "{:?}",
+        import.cross_sections
+    );
     assert!(kept_text.contains(&general(1.0)), "{kept_text}");
     // The plane holds the displacement along z and the rotations about x and y.
     for dof in [3, 4, 5] {
@@ -13183,4 +13190,98 @@ fn infill_sections_lie_between_their_core_and_the_solid_part() {
     assert!(with_walls.abs() > solid.abs(), "{with_walls} {solid}");
     // Triangles at 20 %: in the layer about a fifteenth of the solid.
     assert!(core_only.abs() > 8.0 * solid.abs(), "{core_only} {solid}");
+}
+
+/// A rope on the symmetry plane of a half model over a half block: the block's face on the
+/// plane is the cut, which the rope lies on along its whole length. It is no contact
+/// surface: written with it, the rope slid along the cut face and the block pushed through
+/// it without lifting it.
+#[test]
+fn a_rope_on_a_symmetry_plane_touches_the_block_not_its_cut_face() {
+    let (mut mesh, mut model) = rope_over_block();
+    // The half of the block on z <= 0, its corners in the order of a C3D8; its face S3
+    // lies on the plane z = 0.
+    for id in 101..109 {
+        let p = mesh.node(id).unwrap();
+        let z = if matches!(id, 101 | 102 | 105 | 106) {
+            0.0
+        } else {
+            -10.0
+        };
+        mesh.set_node(id, [p[0], p[1], z]);
+    }
+    let material = model.sections[0].material;
+    model.sections.push(Section {
+        orientation: None,
+        name: "Block".into(),
+        material,
+        region: Region::Parts(vec!["SHEAVE".into()]),
+        thickness: 1.0,
+        kind: SectionKind::Solid,
+    });
+    model.surface_interactions.push(SurfaceInteraction {
+        id: named("Surface_Interaction-1"),
+        name: "Surface_Interaction-1".into(),
+        properties: vec![InteractionProperty::SurfaceBehavior(
+            SurfaceBehavior::Linear {
+                k: 1e5,
+                sigma_inf: 0.01,
+                c0: None,
+            },
+        )],
+    });
+    let mut pair = ContactPair {
+        id: named("Contact_Pair-1"),
+        ..ContactPair::new("Contact_Pair-1", Some(named("Surface_Interaction-1")))
+    };
+    pair.master = Region::Faces(vec![(101, 2), (101, 3)]);
+    pair.slave = Region::Parts(vec!["BEAM".into()]);
+    pair.method = ContactMethod::NodeToSurface;
+    model.contact_pairs.push(pair);
+    let step = &mut model.steps[0];
+    for (name, region, normal) in [
+        ("Symmetry-1", Region::Faces(vec![(101, 3)]), None),
+        (
+            "Symmetry-2",
+            Region::Parts(vec!["BEAM".into()]),
+            Some([0.0, 0.0, 1.0]),
+        ),
+    ] {
+        step.boundary_conditions.push(BoundaryCondition::new(
+            name,
+            region,
+            BoundaryKind::Symmetry {
+                normal,
+                halve_beams: true,
+            },
+        ));
+    }
+    // The block is lifted by 3 under the rope's middle node.
+    step.boundary_conditions.push(BoundaryCondition::new(
+        "Lift",
+        Region::Faces(vec![(101, 1)]),
+        BoundaryKind::displacement([
+            Some(0.0),
+            Some(3.0),
+            Some(0.0),
+            Some(0.0),
+            Some(0.0),
+            Some(0.0),
+        ]),
+    ));
+    let analysis = lowered(&mesh, &model);
+    let master = &analysis.model.contact.pairs[0].master;
+    let Some(plxs_core::mesh::Surface::Element(faces)) = analysis.model.sets.surfaces.get(master)
+    else {
+        panic!("{master}");
+    };
+    assert_eq!(faces.len(), 1, "{faces:?}");
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let Some(frd) = run_solver("seil-symmetrie-kontakt", &text) else {
+        return;
+    };
+    // The block lifts the rope by 3 where it rests on the block's top; the free end of
+    // the rope rises further along its tangent.
+    let lifted = node_value(&frd, "DISP", "U2", 6);
+    assert!(lifted > 2.9, "{lifted}");
 }
