@@ -3544,9 +3544,25 @@ impl Workbench {
                     MeshItemResult::OkRemesh(index, item) => (index, item, true),
                     MeshItemResult::Open | MeshItemResult::Cancel => return,
                 };
+                // A local mesh size is picked on faces and edges: only the parts that hold
+                // them are affected, the old picks of an edited item included.
+                let affected = match (&item.kind, self.geometry.as_ref()) {
+                    (plx_model::MeshSetupKind::LocalMeshSize { .. }, Some(view)) => {
+                        let old = index.and_then(|i| geometry.mesh_items.get(i));
+                        let mut parts = local_size_parts(view, Some(&item));
+                        parts.extend(local_size_parts(view, old));
+                        parts.sort();
+                        parts.dedup();
+                        Some(parts)
+                    }
+                    _ => None,
+                };
+                let before = affected.is_some().then(|| geometry.clone());
                 if remeshes {
-                    // A local mesh size is picked on faces and edges: mesh every part.
-                    remesh = Some(item.kind.parts().map(<[String]>::to_vec));
+                    remesh = Some(match &affected {
+                        Some(parts) if !parts.is_empty() => Some(parts.clone()),
+                        _ => item.kind.parts().map(<[String]>::to_vec),
+                    });
                 }
                 let index = match index.filter(|&i| i < geometry.mesh_items.len()) {
                     Some(index) => {
@@ -3559,6 +3575,19 @@ impl Workbench {
                     }
                 };
                 self.tree.selected = Some((TreeView::Geometry, TreeItem::MeshItem(index)));
+                // The parts a local mesh size does not touch stay up to date.
+                if let (Some(before), Some(affected), Some(model)) =
+                    (before, affected, self.model.as_mut())
+                    && let Some(now) = model.geometry.as_ref()
+                {
+                    keep_up_to_date(
+                        model.fe.properties.space,
+                        &before,
+                        now,
+                        &affected,
+                        &mut model.mesh_inputs,
+                    );
+                }
             }
         }
         self.mesh_item_editor = None;
@@ -8095,5 +8124,39 @@ mod tests {
         assert!(name("SOLID-1").is_err());
         assert!(name("zwei wörter").is_err());
         assert!(name("").is_err());
+    }
+}
+
+/// The parts that hold the faces and edges a local mesh size names, none for another item.
+fn local_size_parts(view: &Model, item: Option<&plx_model::MeshSetupItem>) -> Vec<String> {
+    let Some(plx_model::MeshSetupKind::LocalMeshSize { faces, edges, .. }) = item.map(|i| &i.kind)
+    else {
+        return Vec::new();
+    };
+    crate::meshing::parts_of_entities(
+        view,
+        &faces.iter().copied().collect(),
+        &edges.iter().copied().collect(),
+    )
+}
+
+/// After a mesh setup item changed from `before` to `now`: the parts it does not affect are
+/// as up to date as they were, so their recorded mesh inputs follow the geometry.
+fn keep_up_to_date(
+    space: plx_model::ModelSpace,
+    before: &plx_model::Geometry,
+    now: &plx_model::Geometry,
+    affected: &[String],
+    inputs: &mut std::collections::BTreeMap<String, u64>,
+) {
+    let affected: std::collections::BTreeSet<String> = (affected.iter())
+        .flat_map(|p| now.parts_of_fe_part(p))
+        .collect();
+    for (part, input) in inputs.iter_mut() {
+        if !affected.contains(part)
+            && *input == plx_model::fingerprint::mesh_input(before, space, part)
+        {
+            *input = plx_model::fingerprint::mesh_input(now, space, part);
+        }
     }
 }

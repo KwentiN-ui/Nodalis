@@ -1004,14 +1004,25 @@ fn shell_parts(view: &Model) -> BTreeSet<String> {
 
 /// Names of the parts the CAD faces lie on.
 fn parts_of_faces(view: &Model, faces: &BTreeSet<i32>) -> Vec<String> {
-    if faces.is_empty() {
+    parts_of_entities(view, faces, &BTreeSet::new())
+}
+
+/// The names of the parts that hold any of the CAD faces or edges.
+pub fn parts_of_entities(
+    view: &Model,
+    faces: &BTreeSet<i32>,
+    edges: &BTreeSet<i32>,
+) -> Vec<String> {
+    if faces.is_empty() && edges.is_empty() {
         return Vec::new();
     }
     (view.mesh.parts.iter().zip(&view.parts))
         .filter(|(part, _)| {
-            part.elements.iter().any(
-                |&id| matches!(view.cad_entity(id), Some(CadEntity::Face(tag)) if faces.contains(&tag)),
-            )
+            part.elements.iter().any(|&id| match view.cad_entity(id) {
+                Some(CadEntity::Face(tag)) => faces.contains(&tag),
+                Some(CadEntity::Edge(tag)) => edges.contains(&tag),
+                _ => false,
+            })
         })
         .map(|(_, info)| info.name.clone())
         .collect()
