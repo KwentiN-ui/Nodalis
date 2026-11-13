@@ -351,6 +351,7 @@ mod tests {
             links: Vec::new(),
             frames: Vec::new(),
             compact: Vec::new(),
+            units: Default::default(),
             format: plx_model::PROJECT_FORMAT,
         }
     }

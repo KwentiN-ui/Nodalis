@@ -41,6 +41,30 @@ pub fn quantity(value: &mut f64, units: UnitSystem, quantity: Quantity) -> egui:
     }
 }
 
+/// The field of a value of any kind a block of the project has, stored in SI units: a
+/// quantity shown and typed in `units` ([`quantity`]), a whole count, or a factor. A value
+/// whose dimension no quantity has is shown in SI base units, with their names. Fields of
+/// values that follow the unit system of the project take it here.
+pub fn of_kind(
+    value: &mut f64,
+    kind: plx_model::ValueKind,
+    units: UnitSystem,
+) -> egui::DragValue<'_> {
+    use plx_model::ValueKind;
+    match kind.quantity() {
+        Some(of) => quantity(value, units, of),
+        None if kind == ValueKind::Count => {
+            count(value).range(1.0..=1e6).speed(0.1).fixed_decimals(0)
+        }
+        None => match kind {
+            ValueKind::Derived(dimension) => drag_value(value)
+                .speed(0.01)
+                .suffix(format!(" {}", dimension.si())),
+            _ => drag_value(value).speed(0.01),
+        },
+    }
+}
+
 /// A [`quantity`] field that does not show the unit, e.g. because a column title does.
 pub fn without_unit(value: &mut f64, units: UnitSystem, quantity: Quantity) -> egui::DragValue<'_> {
     converted(value, plx_model::STORED, units, quantity)

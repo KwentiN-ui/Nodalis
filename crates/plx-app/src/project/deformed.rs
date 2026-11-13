@@ -53,8 +53,6 @@ pub(super) struct Want {
 pub(super) struct Made {
     model: LinkedModel,
     largest: f64,
-    /// The units of the analysis, which the output gives the displacement in.
-    units: UnitSystem,
 }
 
 impl DeformedBlock {
@@ -360,7 +358,6 @@ impl ProjectApp {
             model.fe.mesh_sets = data.fe.mesh_sets.clone();
             model.fe.element_types = data.fe.element_types.clone();
             let space = data.fe.properties.space;
-            let units = data.fe.properties.units;
             model.fe.properties.space = space;
             let bound = wanted.bound.clone();
             let step = wanted.step;
@@ -375,11 +372,7 @@ impl ProjectApp {
                     let read = bound.read(&dir)?;
                     let (mesh, largest) = deform(&model.mesh, &read, step, increment, factor)?;
                     model.mesh = mesh;
-                    Ok(Made {
-                        model,
-                        largest,
-                        units,
-                    })
+                    Ok(Made { model, largest })
                 })();
                 let _ = sender.send(made);
             });
@@ -391,6 +384,7 @@ impl ProjectApp {
     /// Takes the meshes the workers of deformed mesh blocks made; returns whether one came.
     pub(super) fn poll_deformed(&mut self) -> bool {
         let mut lines = Vec::new();
+        let units = self.units;
         for node in &mut self.nodes {
             let name = node.name.clone();
             let Some(block) = node.as_deformed_mut() else {
@@ -410,7 +404,6 @@ impl ProjectApp {
             block.making = None;
             match made {
                 Ok(made) => {
-                    let units = made.units;
                     lines.push(format!(
                         "{name}: mesh deformed, {} elements, largest displacement {} {}",
                         made.model.mesh.element_count(),

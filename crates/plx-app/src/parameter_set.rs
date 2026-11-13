@@ -9,7 +9,7 @@ pub enum ParameterSetResult {
     Open,
     /// Closed with OK: the parameters, each with the name it had before, if it had one, so
     /// that links follow a renamed parameter; and the unit system values are shown in.
-    Ok(Vec<(Option<String>, Parameter)>, UnitSystem),
+    Ok(Vec<(Option<String>, Parameter)>),
     Cancel,
 }
 
@@ -18,6 +18,7 @@ pub struct ParameterSetEditor {
     pub id: u64,
     name: String,
     rows: Vec<(Option<String>, Parameter)>,
+    /// The unit system of the project, which the values are shown and typed in.
     units: UnitSystem,
 }
 
@@ -62,18 +63,6 @@ impl ParameterSetEditor {
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Shown in");
-                    egui::ComboBox::from_id_salt("parameter set units")
-                        .selected_text(self.units.label())
-                        .width(200.0)
-                        .show_ui(ui, |ui| {
-                            for choice in UnitSystem::ALL {
-                                ui.selectable_value(&mut self.units, choice, choice.label());
-                            }
-                        });
-                });
-                ui.add_space(4.0);
                 self.table(ui);
                 if ui
                     .button("Add Parameter")
@@ -113,7 +102,7 @@ impl ParameterSetEditor {
                                 (old.clone(), p)
                             })
                             .collect();
-                        result = ParameterSetResult::Ok(rows, self.units);
+                        result = ParameterSetResult::Ok(rows);
                     }
                 });
             });
@@ -150,7 +139,7 @@ impl ParameterSetEditor {
                                 ui.selectable_value(&mut parameter.kind, kind, kind.label());
                             }
                         });
-                    let drag = field(&mut parameter.value, parameter.kind, units);
+                    let drag = numeric::of_kind(&mut parameter.value, parameter.kind, units);
                     crate::numeric::fitted(ui, egui::vec2(110.0, 18.0), drag, "");
                     if ui.small_button("Remove").clicked() {
                         remove = Some(i);
@@ -161,24 +150,5 @@ impl ParameterSetEditor {
         if let Some(i) = remove {
             self.rows.remove(i);
         }
-    }
-}
-
-/// The field of a parameter's value: a quantity in the unit system, a whole count or a
-/// factor.
-pub fn field(value: &mut f64, kind: ValueKind, units: UnitSystem) -> egui::DragValue<'_> {
-    match kind.quantity() {
-        Some(quantity) => numeric::quantity(value, units, quantity),
-        None if kind == ValueKind::Count => crate::numeric::count(value)
-            .range(1.0..=1e6)
-            .speed(0.1)
-            .fixed_decimals(0),
-        // In SI base units, with their names.
-        None => match kind {
-            ValueKind::Derived(dimension) => crate::numeric::drag_value(value)
-                .speed(0.01)
-                .suffix(format!(" {}", dimension.si())),
-            _ => crate::numeric::drag_value(value).speed(0.01),
-        },
     }
 }

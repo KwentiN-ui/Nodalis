@@ -37,7 +37,11 @@ pub(super) fn shown_number(value: f64, kind: Option<ValueKind>, units: UnitSyste
 }
 
 /// The rows of a Math or Switch block: what it computes, its inputs and its result.
-pub(super) fn number_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
+pub(super) fn number_rows(
+    node: &Node,
+    incoming: &[(Vec<String>, String)],
+    units: UnitSystem,
+) -> Vec<Row> {
     let Some((number, switch)) = node.as_number() else {
         return Vec::new();
     };
@@ -183,7 +187,7 @@ pub(super) fn number_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Ve
                 .into();
             format!(
                 "Result: {}",
-                super::series::shown_series(&series, number.kind, number.units)
+                super::series::shown_series(&series, number.kind, units)
             )
         }
         (Some(Err(why)), _) => {
@@ -196,7 +200,7 @@ pub(super) fn number_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Ve
             "Result: none".into()
         }
         (None, Some(value)) => {
-            format!("Result: {}", shown_number(value, number.kind, number.units))
+            format!("Result: {}", shown_number(value, number.kind, units))
         }
         (None, None) if switch => "Result: no choice".into(),
         (None, None) => "Result: none".into(),
@@ -223,7 +227,6 @@ impl ProjectApp {
     fn add_number(&mut self, position: egui::Pos2, switch: bool) -> u64 {
         let id = self.next_id();
         let number = NumberBlock {
-            units: self.settings.new_model.units,
             kind: None,
             operands: [None; 2],
             operation: MathOp::default(),
@@ -671,8 +674,7 @@ impl Viewer {
                 }
                 let before = value;
                 let kind = kind.unwrap_or(ValueKind::Factor);
-                let drag = crate::parameter_set::field(&mut value, kind, block.units);
-                number_field(ui, field, row, drag, tip);
+                self.value_field(ui, field, row, &mut value, kind, tip);
                 if value != before {
                     self.actions.push(Action::SetNumberInput(id, key, value));
                 }
