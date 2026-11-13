@@ -562,6 +562,9 @@ fn constraints(out: &mut Out, model: &Model) {
         if let Some(set) = &mass.elset {
             keyword.push_str(&format!(", Elset={set}"));
         }
+        if let Some(name) = &mass.name {
+            keyword.push_str(&format!(", Name={name}"));
+        }
         out.keyword(&keyword);
         let mut values = vec![number(mass.mass)];
         if let Some((_, tensor)) = mass.inertia {

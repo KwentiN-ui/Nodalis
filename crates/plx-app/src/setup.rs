@@ -116,6 +116,9 @@ pub(crate) enum Source {
     /// The point of a remote displacement boundary condition, offered among the reference
     /// points.
     RemotePoint,
+    /// The point masses on a reference point, for a gravity or centrifugal load that pulls
+    /// them alone: [`Region::ReferencePoint`] of the point.
+    PointMass,
     /// Fixed ground, the end of a spring that has no region. A draft with it stands for no
     /// region: its [`RegionDraft::region`] is empty, callers ask [`RegionDraft::is_world`].
     World,
@@ -130,6 +133,7 @@ impl Source {
             Source::ElementSet => "Element Set",
             Source::Surface => "Surface",
             Source::ReferencePoint | Source::RemotePoint => "Reference Point",
+            Source::PointMass => "Point Mass",
             Source::World => "World",
         }
     }
@@ -196,7 +200,8 @@ pub(crate) const SPRING_END_SOURCES: &[Source] = &[
 ];
 /// Solid elements: whole parts, element sets or the elements of picked faces.
 pub(crate) const SOLID_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet, Source::Selection];
-pub(crate) const ELEMENT_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet];
+pub(crate) const ELEMENT_SOURCES: &[Source] =
+    &[Source::Parts, Source::ElementSet, Source::PointMass];
 /// Nodes or elements of a user-defined set: picked, or of whole parts.
 pub(crate) const SET_SOURCES: &[Source] = &[Source::Selection, Source::Parts];
 /// Element faces of a user-defined surface.
@@ -271,7 +276,11 @@ impl RegionDraft {
                 draft.set = set.clone();
             }
             Region::ReferencePoint(point) => {
-                draft.source = Source::ReferencePoint;
+                draft.source = if sources.contains(&Source::ReferencePoint) {
+                    Source::ReferencePoint
+                } else {
+                    Source::PointMass
+                };
                 draft.point = Some(*point);
             }
             Region::RemotePoint(point) => {
@@ -308,7 +317,10 @@ impl RegionDraft {
                 Region::NodeSet(_) => sources.contains(&Source::NodeSet),
                 Region::ElementSet(_) => sources.contains(&Source::ElementSet),
                 Region::Surface(_) => sources.contains(&Source::Surface),
-                Region::ReferencePoint(_) => sources.contains(&Source::ReferencePoint),
+                Region::ReferencePoint(_) => {
+                    sources.contains(&Source::ReferencePoint)
+                        || sources.contains(&Source::PointMass)
+                }
                 Region::RemotePoint(_) => sources.contains(&Source::RemotePoint),
             };
         if kept {
@@ -337,7 +349,7 @@ impl RegionDraft {
             Source::ElementSet => Region::ElementSet(self.set.clone()),
             Source::Surface => Region::Surface(self.set.clone()),
             // Without a point chosen the region is empty, see `is_empty`.
-            Source::ReferencePoint => {
+            Source::ReferencePoint | Source::PointMass => {
                 (self.point).map_or(Region::Nodes(Vec::new()), Region::ReferencePoint)
             }
             Source::RemotePoint => {
@@ -366,7 +378,9 @@ impl RegionDraft {
                 Target::Lines => self.edges.items().is_empty(),
             },
             Source::Parts => self.parts.is_empty(),
-            Source::ReferencePoint | Source::RemotePoint => self.point.is_none(),
+            Source::ReferencePoint | Source::RemotePoint | Source::PointMass => {
+                self.point.is_none()
+            }
             Source::World => false,
             _ => self.set.is_empty(),
         }
@@ -706,6 +720,7 @@ impl RegionDraft {
                     wanted |= clicked;
                 }
                 Source::ReferencePoint | Source::RemotePoint => self.point_ui(ui, model),
+                Source::PointMass => self.point_mass_ui(ui, model),
                 Source::World => {
                     ui.weak("Fixed ground.");
                 }
@@ -752,6 +767,12 @@ impl RegionDraft {
                     }
                 }
             }
+            Source::PointMass => {
+                let masses = point_masses(fe);
+                if !(masses.iter()).any(|&(point, _)| self.point == Some(point)) {
+                    self.point = masses.first().map(|&(point, _)| point);
+                }
+            }
             Source::NodeSet | Source::ElementSet | Source::Surface => {
                 let mut names: Vec<&String> = match self.source {
                     Source::NodeSet => mesh.node_sets.keys().collect(),
@@ -764,6 +785,33 @@ impl RegionDraft {
             }
             _ => {}
         }
+    }
+
+    /// The point masses, listed by name and kept by their reference point.
+    fn point_mass_ui(&mut self, ui: &mut Ui, model: &Model) {
+        let masses = point_masses(&model.fe);
+        if masses.is_empty() {
+            ui.weak("The model has no point masses (Connections > Constraint).");
+        }
+        let selected = (masses.iter())
+            .filter(|&&(point, _)| self.point == Some(point))
+            .map(|&(_, name)| name)
+            .collect::<Vec<_>>()
+            .join(", ");
+        egui::ComboBox::from_id_salt("region point mass")
+            .selected_text(selected)
+            .width(crate::dock::fit_width(ui, 200.0))
+            .show_ui(ui, |ui| {
+                for &(point, name) in &masses {
+                    if ui
+                        .selectable_label(self.point == Some(point), name)
+                        .clicked()
+                    {
+                        self.point = Some(point);
+                    }
+                }
+            });
+        ui.weak("Pulls the point mass alone, not the elements that carry it.");
     }
 
     /// The reference points, and where the region takes them the points of the remote
@@ -3700,6 +3748,7 @@ impl Editor {
                             }
                             _ => {}
                         }
+                        pulled_masses_row(ui, &region.region(), model);
                     }
                     LoadKind::Centrifugal { point, axis, speed } => {
                         ui.label("Rotational speed");
@@ -3743,6 +3792,7 @@ impl Editor {
                             "The solver takes the square of the speed; the materials need a density.",
                         );
                         ui.end_row();
+                        pulled_masses_row(ui, &region.region(), model);
                     }
                     LoadKind::Moving(moving) => moving_rows(ui, moving, &model.fe, two_d, units),
                     LoadKind::Radiation { sink, emissivity } => {
@@ -8010,6 +8060,37 @@ fn infill_form(
     ui.end_row();
 }
 
+/// The active point masses of the model with their reference points.
+fn point_masses(fe: &FeModel) -> Vec<(Id, &str)> {
+    (fe.constraints.iter())
+        .filter_map(|c| match c {
+            Constraint::PointMass(mass) if mass.active => {
+                Some((mass.reference_point, mass.name.as_str()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The row naming the point masses a gravity or centrifugal load on `region` pulls along.
+fn pulled_masses_row(ui: &mut Ui, region: &Region, model: &Model) {
+    if matches!(region, Region::ReferencePoint(_)) {
+        return;
+    }
+    let pulled = model.fe.point_masses_pulled(region, &model.mesh);
+    if pulled.is_empty() {
+        return;
+    }
+    let names: Vec<&str> = pulled.iter().map(|m| m.name.as_str()).collect();
+    ui.label("");
+    ui.weak(format!(
+        "Also pulls the point mass{} {}, carried by the region.",
+        if names.len() == 1 { "" } else { "es" },
+        names.join(", ")
+    ));
+    ui.end_row();
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -9085,5 +9166,30 @@ mod tests {
         mesh.element_sets.remove("Cantilever");
         model.set_mesh(mesh);
         assert_eq!(model.mesh.element_sets["Cantilever"].len(), elements);
+    }
+
+    #[test]
+    fn a_body_load_takes_a_point_mass_by_its_reference_point() {
+        let mesh = FeMesh::default();
+        let point = plx_model::Id::new();
+        let region = Region::ReferencePoint(point);
+        let draft = RegionDraft::from_region(&region, ELEMENT_SOURCES, Target::Faces, &mesh);
+        assert_eq!(draft.source, Source::PointMass);
+        assert_eq!(draft.region(), region);
+        // A force keeps the point as a reference point.
+        let (force, dropped) = draft.converted(SUPPORT_SOURCES, Target::Nodes, &mesh);
+        assert!(!dropped);
+        assert_eq!(force.source, Source::ReferencePoint);
+        let mut fe = FeModel::default();
+        let mut mass = plx_model::PointMass::new("Motor", point);
+        fe.constraints.push(Constraint::PointMass(mass.clone()));
+        let mut empty = RegionDraft::new(ELEMENT_SOURCES, Target::Faces);
+        empty.source = Source::PointMass;
+        empty.prefill(&fe, &mesh);
+        assert_eq!(empty.region(), region);
+        // An inactive one is not offered.
+        mass.active = false;
+        fe.constraints = vec![Constraint::PointMass(mass)];
+        assert!(point_masses(&fe).is_empty());
     }
 }

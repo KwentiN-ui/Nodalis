@@ -74,6 +74,10 @@ pub struct PointMass {
     /// in those on every set.
     #[serde(default)]
     pub elset: Option<String>,
+    /// `NAME=`: a gravity or centrifugal load (`*DLOAD`) on this name pulls the masses of
+    /// the name alone, without any elements.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 impl PointMass {

@@ -202,7 +202,8 @@ step. A frequency step takes no loads.
   [Pressure], [Pressure on faces; positive values push into the material (`*DLOAD`). A
     #ui("Distribution") (@distributions) makes it vary over the faces, e.g. with depth.],
   [Gravity], [Body force on the mass of whole parts or element sets (`*DLOAD`, `GRAV`); the materials need
-    a density. #ui("Definition") #ui("Standard Gravity") (default) takes only a
+    a density. Point masses carried by the region are pulled too, the dialog names them; the
+    region #ui("Point Mass") pulls one point mass alone (@point-mass). #ui("Definition") #ui("Standard Gravity") (default) takes only a
     #ui("Direction") along an axis (`+X` to `-Z`, in plane models only `X` and `Y`; default
     `-Z`, or `-Y` in plane models) with the standard acceleration of 9.80665 m/s² in every unit
     system. #ui("User Defined") takes the acceleration vector `g1` to `g3` (`g1`, `g2` in plane

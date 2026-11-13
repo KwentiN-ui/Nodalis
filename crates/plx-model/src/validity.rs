@@ -358,6 +358,17 @@ impl FeModel {
                         })
                         .or_else(|| self.missing_distribution(&load.distribution))
                         .or_else(|| table_problem((0..3).map(|c| load.table(c))))
+                        .or_else(|| match (&load.kind, &load.region) {
+                            // A body load on a reference point pulls the point masses there.
+                            (
+                                LoadKind::Gravity(_)
+                                | LoadKind::StandardGravity(_)
+                                | LoadKind::Centrifugal { .. },
+                                Region::ReferencePoint(_),
+                            ) => (self.point_masses_pulled(&load.region, mesh).is_empty())
+                                .then(|| "No active point mass sits on the reference point".into()),
+                            _ => None,
+                        })
                         .or_else(|| match &load.kind {
                             // An unknown coordinate system, or no node in the pinball region.
                             LoadKind::RemoteForce(remote)
@@ -466,6 +477,46 @@ impl FeModel {
             }
             _ => None,
         })
+    }
+
+    /// The elements that carry a point mass: those touching the nodes of its region, or of
+    /// the rigid body on its point when that body carries it. A gravity or centrifugal load
+    /// pulls the mass when its region holds one of them.
+    pub fn point_mass_carriers(
+        &self,
+        mass: &crate::PointMass,
+        mesh: &FeMesh,
+    ) -> Vec<plx_mesh::ElementId> {
+        let point = self.reference_point(mass.reference_point);
+        let carrier = match point.and_then(|_| self.rigid_body_of(mass.reference_point)) {
+            Some(body) => &body.region,
+            None => &mass.region,
+        };
+        let carried: std::collections::BTreeSet<plx_mesh::NodeId> =
+            carrier.nodes(mesh).into_iter().collect();
+        (mesh.elements().iter())
+            .filter(|e| e.nodes.iter().any(|n| carried.contains(n)))
+            .map(|e| e.id)
+            .collect()
+    }
+
+    /// The active point masses that a gravity or centrifugal load on `region` pulls: those
+    /// carried by elements of the region, or on a reference point those on the point alone.
+    pub fn point_masses_pulled(&self, region: &Region, mesh: &FeMesh) -> Vec<&crate::PointMass> {
+        let masses = (self.constraints.iter()).filter_map(|c| match c {
+            Constraint::PointMass(mass) if mass.active => Some(mass),
+            _ => None,
+        });
+        if let Region::ReferencePoint(point) = region {
+            return masses.filter(|m| m.reference_point == *point).collect();
+        }
+        let elements: std::collections::BTreeSet<plx_mesh::ElementId> =
+            region.elements(mesh).into_iter().collect();
+        masses
+            .filter(|mass| {
+                (self.point_mass_carriers(mass, mesh).iter()).any(|e| elements.contains(e))
+            })
+            .collect()
     }
 
     /// Why a point mass cannot be written, if it cannot.

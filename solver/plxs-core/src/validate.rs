@@ -411,7 +411,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
             amplitude(&mut errors, "*CLOAD", &load.amplitude);
         }
         for load in &step.loads.distributed {
-            if !element_known(model, &load.region) {
+            if !element_known(model, &load.region) && !point_mass_named(model, load) {
                 errors.push(Error::undefined(
                     "*DLOAD",
                     kind_of_element_ref(&load.region),
@@ -576,6 +576,19 @@ fn concerning(errors: &mut [Error], from: usize, item: ItemRef) {
             *error = plain.concerning(item.clone());
         }
     }
+}
+
+/// Whether a gravity or centrifugal load names point masses (`*POINT MASS, NAME=`), which
+/// it pulls without elements.
+fn point_mass_named(model: &crate::Model, load: &crate::step::DistributedLoad) -> bool {
+    let crate::mesh::ElementRef::Set(name) = &load.region else {
+        return false;
+    };
+    matches!(
+        load.kind,
+        crate::step::DistributedLoadKind::Gravity { .. }
+            | crate::step::DistributedLoadKind::Centrifugal { .. }
+    ) && (model.point_masses.iter()).any(|m| m.name.as_ref() == Some(name))
 }
 
 #[cfg(test)]
