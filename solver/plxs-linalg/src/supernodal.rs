@@ -30,7 +30,6 @@ use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::ldlt::factor::{
     LdltError, LdltRegularization, cholesky_in_place, cholesky_in_place_scratch,
 };
-use faer::linalg::matmul::triangular::{BlockStructure, matmul as triangular_matmul};
 use faer::linalg::triangular_solve::solve_unit_lower_triangular_in_place;
 use faer::prelude::*;
 use faer::sparse::linalg::cholesky::supernodal::SymbolicSupernodalCholesky;
@@ -475,6 +474,9 @@ const LOCK_COLUMNS: usize = 32;
 /// fewest and most columns: wide products read a descendant's columns fewer times.
 const ITEM_VALUES: usize = 4 << 20;
 const ITEM_COLUMNS: (usize, usize) = (256, 1024);
+/// Values of the piece of an update that is computed and subtracted at once (2 MB, which
+/// stays in the cache of a desktop processor).
+const ITEM_CHUNK_VALUES: usize = 256 << 10;
 
 /// Subtracts the updates of all descendants `updaters` of supernode `s` from its front
 /// `front` (column-major, `c + p` rows), left-looking: `L_d D_d L_dᵀ` restricted to the rows
@@ -559,34 +561,6 @@ fn update_item(
         let dk = ld[(k, k)];
         w_mat.rb_mut().row_mut(k).iter_mut().for_each(|x| *x *= dk);
     }
-    let mut t = ctx.pool.take(r * m);
-    let mut t_mat = MatMut::from_column_major_slice_mut(&mut t, r, m);
-    {
-        let (t_top, t_bot) = t_mat.rb_mut().split_at_row_mut(m);
-        triangular_matmul(
-            t_top,
-            BlockStructure::TriangularLower,
-            Accum::Replace,
-            mid,
-            BlockStructure::Rectangular,
-            w_mat.rb(),
-            BlockStructure::Rectangular,
-            1.0,
-            Par::Seq,
-        );
-        if r > m {
-            faer::linalg::matmul::matmul(
-                t_bot,
-                Accum::Replace,
-                below.subrows(m, r - m),
-                w_mat.rb(),
-                1.0,
-                Par::Seq,
-            );
-        }
-    }
-    ctx.pool.give_back(w);
-
     // Local rows in the front of s: the diagonal block, then the pattern (both sorted, so
     // the pattern positions are found by one forward walk). Consecutive rows that stay
     // consecutive in the front form runs, which are subtracted as slices.
@@ -606,27 +580,55 @@ fn update_item(
             _ => runs.push((i, l, 1)),
         }
     }
-    let mut j = 0;
-    while j < m {
-        let group = (rows[j] as usize - s_start) / lock_columns;
-        let mut block = locks[group].lock().unwrap_or_else(|e| e.into_inner());
-        while j < m && (rows[j] as usize - s_start) / lock_columns == group {
-            let col = rows[j] as usize - s_start - group * lock_columns;
-            let column = &t[j * r..(j + 1) * r];
-            let dst = &mut block[col * rows_s..(col + 1) * rows_s];
-            for &(src, to, len) in &runs {
-                if src + len <= j {
-                    continue;
+
+    // The update `below · w` in pieces of rows, each subtracted while it is still in the
+    // cache: a whole update of a large descendant (tens of MB) went to the memory and back.
+    let chunk = (ITEM_CHUNK_VALUES / m.max(1)).max(16);
+    let mut t = ctx.pool.take(chunk.min(r) * m);
+    let mut i0 = 0;
+    while i0 < r {
+        let i1 = (i0 + chunk).min(r);
+        let h = i1 - i0;
+        // Columns j > i of a row i hold no update (the upper triangle).
+        let width = m.min(i1);
+        let mut t_mat = MatMut::from_column_major_slice_mut(&mut t[..h * width], h, width);
+        faer::linalg::matmul::matmul(
+            t_mat.rb_mut(),
+            Accum::Replace,
+            below.subrows(i0, h),
+            w_mat.rb().subcols(0, width),
+            1.0,
+            Par::Seq,
+        );
+        let mut j = 0;
+        while j < width {
+            let group = (rows[j] as usize - s_start) / lock_columns;
+            let mut block = locks[group].lock().unwrap_or_else(|e| e.into_inner());
+            while j < width && (rows[j] as usize - s_start) / lock_columns == group {
+                let col = rows[j] as usize - s_start - group * lock_columns;
+                let column = &t[j * h..(j + 1) * h];
+                let dst = &mut block[col * rows_s..(col + 1) * rows_s];
+                // Rows i0.max(j)..i1 of the update, through the runs that reach them.
+                let low = i0.max(j);
+                for &(src, to, len) in &runs {
+                    if src + len <= low || src >= i1 {
+                        continue;
+                    }
+                    let begin = src.max(low);
+                    let end = (src + len).min(i1);
+                    let to = to + (begin - src);
+                    for (x, v) in
+                        (dst[to..to + end - begin].iter_mut()).zip(&column[begin - i0..end - i0])
+                    {
+                        *x -= v;
+                    }
                 }
-                let skip = j.saturating_sub(src);
-                let (src, to, len) = (src + skip, to + skip, len - skip);
-                for (x, v) in dst[to..to + len].iter_mut().zip(&column[src..src + len]) {
-                    *x -= v;
-                }
+                j += 1;
             }
-            j += 1;
         }
+        i0 = i1;
     }
+    ctx.pool.give_back(w);
     ctx.pool.give_back(t);
 }
 
@@ -692,7 +694,7 @@ fn factor_front(
 }
 
 /// Columns of one step of [`tiled_front`].
-const TILE: usize = 128;
+const TILE: usize = 256;
 /// Rows of one task of [`tiled_front`].
 const TILE_ROWS: usize = 512;
 
