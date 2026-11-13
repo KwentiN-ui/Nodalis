@@ -8,8 +8,10 @@
 //! changes that replaced it; [`crate::model::Model::set_mesh`] hands the mesh it replaces to
 //! the history.
 //!
-//! Changes of the geometry's shapes (an import, deleted geometry parts, a new unit system)
-//! cannot be undone; the history starts anew after them.
+//! Changes of the geometry's shapes by the CAD tools (Defeature, Split by Plane, Split around
+//! Hole) can be undone: [`before_shape_change`] keeps the geometry, the mesh and the FE model
+//! as they were. Other changes of the shapes (an import, deleted geometry parts, a new unit
+//! system) cannot be undone; the history starts anew after them.
 
 use plx_mesh::FeMesh;
 use plx_model::{FeModel, Geometry, MeshSetupItem, MeshingParameters};
@@ -27,6 +29,7 @@ struct Meshing {
     parameters: MeshingParameters,
     items: Vec<MeshSetupItem>,
     compounds: Vec<plx_model::CompoundPart>,
+    suppressed: Vec<String>,
 }
 
 impl Meshing {
@@ -35,6 +38,7 @@ impl Meshing {
             parameters: g.meshing,
             items: g.mesh_items.clone(),
             compounds: g.compounds.clone(),
+            suppressed: g.suppressed.clone(),
         })
     }
 }
@@ -72,6 +76,8 @@ struct State {
     fe: FeModel,
     meshing: Option<Meshing>,
     mesh: Option<FeMesh>,
+    /// The whole geometry, for a change of its shapes; `meshing` is part of it then.
+    geometry: Option<Geometry>,
 }
 
 /// The data as the history last saw it.
@@ -90,6 +96,9 @@ pub struct History {
     seen: Option<Seen>,
     /// The mesh before it was first replaced since the last [`record`].
     replaced_mesh: Option<FeMesh>,
+    /// The data before a change of the geometry's shapes that [`record`] is to keep.
+    shape_change: Option<State>,
+    shapes_restored: bool,
 }
 
 impl History {
@@ -114,6 +123,12 @@ impl History {
         }
     }
 
+    /// Whether the last undo or redo changed the geometry's shapes, so what is drawn of
+    /// them must be made anew; taken by reading.
+    pub fn take_shapes_restored(&mut self) -> bool {
+        std::mem::take(&mut self.shapes_restored)
+    }
+
     /// Drops the oldest changes beyond the depth of the history.
     fn trim(&mut self) {
         let with_mesh = self.undo.iter().filter(|s| s.mesh.is_some()).count();
@@ -136,6 +151,7 @@ pub fn record(model: &mut Model) {
     let geometry = model.geometry.as_ref();
     let history = &mut model.history;
     let replaced = history.replaced_mesh.take();
+    let shape_change = history.shape_change.take();
     let shapes = match history.seen.take() {
         Some(seen) if Shapes::matches(&seen.shapes, geometry) => {
             let meshing = Meshing::of(geometry);
@@ -147,14 +163,19 @@ pub fn record(model: &mut Model) {
                 fe: seen.fe,
                 meshing: seen.meshing,
                 mesh: replaced,
+                geometry: None,
             });
             history.redo.clear();
             history.trim();
             seen.shapes
         }
-        _ => {
+        seen => {
             history.undo.clear();
             history.redo.clear();
+            // A CAD tool changed the shapes: that can be undone.
+            if let (Some(_), Some(state)) = (seen, shape_change) {
+                history.undo.push(state);
+            }
             Shapes::of(geometry)
         }
     };
@@ -164,6 +185,21 @@ pub fn record(model: &mut Model) {
         shapes,
     });
     model.revision += 1;
+}
+
+/// Keeps the geometry, the mesh and the FE model as they are, for the change of the
+/// geometry's shapes that is about to be made and that the history is to keep as one change
+/// that can be undone; call it before the change.
+pub fn before_shape_change(model: &mut Model) {
+    if !model.history.follows() || model.geometry.is_none() {
+        return;
+    }
+    model.history.shape_change = Some(State {
+        fe: model.fe.clone(),
+        meshing: None,
+        mesh: Some(model.mesh.clone()),
+        geometry: model.geometry.clone(),
+    });
 }
 
 /// Reverts the last change; false if there is none.
@@ -189,6 +225,15 @@ pub fn redo(model: &mut Model) -> bool {
 
 /// Puts the model's data back to `state`; returns the data it had, to go back to it.
 fn restore(model: &mut Model, state: State) -> State {
+    let state = match state {
+        State {
+            fe,
+            geometry: Some(geometry),
+            mesh: Some(mesh),
+            ..
+        } => return restore_shapes(model, fe, geometry, mesh),
+        state => state,
+    };
     let meshing = Meshing::of(model.geometry.as_ref());
     let sets = model.fe.mesh_sets.clone();
     let fe = std::mem::replace(&mut model.fe, state.fe);
@@ -196,6 +241,7 @@ fn restore(model: &mut Model, state: State) -> State {
         geometry.meshing = restored.parameters;
         geometry.mesh_items = restored.items;
         geometry.compounds = restored.compounds;
+        geometry.suppressed = restored.suppressed;
     }
     let mesh = match state.mesh {
         Some(mesh) => {
@@ -224,7 +270,41 @@ fn restore(model: &mut Model, state: State) -> State {
         seen.fe = model.fe.clone();
         seen.meshing = Meshing::of(model.geometry.as_ref());
     }
-    State { fe, meshing, mesh }
+    State {
+        fe,
+        meshing,
+        mesh,
+        geometry: None,
+    }
+}
+
+/// Puts the geometry with its shapes, the mesh and the FE model back; returns what they were.
+fn restore_shapes(model: &mut Model, fe: FeModel, geometry: Geometry, mesh: FeMesh) -> State {
+    let fe = std::mem::replace(&mut model.fe, fe);
+    let current = model.geometry.replace(geometry);
+    let kept: Vec<(String, [f32; 3], bool)> = (model.parts.iter())
+        .map(|p| (p.name.clone(), p.color, p.visible))
+        .collect();
+    model.set_mesh(mesh);
+    for part in &mut model.parts {
+        if let Some((_, color, visible)) = kept.iter().find(|k| k.0 == part.name) {
+            part.color = *color;
+            part.visible = *visible;
+        }
+    }
+    let mesh = model.history.replaced_mesh.take();
+    if let Some(seen) = &mut model.history.seen {
+        seen.fe = model.fe.clone();
+        seen.meshing = Meshing::of(model.geometry.as_ref());
+        seen.shapes = Shapes::of(model.geometry.as_ref());
+    }
+    model.history.shapes_restored = true;
+    State {
+        fe,
+        meshing: None,
+        mesh,
+        geometry: current,
+    }
 }
 
 #[cfg(test)]
@@ -337,6 +417,37 @@ mod tests {
         assert!(undo(&mut model));
         assert_eq!(model.parts.len(), 1);
         assert!(redo(&mut model));
+        assert!(model.parts.is_empty());
+    }
+
+    #[test]
+    fn a_change_of_the_shapes_by_a_tool_is_undone() {
+        let mut model = model();
+        model.geometry = Some(Geometry {
+            source: String::new(),
+            brep: "ONE".into(),
+            meshing: MeshingParameters::for_diagonal(1.0),
+            mesh_items: Vec::new(),
+            part_names: Vec::new(),
+            refinement: 1.0,
+            signatures: Vec::new(),
+            compounds: Vec::new(),
+            suppressed: Vec::new(),
+        });
+        record(&mut model);
+        assert!(!model.history.can_undo());
+        before_shape_change(&mut model);
+        model.geometry.as_mut().unwrap().brep = "TWO".into();
+        model.edit_mesh(|mesh, _| mesh.parts.clear());
+        record(&mut model);
+        assert!(model.history.can_undo());
+        assert!(undo(&mut model));
+        assert!(model.history.take_shapes_restored());
+        assert_eq!(model.geometry.as_ref().unwrap().brep, "ONE");
+        assert_eq!(model.parts.len(), 1);
+        record(&mut model);
+        assert!(redo(&mut model));
+        assert_eq!(model.geometry.as_ref().unwrap().brep, "TWO");
         assert!(model.parts.is_empty());
     }
 

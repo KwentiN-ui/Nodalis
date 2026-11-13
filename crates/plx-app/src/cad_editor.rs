@@ -48,6 +48,9 @@ pub struct CadOperationEditor {
     plane: SplitPlane,
     keep: SplitKeep,
     compound: bool,
+    /// The parts selected when the split was opened, and whether it cuts only them.
+    parts: Vec<String>,
+    only_parts: bool,
     /// Which faces a defeaturing removes.
     faces: DefeatureFaces,
     /// The fillets and chamfers found in the input for a defeaturing, with the size they
@@ -86,11 +89,10 @@ impl CadOperationEditor {
         let (view, flat, message) = match plx_mesher::tessellate(&input) {
             Ok(display) => {
                 let flat = display.solids == 0 && display.faces > 0;
-                (
-                    Some(Model::geometry_view(Path::new(name), display)),
-                    flat,
-                    None,
-                )
+                // Suppressed parts are drawn as their edges and cannot be picked.
+                let mut view = Model::geometry_view(Path::new(name), display);
+                view.mark_suppressed(&input);
+                (Some(view), flat, None)
             }
             Err(error) => (
                 None,
@@ -114,6 +116,8 @@ impl CadOperationEditor {
             plane: operation.plane,
             keep: operation.keep,
             compound: operation.compound,
+            parts: operation.parts.clone(),
+            only_parts: !operation.parts.is_empty(),
             faces: operation.faces,
             found: None,
             note: None,
@@ -157,7 +161,28 @@ impl CadOperationEditor {
             keep: self.keep,
             compound: self.compound,
             faces: self.faces,
+            parts: self.split_parts().to_vec(),
         }
+    }
+
+    /// The parts a split cuts; all when empty.
+    fn split_parts(&self) -> &[String] {
+        if self.kind == CadOperationKind::SplitPlane && self.only_parts {
+            &self.parts
+        } else {
+            &[]
+        }
+    }
+
+    /// The indices of the parts of the view a split cuts, none when it cuts all.
+    fn split_part_indices(&self) -> Vec<usize> {
+        let (parts, Some(view)) = (self.split_parts(), self.view.as_ref()) else {
+            return Vec::new();
+        };
+        (view.parts.iter().enumerate())
+            .filter(|(_, p)| parts.iter().any(|n| n.eq_ignore_ascii_case(&p.name)))
+            .map(|(i, _)| i)
+            .collect()
     }
 
     /// Whether a click picks something: not for a split along a global plane, nor for a
@@ -195,8 +220,11 @@ impl CadOperationEditor {
         } else {
             self.picks.clone()
         };
+        // The parts a split cuts are outlined, as when selected.
+        let outlined = self.split_part_indices();
         if let Some(view) = &mut self.view {
             view.highlight = crate::meshing::entities_highlight(view, &shown);
+            view.highlight.outlines.extend(outlined);
         }
         self.scene_due = true;
     }
@@ -315,10 +343,9 @@ impl CadOperationEditor {
     fn show_result(&mut self, made: Result<Geometry, String>, operation: CadOperation) {
         let made = made.and_then(|geometry| {
             let display = plx_mesher::tessellate(&geometry).map_err(|e| e.to_string())?;
-            Ok((
-                Model::geometry_view(Path::new(&self.name), display),
-                geometry,
-            ))
+            let mut view = Model::geometry_view(Path::new(&self.name), display);
+            view.mark_suppressed(&geometry);
+            Ok((view, geometry))
         });
         match made {
             Ok((model, geometry)) => {
@@ -499,20 +526,20 @@ impl CadOperationEditor {
                 ui.colored_label(crate::style::error(), message);
             }
             None if self.shown == Shown::Input => {
-                ui.weak(match self.kind {
+                let hint = match self.kind {
                     CadOperationKind::PushPull => "Click the planar faces to move along their \
                         normal, outwards for a positive offset; a click on a picked face removes \
                         it. Neighbours at right angles follow, sloped ones get a step."
                         .to_owned(),
-                    CadOperationKind::SplitPlane if self.plane == SplitPlane::Face => {
+                    CadOperationKind::SplitPlane if self.plane == SplitPlane::Face => format!(
                         "Click the planar face whose plane to cut along; the offset moves the \
-                         cut into the part. The parts the plane runs through are split."
-                            .to_owned()
-                    }
-                    CadOperationKind::SplitPlane => "The parts the plane runs through are \
-                        split; the outline shows where. The offset moves the plane along its \
-                        axis."
-                        .to_owned(),
+                         cut into the part. {}",
+                        self.split_scope()
+                    ),
+                    CadOperationKind::SplitPlane => format!(
+                        "{} The outline shows where; the offset moves the plane along its axis.",
+                        self.split_scope()
+                    ),
                     CadOperationKind::HoleRing => "Click the circular edges of holes on planar \
                         faces; each face gets a ring of the width around the hole, a face of \
                         its own to pick. A click on a picked edge removes it."
@@ -545,7 +572,14 @@ impl CadOperationEditor {
                         "Click the edges to {}; a click on a picked edge removes it.",
                         kind.label().to_lowercase()
                     ),
-                });
+                };
+                if self.input.suppressed.is_empty() {
+                    ui.weak(hint);
+                } else {
+                    ui.weak(format!(
+                        "{hint} Suppressed parts, drawn as their edges, stay as they are."
+                    ));
+                }
             }
             None if self.note.is_some() => {
                 ui.weak(self.note.clone().unwrap_or_default());
@@ -659,8 +693,18 @@ impl CadOperationEditor {
 }
 
 impl CadOperationEditor {
-    /// The rows of a split by plane: the plane, the side kept and whether solids cut in two
-    /// stay one part.
+    /// Which parts a split cuts, for the hint below the form.
+    fn split_scope(&self) -> &'static str {
+        if self.split_parts().is_empty() {
+            "The parts the plane runs through are split."
+        } else {
+            "The selected parts the plane runs through are split, drawn outlined; the \
+             others stay as they are."
+        }
+    }
+
+    /// The rows of a split by plane: the plane, the side kept, whether solids cut in two
+    /// stay one part, and whether it cuts only the parts selected.
     fn split_rows(&mut self, ui: &mut egui::Ui) {
         ui.label("Plane");
         let before = self.plane;
@@ -695,6 +739,25 @@ impl CadOperationEditor {
                 );
         });
         ui.end_row();
+        if !self.parts.is_empty() {
+            ui.label("Cut");
+            let label = match self.parts.len() {
+                1 => format!("Only the selected part ({})", self.parts[0]),
+                n => format!("Only the {n} selected parts"),
+            };
+            if ui
+                .checkbox(&mut self.only_parts, label)
+                .on_hover_text(
+                    "On: the parts selected in the tree when the tool was opened are split, \
+                     the others stay as they are. Off: every part the plane runs through.",
+                )
+                .changed()
+            {
+                self.update_highlight();
+                self.scene_due = true;
+            }
+            ui.end_row();
+        }
         if self.plane != before {
             self.scene_due = true;
         }
@@ -741,10 +804,22 @@ impl CadOperationEditor {
             return Vec::new();
         };
         let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
-        for s in &self.input.signatures {
-            for j in 0..3 {
-                lo[j] = lo[j].min(s.min[j]);
-                hi[j] = hi[j].max(s.max[j]);
+        let chosen = self.split_part_indices();
+        if chosen.is_empty() {
+            for s in &self.input.signatures {
+                for j in 0..3 {
+                    lo[j] = lo[j].min(s.min[j]);
+                    hi[j] = hi[j].max(s.max[j]);
+                }
+            }
+        } else {
+            // Over the parts it cuts.
+            for (min, max) in chosen.iter().filter_map(|&i| view.parts[i].bounds) {
+                let (min, max) = (view.model_point(min), view.model_point(max));
+                for j in 0..3 {
+                    lo[j] = lo[j].min(min[j]);
+                    hi[j] = hi[j].max(max[j]);
+                }
             }
         }
         if !lo.iter().chain(&hi).all(|x| x.is_finite()) {

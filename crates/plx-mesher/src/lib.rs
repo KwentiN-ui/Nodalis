@@ -256,6 +256,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         refinement: 1.0,
         signatures,
         compounds: Vec::new(),
+        suppressed: Vec::new(),
     };
     let display = tessellate(&geometry)?;
     Ok(CadImport {
@@ -346,13 +347,7 @@ fn move_into_xy_plane(gmsh: &Gmsh, shapes: &[Entity]) -> Result<Option<f64>, Gms
             top.push((dim, tag));
         }
     }
-    #[rustfmt::skip]
-    let matrix = [
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, -z,
-    ];
-    gmsh.affine_transform(&top, &matrix)?;
+    gmsh.translate(&top, [0.0, 0.0, -z])?;
     Ok(Some(z))
 }
 
@@ -925,6 +920,38 @@ fn parts(gmsh: &Gmsh, geometry: &Geometry) -> Result<Vec<(Shape, String)>, GmshE
     Ok(parts)
 }
 
+/// The faces, edges and vertices of the suppressed parts of `geometry` as read into `gmsh`,
+/// which the CAD operations leave alone.
+fn suppressed_entities(gmsh: &Gmsh, geometry: &Geometry) -> Result<BTreeSet<CadEntity>, GmshError> {
+    let mut found = BTreeSet::new();
+    if geometry.suppressed.is_empty() {
+        return Ok(found);
+    }
+    for (shape, name) in parts(gmsh, geometry)? {
+        if geometry.is_suppressed(&name) {
+            found.extend(merge::closure(gmsh, shape.entities())?);
+        }
+    }
+    Ok(found)
+}
+
+/// Refuses an operation on picked entities of suppressed parts; `noun` names what was
+/// picked.
+fn refuse_suppressed(
+    gmsh: &Gmsh,
+    geometry: &Geometry,
+    entities: &[CadEntity],
+    noun: &str,
+) -> Result<(), GmshError> {
+    let suppressed = suppressed_entities(gmsh, geometry)?;
+    if entities.iter().any(|e| suppressed.contains(e)) {
+        return Err(GmshError::Other(format!(
+            "Some of the picked {noun} lie on suppressed parts: unsuppress the parts first"
+        )));
+    }
+    Ok(())
+}
+
 /// The parts Gmsh read, as [`parts`], with the names Gmsh gives.
 fn default_parts(gmsh: &Gmsh) -> Result<Vec<(Shape, String)>, GmshError> {
     let volumes = gmsh.entities(3)?;
@@ -1183,6 +1210,7 @@ pub fn delete_parts_renumbered(
     };
     smaller.renumber_mesh_items(&renumbered);
     smaller.remove_from_compounds(deleted);
+    smaller.set_suppressed(deleted, false);
     Ok((Some(smaller), renumbered))
 }
 

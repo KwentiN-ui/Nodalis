@@ -176,8 +176,6 @@ pub struct TreeState {
     /// The compound parts of the geometry with the parts they join, by index, for the
     /// Geometry tree.
     pub compounds: Vec<(String, Vec<usize>)>,
-    /// The name being typed for a compound part in its menu, by index.
-    compound_name: Option<(usize, String)>,
 }
 
 impl TreeState {
@@ -387,6 +385,8 @@ pub struct TreeResponse {
     pub merge_parts: bool,
     /// Make, change or dissolve a compound part of the geometry.
     pub compound: Option<CompoundAction>,
+    /// Suppress (`true`) or unsuppress parts of the geometry, by index.
+    pub suppress: Option<(Vec<usize>, bool)>,
     /// Run this contact detection again.
     pub detect: Option<usize>,
     /// The warning sign of an item was clicked: explain its findings.
@@ -404,6 +404,8 @@ pub enum CompoundAction {
     Add(usize, Vec<usize>),
     /// Take parts out of their compound parts.
     Remove(Vec<usize>),
+    /// Ask for a new name of the compound part in a dialog.
+    StartRename(usize),
     Rename(usize, String),
     /// The parts of the compound part become parts of their own again.
     Dissolve(usize),
@@ -943,6 +945,7 @@ pub fn part_menu(
     index: usize,
     visible: bool,
     contours: bool,
+    suppressed: bool,
     view: TreeView,
     selected: &BTreeSet<usize>,
     compounds: &[(String, Vec<usize>)],
@@ -950,8 +953,21 @@ pub fn part_menu(
 ) {
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
     if view == TreeView::Geometry {
-        if ui.button("Create Mesh").clicked() {
+        if ui
+            .add_enabled(!suppressed, egui::Button::new("Create Mesh"))
+            .on_disabled_hover_text("The part is suppressed: unsuppress it to mesh it.")
+            .clicked()
+        {
             response.mesh_part = Some(index);
+        }
+        let label = if suppressed { "Unsuppress" } else { "Suppress" };
+        if ui.button(label).on_hover_text(SUPPRESS_TIP).clicked() {
+            let parts = if selected.contains(&index) {
+                selected.iter().copied().collect()
+            } else {
+                vec![index]
+            };
+            response.suppress = Some((parts, !suppressed));
         }
         ui.separator();
         compound_menu_items(ui, index, selected, compounds, response);
@@ -1049,6 +1065,11 @@ fn compound_menu_items(
         response.compound = Some(CompoundAction::Remove(parts));
     }
 }
+
+/// What suppressing a part of the geometry does, for its tooltips.
+pub const SUPPRESS_TIP: &str = "A suppressed part is left alone by meshing (Mesh All Parts, \
+    solving) and by the CAD tools (splits, Defeature, fillets), as if it were not there, \
+    until it is unsuppressed. A mesh it has already stays. It is drawn as its edges only.";
 
 /// What a compound part is, for its tooltips.
 pub const COMPOUND_TIP: &str = "Joins the parts into one part of the FE model. Each is \
@@ -1282,6 +1303,19 @@ impl Tree<'_> {
                     if ui.button(label).clicked() {
                         (self.response.visibility)
                             .extend(self.part_indices.iter().map(|&i| (i, visible)));
+                    }
+                }
+                let suppressed: Vec<usize> = (self.part_indices.iter().copied())
+                    .filter(|&i| self.inactive.contains(&TreeItem::Part(i)))
+                    .collect();
+                if self.view == TreeView::Geometry && !suppressed.is_empty() {
+                    ui.separator();
+                    if ui
+                        .button("Unsuppress All")
+                        .on_hover_text(SUPPRESS_TIP)
+                        .clicked()
+                    {
+                        self.response.suppress = Some((suppressed, false));
                     }
                 }
             });
@@ -1627,7 +1661,12 @@ impl Tree<'_> {
                 Some(hint) if !inactive => icon_response.on_hover_text(hint),
                 _ => icon_response,
             };
-            if inactive && icon_response.on_hover_text("Activate").clicked() {
+            let wake = if self.view == TreeView::Geometry {
+                "Unsuppress"
+            } else {
+                "Activate"
+            };
+            if inactive && icon_response.on_hover_text(wake).clicked() {
                 self.response.toggle_active = Some(item.clone());
             }
             ui.add_space(3.0);
@@ -1812,6 +1851,12 @@ impl Tree<'_> {
             self.leaf(ui, TreeItem::Group("Parts"), parts);
             return;
         }
+        // Known before the rows, for the menu of Parts.
+        for (index, part) in model.parts.iter().enumerate() {
+            if part.suppressed {
+                self.inactive.insert(TreeItem::Part(index));
+            }
+        }
         let compounds = if self.view == TreeView::Geometry {
             self.state.compounds.clone()
         } else {
@@ -1828,6 +1873,11 @@ impl Tree<'_> {
                 match compound {
                     Some(c) => {
                         let (name, members) = &compounds[c];
+                        let suppressed = (members.iter())
+                            .all(|&m| model.parts.get(m).is_some_and(|p| p.suppressed));
+                        if suppressed && !members.is_empty() {
+                            tree.inactive.insert(TreeItem::Compound(c));
+                        }
                         let label = format!("{name} ({})", members.len());
                         tree.branch(ui, TreeItem::Compound(c), label, true, |tree, ui| {
                             for &member in members {
@@ -1863,8 +1913,14 @@ impl Tree<'_> {
         let Some(part) = model.parts.get_mut(index) else {
             return;
         };
-        let icon = part_icon(part);
         let item = TreeItem::Part(index);
+        // A suppressed part is shown gray with the no-entry sign, like a deactivated item;
+        // a click on the sign unsuppresses it.
+        let icon = if part.suppressed {
+            TreeIcon::Inactive
+        } else {
+            part_icon(part)
+        };
         let (_, response, changed) =
             self.row(ui, None, Some(&mut part.visible), icon, item, &part.name);
         if changed {
@@ -1878,6 +1934,7 @@ impl Tree<'_> {
                 index,
                 part.visible,
                 part.contours,
+                part.suppressed,
                 view,
                 &selected,
                 compounds,
@@ -1889,31 +1946,23 @@ impl Tree<'_> {
     /// The menu of a compound part of the geometry.
     fn compound_menu(&mut self, ui: &mut Ui, c: usize) {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-        let Some((name, _)) = self.state.compounds.get(c).cloned() else {
+        if self.state.compounds.get(c).is_none() {
             return;
-        };
+        }
         if ui.button("Create Mesh").clicked() {
             self.response.compound = Some(CompoundAction::Mesh(c));
             ui.close();
         }
+        let members = (self.state.compounds.get(c)).map_or(Vec::new(), |(_, m)| m.clone());
+        let suppressed = self.inactive.contains(&TreeItem::Compound(c));
+        let label = if suppressed { "Unsuppress" } else { "Suppress" };
+        if ui.button(label).on_hover_text(SUPPRESS_TIP).clicked() {
+            self.response.suppress = Some((members, !suppressed));
+            ui.close();
+        }
         ui.separator();
-        let typed = match &mut self.state.compound_name {
-            Some((i, typed)) if *i == c => typed,
-            other => &mut other.insert((c, name.clone())).1,
-        };
-        let mut rename = false;
-        ui.horizontal(|ui| {
-            ui.label("Name");
-            let edit = ui.add(egui::TextEdit::singleline(typed).desired_width(140.0));
-            rename = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("Rename").clicked() {
-                rename = true;
-            }
-        });
-        if rename {
-            let typed = typed.clone();
-            self.state.compound_name = None;
-            self.response.compound = Some(CompoundAction::Rename(c, typed));
+        if ui.button("Rename...").clicked() {
+            self.response.compound = Some(CompoundAction::StartRename(c));
             ui.close();
         }
         ui.separator();
@@ -2799,8 +2848,10 @@ mod tests {
                     ..Default::default()
                 },
             ];
+            let ctx = egui::Context::default();
+            crate::style::click_tolerance(&ctx);
             let mut h = Self {
-                ctx: egui::Context::default(),
+                ctx,
                 model,
                 state: TreeState::default(),
                 time: 1.0,
@@ -2908,5 +2959,31 @@ mod tests {
             h.click(pos);
             assert_eq!(h.opened, [TreeItem::Material(0)], "slow frame of {slow} s");
         }
+    }
+
+    #[test]
+    fn double_click_survives_a_moving_mouse() {
+        let mut found = None;
+        for (x, y) in (20..300)
+            .step_by(4)
+            .flat_map(|y| (30..140).step_by(6).map(move |x| (x, y)))
+        {
+            let pos = egui::pos2(x as f32, y as f32);
+            let mut h = Harness::new();
+            h.click(pos);
+            if h.state.selected == Some((TreeView::FeModel, TreeItem::Material(0))) {
+                found = Some(pos);
+                break;
+            }
+        }
+        let pos = found.expect("material row found");
+        // The second click lands 8 px right of the first, 0.4 s later.
+        let mut h = Harness::new();
+        h.click(pos);
+        h.time += 0.37;
+        h.frame(vec![]);
+        h.opened.clear();
+        h.click(pos + egui::vec2(8.0, 0.0));
+        assert_eq!(h.opened, [TreeItem::Material(0)]);
     }
 }

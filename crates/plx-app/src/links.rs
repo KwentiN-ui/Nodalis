@@ -608,6 +608,73 @@ const INITIAL_CONDITIONS: &str = "Initial Conditions";
 /// The inputs a step has for the results of steps of other analyses, the rows under it.
 pub const STEP_INPUTS: [&str; 3] = [TEMPERATURES, EIGENMODES, GLOBAL_RESULTS];
 
+/// Where the global results of a step of a submodel come from, as the boundary condition
+/// dialog tells it: the analysis (or results file) and its step linked to the Global
+/// results row of the step, and what in it writes the displacements.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GlobalSource {
+    /// The step of the submodel that takes the results.
+    pub step: String,
+    /// The global analysis, or the results file block.
+    pub source: String,
+    /// The step of the source whose results are read.
+    pub source_step: String,
+    /// What writes the displacements of `source_step`; `None` for a results file, whose
+    /// model is not known.
+    pub writers: Option<DisplacementWriters>,
+}
+
+/// The field outputs that make a step of an analysis write its displacements, the U of a
+/// node field output.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DisplacementWriters {
+    /// Names of the field outputs that write U.
+    pub outputs: Vec<String>,
+    /// The earlier step whose node field outputs the step keeps, having none of its own;
+    /// `None` when they are the step's own.
+    pub carried_from: Option<String>,
+    /// Whether the step computes the displacements of a load at all, rather than mode
+    /// shapes, temperatures or sensitivities.
+    pub load_case: bool,
+}
+
+/// What writes the displacements of `step` of `fe` into its results. A step without an
+/// active node field output of its own keeps those of the active step before it, as the
+/// solver does; inactive steps are not solved.
+pub fn displacement_writers(fe: &FeModel, step: &str) -> Option<DisplacementWriters> {
+    let mut current: Option<(&str, Vec<&plx_model::FieldOutput>)> = None;
+    for own in fe.steps.iter().filter(|s| s.active) {
+        let nodal: Vec<_> = (own.field_outputs.iter())
+            .filter(|o| {
+                o.active && o.kind == plx_model::OutputKind::Node && !o.variables.is_empty()
+            })
+            .collect();
+        if !nodal.is_empty() {
+            current = Some((own.name.as_str(), nodal));
+        }
+        if own.name != step {
+            continue;
+        }
+        let (from, outputs) = current.unwrap_or_default();
+        return Some(DisplacementWriters {
+            outputs: (outputs.iter())
+                .filter(|o| o.variables.iter().any(|v| v.eq_ignore_ascii_case("U")))
+                .map(|o| o.name.clone())
+                .collect(),
+            carried_from: (!from.is_empty() && from != step).then(|| from.to_owned()),
+            load_case: matches!(
+                own.kind,
+                StepKind::Static(_)
+                    | StepKind::Visco(_)
+                    | StepKind::Dynamic(_)
+                    | StepKind::CoupledTempDisp(_)
+                    | StepKind::UncoupledTempDisp(_)
+            ),
+        });
+    }
+    None
+}
+
 /// Name of the defined field a temperature link sets in its step.
 pub const LINKED_TEMPERATURES: &str = "Linked Temperatures";
 
@@ -869,6 +936,7 @@ pub fn take_geometry(target: &mut Option<Geometry>, source: Option<Geometry>) ->
                 meshing: own.meshing,
                 mesh_items: own.mesh_items,
                 refinement: own.refinement,
+                suppressed: own.suppressed,
                 ..source
             };
             if let Some(tags) = &tags {
@@ -1569,12 +1637,52 @@ pub fn path_of(fe: &FeModel, item: &TreeItem) -> Option<Vec<String>> {
 pub struct Incoming {
     pub paths: Vec<(Vec<String>, String)>,
     pub continuation: Continuation,
+    /// Where the steps of a submodel take their global results from.
+    pub global_sources: Vec<GlobalSource>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use plx_model::{BoundaryCondition, Material, Region, Step};
+
+    #[test]
+    fn displacement_writers_follow_the_field_outputs_the_solver_keeps() {
+        let mut fe = FeModel::default();
+        fe.steps.push(Step::new_static("Preload"));
+        fe.steps.push(Step::new_static("Load"));
+        fe.steps.push(Step::new_frequency("Shake"));
+        let writers = |fe: &FeModel, step| displacement_writers(fe, step).unwrap();
+        // The defaults write U.
+        assert_eq!(writers(&fe, "Load").outputs, ["NF-Output-1"]);
+        assert_eq!(writers(&fe, "Load").carried_from, None);
+        assert!(writers(&fe, "Load").load_case);
+        // Two field outputs with U are both named.
+        let mut second = fe.steps[1].field_outputs[0].clone();
+        second.name = "Cut".into();
+        second.variables = vec!["U".into()];
+        fe.steps[1].field_outputs.push(second);
+        assert_eq!(writers(&fe, "Load").outputs, ["NF-Output-1", "Cut"]);
+        // Without U nothing writes the displacements.
+        for output in &mut fe.steps[1].field_outputs {
+            output.variables.retain(|v| v != "U");
+        }
+        assert!(writers(&fe, "Load").outputs.is_empty());
+        // Without node field outputs of its own the step keeps those of the step before.
+        fe.steps[1]
+            .field_outputs
+            .retain(|o| o.kind != plx_model::OutputKind::Node);
+        let kept = writers(&fe, "Load");
+        assert_eq!(kept.outputs, ["NF-Output-1"]);
+        assert_eq!(kept.carried_from.as_deref(), Some("Preload"));
+        // An inactive output writes nothing, and an inactive step is not solved.
+        fe.steps[0].field_outputs[0].active = false;
+        assert!(writers(&fe, "Load").outputs.is_empty());
+        fe.steps[0].active = false;
+        assert!(displacement_writers(&fe, "Preload").is_none());
+        // Mode shapes are no displacements of a load.
+        assert!(!writers(&fe, "Shake").load_case);
+    }
 
     #[test]
     fn meshes_put_together_keep_their_own_nodes_and_names() {
@@ -1653,6 +1761,7 @@ mod tests {
     fn a_geometry_link_takes_the_shapes_and_leaves_the_mesh_setup_to_the_target() {
         let shapes = |brep: &str| Geometry {
             compounds: Vec::new(),
+            suppressed: Vec::new(),
             source: "part.step".into(),
             brep: brep.into(),
             meshing: Default::default(),
@@ -1714,6 +1823,7 @@ mod tests {
         };
         let shapes = |brep: &str, signatures| Geometry {
             compounds: Vec::new(),
+            suppressed: Vec::new(),
             source: "part.step".into(),
             brep: brep.into(),
             meshing: Default::default(),

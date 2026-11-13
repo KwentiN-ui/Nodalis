@@ -135,10 +135,12 @@ pub fn analysis_status(
                 } else {
                     part.bodies.iter().map(|b| b.name.as_str()).collect()
                 };
+                // Suppressed parts keep the mesh they have.
                 let stale = bodies.into_iter().any(|body| {
-                    mesh_inputs.get(body).is_some_and(|made_from| {
-                        fingerprint::mesh_input(geometry, space, body) != *made_from
-                    })
+                    !geometry.is_suppressed(body)
+                        && mesh_inputs.get(body).is_some_and(|made_from| {
+                            fingerprint::mesh_input(geometry, space, body) != *made_from
+                        })
                 });
                 stale.then(|| part.name.clone())
             })
@@ -429,6 +431,7 @@ mod tests {
         let part = mesh.parts[0].name.clone();
         let mut geometry = Geometry {
             compounds: Vec::new(),
+            suppressed: Vec::new(),
             source: "block.step".into(),
             brep: "shapes".into(),
             meshing: MeshingParameters::default(),

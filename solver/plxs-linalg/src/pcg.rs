@@ -30,6 +30,14 @@ use crate::{Pattern, SparseMatrix};
 
 /// The iteration stops when `|r| <= TOLERANCE |b|` (Euclidean norms).
 pub const TOLERANCE: f64 = 1e-12;
+/// A solve that stopped at the relative residual `residual` after `iterations`, as the
+/// iterations a solve to [`TOLERANCE`] would have taken at the same rate: what the
+/// hierarchy is judged by, whatever tolerance each solve was asked for.
+fn to_full_tolerance(iterations: usize, residual: f64) -> usize {
+    let digits = (-residual.log10()).clamp(1.0, 16.0);
+    let full = -TOLERANCE.log10();
+    (iterations as f64 * full / digits).ceil() as usize
+}
 /// `PLXS_AMG_REBUILD=1` rebuilds the hierarchy at every factorization (measurements).
 fn reuse_disabled() -> bool {
     std::env::var("PLXS_AMG_REBUILD").is_ok()
@@ -49,6 +57,25 @@ pub struct PcgStats {
     /// `|r| / |b|` at the end.
     pub relative_residual: f64,
 }
+
+/// What a solve that stopped to be weighed against the direct solver saw (see
+/// [`PcgSolver::set_probe`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PcgProbe {
+    /// Iterations done when it stopped.
+    pub iterations: usize,
+    /// Iterations the whole solve would take at the rate so far.
+    pub predicted: usize,
+    /// Wall clock seconds per iteration so far.
+    pub seconds_per_iteration: f64,
+}
+
+/// The iteration at which a probing solve judges its rate (after the search for a slow
+/// region, see [`crate::patch`]).
+pub const PROBE_AT: usize = 30;
+
+/// A probing solve stops when its rate predicts more than this many iterations.
+pub const PROBE_SUSPICIOUS: usize = 120;
 
 /// Which preconditioner the solver builds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,9 +124,15 @@ pub struct PcgSolver {
     shift: f64,
     factorized: bool,
     max_iterations: Option<usize>,
+    /// The relative residual a solve stops at ([`TOLERANCE`] unless set).
+    tolerance: f64,
     /// Whether a solve gives up early when the residual stalls ([`Stall`]): when another
     /// solver stands by.
     give_up_on_stall: bool,
+    /// Whether the next solves stop at [`PROBE_AT`] when they look slow.
+    probe: bool,
+    /// What the last solve that stopped saw.
+    probed: std::sync::Mutex<Option<PcgProbe>>,
     /// Iterations of the first solve after the hierarchy was built, and of the last
     /// solve (0: none yet); a factorization keeps the hierarchy while the count stays
     /// reasonable.
@@ -139,7 +172,10 @@ impl Default for PcgSolver {
             shift: 0.0,
             factorized: false,
             max_iterations: None,
+            tolerance: TOLERANCE,
             give_up_on_stall: false,
+            probe: false,
+            probed: std::sync::Mutex::new(None),
             iterations_after_build: AtomicUsize::new(0),
             last_iterations: AtomicUsize::new(0),
             build_seconds: 0.0,
@@ -307,6 +343,39 @@ impl PcgSolver {
         Some(defl)
     }
 
+    /// The patch of the region the slow error of the hierarchy sits in: the error a few
+    /// cycles of the stationary iteration leave of a random one (see [`crate::patch`]);
+    /// `None` when it is not local.
+    fn slow_region(&self, trace: bool) -> Option<crate::patch::Patch> {
+        let unknowns = self.padded_unknowns();
+        let padding: Vec<bool> = (unknowns.as_ref())
+            .map(|u| u.component.iter().map(|&c| c == u8::MAX).collect())
+            .unwrap_or_default();
+        let amg = self.amg.as_ref()?;
+        let coordinates = unknowns.map(|u| u.coordinates);
+        // In rounds: the slow error stands out more with every cycle, as long as the
+        // contraction per cycle still grows.
+        let mut error = None;
+        let mut last_factor = 0.0;
+        for (round, &cycles) in crate::patch::TEST_ROUNDS.iter().enumerate() {
+            let (e, factor) = amg.test_error(&self.full, &padding, error.take(), cycles)?;
+            if trace {
+                eprintln!("pcg: test error contracts by {factor:.3} per cycle");
+            }
+            if let Ok(Some(patch)) =
+                crate::patch::Patch::find(&self.full, &e, coordinates.as_deref(), trace)
+            {
+                return Some(patch);
+            }
+            if factor < crate::patch::SLOW_CYCLE || (round > 0 && factor - last_factor < 0.02) {
+                return None;
+            }
+            last_factor = factor;
+            error = Some(e);
+        }
+        None
+    }
+
     /// Whether the matrix is stored in `3 × 3` blocks.
     pub fn is_blocked(&self) -> bool {
         self.full.br == 3
@@ -327,9 +396,13 @@ impl PcgSolver {
                     amg.nonzeros() as f64 / (2 * self.full.nnz().max(1)) as f64,
                     if self.reused { ", kept" } else { "" }
                 ) + &amg
-                    .placement()
-                    .map(|p| format!(", {p}"))
+                    .patch_size()
+                    .map(|n| format!(", direct solve of a slow region of {n} unknowns"))
                     .unwrap_or_default()
+                    + &amg
+                        .placement()
+                        .map(|p| format!(", {p}"))
+                        .unwrap_or_default()
             }
             None if self.shift.is_infinite() => {
                 "diagonal (incomplete Cholesky broke down)".to_owned()
@@ -350,10 +423,30 @@ impl PcgSolver {
         self.max_iterations = Some(max);
     }
 
+    /// The relative residual `|r| / |b|` the solves from now on stop at; [`TOLERANCE`] by
+    /// default. A Newton iteration needs far fewer digits of its correction than a linear
+    /// step of its result.
+    pub fn set_tolerance(&mut self, tolerance: f64) {
+        self.tolerance = tolerance.clamp(TOLERANCE, 0.1);
+    }
+
     /// Gives a solve up as soon as the residual stalls ([`Stall`]) instead of iterating
     /// up to the limit: for a caller that has another solver to fall back on.
     pub fn set_give_up_on_stall(&mut self, give_up: bool) {
         self.give_up_on_stall = give_up;
+    }
+
+    /// Lets the solves stop at [`PROBE_AT`] iterations when their rate predicts more
+    /// than [`PROBE_SUSPICIOUS`]: for a caller that weighs the rest of the iteration
+    /// against a direct solve. A solve that stops fails; [`Self::take_probe`] tells what
+    /// it saw.
+    pub fn set_probe(&mut self, probe: bool) {
+        self.probe = probe;
+    }
+
+    /// What the last solve that stopped for [`Self::set_probe`] saw, once.
+    pub fn take_probe(&self) -> Option<PcgProbe> {
+        self.probed.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
     /// Entries of the preconditioner, its memory in values.
@@ -420,14 +513,16 @@ impl PcgSolver {
         let mut max_iterations = self
             .max_iterations
             .unwrap_or_else(|| n.clamp(1000, 100_000));
-        let tolerance = loose.map_or(TOLERANCE, |(tolerance, _)| tolerance);
+        let tolerance = loose.map_or(self.tolerance, |(tolerance, _)| tolerance);
         if let Some((_, limit)) = loose {
             max_iterations = limit.max(1);
         } else if self.reused {
             // A kept hierarchy that no longer fits its matrix shows soon: give up early,
             // the caller rebuilds it ([`Self::rebuild_preconditioner`]).
             let after_build = self.iterations_after_build.load(Ordering::Relaxed);
-            max_iterations = max_iterations.min((3 * after_build).max(100));
+            let share = tolerance.log10() / TOLERANCE.log10();
+            let expected = (after_build as f64 * share).ceil() as usize;
+            max_iterations = max_iterations.min((3 * expected).max(100));
         }
         let trace = std::env::var("PLXS_PCG_TRACE").is_ok();
         let cancel = plxs_core::CancelToken::current();
@@ -481,7 +576,7 @@ impl PcgSolver {
             match gpu.solve(
                 &b,
                 &mut x,
-                TOLERANCE,
+                tolerance,
                 max_iterations,
                 &cancelled,
                 &mut |i, r| {
@@ -534,7 +629,7 @@ impl PcgSolver {
         // The Lanczos vectors of the solve (single precision), from which the slowest
         // modes of the preconditioned operator are taken after it (see [`Deflation`]).
         let mut deflation = self.deflation.lock().unwrap_or_else(|e| e.into_inner());
-        let collect = deflation.is_none() && loose.is_none() && self.amg.is_some();
+        let mut collect = deflation.is_none() && loose.is_none() && self.amg.is_some();
         let mut lanczos: Vec<Vec<f32>> = Vec::new();
         if collect {
             lanczos.push(z.iter().map(|v| (v / rz.sqrt()) as f32).collect());
@@ -563,6 +658,11 @@ impl PcgSolver {
             }
         };
         let mut residual = 1.0;
+        // The smallest residual after each iteration since the start (or the restart with a
+        // slow region solved directly): that of conjugate gradients is not monotone, and
+        // on a stiff part the first ones lie far above that of the start (a factor 10⁵ on
+        // a thin strip).
+        let mut bests: Vec<f64> = Vec::new();
         let mut stall = Stall::new(self.give_up_on_stall);
         let (mut t_product, mut t_precondition, mut t_vectors) = (0.0, 0.0, 0.0);
         // The Lanczos tridiagonal of the preconditioned operator: its eigenvalues (Ritz
@@ -618,6 +718,7 @@ impl PcgSolver {
             axpy(alpha, &p, x);
             axpy(-alpha, &q, &mut r);
             residual = norm(&r) / b_norm;
+            bests.push(bests.last().map_or(residual, |b: &f64| b.min(residual)));
             tell(iteration, residual);
             if residual <= tolerance {
                 if trace {
@@ -715,6 +816,47 @@ impl PcgSolver {
             rz = rz_new;
             // p = z + beta p
             zip_mut(&mut p, &z, |p, z| *p = z + beta * *p);
+            // A solve on its way to many iterations looks for the region its slow modes
+            // sit in and, when they are local, solves it directly in every cycle from
+            // here on (see [`crate::patch`]); the iteration starts again from its iterate.
+            if iteration == crate::patch::CHECK_AT
+                && loose.is_none()
+                && deflation.is_none()
+                && predicted_iterations(&bests, tolerance) > crate::patch::SLOW_ITERATIONS
+                && let Some(amg) = self.amg.as_ref().filter(|a| a.wants_patch())
+                && let Some(patch) = self.slow_region(trace)
+            {
+                amg.set_patch(patch);
+                self.precondition(&r, &mut z)?;
+                rz = dot(&r, &z);
+                p.copy_from_slice(&z);
+                // The Lanczos relation does not hold across the restart.
+                collect = false;
+                lanczos.clear();
+                ritz = RitzTrace::new(trace);
+                bests.clear();
+            }
+            if self.probe && iteration == PROBE_AT && loose.is_none() {
+                let predicted = predicted_iterations(&bests, tolerance);
+                if predicted > PROBE_SUSPICIOUS as f64 {
+                    let probe = PcgProbe {
+                        iterations: iteration,
+                        predicted: predicted.min(1e9) as usize,
+                        seconds_per_iteration: clock.elapsed().as_secs_f64() / iteration as f64,
+                    };
+                    if trace {
+                        eprintln!("pcg: probe {probe:?}");
+                    }
+                    *self.probed.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe);
+                    return Err(numerical(
+                        plxs_core::Failure::IterativeSolver,
+                        format!(
+                            "the iterative solver would take about {} iterations",
+                            probe.predicted
+                        ),
+                    ));
+                }
+            }
         }
         if loose.is_some() && residual.is_finite() {
             finish(x);
@@ -749,10 +891,10 @@ impl PcgSolver {
         seconds: f64,
     ) -> PcgStats {
         self.unpad(x, rhs);
-        self.last_iterations.store(iterations, Ordering::Relaxed);
+        let full = to_full_tolerance(iterations, residual);
+        self.last_iterations.store(full, Ordering::Relaxed);
         if self.iterations_after_build.load(Ordering::Relaxed) == 0 {
-            self.iterations_after_build
-                .store(iterations, Ordering::Relaxed);
+            self.iterations_after_build.store(full, Ordering::Relaxed);
         }
         if iterations > 0 {
             self.seconds_per_iteration
@@ -848,6 +990,22 @@ impl PcgSolver {
         Some(padded)
     }
 
+    /// The matrix last factorized, on `pattern` (the one analyzed), from the solver's own
+    /// copy of its values; `None` before a factorization or for another pattern.
+    pub fn matrix(&self, pattern: std::sync::Arc<Pattern>) -> Option<SparseMatrix> {
+        if !self.factorized || self.pattern.as_deref() != Some(&*pattern) {
+            return None;
+        }
+        let mut out = SparseMatrix::zeros(pattern);
+        let values = out.values_mut();
+        for (&s, &v) in self.full_src.iter().zip(&self.full.val) {
+            if s != u32::MAX {
+                values[s as usize] = v;
+            }
+        }
+        Some(out)
+    }
+
     /// The vector of the unknowns in the solver's (renumbered, padded) numbering, zero
     /// on the padding.
     fn pad(&self, v: &[f64]) -> Vec<f64> {
@@ -929,7 +1087,9 @@ impl PcgSolver {
         self.padded = n;
     }
 
-    /// Blocked storage: the unknowns padded to three per node, in `3 × 3` blocks.
+    /// Blocked storage: the unknowns padded to three per node, in `3 × 3` blocks. Every
+    /// pass but the renumbering runs in parallel (on a model of 600 000 unknowns this
+    /// took 1.7 s serially, as much as the multigrid built on it).
     fn analyze_blocked(&mut self, pattern: &Pattern, unknowns: &Unknowns) {
         let n = pattern.dimension();
         let (ptr, rows) = (pattern.col_ptr(), pattern.row_idx());
@@ -951,68 +1111,155 @@ impl PcgSolver {
             }
             node_of.push(*slot);
         }
+        drop(dense);
         let nodes = nodes as usize;
-        // Block columns per block row, from the entries of the upper triangle and their
-        // mirror images.
-        let mut lists: Vec<Vec<u32>> = vec![Vec::new(); nodes];
-        for j in 0..n {
-            let bj = node_of[j];
-            for &i in &rows[ptr[j] as usize..ptr[j + 1] as usize] {
-                let bi = node_of[i as usize];
-                lists[bj as usize].push(bi);
-                if bi != bj {
-                    lists[bi as usize].push(bj);
-                }
+        // The unknowns of every node.
+        let mut own_ptr = vec![0u32; nodes + 1];
+        for &b in &node_of {
+            own_ptr[b as usize + 1] += 1;
+        }
+        for b in 0..nodes {
+            own_ptr[b + 1] += own_ptr[b];
+        }
+        let mut own = vec![0u32; n];
+        let mut next = own_ptr.clone();
+        for (j, &b) in node_of.iter().enumerate() {
+            own[next[b as usize] as usize] = j as u32;
+            next[b as usize] += 1;
+        }
+        drop(next);
+        let own_of = |b: usize| &own[own_ptr[b] as usize..own_ptr[b + 1] as usize];
+        // Per node the nodes of the rows in its columns of the upper triangle, then the
+        // mirror images added: the block columns of every block row.
+        let upper: Vec<Vec<u32>> = (0..nodes)
+            .into_par_iter()
+            .with_min_len(512)
+            .map_init(
+                || vec![u32::MAX; nodes],
+                |mark, b| {
+                    let mut list = Vec::new();
+                    for &j in own_of(b) {
+                        let j = j as usize;
+                        for &i in &rows[ptr[j] as usize..ptr[j + 1] as usize] {
+                            let bi = node_of[i as usize];
+                            if mark[bi as usize] != b as u32 {
+                                mark[bi as usize] = b as u32;
+                                list.push(bi);
+                            }
+                        }
+                    }
+                    list
+                },
+            )
+            .collect();
+        let mut mirror_ptr = vec![0u32; nodes + 1];
+        for list in &upper {
+            for &bi in list {
+                mirror_ptr[bi as usize + 1] += 1;
             }
         }
-        for list in &mut lists {
-            list.sort_unstable();
-            list.dedup();
+        for b in 0..nodes {
+            mirror_ptr[b + 1] += mirror_ptr[b];
         }
+        let mut mirror = vec![0u32; mirror_ptr[nodes] as usize];
+        let mut next = mirror_ptr.clone();
+        for (b, list) in upper.iter().enumerate() {
+            for &bi in list {
+                mirror[next[bi as usize] as usize] = b as u32;
+                next[bi as usize] += 1;
+            }
+        }
+        drop(next);
+        let lists: Vec<Vec<u32>> = upper
+            .into_par_iter()
+            .enumerate()
+            .with_min_len(512)
+            .map(|(b, mut list)| {
+                list.extend_from_slice(&mirror[mirror_ptr[b] as usize..mirror_ptr[b + 1] as usize]);
+                list.sort_unstable();
+                list.dedup();
+                list
+            })
+            .collect();
+        drop(mirror);
         // Nodes renumbered by reverse Cuthill-McKee for the locality of the product.
         let adjacency: Vec<Vec<u32>> = lists
-            .iter()
+            .par_iter()
             .enumerate()
             .map(|(b, list)| list.iter().copied().filter(|&c| c as usize != b).collect())
             .collect();
         let renumbered = reverse_cuthill_mckee(&adjacency);
         drop(adjacency);
-        let node_of: Vec<u32> = node_of.iter().map(|&b| renumbered[b as usize]).collect();
+        let node_of: Vec<u32> = node_of
+            .par_iter()
+            .map(|&b| renumbered[b as usize])
+            .collect();
         let slot_of: Vec<u32> = (0..n)
+            .into_par_iter()
             .map(|i| 3 * node_of[i] + unknowns.component[i] as u32)
             .collect();
-        let mut by_new: Vec<Vec<u32>> = vec![Vec::new(); nodes];
-        for (old, list) in lists.into_iter().enumerate() {
-            let mut list: Vec<u32> = list.into_iter().map(|c| renumbered[c as usize]).collect();
-            list.sort_unstable();
-            by_new[renumbered[old] as usize] = list;
+        let mut old_of = vec![0u32; nodes];
+        for (old, &new) in renumbered.iter().enumerate() {
+            old_of[new as usize] = old as u32;
         }
+        let by_new: Vec<Vec<u32>> = old_of
+            .par_iter()
+            .with_min_len(512)
+            .map(|&old| {
+                let mut list: Vec<u32> = lists[old as usize]
+                    .iter()
+                    .map(|&c| renumbered[c as usize])
+                    .collect();
+                list.sort_unstable();
+                list
+            })
+            .collect();
+        drop(lists);
         let mut bptr = Vec::with_capacity(nodes + 1);
-        let mut bcol = Vec::new();
         bptr.push(0);
         for list in &by_new {
-            bcol.extend_from_slice(list);
-            bptr.push(bcol.len());
+            bptr.push(bptr.last().copied().unwrap_or(0) + list.len());
+        }
+        let mut bcol = vec![0u32; *bptr.last().unwrap_or(&0)];
+        {
+            let mut rest = bcol.as_mut_slice();
+            let mut pieces = Vec::with_capacity(nodes);
+            for list in &by_new {
+                let (piece, tail) = rest.split_at_mut(list.len());
+                pieces.push(piece);
+                rest = tail;
+            }
+            pieces
+                .into_par_iter()
+                .zip(by_new.par_iter())
+                .with_min_len(512)
+                .for_each(|(piece, list)| piece.copy_from_slice(list));
         }
         drop(by_new);
         let blocks = bcol.len();
         let mut val = vec![0.0; 9 * blocks];
-        let mut src = vec![u32::MAX; 9 * blocks];
         let position = |bi: u32, bj: u32| -> usize {
             let (s, e) = (bptr[bi as usize], bptr[bi as usize + 1]);
             s + bcol[s..e].binary_search(&bj).expect("block in the pattern")
         };
-        for j in 0..n {
+        // Where every entry of the blocks comes from: each scalar entry fills one place
+        // and its mirror image another, no two the same, so the columns fill in parallel.
+        let src: Vec<std::sync::atomic::AtomicU32> = (0..9 * blocks)
+            .into_par_iter()
+            .map(|_| std::sync::atomic::AtomicU32::new(u32::MAX))
+            .collect();
+        (0..n).into_par_iter().with_min_len(1024).for_each(|j| {
             let (bj, cj) = (node_of[j], unknowns.component[j] as usize);
             let (start, end) = (ptr[j] as usize, ptr[j + 1] as usize);
             for (k, &row) in rows.iter().enumerate().take(end).skip(start) {
                 let i = row as usize;
                 let (bi, ci) = (node_of[i], unknowns.component[i] as usize);
                 // Row i, column j of the full matrix and its mirror image.
-                src[9 * position(bi, bj) + 3 * ci + cj] = k as u32;
-                src[9 * position(bj, bi) + 3 * cj + ci] = k as u32;
+                src[9 * position(bi, bj) + 3 * ci + cj].store(k as u32, Ordering::Relaxed);
+                src[9 * position(bj, bi) + 3 * cj + ci].store(k as u32, Ordering::Relaxed);
             }
-        }
+        });
+        let src: Vec<u32> = src.into_par_iter().map(|s| s.into_inner()).collect();
         // The padding: unit diagonal entries, coupled with nothing.
         let mut present = vec![false; 3 * nodes];
         for &slot in &slot_of {
@@ -1761,6 +2008,24 @@ fn zip_mut(a: &mut [f64], b: &[f64], f: impl Fn(&mut f64, f64) + Sync + Send) {
     }
 }
 
+/// The iterations to the relative residual `tolerance` that the smallest residuals after
+/// each iteration so far (`bests`) predict, at their rate over the second half (the first
+/// iterations show the transient of the start); infinite when they do not fall.
+fn predicted_iterations(bests: &[f64], tolerance: f64) -> f64 {
+    let k = bests.len();
+    if k == 0 {
+        return f64::INFINITY;
+    }
+    let half = (k / 2).max(1);
+    let (last, before) = (bests[k - 1], bests[half - 1]);
+    let per_iteration = (last / before).ln() / (k - half).max(1) as f64;
+    if per_iteration < 0.0 && last > 0.0 {
+        k as f64 + (tolerance / last).ln().min(0.0) / per_iteration
+    } else {
+        f64::INFINITY
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1781,6 +2046,59 @@ mod tests {
         // Off: never.
         let mut stall = super::Stall::new(false);
         assert!((1..3000).all(|i| !stall.stalls(i, 10.0)));
+    }
+
+    #[test]
+    fn the_prediction_measures_the_rate_after_the_transient_of_the_start() {
+        // Up by 10⁵ in the first iteration, then a tenth every 10 iterations.
+        let bests: Vec<f64> = (1..=30)
+            .map(|i| 1e5 * 0.1f64.powf(i as f64 / 10.0))
+            .collect();
+        let predicted = predicted_iterations(&bests, 1e-8);
+        assert!((predicted - 130.0).abs() < 1.0, "{predicted}");
+        // No progress: never.
+        assert!(predicted_iterations(&[1.0; 30], 1e-8).is_infinite());
+        assert!(predicted_iterations(&[], 1e-8).is_infinite());
+        // There already.
+        assert_eq!(predicted_iterations(&[1.0, 1e-9], 1e-8), 2.0);
+    }
+
+    #[test]
+    fn a_probed_slow_solve_stops_and_tells_its_prediction() {
+        // A square grid of springs fixed at one corner: incomplete Cholesky takes some
+        // hundred iterations.
+        let m = 200u32;
+        let n = (m * m) as usize;
+        let blocks: Vec<[u32; 2]> = (0..m * m)
+            .flat_map(|i| {
+                let right = (i % m + 1 < m).then_some([i, i + 1]);
+                let up = (i + m < m * m).then_some([i, i + m]);
+                right.into_iter().chain(up)
+            })
+            .collect();
+        let pattern = Arc::new(Pattern::from_blocks(n, blocks.iter().map(|b| &b[..])));
+        let mut a = SparseMatrix::zeros(pattern);
+        for block in &blocks {
+            a.add_block(block, &[1.0, -1.0, -1.0, 1.0]);
+        }
+        a.add(0, 0, 1.0);
+        let b: Vec<f64> = (0..n).map(|i| ((i * 37) % 11) as f64 - 5.0).collect();
+        let mut pcg = PcgSolver::new();
+        pcg.set_preconditioner(Preconditioner::IncompleteCholesky);
+        pcg.analyze(a.pattern()).unwrap();
+        pcg.factorize(&a).unwrap();
+        pcg.set_probe(true);
+        let first = pcg.solve_counted(&mut b.clone());
+        assert!(first.is_err(), "{:?}", first.map(|s| s.iterations));
+        let probe = pcg.take_probe().expect("probed");
+        assert_eq!(probe.iterations, PROBE_AT);
+        assert!(probe.predicted > PROBE_SUSPICIOUS);
+        assert!(pcg.take_probe().is_none());
+        // Without the probe the same solve goes on to the end.
+        pcg.set_probe(false);
+        let mut x = b.clone();
+        let stats = pcg.solve_counted(&mut x).unwrap();
+        assert!(stats.iterations > PROBE_SUSPICIOUS);
     }
 
     use super::*;
@@ -1898,6 +2216,89 @@ mod tests {
             for (x, e) in x.iter().zip(&expected) {
                 assert!((x - e).abs() <= 1e-7 * scale, "n = {n}: {x} vs {e}");
             }
+        }
+    }
+
+    #[test]
+    fn the_blocked_copy_holds_every_entry_and_solves_as_the_direct_solver() {
+        // A grid of nodes with three unknowns each, coupled to their neighbours; some
+        // unknowns held (left out), so that the blocks are padded.
+        let (nx, ny, nz) = (14usize, 12usize, 8usize);
+        let node = |x: usize, y: usize, z: usize| (x * ny + y) * nz + z;
+        let nodes = nx * ny * nz;
+        let coordinates: Vec<[f64; 3]> = (0..nodes)
+            .map(|i| {
+                [
+                    (i / (ny * nz)) as f64,
+                    ((i / nz) % ny) as f64,
+                    (i % nz) as f64,
+                ]
+            })
+            .collect();
+        let free: Vec<u32> = (0..3 * nodes as u32).filter(|d| d % 97 != 5).collect();
+        let index_of: std::collections::HashMap<u32, u32> = free
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| (d, i as u32))
+            .collect();
+        let mut blocks = Vec::new();
+        for x in 0..nx {
+            for y in 0..ny {
+                for z in 0..nz {
+                    for (dx, dy, dz) in [(1, 0, 0), (0, 1, 0), (0, 0, 1)] {
+                        if x + dx < nx && y + dy < ny && z + dz < nz {
+                            let pair = [node(x, y, z), node(x + dx, y + dy, z + dz)];
+                            let block: Vec<u32> = (pair.iter())
+                                .flat_map(|&p| (0..3).map(move |c| 3 * p as u32 + c))
+                                .filter_map(|d| index_of.get(&d).copied())
+                                .collect();
+                            blocks.push(block);
+                        }
+                    }
+                }
+            }
+        }
+        let n = free.len();
+        let pattern = Arc::new(Pattern::from_blocks(n, blocks.iter().map(Vec::as_slice)));
+        let mut a = SparseMatrix::zeros(pattern.clone());
+        for block in &blocks {
+            let m = block.len();
+            let ke: Vec<f64> = (0..m * m)
+                .map(|e| {
+                    if e / m == e % m {
+                        2.0
+                    } else {
+                        -0.2 - 0.01 * ((e % 7) as f64)
+                    }
+                })
+                .collect();
+            let sym: Vec<f64> = (0..m * m)
+                .map(|e| 0.5 * (ke[e] + ke[(e % m) * m + e / m]))
+                .collect();
+            a.add_block(block, &sym);
+        }
+        for i in 0..n as u32 {
+            a.add(i, i, 6.0);
+        }
+        let unknowns = Unknowns::from_free(&free, 3, &coordinates);
+        let mut pcg = PcgSolver::new();
+        pcg.set_unknowns(Some(unknowns));
+        pcg.analyze(a.pattern()).unwrap();
+        assert!(pcg.is_blocked());
+        pcg.factorize(&a).unwrap();
+        let copy = pcg.matrix(pattern.clone()).expect("factorized");
+        assert_eq!(copy.values(), a.values());
+        let b: Vec<f64> = (0..n).map(|i| ((i * 37) % 11) as f64 - 5.0).collect();
+        let mut direct = LdltSolver::new(1);
+        direct.analyze(a.pattern()).unwrap();
+        direct.factorize(&a).unwrap();
+        let mut expected = b.clone();
+        direct.solve(&mut expected).unwrap();
+        let mut x = b;
+        pcg.solve_counted(&mut x).unwrap();
+        let scale = expected.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        for (x, e) in x.iter().zip(&expected) {
+            assert!((x - e).abs() <= 1e-7 * scale, "{x} vs {e}");
         }
     }
 

@@ -131,6 +131,8 @@ struct Workbench {
     dialog: Option<TreeItem>,
     /// Name typed in the properties window of a part, with why it cannot be taken.
     part_name: (String, Option<String>),
+    /// Rename dialog of a compound part: its index and the name typed so far.
+    compound_rename: Option<(usize, String)>,
     /// Element types of the part in the properties window, as the user picks them.
     part_types: Vec<String>,
     /// Part the open context menu of the 3D view belongs to.
@@ -327,6 +329,7 @@ impl AnalysisWindow {
                 tree: TreeState::default(),
                 dialog: None,
                 part_name: Default::default(),
+                compound_rename: None,
                 part_types: Vec::new(),
                 menu_part: None,
                 tree_view: TreeView::FeModel,
@@ -516,18 +519,8 @@ impl AnalysisWindow {
             }
             workbench.symbols_shown = None;
         }
-        let geometry = own;
-        workbench.geometry = match &geometry {
-            Some(geometry) => match plx_mesher::tessellate(geometry) {
-                Ok(display) => Some(Model::geometry_view(&model.path, display)),
-                Err(error) => {
-                    (workbench.output).push(format!("Geometry cannot be displayed: {error}"));
-                    None
-                }
-            },
-            None => None,
-        };
-        model.geometry = geometry;
+        model.geometry = own;
+        workbench.refresh_geometry_view();
         workbench.after_parts_changed();
     }
 
@@ -1721,6 +1714,7 @@ impl AnalysisWindow {
             .screenshot
             .update(&ctx, view, &mut workbench.output);
         self.workbench.properties_window(&ctx);
+        self.workbench.compound_rename_window(&ctx);
         self.workbench.editor_window(&ctx);
         self.workbench.update_motion_preview(&ctx);
         self.workbench.update_cyclic_preview();
@@ -2306,6 +2300,7 @@ impl Workbench {
         }
         self.tree.active_step = self.active_step();
         self.tree.compounds = self.compound_rows();
+        self.sync_suppressed();
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),
@@ -2437,7 +2432,8 @@ impl Workbench {
         let mesh = TreeItem::Mesh;
         let meshing = response.mesh_part.is_some()
             || response.transform_part.is_some()
-            || response.merge_parts;
+            || response.merge_parts
+            || response.suppress.is_some();
         let mesh_linked =
             (self.incoming.paths.iter()).any(|(path, _)| path[0] == crate::links::MESH);
         if meshing && (check(Some(&mesh), self) || mesh_linked) {
@@ -2447,6 +2443,7 @@ impl Workbench {
             response.mesh_part = None;
             response.transform_part = None;
             response.merge_parts = false;
+            response.suppress = None;
         }
         if let Some(line) = refused {
             self.output.push(line);
@@ -2623,6 +2620,28 @@ impl Workbench {
             {
                 self.tree.selected = None;
             }
+        }
+        // The no-entry sign of a suppressed part of the geometry unsuppresses it.
+        if view == TreeView::Geometry {
+            match response.toggle_active.take() {
+                Some(TreeItem::Part(index)) => {
+                    let selected = self.tree.selected_parts(view);
+                    let parts = if selected.contains(&index) {
+                        selected.into_iter().collect()
+                    } else {
+                        vec![index]
+                    };
+                    response.suppress = Some((parts, false));
+                }
+                Some(TreeItem::Compound(c)) => {
+                    let members = (self.tree.compounds.get(c)).map(|(_, m)| m.clone());
+                    response.suppress = members.map(|m| (m, false));
+                }
+                _ => {}
+            }
+        }
+        if let Some((parts, suppressed)) = response.suppress.take() {
+            self.suppress_parts(&parts, suppressed);
         }
         if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
             // Several selected items all take the state the clicked one changes to.
@@ -3552,6 +3571,37 @@ impl Workbench {
         let Some(geometry) = self.model.as_ref().and_then(|m| m.geometry.clone()) else {
             return;
         };
+        // Suppressed parts are left out, see `meshing::mesh_parts`.
+        let asked: Vec<String> = match &parts {
+            Some(parts) => (parts.iter())
+                .flat_map(|p| geometry.parts_of_fe_part(p))
+                .collect(),
+            None => (self.geometry.as_ref())
+                .map(|g| g.parts.iter().map(|p| p.name.clone()).collect())
+                .unwrap_or_default(),
+        };
+        let left_out: Vec<&String> = (asked.iter())
+            .filter(|p| geometry.is_suppressed(p))
+            .collect();
+        if !asked.is_empty() && left_out.len() == asked.len() {
+            let line = match &parts {
+                Some(_) => format!(
+                    "Nothing to mesh: {} suppressed; unsuppress to mesh",
+                    if left_out.len() == 1 {
+                        "the part is"
+                    } else {
+                        "the parts are"
+                    }
+                ),
+                None => "Nothing to mesh: all parts are suppressed".to_owned(),
+            };
+            self.output.push(line);
+            return;
+        }
+        if !left_out.is_empty() {
+            let names: Vec<&str> = left_out.iter().map(|p| p.as_str()).collect();
+            (self.output).push(format!("Suppressed, not meshed: {}", names.join(", ")));
+        }
         let what = match &parts {
             Some(parts) => parts.join(", "),
             None => geometry.source.clone(),
@@ -4502,7 +4552,7 @@ impl Workbench {
         }
         let part = (self.menu_part).and_then(|index| {
             let info = self.shown()?.parts.get(index)?;
-            Some((index, info.visible, info.contours))
+            Some((index, info.visible, info.contours, info.suppressed))
         });
         let mut tree_response = TreeResponse::default();
         let mut command = None;
@@ -4510,13 +4560,14 @@ impl Workbench {
         let compounds = self.tree.compounds.clone();
         response.context_menu(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            if let Some((index, visible, contours)) = part {
+            if let Some((index, visible, contours, suppressed)) = part {
                 let view = self.tree_view;
                 tree::part_menu(
                     ui,
                     index,
                     visible,
                     contours,
+                    suppressed,
                     view,
                     &selected,
                     &compounds,
@@ -5484,6 +5535,9 @@ impl Workbench {
         }
         // All in one go: each pass builds the whole mesh anew.
         let mesh = plx_mesher::delete_mesh_parts(&model.mesh, &names);
+        // The selections that picked the parts simply lose them. Both changes happen in one
+        // frame, so one undo brings back the mesh and the selections.
+        model.fe.remove_parts_from_regions(&names);
         model.set_mesh(mesh);
         self.output.push(deleted_message(&names));
         self.after_parts_changed();
@@ -5526,6 +5580,44 @@ impl Workbench {
             .collect()
     }
 
+    /// Marks the suppressed parts in the geometry view as the geometry has them, also after
+    /// an undo; a change redraws the parts.
+    fn sync_suppressed(&mut self) {
+        let (Some(model), Some(view)) = (self.model.as_ref(), self.geometry.as_mut()) else {
+            return;
+        };
+        if let Some(geometry) = &model.geometry
+            && view.mark_suppressed(geometry)
+        {
+            self.results_changed = true;
+        }
+    }
+
+    /// Suppresses or unsuppresses parts of the geometry, by index in the geometry view.
+    fn suppress_parts(&mut self, parts: &[usize], suppressed: bool) {
+        let names: Vec<String> = (self.geometry.as_ref())
+            .map(|g| {
+                (parts.iter())
+                    .filter_map(|&i| g.parts.get(i))
+                    .map(|p| p.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Some(geometry) = self.model.as_mut().and_then(|m| m.geometry.as_mut()) else {
+            return;
+        };
+        if names.is_empty() || !geometry.set_suppressed(&names, suppressed) {
+            return;
+        }
+        let what = if suppressed {
+            "suppressed"
+        } else {
+            "unsuppressed"
+        };
+        self.output.push(format!("{} {what}", names.join(", ")));
+        self.sync_suppressed();
+    }
+
     /// Makes, changes or dissolves a compound part from the menus of the Geometry tree. A
     /// mesh that exists already is joined anew at once, without meshing again.
     fn compound_action(&mut self, ctx: &egui::Context, action: tree::CompoundAction) {
@@ -5557,6 +5649,12 @@ impl Workbench {
         };
         let before = geometry.compounds.clone();
         let line = match action {
+            CompoundAction::StartRename(c) => {
+                if let Some(compound) = geometry.compounds.get(c) {
+                    self.compound_rename = Some((c, compound.name.clone()));
+                }
+                return;
+            }
             CompoundAction::Mesh(c) => {
                 if let Some(compound) = geometry.compounds.get(c) {
                     let name = compound.name.clone();
@@ -5762,6 +5860,9 @@ impl Workbench {
             && crate::undo::undo(model)
         {
             self.output.push("Undo".into());
+            if model.history.take_shapes_restored() {
+                self.refresh_geometry_view();
+            }
             self.after_parts_changed();
         }
     }
@@ -5775,8 +5876,28 @@ impl Workbench {
             && crate::undo::redo(model)
         {
             self.output.push("Redo".into());
+            if model.history.take_shapes_restored() {
+                self.refresh_geometry_view();
+            }
             self.after_parts_changed();
         }
+    }
+
+    /// Draws the geometry of the model anew, after its shapes changed.
+    fn refresh_geometry_view(&mut self) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        self.geometry = match &model.geometry {
+            Some(geometry) => match plx_mesher::tessellate(geometry) {
+                Ok(display) => Some(Model::geometry_view(&model.path, display)),
+                Err(error) => {
+                    (self.output).push(format!("Geometry cannot be displayed: {error}"));
+                    None
+                }
+            },
+            None => None,
+        };
     }
 
     fn after_parts_changed(&mut self) {
@@ -5795,6 +5916,7 @@ impl Workbench {
             return;
         };
         editor.set_linked(crate::links::linked_parameters(&self.incoming.paths));
+        editor.set_global_sources(&self.incoming.global_sources);
         // A contact detection searches the geometry, if there is one to search; its derived
         // tolerance is worked out again only when the parts searched change.
         let picked: Vec<String> = (self.tree.selected_parts(TreeView::FeModel).into_iter())
@@ -6390,13 +6512,25 @@ impl Workbench {
             let Some(view) = &mut model.results else {
                 continue;
             };
-            if view.coordinate_systems == model.fe.coordinate_systems {
-                continue;
+            let systems_changed = view.coordinate_systems != model.fe.coordinate_systems;
+            if systems_changed {
+                let systems = model.fe.coordinate_systems.clone();
+                let warnings = view.set_coordinate_systems(systems, &model.mesh);
+                self.output.extend(warnings);
+                self.results_changed = true;
             }
-            let systems = model.fe.coordinate_systems.clone();
-            let warnings = view.set_coordinate_systems(systems, &model.mesh);
-            self.output.extend(warnings);
-            self.results_changed = true;
+            // The results that the steps' field outputs want in a coordinate system; the
+            // steps are those of the analysis, the results keep only its features.
+            let steps = match &self.model {
+                Some(project) if model.fe.steps.is_empty() => &project.fe.steps,
+                _ => &model.fe.steps,
+            };
+            let wanted = view.wanted_output_systems(steps, &model.fe.coordinate_systems);
+            if wanted != view.output_systems || (systems_changed && !wanted.is_empty()) {
+                let warnings = view.set_output_systems(wanted, &model.mesh);
+                self.output.extend(warnings);
+                self.results_changed = true;
+            }
         }
     }
 
@@ -6759,6 +6893,46 @@ impl Workbench {
         if new != self.settings {
             self.settings = new;
             self.update_contour();
+        }
+    }
+
+    /// Small dialog to rename a compound part: Enter renames, Escape cancels.
+    fn compound_rename_window(&mut self, ctx: &egui::Context) {
+        let Some((c, typed)) = self.compound_rename.as_mut() else {
+            return;
+        };
+        let c = *c;
+        let (mut accept, mut cancel) = (false, false);
+        egui::Window::new("Rename Compound Part")
+            .id(crate::ids::window(ctx, "compound rename window"))
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    let edit = ui.add(egui::TextEdit::singleline(typed).desired_width(200.0));
+                    if ui.memory(|m| m.focused().is_none()) {
+                        edit.request_focus();
+                    }
+                    if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        accept = true;
+                    }
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    accept |= ui.button("OK").clicked();
+                    cancel |= ui.button("Cancel").clicked();
+                });
+            });
+        cancel |= ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        if accept {
+            if let Some((_, typed)) = self.compound_rename.take() {
+                self.compound_action(ctx, tree::CompoundAction::Rename(c, typed));
+            }
+        } else if cancel {
+            self.compound_rename = None;
         }
     }
 
@@ -7846,6 +8020,7 @@ mod tests {
             refinement: 1.0,
             signatures: Vec::new(),
             compounds: Vec::new(),
+            suppressed: Vec::new(),
         });
         model.fe.sections.push(plx_model::Section {
             orientation: None,

@@ -110,7 +110,10 @@ pub use exposed::{Exposed, Field, ItemRef, ValuePath};
 pub use features::{
     GLOBAL, Plane, PlaneSource, PointDefinition, PointRef, ReferencePoint, ResultPath, ResultPlane,
 };
-pub use field::{FieldOutput, OutputDimension, OutputKind, output_variable_description};
+pub use field::{
+    FieldOutput, OutputDimension, OutputKind, output_variable_description, output_variable_field,
+    output_variable_label,
+};
 pub use geometry::{
     Algorithm2d, Algorithm3d, CompoundPart, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem,
     MeshSetupKind, MeshingParameters, Recombination, ThickenShellMesh,
@@ -200,9 +203,10 @@ use serde::{Deserialize, Serialize};
 /// three points or by offset and rotation ([`SystemDefinition`]) and a selection they move
 /// with ([`CoordinateSystem::attached`]); formats 21 to 31 read as they are unless they have
 /// coordinate systems. Format 33 adds the Formula block of the project schematic; formats 21
-/// to 32 read as they are. Format 34 lets a File block keep its file in the project
-/// (embedded); formats 21 to 33 read as they are.
-pub const PROJECT_FORMAT: u32 = 34;
+/// to 32 read as they are. Format 34 adds suppressed parts of the geometry
+/// ([`Geometry::suppressed`]); formats 21 to 33 read as they are. Format 36 lets a File
+/// block keep its file in the project (embedded); formats 21 to 35 read as they are.
+pub const PROJECT_FORMAT: u32 = 36;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -562,42 +566,36 @@ impl FeModel {
         self.replace_part_in_regions(old, new);
     }
 
+    /// Parts deleted from the mesh leave the regions that picked them: the region keeps
+    /// the other parts, and nothing is reported for the deleted ones.
+    pub fn remove_parts_from_regions(&mut self, deleted: &[String]) {
+        let drop = |region: &mut Region| {
+            if let Region::Parts(names) = region {
+                names.retain(|name| !deleted.contains(name));
+            }
+        };
+        self.regions_mut().for_each(drop);
+        (self.initial_conditions.iter_mut()).for_each(|i| drop(&mut i.region));
+    }
+
     /// Regions on the part `old`, or on the element set of its name, are on the parts `new`.
     fn replace_part_in_regions(&mut self, old: &str, new: &[String]) {
-        let regions = (self.sections.iter_mut().map(|s| &mut s.region))
-            .chain(
-                self.constraints
-                    .iter_mut()
-                    .flat_map(Constraint::regions_mut),
-            )
-            .chain((self.contact_pairs.iter_mut()).flat_map(|c| [&mut c.master, &mut c.slave]))
-            .chain((self.contact_regions.iter_mut()).flat_map(ContactRegion::regions_mut))
-            .chain(self.bolts.iter_mut().flat_map(Bolt::regions_mut))
-            .chain(self.initial_conditions.iter_mut().map(|i| &mut i.region))
-            .chain(self.mesh_sets.iter_mut().map(|s| &mut s.region))
-            .chain((self.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
-            .chain(self.steps.iter_mut().flat_map(|step| {
-                (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
-                    .chain(step.loads.iter_mut().map(|l| &mut l.region))
-                    .chain(step.defined_fields.iter_mut().map(|f| &mut f.region))
-                    .chain(step.kind.region_mut())
-            }));
-        for region in regions {
-            match region {
-                Region::Parts(names) => {
-                    if let Some(at) = names.iter().position(|n| n == old) {
-                        names.splice(at..=at, new.iter().cloned());
-                    }
-                    // Merged parts leave the same name twice.
-                    let mut seen = std::collections::BTreeSet::new();
-                    names.retain(|name| seen.insert(name.clone()));
+        let replace = |region: &mut Region| match region {
+            Region::Parts(names) => {
+                if let Some(at) = names.iter().position(|n| n == old) {
+                    names.splice(at..=at, new.iter().cloned());
                 }
-                Region::ElementSet(name) if name == old && new.len() == 1 => {
-                    *name = new[0].clone();
-                }
-                _ => {}
+                // Merged parts leave the same name twice.
+                let mut seen = std::collections::BTreeSet::new();
+                names.retain(|name| seen.insert(name.clone()));
             }
-        }
+            Region::ElementSet(name) if name == old && new.len() == 1 => {
+                *name = new[0].clone();
+            }
+            _ => {}
+        };
+        self.regions_mut().for_each(replace);
+        (self.initial_conditions.iter_mut()).for_each(|i| replace(&mut i.region));
     }
 }
 
@@ -2854,6 +2852,37 @@ mod tests {
         // A part merged into another leaves no duplicate.
         model.rename_part("B", "C");
         assert_eq!(model.sections[0].region, Region::Parts(vec!["C".into()]));
+    }
+
+    #[test]
+    fn deleted_parts_leave_regions() {
+        let mut model = FeModel::default();
+        model.sections.push(Section {
+            orientation: None,
+            name: "Section-1".into(),
+            material: None,
+            region: Region::Parts(vec!["A".into(), "B".into()]),
+            thickness: 1.0,
+            kind: SectionKind::Solid,
+        });
+        let mut step = Step::new_static("Step-1");
+        step.boundary_conditions.push(BoundaryCondition {
+            id: crate::Id::new(),
+            distribution: None,
+            name: "Fixed-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Parts(vec!["A".into()]),
+            kind: BoundaryKind::displacement([Some(0.0); 6]),
+            amplitude: None,
+        });
+        model.steps.push(step);
+        model.remove_parts_from_regions(&["A".to_string()]);
+        assert_eq!(model.sections[0].region, Region::Parts(vec!["B".into()]));
+        assert_eq!(
+            model.steps[0].boundary_conditions[0].region,
+            Region::Parts(Vec::new())
+        );
     }
 
     #[test]

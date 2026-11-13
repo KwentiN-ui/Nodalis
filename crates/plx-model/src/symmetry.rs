@@ -9,7 +9,7 @@ use std::fmt;
 
 use std::collections::{BTreeSet, HashSet};
 
-use plx_mesh::{ElementFamily, ElementId, FeMesh};
+use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 
 use crate::{BoundaryKind, FeModel, ModelSpace, Region, SectionKind};
 
@@ -246,6 +246,49 @@ impl FeModel {
             .map(|(id, _)| id)
             .collect()
     }
+}
+
+impl FeModel {
+    /// `region` without the element faces that lie on the plane of an active symmetry
+    /// boundary condition (all their nodes in its region), or `None` when it has none. Such
+    /// a face is the cut of the half model, inside the material of the whole one: as a
+    /// contact surface it is touched by a rope or beam on the plane, which then slides
+    /// along it instead of resting on the true surface.
+    pub fn without_symmetry_faces(&self, mesh: &FeMesh, region: &Region) -> Option<Region> {
+        let planes: Vec<HashSet<NodeId>> = (self.steps.iter())
+            .filter(|step| step.active)
+            .flat_map(|step| &step.boundary_conditions)
+            .filter(|bc| bc.active && matches!(bc.kind, BoundaryKind::Symmetry { .. }))
+            .map(|bc| bc.region.nodes(mesh).into_iter().collect())
+            .collect();
+        if planes.is_empty() {
+            return None;
+        }
+        let faces = region.faces(mesh);
+        let kept: Vec<(ElementId, u8)> = (faces.iter().copied())
+            .filter(|&face| {
+                let nodes = face_nodes(mesh, face);
+                nodes.is_empty()
+                    || !planes
+                        .iter()
+                        .any(|plane| nodes.iter().all(|n| plane.contains(n)))
+            })
+            .collect();
+        (kept.len() < faces.len()).then_some(Region::Faces(kept))
+    }
+}
+
+/// All nodes of an element face, corners and midside nodes.
+fn face_nodes(mesh: &FeMesh, (element, face): (ElementId, u8)) -> Vec<NodeId> {
+    let Some(element) = mesh.element(element) else {
+        return Vec::new();
+    };
+    let Some(topology) = element.faces().get(usize::from(face).wrapping_sub(1)) else {
+        return Vec::new();
+    };
+    (topology.corners.iter().chain(topology.mids))
+        .filter_map(|&i| element.nodes.get(i).copied())
+        .collect()
 }
 
 /// Normal of the plane that fits the points best.

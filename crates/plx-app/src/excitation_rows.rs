@@ -53,12 +53,17 @@ pub fn excitation_rows(
 
     let time = |ui: &mut Ui, label: &str, value: &mut f64, tip: &str| {
         ui.label(label).on_hover_text(tip);
-        ui.add(numeric::physical(value, units, Quantity::Time));
+        ui.add(numeric::scaled(
+            value,
+            units,
+            Quantity::Time,
+            duration * 0.1,
+        ));
         ui.end_row();
     };
     let frequency = |ui: &mut Ui, label: &str, value: &mut f64| {
         ui.label(label);
-        ui.add(numeric::physical(value, units, Quantity::Frequency));
+        ui.add(numeric::scaled(value, units, Quantity::Frequency, 1.0));
         ui.end_row();
     };
     match &mut excitation.signal {
@@ -155,7 +160,12 @@ fn end_row(ui: &mut Ui, end: &mut Option<f64>, duration: f64, units: UnitSystem)
     ui.horizontal(|ui| {
         ui.checkbox(&mut own, "");
         if own {
-            ui.add(numeric::physical(&mut value, units, Quantity::Time));
+            ui.add(numeric::scaled(
+                &mut value,
+                units,
+                Quantity::Time,
+                duration * 0.1,
+            ));
         } else {
             ui.weak("End of the step");
         }

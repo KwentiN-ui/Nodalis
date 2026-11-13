@@ -29,8 +29,9 @@ fn fail(message: impl Into<String>) -> GmshError {
     GmshError::Other(message.into())
 }
 
-/// Splits the parts the plane of `operation` runs through, as read into `gmsh` from `input`;
-/// `entities` holds the picked face of a plane of a face.
+/// Splits the parts the plane of `operation` runs through, as read into `gmsh` from `input`,
+/// among the parts of the operation if it names any; `entities` holds the picked face of a
+/// plane of a face.
 pub(crate) fn split_by_plane(
     gmsh: &Gmsh,
     input: &Geometry,
@@ -39,6 +40,18 @@ pub(crate) fn split_by_plane(
 ) -> Result<Split, GmshError> {
     let (point, normal) = cut_plane(gmsh, operation, entities)?;
     let parts = parts(gmsh, input)?;
+    // Only the chosen parts are cut, or all; never the suppressed ones.
+    let named = |name: &str| {
+        operation.parts.is_empty() || (operation.parts.iter()).any(|p| p.eq_ignore_ascii_case(name))
+    };
+    let chosen = |name: &str| named(name) && !input.is_suppressed(name);
+    if !parts.iter().any(|(_, name)| chosen(name)) {
+        return Err(fail(if parts.iter().any(|(_, name)| named(name)) {
+            "The parts to split are all suppressed"
+        } else {
+            "None of the parts to split is in the geometry"
+        }));
+    }
     let (lo, hi) = gmsh.bounding_box()?;
     let size = distance(lo, hi).max(1e-9);
     let tolerance = 1e-7 * size;
@@ -64,6 +77,10 @@ pub(crate) fn split_by_plane(
     let mut edges: Vec<(Shape, String)> = Vec::new();
     let mut gone: Vec<Entity> = Vec::new();
     for (shape, name) in parts {
+        if !chosen(&name) {
+            record(gmsh, &shape, &name, &mut places)?;
+            continue;
+        }
         // Where the part lies: on one side, or across.
         let (min, max) = shape.bounding_box(gmsh)?;
         let corners =
@@ -99,7 +116,7 @@ pub(crate) fn split_by_plane(
                     [-extent, -extent, 0.0],
                     [2.0 * extent, 2.0 * extent, extent],
                 )?;
-                gmsh.affine_transform(&[(3, tag)], &frame)?;
+                gmsh.place(&[(3, tag)], &frame)?;
                 half = Some(tag);
                 tag
             }
@@ -209,7 +226,7 @@ pub(crate) fn split_by_plane(
             .flat_map(|(shape, _)| shape.entities())
             .collect();
         let sheet = gmsh.add_rectangle([-extent, -extent, 0.0], [2.0 * extent; 2], 0.0)?;
-        gmsh.affine_transform(&[(2, sheet)], &frame)?;
+        gmsh.place(&[(2, sheet)], &frame)?;
         let pieces = fragment_keeping(gmsh, &objects, &[(2, sheet)])
             .map_err(|e| fail(format!("OpenCASCADE could not split the edges: {e}")))?;
         let mut pieces = pieces.into_iter();
@@ -233,7 +250,11 @@ pub(crate) fn split_by_plane(
         }
     }
     if !cut_any && operation.keep == SplitKeep::Both {
-        return Err(fail("The plane runs through no part"));
+        return Err(fail(if operation.parts.is_empty() {
+            "The plane runs through no part"
+        } else {
+            "The plane runs through none of the parts to split"
+        }));
     }
     if places.is_empty() {
         return Err(fail("Nothing is left on the side kept"));

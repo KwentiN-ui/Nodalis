@@ -1629,7 +1629,8 @@ mod tests {
 
     /// Writes a project of a lever bent far by a force at its end, in a coordinate system that
     /// moves with the end face, with a second system given in it by offset and rotation, for
-    /// the user guide's screenshot of moving coordinate systems:
+    /// the user guide's screenshots of moving coordinate systems and of field outputs in a
+    /// coordinate system:
     /// `PLX_MOVING_SYSTEM_DEMO=path cargo test moving_system_demo -- --ignored`.
     #[test]
     #[ignore]
@@ -1707,6 +1708,8 @@ mod tests {
         );
         load.system = Some(system);
         step.loads.push(load);
+        // The node output also shows the displacements in the moving system.
+        step.field_outputs[0].system = Some(system);
         model.steps.push(step);
         let project = single(None, &mesh, &model, None);
         save_project(std::path::Path::new(&path), &project).unwrap();
@@ -2318,6 +2321,7 @@ mod tests {
         let path = dir.join("block.ndl");
         let geometry = Geometry {
             compounds: Vec::new(),
+            suppressed: Vec::new(),
             source: "block.step".into(),
             brep: "DBRep_DrawableShape\n\"quoted\" lines\n".into(),
             meshing: MeshingParameters::for_diagonal(100.0),

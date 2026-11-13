@@ -21,10 +21,12 @@ pub struct FieldOutput {
     /// Writes the contact elements into a `.cel` file (`CONTACT ELEMENTS`).
     #[serde(default)]
     pub contact_elements: bool,
-    /// Results in the global coordinate system; no writes them in the local systems of the
-    /// nodes or elements (`GLOBAL=NO`). Contact outputs have no such option.
-    #[serde(default = "crate::active")]
-    pub global: bool,
+    /// The coordinate system the vector and tensor results are also shown in, next to the
+    /// global ones; `None` for the global system only. The solver writes global results;
+    /// the transformation is made when the results are shown, so that it follows a moving
+    /// system. Contact outputs have no such option.
+    #[serde(default)]
+    pub system: Option<crate::Id>,
     /// How 1D and 2D elements are written; only element outputs have the option.
     #[serde(default)]
     pub dimension: OutputDimension,
@@ -58,8 +60,8 @@ impl OutputDimension {
     pub fn label(self) -> &'static str {
         match self {
             Self::Default => "Default",
-            Self::TwoD => "2D",
-            Self::ThreeD => "3D",
+            Self::TwoD => "On the mid-surface (2D)",
+            Self::ThreeD => "On the expanded solid (3D)",
         }
     }
 }
@@ -76,6 +78,33 @@ impl OutputKind {
             ],
             Self::Contact => &["CDIS", "CSTR", "CELS", "PCON"],
         }
+    }
+
+    /// The variables of the kind in groups for the dialog: a heading and the variables.
+    pub fn groups(self) -> &'static [(&'static str, &'static [&'static str])] {
+        match self {
+            Self::Node => &[
+                ("Mechanical", &["U", "RF", "V", "A"]),
+                ("Thermal", &["NT", "RFL"]),
+                ("Steady state dynamics", &["PU", "PNT"]),
+                ("Sensitivity", &["SEN"]),
+            ],
+            Self::Element => &[
+                (
+                    "Stresses and strains",
+                    &["S", "E", "ME", "PEEQ", "ENER", "SDV"],
+                ),
+                ("Accuracy", &["ZZS", "ERR", "HER"]),
+                ("Thermal", &["HFL"]),
+                ("Steady state dynamics", &["PHS"]),
+            ],
+            Self::Contact => &[("Contact", &["CDIS", "CSTR", "CELS", "PCON"])],
+        }
+    }
+
+    /// Whether the kind has results that can be shown in another coordinate system.
+    pub fn takes_system(self) -> bool {
+        self != Self::Contact
     }
 
     /// The tree's and the dialog's name of the kind.
@@ -104,6 +133,68 @@ impl OutputKind {
             Self::Contact => &["CDIS", "CSTR"],
         }
     }
+}
+
+/// The readable name of a field output variable, shown in the dialog instead of the
+/// variable's keyword.
+pub fn output_variable_label(variable: &str) -> &'static str {
+    match variable {
+        "RF" => "Reaction forces",
+        "U" => "Displacements",
+        "PU" => "Displacement amplitude and phase",
+        "V" => "Velocities",
+        "A" => "Accelerations",
+        "NT" => "Temperatures",
+        "PNT" => "Temperature amplitude and phase",
+        "RFL" => "Reaction heat flows",
+        "SEN" => "Design sensitivities",
+        "S" => "Stresses",
+        "PHS" => "Stress amplitude and phase",
+        "E" => "Total strains",
+        "ME" => "Mechanical strains",
+        "PEEQ" => "Equivalent plastic strain",
+        "ENER" => "Strain energy density",
+        "HFL" => "Heat flux",
+        "ERR" => "Stress error estimate",
+        "HER" => "Heat flux error estimate",
+        "ZZS" => "Improved stresses (Zienkiewicz-Zhu)",
+        "SDV" => "Material state variables",
+        "CDIS" => "Contact gap and slip",
+        "CSTR" => "Contact pressure and shear",
+        "CELS" => "Contact energy",
+        "PCON" => "Contact amplitude and phase",
+        _ => "",
+    }
+}
+
+/// The name of the result the solver writes for a field output variable, as the results
+/// tree shows it; `None` for a variable without a result field of its own.
+pub fn output_variable_field(variable: &str) -> Option<&'static str> {
+    Some(match variable {
+        "RF" => "FORC",
+        "U" => "DISP",
+        "PU" => "PDISP",
+        "V" => "VELO",
+        "A" => "ACCE",
+        "NT" => "NDTEMP",
+        "PNT" => "PNDTEMP",
+        "RFL" => "RFL",
+        "SEN" => "SEN",
+        "S" => "STRESS",
+        "PHS" => "PSTRESS",
+        "E" => "TOSTRAIN",
+        "ME" => "MESTRAIN",
+        "PEEQ" => "PE",
+        "ENER" => "ENER",
+        "HFL" => "FLUX",
+        "ERR" => "ERROR",
+        "HER" => "HERROR",
+        "ZZS" => "ZZSTR",
+        "SDV" => "SDV",
+        "CDIS" | "CSTR" | "CELS" => "CONTACT",
+        "PCON" => "PCONTAC",
+        _ => return None,
+    })
 }
 
 /// The description of a field or history output variable, shown when hovering over its
@@ -158,7 +249,7 @@ impl FieldOutput {
             variables: variables.iter().map(|v| v.to_string()).collect(),
             last_iterations: false,
             contact_elements: false,
-            global: true,
+            system: None,
             dimension: OutputDimension::Default,
         }
     }
@@ -180,7 +271,11 @@ impl FieldOutput {
         let has = |v: &str| self.variables.iter().any(|x| x == v);
         for other in ["ERR", "HER"] {
             if has(other) && has("ZZS") {
-                return Err(format!("{other} and ZZS are mutually exclusive."));
+                return Err(format!(
+                    "{} and {} cannot be written together.",
+                    output_variable_label(other),
+                    output_variable_label("ZZS"),
+                ));
             }
         }
         Ok(())
@@ -275,6 +370,20 @@ mod tests {
                 !output_variable_description(variable).is_empty(),
                 "{variable}"
             );
+        }
+    }
+
+    #[test]
+    fn every_field_variable_has_a_name_and_a_group() {
+        for kind in OutputKind::ALL {
+            let grouped: Vec<&str> = (kind.groups().iter())
+                .flat_map(|(_, v)| v.iter().copied())
+                .collect();
+            for variable in kind.choices() {
+                assert!(!output_variable_label(variable).is_empty(), "{variable}");
+                assert!(grouped.contains(variable), "{variable}");
+            }
+            assert_eq!(grouped.len(), kind.choices().len());
         }
     }
 

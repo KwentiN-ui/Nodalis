@@ -46,7 +46,14 @@ and so half the mass. The dialog says how many beam elements that are. Stresses 
 the full beam; section forces and reactions are those of the half model. Loads on the beam are
 not halved: apply half of a point load such as the rope tension yourself, as for any load on
 the cut plane. A rope keeps its full contact radius and touches the halved pulley with the
-half of its circumference that lies in the model.
+half of its circumference that lies in the model. The results draw the beam with its whole
+profile, as the model does, round for a rope.
+
+Faces on a symmetry plane are the cut of the half model and lie inside the material of the
+whole one, so Nodalis leaves them out of the surfaces of contact pairs and contact regions
+when it writes the input file. A contact detection finds them next to a rope that runs on the
+plane, as the rope lies right on them; without this the rope would slide along the cut faces
+instead of resting in the groove.
 
 #screenshot("symmetry-beams.png", [A rope on the symmetry plane of a half pulley: the
 rope's 80 elements get half their section])

@@ -25,7 +25,11 @@
 
 use plxs_core::step::{EquationSolver, SolverMode};
 use plxs_core::{Error, Progress, ProgressEvent, Result};
-use plxs_linalg::{LdltSolver, LinearSolver, PcgSolver, SparseMatrix, Unknowns, is_out_of_memory};
+use std::sync::Arc;
+
+use plxs_linalg::{
+    LdltSolver, LinearSolver, Pattern, PcgSolver, SparseMatrix, Unknowns, is_out_of_memory,
+};
 
 /// The automatic choice considers the iterative solver from this many equations on;
 /// smaller systems always fit and the direct solver is faster on them.
@@ -55,6 +59,28 @@ pub const UNSYMMETRIC_ACCEPTED: f64 = 1e-6;
 pub const PRECONDITIONER_TOLERANCE: f64 = 1e-1;
 pub const PRECONDITIONER_ITERATIONS: usize = 100;
 
+/// A kept factor is replaced by one of the current tangent once a solve with it took more
+/// conjugate gradient iterations than are worth about half a factorization: the square
+/// root of the factor's nonzeros over this, within these bounds. Twice as many and the
+/// solve is given up for a factorization at once.
+pub const KEPT_FACTOR_SOLVES: f64 = 3000.0;
+pub const KEPT_FACTOR_FEWEST: usize = 3;
+pub const KEPT_FACTOR_ITERATIONS: usize = 20;
+
+/// The relative residual the conjugate gradients on a kept factor stop at when the
+/// procedure asked for no tolerance: as good as the direct solve they stand in for.
+pub const KEPT_FACTOR_TOLERANCE: f64 = 1e-10;
+
+/// The pace of the factorization in the estimate of the automatic choice, floating point
+/// operations per second and thread (measured with 4 threads: a bracket of 591 000
+/// equations, 1.05e12 operations, 9.3 s, about 28 billion per thread; a strip of 167 000,
+/// 1.3e10 operations, 0.21 s, about 16 billion).
+pub const FACTOR_FLOPS_PER_THREAD: f64 = 25e9;
+
+/// The pace at which the factor's memory is taken (written once), bytes per second
+/// (4.2 GB in 3 s in the cloud container).
+pub const TOUCH_BYTES_PER_SECOND: f64 = 1.4e9;
+
 /// Without a way to ask the platform for its free memory, the automatic choice assumes
 /// this much.
 const ASSUMED_MEMORY: u64 = 8 << 30;
@@ -69,7 +95,10 @@ pub struct Equations {
     /// Automatic and iterative: the prepared matrix with the positions of its unknowns, to
     /// factorize it after all when the iteration fails (ordered by the positions, as the
     /// direct solver is ordered otherwise: without them the factor fills many times more).
-    kept: Option<(SparseMatrix, Vec<[f64; 3]>)>,
+    /// Only the pattern is kept: the values are in the iterative solver's own copy of the
+    /// matrix, which gives them back (a second copy of a large matrix costs hundreds of
+    /// megabytes for a fall-back that is rarely taken).
+    kept: Option<(Arc<Pattern>, Vec<[f64; 3]>)>,
     /// Whether the automatic choice already fell back once (it does not switch back).
     fell_back: bool,
     /// The memory the automatic choice works with, `None`: ask the platform.
@@ -79,6 +108,20 @@ pub struct Equations {
     /// Automatic: direct while the factor fits, even for a solid model (a procedure that
     /// solves many systems with one factorization).
     prefer_direct: bool,
+    /// The relative residual the next solves need (`None`: all the solver gives), see
+    /// [`Self::set_tolerance`].
+    tolerance: Option<f64>,
+    /// Direct: whether the factor of an earlier tangent may serve on as the preconditioner
+    /// of conjugate gradients on the current one, see [`Self::keeping_factors`].
+    keep_factors: bool,
+    /// The pattern of the matrix the direct solver's factor belongs to.
+    factored: Option<Arc<Pattern>>,
+    /// The prepared matrix when the factor is that of an earlier one.
+    stale: Option<SparseMatrix>,
+    /// Whether the next prepared matrix is factorized whatever the factor at hand.
+    refresh: bool,
+    /// Whether a slow iteration was weighed against the direct solver already (once).
+    probed: bool,
 }
 
 impl Equations {
@@ -97,7 +140,36 @@ impl Equations {
             available: None,
             automatic_from: AUTOMATIC_FROM,
             prefer_direct: false,
+            tolerance: None,
+            keep_factors: false,
+            factored: None,
+            stale: None,
+            refresh: false,
+            probed: false,
         }
+    }
+
+    /// The direct solver keeps its factor over the systems to come while it still serves:
+    /// for a procedure whose matrices change little from one system to the next (the
+    /// Newton iterations of a static step). A system prepared while a factor of the same
+    /// pattern is at hand is not factorized; conjugate gradients solve it with the kept
+    /// factor as the preconditioner, in a handful of iterations of one substitution and
+    /// one product each where a factorization costs a hundred substitutions. The
+    /// solution is that of the current matrix (to the tolerance asked for), so the Newton
+    /// iteration converges as with a fresh factor, unlike a modified Newton iteration.
+    /// The tangent is factorized anew when the iteration breaks down (an indefinite
+    /// tangent or factor), or takes more iterations than a share of a
+    /// factorization is worth ([`KEPT_FACTOR_SOLVES`]).
+    pub fn keeping_factors(mut self) -> Self {
+        self.keep_factors = std::env::var("PLXS_KEEP_FACTOR").as_deref() != Ok("0");
+        self
+    }
+
+    /// The relative residual `|r| / |b|` the solves from now on have to reach; `None`:
+    /// all the solver gives (the direct solve, the iterative solver's own tolerance). The
+    /// direct solver with a fresh factor ignores it.
+    pub fn set_tolerance(&mut self, tolerance: Option<f64>) {
+        self.tolerance = tolerance;
     }
 
     /// The automatic choice stays direct while the factor fits into the memory, whatever
@@ -165,14 +237,26 @@ impl Equations {
                 Err(error) => return Err(error),
             }
         }
+        // A factor of an earlier matrix of this pattern serves on, see `keeping_factors`.
+        if self.keep_factors
+            && !self.refresh
+            && direct.is_factorized()
+            && (self.factored.as_ref())
+                .is_some_and(|p| Arc::ptr_eq(p, k.pattern()) || **p == **k.pattern())
+        {
+            self.stale = Some(k.clone());
+            return Ok(());
+        }
+        self.stale = None;
         let started = std::time::Instant::now();
         let direct_result = (|| {
             if analyze {
                 direct.set_coordinates(Some(unknowns.coordinates.clone()));
                 direct.analyze(k.pattern())?;
                 progress.event(ProgressEvent::Info(format!(
-                    "factor: {} nonzeros, ordered in {:.2} s",
+                    "factor: {} nonzeros, {:.2e} flops, ordered in {:.2} s",
                     direct.factor_nonzeros().unwrap_or(0),
+                    direct.factor_flops().unwrap_or(0.0),
                     started.elapsed().as_secs_f64()
                 )));
             }
@@ -180,6 +264,8 @@ impl Equations {
         })();
         match direct_result {
             Ok(()) => {
+                self.factored = Some(k.pattern().clone());
+                self.refresh = false;
                 progress.event(ProgressEvent::Info(format!(
                     "stiffness factorized in {:.2} s",
                     started.elapsed().as_secs_f64()
@@ -213,9 +299,33 @@ impl Equations {
         let started = std::time::Instant::now();
         if self.is_iterative() {
             let pcg = self.pcg.as_mut().expect("prepared");
+            pcg.set_tolerance(self.tolerance.unwrap_or(plxs_linalg::pcg::TOLERANCE));
             // The right-hand side, for a second attempt (the solve works in place).
             let b = (self.kept.is_some() || pcg.is_reused()).then(|| rhs.to_vec());
+            // The automatic choice weighs a slow iteration against the direct solver once
+            // (see `weigh_probe`).
+            pcg.set_probe(
+                self.mode == SolverMode::Automatic
+                    && !self.fell_back
+                    && !self.probed
+                    && self.kept.is_some(),
+            );
             let mut result = pcg.solve_counted(rhs);
+            if result.is_err()
+                && let Some(probe) = pcg.take_probe()
+            {
+                self.probed = true;
+                let b = b.as_ref().expect("kept for the second attempt");
+                rhs.copy_from_slice(b);
+                if self.weigh_probe(direct, probe, progress)? {
+                    // Solved directly below.
+                    return self.solve_after_switch(direct, rhs, started, progress);
+                }
+                let pcg = self.pcg.as_mut().expect("prepared");
+                pcg.set_probe(false);
+                result = pcg.solve_counted(rhs);
+            }
+            let pcg = self.pcg.as_mut().expect("prepared");
             if result.is_err() && pcg.is_reused() {
                 // The hierarchy kept from the previous factorization does not fit this
                 // matrix after all: build it anew and try once more.
@@ -235,7 +345,10 @@ impl Equations {
                     return Ok(());
                 }
                 Err(error) if self.may_fall_back(&error) && b.is_some() => {
-                    let (k, coordinates) = self.kept.take().expect("kept for the fall-back");
+                    let (pattern, coordinates) = self.kept.take().expect("kept for the fall-back");
+                    let k = (self.pcg.as_ref())
+                        .and_then(|pcg| pcg.matrix(pattern))
+                        .expect("the iterative solver holds the prepared matrix");
                     direct.set_coordinates(Some(coordinates));
                     if !self.factor_fits(direct, &k, &error, progress)? {
                         return Err(with_message(error, |m| {
@@ -256,6 +369,40 @@ impl Equations {
                     rhs.copy_from_slice(&b.expect("checked"));
                 }
                 Err(error) => return Err(error),
+            }
+        }
+        if let Some(k) = self.stale.take() {
+            let b = rhs.to_vec();
+            let tolerance = self.tolerance.unwrap_or(KEPT_FACTOR_TOLERANCE);
+            // A solve with the factor costs about its nonzeros, the factorization about
+            // their power 1.5: the iterations worth a share of a factorization (counted,
+            // not timed, so that a run repeats itself).
+            let budget = direct
+                .factor_nonzeros()
+                .map_or(KEPT_FACTOR_FEWEST, |nonzeros| {
+                    ((nonzeros as f64).sqrt() / KEPT_FACTOR_SOLVES) as usize
+                });
+            let budget = budget.clamp(KEPT_FACTOR_FEWEST, KEPT_FACTOR_ITERATIONS);
+            match kept_factor_solve(direct, &k, rhs, tolerance, 2 * budget) {
+                Ok((iterations, relative_residual)) => {
+                    if iterations > budget {
+                        self.refresh = true;
+                    }
+                    progress.event(ProgressEvent::LinearSolve {
+                        iterations: iterations as u32,
+                        relative_residual,
+                        seconds: started.elapsed().as_secs_f64(),
+                        quiet: true,
+                    });
+                    return Ok(());
+                }
+                Err(Error::Cancelled) => return Err(Error::Cancelled),
+                Err(_) => {
+                    // The kept factor does not fit this matrix: its own factor solves.
+                    rhs.copy_from_slice(&b);
+                    direct.factorize(&k)?;
+                    self.refresh = false;
+                }
             }
         }
         direct.solve(rhs)?;
@@ -285,6 +432,11 @@ impl Equations {
         b: &[f64],
         progress: &mut dyn Progress,
     ) -> Result<Vec<f64>> {
+        // GMRES is preconditioned by the factor of `k` itself.
+        if self.stale.take().is_some() {
+            direct.factorize(k)?;
+            self.refresh = false;
+        }
         let attempt = |equations: &Self, direct: &LdltSolver| {
             let precondition = |v: &mut [f64]| equations.apply_inverse(direct, v);
             plxs_linalg::gmres(apply, &precondition, b, UNSYMMETRIC_TOLERANCE, 60, 300)
@@ -353,6 +505,78 @@ impl Equations {
         direct.analyze(k.pattern())?;
         direct.factorize(k)?;
         Ok(true)
+    }
+
+    /// Weighs the rest of a slow iteration (`probe`) against the direct solver: the
+    /// symbolic analysis tells the factor's memory and floating point operations, from
+    /// which [`FACTOR_FLOPS_PER_THREAD`] and [`TOUCH_BYTES_PER_SECOND`] estimate the time
+    /// of the factorization; the iteration would take its predicted iterations at its
+    /// pace so far. Switches to the direct solver (and factorizes) when that is cheaper
+    /// and the factor fits; `true` then.
+    fn weigh_probe(
+        &mut self,
+        direct: &mut LdltSolver,
+        probe: plxs_linalg::PcgProbe,
+        progress: &mut dyn Progress,
+    ) -> Result<bool> {
+        let Some((pattern, coordinates)) = self.kept.clone() else {
+            return Ok(false);
+        };
+        let started = std::time::Instant::now();
+        direct.set_coordinates(Some(coordinates));
+        let bytes = direct.estimate_factor_bytes(&pattern)?;
+        let flops = direct.factor_flops().unwrap_or(0.0);
+        let threads = rayon::current_num_threads().max(1) as f64;
+        let direct_seconds =
+            flops / (FACTOR_FLOPS_PER_THREAD * threads) + bytes as f64 / TOUCH_BYTES_PER_SECOND;
+        let iterative_seconds = probe.predicted as f64 * probe.seconds_per_iteration;
+        let need = bytes.saturating_add(bytes / 4);
+        let available = self
+            .available
+            .or_else(plxs_linalg::available_memory)
+            .unwrap_or(ASSUMED_MEMORY);
+        let fits = (need as f64) <= MEMORY_SHARE * available as f64;
+        let switch = fits && direct_seconds < iterative_seconds;
+        progress.event(ProgressEvent::Info(format!(
+            "automatic equation solver: the iteration would take about {} iterations, \
+             {iterative_seconds:.1} s; the direct solver about {direct_seconds:.1} s with a \
+             factor of {:.1} GB{} (analyzed in {:.2} s); solving {}",
+            probe.predicted,
+            need as f64 / 1e9,
+            if fits {
+                ""
+            } else {
+                ", more than fits into the memory"
+            },
+            started.elapsed().as_secs_f64(),
+            if switch { "directly" } else { "iteratively on" }
+        )));
+        if !switch {
+            return Ok(false);
+        }
+        let k = (self.pcg.as_ref())
+            .and_then(|pcg| pcg.matrix(pattern))
+            .expect("the iterative solver holds the prepared matrix");
+        self.switch(false);
+        direct.analyze(k.pattern())?;
+        direct.factorize(&k)?;
+        Ok(true)
+    }
+
+    /// The direct solve of `rhs` right after the switch of [`Self::weigh_probe`].
+    fn solve_after_switch(
+        &mut self,
+        direct: &mut LdltSolver,
+        rhs: &mut [f64],
+        started: std::time::Instant,
+        progress: &mut dyn Progress,
+    ) -> Result<()> {
+        direct.solve(rhs)?;
+        progress.event(ProgressEvent::Info(format!(
+            "solved in {:.2} s",
+            started.elapsed().as_secs_f64()
+        )));
+        Ok(())
     }
 
     /// Whether the factor of `k` fits into the memory, for a fall-back from the iterative
@@ -453,7 +677,7 @@ impl Equations {
             started.elapsed().as_secs_f64()
         )));
         if self.mode == SolverMode::Automatic && !self.fell_back {
-            self.kept = Some((k.clone(), unknowns.coordinates.clone()));
+            self.kept = Some((k.pattern().clone(), unknowns.coordinates.clone()));
         }
         Ok(())
     }
@@ -474,6 +698,70 @@ impl Equations {
             self.pcg = None;
         }
     }
+}
+
+/// Solves `K x = b` in place by conjugate gradients preconditioned with the factor
+/// `direct` holds (that of an earlier matrix of the same pattern), to the relative residual
+/// `tolerance`. Returns the iterations and the relative residual; fails when the matrix or
+/// the factor turns out not to be positive definite or the iteration does not get there
+/// within `limit` iterations.
+fn kept_factor_solve(
+    direct: &LdltSolver,
+    k: &SparseMatrix,
+    rhs: &mut [f64],
+    tolerance: f64,
+    limit: usize,
+) -> Result<(usize, f64)> {
+    let failed = |what: &str| Error::numerical(plxs_core::Failure::IterativeSolver, what);
+    let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+    let n = rhs.len();
+    let b_norm = dot(rhs, rhs).sqrt();
+    if b_norm == 0.0 {
+        return Ok((0, 0.0));
+    }
+    if !b_norm.is_finite() {
+        return Err(failed("the right-hand side is not finite"));
+    }
+    let cancel = plxs_core::CancelToken::current();
+    let mut r = rhs.to_vec();
+    let mut x = vec![0.0; n];
+    let mut z = r.clone();
+    direct.solve(&mut z)?;
+    let mut p = z.clone();
+    let mut q = vec![0.0; n];
+    let mut rz = dot(&r, &z);
+    for iteration in 1..=limit {
+        if cancel
+            .as_ref()
+            .is_some_and(plxs_core::CancelToken::is_cancelled)
+        {
+            return Err(Error::Cancelled);
+        }
+        k.multiply(&p, &mut q);
+        let pq = dot(&p, &q);
+        if rz <= 0.0 || pq <= 0.0 || !pq.is_finite() {
+            return Err(failed("not positive definite with the kept factor"));
+        }
+        let alpha = rz / pq;
+        for i in 0..n {
+            x[i] += alpha * p[i];
+            r[i] -= alpha * q[i];
+        }
+        let residual = dot(&r, &r).sqrt() / b_norm;
+        if residual <= tolerance {
+            rhs.copy_from_slice(&x);
+            return Ok((iteration, residual));
+        }
+        z.copy_from_slice(&r);
+        direct.solve(&mut z)?;
+        let rz_new = dot(&r, &z);
+        let beta = rz_new / rz;
+        rz = rz_new;
+        for i in 0..n {
+            p[i] = z[i] + beta * p[i];
+        }
+    }
+    Err(failed("the kept factor does not precondition this matrix"))
 }
 
 fn message(error: &Error) -> String {
@@ -624,6 +912,56 @@ mod tests {
             residual(k, &x, &b)
         );
         x
+    }
+
+    /// Prepares and solves `k` with `direct`; whether a kept factor served, and the
+    /// residual relative to the right-hand side.
+    fn solve_keeping(
+        equations: &mut Equations,
+        direct: &mut LdltSolver,
+        k: &SparseMatrix,
+    ) -> (bool, f64) {
+        let n = k.dimension();
+        equations
+            .prepare(direct, k, coordinates(n), true, &mut NoProgress)
+            .unwrap();
+        let kept = equations.stale.is_some();
+        let b: Vec<f64> = (0..n).map(|i| 1.0 + i as f64).collect();
+        let mut x = b.clone();
+        equations.solve(direct, &mut x, &mut NoProgress).unwrap();
+        (kept, residual(k, &x, &b) / (n as f64))
+    }
+
+    #[test]
+    fn a_kept_factor_solves_the_current_matrix() {
+        let n = 200;
+        let mut equations = Equations::new(EquationSolver::Spooles).keeping_factors();
+        let mut direct = LdltSolver::new(1);
+        let (kept, relative) = solve_keeping(&mut equations, &mut direct, &chain(n, 2.0));
+        assert!(!kept && relative < 1e-9);
+        // A stiffer end: the factor of the first matrix stays, the solution is that of
+        // the second.
+        let (kept, relative) = solve_keeping(&mut equations, &mut direct, &chain(n, 3.0));
+        assert!(kept && relative < 1e-9, "{relative}");
+        // With a tolerance the solve stops early, within that tolerance.
+        equations.set_tolerance(Some(1e-3));
+        let (kept, relative) = solve_keeping(&mut equations, &mut direct, &chain(n, 2.5));
+        assert!(kept && relative < 1e-3, "{relative}");
+    }
+
+    #[test]
+    fn an_indefinite_matrix_is_factorized_instead_of_iterated_on_a_kept_factor() {
+        let n = 50;
+        let mut equations = Equations::new(EquationSolver::Spooles).keeping_factors();
+        let mut direct = LdltSolver::new(1);
+        solve_keeping(&mut equations, &mut direct, &chain(n, 2.0));
+        // Conjugate gradients stop at the negative curvature; the factorization of the
+        // matrix itself still solves it.
+        let (kept, relative) = solve_keeping(&mut equations, &mut direct, &chain(n, -1.0));
+        assert!(kept && relative < 1e-9, "{relative}");
+        // And is the factor at hand from then on.
+        let (_, relative) = solve_keeping(&mut equations, &mut direct, &chain(n, -1.0));
+        assert!(relative < 1e-9, "{relative}");
     }
 
     #[test]

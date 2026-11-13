@@ -1427,6 +1427,8 @@ pub struct Editor {
     expose: Option<expose::Scope>,
     /// The blocks value links give exposed parameters of the model from, by key.
     linked: Vec<(u32, String)>,
+    /// Where the steps of a submodel take their global results from.
+    global_sources: Vec<crate::links::GlobalSource>,
     /// The CAD geometry a contact detection searches before the parts are meshed.
     detection_scope: Option<connections::DetectionScope>,
     /// The step an edited boundary condition or load was in; the dialog can move it to
@@ -1896,10 +1898,17 @@ fn symmetry_rows(
     }
 }
 
-/// Rows of a submodel boundary condition: the displacements
-/// that follow the global model. Which step of it is read, the link of the global results
-/// says; the global results hold no rotations.
-fn submodel_rows(ui: &mut egui::Ui, step: u32, dofs: &mut [bool; 6], two_d: bool, fe: &FeModel) {
+/// Rows of a submodel boundary condition: the displacements that follow the global model,
+/// and where they come from: the analysis and step linked to the Global results row of the
+/// step `step`, and the field outputs that write the displacements there. The global
+/// results hold no rotations.
+fn submodel_rows(
+    ui: &mut egui::Ui,
+    dofs: &mut [bool; 6],
+    two_d: bool,
+    step: &str,
+    sources: &[crate::links::GlobalSource],
+) {
     // Nodes of 2D models only move in the x-y plane.
     let count = if two_d { 2 } else { 3 };
     for (held, label) in dofs.iter_mut().zip(DOF_LABELS).take(count) {
@@ -1907,18 +1916,105 @@ fn submodel_rows(ui: &mut egui::Ui, step: u32, dofs: &mut [bool; 6], two_d: bool
         ui.checkbox(held, label);
         ui.end_row();
     }
-    let note = match fe.properties.submodel_input() {
-        Some(_) => format!(
-            "The displacements of step {step} of the global analysis, the step whose \
-             results are linked to the Global results row of this analysis."
-        ),
-        None => "No global results yet: in the project window, drag the results of a step \
-                 of the global analysis to the Global results row of this analysis."
-            .into(),
+    for (label, line) in submodel_source_lines(step, sources) {
+        ui.label(label);
+        let text = egui::RichText::new(line.text);
+        let text = match line.tone {
+            Tone::Plain => text,
+            Tone::Weak => text.weak(),
+            Tone::Error => text.color(crate::style::error()),
+        };
+        ui.add(egui::Label::new(text).wrap());
+        ui.end_row();
+    }
+}
+
+/// How a line of the submodel rows reads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Tone {
+    Plain,
+    Weak,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Line {
+    text: String,
+    tone: Tone,
+}
+
+/// The rows that tell where the displacements of a submodel boundary condition in `step`
+/// come from, with their labels, and what keeps them from being read.
+fn submodel_source_lines(
+    step: &str,
+    sources: &[crate::links::GlobalSource],
+) -> Vec<(&'static str, Line)> {
+    let line = |tone, text: String| Line { text, tone };
+    let mut lines = Vec::new();
+    let Some(source) = sources.iter().find(|s| s.step == step) else {
+        let text = format!(
+            "Nothing linked: in the project window, drag the results of a step of the global \
+             analysis to the Global results row of {step}."
+        );
+        lines.push(("Global results", line(Tone::Error, text)));
+        return lines;
     };
-    ui.label("");
-    ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap());
-    ui.end_row();
+    let from = format!("{} of {}", source.source_step, source.source);
+    lines.push(("Global results", line(Tone::Plain, from)));
+    let (global, global_step) = (&source.source, &source.source_step);
+    let written = match &source.writers {
+        None => line(
+            Tone::Weak,
+            "Read from the results file; whether it holds displacements of the step shows \
+             when the analysis runs."
+                .into(),
+        ),
+        Some(writers) if !writers.load_case => line(
+            Tone::Error,
+            format!(
+                "{global_step} computes no displacements of a load (mode shapes, \
+                 temperatures or sensitivities). Link a static or dynamic step."
+            ),
+        ),
+        Some(writers) if writers.outputs.is_empty() => line(
+            Tone::Error,
+            format!(
+                "{global} writes no displacements in {global_step}: add U to a node field \
+                 output of the step and solve it again."
+            ),
+        ),
+        Some(writers) => {
+            let names = writers.outputs.join(", ");
+            let by = match &writers.carried_from {
+                Some(earlier) => format!(
+                    "Written by {names} of {earlier}, which {global_step} keeps having no node \
+                     field output of its own."
+                ),
+                None => format!("Written by {names}."),
+            };
+            line(
+                Tone::Weak,
+                format!("{by} The values at the end of {global_step} are read."),
+            )
+        }
+    };
+    lines.push(("Displacements", written));
+    // The submodel reads a single global results file.
+    let mut others: Vec<&str> = (sources.iter())
+        .map(|s| s.source.as_str())
+        .filter(|s| s != global)
+        .collect();
+    others.sort_unstable();
+    others.dedup();
+    if !others.is_empty() {
+        let text = format!(
+            "Other steps take global results from {}. A submodel reads one global analysis: \
+             link the results of all its steps from {global}.",
+            others.join(", ")
+        );
+        lines.push(("", line(Tone::Error, text)));
+    }
+    lines
 }
 
 const DOF_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
@@ -2374,6 +2470,7 @@ impl Editor {
             cyclic: Default::default(),
             expose: None,
             linked: Vec::new(),
+            global_sources: Vec::new(),
             detection_scope: None,
             from_step: None,
         })
@@ -2397,6 +2494,7 @@ impl Editor {
             cyclic: Default::default(),
             expose: None,
             linked: Vec::new(),
+            global_sources: Vec::new(),
             detection_scope: None,
             from_step: None,
         }
@@ -2435,6 +2533,7 @@ impl Editor {
             cyclic: Default::default(),
             expose: None,
             linked: Vec::new(),
+            global_sources: Vec::new(),
             detection_scope: None,
             from_step: None,
         })
@@ -2586,6 +2685,7 @@ impl Editor {
             cyclic: Default::default(),
             expose: None,
             linked: Vec::new(),
+            global_sources: Vec::new(),
             detection_scope: None,
             from_step,
         })
@@ -2752,6 +2852,14 @@ impl Editor {
     /// Sets the CAD geometry a contact detection being edited searches, `None` for the mesh.
     pub fn set_detection_scope(&mut self, scope: Option<connections::DetectionScope>) {
         self.detection_scope = scope;
+    }
+
+    /// Sets where the steps of a submodel take their global results from, for the
+    /// submodel boundary condition.
+    pub fn set_global_sources(&mut self, sources: &[crate::links::GlobalSource]) {
+        if self.global_sources != sources {
+            self.global_sources = sources.to_vec();
+        }
     }
 
     pub fn set_linked(&mut self, linked: Vec<(u32, String)>) {
@@ -3225,8 +3333,9 @@ impl Editor {
                     let names = (step, bc.name.as_str());
                     displacement_rows(ui, displacement, &region.region(), names, model, units);
                 }
-                if let BoundaryKind::Submodel { step, dofs } = &mut bc.kind {
-                    submodel_rows(ui, *step, dofs, two_d, &model.fe);
+                if let BoundaryKind::Submodel { dofs, .. } = &mut bc.kind {
+                    let name = model.fe.steps.get(*step).map_or("", |s| s.name.as_str());
+                    submodel_rows(ui, dofs, two_d, name, &self.global_sources);
                 }
                 if let BoundaryKind::Symmetry {
                     normal,
@@ -3856,7 +3965,7 @@ impl Editor {
                 ui.end_row();
             }
             Draft::FieldOutput(_, output) => {
-                field_output_form(ui, output, &taken, self.index.is_none());
+                field_output_form(ui, model, output, &taken, self.index.is_none());
             }
             Draft::HistoryOutput(_, output, region) => {
                 history_output_form(ui, model, output, region, &taken);
@@ -5141,81 +5250,93 @@ fn point_hint(region: &Region, fe: &FeModel, mesh: &FeMesh) -> Option<&'static s
     })
 }
 
-/// The field output dialog: the kind, chosen only for a new output, the variables
-/// and the options of `*NODE FILE`, `*EL FILE` and `*CONTACT FILE`.
-fn field_output_form(ui: &mut Ui, output: &mut FieldOutput, taken: &[&str], new: bool) {
+/// The field output dialog: the kind, chosen only for a new output, the results by their
+/// names in groups, the coordinate system they are also shown in and the options of the
+/// solver's output.
+fn field_output_form(
+    ui: &mut Ui,
+    model: &Model,
+    output: &mut FieldOutput,
+    taken: &[&str],
+    new: bool,
+) {
     name_row(ui, &mut output.name);
     ui.label("Type");
-    ui.horizontal(|ui| {
-        for kind in OutputKind::ALL {
-            let selected = kind == output.kind;
-            let radio = ui.add_enabled(
-                new || selected,
-                egui::RadioButton::new(selected, kind.label()),
-            );
-            if radio.clicked() && !selected {
-                rename_default(&mut output.name, output.kind.prefix(), kind.prefix(), taken);
-                output.variables = (kind.default_variables().iter())
-                    .map(|v| v.to_string())
-                    .collect();
-                output.kind = kind;
-            }
-        }
-    });
-    ui.end_row();
-    ui.label("Variables");
-    // Fixed rows: wrapping inside the grid overlaps the next row.
-    ui.vertical(|ui| {
-        for row in output.kind.choices().chunks(7) {
-            ui.horizontal(|ui| {
-                for &variable in row {
-                    let mut on = output.variables.iter().any(|v| v == variable);
-                    let checkbox = ui
-                        .checkbox(&mut on, variable)
-                        .on_hover_text(plx_model::output_variable_description(variable));
-                    if checkbox.changed() {
-                        output.variables.retain(|v| v != variable);
-                        if on {
-                            output.variables.push(variable.to_string());
-                        }
-                        output.normalize_variables();
-                    }
+    if new {
+        ui.horizontal(|ui| {
+            for kind in OutputKind::ALL {
+                let selected = kind == output.kind;
+                if ui.radio(selected, kind.label()).clicked() && !selected {
+                    rename_default(&mut output.name, output.kind.prefix(), kind.prefix(), taken);
+                    output.variables = (kind.default_variables().iter())
+                        .map(|v| v.to_string())
+                        .collect();
+                    output.kind = kind;
                 }
-            });
-        }
-    });
+            }
+        });
+    } else {
+        ui.label(output.kind.label());
+    }
     ui.end_row();
-    let on_off = |ui: &mut Ui, value: &mut bool, id: &str, labels: [&str; 2], hint: &str| {
-        egui::ComboBox::from_id_salt(id)
-            .selected_text(if *value { labels[0] } else { labels[1] })
-            .width(crate::dock::fit_width(ui, 200.0))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(value, true, labels[0]);
-                ui.selectable_value(value, false, labels[1]);
-            })
-            .response
-            .on_hover_text(hint);
+    // The results in groups, one per line: fixed rows, as wrapping inside the grid overlaps
+    // the next row.
+    for (heading, variables) in output.kind.groups() {
+        ui.label(*heading);
+        ui.vertical(|ui| {
+            for &variable in *variables {
+                let mut on = output.variables.iter().any(|v| v == variable);
+                let label = plx_model::output_variable_label(variable);
+                let checkbox = ui
+                    .checkbox(&mut on, label)
+                    .on_hover_text(plx_model::output_variable_description(variable));
+                if checkbox.changed() {
+                    output.variables.retain(|v| v != variable);
+                    if on {
+                        output.variables.push(variable.to_string());
+                    }
+                    output.normalize_variables();
+                }
+            }
+        });
         ui.end_row();
-    };
-    ui.label("Last iterations");
-    on_off(
-        ui,
-        &mut output.last_iterations,
-        "field last iterations",
-        ["On", "Off"],
-        "Writes every iteration of the last increment; useful for finding out why a \
-         solution diverges.",
-    );
-    ui.label("Contact elements");
-    on_off(
-        ui,
-        &mut output.contact_elements,
-        "field contact elements",
-        ["On", "Off"],
-        "Writes the contact elements into a file with the .cel extension.",
-    );
+    }
+    if output.kind.takes_system() {
+        ui.label("Coordinate system");
+        crate::pick_item::system_combo(
+            ui,
+            "field output system",
+            &mut output.system,
+            &model.fe,
+            200.0,
+        );
+        ui.end_row();
+        let system =
+            (output.system).and_then(|id| model.fe.coordinate_systems.iter().find(|c| c.id == id));
+        let hint = match system {
+            None if model.fe.coordinate_systems.is_empty() => {
+                "The results are global. Create a coordinate system to see displacements, \
+                 stresses and other vectors and tensors in it as well."
+                    .to_string()
+            }
+            None => "The results are global.".to_string(),
+            Some(system) => format!(
+                "Displacements, stresses and other vectors and tensors are also shown in \
+                 {}, e.g. as {}.{}",
+                system.name,
+                plx_results::field_output::system_field_name("DISP", &system.name),
+                match system.moves(&model.fe.coordinate_systems) {
+                    true => " The system turns with its selection in every increment.",
+                    false => "",
+                }
+            ),
+        };
+        ui.label("");
+        ui.add(egui::Label::new(egui::RichText::new(hint).weak()).wrap());
+        ui.end_row();
+    }
     if output.kind == OutputKind::Element {
-        ui.label("Output (2D/3D)");
+        ui.label("Shells and beams");
         egui::ComboBox::from_id_salt("field output dimension")
             .selected_text(output.dimension.label())
             .width(crate::dock::fit_width(ui, 200.0))
@@ -5231,16 +5352,20 @@ fn field_output_form(ui: &mut Ui, output: &mut FieldOutput, taken: &[&str], new:
             );
         ui.end_row();
     }
-    if output.kind != OutputKind::Contact {
-        ui.label("Global");
-        on_off(
-            ui,
-            &mut output.global,
-            "field global",
-            ["Yes", "No"],
-            "Whether the results are written in the global or in the local coordinate systems.",
+    ui.label("Diagnostics");
+    ui.vertical(|ui| {
+        ui.checkbox(
+            &mut output.last_iterations,
+            "Every iteration of the last increment",
+        )
+        .on_hover_text(
+            "Writes the results of every iteration of the last increment, for finding \
+                 out why a solution diverges.",
         );
-    }
+        ui.checkbox(&mut output.contact_elements, "Contact elements")
+            .on_hover_text("Writes the contact elements into a file with the .cel extension.");
+    });
+    ui.end_row();
 }
 
 fn validate_history_output(
@@ -7881,6 +8006,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn submodel_rows_name_the_global_results_and_what_is_wrong_with_them() {
+        use crate::links::{DisplacementWriters, GlobalSource};
+        let source = |step: &str, analysis: &str, writers| GlobalSource {
+            step: step.into(),
+            source: analysis.into(),
+            source_step: "Load".into(),
+            writers,
+        };
+        let tones = |lines: &[(&str, Line)]| lines.iter().map(|(_, l)| l.tone).collect::<Vec<_>>();
+        // Nothing linked to the step.
+        let lines = submodel_source_lines("Step-1", &[]);
+        assert_eq!(tones(&lines), [Tone::Error]);
+        assert!(lines[0].1.text.contains("Global results row of Step-1"));
+        let writers = DisplacementWriters {
+            outputs: vec!["NF-Output-1".into()],
+            carried_from: None,
+            load_case: true,
+        };
+        let good = [source("Step-1", "Global", Some(writers.clone()))];
+        let lines = submodel_source_lines("Step-1", &good);
+        assert_eq!(lines[0].1.text, "Load of Global");
+        assert_eq!(tones(&lines), [Tone::Plain, Tone::Weak]);
+        assert!(lines[1].1.text.starts_with("Written by NF-Output-1."));
+        // No U requested.
+        let none = DisplacementWriters {
+            outputs: Vec::new(),
+            ..writers.clone()
+        };
+        let lines = submodel_source_lines("Step-1", &[source("Step-1", "Global", Some(none))]);
+        assert_eq!(tones(&lines), [Tone::Plain, Tone::Error]);
+        assert!(lines[1].1.text.contains("writes no displacements in Load"));
+        // Mode shapes.
+        let modes = DisplacementWriters {
+            load_case: false,
+            ..writers.clone()
+        };
+        let lines = submodel_source_lines("Step-1", &[source("Step-1", "Global", Some(modes))]);
+        assert_eq!(tones(&lines), [Tone::Plain, Tone::Error]);
+        // Two global analyses.
+        let both = [
+            source("Step-1", "Global", Some(writers.clone())),
+            source("Step-2", "Other", Some(writers.clone())),
+            source("Step-3", "Other", Some(writers)),
+        ];
+        let lines = submodel_source_lines("Step-1", &both);
+        assert_eq!(tones(&lines), [Tone::Plain, Tone::Weak, Tone::Error]);
+        assert!(
+            lines[2]
+                .1
+                .text
+                .starts_with("Other steps take global results from Other.")
+        );
+    }
+
+    #[test]
     fn contact_detections_rename_mark_and_release_their_regions() {
         let mut fe = FeModel::default();
         let editor = Editor::create(NewItem::ContactDetection, &fe).unwrap();
@@ -8680,6 +8860,7 @@ mod tests {
             cyclic: Default::default(),
             expose: None,
             linked: Vec::new(),
+            global_sources: Vec::new(),
             detection_scope: None,
             from_step: None,
         }

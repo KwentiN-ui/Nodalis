@@ -39,8 +39,9 @@ impl Step {
             }
         }
         for (i, load) in self.loads.iter().enumerate().filter(|(_, l)| l.active) {
-            for component in 0..load.kind.table_components() {
-                if let Some(table) = &load.tables[component] {
+            let components = load.kind.table_components();
+            for (component, table) in load.tables.iter().enumerate().take(components) {
+                if let Some(table) = table {
                     out.push(StepTable {
                         owner: TableOwner::Load(i),
                         component,

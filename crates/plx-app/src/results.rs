@@ -12,6 +12,16 @@ use plx_results::solver::{MODE, MODE_PHASES};
 use plx_results::transformation::{self, Transformation};
 use plx_results::{AnalysisKind, Component, Field, Increment};
 
+/// A result that the field outputs of steps show in a coordinate system besides the global
+/// one: the copy `name` of `field` in the increments of those steps.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputSystem {
+    pub field: String,
+    pub system: plx_model::Id,
+    pub name: String,
+    pub increments: Vec<usize>,
+}
+
 /// How the deformed shape is scaled, as in the results toolbar.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Deformation {
@@ -127,6 +137,9 @@ pub struct ResultsView {
     pub transformations: Vec<Transformation>,
     /// Coordinate systems of the results' features, for transformed field outputs.
     pub coordinate_systems: Vec<plx_model::CoordinateSystem>,
+    /// The results the field outputs of the model's steps want in a coordinate system, with
+    /// the copies made of them; see [`ResultsView::set_output_systems`].
+    pub output_systems: Vec<OutputSystem>,
     /// Range of the shown values on the section plane, which replaces the model's range in
     /// the legend while only the section is shown.
     pub section_range: Option<(f32, f32)>,
@@ -251,6 +264,7 @@ impl ResultsView {
             history: Vec::new(),
             transformations: Vec::new(),
             coordinate_systems: Vec::new(),
+            output_systems: Vec::new(),
             section_range: None,
             plain_nodes: Vec::new(),
             plane_result: None,
@@ -516,6 +530,87 @@ impl ResultsView {
         };
         let shown = self.shown_names();
         let mut warnings = self.recompute_from(first, mesh);
+        warnings.extend(self.recompute_history(mesh));
+        self.restore_selection(shown);
+        warnings
+    }
+
+    /// The results that the field outputs of `steps` want in a coordinate system of
+    /// `systems`: for each step of the results, the vector and tensor fields of its outputs
+    /// with a system.
+    pub fn wanted_output_systems(
+        &self,
+        steps: &[plx_model::Step],
+        systems: &[plx_model::CoordinateSystem],
+    ) -> Vec<OutputSystem> {
+        let mut wanted: Vec<OutputSystem> = Vec::new();
+        for result_step in &self.steps.steps {
+            let Some(step) = steps.iter().find(|s| s.name == result_step.name) else {
+                continue;
+            };
+            let outputs = (step.field_outputs.iter()).filter(|o| o.active && o.kind.takes_system());
+            for output in outputs {
+                let Some(id) = output.system else {
+                    continue;
+                };
+                let Some(system) = systems.iter().find(|c| c.id == id) else {
+                    continue;
+                };
+                let fields = (output.variables.iter())
+                    .filter_map(|v| plx_model::output_variable_field(v))
+                    .flat_map(|f| [f.to_string(), plx_results::harmonic::imaginary_name(f)])
+                    .filter(|f| field_output::SYSTEM_FIELDS.contains(&f.as_str()));
+                for field in fields {
+                    let name = field_output::system_field_name(&field, &system.name);
+                    match (wanted.iter_mut()).find(|w| w.field == field && w.system == id) {
+                        Some(known) => {
+                            known.increments.extend(&result_step.increments);
+                        }
+                        None => wanted.push(OutputSystem {
+                            field,
+                            system: id,
+                            name,
+                            increments: result_step.increments.clone(),
+                        }),
+                    }
+                }
+            }
+        }
+        for w in &mut wanted {
+            w.increments.sort_unstable();
+            w.increments.dedup();
+        }
+        wanted
+    }
+
+    /// Makes the copies of results in coordinate systems that the field outputs of the steps
+    /// ask for, replacing the earlier ones, and computes the derived outputs again, which
+    /// may use them. Returns the failures.
+    pub fn set_output_systems(&mut self, wanted: Vec<OutputSystem>, mesh: &FeMesh) -> Vec<String> {
+        let shown = self.shown_names();
+        for old in &self.output_systems {
+            field_output::remove(&old.name, &mut self.increments);
+        }
+        let mut warnings = Vec::new();
+        for w in &wanted {
+            let Some(system) = (self.coordinate_systems.iter()).find(|c| c.id == w.system) else {
+                continue;
+            };
+            let systems = &self.coordinate_systems;
+            let added = field_output::add_system_field(
+                &w.field,
+                system,
+                systems,
+                &mut self.increments,
+                &w.increments,
+                mesh,
+            );
+            if let Err(error) = added {
+                warnings.push(format!("{} in {}: {error}", w.field, system.name));
+            }
+        }
+        self.output_systems = wanted;
+        warnings.extend(self.recompute_from(0, mesh));
         warnings.extend(self.recompute_history(mesh));
         self.restore_selection(shown);
         warnings
@@ -1768,7 +1863,15 @@ fn field_measure(field: &str, component: &str) -> Option<Measure> {
             "CPRESS" | "CSHEAR1" | "CSHEAR2" => Some(Of(Pressure)),
             _ => None,
         },
-        _ => None,
+        // A copy of a result in a coordinate system, e.g. DISP_CS_1, measures what the
+        // result does.
+        other => {
+            let (source, _) = other.split_once('_')?;
+            if !field_output::SYSTEM_FIELDS.contains(&source) {
+                return None;
+            }
+            field_measure(source, &component)
+        }
     }
 }
 
@@ -2020,6 +2123,67 @@ mod tests {
         }
     }
 
+    /// A field output with a coordinate system adds its displacements in that system to
+    /// the increments of its step only; renaming the system renames the copy.
+    #[test]
+    fn field_outputs_of_steps_show_results_in_their_system() {
+        let mut mesh = FeMesh::default();
+        for (id, x) in [(1, 0.0), (2, 1.0)] {
+            mesh.set_node(id, [x, 0.0, 0.0]);
+        }
+        let disp = [[1.0, 2.0, 3.0]; 2];
+        let increments = vec![
+            increment(1, 1, AnalysisKind::Static, &disp),
+            increment(2, 1, AnalysisKind::Static, &disp),
+        ];
+        let mut view = ResultsView::new(increments, None);
+        let mut fe = plx_model::FeModel::default();
+        let mut system = plx_model::CoordinateSystem::new("CS-1");
+        // x along global y, y along global -x.
+        system.set_points([0.0; 3], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]);
+        let id = system.id;
+        fe.coordinate_systems.push(system);
+        let mut first = plx_model::Step::new_static("Step-1");
+        first.field_outputs[0].system = Some(id);
+        let second = plx_model::Step::new_static("Step-2");
+        let records: Vec<_> = [&first, &second]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| plx_results::steps::StepRecord::new(&s.name, &s.kind, vec![i as u32 + 1]))
+            .collect();
+        fe.steps = vec![first, second];
+        view.set_step_records(&records, &[], None);
+        view.coordinate_systems = fe.coordinate_systems.clone();
+
+        let wanted = view.wanted_output_systems(&fe.steps, &fe.coordinate_systems);
+        let warnings = view.set_output_systems(wanted, &mesh);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let turned = view.increments[0]
+            .field("DISP_CS_1")
+            .expect("copy in step 1");
+        let u = |c: &str| turned.component(c).unwrap().values.clone();
+        assert_eq!(u("U1"), [2.0; 2]);
+        assert_eq!(u("U2"), [-1.0; 2]);
+        assert_eq!(u("U3"), [3.0; 2]);
+        // The global results stay; the second step has no system.
+        assert!(view.increments[0].field("DISP").is_some());
+        assert!(view.increments[1].field("DISP_CS_1").is_none());
+
+        fe.coordinate_systems[0].name = "Arm".into();
+        view.coordinate_systems = fe.coordinate_systems.clone();
+        let wanted = view.wanted_output_systems(&fe.steps, &fe.coordinate_systems);
+        assert_ne!(wanted, view.output_systems);
+        view.set_output_systems(wanted, &mesh);
+        assert!(view.increments[0].field("DISP_CS_1").is_none());
+        assert!(view.increments[0].field("DISP_Arm").is_some());
+
+        // Back to global: the copy goes.
+        fe.steps[0].field_outputs[0].system = None;
+        let wanted = view.wanted_output_systems(&fe.steps, &fe.coordinate_systems);
+        view.set_output_systems(wanted, &mesh);
+        assert!(view.increments[0].field("DISP_Arm").is_none());
+    }
+
     #[test]
     fn results_in_si_are_shown_in_the_model_units() {
         let mut mesh = FeMesh::default();
@@ -2185,6 +2349,7 @@ mod tests {
         let units = UnitSystem::MTonSC;
         assert_eq!(field_unit("STRESS", "MISES", units).as_deref(), Some("kPa"));
         assert_eq!(field_unit("FORC", "F1", units).as_deref(), Some("kN"));
+        assert_eq!(field_unit("FORC_CS_1", "F1", units).as_deref(), Some("kN"));
         assert_eq!(field_unit("ENER", "ENER", units).as_deref(), Some("kJ/m³"));
         assert_eq!(
             field_unit("CONTACT", "CPRESS", units).as_deref(),

@@ -97,6 +97,8 @@ fn the_profile_names_the_phases_and_the_reused_analyses() {
     std::fs::copy(source, work.join("p.inp")).unwrap();
     let output = Command::new(plxs())
         .args(["--profile", "p"])
+        // Each tangent factorized anew: a kept factor would leave nothing to reuse.
+        .env("PLXS_KEEP_FACTOR", "0")
         .current_dir(&work)
         .output()
         .unwrap();

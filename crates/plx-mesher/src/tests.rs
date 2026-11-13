@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use plx_model::{Algorithm2d, Algorithm3d, MeshSetupItem, MeshSetupKind, UnitSystem};
 
+use std::collections::BTreeSet;
+
 use super::*;
 
 // The tests read CAD files without a unit system, in millimetres as they were drawn, so that
@@ -501,6 +503,7 @@ fn rectangle(origin: [f64; 3], size: [f64; 2], radius: f64) -> Geometry {
     .unwrap();
     Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "rechteck.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
@@ -672,6 +675,7 @@ fn box_and_lines() -> Geometry {
     .unwrap();
     Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "rahmen.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
@@ -708,6 +712,7 @@ fn a_long_thin_round_bar_is_displayed_with_few_triangles() {
     .unwrap();
     let geometry = Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "stab.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::default(),
@@ -1106,6 +1111,7 @@ fn beam_on_block() -> Geometry {
     .unwrap();
     Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "balken.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(40.0),
@@ -1203,6 +1209,7 @@ fn detection_on_geometry_keeps_to_the_faces_that_touch() {
     .unwrap();
     let geometry = Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "bloecke.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(60.0),
@@ -1701,6 +1708,7 @@ fn revolved(origin: [f64; 3], size: [f64; 2], radius: f64, angle: f64) -> Geomet
     .unwrap();
     Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "ring.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
@@ -1873,6 +1881,7 @@ fn plate_and_cube(size: [f64; 3], cube_first: bool) -> Geometry {
     .unwrap();
     with_signatures(Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "platte.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
@@ -1957,6 +1966,7 @@ fn cube() -> Geometry {
     .unwrap();
     with_signatures(Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "wuerfel.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
@@ -2102,6 +2112,7 @@ fn corners_of_flat_faces_are_rounded_and_bevelled() {
     .unwrap();
     let input = with_signatures(Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "quadrate.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters {
@@ -2216,6 +2227,7 @@ fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
     .unwrap();
     let geometry = Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "seilrolle.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(400.0),
@@ -2360,6 +2372,7 @@ fn cut_block() -> Geometry {
         refinement: 1.0,
         signatures: Vec::new(),
         compounds: Vec::new(),
+        suppressed: Vec::new(),
     })
     .unwrap();
     geometry.compounds.push(plx_model::CompoundPart {
@@ -2558,6 +2571,68 @@ fn a_split_geometry_splits_again_with_parts_beside_the_plane() {
     assert!((solid_volume(&twice) - 2000.0).abs() < 1e-6);
     let parts: usize = twice.compounds.iter().map(|c| c.parts.len()).sum();
     assert_eq!(parts, 6);
+}
+
+/// A split of chosen parts leaves the others whole, even those the plane runs through or
+/// whose side is dropped.
+#[test]
+fn a_split_of_chosen_parts_leaves_the_others_whole() {
+    use plx_model::{CadOperationKind::SplitPlane, SplitKeep};
+    if !gmsh_available() {
+        return;
+    }
+    // Two cubes of 10 mm side by side along y; the plane x = 4 runs through both.
+    let input = with_signatures(Geometry {
+        compounds: Vec::new(),
+        ..made_geometry(|gmsh| {
+            gmsh.add_box([0.0; 3], [10.0; 3])?;
+            gmsh.add_box([0.0, 20.0, 0.0], [10.0; 3])?;
+            Ok(())
+        })
+    })
+    .unwrap();
+    let names = part_names(&input).unwrap();
+    assert_eq!(names.len(), 2);
+    let second = names[1].clone();
+    let operation = plx_model::CadOperation {
+        parts: vec![second.clone()],
+        ..split(SplitPlane, 4.0)
+    };
+    let once = apply_operation(&input, &operation, &[]).unwrap();
+    let mut after = part_names(&once).unwrap();
+    after.sort();
+    let mut expected = vec![
+        names[0].clone(),
+        format!("{second}-1"),
+        format!("{second}-2"),
+    ];
+    expected.sort();
+    assert_eq!(after, expected);
+    assert_eq!(once.compounds.len(), 1);
+    assert_eq!(once.compounds[0].name, second);
+    assert!((solid_volume(&once) - 2000.0).abs() < 1e-6);
+    // Dropping a side drops it of the chosen part only.
+    let positive = plx_model::CadOperation {
+        keep: SplitKeep::Positive,
+        ..operation.clone()
+    };
+    let kept = apply_operation(&input, &positive, &[]).unwrap();
+    assert_eq!(part_names(&kept).unwrap().len(), 2);
+    assert!((solid_volume(&kept) - 1600.0).abs() < 1e-6);
+    // A plane beside the chosen part cuts nothing, though it runs through the other one.
+    let beside = plx_model::CadOperation {
+        plane: plx_model::SplitPlane::Global(plx_model::CoordinatePlane::Xz),
+        parts: vec![second.clone()],
+        ..split(SplitPlane, 5.0)
+    };
+    let error = apply_operation(&input, &beside, &[]).unwrap_err();
+    assert!(error.to_string().contains("none of the parts"), "{error}");
+    // A part no longer there.
+    let gone = plx_model::CadOperation {
+        parts: vec!["nothing".into()],
+        ..split(SplitPlane, 4.0)
+    };
+    assert!(apply_operation(&input, &gone, &[]).is_err());
 }
 
 #[test]
@@ -3099,6 +3174,7 @@ fn rounded_plate() -> Geometry {
     .unwrap();
     let input = with_signatures(Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "platte.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::default(),
@@ -3242,6 +3318,7 @@ fn defeaturing_keeps_the_round_ends_of_slots_and_removes_pocket_corners() {
     .unwrap();
     let input = with_signatures(Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "schlitz.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::default(),
@@ -3335,6 +3412,7 @@ fn bracket() -> Geometry {
     .unwrap();
     with_signatures(Geometry {
         compounds: Vec::new(),
+        suppressed: Vec::new(),
         source: "winkel.brep".into(),
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::default(),
@@ -3495,8 +3573,12 @@ fn drawn_edges_run_through_the_nodes_of_the_face_triangulation() {
 /// The largest distance of a drawn edge segment's middle from its CAD curve, against the
 /// diagonal of the geometry.
 fn edge_stray(path: &Path) -> f64 {
-    let geometry = import_cad(path, UnitSystem::Unitless).unwrap().geometry;
-    let display = tessellate(&geometry).unwrap();
+    edge_stray_of(&import_cad(path, UnitSystem::Unitless).unwrap().geometry)
+}
+
+/// [`edge_stray`] of a geometry.
+fn edge_stray_of(geometry: &Geometry) -> f64 {
+    let display = tessellate(geometry).unwrap();
     let mesh = &display.mesh;
     let file = TempFile::with_contents("brep", &geometry.brep).unwrap();
     with_gmsh(|gmsh| {
@@ -3545,4 +3627,84 @@ fn drawn_edges_follow_their_curve() {
         stray < 1e-4,
         "Drawn edges stray {stray} of the diagonal from their curves"
     );
+}
+
+/// A split cuts with a box turned into the plane: turned, not mapped, so that no shape of
+/// the geometry becomes a spline. The splines OpenCASCADE made of the mapped box's faces
+/// came back coarser with every split, until a hole was drawn as a pentagon.
+#[test]
+fn splits_keep_planes_and_circles() {
+    use plx_model::{CadOperationKind::SplitPlane, CoordinatePlane, SplitPlane as Plane};
+    if !gmsh_available() {
+        return;
+    }
+    let kinds = |geometry: &Geometry| -> BTreeSet<String> {
+        (geometry.signatures.iter())
+            .filter(|s| s.entity.dim() > 0)
+            .map(|s| s.kind.clone())
+            .collect()
+    };
+    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless)
+        .unwrap()
+        .geometry;
+    let before = kinds(&geometry);
+    assert!(before.iter().any(|k| k == "Circle"), "{before:?}");
+    // Three times through the hole of 8 mm about (50, 20).
+    let across = plx_model::CadOperation {
+        plane: Plane::Global(CoordinatePlane::Xz),
+        ..split(SplitPlane, 18.0)
+    };
+    for operation in [split(SplitPlane, 50.0), across, split(SplitPlane, 53.0)] {
+        geometry = apply_operation(&geometry, &operation, &[]).unwrap();
+        let after = kinds(&geometry);
+        assert!(
+            after.is_subset(&before),
+            "{after:?} after a split of {before:?}"
+        );
+    }
+    assert!(edge_stray_of(&geometry) < 1e-4);
+}
+
+#[test]
+fn suppressed_parts_are_left_alone_by_splits_and_cad_operations() {
+    use plx_model::CadOperationKind::{Fillet, SplitPlane};
+    if !gmsh_available() {
+        return;
+    }
+    // Two cubes of 10 mm side by side along y; the plane x = 4 runs through both.
+    let mut input = with_signatures(made_geometry(|gmsh| {
+        gmsh.add_box([0.0; 3], [10.0; 3])?;
+        gmsh.add_box([0.0, 20.0, 0.0], [10.0; 3])?;
+        Ok(())
+    }))
+    .unwrap();
+    let names = part_names(&input).unwrap();
+    let (first, second) = (names[0].clone(), names[1].clone());
+    input.set_suppressed(std::slice::from_ref(&first), true);
+    // A split of all parts cuts the second only.
+    let once = apply_operation(&input, &split(SplitPlane, 4.0), &[]).unwrap();
+    let mut after = part_names(&once).unwrap();
+    after.sort();
+    let mut expected = vec![first.clone(), format!("{second}-1"), format!("{second}-2")];
+    expected.sort();
+    assert_eq!(after, expected);
+    assert!(once.is_suppressed(&first));
+    // Chosen, the suppressed part is not cut either.
+    let chosen = plx_model::CadOperation {
+        parts: vec![first.clone()],
+        ..split(SplitPlane, 4.0)
+    };
+    let error = apply_operation(&input, &chosen, &[]).unwrap_err();
+    assert!(error.to_string().contains("suppressed"), "{error}");
+    // An edge of the suppressed cube cannot be filleted, one of the other can.
+    let edge_in = |y: f64| {
+        (input.signatures.iter())
+            .find(|s| matches!(s.entity, CadEntity::Edge(_)) && (s.centroid[1] - y).abs() < 6.0)
+            .unwrap()
+            .entity
+    };
+    let fillet = |edge| apply_operation(&input, &split(Fillet, 1.0), &[edge]);
+    let error = fillet(edge_in(5.0)).unwrap_err();
+    assert!(error.to_string().contains("suppressed"), "{error}");
+    assert!(fillet(edge_in(25.0)).is_ok());
 }
