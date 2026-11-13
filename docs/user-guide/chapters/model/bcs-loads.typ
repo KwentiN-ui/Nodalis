@@ -27,7 +27,9 @@ plates (rotations).
   [Submodel], [Displacements taken from the global model (static steps; offered only when the model type in the
     model properties is #ui("Submodel"),
     @submodel). The check boxes select the displacements U1 to U3; the step of the global
-    results is the one linked to the #ui("Global results") row. The global results hold no
+    results is the one linked to the #ui("Global results") row. The dialog names that step,
+    its analysis and the field outputs that write its displacements, and shows in red when
+    nothing usable is linked (@submodel). The global results hold no
     rotations. Each node takes the displacement interpolated in the global element it lies
     in; a node a little outside the global mesh (a curved surface meshed differently) takes
     that of the nearest point of the global mesh, and the solver warns how many nodes do and

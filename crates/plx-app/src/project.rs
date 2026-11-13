@@ -7006,6 +7006,22 @@ impl ProjectApp {
         for link in self.links.iter().filter(|l| l.target == target) {
             let source = self.name_of(link.source);
             incoming.paths.extend(links::filled_paths(link, &source));
+            if links::ResultsUse::of(link) == Some(links::ResultsUse::Submodel)
+                && let (Some(step), Some(source_step)) =
+                    (links::target_step(link), link.item.get(1))
+            {
+                let node = self.nodes.iter().find(|n| n.id == link.source);
+                let writers = node
+                    .filter(|n| n.as_file().is_none())
+                    .and_then(Node::link_data)
+                    .and_then(|d| links::displacement_writers(d.fe, source_step));
+                incoming.global_sources.push(links::GlobalSource {
+                    step: step.to_owned(),
+                    source: source.clone(),
+                    source_step: source_step.clone(),
+                    writers,
+                });
+            }
             if links::is_state(link) {
                 (incoming.continuation.inherited_steps).extend(
                     link.inherited

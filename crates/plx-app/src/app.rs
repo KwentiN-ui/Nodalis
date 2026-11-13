@@ -5811,6 +5811,7 @@ impl Workbench {
             return;
         };
         editor.set_linked(crate::links::linked_parameters(&self.incoming.paths));
+        editor.set_global_sources(&self.incoming.global_sources);
         // A contact detection searches the geometry, if there is one to search; its derived
         // tolerance is worked out again only when the parts searched change.
         let picked: Vec<String> = (self.tree.selected_parts(TreeView::FeModel).into_iter())
