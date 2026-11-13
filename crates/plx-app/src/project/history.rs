@@ -30,6 +30,7 @@ struct Snapshot {
     links: Vec<Link>,
     frames: Vec<file::Frame>,
     compact: BTreeSet<u64>,
+    units: UnitSystem,
 }
 
 impl Snapshot {
@@ -39,6 +40,7 @@ impl Snapshot {
         self.links == other.links
             && self.frames == other.frames
             && self.compact == other.compact
+            && self.units == other.units
             && self.blocks.len() == other.blocks.len()
             && (self.blocks.iter().zip(&other.blocks)).all(|(a, b)| {
                 a.id == b.id
@@ -57,7 +59,7 @@ fn same_data(a: Option<&ProjectNode>, b: Option<&ProjectNode>) -> bool {
         (Some(ProjectNode::CrossSections(a)), Some(ProjectNode::CrossSections(b))) => a == b,
         // The mesh is made from the primitive.
         (Some(ProjectNode::Mesh(a)), Some(ProjectNode::Mesh(b))) => {
-            a.space == b.space && a.units == b.units && a.primitive == b.primitive
+            a.space == b.space && a.primitive == b.primitive
         }
         (Some(ProjectNode::RefineMesh(a)), Some(ProjectNode::RefineMesh(b))) => {
             a.factor == b.factor
@@ -66,9 +68,7 @@ fn same_data(a: Option<&ProjectNode>, b: Option<&ProjectNode>) -> bool {
             a.factor == b.factor && a.increment == b.increment
         }
         (Some(ProjectNode::Parameters(a)), Some(ProjectNode::Parameters(b))) => a == b,
-        (Some(ProjectNode::Measure(a)), Some(ProjectNode::Measure(b))) => {
-            a.units == b.units && a.kind == b.kind
-        }
+        (Some(ProjectNode::Measure(a)), Some(ProjectNode::Measure(b))) => a.kind == b.kind,
         (Some(ProjectNode::Study(a)), Some(ProjectNode::Study(b))) => a == b,
         (Some(ProjectNode::MeshExport(a)), Some(ProjectNode::MeshExport(b))) => a.path == b.path,
         (Some(ProjectNode::File(a)), Some(ProjectNode::File(b))) => {
@@ -185,6 +185,7 @@ impl ProjectApp {
             links: self.links.clone(),
             frames: self.frames.clone(),
             compact: self.compact.clone(),
+            units: self.units,
         }
     }
 
@@ -403,6 +404,10 @@ impl ProjectApp {
         self.links = before.links;
         self.frames = before.frames;
         self.compact = before.compact;
+        if self.units != before.units {
+            self.units = before.units;
+            self.apply_units(ctx);
+        }
         self.applied.clear();
         self.sync_due = true;
         self.history.positions = self.positions();

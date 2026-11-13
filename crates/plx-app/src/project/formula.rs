@@ -9,9 +9,8 @@ use plx_model::formula::{Expr, Function, MAX_INPUTS, input_index, input_letter};
 
 impl NumberBlock {
     /// A Formula block of `text` with the values of its inputs.
-    pub(super) fn formula(units: UnitSystem, text: String, values: Vec<f64>) -> Self {
+    pub(super) fn formula(text: String, values: Vec<f64>) -> Self {
         let mut block = Self {
-            units,
             kind: None,
             operands: [None; 2],
             operation: MathOp::default(),
@@ -302,14 +301,14 @@ pub(super) fn open_linked_inputs(number: &mut NumberBlock, id: u64, links: &[Lin
 }
 
 /// The text of the result of a Formula block, for messages: its kind and unit.
-fn result_text(number: &NumberBlock) -> String {
+fn result_text(number: &NumberBlock, units: UnitSystem) -> String {
     if let Some(problem) = number.formula_problem() {
         return format!("No result: {problem}.");
     }
     let value = match (number.formula_series(), number.formula_number()) {
-        (Some(Ok(series)), _) => super::series::shown_series(&series, number.kind, number.units),
+        (Some(Ok(series)), _) => super::series::shown_series(&series, number.kind, units),
         (Some(Err(why)), _) => return format!("No result: {why}."),
-        (None, Some(value)) => numbers::shown_number(value, number.kind, number.units),
+        (None, Some(value)) => numbers::shown_number(value, number.kind, units),
         (None, None) if number.kind.is_none() => {
             return "No result yet: an input has no kind of number yet.".into();
         }
@@ -336,6 +335,8 @@ pub(super) struct FormulaEditor {
     draft: String,
     /// The block as it is, to try the draft on.
     block: NumberBlock,
+    /// The unit system of the project, which values are shown in.
+    units: UnitSystem,
     /// Where each input comes from, by index.
     sources: Vec<Option<String>>,
     focus: bool,
@@ -378,7 +379,7 @@ impl FormulaEditor {
                     edit.request_focus();
                     self.focus = false;
                 }
-                let text = result_text(&tried);
+                let text = result_text(&tried, self.units);
                 if text.starts_with("No result") {
                     ui.colored_label(crate::style::error(), text);
                 } else {
@@ -408,7 +409,7 @@ impl FormulaEditor {
                                 (Some(s), None) => format!("Series of {} values", s.len()),
                                 (None, Some(kind)) => format!(
                                     "{}, {}",
-                                    numbers::shown_number(value, Some(kind), self.block.units),
+                                    numbers::shown_number(value, Some(kind), self.units),
                                     describe_kind(kind)
                                 ),
                                 (None, None) => "No kind of number yet".into(),
@@ -485,7 +486,7 @@ impl ProjectApp {
     pub(super) fn add_formula(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
         let name = block_name("Formula");
-        let block = NumberBlock::formula(self.settings.new_model.units, String::new(), Vec::new());
+        let block = NumberBlock::formula(String::new(), Vec::new());
         self.nodes
             .push(Node::new(id, name.clone(), Block::Formula(block)));
         self.graph.insert_node(position, id);
@@ -570,6 +571,7 @@ impl ProjectApp {
             name: node.name.clone(),
             draft: number.formula_text().to_owned(),
             block: number.clone(),
+            units: self.units,
             sources,
             focus: true,
         });
@@ -830,10 +832,10 @@ mod tests {
     #[test]
     fn a_wire_on_the_empty_pin_adds_the_next_letter() {
         let node = formula(1, "", 0);
-        let rows = numbers::number_rows(&node, &[]);
+        let rows = numbers::number_rows(&node, &[], UnitSystem::default());
         assert!(rows.iter().any(|r| r.path == path(&["Parameters", "+"])));
         let mut node = formula(1, "a + b", 2);
-        let rows = numbers::number_rows(&node, &[]);
+        let rows = numbers::number_rows(&node, &[], UnitSystem::default());
         let inputs: Vec<&str> = (rows.iter())
             .filter(|r| r.input && r.path.len() == 2 && r.path[1] != "+")
             .map(|r| r.text.as_str())

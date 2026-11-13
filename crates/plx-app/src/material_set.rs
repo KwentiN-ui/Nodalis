@@ -219,24 +219,6 @@ impl MaterialSetEditor {
 
     fn body(&mut self, ui: &mut egui::Ui) -> MaterialSetResult {
         let mut result = MaterialSetResult::Open;
-        ui.horizontal(|ui| {
-            ui.label("Shown in");
-            let units = &mut self.model.fe.properties.units;
-            egui::ComboBox::from_id_salt("material set units")
-                .selected_text(units.label())
-                .width(220.0)
-                .show_ui(ui, |ui| {
-                    for choice in UnitSystem::ALL {
-                        ui.selectable_value(units, choice, choice.label());
-                    }
-                });
-        })
-        .response
-        .on_hover_text(
-            "The unit system the values are shown and typed in; they are stored in SI units, \
-             and every analysis that links them shows them in its own.",
-        );
-        ui.add_space(4.0);
         ui.horizontal_top(|ui| {
             crate::tree_rows::frame().show(ui, |ui| {
                 ui.set_min_size(egui::vec2(220.0, 240.0));

@@ -54,6 +54,7 @@ mod saving;
 mod series;
 mod study_worker;
 mod transform;
+mod units;
 mod unsaved;
 mod visualize;
 mod workspace;
@@ -200,7 +201,6 @@ enum Block {
 /// a Switch block are its index and then its choices.
 #[derive(Clone)]
 struct NumberBlock {
-    units: UnitSystem,
     /// `None` until a link gives it the kind of the other end. Of a product or quotient,
     /// the kind of its result.
     kind: Option<ValueKind>,
@@ -459,11 +459,9 @@ impl ModelMut<'_> {
     }
 }
 
-/// A materials or cross-sections block: its items, in the setup of a model, and the units
-/// they are shown in.
+/// A materials or cross-sections block: its items, in the setup of a model.
 struct CollectionBlock {
     model: LinkedModel,
-    units: UnitSystem,
 }
 
 /// A mesh block: what it meshes, the mesh it made and the fingerprint of what that was made
@@ -471,7 +469,6 @@ struct CollectionBlock {
 struct MeshBlock {
     model: LinkedModel,
     space: ModelSpace,
-    units: UnitSystem,
     primitive: MeshPrimitive,
     generated: Option<u64>,
 }
@@ -548,7 +545,6 @@ impl RefineBlock {
 
 /// A parameters block: its numbers.
 struct ParametersBlock {
-    units: UnitSystem,
     parameters: Vec<Parameter>,
 }
 
@@ -556,7 +552,6 @@ struct ParametersBlock {
 /// results and the definition it was computed from, see [`ProjectApp::measure_key`].
 #[derive(Default)]
 struct MeasureBlock {
-    units: UnitSystem,
     kind: MeasureKind,
     value: Option<f64>,
     evaluated: Option<u64>,
@@ -570,7 +565,6 @@ struct MeasureBlock {
 /// A parameter study: its table, the fingerprint of the blocks it runs as they are now, see
 /// [`ProjectApp::study_body_key`], and the point being solved while it runs.
 struct StudyBlock {
-    units: UnitSystem,
     table: StudyTable,
     body: Option<u64>,
     active: Option<usize>,
@@ -777,7 +771,6 @@ impl Node {
         id: u64,
         name: String,
         space: ModelSpace,
-        units: UnitSystem,
         primitive: MeshPrimitive,
         mesh: plx_mesh::FeMesh,
         generated: Option<u64>,
@@ -790,7 +783,6 @@ impl Node {
         let block = MeshBlock {
             model,
             space,
-            units,
             primitive,
             generated,
         };
@@ -1176,34 +1168,6 @@ impl Node {
         }
     }
 
-    /// The unit system the block shows its values in; an analysis' is that of its model.
-    fn units(&self) -> UnitSystem {
-        match &self.block {
-            Block::Analysis(_) => {
-                (self.link_data()).map_or_else(UnitSystem::default, |d| d.fe.properties.units)
-            }
-            Block::Materials(m) | Block::CrossSections(m) => m.units,
-            Block::Mesh(m) => m.units,
-            Block::Parameters(p) => p.units,
-            Block::Measure(m) => m.units,
-            Block::Study(s) => s.units,
-            Block::File(f) => f.units,
-            Block::Math(n) | Block::Switch(n) | Block::Formula(n) => n.units,
-            Block::Plot(p) => p.units,
-            Block::CadOperation(c) => c.units,
-            Block::Transform(t) => t.units,
-            Block::Preview(_)
-            | Block::MeshExport(_)
-            | Block::Campbell(_)
-            | Block::RefineMesh(_)
-            | Block::DeformedMesh(_)
-            | Block::Note(_)
-            | Block::Group(_)
-            | Block::GroupInput
-            | Block::GroupOutput => UnitSystem::default(),
-        }
-    }
-
     /// Fingerprint of the mesh a mesh export block holds and the path it writes to; `None`
     /// while no mesh is linked to it.
     fn export_print(&self) -> Option<u64> {
@@ -1328,20 +1292,14 @@ impl Node {
                 let mut model = LinkedModel::default();
                 model.fe.materials = set.materials;
                 model.fe.exposed = set.exposed;
-                let block = CollectionBlock {
-                    model,
-                    units: set.units,
-                };
+                let block = CollectionBlock { model };
                 Self::new(set.id, set.name, Block::Materials(Box::new(block)))
             }
             ProjectNode::CrossSections(set) => {
                 let mut model = LinkedModel::default();
                 model.fe.cross_sections = set.cross_sections;
                 model.fe.exposed = set.exposed;
-                let block = CollectionBlock {
-                    model,
-                    units: set.units,
-                };
+                let block = CollectionBlock { model };
                 Self::new(set.id, set.name, Block::CrossSections(Box::new(block)))
             }
             ProjectNode::Mesh(block) => {
@@ -1350,7 +1308,6 @@ impl Node {
                     block.id,
                     block.name,
                     block.space,
-                    block.units,
                     block.primitive,
                     block.mesh,
                     block.generated,
@@ -1372,24 +1329,21 @@ impl Node {
             }
             ProjectNode::CadOperation(block) => {
                 let block = *block;
-                let cad =
-                    CadBlock::new(block.operation, block.units, block.result, block.made_from);
+                let cad = CadBlock::new(block.operation, block.result, block.made_from);
                 Self::new(block.id, block.name, Block::CadOperation(Box::new(cad)))
             }
             ProjectNode::Transform(block) => {
-                let transform = TransformBlock::new(block.transform, block.units);
+                let transform = TransformBlock::new(block.transform);
                 Self::new(block.id, block.name, Block::Transform(Box::new(transform)))
             }
             ProjectNode::Parameters(set) => {
                 let block = ParametersBlock {
-                    units: set.units,
                     parameters: set.parameters,
                 };
                 Self::new(set.id, set.name, Block::Parameters(block))
             }
             ProjectNode::Measure(block) => {
                 let measure = MeasureBlock {
-                    units: block.units,
                     kind: block.kind,
                     value: block.value,
                     evaluated: block.evaluated,
@@ -1401,7 +1355,6 @@ impl Node {
             }
             ProjectNode::Study(block) => {
                 let study = StudyBlock {
-                    units: block.units,
                     table: block.table,
                     body: None,
                     active: None,
@@ -1424,7 +1377,6 @@ impl Node {
             ProjectNode::Note(note) => Self::new(note.id, note.name, Block::Note(note.text)),
             ProjectNode::Math(math) => {
                 let block = NumberBlock {
-                    units: math.units,
                     kind: math.kind,
                     operands: math.operands,
                     operation: math.operation,
@@ -1435,14 +1387,13 @@ impl Node {
                 Self::new(math.id, math.name, Block::Math(block))
             }
             ProjectNode::Formula(formula) => {
-                let block = NumberBlock::formula(formula.units, formula.formula, formula.values);
+                let block = NumberBlock::formula(formula.formula, formula.values);
                 Self::new(formula.id, formula.name, Block::Formula(block))
             }
             ProjectNode::Switch(switch) => {
                 let mut values = vec![switch.index];
                 values.extend(switch.choices);
                 let block = NumberBlock {
-                    units: switch.units,
                     kind: switch.kind,
                     operands: [None; 2],
                     operation: MathOp::default(),
@@ -1455,7 +1406,7 @@ impl Node {
             ProjectNode::Plot(plot) => Self::new(
                 plot.id,
                 plot.name,
-                Block::Plot(PlotBlock::new(plot.units, plot.kind, plot.bins)),
+                Block::Plot(PlotBlock::new(plot.kind, plot.bins)),
             ),
             ProjectNode::Preview(preview) => {
                 Self::new(preview.id, preview.name, Block::Preview(Box::default()))
@@ -1487,7 +1438,6 @@ impl Node {
                 id,
                 name,
                 position,
-                units: m.units,
                 materials: m.model.fe.materials.clone(),
                 exposed: m.model.fe.exposed.clone(),
             }),
@@ -1495,7 +1445,6 @@ impl Node {
                 id,
                 name,
                 position,
-                units: m.units,
                 cross_sections: m.model.fe.cross_sections.clone(),
                 exposed: m.model.fe.exposed.clone(),
             }),
@@ -1504,7 +1453,6 @@ impl Node {
                 name,
                 position,
                 space: m.space,
-                units: m.units,
                 primitive: m.primitive.clone(),
                 mesh: m.model.mesh.clone(),
                 generated: m.generated,
@@ -1531,7 +1479,6 @@ impl Node {
                     id,
                     name,
                     position,
-                    units: c.units,
                     operation: c.operation.clone(),
                     result: c.model.geometry.clone(),
                     made_from: c.made_from,
@@ -1541,21 +1488,18 @@ impl Node {
                 id,
                 name,
                 position,
-                units: t.units,
                 transform: t.transform,
             }),
             Block::Parameters(p) => ProjectNode::Parameters(file::ParameterSet {
                 id,
                 name,
                 position,
-                units: p.units,
                 parameters: p.parameters.clone(),
             }),
             Block::Measure(m) => ProjectNode::Measure(file::MeasureBlock {
                 id,
                 name,
                 position,
-                units: m.units,
                 kind: m.kind.clone(),
                 value: m.value,
                 evaluated: m.evaluated,
@@ -1566,7 +1510,6 @@ impl Node {
                 id,
                 name,
                 position,
-                units: s.units,
                 table: s.table.clone(),
             }),
             // It keeps no mesh: the link brings it again.
@@ -1609,7 +1552,6 @@ impl Node {
                 id,
                 name,
                 position,
-                units: math.units,
                 operation: math.operation,
                 kind: math.kind,
                 operands: math.operands,
@@ -1619,7 +1561,6 @@ impl Node {
                 id,
                 name,
                 position,
-                units: switch.units,
                 kind: switch.kind,
                 index: switch.values.first().copied().unwrap_or(1.0),
                 choices: switch.values.get(1..).unwrap_or_default().to_vec(),
@@ -1628,7 +1569,6 @@ impl Node {
                 id,
                 name,
                 position,
-                units: formula.units,
                 formula: formula.formula_text().to_owned(),
                 values: formula.values.clone(),
             }),
@@ -1636,7 +1576,6 @@ impl Node {
                 id,
                 name,
                 position,
-                units: plot.units,
                 kind: plot.kind,
                 bins: plot.bins,
             }),
@@ -1669,18 +1608,12 @@ impl Node {
             Block::Materials(m) => {
                 let mut model = LinkedModel::default();
                 model.fe.materials = m.model.fe.materials.clone();
-                Block::Materials(Box::new(CollectionBlock {
-                    model,
-                    units: m.units,
-                }))
+                Block::Materials(Box::new(CollectionBlock { model }))
             }
             Block::CrossSections(m) => {
                 let mut model = LinkedModel::default();
                 model.fe.cross_sections = m.model.fe.cross_sections.clone();
-                Block::CrossSections(Box::new(CollectionBlock {
-                    model,
-                    units: m.units,
-                }))
+                Block::CrossSections(Box::new(CollectionBlock { model }))
             }
             Block::Mesh(m) => {
                 let mut model = LinkedModel {
@@ -1691,7 +1624,6 @@ impl Node {
                 Block::Mesh(Box::new(MeshBlock {
                     model,
                     space: m.space,
-                    units: m.units,
                     primitive: m.primitive.clone(),
                     generated: m.generated,
                 }))
@@ -1708,21 +1640,14 @@ impl Node {
             Block::DeformedMesh(d) => {
                 Block::DeformedMesh(Box::new(DeformedBlock::new(d.factor, d.increment)))
             }
-            Block::CadOperation(c) => Block::CadOperation(Box::new(CadBlock::new(
-                c.operation.clone(),
-                c.units,
-                None,
-                None,
-            ))),
-            Block::Transform(t) => {
-                Block::Transform(Box::new(TransformBlock::new(t.transform, t.units)))
+            Block::CadOperation(c) => {
+                Block::CadOperation(Box::new(CadBlock::new(c.operation.clone(), None, None)))
             }
+            Block::Transform(t) => Block::Transform(Box::new(TransformBlock::new(t.transform))),
             Block::Parameters(p) => Block::Parameters(ParametersBlock {
-                units: p.units,
                 parameters: p.parameters.clone(),
             }),
             Block::Measure(m) => Block::Measure(MeasureBlock {
-                units: m.units,
                 kind: m.kind.clone(),
                 ..MeasureBlock::default()
             }),
@@ -1730,7 +1655,6 @@ impl Node {
                 let mut table = s.table.clone();
                 table.reset();
                 Block::Study(Box::new(StudyBlock {
-                    units: s.units,
                     table,
                     body: None,
                     active: None,
@@ -1759,7 +1683,7 @@ impl Node {
             Block::Math(math) => Block::Math(math.clone()),
             Block::Switch(switch) => Block::Switch(switch.clone()),
             Block::Formula(formula) => Block::Formula(formula.clone()),
-            Block::Plot(plot) => Block::Plot(PlotBlock::new(plot.units, plot.kind, plot.bins)),
+            Block::Plot(plot) => Block::Plot(PlotBlock::new(plot.kind, plot.bins)),
             Block::Preview(_) => Block::Preview(Box::default()),
             // A group is copied with its blocks, see [`ProjectApp::duplicate_group`].
             Block::Group(_) | Block::GroupInput | Block::GroupOutput => return None,
@@ -2225,6 +2149,9 @@ pub struct ProjectApp {
     frames: Vec<file::Frame>,
     /// The blocks shown compact.
     compact: BTreeSet<u64>,
+    /// The unit system the schematic shows and takes values in, chosen at its bottom right.
+    /// Values are stored in SI units whatever it is.
+    units: UnitSystem,
     /// The size each block was drawn at in the last frame, in the schematic.
     block_sizes: HashMap<u64, egui::Vec2>,
     /// The blocks selected in the schematic.
@@ -2385,6 +2312,7 @@ impl ProjectApp {
         crate::results::set_significant_digits(settings.post.digits);
         crate::style::set_theme(&cc.egui_ctx, settings.graphics.theme);
         plx_mesher::set_library_path(settings.gmsh.library());
+        let units = settings.new_model.units;
         let mut app = Self {
             render_state,
             settings,
@@ -2401,6 +2329,7 @@ impl ProjectApp {
             toast: None,
             frames: Vec::new(),
             compact: BTreeSet::new(),
+            units,
             block_sizes: HashMap::new(),
             selected: Vec::new(),
             frame_label: None,
@@ -2515,7 +2444,10 @@ impl ProjectApp {
             name: name.clone(),
             ..Default::default()
         };
-        data.model.properties = properties;
+        data.model.properties = ModelProperties {
+            units: self.units,
+            ..properties
+        };
         self.nodes.push(Node::analysis(id, name, data));
         self.graph.insert_node(position, id);
         id
@@ -2532,7 +2464,6 @@ impl ProjectApp {
         let name = block_name(collection.title());
         let block = Box::new(CollectionBlock {
             model: LinkedModel::default(),
-            units: self.settings.new_model.units,
         });
         let block = match collection {
             Collection::Materials => Block::Materials(block),
@@ -2558,9 +2489,8 @@ impl ProjectApp {
                 space => space,
             },
         };
-        let units = self.settings.new_model.units;
         let mesh = Default::default();
-        let mut node = Node::mesh_block(id, name.clone(), space, units, primitive, mesh, None);
+        let mut node = Node::mesh_block(id, name.clone(), space, primitive, mesh, None);
         let made = node.generate();
         self.nodes.push(node);
         self.graph.insert_node(position, id);
@@ -2580,7 +2510,7 @@ impl ProjectApp {
     fn add_cad_operation(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
         let name = block_name("CAD Operation");
-        let cad = CadBlock::new(Default::default(), UnitSystem::default(), None, None);
+        let cad = CadBlock::new(Default::default(), None, None);
         self.nodes.push(Node::new(
             id,
             name.clone(),
@@ -2617,7 +2547,6 @@ impl ProjectApp {
         let id = self.next_id();
         let name = block_name("Parameters");
         let block = ParametersBlock {
-            units: self.settings.new_model.units,
             parameters: vec![Parameter::new("Length", ValueKind::LENGTH, 0.1)],
         };
         self.nodes
@@ -2654,7 +2583,7 @@ impl ProjectApp {
             id,
             &node.name,
             &block.parameters,
-            block.units,
+            self.units,
         ));
     }
 
@@ -2666,7 +2595,7 @@ impl ProjectApp {
         match editor.show(ctx) {
             ParameterSetResult::Open => {}
             ParameterSetResult::Cancel => self.parameter_set = None,
-            ParameterSetResult::Ok(rows, units) => {
+            ParameterSetResult::Ok(rows) => {
                 self.checkpoint(&[]);
                 self.parameter_set = None;
                 // Links follow a renamed parameter; those of a removed one go.
@@ -2690,7 +2619,6 @@ impl ProjectApp {
                 });
                 if let Some(block) = self.node(id).and_then(Node::as_parameters_mut) {
                     block.parameters = rows.into_iter().map(|(_, p)| p).collect();
-                    block.units = units;
                 }
                 self.sync_due = true;
             }
@@ -2702,7 +2630,6 @@ impl ProjectApp {
         let id = self.next_id();
         let name = block_name("Measure");
         let block = MeasureBlock {
-            units: self.settings.new_model.units,
             ..MeasureBlock::default()
         };
         self.nodes
@@ -2723,7 +2650,6 @@ impl ProjectApp {
         let Some(measure) = node.as_measure() else {
             return;
         };
-        let units = measure.units;
         let node_sets = self
             .measure_link(id)
             .and_then(|l| self.nodes.iter().find(|n| n.id == l.source))
@@ -2738,7 +2664,6 @@ impl ProjectApp {
             id,
             &node.name,
             measure.kind.clone(),
-            units,
             node_sets,
             offered,
         ));
@@ -2771,13 +2696,12 @@ impl ProjectApp {
         match editor.show(ctx) {
             MeasureEditorResult::Open => {}
             MeasureEditorResult::Cancel => self.measure_editor = None,
-            MeasureEditorResult::Ok(kind, units) => {
+            MeasureEditorResult::Ok(kind) => {
                 self.checkpoint(&[]);
                 self.measure_editor = None;
                 let at_point = kind.point().is_some();
                 if let Some(measure) = self.node(id).and_then(Node::as_measure_mut) {
                     measure.kind = kind;
-                    measure.units = units;
                 }
                 // Without a point the block has no coordinate rows to link to, and without a
                 // whole history no times.
@@ -2871,6 +2795,7 @@ impl ProjectApp {
                 })
                 .collect();
         let came = !done.is_empty();
+        let units = self.units;
         for (id, key, result) in done {
             self.measuring.remove(&id);
             let Some(node) = self.node(id) else {
@@ -2880,7 +2805,6 @@ impl ProjectApp {
             let Some(measure) = node.as_measure_mut() else {
                 continue;
             };
-            let units = measure.units;
             measure.evaluated = Some(key);
             let line = match result {
                 Ok(measured) => {
@@ -2929,9 +2853,10 @@ impl ProjectApp {
             let Some((source, step, bound)) = self.measured(id) else {
                 continue;
             };
-            let Some((kind, units)) = (self.nodes.iter().find(|n| n.id == id))
+            let units = self.units;
+            let Some(kind) = (self.nodes.iter().find(|n| n.id == id))
                 .and_then(Node::as_measure)
-                .map(|m| (m.kind.clone(), m.units))
+                .map(|m| m.kind.clone())
             else {
                 continue;
             };
@@ -2956,7 +2881,6 @@ impl ProjectApp {
         let id = self.next_id();
         let name = block_name("Parameter Study");
         let block = StudyBlock {
-            units: self.settings.new_model.units,
             table: StudyTable::default(),
             body: None,
             active: None,
@@ -3018,7 +2942,6 @@ impl ProjectApp {
         };
         let table = &mut study.table;
         match edit {
-            StudyEdit::Units(units) => study.units = units,
             StudyEdit::SetInput {
                 point,
                 column,
@@ -3105,7 +3028,7 @@ impl ProjectApp {
         let table = &study.table;
         let running = self.looping.as_ref().is_some_and(|run| run.id == id);
         StudyView {
-            units: study.units,
+            units: self.units,
             inputs: (table.inputs.iter())
                 .map(|c| (c.name.clone(), c.kind))
                 .collect(),
@@ -3173,7 +3096,7 @@ impl ProjectApp {
         match source {
             Some((node, _)) if node.as_measure().is_some() => {
                 let measure = node.as_measure().expect("a measure");
-                let units = measure.units;
+                let units = self.units;
                 match measure.kind.field() {
                     ("FREQ", _) => quantity(plx_model::Quantity::Frequency, units),
                     (field, component) => (
@@ -3184,7 +3107,7 @@ impl ProjectApp {
             }
             Some((node, link)) => {
                 match value_kind(&self.nodes, node.id, &link.item).and_then(ValueKind::quantity) {
-                    Some(q) => quantity(q, node.units()),
+                    Some(q) => quantity(q, self.units),
                     None => (value, String::new()),
                 }
             }
@@ -3492,7 +3415,7 @@ impl ProjectApp {
             let value =
                 (current.and_then(|p| p.inputs.get(i).copied())).map_or_else(String::new, |v| {
                     match column.kind {
-                        Some(kind) => format!("  {}", crate::study::shown(kind, v, study.units)),
+                        Some(kind) => format!("  {}", crate::study::shown(kind, v, self.units)),
                         None => format!("  {}", crate::results::format_value(v as f32)),
                     }
                 });
@@ -4014,7 +3937,7 @@ impl ProjectApp {
     fn add_file(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
         let name = block_name("File");
-        let units = self.settings.new_model.units;
+        let units = self.units;
         self.nodes.push(Node::file_block(
             id,
             name.clone(),
@@ -4693,7 +4616,7 @@ impl ProjectApp {
             &node.name,
             mesh.primitive.clone(),
             mesh.space,
-            mesh.units,
+            self.units,
             linked,
         ));
     }
@@ -4722,7 +4645,7 @@ impl ProjectApp {
             &node.name,
             input,
             &cad.operation,
-            cad.units,
+            self.units,
             length_linked,
         ));
     }
@@ -4775,14 +4698,13 @@ impl ProjectApp {
         match editor.show(ctx) {
             MeshBlockResult::Open => {}
             MeshBlockResult::Cancel => self.mesh_block = None,
-            MeshBlockResult::Ok(primitive, space, units) => {
+            MeshBlockResult::Ok(primitive, space) => {
                 self.checkpoint(&[]);
                 self.mesh_block = None;
                 if let Some(node) = self.node(id) {
                     if let Some(mesh) = node.as_mesh_mut() {
                         mesh.primitive = primitive;
                         mesh.space = space;
-                        mesh.units = units;
                     }
                     if node.mesh_state() == CellState::OutOfDate {
                         let line = format!(
@@ -4820,7 +4742,7 @@ impl ProjectApp {
             &node.name,
             collection,
             &block.model.fe,
-            block.units,
+            self.units,
             analyses,
             links::linked_parameters(&linked),
         ));
@@ -4844,7 +4766,6 @@ impl ProjectApp {
                 {
                     collection.take(&mut block.model.fe, &edited);
                     block.model.fe.exposed = edited.exposed;
-                    block.units = edited.properties.units;
                 }
 
                 // The analyses that link them take them now.
@@ -5045,6 +4966,7 @@ impl ProjectApp {
         self.links.clear();
         self.frames.clear();
         self.compact.clear();
+        self.units = self.settings.new_model.units;
         self.level.clear();
         self.frame_label = None;
         self.applied.clear();
@@ -5140,6 +5062,7 @@ impl ProjectApp {
                 self.links = project.links;
                 self.frames = project.frames;
                 self.compact = project.compact.into_iter().collect();
+                self.units = project.units;
                 self.frame_label = None;
                 self.applied.clear();
                 self.restoring.clear();
@@ -5197,6 +5120,7 @@ impl ProjectApp {
             links: self.links.clone(),
             frames: self.frames.clone(),
             compact: self.compact.iter().copied().collect(),
+            units: self.units,
             format: plx_model::PROJECT_FORMAT,
         }
     }
@@ -6124,6 +6048,7 @@ impl ProjectApp {
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
                         self.measure_state(n.id),
                         self.measuring.contains_key(&n.id),
+                        self.units,
                     ),
                     (Kind::RefineMesh, _) => {
                         refine_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
@@ -6133,9 +6058,7 @@ impl ProjectApp {
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
                         n.as_deformed()
                             .map_or(CellState::Missing, DeformedBlock::state),
-                        (deformed::deformed_link(&self.links, n.id))
-                            .and_then(|l| self.nodes.iter().find(|s| s.id == l.source))
-                            .map_or_else(UnitSystem::default, Node::units),
+                        self.units,
                     ),
                     (Kind::CadOperation, _) => {
                         cad::cad_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
@@ -6143,6 +6066,7 @@ impl ProjectApp {
                     (Kind::Transform, _) => transform::transform_rows(
                         n,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
+                        self.units,
                     ),
                     (Kind::Analysis, Some(status)) => block_rows(
                         status,
@@ -6152,9 +6076,11 @@ impl ProjectApp {
                         bundles.get(&n.id).map_or(&[][..], Vec::as_slice),
                         continuations.get(&n.id),
                     ),
-                    (Kind::Math | Kind::Switch | Kind::Formula, _) => {
-                        numbers::number_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
-                    }
+                    (Kind::Math | Kind::Switch | Kind::Formula, _) => numbers::number_rows(
+                        n,
+                        incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
+                        self.units,
+                    ),
                     (Kind::Plot, _) => {
                         visualize::plot_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
                     }
@@ -6201,7 +6127,6 @@ impl ProjectApp {
                     point: n.as_measure().and_then(|m| m.kind.point()),
                     parameters: (n.as_parameters()).map_or_else(Vec::new, |p| p.parameters.clone()),
                     exposed: n.exposing_fe().map_or_else(Vec::new, ExposedView::of),
-                    units: n.units(),
                     note: match &n.block {
                         Block::Note(text) => text.clone(),
                         _ => String::new(),
@@ -6246,6 +6171,7 @@ impl ProjectApp {
         self.sync_wires(&blocks);
         let verdicts = self.drag_verdicts(ui.ctx(), &blocks);
         let mut viewer = Viewer {
+            units: self.units,
             drag: self.dragging.clone(),
             verdicts,
             nodes: blocks,
@@ -8318,12 +8244,13 @@ impl ProjectApp {
         }
     }
 
-    /// Asks for the model space, unit system and type of a new analysis, whose block goes
-    /// to `position`; the last choice is proposed.
+    /// Asks for the model space and type of a new analysis, whose block goes to `position`;
+    /// the last choice is proposed. Its unit system is that of the project.
     fn ask_new_analysis(&mut self, position: egui::Pos2) {
         let properties = ModelProperties {
             kind: plx_model::ModelKind::General,
             global_results: None,
+            units: self.units,
             ..self.settings.new_model.clone()
         };
         self.new_analysis = Some((position, ModelPropertiesDialog::create(properties)));
@@ -8685,6 +8612,7 @@ impl eframe::App for ProjectApp {
         self.settings_window(&ctx);
         self.unsaved_window(&ctx);
         self.updater.show(&ctx, &mut self.output);
+        self.keep_units();
         self.sync_links(&ctx);
         if self.update_after_sync && !self.sync_due {
             self.update_after_sync = false;
@@ -8732,17 +8660,26 @@ impl ProjectApp {
                     }
                 }
                 ui.separator();
-                if let Some((path, _)) = &self.opening {
-                    ui.spinner();
-                    ui.label(format!("Opening {} …", path.display()));
-                } else if let Some(status) = crate::save_status::get(&ctx) {
-                    ui.spinner();
-                    ui.label(status);
-                } else {
-                    let file = (self.path.as_ref())
-                        .map_or_else(|| "not saved yet".into(), |p| p.display().to_string());
-                    ui.label(format!("Project: {file}"));
-                }
+                // The unit system at the right end, the state of the project file before it.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.units_menu(ui);
+                    ui.separator();
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        if let Some((path, _)) = &self.opening {
+                            ui.spinner();
+                            ui.label(format!("Opening {} …", path.display()));
+                        } else if let Some(status) = crate::save_status::get(&ctx) {
+                            ui.spinner();
+                            ui.label(status);
+                        } else {
+                            let file = (self.path.as_ref()).map_or_else(
+                                || "not saved yet".into(),
+                                |p| p.display().to_string(),
+                            );
+                            ui.label(format!("Project: {file}"));
+                        }
+                    });
+                });
             });
         });
         let pane = egui::Frame::new()
@@ -8912,7 +8849,6 @@ struct BlockView {
     parameters: Vec<Parameter>,
     /// The exposed parameters of an analysis or a materials block.
     exposed: Vec<ExposedView>,
-    units: UnitSystem,
     /// What a mesh export block writes to.
     export_path: String,
     /// Of a file block, whether its file is kept in the project, or being taken in.
@@ -10692,11 +10628,11 @@ fn measure_rows(
     incoming: &[(Vec<String>, String)],
     state: CellState,
     busy: bool,
+    units: UnitSystem,
 ) -> Vec<Row> {
     let Some(measure) = node.as_measure() else {
         return Vec::new();
     };
-    let units = measure.units;
     let row = |path: &[&str], text: String, icon, tip: String| Row {
         path: path.iter().map(|p| p.to_string()).collect(),
         text,
@@ -11286,6 +11222,8 @@ fn header_fill(kind: Kind) -> Option<egui::Color32> {
 
 struct Viewer {
     nodes: Vec<BlockView>,
+    /// The unit system of the project, which the fields show and take values in.
+    units: UnitSystem,
     actions: Vec<Action>,
     /// From the schematic to the screen.
     to_global: egui::emath::TSTransform,
@@ -11467,7 +11405,7 @@ impl Viewer {
             }
             return;
         }
-        let (units, space, refinement) = (block.units, block.space, block.refinement);
+        let (space, refinement) = (block.space, block.refinement);
         let cad_length = block.cad_length;
         let transform = block.transform;
         let deform = block.deform;
@@ -11615,8 +11553,7 @@ impl Viewer {
                     return;
                 };
                 let before = value;
-                let drag = crate::parameter_set::field(&mut value, kind, units);
-                number_field(&mut ui, field, row, drag, &tip);
+                self.value_field(&mut ui, field, row, &mut value, kind, &tip);
                 if value != before {
                     self.actions.push(Action::SetExposed(id, key, value));
                 }
@@ -11627,8 +11564,8 @@ impl Viewer {
                     return;
                 };
                 let before = parameter.value;
-                let drag = crate::parameter_set::field(&mut parameter.value, parameter.kind, units);
-                number_field(&mut ui, field, row, drag, &tip);
+                let kind = parameter.kind;
+                self.value_field(&mut ui, field, row, &mut parameter.value, kind, &tip);
                 if parameter.value != before {
                     self.actions
                         .push(Action::SetParameter(id, index, parameter.value));
@@ -11637,8 +11574,7 @@ impl Viewer {
             }
             RowWidget::CadLength => {
                 let mut value = cad_length;
-                let drag = crate::numeric::quantity(&mut value, units, Quantity::Length);
-                number_field(&mut ui, field, row, drag, &tip);
+                self.value_field(&mut ui, field, row, &mut value, ValueKind::LENGTH, &tip);
                 if value != cad_length {
                     self.actions.push(Action::SetCadLength(id, value));
                 }
@@ -11652,8 +11588,7 @@ impl Viewer {
                 };
                 let mut value = before;
                 if kind == ValueKind::LENGTH {
-                    let drag = crate::numeric::quantity(&mut value, units, Quantity::Length);
-                    number_field(&mut ui, field, row, drag, &tip);
+                    self.value_field(&mut ui, field, row, &mut value, kind, &tip);
                 } else {
                     let mut drag = crate::numeric::drag_value(&mut value).speed(0.01);
                     if key == transform::ANGLE {
@@ -11671,8 +11606,7 @@ impl Viewer {
                     return;
                 };
                 let mut value = point[axis];
-                let drag = crate::numeric::quantity(&mut value, units, Quantity::Length);
-                number_field(&mut ui, field, row, drag, &tip);
+                self.value_field(&mut ui, field, row, &mut value, ValueKind::LENGTH, &tip);
                 if value != point[axis] {
                     (self.actions).push(Action::SetMeasurePoint(id, POINT_AXES[axis], value));
                 }
@@ -11725,8 +11659,7 @@ impl Viewer {
             RowWidget::ExportPath | RowWidget::External => return,
             RowWidget::Param(param) => match primitive.slot(param.key) {
                 Some(ParamSlot::Length(value)) => {
-                    let drag = crate::numeric::quantity(value, units, Quantity::Length);
-                    number_field(&mut ui, field, row, drag, &tip);
+                    self.value_field(&mut ui, field, row, value, ValueKind::LENGTH, &tip);
                     return self.set_primitive(id, primitive, before);
                 }
                 Some(ParamSlot::Count(value)) => {
@@ -11841,6 +11774,24 @@ fn number_field(
         ui.disable();
     }
     crate::numeric::fitted(ui, field.size(), drag, tip)
+}
+
+impl Viewer {
+    /// The [`number_field`] of a value of `kind` in a row, stored in SI units and shown and
+    /// typed in the unit system of the project ([`crate::numeric::of_kind`]). Every value of
+    /// a block that has a kind goes through it, so that it follows the unit system.
+    fn value_field(
+        &self,
+        ui: &mut egui::Ui,
+        field: egui::Rect,
+        row: &Row,
+        value: &mut f64,
+        kind: ValueKind,
+        tip: &str,
+    ) -> egui::Response {
+        let drag = crate::numeric::of_kind(value, kind, self.units);
+        number_field(ui, field, row, drag, tip)
+    }
 }
 
 impl SnarlViewer<u64> for Viewer {
@@ -13528,7 +13479,6 @@ mod tests {
             id: 4,
             name: "Materials".into(),
             position: [5.0, 6.0],
-            units: plx_model::UnitSystem::MKgSC,
             materials: vec![plx_model::Material {
                 name: "Steel".into(),
                 density: Some(7850.0),
@@ -13567,7 +13517,6 @@ mod tests {
             id: 7,
             name: "Cross-Sections".into(),
             position: [1.0, 2.0],
-            units: plx_model::UnitSystem::MmTonSC,
             cross_sections: vec![CrossSection {
                 id: plx_model::Id::new(),
                 name: "Girder".into(),
@@ -13619,7 +13568,6 @@ mod tests {
             name: "Box".into(),
             position: [0.0; 2],
             space: ModelSpace::ThreeD,
-            units: plx_model::UnitSystem::MmTonSC,
             primitive: MeshPrimitive::default_box(),
             mesh: Default::default(),
             generated: None,
@@ -13691,7 +13639,6 @@ mod tests {
             id: 3,
             name: "Fillet".into(),
             position: [0.0; 2],
-            units: plx_model::UnitSystem::MmTonSC,
             operation: plx_model::CadOperation {
                 entities: vec![edge],
                 value: 0.5e-3,
@@ -13749,7 +13696,6 @@ mod tests {
             2,
             "Box".into(),
             ModelSpace::ThreeD,
-            plx_model::UnitSystem::MmTonSC,
             MeshPrimitive::default_box(),
             Default::default(),
             None,
@@ -13968,7 +13914,6 @@ mod tests {
             id: 4,
             name: "Parameters".into(),
             position: [3.0, 4.0],
-            units: plx_model::UnitSystem::MmTonSC,
             parameters: vec![
                 Parameter::new("Length", ValueKind::LENGTH, 0.3),
                 Parameter::new("Cells", ValueKind::Count, 12.0),
@@ -14035,7 +13980,7 @@ mod tests {
         assert!(!is_switch);
         assert_eq!(number.result(false), Some(0.2));
         assert_eq!(switch.as_number().unwrap().0.result(true), Some(7.0));
-        let rows = numbers::number_rows(&math, &[]);
+        let rows = numbers::number_rows(&math, &[], UnitSystem::default());
         assert_eq!(rows.last().unwrap().path, [links::VALUE, RESULT]);
         assert!(rows.last().unwrap().output);
         let mut nodes = vec![parameters, math, switch];
@@ -14380,7 +14325,6 @@ mod tests {
             2,
             "Parameters".into(),
             Block::Parameters(ParametersBlock {
-                units: Default::default(),
                 parameters: vec![
                     Parameter::new("Load", ValueKind::Quantity(Quantity::Force), -50.0),
                     Parameter::new("Width", ValueKind::LENGTH, 0.1),
@@ -14417,7 +14361,6 @@ mod tests {
             3,
             "Study".into(),
             Block::Study(Box::new(StudyBlock {
-                units: Default::default(),
                 table,
                 body: None,
                 active: None,
@@ -14436,7 +14379,6 @@ mod tests {
             id: 5,
             name: "Measure".into(),
             position: [5.0, 6.0],
-            units: plx_model::UnitSystem::MmTonSC,
             kind: MeasureKind::Eigenfrequency { mode: 2 },
             value: Some(12.5),
             evaluated: Some(7),
@@ -14445,7 +14387,13 @@ mod tests {
         let mut node = Node::read(ProjectNode::Measure(block.clone()));
         assert_eq!(node.kind(), Kind::Measure);
         let incoming = vec![(vec!["Measure".to_owned()], "Modal".to_owned())];
-        let rows = measure_rows(&node, &incoming, CellState::UpToDate, false);
+        let rows = measure_rows(
+            &node,
+            &incoming,
+            CellState::UpToDate,
+            false,
+            UnitSystem::default(),
+        );
         assert_eq!(rows[0].path, ["Measure"]);
         assert!(rows[0].input && !rows[0].output);
         assert_eq!(rows[0].linked_from.as_deref(), Some("Modal"));
@@ -14477,7 +14425,13 @@ mod tests {
         };
         let node = Node::read(ProjectNode::Measure(block));
         let incoming = vec![(path(&["Parameters", "x"]), "Parameters".to_owned())];
-        let rows = measure_rows(&node, &incoming, CellState::Missing, false);
+        let rows = measure_rows(
+            &node,
+            &incoming,
+            CellState::Missing,
+            false,
+            UnitSystem::default(),
+        );
         let coordinates: Vec<_> = rows.iter().filter(|r| r.input).skip(1).collect();
         assert_eq!(coordinates.len(), 3);
         assert_eq!(coordinates[0].path, path(&["Parameters", "x"]));
@@ -14489,7 +14443,6 @@ mod tests {
             2,
             "Parameters".into(),
             Block::Parameters(ParametersBlock {
-                units: Default::default(),
                 parameters: vec![
                     Parameter::new("Load", ValueKind::Quantity(Quantity::Force), -50.0),
                     Parameter::new("Length", ValueKind::LENGTH, 0.3),
@@ -14512,7 +14465,14 @@ mod tests {
         }
         assert_eq!(value_kind(&extreme, 5, &x), None);
         assert_eq!(
-            measure_rows(&extreme[0], &[], CellState::Missing, false).len(),
+            measure_rows(
+                &extreme[0],
+                &[],
+                CellState::Missing,
+                false,
+                UnitSystem::default()
+            )
+            .len(),
             3
         );
     }
@@ -14661,7 +14621,6 @@ mod tests {
             name: "Box".into(),
             position: [0.0; 2],
             space: ModelSpace::ThreeD,
-            units: plx_model::UnitSystem::MmTonSC,
             primitive: MeshPrimitive::default_box(),
             mesh: Default::default(),
             generated: None,
@@ -14704,7 +14663,6 @@ mod tests {
                 name: name.into(),
                 position: [0.0; 2],
                 space: ModelSpace::ThreeD,
-                units: plx_model::UnitSystem::MmTonSC,
                 primitive: MeshPrimitive::default_box(),
                 mesh: Default::default(),
                 generated: None,
@@ -14732,15 +14690,13 @@ mod tests {
         };
         let mesh = |id, space| {
             let primitive = MeshPrimitive::default_rectangle();
-            let units = plx_model::UnitSystem::default();
             let mesh = Default::default();
-            Node::mesh_block(id, "Plate".into(), space, units, primitive, mesh, None)
+            Node::mesh_block(id, "Plate".into(), space, primitive, mesh, None)
         };
         let parameters = Node::new(
             5,
             "Parameters".into(),
             Block::Parameters(ParametersBlock {
-                units: Default::default(),
                 parameters: vec![Parameter::new("Width", ValueKind::LENGTH, 0.1)],
             }),
         );
@@ -15104,7 +15060,6 @@ mod tests {
             id: 7,
             name: "Study".into(),
             position: [7.0, 8.0],
-            units: plx_model::UnitSystem::MmTonSC,
             table,
         };
         let mut node = Node::read(ProjectNode::Study(block.clone()));
@@ -15117,7 +15072,6 @@ mod tests {
         let copy = node.copied(8, "Copy".into()).unwrap();
         let study = copy.as_study().unwrap();
         assert_eq!((copy.id, copy.kind()), (8, Kind::Study));
-        assert_eq!(study.units, block.units);
         assert_eq!(study.table.points.len(), 2);
         assert_eq!(study.table.points[0].run, PointRun::NotSolved);
         assert_eq!(study.table.points[0].outputs, [None]);
@@ -15130,7 +15084,6 @@ mod tests {
             name: "Box".into(),
             position: [0.0; 2],
             space: ModelSpace::ThreeD,
-            units: Default::default(),
             primitive: MeshPrimitive::default_box(),
             mesh: Default::default(),
             generated: None,

@@ -11,7 +11,6 @@ use crate::table_export;
 
 /// A change the editor asks for.
 pub enum StudyEdit {
-    Units(UnitSystem),
     SetInput {
         point: usize,
         column: usize,
@@ -237,21 +236,6 @@ impl StudyEditor {
             .default_pos(ctx.content_rect().center())
             .default_width(640.0)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Shown in");
-                    let mut units = view.units;
-                    egui::ComboBox::from_id_salt("study units")
-                        .selected_text(units.label())
-                        .width(200.0)
-                        .show_ui(ui, |ui| {
-                            for choice in UnitSystem::ALL {
-                                ui.selectable_value(&mut units, choice, choice.label());
-                            }
-                        });
-                    if units != view.units {
-                        edits.push(StudyEdit::Units(units));
-                    }
-                });
                 if view.inputs.is_empty() || view.outputs.is_empty() {
                     ui.weak(
                         "Drag the Inputs pin of the block to the exposed parameters of \
@@ -931,7 +915,7 @@ fn number_field(
     match kind {
         Some(kind) => match kind.quantity() {
             Some(quantity) => crate::numeric::without_unit(value, units, quantity),
-            None => crate::parameter_set::field(value, kind, units),
+            None => crate::numeric::of_kind(value, kind, units),
         },
         None => crate::numeric::drag_value(value),
     }

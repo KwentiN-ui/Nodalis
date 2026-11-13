@@ -7,8 +7,9 @@ Project workspace (@workspaces), also called the *project window* in this guide,
 analysis as a block in the project schematic. A double-click on a block opens the analysis in
 the Geometry, FE Model or Results workspace of the same window (@main-window); with
 #ui("Open in New Window") it opens in a window of its own. A new project starts empty: add the
-first analysis with #ui("New Analysis"), which asks for its model space and unit system
-(@new-analysis).
+first analysis with #ui("New Analysis"), which asks for its model space (@new-analysis). The
+unit system of the whole project is chosen at the bottom right of the window
+(@project-units).
 
 #screenshot("project-empty.png", [A new project: the schematic is empty until the first
   analysis is added])
@@ -27,15 +28,36 @@ both.
 #menu("File", "New Analysis"), a double-click or right-click on the background of the
 schematic or #ui("Analysis") in the block search (@block-search) open #ui("Model Properties") for the new analysis
 (@model-properties). Choose its *model space* (3D, plane stress, plane strain or axisymmetric)
-and its *unit system* there.
+there. It takes the unit system of the project (@project-units).
 
 #screenshot("new-analysis-dialog.png", [Model Properties for a new analysis])
 
-#note[The model space and the unit system of an analysis are fixed once it is created. In the
-  analysis window, #menu("Material", "Model Properties") shows them, but they cannot be
-  changed; create a new analysis instead. Analyses of one project may use different unit systems,
-  because all values are stored in SI units and only shown in the units of their analysis
-  (@unit-systems).]
+#note[The model space of an analysis is fixed once it is created. In the analysis window,
+  #menu("Material", "Model Properties") shows it, but it cannot be changed; create a new
+  analysis instead.]
+
+=== Unit system of the project <project-units>
+
+The button at the bottom right of the project window shows the unit system of the project, such
+as #ui("Units: mm, ton, s, °C"). A click on it lists the other unit systems (@unit-systems);
+hover over one for its main units. The unit system says in which units every number of the
+project is *shown and typed*: the fields and results of the blocks in the schematic, their
+editors, and the analyses with their dialogs, results, legends and tables. Nodalis stores all
+values in SI units, so another unit system changes no value, only how it is shown: a length of
+`100 mm` reads `0.1 m` in m, kg, s. A field also takes a value typed in another unit, such as
+`3 cm`.
+
+#screenshot("project-units.png", [The unit system of the project, chosen at the bottom right of
+  the project window])
+
+The unit system is saved with the project; a new project starts in the one chosen last. A
+change of the unit system can be undone like other changes of the project (@undo). Analyses
+that are open read their model again in the new units; while one of them is busy, for example
+loading or meshing, the button waits for it.
+
+#note[Equations of distributions take their coordinates in the length unit of the project
+  (@unit-systems), so they give other values in another unit system. A File block reads an input
+  file without units in the unit system the project had when the block was added.]
 
 === The blocks of the schematic
 
