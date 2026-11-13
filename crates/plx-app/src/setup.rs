@@ -989,7 +989,8 @@ fn remote_force_rows(
 ) {
     let space = model.fe.properties.space;
     let dofs = space.remote_dofs();
-    let force_labels = ["F1", "F2", "F3"].into_iter().zip(Field::VECTOR);
+    let directions = Directions::of(&model.fe, remote.system);
+    let force_labels = directions.forces().into_iter().zip(Field::VECTOR);
     for (k, (value, (label, field))) in remote.force.iter_mut().zip(force_labels).enumerate() {
         if !dofs.contains(&k) {
             continue;
@@ -1000,7 +1001,7 @@ fn remote_force_rows(
         });
         ui.end_row();
     }
-    let moment_labels = ["M1", "M2", "M3"].into_iter().zip(Field::ROTATION);
+    let moment_labels = directions.moments().into_iter().zip(Field::ROTATION);
     for (k, (value, (label, field))) in remote.moment.iter_mut().zip(moment_labels).enumerate() {
         if !dofs.contains(&(k + 3)) {
             continue;
@@ -1160,7 +1161,9 @@ fn moving_rows(ui: &mut Ui, moving: &mut MovingLoad, fe: &FeModel, two_d: bool, 
                 if !two_d {
                     ui.strong("Across");
                 }
-                for label in ["F1", "F2", "F3"].iter().take(if two_d { 2 } else { 3 }) {
+                // The wheel forces act in global directions.
+                let forces = Directions::RECTANGULAR.forces();
+                for label in forces.iter().take(if two_d { 2 } else { 3 }) {
                     ui.strong(*label);
                 }
                 ui.label("");
@@ -1608,7 +1611,7 @@ fn direction_rows(
         .is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
     if cylindrical {
         ui.label("");
-        ui.weak("Components 1, 2, 3 are radial, tangential and axial at every node.");
+        ui.weak("R, Theta, Z are the radial, tangential and axial directions at every node.");
         ui.end_row();
     }
     if fe.system_attachment(*system).is_some() {
@@ -1936,7 +1939,8 @@ fn submodel_rows(
 ) {
     // Nodes of 2D models only move in the x-y plane.
     let count = if two_d { 2 } else { 3 };
-    for (held, label) in dofs.iter_mut().zip(DOF_LABELS).take(count) {
+    let labels = Directions::RECTANGULAR.dofs();
+    for (held, label) in dofs.iter_mut().zip(labels).take(count) {
         ui.label("");
         ui.checkbox(held, label);
         ui.end_row();
@@ -2042,7 +2046,76 @@ fn submodel_source_lines(
     lines
 }
 
-const DOF_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
+/// The names of the directions of a coordinate system in dialogs: X, Y, Z of a rectangular
+/// system, R, Theta, Z (radial, tangential, axial) of a cylindrical one. Only for display:
+/// the model keeps the components 1, 2, 3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Directions {
+    cylindrical: bool,
+}
+
+impl Directions {
+    /// The directions of a rectangular system, such as the global one.
+    pub(crate) const RECTANGULAR: Self = Self { cylindrical: false };
+
+    /// The directions of the system `system` of the model, the global one for `None`.
+    pub(crate) fn of(fe: &FeModel, system: Option<Id>) -> Self {
+        let cylindrical = (system.and_then(|id| fe.coordinate_system(id)))
+            .is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
+        Self { cylindrical }
+    }
+
+    /// The displacements along the three directions and the rotations about them.
+    pub(crate) fn dofs(self) -> [&'static str; 6] {
+        if self.cylindrical {
+            ["R", "Theta", "Z", "RR", "RTheta", "RZ"]
+        } else {
+            ["X", "Y", "Z", "RX", "RY", "RZ"]
+        }
+    }
+
+    /// The force components along the three directions.
+    pub(crate) fn forces(self) -> [&'static str; 3] {
+        if self.cylindrical {
+            ["FR", "FTheta", "FZ"]
+        } else {
+            ["FX", "FY", "FZ"]
+        }
+    }
+
+    /// The moment components about the three directions.
+    pub(crate) fn moments(self) -> [&'static str; 3] {
+        if self.cylindrical {
+            ["MR", "MTheta", "MZ"]
+        } else {
+            ["MX", "MY", "MZ"]
+        }
+    }
+
+    /// What the degree of freedom `dof` (0 to 5) means, for a tooltip.
+    pub(crate) fn describe(self, dof: usize) -> &'static str {
+        let names = if self.cylindrical {
+            [
+                "Radial, away from the axis of the system",
+                "Tangential, around the axis of the system",
+                "Axial, along the axis of the system",
+                "Rotation about the radial direction",
+                "Rotation about the tangential direction",
+                "Rotation about the axis of the system",
+            ]
+        } else {
+            [
+                "Along x",
+                "Along y",
+                "Along z",
+                "Rotation about x",
+                "Rotation about y",
+                "Rotation about z",
+            ]
+        };
+        names[dof.min(5)]
+    }
+}
 
 /// The load kinds of the dialog, the force first: label, default name and the kind with zero
 /// values.
@@ -3320,10 +3393,12 @@ impl Editor {
                 let period = step_kind.map_or(1.0, StepKind::period);
                 let bc_name = bc.name.clone();
                 if let BoundaryKind::Displacement(displacement) = &mut bc.kind {
+                    let directions = Directions::of(&model.fe, displacement.system);
                     for i in dofs {
-                        let (value, label) = (&mut displacement.values[i], DOF_LABELS[i]);
+                        let (value, label) = (&mut displacement.values[i], directions.dofs()[i]);
                         let mut set = value.is_some();
-                        ui.checkbox(&mut set, label);
+                        ui.checkbox(&mut set, label)
+                            .on_hover_text(directions.describe(i));
                         let mut number = value.unwrap_or(0.0);
                         // Displacements are lengths, rotations angles in radian.
                         let quantity = if i < 3 {
@@ -3502,7 +3577,7 @@ impl Editor {
                                 ui,
                                 moment,
                                 &mut load.tables,
-                                &["M1", "M2", "M3"],
+                                &Directions::of(&model.fe, load.system).moments(),
                                 &Field::VECTOR,
                                 Quantity::Moment,
                                 &load_name,
@@ -3540,7 +3615,7 @@ impl Editor {
                             ui,
                             &mut value[..count],
                             &mut load.tables,
-                            &["F1", "F2", "F3"],
+                            &Directions::of(&model.fe, load.system).forces(),
                             &Field::VECTOR,
                             Quantity::Force,
                             &load_name,
@@ -3566,8 +3641,9 @@ impl Editor {
                         remote_force_rows(ui, remote, &region.region(), model, units);
                     }
                     LoadKind::Excitation(excitation) => {
+                        let labels = Directions::of(&model.fe, load.system).forces();
                         crate::excitation_rows::excitation_rows(
-                            ui, excitation, period, two_d, units,
+                            ui, excitation, labels, period, two_d, units,
                         );
                         revolution_hint(ui, axisymmetric);
                         let nlgeom = step_kind.is_some_and(|k| model.fe.step_nlgeom(k));
