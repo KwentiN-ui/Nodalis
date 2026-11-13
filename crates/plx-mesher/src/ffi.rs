@@ -122,6 +122,13 @@ gmsh_api! {
     );
     occ_affine_transform = "gmshModelOccAffineTransform":
         fn(*const c_int, usize, *const c_double, usize, Ierr);
+    mesh_set_periodic = "gmshModelMeshSetPeriodic": fn(
+        c_int,
+        *const c_int, usize,
+        *const c_int, usize,
+        *const c_double, usize,
+        Ierr,
+    );
     occ_intersect = "gmshModelOccIntersect": fn(
         *const c_int, usize,
         *const c_int, usize,

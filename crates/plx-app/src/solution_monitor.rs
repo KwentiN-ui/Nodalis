@@ -390,7 +390,12 @@ impl BackgroundSolve {
                 None => geometry.source.clone(),
             };
             self.before.push(format!("Meshing {what} …"));
-            self.stage = Stage::Meshing(Box::new(MeshingJob::start(geometry, parts, ctx)));
+            self.stage = Stage::Meshing(Box::new(MeshingJob::start(
+                geometry,
+                model.fe.matching_faces(),
+                parts,
+                ctx,
+            )));
             return;
         }
         if !status.needs_solve() && !self.force {

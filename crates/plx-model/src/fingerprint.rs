@@ -6,7 +6,7 @@
 
 use plx_mesh::{FeMesh, Fnv};
 
-use crate::{ContactRegion, FeModel, Geometry, MeshSetupKind, ModelSpace};
+use crate::{ContactRegion, FeModel, Geometry, MeshSetupKind, ModelSpace, PeriodicFaces};
 
 /// The inputs of the solution: everything that goes into the input file the solver runs, the
 /// mesh and the model definition. Items only used to evaluate results, result paths and
@@ -198,10 +198,16 @@ fn used_features<'a>(
     )
 }
 
-/// The inputs of the mesh of one part of the geometry: the shapes, the model space and the
-/// meshing settings that apply to the part. Changing the settings of one part leaves the
-/// meshes of the others up to date.
-pub fn mesh_input(geometry: &Geometry, space: ModelSpace, part: &str) -> u64 {
+/// The inputs of the mesh of one part of the geometry: the shapes, the model space, the
+/// meshing settings that apply to the part and the cut faces of cyclic symmetries meshed
+/// alike ([`FeModel::matching_faces`]). Changing the settings of one part leaves the meshes
+/// of the others up to date.
+pub fn mesh_input(
+    geometry: &Geometry,
+    matching: &[PeriodicFaces],
+    space: ModelSpace,
+    part: &str,
+) -> u64 {
     let mut hash = Fnv::new();
     hash.add_str(&geometry.brep);
     hash.add_debug(&geometry.part_names);
@@ -218,6 +224,11 @@ pub fn mesh_input(geometry: &Geometry, space: ModelSpace, part: &str) -> u64 {
         if applies {
             hash.add_debug(&item.kind);
         }
+    }
+    // The cut faces of cyclic symmetries are meshed alike; a mesh made before the tie is
+    // out of date. Without any the input stays what it was.
+    if !matching.is_empty() {
+        hash.add_debug(&matching);
     }
     hash.finish()
 }
@@ -362,8 +373,8 @@ mod tests {
         let mut geometry = geometry();
         let space = ModelSpace::default();
         let (a, b) = (
-            mesh_input(&geometry, space, "Solid-1"),
-            mesh_input(&geometry, space, "Solid-2"),
+            mesh_input(&geometry, &[], space, "Solid-1"),
+            mesh_input(&geometry, &[], space, "Solid-2"),
         );
         geometry.mesh_items.push(MeshSetupItem {
             name: "Meshing_Parameters-1".into(),
@@ -375,19 +386,32 @@ mod tests {
                 },
             },
         });
-        assert_ne!(mesh_input(&geometry, space, "Solid-1"), a);
-        assert_eq!(mesh_input(&geometry, space, "Solid-2"), b);
+        assert_ne!(mesh_input(&geometry, &[], space, "Solid-1"), a);
+        assert_eq!(mesh_input(&geometry, &[], space, "Solid-2"), b);
         // New shapes need every part meshed again.
         geometry.brep = "other shapes".into();
-        assert_ne!(mesh_input(&geometry, space, "Solid-2"), b);
+        assert_ne!(mesh_input(&geometry, &[], space, "Solid-2"), b);
     }
 
     #[test]
     fn a_refinement_puts_every_part_out_of_date() {
         let mut geometry = geometry();
         let space = ModelSpace::default();
-        let before = mesh_input(&geometry, space, "SOLID-1");
+        let before = mesh_input(&geometry, &[], space, "SOLID-1");
         geometry.refinement = 1.5;
-        assert_ne!(mesh_input(&geometry, space, "SOLID-1"), before);
+        assert_ne!(mesh_input(&geometry, &[], space, "SOLID-1"), before);
+    }
+
+    #[test]
+    fn a_cyclic_symmetry_puts_the_mesh_out_of_date() {
+        let geometry = geometry();
+        let space = ModelSpace::default();
+        let before = mesh_input(&geometry, &[], space, "SOLID-1");
+        let matching = [PeriodicFaces {
+            master: vec![3],
+            slave: vec![5],
+            cyclic: crate::CyclicSymmetry::default(),
+        }];
+        assert_ne!(mesh_input(&geometry, &matching, space, "SOLID-1"), before);
     }
 }

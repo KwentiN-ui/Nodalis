@@ -47,6 +47,19 @@ Only 3D models can be cyclic symmetric. The nodes of the slave face follow the m
 Nodalis leaves them out of the boundary conditions: CalculiX refuses a node that is both bound
 and fixed ("dependent side of a MPC and a SPC").
 
+=== Matching meshes on the cut faces
+
+The tie couples every node of the slave face to the master face it lands on when rotated back
+by one sector. If the nodes of the two faces miss each other, the tie passes the forces of the
+quadratic faces on unevenly, and the stresses next to the cut faces show stripes that run along
+them. So the mesher copies the mesh of the master face, rotated by one sector, onto the slave
+face, for the tetrahedra as well as for the swept hexahedra; each slave node then lies on a
+master node. This needs the cut faces picked on the geometry. Creating or changing the cyclic
+symmetry tie puts the mesh out of date, and the next solve meshes the parts again.
+
+#screenshot("cyclic-symmetry-matching.png", [S11 of a thick pipe sector under inner
+pressure: with matching cut faces the contours run smoothly across them])
+
 === Frequency steps by nodal diameter
 
 As soon as an active tie has a cyclic symmetry, the #ui("Frequency") step dialog shows a
