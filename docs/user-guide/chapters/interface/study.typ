@@ -73,6 +73,17 @@ solves them again. #ui("Set as Current") gives the inputs of a point to the bloc
 is up to date, #ui("Update Project") then solves the analyses for its results without running
 the study.
 
+A study whose blocks only compute numbers, Parameters, Math, Switch and Formula blocks
+(@math-switch) without an analysis, a mesh or a Measure block among them, needs no update of
+the project: it evaluates its points on a thread of its own, a thousand of them in a blink,
+and goes on while the window is not drawn, for instance with the pointer outside it. The
+output pane then prints one line for the whole run instead of one per point. A study with
+analyses solves its points one after the other as before, also while the pointer is outside
+the window.
+
+#screenshot("study-numbers.png", [A thousand points of a study over a Math block, evaluated
+  in 16 ms with the pointer outside the window])
+
 === Filling and importing points <study-fill>
 
 #ui("Fill ...") makes points from values per input. Each input takes the value of the current

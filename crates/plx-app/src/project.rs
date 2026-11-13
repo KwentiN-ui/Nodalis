@@ -51,6 +51,7 @@ mod minimap;
 mod numbers;
 mod saving;
 mod series;
+mod study_worker;
 mod transform;
 mod visualize;
 mod workspace;
@@ -2019,6 +2020,11 @@ struct StudyRun {
     /// How many points it solved, and how many of those failed.
     solved: usize,
     failed: usize,
+    /// The thread that evaluates the points of a study whose blocks only compute numbers,
+    /// see [`study_worker`], before it started and while it runs; `None` while the project
+    /// is updated for each point.
+    job: Option<study_worker::NumberStudy>,
+    number: Option<study_worker::NumberRun>,
 }
 
 /// What a link copies into its target.
@@ -3558,18 +3564,31 @@ impl ProjectApp {
             return self.next_study();
         }
         study.report = None;
+        // Numbers alone are evaluated on a thread of their own, without the project.
+        let job = self.number_study(id, &points);
+        let solving = if job.is_some() {
+            "evaluating"
+        } else {
+            "solving"
+        };
         self.output
-            .push(format!("{name}: solving {} design points", points.len()));
+            .push(format!("{name}: {solving} {} design points", points.len()));
         // A study updates the whole project for every point.
         self.update_scope = None;
         self.looping = Some(StudyRun {
             id,
             body,
-            points: points.into(),
+            points: if job.is_some() {
+                VecDeque::new()
+            } else {
+                points.into()
+            },
             current: None,
             updating: false,
             solved: 0,
             failed: 0,
+            job,
+            number: None,
         });
     }
 
@@ -3588,14 +3607,27 @@ impl ProjectApp {
 
     /// Works through a study: gives the inputs of the next point, has the project updated,
     /// and reads the outputs once all is done.
-    fn run_study(&mut self) {
-        let Some(run) = &self.looping else {
+    fn run_study(&mut self, ctx: &egui::Context) {
+        let Some(run) = &mut self.looping else {
             return;
         };
+        if let Some(job) = run.job.take() {
+            run.number = Some(job.spawn(ctx));
+        }
+        if run.number.is_some() {
+            return self.poll_number_study();
+        }
         let id = run.id;
+        // The next step comes with the next frame, which is drawn also while the pointer is
+        // outside the window; a solve or measure under way asks for frames itself, and is
+        // looked after now and then besides.
         match run.current {
-            None => self.next_point(id),
+            None => {
+                ctx.request_repaint();
+                self.next_point(id);
+            }
             Some(_) if !run.updating => {
+                ctx.request_repaint();
                 // The inputs went to their numbers; then the update.
                 if !self.sync_due {
                     if let Some(run) = &mut self.looping {
@@ -3613,8 +3645,10 @@ impl ProjectApp {
                     && !self.deforming()
                     && !self.restoring.values().any(Option::is_some);
                 if !idle {
+                    ctx.request_repaint_after(Duration::from_millis(50));
                     return;
                 }
+                ctx.request_repaint();
                 let names: Vec<String> = (self.nodes.iter().find(|n| n.id == id))
                     .and_then(Node::as_study)
                     .map(|s| s.table.outputs.iter().map(|c| c.name.clone()).collect())
@@ -8592,7 +8626,7 @@ impl eframe::App for ProjectApp {
         }
         self.poll_solves(&ctx);
         self.run_update(&ctx);
-        self.run_study();
+        self.run_study(&ctx);
         self.run_exports();
         self.analysis_windows(&ctx);
         self.join_dropped(&ctx);
