@@ -36,13 +36,33 @@ impl AnalysisWindow {
         } else {
             geometry
         };
-        // The YZ plane through the middle of the geometry; a width or size of a few
-        // millimetres.
+        // A split cuts the parts selected in the Geometry tree, or all when none is.
+        let chosen = if kind == CadOperationKind::SplitPlane {
+            w.selected_geometry_parts()
+        } else {
+            Vec::new()
+        };
+        // The YZ plane through the middle of the geometry, or of the parts selected; a
+        // width or size of a few millimetres.
         let value = if kind == CadOperationKind::SplitPlane {
-            let (lo, hi) = (geometry.signatures.iter())
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), s| {
-                    (lo.min(s.min[0]), hi.max(s.max[0]))
-                });
+            let shown = w.geometry.as_ref();
+            let bounds: Vec<(f64, f64)> = (chosen.iter())
+                .filter_map(|&i| {
+                    let view = shown?;
+                    let (min, max) = view.parts.get(i)?.bounds?;
+                    Some((view.model_point(min).x, view.model_point(max).x))
+                })
+                .collect();
+            let (lo, hi) = if bounds.is_empty() {
+                (geometry.signatures.iter())
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), s| {
+                        (lo.min(s.min[0]), hi.max(s.max[0]))
+                    })
+            } else {
+                (bounds.iter()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), b| {
+                    (lo.min(b.0), hi.max(b.1))
+                })
+            };
             if lo.is_finite() && hi.is_finite() {
                 0.5 * (lo + hi)
             } else {
@@ -51,9 +71,13 @@ impl AnalysisWindow {
         } else {
             3e-3
         };
+        let parts = (chosen.iter())
+            .filter_map(|&i| Some(w.geometry.as_ref()?.parts.get(i)?.name.clone()))
+            .collect();
         let operation = CadOperation {
             kind,
             value,
+            parts,
             ..CadOperation::default()
         };
         let editor = CadOperationEditor::new(
@@ -67,7 +91,25 @@ impl AnalysisWindow {
         let viewport = Viewport::new(w.viewport.render_state());
         w.cad_tool = Some((editor, viewport));
     }
+}
 
+impl Workbench {
+    /// The parts selected in the Geometry tree, those of selected compound parts included,
+    /// as indices of the parts of the geometry view, in ascending order.
+    fn selected_geometry_parts(&self) -> Vec<usize> {
+        let mut parts = self.tree.selected_parts(TreeView::Geometry);
+        for item in self.tree.selected_items(TreeView::Geometry) {
+            if let TreeItem::Compound(c) = item
+                && let Some((_, members)) = self.tree.compounds.get(c)
+            {
+                parts.extend(members.iter().copied());
+            }
+        }
+        parts.into_iter().collect()
+    }
+}
+
+impl AnalysisWindow {
     /// Shows the editor of a CAD tool; OK applies the operation to the geometry.
     pub(super) fn cad_tool_window(&mut self, ctx: &egui::Context) {
         let Some((editor, viewport)) = &mut self.workbench.cad_tool else {
