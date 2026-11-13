@@ -1107,8 +1107,6 @@ struct Tree<'a> {
     master_slave: HashSet<TreeItem>,
     /// The detection each detected contact region is shown under.
     detected: HashMap<usize, usize>,
-    /// The contact regions bolts replace, with the bolt.
-    replaced: std::collections::BTreeMap<usize, usize>,
     /// Constraints, boundary conditions and loads with a symbol in the 3D view, and whether
     /// it is shown; hidden ones get the hide icon.
     symbols: HashMap<TreeItem, bool>,
@@ -2187,7 +2185,6 @@ pub fn show(
         symbols: HashMap::new(),
         master_slave: HashSet::new(),
         detected: HashMap::new(),
-        replaced: Default::default(),
         step_count: 0,
         history_links: HashMap::new(),
         step_names: Vec::new(),
@@ -2271,7 +2268,6 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 tree.detected.insert(r, d);
             }
         }
-        tree.replaced = model.replaced_regions();
         for finding in model.findings().into_iter().chain(solver.iter().cloned()) {
             let (item, mut containers) = tree_items(finding.item);
             if let TreeItem::ContactRegion(r) = item
@@ -2340,7 +2336,7 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             tree.inactive.insert(TreeItem::NodeTie(i));
         }
         for (i, region) in fe.contact_regions.iter().enumerate() {
-            if !region.active || tree.replaced.contains_key(&i) {
+            if !region.active {
                 tree.inactive.insert(TreeItem::ContactRegion(i));
             }
             tree.master_slave.insert(TreeItem::ContactRegion(i));
@@ -2362,14 +2358,8 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             || !fe.contact_detections.is_empty()
             || !fe.part_groups.is_empty()
             || !fe.bolts.is_empty();
-        // A region a bolt replaces says so after its name.
-        let region_names: Vec<String> = (fe.contact_regions.iter().enumerate())
-            .map(
-                |(r, region)| match tree.replaced.get(&r).and_then(|&b| fe.bolts.get(b)) {
-                    Some(bolt) => format!("{} (replaced by {})", region.name, bolt.name),
-                    None => region.name.clone(),
-                },
-            )
+        let region_names: Vec<&str> = (fe.contact_regions.iter())
+            .map(|region| region.name.as_str())
             .collect();
         // The group keeps its name "Contacts", which links of the project schematic use.
         if open {
@@ -2381,13 +2371,13 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 for (d, detection) in fe.contact_detections.iter().enumerate() {
                     let regions = (0..fe.contact_regions.len())
                         .filter(|r| tree.detected.get(r) == Some(&d))
-                        .map(|r| (TreeItem::ContactRegion(r), region_names[r].as_str()))
+                        .map(|r| (TreeItem::ContactRegion(r), region_names[r]))
                         .collect();
                     tree.detection(ui, d, &detection.name, regions);
                 }
                 let regions = (0..fe.contact_regions.len())
                     .filter(|r| !tree.detected.contains_key(r))
-                    .map(|r| (TreeItem::ContactRegion(r), region_names[r].as_str()))
+                    .map(|r| (TreeItem::ContactRegion(r), region_names[r]))
                     .collect();
                 tree.container(ui, CONTACT_REGIONS, regions);
                 let bolts = (fe.bolts.iter().enumerate())
