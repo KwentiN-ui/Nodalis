@@ -255,6 +255,12 @@ struct Context<'a> {
     /// With `PLXS_LDLT_TRACE`: the start of the factorization and the timings of the large
     /// supernodes (those whose updates run in parallel).
     trace: Option<(std::time::Instant, Mutex<Vec<LargeNode>>)>,
+    /// Columns and rows of the tiles of [`tiled_front`]; no tiles: `faer`'s parallel
+    /// kernels. `PLXS_FRONT=faer`, `PLXS_FRONT_TILE` and `PLXS_FRONT_ROWS` set them, for
+    /// measurements.
+    tiles: Option<(usize, usize)>,
+    /// [`PARALLEL_NODE`], or `PLXS_PARALLEL_NODE` for measurements.
+    parallel_node: f64,
 }
 
 /// Timings of one large supernode for `PLXS_LDLT_TRACE`, in seconds since the start.
@@ -407,6 +413,21 @@ pub fn factorize<'a>(
         trace: std::env::var("PLXS_LDLT_TRACE")
             .is_ok()
             .then(|| (std::time::Instant::now(), Mutex::new(Vec::new()))),
+        parallel_node: (std::env::var("PLXS_PARALLEL_NODE").ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(PARALLEL_NODE),
+        tiles: (std::env::var("PLXS_FRONT").as_deref() != Ok("faer")).then(|| {
+            let read = |name: &str, default: usize| {
+                (std::env::var(name).ok())
+                    .and_then(|v| v.parse().ok())
+                    .filter(|&v: &usize| v >= 16)
+                    .unwrap_or(default)
+            };
+            (
+                read("PLXS_FRONT_TILE", TILE),
+                read("PLXS_FRONT_ROWS", TILE_ROWS),
+            )
+        }),
     };
     let counts: Vec<usize> = if threads > 1 {
         tree.roots
@@ -496,13 +517,13 @@ fn node(ctx: &Context<'_>, s: usize) -> Result<usize, FactorError> {
     }
 
     // Updates from the descendants, those of a large supernode in parallel.
-    let parallel = ctx.threads > 1 && tree.incoming_work[s] >= PARALLEL_NODE;
+    let parallel = ctx.threads > 1 && tree.incoming_work[s] >= ctx.parallel_node;
     let started = std::time::Instant::now();
     apply_updates(ctx, s, tree.updaters(s), ls_values, parallel);
     let updated = std::time::Instant::now();
     let mut ls = MatMut::from_column_major_slice_mut(&mut *ls_values, c + p, c);
 
-    let node_par = if ctx.par.degree() > 1 && tree.node_work[s] >= PARALLEL_NODE {
+    let node_par = if ctx.par.degree() > 1 && tree.node_work[s] >= ctx.parallel_node {
         ctx.par
     } else {
         Par::Seq
@@ -700,8 +721,8 @@ fn factor_front(
     mut ls: MatMut<'_, f64>,
     node_par: Par,
 ) -> Result<usize, LdltError> {
-    if node_par.degree() > 1 {
-        return tiled_front(ctx, s_start, c, ls);
+    if let Some((tile, tile_rows)) = ctx.tiles.filter(|_| node_par.degree() > 1) {
+        return tiled_front(ctx, s_start, c, ls, tile, tile_rows);
     }
     let (mut top, mut bot) = ls.rb_mut().split_at_row_mut(c);
     let s_end = s_start + c;
@@ -768,12 +789,14 @@ fn tiled_front(
     s_start: usize,
     c: usize,
     mut ls: MatMut<'_, f64>,
+    tile: usize,
+    tile_rows: usize,
 ) -> Result<usize, LdltError> {
     let rows = ls.nrows();
     let mut count = 0;
     let mut k0 = 0;
     while k0 < c {
-        let k1 = (k0 + TILE).min(c);
+        let k1 = (k0 + tile).min(c);
         let nb = k1 - k0;
         let (left, right) = ls.rb_mut().split_at_col_mut(k1);
         let mut block = left.subcols_mut(k0, nb);
@@ -821,7 +844,7 @@ fn tiled_front(
             let mut tasks = Vec::new();
             let (mut panel, mut w_rest) = (panel, w_mat);
             while panel.nrows() > 0 {
-                let r = TILE_ROWS.min(panel.nrows());
+                let r = tile_rows.min(panel.nrows());
                 let (head, tail) = panel.split_at_row_mut(r);
                 let (w_head, w_tail) = w_rest.split_at_row_mut(r);
                 tasks.push((head, w_head));
@@ -852,13 +875,13 @@ fn tiled_front(
             let mut rest = right.subcols_mut(0, c - k1);
             let mut j0 = 0;
             while rest.ncols() > 0 {
-                let wdt = TILE.min(rest.ncols());
+                let wdt = tile.min(rest.ncols());
                 let (head, tail) = rest.split_at_col_mut(wdt);
                 // Rows from the tile's first column down.
                 let (_, mut lower) = head.split_at_row_mut(k1 + j0);
                 let mut i0 = j0;
                 while lower.nrows() > 0 {
-                    let r = TILE_ROWS.min(lower.nrows());
+                    let r = tile_rows.min(lower.nrows());
                     let (piece, tail_rows) = lower.split_at_row_mut(r);
                     tasks.push((piece, i0, j0));
                     lower = tail_rows;
