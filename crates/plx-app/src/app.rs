@@ -510,7 +510,7 @@ impl AnalysisWindow {
         };
         // The analysis keeps its own mesh setup.
         let mut own = model.geometry.take();
-        if let Some(tags) = crate::links::take_geometry(&mut own, geometry)
+        if let Some(tags) = crate::links::take_geometry(&mut own, geometry, follow)
             && follow
         {
             let lost = crate::links::follow_geometry(&mut model.fe, Some(&mut model.mesh), &tags);
@@ -2413,9 +2413,6 @@ impl Workbench {
         if check(response.toggle_active.as_ref(), self) {
             response.toggle_active = None;
         }
-        if response.compound.is_some() && check(Some(&TreeItem::Group("Parts")), self) {
-            response.compound = None;
-        }
         if check(response.swap_master_slave.as_ref(), self) {
             response.swap_master_slave = None;
         }
@@ -2429,13 +2426,13 @@ impl Workbench {
         {
             response.create = None;
         }
+        let mesh_linked =
+            (self.incoming.paths.iter()).any(|(path, _)| path[0] == crate::links::MESH);
         let mesh = TreeItem::Mesh;
         let meshing = response.mesh_part.is_some()
             || response.transform_part.is_some()
             || response.merge_parts
             || response.suppress.is_some();
-        let mesh_linked =
-            (self.incoming.paths.iter()).any(|(path, _)| path[0] == crate::links::MESH);
         if meshing && (check(Some(&mesh), self) || mesh_linked) {
             if refused.is_none() {
                 refused = Some("The mesh comes from another analysis: mesh it there.".into());
@@ -2444,6 +2441,15 @@ impl Workbench {
             response.transform_part = None;
             response.merge_parts = false;
             response.suppress = None;
+        }
+        // Compound parts join meshes only, the linked shapes stay as they are: they are
+        // this analysis' own, unless a mesh link brings a mesh already joined.
+        if response.compound.is_some() && mesh_linked {
+            response.compound = None;
+            if refused.is_none() {
+                refused =
+                    Some("The mesh comes from another analysis: join its parts there.".into());
+            }
         }
         if let Some(line) = refused {
             self.output.push(line);
