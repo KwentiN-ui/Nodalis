@@ -42,6 +42,7 @@
 #include "chapters/model/features.typ"
 #include "chapters/model/interactions.typ"
 #include "chapters/model/rigid-body.typ"
+#include "chapters/model/point-mass.typ"
 #include "chapters/model/amplitudes.typ"
 #include "chapters/model/distributions.typ"
 #include "chapters/model/initial-conditions.typ"

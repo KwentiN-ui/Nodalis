@@ -554,6 +554,21 @@ fn constraints(out: &mut Out, model: &Model) {
             out.line(&held.join(", "));
         }
     }
+    for mass in &model.point_masses {
+        let mut keyword = format!("*Point mass, Node={}", mass.node);
+        if let Some((rotation, _)) = mass.inertia {
+            keyword.push_str(&format!(", Rotation node={rotation}"));
+        }
+        if let Some(set) = &mass.elset {
+            keyword.push_str(&format!(", Elset={set}"));
+        }
+        out.keyword(&keyword);
+        let mut values = vec![number(mass.mass)];
+        if let Some((_, tensor)) = mass.inertia {
+            values.extend(tensor.iter().map(|&v| number(v)));
+        }
+        out.line(&values.join(", "));
+    }
     if !constraints.equations.is_empty() {
         out.keyword("*Equation");
         for equation in &constraints.equations {

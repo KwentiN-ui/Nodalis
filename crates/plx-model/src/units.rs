@@ -65,6 +65,8 @@ pub enum Quantity {
     /// Also stress and the elastic modulus.
     Pressure,
     Density,
+    /// Mass moment of inertia, the rotary inertia of a point mass.
+    MomentOfInertia,
     Energy,
     Power,
     Frequency,
@@ -90,7 +92,7 @@ pub enum Quantity {
 
 impl Quantity {
     /// Every quantity, in the order a list offers them.
-    pub const ALL: [Quantity; 28] = [
+    pub const ALL: [Quantity; 29] = [
         Quantity::Length,
         Quantity::Angle,
         Quantity::Mass,
@@ -107,6 +109,7 @@ impl Quantity {
         Quantity::Moment,
         Quantity::Pressure,
         Quantity::Density,
+        Quantity::MomentOfInertia,
         Quantity::Energy,
         Quantity::Power,
         Quantity::Frequency,
@@ -140,6 +143,7 @@ impl Quantity {
             Quantity::Moment => "Moment",
             Quantity::Pressure => "Pressure",
             Quantity::Density => "Density",
+            Quantity::MomentOfInertia => "Moment of inertia",
             Quantity::Energy => "Energy",
             Quantity::Power => "Power",
             Quantity::Frequency => "Frequency",
@@ -174,6 +178,7 @@ impl Quantity {
             Quantity::Moment | Quantity::Energy => d(2, 1, -2, 0, 0),
             Quantity::Pressure => d(-1, 1, -2, 0, 0),
             Quantity::Density => d(-3, 1, 0, 0, 0),
+            Quantity::MomentOfInertia => d(2, 1, 0, 0, 0),
             Quantity::Power => d(2, 1, -3, 0, 0),
             Quantity::Frequency => d(0, 0, -1, 0, 0),
             Quantity::ForcePerVolume => d(-2, 1, -2, 0, 0),
@@ -356,6 +361,7 @@ impl UnitSystem {
             Pressure => ["Pa", "MPa", "kPa", "psi"],
             // The fourth power has no Latin-1 character, which the GUI font sticks to.
             Density => ["kg/m³", "t/mm³", "t/m³", "lbf·s²/in^4"],
+            MomentOfInertia => ["kg·m²", "t·mm²", "t·m²", "lbf·s²·in"],
             Energy => ["J", "mJ", "kJ", "lbf·in"],
             Power => ["W", "mW", "kW", "lbf·in/s"],
             Frequency => ["Hz"; 4],

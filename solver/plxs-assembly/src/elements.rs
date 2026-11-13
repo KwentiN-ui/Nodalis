@@ -90,6 +90,18 @@ pub struct ElementTable {
     /// Whether a continuum element has a hyperelastic material: steps that deform the
     /// model then work with NLGEOM.
     pub hyperelastic: bool,
+    /// The point masses (`*POINT MASS`): their translational masses and rotary inertias,
+    /// which enter the mass matrix only.
+    pub mass_blocks: Vec<MassBlock>,
+}
+
+/// A constant mass on the three DOFs of a node: the mass of a point mass on the
+/// translations of its node, or its rotary inertia on those of its rotation node.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MassBlock {
+    pub dofs: [u32; 3],
+    /// Row-major 3 × 3, symmetric.
+    pub mass: [f64; 9],
 }
 
 /// A native membrane (`M3D3`, `M3D4`; `plxs_elements::membrane`).
@@ -171,6 +183,15 @@ pub struct LinearBlock {
 }
 
 impl ElementTable {
+    /// The DOFs of every block of the global matrices: elements, constant blocks, springs
+    /// and gaps, point masses.
+    pub fn blocks(&self) -> impl Iterator<Item = &[u32]> {
+        (self.entries.iter().map(|e| e.dofs.as_slice()))
+            .chain(self.linear_blocks.iter().map(|b| b.dofs.as_slice()))
+            .chain(self.discrete.iter().map(|e| e.dofs.as_slice()))
+            .chain(self.mass_blocks.iter().map(|b| b.dofs.as_slice()))
+    }
+
     /// Fails when a material lacks `*ELASTIC`: mechanical steps need it, heat transfer not.
     pub fn require_elastic(&self) -> Result<()> {
         match &self.missing_elastic {
@@ -522,6 +543,28 @@ impl ElementTable {
                 }
             }
         }
+        let mut mass_blocks = Vec::new();
+        for mass in &model.point_masses {
+            let index = |id| {
+                model
+                    .nodes
+                    .index(id)
+                    .ok_or_else(|| Error::undefined("*POINT MASS", "node", id.to_string()))
+            };
+            let n = index(mass.node)?;
+            let m = mass.mass;
+            mass_blocks.push(MassBlock {
+                dofs: std::array::from_fn(|d| n * 3 + d as u32),
+                mass: [m, 0.0, 0.0, 0.0, m, 0.0, 0.0, 0.0, m],
+            });
+            if let Some((rotation, _)) = mass.inertia {
+                let r = index(rotation)?;
+                mass_blocks.push(MassBlock {
+                    dofs: std::array::from_fn(|d| r * 3 + d as u32),
+                    mass: mass.inertia_matrix(),
+                });
+            }
+        }
         for support in &model.contact.compression_only {
             for gap in crate::discrete::surface_gaps(model, support)? {
                 for &d in &gap.dofs {
@@ -557,6 +600,7 @@ impl ElementTable {
             beams,
             missing_elastic,
             hyperelastic,
+            mass_blocks,
         })
     }
 
@@ -719,16 +763,11 @@ impl ElementTable {
         model.elements[self.entries[entry as usize].element as usize].id
     }
 
-    /// Marks the DOFs that some element (continuum, discrete or native block) uses.
+    /// Marks the DOFs that some element (continuum, discrete or native block) or point
+    /// mass uses.
     pub fn active_dofs(&self) -> Vec<bool> {
         let mut active = vec![false; self.dofs.len()];
-        for dof in self
-            .entries
-            .iter()
-            .flat_map(|e| &e.dofs)
-            .chain(self.discrete.iter().flat_map(|e| &e.dofs))
-            .chain(self.linear_blocks.iter().flat_map(|b| &b.dofs))
-        {
+        for dof in self.blocks().flatten() {
             active[*dof as usize] = true;
         }
         active

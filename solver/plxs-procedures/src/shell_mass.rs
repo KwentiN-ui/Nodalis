@@ -140,12 +140,19 @@ pub(crate) fn fibre_block(alpha: f64, m: &[f64]) -> Vec<f64> {
 pub(crate) struct FibreMass {
     pub(crate) nodes: Vec<Vec<u32>>,
     pub(crate) blocks: Vec<Vec<f64>>,
+    /// The off-diagonal part of the rotary inertias of point masses: three DOFs of a node
+    /// and their 3 × 3 block (zero on the diagonal, which the lumped mass holds).
+    pub(crate) dof_blocks: Vec<([u32; 3], [f64; 9])>,
 }
 
 impl FibreMass {
     pub(crate) fn new(nodes: Vec<Vec<u32>>) -> Self {
         let blocks = nodes.iter().map(|f| vec![0.0; f.len() * f.len()]).collect();
-        Self { nodes, blocks }
+        Self {
+            nodes,
+            blocks,
+            dof_blocks: Vec::new(),
+        }
     }
 
     /// Adds an element's block of fibre `fibre` (on the fibre positions `positions`).
@@ -162,6 +169,13 @@ impl FibreMass {
 
     /// `out += ΔM x` (three DOFs per node).
     pub(crate) fn add_times(&self, x: &[f64], out: &mut [f64]) {
+        for (dofs, block) in &self.dof_blocks {
+            for (i, &a) in dofs.iter().enumerate() {
+                for (j, &b) in dofs.iter().enumerate() {
+                    out[a as usize] += block[i * 3 + j] * x[b as usize];
+                }
+            }
+        }
         for (nodes, block) in self.nodes.iter().zip(&self.blocks) {
             let k = nodes.len();
             for (i, &a) in nodes.iter().enumerate() {
@@ -188,6 +202,15 @@ impl FibreMass {
     /// The rows above the diagonal the blocks add to every column (three DOFs per node).
     pub(crate) fn columns(&self, n: usize) -> Vec<Vec<u32>> {
         let mut rows: Vec<Vec<u32>> = (0..n as u32).map(|j| vec![j]).collect();
+        for (dofs, _) in &self.dof_blocks {
+            for &r in dofs {
+                for &c in dofs {
+                    if r < c && (c as usize) < n {
+                        rows[c as usize].push(r);
+                    }
+                }
+            }
+        }
         for nodes in &self.nodes {
             for &a in nodes {
                 for &b in nodes {
@@ -207,6 +230,17 @@ impl FibreMass {
     pub(crate) fn add_to(&self, m: &mut SparseMatrix) {
         let pattern = m.pattern().clone();
         let values = m.values_mut();
+        for (dofs, block) in &self.dof_blocks {
+            for (i, &r) in dofs.iter().enumerate() {
+                for (j, &c) in dofs.iter().enumerate() {
+                    if r < c
+                        && let Some(p) = pattern.position(r, c)
+                    {
+                        values[p] += block[i * 3 + j];
+                    }
+                }
+            }
+        }
         for (nodes, block) in self.nodes.iter().zip(&self.blocks) {
             let k = nodes.len();
             for (i, &a) in nodes.iter().enumerate() {

@@ -10,15 +10,7 @@ use crate::ElementTable;
 
 /// The pattern of the global matrix: every element couples all its DOFs.
 pub fn build_pattern(table: &ElementTable) -> Arc<Pattern> {
-    Arc::new(Pattern::from_blocks(
-        table.dofs.len(),
-        table
-            .entries
-            .iter()
-            .map(|e| e.dofs.as_slice())
-            .chain(table.linear_blocks.iter().map(|b| b.dofs.as_slice()))
-            .chain(table.discrete.iter().map(|e| e.dofs.as_slice())),
-    ))
+    Arc::new(Pattern::from_blocks(table.dofs.len(), table.blocks()))
 }
 
 /// Assembles `K` from the element stiffness matrices: the elements are computed in

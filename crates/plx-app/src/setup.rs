@@ -5041,10 +5041,8 @@ pub fn acting_on_parts(model: &Model, parts: &BTreeSet<usize>) -> BTreeSet<TreeI
     };
     // A load on a reference point acts on the rigid bodies the point drives.
     let driven = |region: &Region| match region.reference_point() {
-        Some(point) => fe.constraints.iter().any(|c| match c {
-            Constraint::RigidBody(body) => body.reference_point == point && on_parts(&body.region),
-            _ => false,
-        }),
+        Some(point) => (fe.constraints.iter().filter_map(Constraint::coupling))
+            .any(|body| body.reference_point == point && on_parts(body.region)),
         None => on_parts(region),
     };
     let mut acting = BTreeSet::new();

@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CompressionOnly, NodeTie, Region, RigidBody, Spring, SpringEnd};
+use crate::{CompressionOnly, NodeTie, PointMass, Region, RigidBody, Spring, SpringEnd};
 
 /// Mechanical and thermal behaviour of touching surfaces (`*SURFACE INTERACTION`), referred to
 /// by contact pairs.
@@ -313,6 +313,7 @@ pub enum Constraint {
     Tie(Tie),
     RigidBody(RigidBody),
     Joint(crate::Joint),
+    PointMass(PointMass),
     /// Only in projects saved while node ties were constraints; [`crate::FeModel::migrate`]
     /// moves them to the model's node ties, where they belong with the contact pairs.
     NodeTie(NodeTie),
@@ -325,6 +326,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => &c.name,
             Constraint::Tie(tie) => &tie.name,
             Constraint::RigidBody(c) => &c.name,
+            Constraint::PointMass(c) => &c.name,
             Constraint::Joint(c) => &c.name,
             Constraint::NodeTie(c) => &c.name,
         }
@@ -336,6 +338,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => c.active,
             Constraint::Tie(tie) => tie.active,
             Constraint::RigidBody(c) => c.active,
+            Constraint::PointMass(c) => c.active,
             Constraint::Joint(c) => c.active,
             Constraint::NodeTie(c) => c.active,
         }
@@ -347,6 +350,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => &mut c.active,
             Constraint::Tie(tie) => &mut tie.active,
             Constraint::RigidBody(c) => &mut c.active,
+            Constraint::PointMass(c) => &mut c.active,
             Constraint::Joint(c) => &mut c.active,
             Constraint::NodeTie(c) => &mut c.active,
         }
@@ -358,6 +362,7 @@ impl Constraint {
             Constraint::Spring(c) => c.visible,
             Constraint::CompressionOnly(c) => c.visible,
             Constraint::RigidBody(c) => c.visible,
+            Constraint::PointMass(c) => c.visible,
             Constraint::Joint(c) => c.visible,
             Constraint::Tie(_) | Constraint::NodeTie(_) => true,
         }
@@ -369,6 +374,7 @@ impl Constraint {
             Constraint::Spring(c) => Some(&mut c.visible),
             Constraint::CompressionOnly(c) => Some(&mut c.visible),
             Constraint::RigidBody(c) => Some(&mut c.visible),
+            Constraint::PointMass(c) => Some(&mut c.visible),
             Constraint::Joint(c) => Some(&mut c.visible),
             Constraint::Tie(_) | Constraint::NodeTie(_) => None,
         }
@@ -380,8 +386,32 @@ impl Constraint {
             Constraint::CompressionOnly(c) => &mut c.name,
             Constraint::Tie(tie) => &mut tie.name,
             Constraint::RigidBody(c) => &mut c.name,
+            Constraint::PointMass(c) => &mut c.name,
             Constraint::Joint(c) => &mut c.name,
             Constraint::NodeTie(c) => &mut c.name,
+        }
+    }
+
+    /// The coupling of a selection to a reference point the constraint makes: a rigid
+    /// body, or a point mass on a selection of its own (one on a point that a rigid body
+    /// couples has none).
+    pub fn coupling(&self) -> Option<Coupling<'_>> {
+        match self {
+            Constraint::RigidBody(body) => Some(Coupling {
+                name: &body.name,
+                active: body.active,
+                region: &body.region,
+                reference_point: body.reference_point,
+                behavior: body.behavior,
+            }),
+            Constraint::PointMass(mass) if !mass.region.is_empty() => Some(Coupling {
+                name: &mass.name,
+                active: mass.active,
+                region: &mass.region,
+                reference_point: mass.reference_point,
+                behavior: mass.behavior,
+            }),
+            _ => None,
         }
     }
 
@@ -418,6 +448,7 @@ impl Constraint {
             Constraint::CompressionOnly(c) => vec![&c.region],
             Constraint::Tie(tie) => vec![&tie.master, &tie.slave],
             Constraint::RigidBody(c) => vec![&c.region],
+            Constraint::PointMass(c) => vec![&c.region],
             Constraint::Joint(c) => c.ends.iter().rev().filter_map(SpringEnd::region).collect(),
             Constraint::NodeTie(c) => vec![&c.region],
         }
@@ -431,12 +462,24 @@ impl Constraint {
             Constraint::CompressionOnly(c) => vec![&mut c.region],
             Constraint::Tie(tie) => vec![&mut tie.master, &mut tie.slave],
             Constraint::RigidBody(c) => vec![&mut c.region],
+            Constraint::PointMass(c) => vec![&mut c.region],
             Constraint::Joint(c) => (c.ends.iter_mut().rev())
                 .filter_map(SpringEnd::region_mut)
                 .collect(),
             Constraint::NodeTie(c) => vec![&mut c.region],
         }
     }
+}
+
+/// A selection coupled to a reference point, by a rigid body or a point mass, see
+/// [`Constraint::coupling`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Coupling<'a> {
+    pub name: &'a str,
+    pub active: bool,
+    pub region: &'a Region,
+    pub reference_point: crate::Id,
+    pub behavior: crate::RemoteBehavior,
 }
 
 /// Slave surface glued to a master surface (`*TIE`), e.g. parts meshed separately.

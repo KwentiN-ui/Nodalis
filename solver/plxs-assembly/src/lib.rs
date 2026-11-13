@@ -23,7 +23,7 @@ pub mod nonlinear;
 pub mod stiffness;
 
 pub use dofs::{DofMap, Reduction, Spc};
-pub use elements::{Beam, ElementTable, IntegrationPointLayout, LinearBlock};
+pub use elements::{Beam, ElementTable, IntegrationPointLayout, LinearBlock, MassBlock};
 pub use follower::{FollowerLoads, Turning};
 
 pub use heat::{HeatTable, assemble_heat, heat_loads, temperature_spc};

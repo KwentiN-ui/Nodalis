@@ -26,6 +26,9 @@ pub struct Model {
     #[serde(default)]
     pub orientations: Vec<crate::section::Orientation>,
     pub constraints: Constraints,
+    /// `*POINT MASS` (no CalculiX keyword): masses and rotary inertias on nodes.
+    #[serde(default)]
+    pub point_masses: Vec<PointMass>,
     pub contact: Contact,
     pub amplitudes: Vec<Amplitude>,
     pub initial: InitialConditions,
@@ -52,6 +55,37 @@ pub struct Model {
     pub expanded_structure: bool,
     #[serde(skip)]
     element_index: HashMap<ElementId, u32>,
+}
+
+/// `*POINT MASS, NODE=n[, ROTATION NODE=r]`: a mass on the translations of a node and,
+/// with a rotation node (the rotation node of a rigid body or coupling), a rotary inertia on
+/// that node's three DOFs, which are rotations. The inertia is the tensor about the global
+/// axes, `[I11, I22, I33, I12, I13, I23]`, `Iij = ∫ (r·r δij − xi xj) dm`. Point masses
+/// enter the mass matrix, and gravity and centrifugal loads (`*POINT MASS` lists the element
+/// sets of the loads it takes part in, see [`PointMass::elsets`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PointMass {
+    pub node: NodeId,
+    pub mass: f64,
+    /// The rotation node and the inertia tensor about the global axes.
+    pub inertia: Option<(NodeId, [f64; 6])>,
+    /// `ELSET=`: the mass takes part in the gravity and centrifugal loads (`*DLOAD`, GRAV
+    /// and CENTRIF) on this element set, the set of the elements that carry it. `None`:
+    /// in those on every set.
+    #[serde(default)]
+    pub elset: Option<String>,
+}
+
+impl PointMass {
+    /// The inertia as a symmetric 3x3 matrix (row major), zero without one.
+    pub fn inertia_matrix(&self) -> [f64; 9] {
+        match self.inertia {
+            Some((_, [i11, i22, i33, i12, i13, i23])) => {
+                [i11, i12, i13, i12, i22, i23, i13, i23, i33]
+            }
+            None => [0.0; 9],
+        }
+    }
 }
 
 impl Model {

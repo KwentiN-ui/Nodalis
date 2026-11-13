@@ -221,6 +221,19 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
         }
         concerning(&mut errors, before, ItemRef::RigidBody(index));
     }
+    for mass in &model.point_masses {
+        let nodes = std::iter::once(mass.node).chain(mass.inertia.map(|(r, _)| r));
+        for node in nodes {
+            if model.nodes.index(node).is_none() {
+                errors.push(Error::undefined("*POINT MASS", "node", node.to_string()));
+            }
+        }
+        if let Some(set) = &mass.elset
+            && !model.sets.element_sets.contains_key(set)
+        {
+            errors.push(Error::undefined("*POINT MASS", "element set", set));
+        }
+    }
     for joint in &model.constraints.joints {
         let before = errors.len();
         for node in joint.ends.iter().flatten().flatten() {

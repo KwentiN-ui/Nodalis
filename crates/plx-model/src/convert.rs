@@ -495,6 +495,12 @@ impl Constraint {
                 c.option(&mut s.tensile_force, Quantity::Force);
             }
             Constraint::Tie(t) => c.option(&mut t.position_tolerance, Quantity::Length),
+            Constraint::PointMass(m) => {
+                c.value(&mut m.mass, Quantity::Mass);
+                if let Some(inertia) = &mut m.inertia {
+                    c.all(&mut inertia.tensor, Quantity::MomentOfInertia);
+                }
+            }
             Constraint::NodeTie(_) | Constraint::RigidBody(_) | Constraint::Joint(_) => {}
         }
     }
