@@ -74,7 +74,7 @@ fn find_stack(gmsh: &Gmsh, topology: &Topology) -> Result<Result<Stack, String>,
     if candidates.is_empty() {
         return Ok(Err("it has no planar face".into()));
     }
-    let mut best: Option<(f64, Stack)> = None;
+    let mut best: Option<((usize, f64), Stack)> = None;
     let mut reason = String::new();
     'directions: for direction in candidates {
         let (mut caps, mut walls) = (Vec::new(), Vec::new());
@@ -96,11 +96,20 @@ fn find_stack(gmsh: &Gmsh, topology: &Topology) -> Result<Result<Stack, String>,
                 continue 'directions;
             }
         }
-        // A plain block is a stack three ways: the one with the largest ends has the
-        // fewest layers.
-        if best.as_ref().is_none_or(|(a, _)| area > *a) {
+        // A plain block is a stack three ways, a block with a pocket or an L-shaped bar
+        // too. The direction with the fewest heights of ends has the fewest cells; of those,
+        // the one with the smallest ends: a bar is swept along its length, so the face
+        // mesh, the fragile part, is that of its cross-section and not of its long sides.
+        let mut levels: Vec<f64> = caps.iter().map(|c| c.1).collect();
+        levels.sort_by(f64::total_cmp);
+        levels.dedup_by(|a, b| (*a - *b).abs() <= 1e-6 * topology.size);
+        let rank = (levels.len(), area);
+        if best
+            .as_ref()
+            .is_none_or(|(b, _)| rank.0 < b.0 || (rank.0 == b.0 && rank.1 < b.1 * (1.0 - 1e-9)))
+        {
             best = Some((
-                area,
+                rank,
                 Stack {
                     direction,
                     caps,

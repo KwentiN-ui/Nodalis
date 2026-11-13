@@ -3832,6 +3832,68 @@ fn a_detected_bonded_pin_with_play_passes_the_model_check() {
 }
 
 #[test]
+fn a_square_bar_is_swept_along_its_length_with_the_size_asked_for() {
+    if !gmsh_available() {
+        return;
+    }
+    // The core of a round bar cut into pieces for the mesher: 80 by 80 and 1400 long, in
+    // metres as projects in mm store it. Across its long sides it was a stack too, and the
+    // quasi-structured algorithm meshed such a long side alone with one element per edge.
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        gmsh.add_box([-0.04, -0.04, 0.0], [0.08, 0.08, 1.4])?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    let size = 0.004;
+    let geometry = Geometry {
+        compounds: Vec::new(),
+        suppressed: Vec::new(),
+        source: "kern.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters {
+            max_size: size,
+            min_size: 0.001,
+            second_order: false,
+            hexahedra_where_possible: true,
+            ..MeshingParameters::default()
+        },
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+        signatures: Vec::new(),
+    };
+    let generated = generate_part_mesh(&geometry, "SOLID-1").unwrap();
+    let mesh = generated.mesh;
+    let position: HashMap<NodeId, [f64; 3]> = (mesh.node_ids().iter().copied())
+        .zip(mesh.coords().iter().copied())
+        .collect();
+    assert!(!mesh.elements().is_empty());
+    for element in mesh.elements() {
+        assert_eq!(element.shape, ElementShape::Hex8);
+        let (mut low, mut high) = ([f64::MAX; 3], [f64::MIN; 3]);
+        for node in &element.nodes {
+            for ((l, h), &c) in low.iter_mut().zip(&mut high).zip(&position[node]) {
+                (*l, *h) = (l.min(c), h.max(c));
+            }
+        }
+        for (axis, (l, h)) in low.iter().zip(&high).enumerate() {
+            assert!(
+                h - l < 2.0 * size,
+                "element {} is {} wide along axis {axis}",
+                element.id,
+                h - l
+            );
+        }
+    }
+    // Swept along its length: the layers are the 350 along the bar.
+    let mut heights: Vec<f64> = mesh.coords().iter().map(|c| c[2]).collect();
+    heights.sort_by(f64::total_cmp);
+    heights.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    assert_eq!(heights.len(), 351, "{:?}", generated.warnings);
+}
+
+#[test]
 fn the_cut_faces_of_a_cyclic_symmetry_are_meshed_alike() {
     if !gmsh_available() {
         return;
