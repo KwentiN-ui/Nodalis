@@ -1754,3 +1754,37 @@ Gemessen (4 Threads, ohne GPU): Streifen 442 000 Gl. (vorhergesagt 246 Iteration
 (gewechselt, die Analyse mit 1,3 s frisst den Gewinn). Nicht ausgelöst: Bracket (27
 Iterationen mit C2), Würfel (17), Platten mit einer und zwei Schichten (63, 73), Balken
 (21).
+
+## Stand nach der bandbreitensparenden Faktorisierung (2026-11-13, Thread "Speed up direct solver factorization")
+
+Modell: Quentins Punktmasse (C3D20, Ties, Rigid Body; 562k Gleichungen, Faktor 935 Mio.
+Nichtnullen = 7.5 GB). Auf seinem i9-9900KF (8 Kerne, 16 MB L3) brauchte die
+Faktorisierung 53 s mit 16 und 44 s mit 8 Threads, in der Cloud (4 Kerne, 260 MB L3) 22 s.
+
+- Ursache: Die großen Supernoden teilten ihre Front in `4 × threads` Spaltenblöcke, und jeder
+  Block holte die Updates aller Nachfahren. Jeder Nachfahre wurde also einmal pro Block
+  gelesen, in schmalen Produkten (wenige seiner Zeilen pro Block): 115 GB Lesevolumen mit 4,
+  243 GB mit 16 Threads.
+- `supernodal::apply_updates`: eine Aufgabe je Nachfahre und bis zu 1024 Spalten (höchstens
+  32 MB Update), in Zeilenstücken von 2 MB gerechnet und sofort abgezogen, unter Sperren je
+  32 Spalten der Front. Lesevolumen 19 GB, unabhängig von der Threadzahl. Der sequentielle
+  Pfad nimmt denselben Code mit einer Sperre.
+- `supernodal::tiled_front`: die dichte LDLᵀ großer Fronten rechts-schauend in Schritten
+  von 256 Spalten, Kacheln von 512 Zeilen, dynamisch verteilt (statt faers paralleler
+  Kerne, die gleich große Teile je Thread vergeben).
+- `ordering::order_parallel`: beide Seiten großer Schnitte (ab 20k Knoten) parallel,
+  gleiche Permutation. `LdltSolver::allocate` belegt den Faktor parallel vor.
+- Messschalter: `PLXS_LDLT_TRACE` (Zeiten der großen Supernoden), `PLXS_FRONT=faer`,
+  `PLXS_FRONT_TILE`, `PLXS_FRONT_ROWS`, `PLXS_PARALLEL_NODE`.
+
+Zahlen (Cloud, 4 Kerne, im Wechsel gemessen): Analyse 16.5 → 9.1 s, Faktorisierung
+4 Threads 22.4 → 18.5 s, 16 Threads 39.8 → 18.1 s. 9900KF: 53 → 30 s (16 Threads),
+44 → 30 s (8 Threads). Dort skaliert der numerische Teil weiter schlecht (1 Thread 66 s,
+4 Threads 28 s, 8 Threads 25 s). `perf stat` zeigt kaum TLB-Fehler (9 Mio.) und etwa
+150 GB LLC-Fehlzugriffe über den Lauf, also keine gesättigte Bandbreite. Huge Pages
+(`GLIBC_TUNABLES=glibc.malloc.hugetlb=1`) brachten dort nichts. Keine der Schalter-Varianten
+war besser als 23 bis 25 s.
+
+Offen: das Ordering. METIS ordnet diesen Graphen mit 823 Mio. Nichtnullen und 24 % weniger
+Flops, Scotch mit 897 Mio., unsere Dissektion mit 935 Mio. Schnitte in 13 statt 3 Richtungen
+sparen 7 % Flops, kosten aber die vierfache Ordnungszeit. Die Blattgröße ist ohne Einfluss.
