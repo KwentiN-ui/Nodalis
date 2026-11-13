@@ -979,6 +979,52 @@ fn solver_holds_each_node_in_its_coordinate_system() {
     }
 }
 
+/// Nodes held in two coordinate systems get one of their own in which both hold their
+/// directions: a face held along global x and z by one boundary condition and along y,
+/// the x axis of a turned system, by another is clamped. A node set takes one system only:
+/// the turned one of the second set would also turn the directions of the first.
+#[test]
+fn solver_holds_nodes_shared_by_two_coordinate_systems() {
+    let force = Load {
+        region: Region::Nodes(vec![99]),
+        kind: LoadKind::force([100.0, 0.0, 0.0]),
+        ..tip_force()
+    };
+    let (mesh, mut model) = analysis("kragbalken_c3d8.inp", force);
+    turned_system(&mut model);
+    let mut global = Displacement::new([Some(0.0), None, Some(0.0), None, None, None]);
+    global.behavior = Behavior::EachNode;
+    let mut turned = Displacement::new([Some(0.0), None, None, None, None, None]);
+    turned.behavior = Behavior::EachNode;
+    turned.system = Some(named("Turned"));
+    let step = &mut model.steps[0];
+    step.boundary_conditions[0].kind = BoundaryKind::Displacement(global);
+    let mut second = step.boundary_conditions[0].clone();
+    second.id = plx_model::Id::new();
+    second.name = "Turned-1".into();
+    second.kind = BoundaryKind::Displacement(turned);
+    step.boundary_conditions.push(second);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // The global system has the turned x (global y) as an axis: the nodes are held in it,
+    // which overrides the turned system of the second set.
+    assert!(
+        text.contains(
+            "*Transform, Nset=INTERNAL_SELECTION-1_NODE_SYSTEM, Type=R\n1, 0, 0, 0, 1, 0\n"
+        ),
+        "{text}"
+    );
+    let Some(frd) = run_solver("two-systems", &text) else {
+        return;
+    };
+    let root = mesh.node_sets["FIX"].clone();
+    for id in root {
+        let u = ["U1", "U2", "U3"].map(|c| node_value(&frd, "DISP", c, id));
+        assert!(u.iter().all(|u| u.abs() < 1e-9), "{id}: {u:?}");
+    }
+    let tip = node_value(&frd, "DISP", "U1", 99);
+    assert!(tip > 0.0 && tip < 1e-2, "{tip}");
+}
+
 /// A face of solids held in its translations and free to turn becomes a hinge about its
 /// centre; held in all directions it is clamped node by node. Nodes that another boundary
 /// condition holds directly stay out of the point.
