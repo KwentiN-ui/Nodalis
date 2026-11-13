@@ -622,10 +622,34 @@ impl Picker {
                 );
             }
             SelectBy::GeometryPart | SelectBy::Part => (0..picker.faces().len()).collect(),
-            SelectBy::GeometryEdgeAngle | SelectBy::EdgeAngle | SelectBy::Edge => {
-                let limit = (self.select_by != SelectBy::Edge).then_some(angle);
+            SelectBy::GeometryEdgeAngle | SelectBy::EdgeAngle => {
+                // On across the borders of the parts and bodies.
+                let chains = match picker.nearest_edge(hit.point) {
+                    Some(edge) => edges_by_angle_across(model, hit.part, edge, angle),
+                    None => BTreeMap::new(),
+                };
+                let ids = model.mesh.node_ids();
+                let mut nodes = BTreeSet::new();
+                for (&part, edges) in &chains {
+                    let skin = &model.skin(part).edges;
+                    for edge in edges.iter().map(|&e| &skin[e]) {
+                        nodes.extend([Some(edge.a), Some(edge.b), edge.mid].into_iter().flatten());
+                    }
+                }
+                let nodes: BTreeSet<NodeId> = nodes.into_iter().map(|n| ids[n]).collect();
+                if target == Target::Surfaces {
+                    // The edges of shells along the picked edges.
+                    return Items::Faces(
+                        (chains.keys())
+                            .flat_map(|&part| outline_edges_within(model, Some(part), &nodes))
+                            .collect(),
+                    );
+                }
+                return Items::Nodes(nodes);
+            }
+            SelectBy::Edge => {
                 let nodes = match picker.nearest_edge(hit.point) {
-                    Some(edge) => picker.edge_chain(edge, limit),
+                    Some(edge) => picker.edge_chain(edge, None),
                     None => BTreeSet::new(),
                 };
                 if target == Target::Surfaces {
@@ -715,13 +739,15 @@ impl Picker {
         let Some(edge) = picker.nearest_edge(hit.point) else {
             return Items::Edges(BTreeSet::new());
         };
-        let chain = match self.select_by {
-            SelectBy::GeometryEdgeAngle | SelectBy::EdgeAngle => {
-                picker.chain_edges(edge, Some(self.angle.to_radians()))
-            }
-            _ => picker.geometry_edge(edge),
-        };
-        Items::Edges(picker.segments(chain))
+        match self.select_by {
+            // On across the borders of the parts and bodies.
+            SelectBy::GeometryEdgeAngle | SelectBy::EdgeAngle => Items::Edges(
+                (edges_by_angle_across(model, hit.part, edge, self.angle.to_radians()).into_iter())
+                    .flat_map(|(part, edges)| MeshPicker::new(model, part).segments(edges))
+                    .collect(),
+            ),
+            _ => Items::Edges(picker.segments(picker.geometry_edge(edge))),
+        }
     }
 
     /// What a click picks as a point: in the geometry mode the corner point of the geometry
@@ -1534,6 +1560,92 @@ fn faces_by_angle_across(
     faces
 }
 
+/// The feature edges, as part and edge of its skin, reached from `start` of `part` across
+/// nodes where the next edge bends by no more than `angle` (radians): within the part, and
+/// into other visible parts, or other bodies of a compound part, over ends lying on each
+/// other and onto outline edges lying on the edges reached ([`crate::seams`]). A plane
+/// model stays in the part, as for the surface angle.
+fn edges_by_angle_across(
+    model: &Model,
+    part: usize,
+    start: usize,
+    angle: f64,
+) -> BTreeMap<usize, BTreeSet<usize>> {
+    #[derive(Default)]
+    struct PartEdges {
+        at_node: HashMap<usize, Vec<usize>>,
+        by_nodes: HashMap<(usize, usize), usize>,
+    }
+    let coords = model.mesh.coords();
+    let point = |n: usize| DVec3::from(coords[n]);
+    let cos_limit = angle.cos();
+    let seams = (!model.is_plane()).then(|| model.seams());
+    let visible = |p: usize| model.parts.get(p).is_some_and(|info| info.visible);
+    // The feature edges of each part by node and by end nodes, built when reached.
+    let mut lookups: HashMap<usize, PartEdges> = HashMap::new();
+    let ensure = |lookups: &mut HashMap<usize, PartEdges>, part: usize| {
+        lookups.entry(part).or_insert_with(|| {
+            let mut edges = PartEdges::default();
+            for (index, edge) in model.skin(part).edges.iter().enumerate() {
+                if edge.feature {
+                    edges.at_node.entry(edge.a).or_default().push(index);
+                    edges.at_node.entry(edge.b).or_default().push(index);
+                    edges
+                        .by_nodes
+                        .insert((edge.a.min(edge.b), edge.a.max(edge.b)), index);
+                }
+            }
+            edges
+        });
+    };
+    let mut seen: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    seen.entry(part).or_default().insert(start);
+    let mut stack = vec![(part, start)];
+    while let Some((part, index)) = stack.pop() {
+        let edge = &model.skin(part).edges[index];
+        let (a, b) = (edge.a, edge.b);
+        // The next edges as part and edge.
+        let mut next: Vec<(usize, usize)> = Vec::new();
+        for (node, from) in [(a, b), (b, a)] {
+            let length = point(node).distance(point(from));
+            let incoming = (point(node) - point(from)).normalize_or_zero();
+            let mut candidates: Vec<(usize, usize, usize, usize)> = Vec::new();
+            ensure(&mut lookups, part);
+            for &other in lookups[&part].at_node.get(&node).into_iter().flatten() {
+                let e = &model.skin(part).edges[other];
+                candidates.push((part, e.a, e.b, node));
+            }
+            if let Some(seams) = seams {
+                candidates.extend(seams.at(node, length, coords, visible));
+            }
+            for (other, c, d, end) in candidates {
+                let far = if end == c { d } else { c };
+                let leaving = (point(far) - point(end)).normalize_or_zero();
+                if incoming.dot(leaving) >= cos_limit {
+                    ensure(&mut lookups, other);
+                    if let Some(&e) = lookups[&other].by_nodes.get(&(c.min(d), c.max(d))) {
+                        next.push((other, e));
+                    }
+                }
+            }
+        }
+        if let Some(seams) = seams {
+            for (other, c, d) in seams.along(part, a, b, coords, visible) {
+                ensure(&mut lookups, other);
+                if let Some(&e) = lookups[&other].by_nodes.get(&(c, d)) {
+                    next.push((other, e));
+                }
+            }
+        }
+        for (other, e) in next {
+            if seen.entry(other).or_default().insert(e) {
+                stack.push((other, e));
+            }
+        }
+    }
+    seen
+}
+
 fn corner_edges(corners: &[usize]) -> impl Iterator<Item = (usize, usize)> + '_ {
     (0..corners.len()).map(|i| (corners[i], corners[(i + 1) % corners.len()]))
 }
@@ -1890,6 +2002,40 @@ mod tests {
             faces(by_angle.pick(&model, &hit, Target::Faces, 0.1)).len(),
             13
         );
+    }
+
+    #[test]
+    fn edge_angle_goes_on_across_parts_and_bodies() {
+        let lines = |items: Items| match items {
+            Items::Edges(edges) => edges.len(),
+            other => panic!("{other:?} instead of lines"),
+        };
+        let mut model = two_blocks(false);
+        let by_angle = picker(SelectBy::EdgeAngle);
+        // The top edge along y = 0 runs on from the left block, in 2 segments, into the
+        // right one, in 3: the meshes share no nodes there.
+        let hit = block_hit(&model, 5.0, 0.2);
+        assert_eq!(lines(by_angle.pick(&model, &hit, Target::Lines, 0.1)), 5);
+        assert_eq!(
+            nodes(by_angle.pick(&model, &hit, Target::Nodes, 0.1)).len(),
+            3 + 4
+        );
+        // The top edges where the blocks meet lie on each other: both are taken.
+        let hit = block_hit(&model, 9.9, 5.0);
+        assert_eq!(lines(by_angle.pick(&model, &hit, Target::Lines, 0.1)), 5);
+        // Not into a hidden part.
+        model.parts[1].visible = false;
+        let hit = block_hit(&model, 5.0, 0.2);
+        assert_eq!(lines(by_angle.pick(&model, &hit, Target::Lines, 0.1)), 2);
+        // The plain edge mode stays at the corner of the part.
+        model.parts[1].visible = true;
+        let edge = picker(SelectBy::Edge);
+        assert_eq!(nodes(edge.pick(&model, &hit, Target::Nodes, 0.1)).len(), 3);
+
+        // The bodies of a compound part are crossed alike.
+        let model = two_blocks(true);
+        let hit = block_hit(&model, 15.0, 0.2);
+        assert_eq!(lines(by_angle.pick(&model, &hit, Target::Lines, 0.1)), 5);
     }
 
     /// The side of a flat shell ends at the corners of the plate, although its outline is
