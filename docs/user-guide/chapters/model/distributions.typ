@@ -47,6 +47,16 @@ few examples such as a linear gradient, a bearing load `Max(0, Cos(theta))` or a
 `Exp(-(r/10)^2)`. A click on a name or function puts it into the equation at the cursor, a click on
 an example replaces the equation with it.
 
+#ui("Show in colors on the mesh") below the factor colours the mesh by the factor at the nodes
+while the dialog is open, with a legend in the 3D view; the colours follow the equation, the
+variables and the coordinate system as you change them. The symbols of a pressure or a
+temperature boundary condition that uses a distribution show it too: each arrow or ball is as
+large as the factor where it is, relative to the largest one over the region; a negative factor
+turns a pressure arrow around, where the factor is zero there is none.
+
+#screenshot("distribution-preview.png", [The factor in colours over the mesh and the arrows of a
+  pressure that uses the distribution, scaled by it])
+
 With #ui("Points from file") the factors come from a text file with one point per line:
 `X Y Z factor`, the coordinates in the length unit of the project along the axes of the
 coordinate system (also of a cylindrical one), separated by blanks, tabs,

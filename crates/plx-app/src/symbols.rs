@@ -126,6 +126,9 @@ pub struct Item {
     /// The coordinate system the components of a force, moment or excitation are given in;
     /// `None` is the global one.
     pub system: Option<plx_model::Id>,
+    /// The distribution a pressure or temperature is scaled by: its arrows or balls are
+    /// drawn as large as the factor where they are.
+    pub distribution: Option<plx_model::Id>,
     /// Selected in the tree or edited in a dialog: drawn in the highlight colour.
     pub selected: bool,
 }
@@ -139,6 +142,9 @@ pub struct Symbol {
     pub direction: Vec3,
     pub shape: SymbolShape,
     pub color: Color32,
+    /// Size relative to the usual one: 1, or the factor of a distribution over the largest
+    /// one of the item.
+    pub scale: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -194,8 +200,25 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     direction: direction.as_vec3(),
                     shape,
                     color,
+                    scale: 1.0,
                 });
             }
+        };
+        // The factors of the item's distribution, relative to the largest one over the
+        // region, and the arrows or balls it scales.
+        let sampler = (item.distribution)
+            .and_then(|id| model.fe.distribution(id))
+            .and_then(|d| {
+                (d.sampler(model.fe.properties.units, &model.fe.coordinate_systems)).ok()
+            });
+        let scaled = |points: &[DVec3]| -> Option<(Vec<f64>, f64, Vec<usize>)> {
+            let sampler = sampler.as_ref()?;
+            let factors: Vec<f64> = points.iter().map(|&p| sampler.factor(p.into())).collect();
+            let largest = (factors.iter().map(|f| f.abs()))
+                .filter(|f| f.is_finite())
+                .fold(0.0, f64::max);
+            // Denser than usual, to show how the factor varies.
+            Some((factors, largest, sample(points, DIVISIONS * 2.0)))
         };
         match item.kind {
             // Lines from nodes spread over the region to the reference point, half as dense
@@ -212,6 +235,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                         direction: Vec3::ZERO,
                         shape: SymbolShape::LineTo(to),
                         color,
+                        scale: 1.0,
                     });
                 }
             }
@@ -228,6 +252,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                         direction: Vec3::ZERO,
                         shape: SymbolShape::LineTo(to),
                         color,
+                        scale: 1.0,
                     });
                 }
                 symbols.push(Symbol {
@@ -235,6 +260,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     direction: Vec3::Z,
                     shape: SymbolShape::Mass,
                     color,
+                    scale: 1.0,
                 });
             }
             // A spring for each direction with stiffness. To a surface at points spread over
@@ -303,6 +329,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                                 direction: Vec3::ZERO,
                                 shape: SymbolShape::LineTo(to),
                                 color,
+                                scale: 1.0,
                             });
                         }
                     }
@@ -329,6 +356,26 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
             Kind::Load(LoadKind::Pressure(pressure)) => {
                 let faces = face_geometry(model, &item.region, &visible);
                 let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
+                if let Some((factors, largest, picked)) = scaled(&centers) {
+                    for index in picked {
+                        let face = &faces[index];
+                        let value = pressure * factors[index];
+                        let (direction, shape) = if value >= 0.0 {
+                            (-face.normal, SymbolShape::ArrowOnto)
+                        } else {
+                            (face.normal, SymbolShape::Arrow)
+                        };
+                        symbols.extend(scaled_symbol(
+                            model,
+                            face.center,
+                            direction,
+                            shape,
+                            color,
+                            factors[index].abs() / largest,
+                        ));
+                    }
+                    continue;
+                }
                 for index in sample(&centers, DIVISIONS) {
                     let face = &faces[index];
                     if pressure >= 0.0 {
@@ -412,6 +459,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                         direction: Vec3::ZERO,
                         shape: SymbolShape::LineTo(to),
                         color,
+                        scale: 1.0,
                     });
                 }
             }
@@ -511,6 +559,23 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                 }
             }
             Kind::Load(LoadKind::Film { .. } | LoadKind::Radiation { .. }) => {}
+            Kind::Boundary(BoundaryKind::Temperature(_)) if sampler.is_some() => {
+                let points = node_points(model, &item.region, &visible);
+                let Some((factors, largest, picked)) = scaled(&points) else {
+                    continue;
+                };
+                for index in picked {
+                    let scale = factors[index].abs() / largest;
+                    symbols.extend(scaled_symbol(
+                        model,
+                        points[index],
+                        DVec3::Z,
+                        SymbolShape::Ball,
+                        color,
+                        scale,
+                    ));
+                }
+            }
             Kind::Load(LoadKind::Flux { .. }) | Kind::Boundary(BoundaryKind::Temperature(_)) => {
                 let points = node_points(model, &item.region, &visible);
                 for index in sample(&points, DIVISIONS) {
@@ -565,6 +630,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                         direction: Vec3::ZERO,
                         shape: SymbolShape::LineTo(to),
                         color,
+                        scale: 1.0,
                     });
                 }
             }
@@ -618,6 +684,31 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
     }
     symbols
 }
+
+/// A symbol drawn `scale` times as large as usual; none where it would be too small to see
+/// or the scale is no number.
+fn scaled_symbol(
+    model: &Model,
+    position: DVec3,
+    direction: DVec3,
+    shape: SymbolShape,
+    color: Color32,
+    scale: f64,
+) -> Option<Symbol> {
+    if scale.is_nan() || scale < MIN_SCALE {
+        return None;
+    }
+    Some(Symbol {
+        position: (position - model.origin()).as_vec3(),
+        direction: direction.try_normalize()?.as_vec3(),
+        shape,
+        color,
+        scale: scale.min(1.0) as f32,
+    })
+}
+
+/// Symbols of a distribution smaller than this part of the largest are left out.
+const MIN_SCALE: f64 = 0.02;
 
 /// The global directions a spring with this stiffness acts in.
 fn acting(stiffness: [f64; 3]) -> impl Iterator<Item = DVec3> {
@@ -851,7 +942,7 @@ pub fn draw(painter: &Painter, rect: Rect, camera: &Camera, symbols: &[Symbol]) 
             painter.add(wire(SPRING_WIDTH, symbol.color));
             continue;
         }
-        let mut solids = solids(symbol.shape, symbol.direction);
+        let mut solids = solids(symbol.shape, symbol.direction, symbol.scale);
         solids.sort_by(|a, b| (b.depth.dot(forward)).total_cmp(&a.depth.dot(forward)));
         for solid in solids {
             let points: Vec<Pos2> = solid.points.iter().map(|&p| anchor + screen(p)).collect();
@@ -885,16 +976,17 @@ struct Solid {
 /// symbol size): the arrow source with tip length 0.3, tip radius 0.1 and shaft radius 0.03,
 /// shifted 0.05 off the point; the cone of height 1 and radius 0.5; the rod of length 1.3
 /// with a 0.4 thick plate of width 0.9.
-fn solids(shape: SymbolShape, direction: Vec3) -> Vec<Solid> {
-    let size = match shape {
-        SymbolShape::Arrow | SymbolShape::ArrowOnto | SymbolShape::MomentArrow => ARROW_SIZE,
-        SymbolShape::Cone
-        | SymbolShape::RotationLock
-        | SymbolShape::Ball
-        | SymbolShape::Mass
-        | SymbolShape::GapSupport => SUPPORT_SIZE,
-        SymbolShape::LineTo(_) | SymbolShape::Spring => return Vec::new(),
-    };
+fn solids(shape: SymbolShape, direction: Vec3, scale: f32) -> Vec<Solid> {
+    let size = scale
+        * match shape {
+            SymbolShape::Arrow | SymbolShape::ArrowOnto | SymbolShape::MomentArrow => ARROW_SIZE,
+            SymbolShape::Cone
+            | SymbolShape::RotationLock
+            | SymbolShape::Ball
+            | SymbolShape::Mass
+            | SymbolShape::GapSupport => SUPPORT_SIZE,
+            SymbolShape::LineTo(_) | SymbolShape::Spring => return Vec::new(),
+        };
     let axis = direction * size;
     let (u, v) = direction.any_orthonormal_pair();
     let disc = |at: f32, radius: f32| -> Vec<Vec3> {
@@ -1082,6 +1174,7 @@ mod tests {
             },
             region: Region::Surface("TIP".into()),
             system: None,
+            distribution: None,
             selected: false,
         };
         let symbols = build(&model, &[item("RP-1")]);
@@ -1098,6 +1191,55 @@ mod tests {
     }
 
     #[test]
+    fn pressure_arrows_follow_their_distribution() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/kragbalken_c3d8.inp");
+        let mesh = plx_io::inp::read_inp(&path).unwrap().mesh;
+        let mut model = Model::new(&path, mesh);
+        let mut distribution = plx_model::Distribution::new("Rising");
+        let id = distribution.id;
+        let mut symbols_with = |model: &mut Model, equation: &str| {
+            distribution.kind = plx_model::DistributionKind::Equation(equation.into());
+            model.fe.distributions = vec![distribution.clone()];
+            let item = Item {
+                kind: Kind::Load(LoadKind::Pressure(2.0)),
+                region: Region::Surface("TIP".into()),
+                system: None,
+                distribution: Some(id),
+                selected: false,
+            };
+            build(model, &[item])
+        };
+        // Arrows as long as the factor where they are, the longest of full size; the unit of
+        // y cancels out.
+        let arrows = symbols_with(&mut model, "y");
+        assert!(!arrows.is_empty());
+        let largest = arrows.iter().map(|a| a.scale).fold(0.0, f32::max);
+        assert!((largest - 1.0).abs() < 1e-6);
+        for arrow in &arrows {
+            assert_eq!(arrow.shape, SymbolShape::ArrowOnto);
+            let y = arrow.position.y as f64 + model.origin().y;
+            let expected = y / arrows
+                .iter()
+                .map(|a| a.position.y as f64 + model.origin().y)
+                .fold(0.0, f64::max);
+            assert!(
+                (arrow.scale as f64 - expected).abs() < 1e-4,
+                "{y}: {}",
+                arrow.scale
+            );
+        }
+        // A negative factor pulls, a factor of zero has no arrows.
+        let pulled = symbols_with(&mut model, "-1");
+        assert!(
+            pulled
+                .iter()
+                .all(|a| a.shape == SymbolShape::Arrow && a.scale == 1.0)
+        );
+        assert!(symbols_with(&mut model, "0").is_empty());
+    }
+
+    #[test]
     fn springs_act_where_they_have_stiffness() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/kragbalken_c3d8.inp");
@@ -1110,6 +1252,7 @@ mod tests {
             },
             region: Region::Nodes(nodes),
             system: None,
+            distribution: None,
             selected: false,
         };
         // Two directions at each of three nodes, or once at the centre of many nodes.
@@ -1126,6 +1269,7 @@ mod tests {
             kind: Kind::CompressionOnly { flipped },
             region: Region::Surface("TIP".into()),
             system: None,
+            distribution: None,
             selected: false,
         };
         let cones = build(&model, &[support(false)]);
@@ -1175,6 +1319,7 @@ mod tests {
                 kind: Kind::Boundary(BoundaryKind::Displacement(displacement)),
                 region: Region::Surface("TIP".into()),
                 system: None,
+                distribution: None,
                 selected: false,
             }
         };
@@ -1203,7 +1348,7 @@ mod tests {
     #[test]
     fn arrows_start_or_end_at_the_point() {
         let tip = |shape| {
-            let parts = solids(shape, Vec3::X);
+            let parts = solids(shape, Vec3::X, 1.0);
             let head = &parts[1].points;
             head[head.len() - 1].x / ARROW_SIZE
         };

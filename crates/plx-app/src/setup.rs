@@ -2848,15 +2848,20 @@ impl Editor {
     /// The boundary condition or load being edited as it would be applied: its step, its
     /// index (`None` for a new one) and the symbol item, for the 3D view.
     pub fn step_item(&self) -> Option<(usize, Option<usize>, crate::symbols::Item)> {
-        let (step, kind, region, system) = match &self.draft {
-            Draft::BoundaryCondition(s, bc, r) => {
-                (*s, crate::symbols::Kind::Boundary(bc.kind.clone()), r, None)
-            }
+        let (step, kind, region, system, distribution) = match &self.draft {
+            Draft::BoundaryCondition(s, bc, r) => (
+                *s,
+                crate::symbols::Kind::Boundary(bc.kind.clone()),
+                r,
+                None,
+                bc.distribution,
+            ),
             Draft::Load(s, load, r) => (
                 *s,
                 crate::symbols::Kind::Load(load.kind.clone()),
                 r,
                 load.system,
+                load.distribution,
             ),
             _ => return None,
         };
@@ -2864,6 +2869,7 @@ impl Editor {
             kind,
             region: region.region(),
             system,
+            distribution,
             selected: true,
         };
         Some((step, self.index, item))
@@ -4478,6 +4484,14 @@ impl Editor {
                 .into()),
             _ => Ok(()),
         }
+    }
+
+    /// The factors of the edited distribution at the nodes, while its dialog shows them.
+    pub fn distribution_preview(&self, model: &Model) -> Option<crate::model::DistributionPreview> {
+        let Draft::Distribution(distribution, view) = &self.draft else {
+            return None;
+        };
+        view.preview(distribution, model)
     }
 
     /// The whole part a cyclic symmetry tie dialog's sector stands for, previewed in the 3D

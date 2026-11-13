@@ -400,6 +400,7 @@ impl ConstraintDraft {
             kind,
             region,
             system: None,
+            distribution: None,
             selected: true,
         })
     }
