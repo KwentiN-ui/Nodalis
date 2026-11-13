@@ -89,11 +89,10 @@ impl CadOperationEditor {
         let (view, flat, message) = match plx_mesher::tessellate(&input) {
             Ok(display) => {
                 let flat = display.solids == 0 && display.faces > 0;
-                (
-                    Some(Model::geometry_view(Path::new(name), display)),
-                    flat,
-                    None,
-                )
+                // Suppressed parts are drawn as their edges and cannot be picked.
+                let mut view = Model::geometry_view(Path::new(name), display);
+                view.mark_suppressed(&input);
+                (Some(view), flat, None)
             }
             Err(error) => (
                 None,
@@ -344,10 +343,9 @@ impl CadOperationEditor {
     fn show_result(&mut self, made: Result<Geometry, String>, operation: CadOperation) {
         let made = made.and_then(|geometry| {
             let display = plx_mesher::tessellate(&geometry).map_err(|e| e.to_string())?;
-            Ok((
-                Model::geometry_view(Path::new(&self.name), display),
-                geometry,
-            ))
+            let mut view = Model::geometry_view(Path::new(&self.name), display);
+            view.mark_suppressed(&geometry);
+            Ok((view, geometry))
         });
         match made {
             Ok((model, geometry)) => {
@@ -528,7 +526,7 @@ impl CadOperationEditor {
                 ui.colored_label(crate::style::error(), message);
             }
             None if self.shown == Shown::Input => {
-                ui.weak(match self.kind {
+                let hint = match self.kind {
                     CadOperationKind::PushPull => "Click the planar faces to move along their \
                         normal, outwards for a positive offset; a click on a picked face removes \
                         it. Neighbours at right angles follow, sloped ones get a step."
@@ -574,7 +572,14 @@ impl CadOperationEditor {
                         "Click the edges to {}; a click on a picked edge removes it.",
                         kind.label().to_lowercase()
                     ),
-                });
+                };
+                if self.input.suppressed.is_empty() {
+                    ui.weak(hint);
+                } else {
+                    ui.weak(format!(
+                        "{hint} Suppressed parts, drawn as their edges, stay as they are."
+                    ));
+                }
             }
             None if self.note.is_some() => {
                 ui.weak(self.note.clone().unwrap_or_default());

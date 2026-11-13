@@ -2300,6 +2300,7 @@ impl Workbench {
         }
         self.tree.active_step = self.active_step();
         self.tree.compounds = self.compound_rows();
+        self.sync_suppressed();
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),
@@ -2431,7 +2432,8 @@ impl Workbench {
         let mesh = TreeItem::Mesh;
         let meshing = response.mesh_part.is_some()
             || response.transform_part.is_some()
-            || response.merge_parts;
+            || response.merge_parts
+            || response.suppress.is_some();
         let mesh_linked =
             (self.incoming.paths.iter()).any(|(path, _)| path[0] == crate::links::MESH);
         if meshing && (check(Some(&mesh), self) || mesh_linked) {
@@ -2441,6 +2443,7 @@ impl Workbench {
             response.mesh_part = None;
             response.transform_part = None;
             response.merge_parts = false;
+            response.suppress = None;
         }
         if let Some(line) = refused {
             self.output.push(line);
@@ -2617,6 +2620,28 @@ impl Workbench {
             {
                 self.tree.selected = None;
             }
+        }
+        // The no-entry sign of a suppressed part of the geometry unsuppresses it.
+        if view == TreeView::Geometry {
+            match response.toggle_active.take() {
+                Some(TreeItem::Part(index)) => {
+                    let selected = self.tree.selected_parts(view);
+                    let parts = if selected.contains(&index) {
+                        selected.into_iter().collect()
+                    } else {
+                        vec![index]
+                    };
+                    response.suppress = Some((parts, false));
+                }
+                Some(TreeItem::Compound(c)) => {
+                    let members = (self.tree.compounds.get(c)).map(|(_, m)| m.clone());
+                    response.suppress = members.map(|m| (m, false));
+                }
+                _ => {}
+            }
+        }
+        if let Some((parts, suppressed)) = response.suppress.take() {
+            self.suppress_parts(&parts, suppressed);
         }
         if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
             // Several selected items all take the state the clicked one changes to.
@@ -3546,6 +3571,37 @@ impl Workbench {
         let Some(geometry) = self.model.as_ref().and_then(|m| m.geometry.clone()) else {
             return;
         };
+        // Suppressed parts are left out, see `meshing::mesh_parts`.
+        let asked: Vec<String> = match &parts {
+            Some(parts) => (parts.iter())
+                .flat_map(|p| geometry.parts_of_fe_part(p))
+                .collect(),
+            None => (self.geometry.as_ref())
+                .map(|g| g.parts.iter().map(|p| p.name.clone()).collect())
+                .unwrap_or_default(),
+        };
+        let left_out: Vec<&String> = (asked.iter())
+            .filter(|p| geometry.is_suppressed(p))
+            .collect();
+        if !asked.is_empty() && left_out.len() == asked.len() {
+            let line = match &parts {
+                Some(_) => format!(
+                    "Nothing to mesh: {} suppressed; unsuppress to mesh",
+                    if left_out.len() == 1 {
+                        "the part is"
+                    } else {
+                        "the parts are"
+                    }
+                ),
+                None => "Nothing to mesh: all parts are suppressed".to_owned(),
+            };
+            self.output.push(line);
+            return;
+        }
+        if !left_out.is_empty() {
+            let names: Vec<&str> = left_out.iter().map(|p| p.as_str()).collect();
+            (self.output).push(format!("Suppressed, not meshed: {}", names.join(", ")));
+        }
         let what = match &parts {
             Some(parts) => parts.join(", "),
             None => geometry.source.clone(),
@@ -4496,7 +4552,7 @@ impl Workbench {
         }
         let part = (self.menu_part).and_then(|index| {
             let info = self.shown()?.parts.get(index)?;
-            Some((index, info.visible, info.contours))
+            Some((index, info.visible, info.contours, info.suppressed))
         });
         let mut tree_response = TreeResponse::default();
         let mut command = None;
@@ -4504,13 +4560,14 @@ impl Workbench {
         let compounds = self.tree.compounds.clone();
         response.context_menu(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            if let Some((index, visible, contours)) = part {
+            if let Some((index, visible, contours, suppressed)) = part {
                 let view = self.tree_view;
                 tree::part_menu(
                     ui,
                     index,
                     visible,
                     contours,
+                    suppressed,
                     view,
                     &selected,
                     &compounds,
@@ -5521,6 +5578,44 @@ impl Workbench {
         (geometry.compounds.iter())
             .map(|c| (c.name.clone(), c.parts.iter().filter_map(index).collect()))
             .collect()
+    }
+
+    /// Marks the suppressed parts in the geometry view as the geometry has them, also after
+    /// an undo; a change redraws the parts.
+    fn sync_suppressed(&mut self) {
+        let (Some(model), Some(view)) = (self.model.as_ref(), self.geometry.as_mut()) else {
+            return;
+        };
+        if let Some(geometry) = &model.geometry
+            && view.mark_suppressed(geometry)
+        {
+            self.results_changed = true;
+        }
+    }
+
+    /// Suppresses or unsuppresses parts of the geometry, by index in the geometry view.
+    fn suppress_parts(&mut self, parts: &[usize], suppressed: bool) {
+        let names: Vec<String> = (self.geometry.as_ref())
+            .map(|g| {
+                (parts.iter())
+                    .filter_map(|&i| g.parts.get(i))
+                    .map(|p| p.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Some(geometry) = self.model.as_mut().and_then(|m| m.geometry.as_mut()) else {
+            return;
+        };
+        if names.is_empty() || !geometry.set_suppressed(&names, suppressed) {
+            return;
+        }
+        let what = if suppressed {
+            "suppressed"
+        } else {
+            "unsuppressed"
+        };
+        self.output.push(format!("{} {what}", names.join(", ")));
+        self.sync_suppressed();
     }
 
     /// Makes, changes or dissolves a compound part from the menus of the Geometry tree. A
@@ -7925,6 +8020,7 @@ mod tests {
             refinement: 1.0,
             signatures: Vec::new(),
             compounds: Vec::new(),
+            suppressed: Vec::new(),
         });
         model.fe.sections.push(plx_model::Section {
             orientation: None,

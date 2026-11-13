@@ -37,8 +37,16 @@ impl AnalysisWindow {
             geometry
         };
         // A split cuts the parts selected in the Geometry tree, or all when none is.
+        // Suppressed parts are never cut.
         let chosen = if kind == CadOperationKind::SplitPlane {
-            w.selected_geometry_parts()
+            let shown = w.geometry.as_ref();
+            (w.selected_geometry_parts().into_iter())
+                .filter(|&i| {
+                    !shown
+                        .and_then(|v| v.parts.get(i))
+                        .is_some_and(|p| p.suppressed)
+                })
+                .collect()
         } else {
             Vec::new()
         };

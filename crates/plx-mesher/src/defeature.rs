@@ -66,8 +66,9 @@ pub fn defeature(
             ));
         }
         let faces = if found {
-            blend_faces(gmsh, operation.value)?
+            unsuppressed(gmsh, input, blend_faces(gmsh, operation.value)?)?
         } else {
+            crate::refuse_suppressed(gmsh, input, entities, "faces")?;
             picked_faces(gmsh, entities)?
         };
         if faces.is_empty() {
@@ -205,10 +206,17 @@ pub fn find_blends(input: &Geometry, max_size: f64) -> Result<Vec<CadEntity>, Gm
     let file = TempFile::with_contents("brep", &input.brep)?;
     with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
-        Ok((blend_faces(gmsh, max_size)?.into_iter())
-            .map(CadEntity::Face)
-            .collect())
+        let faces = unsuppressed(gmsh, input, blend_faces(gmsh, max_size)?)?;
+        Ok((faces.into_iter()).map(CadEntity::Face).collect())
     })
+}
+
+/// The faces among `faces` that lie on no suppressed part.
+fn unsuppressed(gmsh: &Gmsh, input: &Geometry, faces: Vec<i32>) -> Result<Vec<i32>, GmshError> {
+    let suppressed = crate::suppressed_entities(gmsh, input)?;
+    Ok((faces.into_iter())
+        .filter(|&f| !suppressed.contains(&CadEntity::Face(f)))
+        .collect())
 }
 
 /// Whether two signatures are the same face, unchanged.
