@@ -228,12 +228,17 @@ fn point_mass_body_loads(
         }
         let factor = amplitude_factor(model, step, load.amplitude.as_deref(), time, total, period);
         let loaded = elements_of(&load.region);
+        let named = |mass: &plxs_core::PointMass| match (&load.region, &mass.name) {
+            (ElementRef::Set(set), Some(name)) => set == name,
+            _ => false,
+        };
         for mass in &model.point_masses {
-            let carried = match &mass.elset {
-                None => true,
-                Some(set) => (model.sets.element_sets.get(set))
-                    .is_some_and(|ids| ids.iter().any(|id| loaded.contains(id))),
-            };
+            let carried = named(mass)
+                || match &mass.elset {
+                    None => true,
+                    Some(set) => (model.sets.element_sets.get(set))
+                        .is_some_and(|ids| ids.iter().any(|id| loaded.contains(id))),
+                };
             let Some(node) = model.nodes.index(mass.node).filter(|_| carried) else {
                 continue;
             };

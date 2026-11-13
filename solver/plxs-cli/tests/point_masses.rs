@@ -241,3 +241,65 @@ fn gravity_pulls_a_point_mass_with_its_weight() {
     assert!((u[2] - expected).abs() < 1e-9, "{u:?} vs {expected}");
     clean(&dir);
 }
+
+/// Runs `text` as job `job` in `dir` and returns its `.dat` file.
+fn run_text(dir: &Path, job: &str, text: &str) -> String {
+    std::fs::write(dir.join(format!("{job}.inp")), text).unwrap();
+    let output = Command::new(plxs())
+        .arg(job)
+        .arg("--threads")
+        .arg("1")
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && log.contains("Job finished"),
+        "{log}"
+    );
+    std::fs::read_to_string(dir.join(format!("{job}.dat"))).unwrap()
+}
+
+/// A gravity load on the name of a point mass pulls that mass alone, statically and, held
+/// from the start, in explicit time integration to twice its static sag after half a
+/// period; a later step replaces it instead of adding to it.
+#[test]
+fn gravity_on_the_name_of_a_point_mass_pulls_it_alone() {
+    let dir = directory("named");
+    let with_name = |step: &str| {
+        model(step).replace(
+            "*Point mass, Node=1\n",
+            "*Nset, Nset=NALL\n1, 2\n*Point mass, Node=1, Elset=S3, Name=Motor\n",
+        )
+    };
+    let sag = -MASS * 9.81 / K;
+    let dat = run_text(
+        &dir,
+        "static",
+        &with_name("*Static\n*Dload\nMotor, Grav, 9.81, 0, 0, -1\n*Node print, Nset=NALL\nU"),
+    );
+    let u = last_print(&dat, 1.0);
+    assert!((u[2] - sag).abs() < 1e-9 * sag.abs(), "{u:?} vs {sag}");
+    // The same load again in a second step: still the weight once.
+    let twice =
+        with_name("*Static\n*Dload\nMotor, Grav, 9.81, 0, 0, -1\n*Node print, Nset=NALL\nU")
+            + "*Step\n*Static\n*Dload\nMotor, Grav, 9.81, 0, 0, -1\n*Node print, Nset=NALL\nU\n\
+           *End step\n";
+    let u = last_print(&run_text(&dir, "again", &twice), 1.0);
+    assert!((u[2] - sag).abs() < 1e-9 * sag.abs(), "{u:?} vs {sag}");
+    let half = std::f64::consts::PI * (MASS / K).sqrt();
+    let step = format!(
+        "*Dynamic, Integration=Explicit\n{}, {half}\n*Dload\nMotor, Grav, 9.81, 0, 0, -1\n\
+         *Node print, Nset=NALL\nU",
+        half / 400.0
+    );
+    let text = with_name(&step).replace("*Step\n", "*Step, Amplitude=Step, Inc=1000\n");
+    let u = last_print(&run_text(&dir, "explicit", &text), 1.0);
+    assert!(
+        (u[2] - 2.0 * sag).abs() < 2e-3 * sag.abs(),
+        "{u:?} vs {}",
+        2.0 * sag
+    );
+    clean(&dir);
+}

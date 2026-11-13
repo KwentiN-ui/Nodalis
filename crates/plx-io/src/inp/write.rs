@@ -1141,6 +1141,9 @@ struct Sets<'a> {
     /// Reference and rotation node of each reference point an active rigid body is driven
     /// by, and the node set holding the reference node once something refers to it.
     reference_nodes: BTreeMap<Id, ReferenceNodes>,
+    /// The name (`*POINT MASS, NAME=`) of the point masses on each reference point, by which
+    /// a gravity or centrifugal load on the point pulls them alone.
+    point_mass_names: BTreeMap<Id, String>,
     /// Reference and rotation node of the point of each displacement written with a point,
     /// with its region; boundary conditions with the same region and point share it.
     remote_points: Vec<(Region, plx_model::Displacement, [NodeId; 2])>,
@@ -1192,6 +1195,7 @@ impl<'a> Sets<'a> {
             shortened: Vec::new(),
             surface_sets: BTreeMap::new(),
             reference_nodes: BTreeMap::new(),
+            point_mass_names: BTreeMap::new(),
             remote_points: Vec::new(),
             remote_names: BTreeMap::new(),
             pre_tension_nodes: BTreeMap::new(),
@@ -1312,6 +1316,19 @@ impl<'a> Sets<'a> {
         let set = self.free_name("Internal_Selection", &name(item));
         self.element_sets.push((set.clone(), members));
         Ok(set)
+    }
+
+    /// The target of a gravity or centrifugal load: the element set of its region, or the
+    /// name of the point masses on its reference point.
+    fn body_load_set(&mut self, item: &str, region: &Region) -> Result<String, WriteError> {
+        match region {
+            Region::ReferencePoint(point) => (self.point_mass_names.get(point).cloned())
+                .ok_or_else(|| WriteError::InvalidLoad {
+                    item: item.to_string(),
+                    reason: "no point mass sits on the reference point".into(),
+                }),
+            _ => self.element_set(item, region),
+        }
     }
 
     /// The nodes of the rigid body a reference point drives.
@@ -2338,11 +2355,6 @@ fn constraints(
             )?,
             None => sets.reference_nodes(&mass.name, mass.reference_point)?,
         };
-        let point = model.reference_point(mass.reference_point);
-        let carrier = match point.and_then(|_| model.rigid_body_of(mass.reference_point)) {
-            Some(body) => &body.region,
-            None => &mass.region,
-        };
         let inertia = match &mass.inertia {
             Some(inertia) => {
                 let tensor = if model.properties.space.is_2d() {
@@ -2363,23 +2375,29 @@ fn constraints(
             None => None,
         };
         // The elements that carry the mass, for the gravity and centrifugal loads on them.
-        let carried: BTreeSet<NodeId> = carrier.nodes(sets.mesh).into_iter().collect();
-        let elements: Vec<ElementId> = (sets.mesh.elements().iter())
-            .filter(|e| e.nodes.iter().any(|n| carried.contains(n)))
-            .map(|e| e.id)
-            .collect();
+        let elements = model.point_mass_carriers(mass, sets.mesh);
         let elset = (!elements.is_empty()).then(|| {
             let set = sets.free_name("Internal_Selection", &name(&mass.name));
             sets.element_sets
                 .push((set.clone(), Members::Ids(elements)));
             ir_name(&set)
         });
+        let label = name(&nodes.name);
+        let named = match sets.point_mass_names.get(&mass.reference_point) {
+            Some(named) => named.clone(),
+            None => {
+                let named = sets.free_name("Internal_Mass", &label);
+                (sets.point_mass_names).insert(mass.reference_point, named.clone());
+                named
+            }
+        };
         owners.resize(items.len(), None);
         items.push(ConstraintItem::PointMass(ir::PointMass {
             node: nodes.reference,
             mass: mass.mass,
             inertia,
             elset,
+            name: Some(ir_name(&named)),
         }));
         owners.push(Some(ModelItem::Constraint(index)));
     }
@@ -4555,7 +4573,7 @@ fn step_block<'f>(
             // Gravity: the size of the acceleration and its direction.
             LoadKind::Gravity(_) | LoadKind::StandardGravity(_) => {
                 let acceleration = load.kind.gravity_vector().unwrap_or_default();
-                let set = sets.element_set(&load.name, &load.region)?;
+                let set = sets.body_load_set(&load.name, &load.region)?;
                 let Some((size, direction)) = unit_vector(acceleration) else {
                     return Err(WriteError::InvalidLoad {
                         item: load.name.clone(),
@@ -4574,7 +4592,7 @@ fn step_block<'f>(
             // Centrifugal load: the square of the rotational speed, a point on
             // the axis and the axis direction.
             LoadKind::Centrifugal { point, axis, speed } => {
-                let set = sets.element_set(&load.name, &load.region)?;
+                let set = sets.body_load_set(&load.name, &load.region)?;
                 let Some((_, direction)) = unit_vector(axis) else {
                     return Err(WriteError::InvalidLoad {
                         item: load.name.clone(),

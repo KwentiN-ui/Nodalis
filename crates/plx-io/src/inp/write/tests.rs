@@ -13414,7 +13414,8 @@ fn a_point_mass_couples_its_region_and_sits_on_its_point() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains(&format!(
-            "*Point mass, Node={}, Rotation node={rotation}, Elset={elset}\n0.5, 7, 1, 2, 0, 0, 0\n",
+            "*Point mass, Node={}, Rotation node={rotation}, Elset={elset}, \
+             Name=INTERNAL_MASS-1_RP-1\n0.5, 7, 1, 2, 0, 0, 0\n",
             mass.node
         )),
         "{text}"
@@ -13507,6 +13508,58 @@ fn solver_swings_and_weighs_a_cantilever_with_a_tip_mass() {
             "{f} Hz vs {expected} Hz"
         );
     }
+}
+
+/// Gravity on the reference point of a point mass pulls the mass alone, without the weight
+/// of the beam; on the part it pulls both. The model names the masses each load pulls.
+#[test]
+fn solver_pulls_a_point_mass_alone_by_gravity_on_its_point() {
+    let beam = 7.85e-9 * 100.0 * 100.0;
+    let mass = 10.0 * beam;
+    let (mesh, mut model) = tip_mass(mass, None);
+    let mut gravity = body_load(LoadKind::Gravity([0.0, 0.0, -9810.0]));
+    let on_part = model.point_masses_pulled(&gravity.region, &mesh).len();
+    assert_eq!(on_part, 1);
+    gravity.region = Region::ReferencePoint(named("RP-1"));
+    assert_eq!(model.point_masses_pulled(&gravity.region, &mesh).len(), 1);
+    model.steps[0].loads.push(gravity.clone());
+    model.steps[0].field_outputs = ccx_eigen_outputs(&StepKind::Static(Default::default()));
+    assert!(
+        model.invalid_items(&mesh).is_empty(),
+        "{:?}",
+        model.invalid_items(&mesh)
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains(", Name=INTERNAL_MASS-1_RP-1\n"), "{text}");
+    assert!(
+        text.contains("INTERNAL_MASS-1_RP-1, GRAV, 9810, 0, 0, -1"),
+        "{text}"
+    );
+    // Without the point mass the load has nothing to pull.
+    let mut alone = model.clone();
+    alone.constraints.clear();
+    let invalid = alone.invalid_items(&mesh);
+    assert!(
+        invalid
+            .iter()
+            .any(|i| i.reason.contains("No active point mass")),
+        "{invalid:?}"
+    );
+    let Some(frd) = run_solver("point_mass_gravity_alone", &text) else {
+        return;
+    };
+    let increment = (frd.increments.iter())
+        .rfind(|i| i.kind != plx_results::AnalysisKind::Frequency)
+        .unwrap();
+    let forces = increment.field("FORC").unwrap().component("F3").unwrap();
+    let reaction: f64 = (fixed_nodes(&mesh).iter())
+        .map(|&n| f64::from(forces.values[frd.mesh.node_index(n).unwrap()]))
+        .sum();
+    let expected = mass * 9810.0;
+    assert!(
+        (reaction - expected).abs() < 1e-3 * expected,
+        "{reaction} vs {expected}"
+    );
 }
 
 /// A rotary inertia about the axis of the cantilever, given about the z axis of a turned

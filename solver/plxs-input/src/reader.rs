@@ -1180,7 +1180,7 @@ impl Reader {
     /// with the mass and, with a rotation node, the rotary inertia `I11, I22, I33, I12,
     /// I13, I23` about the global axes; see [`plxs_core::PointMass`].
     fn point_mass(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
-        k.check_parameters(&["NODE", "ROTATION NODE", "ELSET"])?;
+        k.check_parameters(&["NODE", "ROTATION NODE", "ELSET", "NAME"])?;
         let Some(node) = k.integer("NODE")? else {
             return Err(k.error("NODE is needed"));
         };
@@ -1209,6 +1209,7 @@ impl Reader {
             mass: values[0],
             inertia,
             elset: k.value("ELSET").map(normalized_name),
+            name: k.value("NAME").map(normalized_name),
         });
         Ok(())
     }
