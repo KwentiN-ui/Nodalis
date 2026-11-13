@@ -306,7 +306,12 @@ impl PathPlot {
         }
         Some(PlotBox {
             index,
-            title: format!("{}: {} {}", path.name, field.name, component.name),
+            title: format!(
+                "{}: {} {}",
+                path.name,
+                field.name,
+                view.component_label(&field.name, &component.name)
+            ),
             distances: points.iter().map(|p| p.distance).collect(),
             values,
             ends,

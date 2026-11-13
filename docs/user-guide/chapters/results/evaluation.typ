@@ -48,7 +48,8 @@ from the results.
   [Envelope], [`MAX`, `MIN` and `AVERAGE` of a component over all increments of all steps.],
   [Equation], [A formula of components, for example `=Abs([STRESS.S11]) / 235`, with the
     functions (`Abs`, `Sqrt`, `Max`, `Min`, `Pow`, `Sin`, `If`, ...). #ui("Insert
-    Component...") inserts a component name. #ui("Unit") is shown in the legend.],
+    Component...") inserts a component name; it lists the shown name with the numbered one
+    the equation takes, e.g. `SXX (S11)`. #ui("Unit") is shown in the legend.],
   [Coordinate System Transformation], [Rotates a vector or tensor field into a coordinate system
     defined under #ui("Features"); cylindrical systems give radial, tangential and axial
     components. A system that moves with a selection (@coordinate-systems) turns with it in

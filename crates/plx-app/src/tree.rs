@@ -2540,8 +2540,23 @@ pub fn feature(item: &TreeItem) -> Option<FeatureItem> {
     Some(FeatureItem { kind, index })
 }
 
-/// A name with the names of its children, e.g. a field with its components.
-type NamedList = (String, Vec<String>);
+/// A component's shown name with what it means, for its tooltip.
+type LabeledName = (String, Option<String>);
+
+/// A name with the shown names of its children, e.g. a field with its components.
+type NamedList = (String, Vec<LabeledName>);
+
+/// The shown name of the component `component` of `field` whose components point in `axes`
+/// (`UX` for `U1`), with what it means.
+fn labeled(field: &str, component: &str, axes: Option<plx_results::names::Axes>) -> LabeledName {
+    match axes {
+        Some(axes) => (
+            plx_results::names::component_label(component, axes),
+            plx_results::names::component_description(field, component, axes),
+        ),
+        None => (component.to_string(), None),
+    }
+}
 
 fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
     let model = model.filter(|m| m.results.is_some());
@@ -2558,7 +2573,10 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
             .map(|set| {
                 let fields = (set.fields.iter())
                     .map(|f| {
-                        let components = f.components.iter().map(|c| c.name.clone()).collect();
+                        // Shown by their directions, global for history outputs.
+                        let components = (f.components.iter())
+                            .map(|c| labeled(&f.name, &c.name, view.component_axes(&f.name)))
+                            .collect();
                         (f.name.clone(), components)
                     })
                     .collect();
@@ -2576,9 +2594,10 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                 .map(|(index, f)| {
                     // Components out of the plane of a 2D model are zero and not listed;
                     // the rest keep their index in the field.
-                    let components: Vec<(usize, String)> = (f.components.iter().enumerate())
+                    let axes = view.component_axes(&f.name);
+                    let components: Vec<(usize, LabeledName)> = (f.components.iter().enumerate())
                         .filter(|(_, c)| !c.out_of_plane)
-                        .map(|(c, component)| (c, component.name.clone()))
+                        .map(|(c, component)| (c, labeled(&f.name, &component.name, axes)))
                         .collect();
                     let derived = view.field_outputs.iter().any(|o| o.name == f.name);
                     (index, f.name.clone(), components, derived)
@@ -2612,11 +2631,14 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                         };
                         // Nodalis opens the first two fields.
                         tree.branch(ui, item, name, shown < 2, |tree, ui| {
-                            for (c, component) in components {
+                            for (c, (label, tip)) in components {
                                 let item = TreeItem::Component(f, c);
-                                if tree.leaf(ui, item, component).clicked()
-                                    && active != Some((f, c))
-                                {
+                                let response = tree.leaf(ui, item, label);
+                                let response = match tip {
+                                    Some(tip) => response.on_hover_text(tip),
+                                    None => response,
+                                };
+                                if response.clicked() && active != Some((f, c)) {
                                     tree.response.component = Some((f, c));
                                 }
                             }
@@ -2637,9 +2659,12 @@ fn results(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>) {
                             for (f, (name, components)) in fields.into_iter().enumerate() {
                                 let item = TreeItem::HistoryField(s, f);
                                 tree.branch(ui, item, name, open, |tree, ui| {
-                                    for (c, component) in components.into_iter().enumerate() {
+                                    for (c, (label, tip)) in components.into_iter().enumerate() {
                                         let item = TreeItem::HistoryComponent(s, f, c);
-                                        tree.leaf(ui, item, component);
+                                        let response = tree.leaf(ui, item, label);
+                                        if let Some(tip) = tip {
+                                            response.on_hover_text(tip);
+                                        }
                                     }
                                 });
                             }

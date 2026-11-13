@@ -1,4 +1,5 @@
 use plx_render::contour::{band_colors, normalize, rgb};
+use plx_results::names::{Axes, component_label, is_directional};
 
 use crate::animation::{Animation, AnimationKind, ColorLimits};
 use crate::sound::ModeSound;
@@ -337,6 +338,46 @@ impl ResultsView {
     pub fn current(&self) -> Option<(&Field, &Component)> {
         let field = self.current_increment()?.fields.get(self.field)?;
         Some((field, field.components.get(self.component)?))
+    }
+
+    /// The directions of the numbered components of the field `field` (`U1`, `S12`):
+    /// global axes for the solver's vector and tensor fields, those of the coordinate system
+    /// for a copy in one; `None` for fields whose components are no directions.
+    pub fn component_axes(&self, field: &str) -> Option<Axes> {
+        let axes_of = |system: Option<&plx_model::CoordinateSystem>| match system.map(|s| s.kind) {
+            Some(plx_model::CoordinateSystemKind::Cylindrical) => Axes::Cylindrical,
+            _ => Axes::Rectangular,
+        };
+        if let Some(copy) = self.output_systems.iter().find(|w| w.name == field) {
+            let system = self.coordinate_systems.iter().find(|c| c.id == copy.system);
+            return is_directional(&copy.field).then(|| axes_of(system));
+        }
+        match self
+            .field_outputs
+            .iter()
+            .find(|o| o.name == field)
+            .map(|o| &o.kind)
+        {
+            Some(plx_results::FieldOutputKind::CoordinateSystemTransform {
+                field,
+                coordinate_system,
+            }) => {
+                let system =
+                    (self.coordinate_systems.iter()).find(|c| c.name == *coordinate_system);
+                is_directional(field).then(|| axes_of(system))
+            }
+            Some(_) => None,
+            None => is_directional(field).then_some(Axes::Rectangular),
+        }
+    }
+
+    /// The name shown for the component `component` of the field `field`: `UX` for `U1`,
+    /// `U radial` in a cylindrical system (see [`component_label`]).
+    pub fn component_label(&self, field: &str, component: &str) -> String {
+        match self.component_axes(field) {
+            Some(axes) => component_label(component, axes),
+            None => component.to_string(),
+        }
     }
 
     /// The field whose directions arrows or streaks follow: the chosen one, else the shown
@@ -1791,7 +1832,7 @@ impl ResultsView {
             title: format!(
                 "{}: {}{unit}\n{scope}{arrows}",
                 name(&field.name),
-                name(&component.name)
+                self.component_label(&field.name, &component.name)
             ),
             min,
             max,
