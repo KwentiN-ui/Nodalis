@@ -33,6 +33,16 @@ sector; the wireframe previews the other eleven sectors])
     large models small.],
 )
 
+In a static step the tie holds the sector like the whole part: it can no longer slide across
+the axis or tilt. Like the whole part, it can still move along the axis and turn about it, so
+the boundary conditions only need to hold these two motions, for example one node of the master
+face held axially and tangentially (a displacement in a cylindrical coordinate system). The model
+check (@model-check) counts the tie this way and reports a sector that can still turn as
+#ui("Rigid body motion possible") with the rotation about the axis.
+
+#screenshot("cyclic-symmetry-rigid-body.png", [Model check of a sector held only along the
+axis: the cyclic symmetry holds everything but the turn about the axis])
+
 Only 3D models can be cyclic symmetric. The nodes of the slave face follow the master face, so
 Nodalis leaves them out of the boundary conditions: CalculiX refuses a node that is both bound
 and fixed ("dependent side of a MPC and a SPC").
