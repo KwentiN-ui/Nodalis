@@ -480,8 +480,20 @@ pub(crate) fn names_after(
     Ok(names)
 }
 
-/// The plane to cut along as a point on it and its unit normal.
+/// The plane to cut along as a point on it and its unit normal: the plane shifted by the
+/// offset, then tilted about its axis through that point.
 fn cut_plane(
+    gmsh: &Gmsh,
+    operation: &CadOperation,
+    entities: &[CadEntity],
+) -> Result<([f64; 3], [f64; 3]), GmshError> {
+    let (point, normal) = untilted_plane(gmsh, operation, entities)?;
+    let normal = plx_model::tilted_normal(normal, operation.tilt_axis.min(2), operation.tilt_angle);
+    Ok((point, normal))
+}
+
+/// The plane to cut along before its tilt.
+fn untilted_plane(
     gmsh: &Gmsh,
     operation: &CadOperation,
     entities: &[CadEntity],

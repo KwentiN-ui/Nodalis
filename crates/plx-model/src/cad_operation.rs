@@ -153,6 +153,15 @@ impl SplitPlane {
         }
     }
 
+    /// The axes a global plane can be tilted about: the two lying in it, as indices 0 to 2;
+    /// a plane of a face about any.
+    pub fn tilt_axes(self) -> Vec<usize> {
+        match self {
+            Self::Global(plane) => (0..3).filter(|&k| k != plane.normal_axis()).collect(),
+            Self::Face => vec![0, 1, 2],
+        }
+    }
+
     /// The unit normal of a global plane, the direction its offset goes.
     pub fn axis(self) -> Option<[f64; 3]> {
         match self {
@@ -164,6 +173,19 @@ impl SplitPlane {
             Self::Face => None,
         }
     }
+}
+
+/// `normal` turned by `degrees` about the global axis `axis` (0 to 2), right-handed.
+pub fn tilted_normal(normal: [f64; 3], axis: usize, degrees: f64) -> [f64; 3] {
+    if degrees == 0.0 {
+        return normal;
+    }
+    let (s, c) = degrees.to_radians().sin_cos();
+    let (a, b) = ((axis + 1) % 3, (axis + 2) % 3);
+    let mut turned = normal;
+    turned[a] = c * normal[a] - s * normal[b];
+    turned[b] = s * normal[a] + c * normal[b];
+    turned
 }
 
 /// Which faces a [`CadOperationKind::Defeature`] removes.
@@ -256,6 +278,14 @@ pub struct CadOperation {
     /// when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<String>,
+    /// The global axis, 0 to 2 for x to z, a split plane is tilted about, through the point
+    /// of the plane its offset gives.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub tilt_axis: usize,
+    /// The angle in degrees the split plane is tilted by about its tilt axis, right-handed;
+    /// zero leaves it as it is.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub tilt_angle: f64,
 }
 
 impl Default for CadOperation {
@@ -270,6 +300,8 @@ impl Default for CadOperation {
             compound: true,
             faces: DefeatureFaces::default(),
             parts: Vec::new(),
+            tilt_axis: 0,
+            tilt_angle: 0.0,
         }
     }
 }
@@ -278,10 +310,17 @@ impl CadOperation {
     /// What it acts on, for texts, e.g. "2 edges" or "1 corner".
     pub fn describe_picks(&self) -> String {
         if self.kind == CadOperationKind::SplitPlane {
-            let plane = match self.plane {
+            let mut plane = match self.plane {
                 SplitPlane::Face if self.entities.is_empty() => "no face picked".to_owned(),
                 plane => plane.label().to_owned(),
             };
+            if self.tilt_angle != 0.0 {
+                plane = format!(
+                    "{plane} tilted {} deg about {}",
+                    self.tilt_angle,
+                    ["X", "Y", "Z"][self.tilt_axis.min(2)]
+                );
+            }
             return match self.parts.len() {
                 0 => plane,
                 1 => format!("{plane}, 1 part"),
@@ -365,6 +404,7 @@ impl CadOperation {
         hash.add(&self.value.to_le_bytes());
         if self.kind == CadOperationKind::SplitPlane {
             hash.add_debug(&(self.plane, self.keep, self.compound));
+            hash.add_debug(&(self.tilt_axis, self.tilt_angle.to_bits()));
         }
         if self.kind == CadOperationKind::Defeature {
             hash.add_debug(&self.faces);
@@ -379,6 +419,9 @@ impl CadOperation {
                 "the {} is not a number",
                 self.kind.value_label().to_lowercase()
             ));
+        }
+        if self.kind == CadOperationKind::SplitPlane && !self.tilt_angle.is_finite() {
+            return Some("the tilt angle is not a number".to_owned());
         }
         if !self.kind.signed() && self.value < 0.0 {
             return Some(format!(
