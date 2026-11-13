@@ -361,6 +361,7 @@ pub fn apply(ctx: &egui::Context) {
 
     // egui falls back to dark when the system does not tell; the default look is light.
     ctx.options_mut(|o| o.fallback_theme = Theme::Light);
+    click_tolerance(ctx);
     ctx.set_visuals_of(Theme::Light, visuals(Visuals::light(), &LIGHT));
     ctx.set_visuals_of(Theme::Dark, visuals(Visuals::dark(), &DARK));
     for theme in [Theme::Light, Theme::Dark] {
@@ -475,6 +476,15 @@ pub fn status_tabs(
         }
     });
     clicked
+}
+
+/// A hand on a mouse jitters: egui's 6 px between press and release, and 0.3 s between two
+/// clicks, drop many double clicks (tree rows, blocks). Windows allows 0.5 s.
+pub fn click_tolerance(ctx: &egui::Context) {
+    ctx.options_mut(|o| {
+        o.input_options.max_click_dist = 10.0;
+        o.input_options.max_double_click_delay = 0.5;
+    });
 }
 
 #[cfg(test)]

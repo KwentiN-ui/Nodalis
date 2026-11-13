@@ -2799,8 +2799,10 @@ mod tests {
                     ..Default::default()
                 },
             ];
+            let ctx = egui::Context::default();
+            crate::style::click_tolerance(&ctx);
             let mut h = Self {
-                ctx: egui::Context::default(),
+                ctx,
                 model,
                 state: TreeState::default(),
                 time: 1.0,
@@ -2908,5 +2910,31 @@ mod tests {
             h.click(pos);
             assert_eq!(h.opened, [TreeItem::Material(0)], "slow frame of {slow} s");
         }
+    }
+
+    #[test]
+    fn double_click_survives_a_moving_mouse() {
+        let mut found = None;
+        for (x, y) in (20..300)
+            .step_by(4)
+            .flat_map(|y| (30..140).step_by(6).map(move |x| (x, y)))
+        {
+            let pos = egui::pos2(x as f32, y as f32);
+            let mut h = Harness::new();
+            h.click(pos);
+            if h.state.selected == Some((TreeView::FeModel, TreeItem::Material(0))) {
+                found = Some(pos);
+                break;
+            }
+        }
+        let pos = found.expect("material row found");
+        // The second click lands 8 px right of the first, 0.4 s later.
+        let mut h = Harness::new();
+        h.click(pos);
+        h.time += 0.37;
+        h.frame(vec![]);
+        h.opened.clear();
+        h.click(pos + egui::vec2(8.0, 0.0));
+        assert_eq!(h.opened, [TreeItem::Material(0)]);
     }
 }
