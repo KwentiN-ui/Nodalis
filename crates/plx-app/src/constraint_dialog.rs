@@ -5,8 +5,8 @@ use egui::Ui;
 use plx_mesh::FeMesh;
 use plx_model::{
     CompressionOnly, Constraint, FeModel, Joint, JointAxis, JointKind, ModelSpace, PointDefinition,
-    Quantity, ReferencePoint, Region, RemoteBehavior, RigidBody, Spring, SpringEnd, SpringLayout,
-    UnitSystem, next_name,
+    PointMass, Quantity, ReferencePoint, Region, RemoteBehavior, RigidBody, RotaryInertia, Spring,
+    SpringEnd, SpringLayout, UnitSystem, next_name,
 };
 
 use crate::contacts::{MasterSlave, Side};
@@ -23,11 +23,12 @@ pub(crate) const WIDTH: f32 = 440.0;
 
 /// The list of constraint types, its point and surface springs merged into one spring
 /// that also connects two surfaces.
-const TYPES: [(&str, Type); 4] = [
+const TYPES: [(&str, Type); 5] = [
     ("Spring", Type::Spring),
     ("Joint", Type::Joint),
     ("Compression Only", Type::CompressionOnly),
     ("Rigid Body", Type::RigidBody),
+    ("Point Mass", Type::PointMass),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +37,7 @@ enum Type {
     Joint,
     CompressionOnly,
     RigidBody,
+    PointMass,
 }
 
 impl Type {
@@ -45,6 +47,7 @@ impl Type {
             Constraint::Joint(_) => Type::Joint,
             Constraint::CompressionOnly(_) => Type::CompressionOnly,
             Constraint::RigidBody(_) => Type::RigidBody,
+            Constraint::PointMass(_) => Type::PointMass,
             // Moved to the ties and node ties when the project was read; never edited here.
             Constraint::Tie(_) => unreachable!("ties are not constraints"),
             Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
@@ -58,6 +61,7 @@ impl Type {
             Type::Joint => "Joint",
             Type::CompressionOnly => "Compression_Only",
             Type::RigidBody => "Rigid_Body",
+            Type::PointMass => "Point_Mass",
         }
     }
 
@@ -83,6 +87,7 @@ impl Type {
             }),
             // The dialog chooses the point, see `ConstraintDraft::point_exists`.
             Type::RigidBody => Constraint::RigidBody(RigidBody::new(name, plx_model::Id::new())),
+            Type::PointMass => Constraint::PointMass(PointMass::new(name, plx_model::Id::new())),
         }
     }
 
@@ -317,6 +322,9 @@ impl ConstraintDraft {
         if self.kind().has_ends() {
             return self.validate_spring();
         }
+        if let Constraint::PointMass(mass) = &self.current() {
+            return self.validate_point_mass(fe, mass);
+        }
         if self.region.is_empty() {
             Err("The region is empty.".into())
         } else if let Some(point) = self.creates_point()
@@ -329,6 +337,33 @@ impl ConstraintDraft {
             Err("Choose the reference point that drives the rigid body.".into())
         } else {
             Ok(())
+        }
+    }
+
+    fn validate_point_mass(&self, fe: &FeModel, mass: &PointMass) -> Result<(), String> {
+        match self.creates_point() {
+            Some(point) => {
+                if self.region.is_empty() {
+                    return Err("Select the region that carries the mass.".into());
+                }
+                if let Some(problem) = point.problem(fe) {
+                    return Err(problem);
+                }
+                // The point exists once the dialog creates it.
+                let mut with_point = fe.clone();
+                with_point
+                    .reference_points
+                    .push(point.point(&self.region.region()));
+                with_point
+                    .point_mass_problem(mass)
+                    .map_or(Ok(()), |p| Err(format!("{p}.")))
+            }
+            None if fe.reference_point(mass.reference_point).is_none() => {
+                Err("Choose the reference point the mass sits at.".into())
+            }
+            None => fe
+                .point_mass_problem(mass)
+                .map_or(Ok(()), |p| Err(format!("{p}."))),
         }
     }
 
@@ -378,7 +413,7 @@ impl ConstraintDraft {
     fn creates_point(&self) -> Option<&NewPoint> {
         self.new_point
             .as_deref()
-            .filter(|_| self.kind() == Type::RigidBody)
+            .filter(|_| matches!(self.kind(), Type::RigidBody | Type::PointMass))
     }
 
     /// The reference point the rigid body creates with it, to add to the model together
@@ -407,10 +442,10 @@ impl ConstraintDraft {
                 for slot in constraint.regions_mut() {
                     *slot = self.region.region();
                 }
-                if let (Constraint::RigidBody(body), Some(point)) =
-                    (&mut constraint, self.creates_point())
-                {
-                    body.reference_point = point.id;
+                match (&mut constraint, self.creates_point()) {
+                    (Constraint::RigidBody(body), Some(point)) => body.reference_point = point.id,
+                    (Constraint::PointMass(mass), Some(point)) => mass.reference_point = point.id,
+                    _ => {}
                 }
             }
         }
@@ -466,8 +501,18 @@ impl ConstraintDraft {
             Constraint::RigidBody(body) => {
                 self.region.ui(ui, model);
                 let region = (!self.region.is_empty()).then(|| self.region.region());
-                rigid_body_point_rows(ui, model, body, &mut self.new_point, region.as_ref());
+                rigid_body_point_rows(
+                    ui,
+                    model,
+                    &mut body.reference_point,
+                    &mut self.new_point,
+                    region.as_ref(),
+                    PointUse::RigidBody,
+                );
                 coupling_behavior_row(ui, &mut body.behavior);
+            }
+            Constraint::PointMass(mass) => {
+                point_mass_rows(ui, model, mass, &mut self.region, &mut self.new_point);
             }
             Constraint::Tie(_) => unreachable!("ties are not constraints"),
             Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
@@ -835,26 +880,35 @@ pub(crate) fn coupling_behavior_row(ui: &mut Ui, behavior: &mut RemoteBehavior) 
     ui.end_row();
 }
 
-/// The reference point that drives a rigid body: an existing one, or a new one created with
-/// the body at the centroid of its region, the centre of its bounding box or coordinates.
+/// What the reference point of the rows of [`rigid_body_point_rows`] is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PointUse {
+    RigidBody,
+    PointMass,
+}
+
+/// The reference point that drives a rigid body or carries a point mass: an existing one,
+/// or a new one created with the constraint at the centroid of its region, the centre of
+/// its bounding box or coordinates.
 fn rigid_body_point_rows(
     ui: &mut Ui,
     model: &Model,
-    body: &mut RigidBody,
+    reference_point: &mut plx_model::Id,
     new_point: &mut Option<Box<NewPoint>>,
     region: Option<&Region>,
+    used: PointUse,
 ) {
     let points = &model.fe.reference_points;
-    if new_point.is_none() && !points.iter().any(|p| p.id == body.reference_point) {
+    if new_point.is_none() && !points.iter().any(|p| p.id == *reference_point) {
         match points.first() {
-            Some(first) => body.reference_point = first.id,
+            Some(first) => *reference_point = first.id,
             None => *new_point = Some(Box::new(NewPoint::new(&model.fe))),
         }
     }
     ui.label("Reference point");
     let selected = match new_point {
         Some(_) => "New point".to_string(),
-        None => model.fe.name_or_missing(Some(body.reference_point)),
+        None => model.fe.name_or_missing(Some(*reference_point)),
     };
     egui::ComboBox::from_id_salt("rigid body point")
         .selected_text(selected)
@@ -868,10 +922,10 @@ fn rigid_body_point_rows(
                 *new_point = Some(Box::new(NewPoint::new(&model.fe)));
             }
             for point in points {
-                let chosen = new_point.is_none() && body.reference_point == point.id;
+                let chosen = new_point.is_none() && *reference_point == point.id;
                 if ui.selectable_label(chosen, &point.name).clicked() {
                     *new_point = None;
-                    body.reference_point = point.id;
+                    *reference_point = point.id;
                 }
             }
         });
@@ -935,17 +989,137 @@ fn rigid_body_point_rows(
         }
         hint(
             ui,
-            "The point is created under Features > Reference Points when you click OK, \
-             where it can be edited later. Boundary conditions, forces and moments on it \
-             drive the body.",
+            match used {
+                PointUse::RigidBody => {
+                    "The point is created under Features > Reference Points when you click \
+                     OK, where it can be edited later. Boundary conditions, forces and \
+                     moments on it drive the body."
+                }
+                PointUse::PointMass => {
+                    "The point is created under Features > Reference Points when you click \
+                     OK, where it can be edited later. The mass sits at the point, which the \
+                     region carries as Behavior says."
+                }
+            },
         );
-    } else {
+    } else if used == PointUse::RigidBody {
         hint(
             ui,
             "The region is coupled to the reference point as Behavior says. Boundary \
              conditions, forces and moments on the point drive the region.",
         );
     }
+}
+
+/// The rows of a point mass: the reference point it sits at and the region that carries it
+/// (none when a rigid body couples the point already), the mass and the rotary inertia, a
+/// tensor about the axes of a coordinate system in 3D, the inertia about the axis normal to
+/// the plane in 2D.
+fn point_mass_rows(
+    ui: &mut Ui,
+    model: &Model,
+    mass: &mut PointMass,
+    region: &mut RegionDraft,
+    new_point: &mut Option<Box<NewPoint>>,
+) {
+    let fe = &model.fe;
+    let carrier = new_point
+        .is_none()
+        .then(|| fe.rigid_body_of(mass.reference_point))
+        .flatten();
+    if carrier.is_none() {
+        region.ui(ui, model);
+    }
+    let picked = (!region.is_empty()).then(|| region.region());
+    rigid_body_point_rows(
+        ui,
+        model,
+        &mut mass.reference_point,
+        new_point,
+        picked.as_ref(),
+        PointUse::PointMass,
+    );
+    // The choice of the point may have changed what couples it.
+    let carrier = new_point
+        .is_none()
+        .then(|| fe.rigid_body_of(mass.reference_point))
+        .flatten();
+    match carrier {
+        Some(body) => {
+            if !region.is_empty() {
+                *region = RegionDraft::new(FACE_SOURCES, face_target(fe));
+            }
+            ui.label("Carried by");
+            ui.label(&body.name);
+            ui.end_row();
+            hint(
+                ui,
+                "A rigid body couples the reference point already: the mass sits at the point \
+                 and moves with that body.",
+            );
+        }
+        None => coupling_behavior_row(ui, &mut mass.behavior),
+    }
+    let units = fe.properties.units;
+    ui.label("Mass");
+    ui.add(
+        numeric::quantity(&mut mass.mass, units, Quantity::Mass)
+            .speed(0.01)
+            .range(0.0..=f64::MAX),
+    );
+    ui.end_row();
+    ui.label("Rotary inertia");
+    let mut has = mass.inertia.is_some();
+    if ui
+        .checkbox(&mut has, "")
+        .on_hover_text("The mass moments of inertia of the body about the point.")
+        .changed()
+    {
+        mass.inertia = has.then_some(RotaryInertia {
+            system: None,
+            tensor: [0.0; 6],
+        });
+    }
+    ui.end_row();
+    let Some(inertia) = &mut mass.inertia else {
+        return;
+    };
+    let field = |ui: &mut Ui, label: &str, value: &mut f64, hover: &str, positive: bool| {
+        ui.label(format!("    {label}")).on_hover_text(hover);
+        let range = if positive {
+            0.0..=f64::MAX
+        } else {
+            f64::MIN..=f64::MAX
+        };
+        ui.add(
+            numeric::quantity(value, units, Quantity::MomentOfInertia)
+                .speed(0.01)
+                .range(range),
+        );
+        ui.end_row();
+    };
+    if fe.properties.space.is_2d() {
+        field(
+            ui,
+            "Iz",
+            &mut inertia.tensor[2],
+            "The moment of inertia about the axis normal to the plane, through the point.",
+            true,
+        );
+        return;
+    }
+    crate::setup::system_row(ui, &mut inertia.system, fe);
+    let [i11, i22, i33, i12, i13, i23] = &mut inertia.tensor;
+    let moment = "The moment of inertia about this axis of the coordinate system, through the \
+                  point.";
+    let product = "The product of inertia, the entry of the inertia tensor: -∫ x y dm for I12. \
+                   Zero about principal axes.";
+    field(ui, "I11", i11, moment, true);
+    field(ui, "I22", i22, moment, true);
+    field(ui, "I33", i33, moment, true);
+    field(ui, "I12", i12, product, false);
+    field(ui, "I13", i13, product, false);
+    field(ui, "I23", i23, product, false);
 }
 
 fn names(fe: &FeModel) -> impl Iterator<Item = &str> {
@@ -958,6 +1132,7 @@ fn name_row(ui: &mut Ui, constraint: &mut Constraint) {
         Constraint::Joint(c) => &mut c.name,
         Constraint::CompressionOnly(c) => &mut c.name,
         Constraint::RigidBody(c) => &mut c.name,
+        Constraint::PointMass(c) => &mut c.name,
         Constraint::Tie(_) => unreachable!("ties are not constraints"),
         Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
     };
@@ -1154,6 +1329,71 @@ mod tests {
             unreachable!()
         };
         assert_eq!(body.reference_point, created.id);
+    }
+
+    #[test]
+    fn a_point_mass_creates_its_reference_point_and_needs_a_mass() {
+        let model = empty_model();
+        let fe = FeModel::default();
+        let mut draft = ConstraintDraft::new(&fe);
+        draft.switch(Type::PointMass, &[], &model);
+        assert_eq!(draft.name(), "Point_Mass-1");
+        assert!(draft.validate(&fe).is_err(), "no region");
+        draft.region.take(
+            &model.mesh,
+            Items::Faces([(1, 2)].into()),
+            Operation::Replace,
+        );
+        let point = draft.new_point.as_mut().unwrap();
+        point.location = Location::Coordinates;
+        point.coordinates = [1.0, 2.0, 3.0];
+        assert_eq!(draft.validate(&fe), Err("The mass is zero.".into()));
+        let Constraint::PointMass(mass) = &mut draft.constraint else {
+            unreachable!()
+        };
+        mass.mass = 0.5;
+        mass.inertia = Some(RotaryInertia {
+            system: None,
+            tensor: [1.0, 1.0, 1.0, 2.0, 0.0, 0.0],
+        });
+        assert!(
+            draft
+                .validate(&fe)
+                .unwrap_err()
+                .contains("negative principal")
+        );
+        let Constraint::PointMass(mass) = &mut draft.constraint else {
+            unreachable!()
+        };
+        mass.inertia.as_mut().unwrap().tensor[3] = 0.5;
+        assert_eq!(draft.validate(&fe), Ok(()));
+        let created = draft.new_point().unwrap();
+        let Constraint::PointMass(mass) = draft.finish() else {
+            unreachable!()
+        };
+        assert_eq!(mass.reference_point, created.id);
+        assert_eq!(mass.region, Region::Faces(vec![(1, 2)]));
+    }
+
+    /// On a point a rigid body couples, the mass needs no region of its own.
+    #[test]
+    fn a_point_mass_on_a_coupled_point_takes_no_region() {
+        let model = empty_model();
+        let mut fe = FeModel::default();
+        let point = ReferencePoint::new("RP-1", [0.0; 3]);
+        let id = point.id;
+        fe.reference_points.push(point);
+        let mut body = RigidBody::new("Rigid_Body-1", id);
+        body.region = Region::Faces(vec![(1, 2)]);
+        fe.constraints.push(Constraint::RigidBody(body));
+        let mut mass = PointMass::new("Point_Mass-1", id);
+        mass.mass = 1.0;
+        let draft = ConstraintDraft::edit(&Constraint::PointMass(mass), Target::Faces, &model.mesh);
+        assert_eq!(draft.validate(&fe), Ok(()));
+        let Constraint::PointMass(mass) = draft.finish() else {
+            unreachable!()
+        };
+        assert!(mass.region.is_empty());
     }
 
     #[test]

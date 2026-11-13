@@ -109,6 +109,9 @@ pub fn assemble_mass_with(
         })?;
         m.add_block(&beam.dofs, &me);
     }
+    for block in &table.mass_blocks {
+        m.add_block(&block.dofs, &block.mass);
+    }
     Ok(())
 }
 

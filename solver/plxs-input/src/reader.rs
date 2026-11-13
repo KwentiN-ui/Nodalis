@@ -261,6 +261,7 @@ impl Reader {
             "*EQUATION" => self.equation(k, data)?,
             "*RIGIDBODY" => self.rigid_body(k)?,
             "*JOINT" => self.joint(k, data)?,
+            "*POINTMASS" => self.point_mass(k, data)?,
             "*TIE" => self.tie(k, data)?,
             "*CYCLICSYMMETRYMODEL" => self.cyclic_symmetry_model(k, data)?,
             "*TRANSFORM" => self.transform(k, data)?,
@@ -1171,6 +1172,43 @@ impl Reader {
             nodes,
             reference_node,
             rotation_node,
+        });
+        Ok(())
+    }
+
+    /// `*POINT MASS, NODE=n[, ROTATION NODE=r][, ELSET=name]` (plxs only): one data line
+    /// with the mass and, with a rotation node, the rotary inertia `I11, I22, I33, I12,
+    /// I13, I23` about the global axes; see [`plxs_core::PointMass`].
+    fn point_mass(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
+        k.check_parameters(&["NODE", "ROTATION NODE", "ELSET"])?;
+        let Some(node) = k.integer("NODE")? else {
+            return Err(k.error("NODE is needed"));
+        };
+        let rotation = k.integer("ROTATION NODE")?;
+        let [line] = data else {
+            return Err(k.error("one data line with the mass (and the rotary inertia) is needed"));
+        };
+        let values = numbers(k, line)?;
+        let inertia = match (rotation, values.len()) {
+            (None, 1) => None,
+            (Some(r), 7) => Some((r, std::array::from_fn(|i| values[i + 1]))),
+            (None, _) => return Err(data_error(k, line, "the mass is needed")),
+            (Some(_), _) => {
+                return Err(data_error(
+                    k,
+                    line,
+                    "the mass and I11, I22, I33, I12, I13, I23 are needed",
+                ));
+            }
+        };
+        if !values[0].is_finite() || values[0] < 0.0 {
+            return Err(data_error(k, line, "the mass must not be negative"));
+        }
+        self.model().point_masses.push(plxs_core::PointMass {
+            node,
+            mass: values[0],
+            inertia,
+            elset: k.value("ELSET").map(normalized_name),
         });
         Ok(())
     }

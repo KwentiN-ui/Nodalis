@@ -56,7 +56,7 @@ nodes are not coupled: to join beams rigidly, give them a shared node with a #ui
 
 Boundary conditions and loads can act on a reference point instead of on nodes: choose
 #ui("Reference Point") as the region in their dialogs. The point must drive an active rigid
-body, otherwise the model check (@model-check) reports "Reference point without rigid body".
+body or point mass (@point-mass), otherwise the model check (@model-check) reports "Reference point without rigid body".
 
 - A #ui("Displacement/Rotation") boundary condition on the point holds or moves the whole body; `UR1`, `UR2`, `UR3` turn it about the point.
 - A #ui("Force") on the point pulls the whole body with the given force.

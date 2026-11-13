@@ -82,13 +82,13 @@ pub use connection::{
     WEAK_SPRING_FACTOR, WEAK_SPRING_STABILIZATION, conducts_across_contacts, mortar_supports,
 };
 pub use constraint::{
-    CompressionOnly, Joint, JointAxis, JointKind, NodeTie, RigidBody, Spring, SpringEnd,
-    SpringLayout,
+    CompressionOnly, Joint, JointAxis, JointKind, NodeTie, PointMass, RigidBody, RotaryInertia,
+    Spring, SpringEnd, SpringLayout,
 };
 pub use contact::{
-    Constraint, ContactMethod, ContactPair, ContactScale, CyclicSymmetry, ElementYoung, Friction,
-    GapConductance, InteractionProperty, NORMAL_STIFFNESS_FACTOR, STICK_SLOPE_RATIO, SectorDisplay,
-    SurfaceBehavior, SurfaceInteraction, Tie, default_stick_slope,
+    Constraint, ContactMethod, ContactPair, ContactScale, Coupling, CyclicSymmetry, ElementYoung,
+    Friction, GapConductance, InteractionProperty, NORMAL_STIFFNESS_FACTOR, STICK_SLOPE_RATIO,
+    SectorDisplay, SurfaceBehavior, SurfaceInteraction, Tie, default_stick_slope,
 };
 pub use contact_check::{ContactCheck, ContactStatus};
 pub use contact_steps::{ContactChange, ContactState};
@@ -211,8 +211,9 @@ use serde::{Deserialize, Serialize};
 /// they are unless they have bolts. Format 36 lets a File block keep its file in the project
 /// (embedded); formats 21 to 35 read as they are. Format 37 drops the preload of a bolt: its
 /// steps set it ([`BoltChange`]), an adjustment adds to the length at the end of the previous
-/// step; formats 21 to 36 read as they are unless they have bolts.
-pub const PROJECT_FORMAT: u32 = 37;
+/// step; formats 21 to 36 read as they are unless they have bolts. Format 38 adds point
+/// masses ([`PointMass`]); formats 21 to 37 read as they are.
+pub const PROJECT_FORMAT: u32 = 38;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

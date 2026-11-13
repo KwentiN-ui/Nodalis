@@ -15,13 +15,7 @@ use plxs_linalg::Pattern;
 pub fn pattern_with(table: &ElementTable, extra: &[Vec<u32>]) -> Arc<Pattern> {
     Arc::new(Pattern::from_blocks(
         table.dofs.len(),
-        table
-            .entries
-            .iter()
-            .map(|e| e.dofs.as_slice())
-            .chain(table.linear_blocks.iter().map(|b| b.dofs.as_slice()))
-            .chain(table.discrete.iter().map(|e| e.dofs.as_slice()))
-            .chain(extra.iter().map(Vec::as_slice)),
+        (table.blocks()).chain(extra.iter().map(Vec::as_slice)),
     ))
 }
 

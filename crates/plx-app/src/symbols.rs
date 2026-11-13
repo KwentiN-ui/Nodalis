@@ -54,6 +54,11 @@ pub enum Kind {
     RigidBody {
         reference_point: plx_model::Id,
     },
+    /// A point mass: a ball at its reference point, with the lines of a rigid body from the
+    /// selection that carries it.
+    PointMass {
+        reference_point: plx_model::Id,
+    },
     /// Springs with their stiffness K1..K3, to ground or to a surface.
     Spring {
         stiffness: [f64; 3],
@@ -77,6 +82,12 @@ impl Kind {
                     reference_point: body.reference_point,
                 },
                 body.region.clone(),
+            ),
+            Constraint::PointMass(mass) => (
+                Kind::PointMass {
+                    reference_point: mass.reference_point,
+                },
+                mass.region.clone(),
             ),
             // At the selection, else at the point; an axis shows translational and
             // rotational springs alike.
@@ -144,6 +155,8 @@ pub enum SymbolShape {
     RotationLock,
     /// Ball around the point: a temperature or heat at a node.
     Ball,
+    /// A larger ball on the point: a point mass, seen around the reference point marker.
+    Mass,
     /// Line from the point to another point in render coordinates.
     LineTo(Vec3),
     /// Coil spring ending at the point.
@@ -201,6 +214,28 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                         color,
                     });
                 }
+            }
+            Kind::PointMass { reference_point } => {
+                let Some(point) = model.fe.reference_point(reference_point) else {
+                    continue;
+                };
+                let at = DVec3::from(point.position);
+                let to = (at - model.origin()).as_vec3();
+                let points = node_points(model, &item.region, &visible);
+                for index in sample(&points, DIVISIONS / 2.0) {
+                    symbols.push(Symbol {
+                        position: (points[index] - model.origin()).as_vec3(),
+                        direction: Vec3::ZERO,
+                        shape: SymbolShape::LineTo(to),
+                        color,
+                    });
+                }
+                symbols.push(Symbol {
+                    position: to,
+                    direction: Vec3::Z,
+                    shape: SymbolShape::Mass,
+                    color,
+                });
             }
             // A spring for each direction with stiffness. To a surface at points spread over
             // the region; to ground at the centre of faces, or at each node and at the
@@ -832,6 +867,7 @@ fn solids(shape: SymbolShape, direction: Vec3) -> Vec<Solid> {
         SymbolShape::Cone
         | SymbolShape::RotationLock
         | SymbolShape::Ball
+        | SymbolShape::Mass
         | SymbolShape::GapSupport => SUPPORT_SIZE,
         SymbolShape::LineTo(_) | SymbolShape::Spring => return Vec::new(),
     };
@@ -886,9 +922,9 @@ fn solids(shape: SymbolShape, direction: Vec3) -> Vec<Solid> {
                 },
             ]
         }
-        SymbolShape::Ball => {
+        SymbolShape::Ball | SymbolShape::Mass => {
             // Three great circles; their outline is round from every side.
-            let radius = 0.3 * size;
+            let radius = if shape == SymbolShape::Mass { 0.6 } else { 0.3 } * size;
             let circle = |a: Vec3, b: Vec3| -> Vec<Vec3> {
                 (0..CIRCLE_SEGMENTS)
                     .map(|i| {

@@ -232,6 +232,7 @@ impl FeModel {
                                     .then(|| self.joint_frame(mesh, joint).err())
                                     .flatten()
                             }),
+                        Constraint::PointMass(mass) => self.point_mass_problem(mass),
                         _ => None,
                     }),
             };
@@ -455,6 +456,71 @@ impl FeModel {
     /// The reference point, if the model does not have it.
     fn missing_reference_point(&self, id: Id) -> Option<String> {
         (self.reference_point(id).is_none()).then(|| "The reference point does not exist".into())
+    }
+
+    /// The rigid body that couples a reference point, if one does.
+    pub fn rigid_body_of(&self, point: Id) -> Option<&crate::RigidBody> {
+        self.constraints.iter().find_map(|c| match c {
+            Constraint::RigidBody(body) if body.active && body.reference_point == point => {
+                Some(body)
+            }
+            _ => None,
+        })
+    }
+
+    /// Why a point mass cannot be written, if it cannot.
+    pub fn point_mass_problem(&self, mass: &crate::PointMass) -> Option<String> {
+        if self.properties.space == crate::ModelSpace::Axisymmetric {
+            return Some("Point masses are not available in axisymmetric models".into());
+        }
+        if let Some(problem) = self.missing_reference_point(mass.reference_point) {
+            return Some(problem);
+        }
+        let body = self.rigid_body_of(mass.reference_point);
+        match (mass.region.is_empty(), body) {
+            (true, None) => {
+                return Some(
+                    "Select the region that carries the mass, or choose a reference point a \
+                     rigid body couples"
+                        .into(),
+                );
+            }
+            (false, Some(body)) => {
+                return Some(format!(
+                    "The rigid body {} couples the reference point already; the mass needs \
+                     no region of its own",
+                    body.name
+                ));
+            }
+            _ => {}
+        }
+        if !mass.mass.is_finite() || mass.mass < 0.0 {
+            return Some("The mass is negative".into());
+        }
+        match &mass.inertia {
+            None if mass.mass == 0.0 => Some("The mass is zero".into()),
+            None => None,
+            Some(inertia) => {
+                if self.coordinate_system_or_global(inertia.system).is_none() {
+                    return Some("The coordinate system does not exist".into());
+                }
+                if self.properties.space.is_2d() {
+                    // About the axis normal to the plane only.
+                    if inertia.tensor[2] < 0.0 || !inertia.tensor[2].is_finite() {
+                        return Some("The rotary inertia is negative".into());
+                    }
+                } else if let Some(problem) = inertia.problem() {
+                    return Some(problem);
+                }
+                let tensor = if self.properties.space.is_2d() {
+                    &inertia.tensor[2..3]
+                } else {
+                    &inertia.tensor[..]
+                };
+                (mass.mass == 0.0 && tensor.iter().all(|v| *v == 0.0))
+                    .then(|| "The mass and the rotary inertia are zero".into())
+            }
+        }
     }
 
     /// The reference point of a region on one, if the model does not have it.

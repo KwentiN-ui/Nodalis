@@ -746,6 +746,7 @@ fn lower_model_named(
             origins.insert(ir::ItemRef::Section(i), item);
         }
     }
+    let mut point_masses = Vec::new();
     let constraint_list = &mut ir_model.constraints;
     constraint_list.equations.extend(pre_tension_equations);
     // The equations generated after them have no item of their own.
@@ -766,6 +767,7 @@ fn lower_model_named(
                 }
                 constraint_list.joints.push(joint);
             }
+            ConstraintItem::PointMass(mass) => point_masses.push(mass),
             ConstraintItem::Tie(tie, cyclic) => {
                 constraint_list.ties.push(tie);
                 if cyclic.is_some() {
@@ -774,6 +776,7 @@ fn lower_model_named(
             }
         }
     }
+    ir_model.point_masses = point_masses;
     for (i, tie) in model.ties.iter().enumerate().filter(|(_, t)| t.active) {
         if let Some(item) = origin(ModelItem::Tie(i)) {
             origins.insert(ir::ItemRef::Tie(ir_name(&name(&tie.name))), item);
@@ -837,6 +840,7 @@ enum ConstraintItem {
     Equation(ir::constraints::Equation),
     RigidBody(ir::constraints::RigidBody),
     Joint(ir::constraints::Joint),
+    PointMass(ir::PointMass),
     Tie(
         ir::constraints::Tie,
         Option<ir::constraints::CyclicSymmetryModel>,
@@ -2268,90 +2272,94 @@ fn constraints(
             Constraint::Spring(_) | Constraint::CompressionOnly(_) | Constraint::Joint(_) => {}
             // Moved to the model's node ties when the project was read.
             Constraint::NodeTie(_) => {}
-            Constraint::RigidBody(body) => {
-                let Some(point) = model.reference_point(body.reference_point) else {
-                    return Err(WriteError::UnknownReferencePoint {
-                        item: body.name.clone(),
-                        point: body.reference_point.to_string(),
-                    });
-                };
-                if body.behavior == RemoteBehavior::Deformable {
-                    // The point follows the mean motion of the selection, as the point of a
-                    // deformable remote displacement does.
-                    let spec = plx_model::Displacement {
-                        values: [None; 6],
-                        behavior: plx_model::Behavior::Deformable,
-                        system: None,
-                        location: Some(point.position),
-                        pinball: None,
-                        tables: Default::default(),
-                    };
-                    let invalid = |reason: String| WriteError::InvalidConstraint {
-                        item: body.name.clone(),
-                        reason,
-                    };
-                    let excluded = model.directly_held_nodes_in(sets.mesh, |_| true);
-                    let held = model.held_translations(sets.mesh);
-                    let resolved = (spec.resolve(model, sets.mesh, &body.region, &excluded))
-                        .map_err(invalid)?;
-                    let [reference, rotation] = remote_point(
-                        RemoteSource {
-                            item: &body.name,
-                            region: &body.region,
-                            spec: &spec,
-                            behavior: RemoteBehavior::Deformable,
-                            owner: ModelItem::Constraint(index),
-                            free_point: !model.point_bound(body.reference_point),
-                        },
-                        resolved,
-                        held,
-                        &mut next_node,
-                        (&mut items, &mut owners),
-                        sets,
-                        model,
-                        generated,
-                    )?;
-                    sets.reference_nodes.insert(
-                        body.reference_point,
-                        ReferenceNodes {
-                            name: point.name.clone(),
-                            reference,
-                            rotation,
-                            set: None,
-                            behavior: RemoteBehavior::Deformable,
-                        },
-                    );
-                    continue;
-                }
-                // Both nodes sit on the reference point.
-                let (reference, rotation) = (next_node, next_node + 1);
-                next_node += 2;
-                generated.nodes.push((reference, point.position));
-                generated.nodes.push((rotation, point.position));
-                sets.reference_nodes.insert(
-                    body.reference_point,
-                    ReferenceNodes {
-                        name: point.name.clone(),
-                        reference,
-                        rotation,
-                        set: None,
-                        behavior: RemoteBehavior::Rigid,
-                    },
-                );
-                owners.resize(items.len(), None);
-                rigid_body(
-                    &mut items,
+            Constraint::RigidBody(_) => {
+                let coupling = constraint.coupling().expect("a rigid body couples");
+                couple_point(
+                    index,
+                    coupling,
                     sets,
-                    &body.name,
-                    &body.region,
-                    point.position,
-                    None,
-                    [reference, rotation],
+                    model,
+                    generated,
+                    &mut next_node,
+                    (&mut items, &mut owners),
                 )?;
-                owners.resize(items.len(), Some(ModelItem::Constraint(index)));
             }
+            // After the rigid bodies, whose points they may sit on.
+            Constraint::PointMass(_) => {}
             Constraint::Tie(t) => items.push(tie(sets, t)?),
         }
+    }
+    // A point mass sits on the nodes of its reference point: those of the rigid body that
+    // couples the point, or of the coupling of its own selection.
+    for (index, constraint) in model.constraints.iter().enumerate() {
+        let Constraint::PointMass(mass) = constraint else {
+            continue;
+        };
+        if !mass.active {
+            continue;
+        }
+        if let Some(problem) = model.point_mass_problem(mass) {
+            return Err(WriteError::InvalidConstraint {
+                item: mass.name.clone(),
+                reason: problem,
+            });
+        }
+        let nodes = match constraint.coupling() {
+            Some(coupling) => couple_point(
+                index,
+                coupling,
+                sets,
+                model,
+                generated,
+                &mut next_node,
+                (&mut items, &mut owners),
+            )?,
+            None => sets.reference_nodes(&mass.name, mass.reference_point)?,
+        };
+        let point = model.reference_point(mass.reference_point);
+        let carrier = match point.and_then(|_| model.rigid_body_of(mass.reference_point)) {
+            Some(body) => &body.region,
+            None => &mass.region,
+        };
+        let inertia = match &mass.inertia {
+            Some(inertia) => {
+                let tensor = if model.properties.space.is_2d() {
+                    // About the axis normal to the plane, which no system turns.
+                    [0.0, 0.0, inertia.tensor[2], 0.0, 0.0, 0.0]
+                } else {
+                    let axes = (model.coordinate_system_or_global(inertia.system))
+                        .and_then(|frame| frame.axes().ok())
+                        .ok_or_else(|| WriteError::InvalidConstraint {
+                            item: mass.name.clone(),
+                            reason: "the coordinate system of the rotary inertia has no axes"
+                                .into(),
+                        })?;
+                    inertia.global(axes)
+                };
+                Some((nodes.rotation, tensor))
+            }
+            None => None,
+        };
+        // The elements that carry the mass, for the gravity and centrifugal loads on them.
+        let carried: BTreeSet<NodeId> = carrier.nodes(sets.mesh).into_iter().collect();
+        let elements: Vec<ElementId> = (sets.mesh.elements().iter())
+            .filter(|e| e.nodes.iter().any(|n| carried.contains(n)))
+            .map(|e| e.id)
+            .collect();
+        let elset = (!elements.is_empty()).then(|| {
+            let set = sets.free_name("Internal_Selection", &name(&mass.name));
+            sets.element_sets
+                .push((set.clone(), Members::Ids(elements)));
+            ir_name(&set)
+        });
+        owners.resize(items.len(), None);
+        items.push(ConstraintItem::PointMass(ir::PointMass {
+            node: nodes.reference,
+            mass: mass.mass,
+            inertia,
+            elset,
+        }));
+        owners.push(Some(ModelItem::Constraint(index)));
     }
     // A displacement that needs a point drives its region from it, by default at the centre
     // of the region; the point exists only in the analysis. Its reference node takes the
@@ -3396,6 +3404,98 @@ fn complex_frequency_blocks(
     first.opens = true;
     first.unloaded = unloaded;
     Ok(blocks)
+}
+
+/// Couples the selection of a rigid body or point mass to its reference point, rigidly
+/// (`*RIGID BODY` on a reference and a rotation node at the point) or deformably (the point
+/// follows the mean motion, as the point of a deformable remote displacement does). The
+/// nodes are those of the point from then on.
+fn couple_point(
+    index: usize,
+    coupling: plx_model::Coupling<'_>,
+    sets: &mut Sets,
+    model: &FeModel,
+    generated: &mut constraints::Generated,
+    next_node: &mut NodeId,
+    (items, owners): (&mut Vec<ConstraintItem>, &mut Vec<Option<ModelItem>>),
+) -> Result<ReferenceNodes, WriteError> {
+    let Some(point) = model.reference_point(coupling.reference_point) else {
+        return Err(WriteError::UnknownReferencePoint {
+            item: coupling.name.to_string(),
+            point: coupling.reference_point.to_string(),
+        });
+    };
+    if coupling.behavior == RemoteBehavior::Deformable {
+        let spec = plx_model::Displacement {
+            values: [None; 6],
+            behavior: plx_model::Behavior::Deformable,
+            system: None,
+            location: Some(point.position),
+            pinball: None,
+            tables: Default::default(),
+        };
+        let invalid = |reason: String| WriteError::InvalidConstraint {
+            item: coupling.name.to_string(),
+            reason,
+        };
+        let excluded = model.directly_held_nodes_in(sets.mesh, |_| true);
+        let held = model.held_translations(sets.mesh);
+        let resolved =
+            (spec.resolve(model, sets.mesh, coupling.region, &excluded)).map_err(invalid)?;
+        let [reference, rotation] = remote_point(
+            RemoteSource {
+                item: coupling.name,
+                region: coupling.region,
+                spec: &spec,
+                behavior: RemoteBehavior::Deformable,
+                owner: ModelItem::Constraint(index),
+                free_point: !model.point_bound(coupling.reference_point),
+            },
+            resolved,
+            held,
+            next_node,
+            (items, owners),
+            sets,
+            model,
+            generated,
+        )?;
+        let nodes = ReferenceNodes {
+            name: point.name.clone(),
+            reference,
+            rotation,
+            set: None,
+            behavior: RemoteBehavior::Deformable,
+        };
+        sets.reference_nodes
+            .insert(coupling.reference_point, nodes.clone());
+        return Ok(nodes);
+    }
+    // Both nodes sit on the reference point.
+    let (reference, rotation) = (*next_node, *next_node + 1);
+    *next_node += 2;
+    generated.nodes.push((reference, point.position));
+    generated.nodes.push((rotation, point.position));
+    let nodes = ReferenceNodes {
+        name: point.name.clone(),
+        reference,
+        rotation,
+        set: None,
+        behavior: RemoteBehavior::Rigid,
+    };
+    sets.reference_nodes
+        .insert(coupling.reference_point, nodes.clone());
+    owners.resize(items.len(), None);
+    rigid_body(
+        items,
+        sets,
+        coupling.name,
+        coupling.region,
+        point.position,
+        None,
+        [reference, rotation],
+    )?;
+    owners.resize(items.len(), Some(ModelItem::Constraint(index)));
+    Ok(nodes)
 }
 
 /// A rigid body of the nodes of `region` driven by a reference and a rotation node at

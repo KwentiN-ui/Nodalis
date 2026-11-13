@@ -191,7 +191,78 @@ pub fn load_vector(
     let pressures = membrane_pressures(model, table, step, time, total, period)?;
     add_membrane_pressures(table, &pressures, None, &mut f);
     membrane_body_loads(model, table, step, time, total, period, &mut f)?;
+    point_mass_body_loads(model, table, step, time, total, period, &mut f);
     Ok((f, warnings))
+}
+
+/// Gravity and centrifugal loads on the point masses, added to `f`: a point mass takes part
+/// in those on an element set that shares an element with its own (`ELSET`), or in all
+/// without one. The centrifugal force acts at the undeformed position of its node, as the
+/// body force of the elements does.
+fn point_mass_body_loads(
+    model: &Model,
+    table: &ElementTable,
+    step: &Step,
+    time: f64,
+    total: f64,
+    period: f64,
+    f: &mut [f64],
+) {
+    if model.point_masses.is_empty() {
+        return;
+    }
+    let elements_of = |region: &ElementRef| -> std::collections::HashSet<u32> {
+        match region {
+            ElementRef::Element(id) => [*id].into(),
+            ElementRef::Set(name) => (model.sets.element_sets.get(name))
+                .map(|ids| ids.iter().copied().collect())
+                .unwrap_or_default(),
+        }
+    };
+    for load in &step.loads.distributed {
+        if !matches!(
+            load.kind,
+            DistributedLoadKind::Gravity { .. } | DistributedLoadKind::Centrifugal { .. }
+        ) {
+            continue;
+        }
+        let factor = amplitude_factor(model, step, load.amplitude.as_deref(), time, total, period);
+        let loaded = elements_of(&load.region);
+        for mass in &model.point_masses {
+            let carried = match &mass.elset {
+                None => true,
+                Some(set) => (model.sets.element_sets.get(set))
+                    .is_some_and(|ids| ids.iter().any(|id| loaded.contains(id))),
+            };
+            let Some(node) = model.nodes.index(mass.node).filter(|_| carried) else {
+                continue;
+            };
+            let acceleration = match &load.kind {
+                DistributedLoadKind::Gravity {
+                    magnitude,
+                    direction,
+                } => direction.map(|d| d * magnitude),
+                DistributedLoadKind::Centrifugal {
+                    omega_squared,
+                    point,
+                    axis,
+                } => {
+                    let x = model.nodes.coordinates[node as usize];
+                    let len = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+                    let a = axis.map(|c| c / len);
+                    let r = [x[0] - point[0], x[1] - point[1], x[2] - point[2]];
+                    let along = r[0] * a[0] + r[1] * a[1] + r[2] * a[2];
+                    std::array::from_fn(|k| omega_squared * (r[k] - along * a[k]))
+                }
+                _ => continue,
+            };
+            for (d, g) in acceleration.iter().enumerate() {
+                if let Some(dof) = table.dofs.dof(node, d) {
+                    f[dof as usize] += mass.mass * g * factor;
+                }
+            }
+        }
+    }
 }
 
 /// Gravity and centrifugal loads on native membranes, added to `f`.

@@ -13298,3 +13298,294 @@ fn a_rope_on_a_symmetry_plane_touches_the_block_not_its_cut_face() {
     let lifted = node_value(&frd, "DISP", "U2", 6);
     assert!(lifted > 2.9, "{lifted}");
 }
+
+/// The C3D20R cantilever with a point mass on its tip nodes, at a new reference point at the
+/// centre of the tip face, coupled rigidly; a frequency step follows the static one.
+fn tip_mass(mass: f64, inertia: Option<plx_model::RotaryInertia>) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = frequency_analysis();
+    model.steps[0].loads.clear();
+    model.steps[1].loads.clear();
+    model.reference_points.push(ReferencePoint {
+        id: named("RP-1"),
+        ..ReferencePoint::new("RP-1", [100.0, 5.0, 5.0])
+    });
+    let mut point_mass = plx_model::PointMass::new("Point_Mass-1", named("RP-1"));
+    point_mass.region = Region::NodeSet("TIP".into());
+    point_mass.mass = mass;
+    point_mass.inertia = inertia;
+    model.constraints.push(Constraint::PointMass(point_mass));
+    (mesh, model)
+}
+
+/// A coordinate system whose z axis is the global x axis, the axis of the cantilever.
+fn axial_system(model: &mut FeModel) {
+    let mut cs = plx_model::CoordinateSystem {
+        id: named("Axial"),
+        ..plx_model::CoordinateSystem::new("Axial")
+    };
+    cs.set_points([0.0; 3], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+    model.coordinate_systems.push(cs);
+}
+
+/// The mass sits on the reference node of the coupling its point mass makes, the rotary
+/// inertia on the rotation node, turned from its coordinate system into the global axes;
+/// the elements of the coupled nodes carry it for gravity.
+#[test]
+fn a_point_mass_couples_its_region_and_sits_on_its_point() {
+    let (mesh, mut model) = tip_mass(
+        0.5,
+        Some(plx_model::RotaryInertia {
+            system: Some(named("Axial")),
+            tensor: [1.0, 2.0, 7.0, 0.0, 0.0, 0.0],
+        }),
+    );
+    axial_system(&mut model);
+    let analysis = lowered(&mesh, &model);
+    let bodies = &analysis.model.constraints.rigid_bodies;
+    assert_eq!(bodies.len(), 1);
+    let [mass] = &analysis.model.point_masses[..] else {
+        panic!("{:?}", analysis.model.point_masses)
+    };
+    assert_eq!(mass.node, bodies[0].reference_node);
+    assert_eq!(mass.mass, 0.5);
+    let (rotation, tensor) = mass.inertia.unwrap();
+    assert_eq!(rotation, bodies[0].rotation_node);
+    // Local x, y, z are global y, z, x.
+    let expected = [7.0, 1.0, 2.0, 0.0, 0.0, 0.0];
+    assert!(
+        tensor
+            .iter()
+            .zip(expected)
+            .all(|(a, b)| (a - b).abs() < 1e-12),
+        "{tensor:?}"
+    );
+    let elset = mass.elset.as_ref().unwrap();
+    let carriers = &analysis.model.sets.element_sets[elset];
+    // The tip layer of elements, one of the 40 along the beam.
+    assert!(!carriers.is_empty() && carriers.len() < 10, "{carriers:?}");
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(&format!(
+            "*Point mass, Node={}, Rotation node={rotation}, Elset={elset}\n0.5, 7, 1, 2, 0, 0, 0\n",
+            mass.node
+        )),
+        "{text}"
+    );
+    // The analysis reads back the same.
+    let read = plxs_input::read_inp_str(&text, None).unwrap().analysis;
+    assert_eq!(read.model.point_masses, analysis.model.point_masses);
+}
+
+/// A point mass on a reference point a rigid body couples rides on that body: no coupling
+/// of its own; with a region of its own as well it is invalid.
+#[test]
+fn a_point_mass_rides_on_the_rigid_body_of_its_point() {
+    let (mesh, mut model) = rigid_tip(None, None);
+    let mut point_mass = plx_model::PointMass::new("Point_Mass-1", named("RP-1"));
+    point_mass.mass = 0.25;
+    model.constraints.push(Constraint::PointMass(point_mass));
+    let analysis = lowered(&mesh, &model);
+    let bodies = &analysis.model.constraints.rigid_bodies;
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(analysis.model.point_masses.len(), 1);
+    assert_eq!(
+        analysis.model.point_masses[0].node,
+        bodies[0].reference_node
+    );
+    assert!(analysis.model.point_masses[0].elset.is_some());
+    let Constraint::PointMass(point_mass) = model.constraints.last_mut().unwrap() else {
+        unreachable!()
+    };
+    point_mass.region = Region::Surface("TIP".into());
+    assert!(write_inp(&mesh, &model, "").is_err());
+}
+
+fn frequencies(frd: &FrdImport) -> Vec<(f64, usize)> {
+    (frd.increments.iter().enumerate())
+        .filter(|(_, i)| i.kind == plx_results::AnalysisKind::Frequency)
+        .map(|(n, i)| (i.value, n))
+        .collect()
+}
+
+/// A heavy tip mass: the cantilever swings on its tip stiffness with the mass and about a
+/// quarter of its own (Rayleigh: 33/140), and gravity pulls the mass with its weight.
+#[test]
+fn solver_swings_and_weighs_a_cantilever_with_a_tip_mass() {
+    let beam = 7.85e-9 * 100.0 * 100.0;
+    let mass = 100.0 * beam;
+    let (mesh, mut model) = tip_mass(mass, None);
+    // The static step: a tip force on the point, and gravity.
+    let mut force = tip_force();
+    force.region = Region::ReferencePoint(named("RP-1"));
+    model.steps[0].loads.push(force);
+    model.steps[0]
+        .loads
+        .push(body_load(LoadKind::Gravity([0.0, 0.0, -9810.0])));
+    model.steps[0].field_outputs = ccx_eigen_outputs(&StepKind::Static(Default::default()));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let Some(frd) = run_solver("point_mass_tip", &text) else {
+        return;
+    };
+    let static_increment = (frd.increments.iter())
+        .rfind(|i| i.kind != plx_results::AnalysisKind::Frequency)
+        .unwrap();
+    let field = |name: &str, component: &str, node: NodeId| {
+        let index = frd.mesh.node_index(node).unwrap();
+        let values = &static_increment.field(name).unwrap();
+        f64::from(values.component(component).unwrap().values[index])
+    };
+    // The tip face moves with the point; its mean motion is the point's.
+    let tip = mesh.node_sets["TIP"].clone();
+    // Force and weights together hold the reaction.
+    let reaction: f64 = fixed_nodes(&mesh)
+        .iter()
+        .map(|&n| field("FORC", "F3", n))
+        .sum();
+    let expected = 100.0 + (beam + mass) * 9810.0;
+    assert!(
+        (reaction - expected).abs() < 1e-3 * expected,
+        "{reaction} vs {expected}"
+    );
+    // The tip stiffness from the deflection under force and weight (the beam's own weight
+    // deflects the tip as 3/8 of it at the tip).
+    let deflection = -tip.iter().map(|&n| field("DISP", "U3", n)).sum::<f64>() / tip.len() as f64;
+    let stiffness = (100.0 + mass * 9810.0 + 0.375 * beam * 9810.0) / deflection;
+    let omega = (stiffness / (mass + 33.0 / 140.0 * beam)).sqrt();
+    let expected = omega / (2.0 * std::f64::consts::PI);
+    let modes = frequencies(&frd);
+    for (f, _) in &modes[..2] {
+        assert!(
+            (f - expected).abs() < 0.01 * expected,
+            "{f} Hz vs {expected} Hz"
+        );
+    }
+}
+
+/// A rotary inertia about the axis of the cantilever, given about the z axis of a turned
+/// system: the lowest mode twists the beam (the point stays on its axis), with the
+/// frequency that falls by half when the inertia is four times as large.
+#[test]
+fn solver_twists_a_cantilever_with_a_rotary_inertia_at_its_tip() {
+    let run = |inertia: f64| {
+        let (mesh, mut model) = tip_mass(
+            0.0,
+            Some(plx_model::RotaryInertia {
+                system: Some(named("Axial")),
+                tensor: [0.0, 0.0, inertia, 0.0, 0.0, 0.0],
+            }),
+        );
+        axial_system(&mut model);
+        let text = write_inp(&mesh, &model, "").unwrap();
+        let frd = run_solver(&format!("point_mass_twist_{inertia}"), &text)?;
+        let (f, n) = frequencies(&frd)[0];
+        let shape = |node: NodeId| {
+            let index = frd.mesh.node_index(node).unwrap();
+            let disp = frd.increments[n].field("DISP").unwrap();
+            ["U1", "U2", "U3"].map(|c| f64::from(disp.component(c).unwrap().values[index]))
+        };
+        let length = |u: [f64; 3]| (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+        let largest = (mesh.node_ids().iter())
+            .map(|&n| length(shape(n)))
+            .fold(0.0, f64::max);
+        let tip = &mesh.node_sets["TIP"];
+        let mean = (tip.iter().map(|&n| shape(n)))
+            .fold([0.0; 3], |a, u| [a[0] + u[0], a[1] + u[1], a[2] + u[2]])
+            .map(|c| c / tip.len() as f64);
+        Some((f, length(mean) / largest))
+    };
+    let Some((low, centre)) = run(400.0) else {
+        return;
+    };
+    let (high, _) = run(100.0).unwrap();
+    assert!(
+        centre < 1e-3,
+        "the point moves {centre} of the largest motion"
+    );
+    assert!((high / low - 2.0).abs() < 0.01, "{high} Hz vs {low} Hz");
+    // Saint-Venant torsion of the square section, J = 0.1406 a⁴, G = E / 2.6.
+    let torsion = 210_000.0 / 2.6 * 0.1406 * 10.0_f64.powi(4) / 100.0;
+    let expected = (torsion / 400.0).sqrt() / (2.0 * std::f64::consts::PI);
+    assert!(
+        (low - expected).abs() < 0.05 * expected,
+        "{low} Hz vs {expected} Hz"
+    );
+}
+
+/// A deformably coupled tip mass weighs on the beam as a rigidly coupled one: the point
+/// follows the mean of the tip face, and the beam swings at almost the same frequency.
+#[test]
+fn solver_swings_a_cantilever_with_a_deformably_coupled_tip_mass() {
+    let mass = 100.0 * 7.85e-9 * 100.0 * 100.0;
+    let first = |behavior: RemoteBehavior| {
+        let (mesh, mut model) = tip_mass(mass, None);
+        let Constraint::PointMass(point_mass) = &mut model.constraints[0] else {
+            unreachable!()
+        };
+        point_mass.behavior = behavior;
+        let name = format!("point_mass_{behavior:?}").to_ascii_lowercase();
+        let frd = run_solver(&name, &write_inp(&mesh, &model, "").unwrap())?;
+        Some(frequencies(&frd)[0].0)
+    };
+    let Some(rigid) = first(RemoteBehavior::Rigid) else {
+        return;
+    };
+    let deformable = first(RemoteBehavior::Deformable).unwrap();
+    assert!(deformable < 60.0, "{deformable} Hz: the mass is missing");
+    assert!(
+        (deformable - rigid).abs() < 0.02 * rigid,
+        "{deformable} Hz vs {rigid} Hz"
+    );
+}
+
+/// A plane strip with a heavy tip mass: in 2D only the inertia about z counts (the other
+/// entries of the tensor stay out), and it lowers the bending frequency of the mass on the
+/// tip stiffness.
+#[test]
+fn solver_swings_a_plane_strip_with_a_tip_mass_and_its_inertia_about_z() {
+    let (length, height) = (100.0, 10.0);
+    let beam = 7.85e-9 * length * height;
+    let mass = 100.0 * beam;
+    let run = |inertia: f64| {
+        let mesh = rectangle(0.0, length, height, 20, 2);
+        let fixed = (nodes_at(&mesh, 0, 0.0), [Some(0.0); 6]);
+        let load = LoadKind::force([0.0, -1.0, 0.0]);
+        let tip = Region::Faces(edges_at(&mesh, 0, length));
+        let mut model = plane_model(ModelSpace::PlaneStress, 1.0, vec![fixed], load, tip.clone());
+        model.materials[0].density = Some(7.85e-9);
+        let mut step = Step::new_frequency("Step-2");
+        step.field_outputs = ccx_eigen_outputs(&step.kind);
+        step.boundary_conditions = model.steps[0].boundary_conditions.clone();
+        model.steps.push(step);
+        model.reference_points.push(ReferencePoint {
+            id: named("RP-1"),
+            ..ReferencePoint::new("RP-1", [length, height / 2.0, 0.0])
+        });
+        let mut point_mass = plx_model::PointMass::new("Point_Mass-1", named("RP-1"));
+        point_mass.region = tip;
+        point_mass.mass = mass;
+        point_mass.inertia = Some(plx_model::RotaryInertia {
+            system: None,
+            tensor: [9.0, 9.0, inertia, 1.0, 1.0, 1.0],
+        });
+        model.constraints.push(Constraint::PointMass(point_mass));
+        let analysis = lowered(&mesh, &model);
+        let (_, tensor) = analysis.model.point_masses[0].inertia.unwrap();
+        assert_eq!(tensor, [0.0, 0.0, inertia, 0.0, 0.0, 0.0]);
+        let text = write_inp(&mesh, &model, "").unwrap();
+        let frd = run_solver(&format!("point_mass_plane_{inertia}"), &text)?;
+        Some(frequencies(&frd)[0].0)
+    };
+    let Some(plain) = run(0.0) else {
+        return;
+    };
+    // Euler-Bernoulli tip stiffness 3EI/L³ with the mass and a quarter of the strip's own;
+    // shear and the rigid tip edge stay within a few percent.
+    let stiffness = 3.0 * 210_000.0 * (height.powi(3) / 12.0) / length.powi(3);
+    let expected = (stiffness / (mass + 33.0 / 140.0 * beam)).sqrt() / (2.0 * std::f64::consts::PI);
+    assert!(
+        (plain - expected).abs() < 0.03 * expected,
+        "{plain} Hz vs {expected} Hz"
+    );
+    let turned = run(mass * 400.0).unwrap();
+    assert!(turned < 0.97 * plain, "{turned} Hz vs {plain} Hz");
+}

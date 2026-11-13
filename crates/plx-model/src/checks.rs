@@ -2025,13 +2025,13 @@ impl FeModel {
         let mut averaging: Vec<(ModelItem, &str, HashSet<NodeId>)> = Vec::new();
         let mut held = None;
         for (i, constraint) in self.constraints.iter().enumerate() {
-            if let Constraint::RigidBody(body) = constraint
+            if let Some(body) = constraint.coupling()
                 && body.active
                 && body.behavior == RemoteBehavior::Deformable
             {
                 let nodes = body.region.nodes(mesh).into_iter().collect();
-                averaging.push((ModelItem::Constraint(i), &body.name, nodes));
-            } else if let Constraint::RigidBody(body) = constraint
+                averaging.push((ModelItem::Constraint(i), body.name, nodes));
+            } else if let Some(body) = constraint.coupling()
                 && body.active
             {
                 let nodes: HashSet<NodeId> = body.region.nodes(mesh).into_iter().collect();
@@ -2048,7 +2048,7 @@ impl FeModel {
                         ),
                     ));
                 }
-                bodies.push((ModelItem::Constraint(i), &body.name, nodes));
+                bodies.push((ModelItem::Constraint(i), body.name, nodes));
             }
         }
         let mut points: Vec<(&Region, &crate::Displacement)> = Vec::new();
@@ -2780,7 +2780,8 @@ impl FeModel {
         let driven = |region: &Region| {
             region.reference_point().is_none_or(|point| {
                 self.constraints.iter().any(|c| {
-                    matches!(c, Constraint::RigidBody(body) if body.active && body.reference_point == point)
+                    c.coupling()
+                        .is_some_and(|body| body.active && body.reference_point == point)
                 })
             })
         };
@@ -3321,12 +3322,9 @@ impl FeModel {
     fn point_regions(&self, mesh: &FeMesh, point: &Region) -> Vec<Region> {
         match point {
             Region::ReferencePoint(name) => (self.constraints.iter())
-                .filter_map(|c| match c {
-                    Constraint::RigidBody(body) if body.active && body.reference_point == *name => {
-                        Some(body.region.clone())
-                    }
-                    _ => None,
-                })
+                .filter_map(|c| c.coupling())
+                .filter(|body| body.active && body.reference_point == *name)
+                .map(|body| body.region.clone())
                 .collect(),
             Region::RemotePoint(id) => (self.remote_point_of(mesh, *id))
                 .map(|(region, _)| region.clone())
@@ -3511,11 +3509,15 @@ impl FeModel {
                         join(&mut contacts, &a, &b);
                     }
                 }
-                Constraint::RigidBody(body) => {
+                Constraint::PointMass(_) if constraint.coupling().is_none() => {}
+                Constraint::RigidBody(_) | Constraint::PointMass(_) => {
+                    let Some(body) = constraint.coupling() else {
+                        continue;
+                    };
                     // A deformable coupling only averages its selection: it joins nothing
                     // by itself, but a boundary condition on its point holds it all the same.
                     if body.behavior == RemoteBehavior::Rigid {
-                        let tied = pieces(&body.region);
+                        let tied = pieces(body.region);
                         join(&mut ties, &tied, &[]);
                         join(&mut contacts, &tied, &[]);
                     }
@@ -3525,7 +3527,7 @@ impl FeModel {
                     let Some(point) = self.reference_point(body.reference_point) else {
                         continue;
                     };
-                    let Some(node) = nearest_node(mesh, &body.region, point.position) else {
+                    let Some(node) = nearest_node(mesh, body.region, point.position) else {
                         continue;
                     };
                     let springs =
@@ -3784,9 +3786,11 @@ impl FeModel {
                         mark(region, &mut held_otherwise);
                     }
                 }
-                Constraint::RigidBody(body) => {
-                    if !self.point_dofs(s, body.reference_point).is_empty() {
-                        mark(&body.region, &mut held_otherwise);
+                Constraint::RigidBody(_) | Constraint::PointMass(_) => {
+                    if let Some(body) = constraint.coupling()
+                        && !self.point_dofs(s, body.reference_point).is_empty()
+                    {
+                        mark(body.region, &mut held_otherwise);
                     }
                 }
                 Constraint::Joint(joint) => {

@@ -77,6 +77,122 @@ impl RigidBody {
     }
 }
 
+/// A point mass: a mass, and optionally a rotary inertia, at a reference point that a
+/// selection carries, rigidly or deformably as a [`RigidBody`] couples it. A reference point
+/// a rigid body already couples carries the mass through that body and needs no selection.
+/// The mass takes part wherever the solver works with masses: frequencies, dynamic steps,
+/// and gravity and centrifugal loads on the parts of its selection.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PointMass {
+    pub name: String,
+    #[serde(default = "crate::active")]
+    pub active: bool,
+    /// Hidden constraints have no symbol in the 3D view unless selected.
+    #[serde(default = "crate::active")]
+    pub visible: bool,
+    /// The selection that carries the mass; unused when a rigid body couples the point.
+    pub region: Region,
+    /// The reference point ([`crate::ReferencePoint`]) the mass sits at.
+    pub reference_point: crate::Id,
+    /// How the selection carries the point.
+    #[serde(default)]
+    pub behavior: RemoteBehavior,
+    pub mass: f64,
+    /// The rotary inertia about the point, `None` for a mass without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inertia: Option<RotaryInertia>,
+}
+
+/// The inertia tensor of a body about a point, `[I11, I22, I33, I12, I13, I23]` about the
+/// axes of a coordinate system: `Iij = ∫ (r·r δij − xi xj) dm`, so the products of inertia
+/// are the off-diagonal entries of the tensor (`I12 = −∫ x y dm`), as Abaqus'
+/// `*ROTARY INERTIA` has them. 2D models use `I33` only, the inertia about the axis normal
+/// to the plane.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RotaryInertia {
+    /// The coordinate system of the axes; `None` is the global one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<crate::Id>,
+    pub tensor: [f64; 6],
+}
+
+impl RotaryInertia {
+    /// The tensor as a symmetric 3x3 matrix.
+    pub fn matrix(&self) -> [[f64; 3]; 3] {
+        let [i11, i22, i33, i12, i13, i23] = self.tensor;
+        [[i11, i12, i13], [i12, i22, i23], [i13, i23, i33]]
+    }
+
+    /// The tensor about the global axes, `axes` the unit axes of its system (rows, global
+    /// components): `R^T I R`.
+    pub fn global(&self, axes: [[f64; 3]; 3]) -> [f64; 6] {
+        let local = self.matrix();
+        let mut g = [[0.0; 3]; 3];
+        for (i, row) in g.iter_mut().enumerate() {
+            for (j, value) in row.iter_mut().enumerate() {
+                *value = (0..3)
+                    .flat_map(|a| (0..3).map(move |b| (a, b)))
+                    .map(|(a, b)| axes[a][i] * local[a][b] * axes[b][j])
+                    .sum();
+            }
+        }
+        [g[0][0], g[1][1], g[2][2], g[0][1], g[0][2], g[1][2]]
+    }
+
+    /// Why the tensor is no inertia, if it is none: a negative principal moment. (A body has
+    /// none larger than the other two together, but the inertia about one axis alone is a
+    /// common input, so that is left to the user.)
+    pub fn problem(&self) -> Option<String> {
+        let m = self.matrix();
+        if self.tensor.iter().any(|v| !v.is_finite()) {
+            return Some("The rotary inertia is not a number".into());
+        }
+        let principal = symmetric_eigenvalues(m);
+        let scale = principal.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
+        let tolerance = 1e-9 * scale;
+        if principal.iter().any(|&p| p < -tolerance) {
+            return Some("The rotary inertia has a negative principal moment".into());
+        }
+        None
+    }
+}
+
+/// The eigenvalues of a symmetric 3x3 matrix (closed form).
+fn symmetric_eigenvalues(m: [[f64; 3]; 3]) -> [f64; 3] {
+    let p1 = m[0][1].powi(2) + m[0][2].powi(2) + m[1][2].powi(2);
+    if p1 == 0.0 {
+        return [m[0][0], m[1][1], m[2][2]];
+    }
+    let q = (m[0][0] + m[1][1] + m[2][2]) / 3.0;
+    let p2 = (m[0][0] - q).powi(2) + (m[1][1] - q).powi(2) + (m[2][2] - q).powi(2) + 2.0 * p1;
+    let p = (p2 / 6.0).sqrt();
+    let b: [[f64; 3]; 3] = std::array::from_fn(|i| {
+        std::array::from_fn(|j| (m[i][j] - if i == j { q } else { 0.0 }) / p)
+    });
+    let det = b[0][0] * (b[1][1] * b[2][2] - b[1][2] * b[2][1])
+        - b[0][1] * (b[1][0] * b[2][2] - b[1][2] * b[2][0])
+        + b[0][2] * (b[1][0] * b[2][1] - b[1][1] * b[2][0]);
+    let phi = (det / 2.0).clamp(-1.0, 1.0).acos() / 3.0;
+    let e1 = q + 2.0 * p * phi.cos();
+    let e3 = q + 2.0 * p * (phi + 2.0 * std::f64::consts::PI / 3.0).cos();
+    [e1, 3.0 * q - e1 - e3, e3]
+}
+
+impl PointMass {
+    pub fn new(name: impl Into<String>, reference_point: crate::Id) -> Self {
+        Self {
+            name: name.into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(Vec::new()),
+            reference_point,
+            behavior: RemoteBehavior::Rigid,
+            mass: 0.0,
+            inertia: None,
+        }
+    }
+}
+
 /// One end of a spring or joint: fixed ground, a region of the mesh or a point.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SpringEnd {

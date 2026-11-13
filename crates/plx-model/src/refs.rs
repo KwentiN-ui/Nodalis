@@ -200,6 +200,12 @@ impl FeModel {
         for constraint in &mut self.constraints {
             match constraint {
                 Constraint::RigidBody(body) => visit(&mut body.reference_point),
+                Constraint::PointMass(mass) => {
+                    visit(&mut mass.reference_point);
+                    if let Some(inertia) = &mut mass.inertia {
+                        optional(&mut inertia.system, visit);
+                    }
+                }
                 Constraint::Joint(joint) => optional(&mut joint.system, visit),
                 _ => {}
             }

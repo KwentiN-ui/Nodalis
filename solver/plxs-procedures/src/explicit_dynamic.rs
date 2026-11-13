@@ -119,13 +119,25 @@ pub(crate) struct ShellEntry {
 }
 
 impl ElementData {
-    /// The mass the fibres of the scaled shells add, `None` without them; from the lumped
-    /// masses as they are (after a mass scaling).
+    /// The mass the fibres of the scaled shells add, and the products of inertia of point
+    /// masses, `None` without them; from the lumped masses as they are (after a mass
+    /// scaling).
     pub(crate) fn fibre_mass(&self, table: &ElementTable) -> Option<FibreMass> {
-        if self.shells.iter().all(Option::is_none) {
+        let products: Vec<([u32; 3], [f64; 9])> = (table.mass_blocks.iter())
+            .map(|b| {
+                let mut off = b.mass;
+                for d in 0..3 {
+                    off[d * 4] = 0.0;
+                }
+                (b.dofs, off)
+            })
+            .filter(|(_, off)| off.iter().any(|v| *v != 0.0))
+            .collect();
+        if self.shells.iter().all(Option::is_none) && products.is_empty() {
             return None;
         }
         let mut out = FibreMass::new(self.fibre_nodes.clone());
+        out.dof_blocks = products;
         let mut offset = 0;
         for (entry, shell) in table.entries.iter().zip(&self.shells) {
             let lumped = &self.lumped[offset..offset + entry.dofs.len()];
@@ -378,6 +390,13 @@ pub(crate) fn element_data(
             &membrane.formulation.stiffness(),
             &lumped,
         ));
+    }
+    // Point masses: their mass and the moments of inertia on the diagonal, the products of
+    // inertia coupled (`ElementData::fibre_mass`).
+    for block in &table.mass_blocks {
+        for (d, &dof) in block.dofs.iter().enumerate() {
+            mass[dof as usize] += block.mass[d * 4];
+        }
     }
     // Springs and constant blocks have no mass of their own: their frequency on the masses
     // of the nodes they join (Gershgorin's bound of `M^-½ K M^-½`).
