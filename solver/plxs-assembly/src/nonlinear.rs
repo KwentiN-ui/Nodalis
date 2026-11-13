@@ -49,9 +49,27 @@ pub struct NonlinearOutput {
     /// CalculiX's "average force" for the convergence check is their ratio.
     pub flux_sum: f64,
     pub flux_count: u64,
+    /// Per DOF, the sum of the absolute values of the element nodal forces on it and their
+    /// number: the force scale of the DOF's own elements, see
+    /// [`NonlinearOutput::local_force`].
+    pub dof_flux: Vec<f64>,
+    pub dof_count: Vec<u32>,
     /// Largest change of the equivalent creep strain rate against the start of the
     /// increment, over all integration points (`CETOL` control).
     pub max_creep_rate_change: f64,
+}
+
+impl NonlinearOutput {
+    /// The force scale of a DOF: the mean absolute nodal force its elements put on it
+    /// (zero for a DOF without elements). Where a few elements carry a large force (a
+    /// rope, a beam, a stiff spring), it is far above the model's average force, which a
+    /// finer mesh of the solids around lowers further.
+    pub fn local_force(&self, dof: usize) -> f64 {
+        match self.dof_count.get(dof) {
+            Some(&n) if n > 0 => self.dof_flux[dof] / f64::from(n),
+            _ => 0.0,
+        }
+    }
 }
 
 /// The material state field of a model with the layout of `table` (zeros).
@@ -79,6 +97,8 @@ pub fn assemble_nonlinear(
     let mut material = table.layout.field(STATE_SIZE);
     let mut flux_sum = 0.0;
     let mut flux_count = 0;
+    let mut dof_flux = vec![0.0; table.dofs.len()];
+    let mut dof_count = vec![0_u32; table.dofs.len()];
     let mut max_creep_rate_change = 0.0_f64;
     // The material state at the start of the increment (zero before the first one).
     let initial;
@@ -206,6 +226,8 @@ pub fn assemble_nonlinear(
             for (&dof, value) in entry.dofs.iter().zip(&result.fe) {
                 f_int[dof as usize] += value;
                 flux_sum += value.abs();
+                dof_flux[dof as usize] += value.abs();
+                dof_count[dof as usize] += 1;
             }
             flux_count += result.fe.len() as u64;
             max_creep_rate_change = max_creep_rate_change.max(result.creep_change);
@@ -221,6 +243,8 @@ pub fn assemble_nonlinear(
         material,
         flux_sum,
         flux_count,
+        dof_flux,
+        dof_count,
         max_creep_rate_change,
     };
     // Native membranes (total Lagrangian under NLGEOM) and the other elements of constant
@@ -234,6 +258,8 @@ pub fn assemble_nonlinear(
                 .sum();
             out.f_int[dof as usize] += f;
             out.flux_sum += f.abs();
+            out.dof_flux[dof as usize] += f.abs();
+            out.dof_count[dof as usize] += 1;
         }
         out.flux_count += n as u64;
         if let Some(k) = k.as_deref_mut() {
@@ -259,6 +285,8 @@ pub fn assemble_nonlinear(
         for (&dof, value) in m.dofs.iter().zip(fe) {
             out.f_int[dof as usize] += value;
             out.flux_sum += value.abs();
+            out.dof_flux[dof as usize] += value.abs();
+            out.dof_count[dof as usize] += 1;
         }
         out.flux_count += fe.len() as u64;
         if let Some(k) = k.as_deref_mut() {
@@ -281,6 +309,8 @@ pub fn assemble_nonlinear(
             for (&dof, value) in b.dofs.iter().zip(fe) {
                 out.f_int[dof as usize] += value;
                 out.flux_sum += value.abs();
+                out.dof_flux[dof as usize] += value.abs();
+                out.dof_count[dof as usize] += 1;
             }
             out.flux_count += 12;
             if let Some(k) = k.as_deref_mut() {
