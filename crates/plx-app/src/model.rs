@@ -202,8 +202,6 @@ struct Checks {
     mesh: MeshCheck,
     fe: FeModel,
     findings: Vec<Finding>,
-    /// The contact regions the bolts replace, with the bolt.
-    replaced: std::collections::BTreeMap<usize, usize>,
 }
 
 /// Which nodes belong to which part; a node shared by parts belongs to the first of them.
@@ -1156,24 +1154,12 @@ impl Model {
             _ => MeshCheck::new(&self.mesh, space),
         };
         let findings = self.fe.check(&self.mesh, &mesh);
-        let replaced = self.fe.replaced_contact_regions(&self.mesh);
         *cache = Some(Checks {
             mesh,
             fe: self.fe.clone(),
             findings: findings.clone(),
-            replaced,
         });
         findings
-    }
-
-    /// The contact regions the bolts replace, with the bolt; computed with the checks.
-    pub fn replaced_regions(&self) -> std::collections::BTreeMap<usize, usize> {
-        self.findings();
-        let cache = self.checks.lock().unwrap_or_else(|e| e.into_inner());
-        cache
-            .as_ref()
-            .map(|c| c.replaced.clone())
-            .unwrap_or_default()
     }
 
     /// Lookups for selections on the geometry display, see [`crate::geometry_selection`].

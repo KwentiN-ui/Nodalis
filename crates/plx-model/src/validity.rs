@@ -288,9 +288,9 @@ impl FeModel {
             }
         }
         for (i, bolt) in self.bolts.iter().enumerate() {
-            let reason = (bolt.side_a.missing_reference(mesh))
-                .map(|r| format!("Side A: {r}"))
-                .or_else(|| (bolt.side_b.missing_reference(mesh)).map(|r| format!("Side B: {r}")));
+            let reason = (bolt.surface.missing_reference(mesh))
+                .map(|r| format!("Bolt surface: {r}"))
+                .or_else(|| (bolt.thread.missing_reference(mesh)).map(|r| format!("Thread: {r}")));
             if let Some(reason) = reason {
                 invalid.push(Invalid {
                     item: ModelItem::Bolt(i),

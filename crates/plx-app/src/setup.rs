@@ -1351,7 +1351,7 @@ enum Draft {
     ContactRegion(plx_model::ContactRegion, MasterSlave, RegionView),
     ContactDetection(plx_model::ContactDetection),
     PartGroup(plx_model::PartGroup),
-    /// A bolt with the sides of its cut and its thread, and what it does in each step.
+    /// A bolt with its surface and its thread, and what it does in each step.
     Bolt(
         plx_model::Bolt,
         crate::bolts::BoltSides,
@@ -4579,7 +4579,7 @@ impl Editor {
             Draft::ContactDetection(detection) => put(&mut fe.contact_detections, index, detection),
             Draft::PartGroup(group) => put(&mut fe.part_groups, index, group),
             Draft::Bolt(mut bolt, sides, actions, _) => {
-                (bolt.side_a, bolt.side_b, bolt.thread) = sides.regions();
+                (bolt.surface, bolt.thread) = sides.regions();
                 if let Some(existing) = index.and_then(|i| fe.bolts.get(i)) {
                     bolt.active = existing.active;
                     let old = existing.id;
@@ -4942,7 +4942,7 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
         TreeItem::ContactRegion(i) => fe.contact_regions.get(i).map(|r| [&r.side_a, &r.side_b]),
         TreeItem::Bolt(i) => {
             return fe.bolts.get(i).map_or_else(Highlight::default, |bolt| {
-                crate::bolts::bolt_highlight(model, &bolt.side_a, &bolt.side_b, &bolt.thread)
+                crate::bolts::bolt_highlight(model, &bolt.surface, &bolt.thread)
             });
         }
         TreeItem::HistoryOutput(s, i) => {
@@ -5043,7 +5043,7 @@ pub fn acting_on_parts(model: &Model, parts: &BTreeSet<usize>) -> BTreeSet<TreeI
         }
     }
     for (i, b) in fe.bolts.iter().enumerate() {
-        if on_parts(&b.side_a) || on_parts(&b.side_b) {
+        if on_parts(&b.surface) || on_parts(&b.thread) {
             acting.insert(TreeItem::Bolt(i));
         }
     }
