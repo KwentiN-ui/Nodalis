@@ -38,8 +38,9 @@ there. It takes the unit system of the project (@project-units).
 
 === Unit system of the project <project-units>
 
-The button at the bottom right of the project window shows the unit system of the project, such
-as #ui("Units: mm, ton, s, °C"). A click on it lists the other unit systems (@unit-systems);
+The text at the bottom right of the project window shows the unit system of the project, such
+as #ui("Units: mm, ton, s, °C"); the status bar of the Geometry, FE Model and Results workspaces
+shows it at the same place. A click on it lists the other unit systems (@unit-systems);
 hover over one for its main units. The unit system says in which units every number of the
 project is *shown and typed*: the fields and results of the blocks in the schematic, their
 editors, and the analyses with their dialogs, results, legends and tables. Nodalis stores all

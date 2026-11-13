@@ -22,8 +22,8 @@ From top to bottom the window contains:
   ..."), unit conversions and the output of the query tool. #ui("Analysis") is the monitor of
   the solver (@monitor); it opens when a run starts.
 / Status bar: on the left what is loaded ("bracket.ndl: 12345 nodes, 6789 elements, 3 parts") or
-  what is running ("Meshing ..."), on the right the unit system of the project (@project-units) and the
-  model space of the analysis.
+  what is running ("Meshing ..."), on the right the model space of the analysis and the unit
+  system of the project (@project-units), which a click changes here as in the project window.
 
 === Commands of the ribbon
 
