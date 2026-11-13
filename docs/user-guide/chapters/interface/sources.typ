@@ -657,9 +657,10 @@ needs: the bending stress 6 F L / (b h²) of a cantilever, the magnitude of a ve
 components, the utilization of the largest stress of a region. Add it with
 #menu("Parameters", "Formula"), or search it with #key("Shift+A").
 
-#screenshot("schematic-formula.png", [The Formula block Bending Stress computes 6 a b / (c d²)
-  from the force, the length, the width and the height of a cantilever, a stress in MPa. The
-  Formula block Utilization divides it by 235 MPa, a factor without unit])
+#screenshot("schematic-formula.png", [The Formula block Bending Stress computes
+  6 a (b − 20 mm) / (c d²) from the force, the length, the width and the height of a
+  cantilever, a stress in MPa. The Formula block Utilization divides it by 235 N/mm², a factor
+  without unit])
 
 A new block has no inputs, only an empty pin. Drag the pin of a number or a series to it, and
 it becomes the input #ui("a"); the next one #ui("b"), then #ui("c"), up to #ui("z"), as with
@@ -674,15 +675,18 @@ window: the formula, the result it gives as you type, the inputs with their kind
 they come from, and below the list of the functions; a click on a function adds it to the
 formula. #ui("OK") applies the formula.
 
-#screenshot("formula-editor.png", [The editor of the Formula block: the formula, what it gives,
-  its inputs and the functions it can call])
+#screenshot("formula-editor.png", [The editor of the Formula block: the formula with the unit
+  literal 20mm, what it gives, its inputs and the functions it can call])
 
 #fields(
   [Operators], [`+ - * /` and `^` (or `**`) for powers, with parentheses. A power binds more
     than a sign: `-a^2` is −(a²).],
-  [Numbers], [`2.5`, `1e-3`, `pi`, and numbers with a unit in brackets: `5[mm]`, `210[GPa]`,
-    `3[N/mm]`. A number without unit is a factor. Values are in SI units, so `a / 1[mm]` is
-    the number of millimetres in the length a.],
+  [Numbers], [`2.5`, `1e-3`, `pi`, and numbers with a unit: `a - 10mm`, `210GPa`,
+    `3 N/mm`, `10N/mm^2` or `10*N/mm^2`. A unit written right after a number goes with it
+    before any operator, and its power with it: `10mm^2` is ten square millimetres, `a / 10mm`
+    divides by ten millimetres. A unit can also stand in brackets, `5[mm]` or `10[N/mm^2]`;
+    `10[mm]^2` is the square of ten millimetres. A number without unit is a factor. Values are
+    in SI units, so `a / 1mm` is the number of millimetres in the length a.],
   [Functions], [`sqrt`, `cbrt`, `abs`, `sign`, `exp`, `ln`, `log10`, `sin`, `cos`, `tan`,
     `asin`, `acos`, `atan`, `atan2(y, x)`, `floor`, `ceil`, `round`, `clamp(x, low, high)`,
     and `min`, `max`, `mean`, `sum`, `std` and `norm` of one series or of several values.],
@@ -696,6 +700,11 @@ difference, `min`, `max` and `clamp` take numbers of one unit, and `exp`, `ln` o
 number without unit. A formula whose units do not go together, such as a force plus a length,
 gives no result; the formula in the block turns red and its tooltip says why. So does a formula
 whose result goes to a number of another unit: the link stays while you correct the formula.
+Where a number lacks its unit, as in `a - 10` with a length a, the tooltip says how to write
+it: `10mm`.
+
+#screenshot("formula-unit-hint.png", [The number 20 lacks its unit: the editor says to write
+  20mm])
 
 *Series* go element by element, as in NumPy (@series): a number goes with every value of a
 series, and series of the same length go value by value. `max`, `min`, `mean`, `sum`, `std`
@@ -703,6 +712,9 @@ and `norm` of a single series make one number of it, so `max(abs(a)) / 235[MPa]`
 utilization of the largest stress of a region. Of several values they work element by
 element: `max(a, 0)` keeps the positive values of a series, `norm(a, b, c)` is the magnitude
 of the components a, b and c at every node.
+
+A single lowercase letter is always an input, so `m` alone is the input m; right after a number
+it is the unit: `2m` is two metres, `2*m` twice the input m. Write `2[m]` where that matters.
 
 === Exposed parameters <exposed-parameters>
 

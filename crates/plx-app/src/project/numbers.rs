@@ -59,11 +59,12 @@ pub(super) fn number_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Ve
     let mut rows = Vec::new();
     let formula = number.formula.is_some();
     if formula {
-        let mut tip = "The formula of the inputs a, b, c, ...: + - * / ^, numbers with units in \
-                       brackets such as 5[mm], and functions such as sqrt, max, min and mean. \
+        let mut tip =
+            "The formula of the inputs a, b, c, ...: + - * / ^, numbers with units such as \
+                       10mm or 10N/mm^2, and functions such as sqrt, max, min and mean. \
                        Click it or double-click the block to edit it, with the list of \
                        functions."
-            .to_owned();
+                .to_owned();
         if let Some(problem) = number.formula_problem() {
             tip.push_str(&format!("\nNo result: {problem}."));
         }
