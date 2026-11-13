@@ -3830,3 +3830,70 @@ fn a_detected_bonded_pin_with_play_passes_the_model_check() {
         Some(plx_model::InterfaceTreatment::AdjustToTouch);
     assert_eq!(folds(&model), 1);
 }
+
+#[test]
+fn the_cut_faces_of_a_cyclic_symmetry_are_meshed_alike() {
+    if !gmsh_available() {
+        return;
+    }
+    // A sector of 30 degrees of a thick pipe along y, cut in the x-y plane (z = 0) and in
+    // the plane turned by the sector about y.
+    let angle = std::f64::consts::TAU / 12.0;
+    let mut geometry = revolved([30.0, 0.0, 0.0], [20.0, 50.0], 0.0, angle);
+    geometry.meshing.max_size = 1.5;
+    geometry.meshing.second_order = true;
+    let turned = |p: [f64; 3], a: f64| {
+        let (s, c) = a.sin_cos();
+        // About +y: z' = c z - s x, x' = c x + s z.
+        [c * p[0] + s * p[2], p[1], c * p[2] - s * p[0]]
+    };
+    for hexahedra in [true, false] {
+        geometry.meshing.hexahedra_where_possible = hexahedra;
+        let mesh = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+        // The cut faces: all nodes in the plane z = 0, or in the plane turned by the angle.
+        let in_plane = |face: &[NodeId], a: f64| {
+            (face.iter()).all(|&n| turned(mesh.node(n).unwrap(), -a)[2].abs() < 1e-6)
+        };
+        let face_of = |a: f64| -> i32 {
+            (mesh.cad.nodes.iter())
+                .find_map(|(entity, nodes)| match entity {
+                    CadEntity::Face(f) if in_plane(nodes, a) => Some(*f),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let (start, end) = (face_of(0.0), face_of(angle));
+        assert_ne!(start, end);
+        // The revolve turns the start face by the angle: the start face is the master.
+        let matching = [PeriodicFaces {
+            master: vec![start],
+            slave: vec![end],
+            cyclic: plx_model::CyclicSymmetry {
+                axis_point: [0.0; 3],
+                axis_direction: [0.0, 1.0, 0.0],
+                ..Default::default()
+            },
+        }];
+        let mesh = generate_part_mesh_matching(&geometry, "SOLID-1", &matching)
+            .unwrap()
+            .mesh;
+        let nodes = |face: i32| -> Vec<[f64; 3]> {
+            (mesh.cad.nodes[&CadEntity::Face(face)].iter())
+                .map(|&n| mesh.node(n).unwrap())
+                .collect()
+        };
+        let (master, slave) = (nodes(start), nodes(end));
+        assert_eq!(master.len(), slave.len(), "hexahedra {hexahedra}");
+        // Every slave node turned back lies on a master node.
+        for &p in &slave {
+            let back = turned(p, -angle);
+            let closest = (master.iter())
+                .map(|q| (0..3).map(|d| (q[d] - back[d]).powi(2)).sum::<f64>().sqrt())
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                closest < 1e-6,
+                "hexahedra {hexahedra}: {p:?} misses by {closest}"
+            );
+        }
+    }
+}

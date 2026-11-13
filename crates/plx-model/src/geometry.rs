@@ -44,6 +44,22 @@ pub struct Geometry {
     pub suppressed: Vec<String>,
 }
 
+/// Cut faces of a cyclic symmetric sector, whose meshes have to match: the slave faces are
+/// the master faces rotated by one sector about the axis. A cyclic symmetry ties every slave
+/// node to the master face it lands on; where the nodes of both sides do not coincide, the
+/// tie passes the forces on unevenly and the stresses next to the cut faces show stripes.
+/// The mesher copies the mesh of the master faces on to the slave faces instead. Taken from
+/// the cyclic symmetry ties for meshing ([`crate::FeModel::matching_faces`]), not stored.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PeriodicFaces {
+    /// Faces of the geometry (Gmsh tags) on the master side.
+    pub master: Vec<i32>,
+    /// Faces of the geometry on the slave side.
+    pub slave: Vec<i32>,
+    /// The cyclic symmetry: its axis.
+    pub cyclic: crate::CyclicSymmetry,
+}
+
 /// Parts of the geometry joined into one part of the FE model, as the pieces a CAD model
 /// is cut into for the mesher. Each piece is meshed on its own; where they touch, the
 /// solver input ties them, as a bonded contact would.

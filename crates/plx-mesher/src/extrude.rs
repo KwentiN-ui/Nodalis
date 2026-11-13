@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use plx_mesh::{CadMap, Element, ElementId, ElementShape, FeMesh, NodeId, Part};
-use plx_model::{ExtrudeMesh, Geometry, Recombination};
+use plx_model::{ExtrudeMesh, Geometry, PeriodicFaces, Recombination};
 
 use crate::gmsh::{Gmsh, GmshError};
 use crate::{
@@ -519,8 +519,11 @@ pub(crate) fn extrude_part_mesh(
     part: &str,
     volume: i32,
     extrude: &ExtrudeMesh,
+    matching: &[PeriodicFaces],
 ) -> Result<Result<GeneratedMesh, String>, GmshError> {
     let topology = Topology::read(gmsh, volume)?;
+    // Taken while the part's own faces are there.
+    let rotations = crate::periodic::rotations(gmsh, matching)?;
     let sweep = match find_sweep(&topology, extrude, part) {
         Ok(sweep) => sweep,
         Err(reason) => return Ok(Err(reason)),
@@ -545,6 +548,13 @@ pub(crate) fn extrude_part_mesh(
     options.recombination = recombination_number(extrude.recombination);
     let mut notes = Vec::new();
     let sizes = local_sizes(gmsh, geometry, &sweep.source.iter().copied().collect())?;
+    // The edges of the cut faces of a cyclic symmetry are edges of the source faces.
+    let mut curves = std::collections::BTreeSet::new();
+    for &face in &sweep.source {
+        curves.extend(gmsh.adjacencies(2, face)?.1);
+    }
+    let curves: Vec<i32> = curves.into_iter().collect();
+    crate::periodic::match_rotated(gmsh, 1, &curves, &rotations)?;
     generate_faces(gmsh, &mut options, &sweep.source, &sizes, &mut notes)?;
     let quadratic = options.order == 2;
     let coords = node_coords(gmsh)?;

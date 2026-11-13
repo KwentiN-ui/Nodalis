@@ -869,6 +869,31 @@ impl Gmsh {
         self.synchronize()
     }
 
+    /// Makes the mesh of each of `slaves` (entities of dimension `dim`) a copy of the mesh
+    /// of the master of the same index, carried over by the affine transformation (`4 × 4`,
+    /// row by row) that takes the master onto the slave. Gmsh finds the matching curves and
+    /// points of their boundaries itself.
+    pub fn set_periodic(
+        &self,
+        dim: i32,
+        slaves: &[i32],
+        masters: &[i32],
+        transform: &[f64; 16],
+    ) -> Result<(), GmshError> {
+        self.call(|e| unsafe {
+            (self.api.mesh_set_periodic)(
+                dim,
+                slaves.as_ptr(),
+                slaves.len(),
+                masters.as_ptr(),
+                masters.len(),
+                transform.as_ptr(),
+                16,
+                e,
+            );
+        })
+    }
+
     /// The common part of the objects and the tools; the tools stay.
     pub fn intersect(
         &self,

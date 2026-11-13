@@ -12,14 +12,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use plx_model::{ExtrudeMesh, Geometry, Recombination};
+use plx_model::{ExtrudeMesh, Geometry, PeriodicFaces, Recombination};
 
 use crate::extrude::{
     Motion, Point, Topology, add, dot, norm, recombination_number, scale, source_elements, sub,
     sweep_mesh,
 };
 use crate::gmsh::{Gmsh, GmshError};
-use crate::{GeneratedMesh, LocalSize, MeshOptions, generate_faces, node_coords, revolve};
+use crate::{
+    GeneratedMesh, LocalSize, MeshOptions, generate_faces, node_coords, periodic, revolve,
+};
 
 /// How a part is a stack of extrusions.
 struct Stack {
@@ -228,9 +230,12 @@ pub(crate) fn stacked_part_mesh(
     part: &str,
     volume: i32,
     extrude: &ExtrudeMesh,
+    matching: &[PeriodicFaces],
 ) -> Result<Result<GeneratedMesh, String>, GmshError> {
     let refuse = |reason: String| Ok(Err(format!("{part}: no stack of extrusions: {reason}")));
     let topology = Topology::read(gmsh, volume)?;
+    // Taken while the part's own faces are there.
+    let rotations = periodic::rotations(gmsh, matching)?;
     let stack = match find_stack(gmsh, &topology)? {
         Ok(stack) => stack,
         Err(reason) => return refuse(reason),
@@ -283,6 +288,14 @@ pub(crate) fn stacked_part_mesh(
     options.visible_only = true;
     let (sizes, layer_sizes) =
         local_sizes_on_cells(gmsh, geometry, &topology, &stack, base, &cap_cells, &cells)?;
+    // The edges of the cut faces of a cyclic symmetry are edges of the cells: meshed alike,
+    // the cut faces are.
+    let mut curves = BTreeSet::new();
+    for &cell in &cells {
+        curves.extend(gmsh.adjacencies(2, cell)?.1);
+    }
+    let curves: Vec<i32> = curves.into_iter().collect();
+    periodic::match_rotated(gmsh, 1, &curves, &rotations)?;
     let mut notes = Vec::new();
     generate_faces(gmsh, &mut options, &cells, &sizes, &mut notes)?;
     gmsh.set_number("Mesh.MeshOnlyVisible", 0.0)?;

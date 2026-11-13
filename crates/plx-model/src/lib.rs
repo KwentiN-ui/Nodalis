@@ -118,7 +118,7 @@ pub use field::{
 };
 pub use geometry::{
     Algorithm2d, Algorithm3d, CompoundPart, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem,
-    MeshSetupKind, MeshingParameters, Recombination, ThickenShellMesh,
+    MeshSetupKind, MeshingParameters, PeriodicFaces, Recombination, ThickenShellMesh,
 };
 pub use handover::Handover;
 pub use history::{HistoryKind, HistoryOutput, Totals};
@@ -306,6 +306,34 @@ impl FeModel {
     /// by nodal diameter.
     pub fn cyclic_tie(&self) -> Option<&Tie> {
         (self.ties.iter()).find(|t| t.active && t.cyclic.is_some())
+    }
+
+    /// The cut faces of the active cyclic symmetry ties picked on the geometry, whose meshes
+    /// the mesher makes match ([`PeriodicFaces`]).
+    pub fn matching_faces(&self) -> Vec<PeriodicFaces> {
+        let faces = |region: &Region| -> Vec<i32> {
+            match region {
+                Region::Geometry(entities) => (entities.iter())
+                    .filter_map(|e| match e {
+                        CadEntity::Face(face) => Some(*face),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+        (self.ties.iter())
+            .filter(|t| t.active)
+            .filter_map(|t| {
+                let cyclic = t.cyclic.clone()?;
+                let (master, slave) = (faces(&t.master), faces(&t.slave));
+                (!master.is_empty() && !slave.is_empty()).then_some(PeriodicFaces {
+                    master,
+                    slave,
+                    cyclic,
+                })
+            })
+            .collect()
     }
 
     /// Every region of the model: of sections, constraints, contact pairs, boundary

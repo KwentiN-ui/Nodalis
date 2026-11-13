@@ -13809,7 +13809,7 @@ mod tests {
         let space = ModelSpace::ThreeD;
         let mesh_inputs = BTreeMap::from([(
             "SOLID-1".to_owned(),
-            plx_model::fingerprint::mesh_input(&geometry, space, "SOLID-1"),
+            plx_model::fingerprint::mesh_input(&geometry, &[], space, "SOLID-1"),
         )]);
         let mut model = plx_model::FeModel::default();
         model.properties.space = space;

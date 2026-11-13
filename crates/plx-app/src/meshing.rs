@@ -12,7 +12,8 @@ use plx_mesh::{ElementShape, FeMesh, NodeId};
 use plx_mesher::{CadEntity, GeneratedMesh};
 use plx_model::{
     Algorithm2d, Algorithm3d, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem, MeshSetupKind,
-    MeshingParameters, Quantity, Recombination, ThickenShellMesh, UnitSystem, next_name,
+    MeshingParameters, PeriodicFaces, Quantity, Recombination, ThickenShellMesh, UnitSystem,
+    next_name,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1173,6 +1174,9 @@ struct WorkerRequest {
     /// Gmsh library of the program, so that both mesh alike.
     library: Option<PathBuf>,
     geometry: Geometry,
+    /// The cut faces of cyclic symmetries, meshed alike.
+    #[serde(default)]
+    matching: Vec<PeriodicFaces>,
     /// The parts to mesh, all with `None`.
     parts: Option<Vec<String>>,
 }
@@ -1180,9 +1184,13 @@ struct WorkerRequest {
 /// The worker's answer in `result.ron`: per part the mesh and Gmsh's warnings.
 type WorkerResult = Result<Vec<(FeMesh, Vec<String>)>, String>;
 
-/// Meshes the named parts, or all with `None`, one after the other; suppressed parts are
-/// left out.
-fn mesh_parts(geometry: &Geometry, parts: Option<Vec<String>>) -> Result<PartMeshes, String> {
+/// Meshes the named parts, or all with `None`, one after the other, with the cut faces of
+/// the cyclic symmetries `matching` meshed alike; suppressed parts are left out.
+fn mesh_parts(
+    geometry: &Geometry,
+    matching: &[PeriodicFaces],
+    parts: Option<Vec<String>>,
+) -> Result<PartMeshes, String> {
     let parts = match parts {
         // A compound part is meshed as the parts of the geometry it joins.
         Some(parts) => {
@@ -1202,7 +1210,8 @@ fn mesh_parts(geometry: &Geometry, parts: Option<Vec<String>>) -> Result<PartMes
         .collect();
     let mut meshes = Vec::with_capacity(parts.len());
     for part in parts {
-        let mesh = plx_mesher::generate_part_mesh(geometry, &part).map_err(|e| e.to_string())?;
+        let mesh = plx_mesher::generate_part_mesh_matching(geometry, &part, matching)
+            .map_err(|e| e.to_string())?;
         meshes.push(mesh);
     }
     Ok(PartMeshes { meshes })
@@ -1225,7 +1234,7 @@ pub fn worker_main() -> Option<i32> {
         if request.library.is_some() {
             plx_mesher::set_library_path(request.library);
         }
-        let generated = mesh_parts(&request.geometry, request.parts)?;
+        let generated = mesh_parts(&request.geometry, &request.matching, request.parts)?;
         Ok((generated.meshes.into_iter())
             .map(|g| (g.mesh, g.warnings))
             .collect())
@@ -1267,6 +1276,7 @@ impl Drop for WorkerDir {
 fn mesh_in_worker(
     program: &Path,
     geometry: Geometry,
+    matching: Vec<PeriodicFaces>,
     parts: Option<Vec<String>>,
     cancel: &AtomicBool,
 ) -> Result<PartMeshes, String> {
@@ -1274,6 +1284,7 @@ fn mesh_in_worker(
     let request = WorkerRequest {
         library: plx_mesher::library_path(),
         geometry,
+        matching,
         parts,
     };
     let text = ron::to_string(&request).map_err(|e| e.to_string())?;
@@ -1337,8 +1348,14 @@ pub struct MeshingJob {
 }
 
 impl MeshingJob {
-    /// Meshes the named parts, or all parts with `None`.
-    pub fn start(geometry: Geometry, parts: Option<Vec<String>>, ctx: &egui::Context) -> Self {
+    /// Meshes the named parts, or all parts with `None`, with the cut faces of the cyclic
+    /// symmetries `matching` meshed alike ([`plx_model::FeModel::matching_faces`]).
+    pub fn start(
+        geometry: Geometry,
+        matching: Vec<PeriodicFaces>,
+        parts: Option<Vec<String>>,
+        ctx: &egui::Context,
+    ) -> Self {
         let (sender, receiver) = std::sync::mpsc::channel();
         let meshed = geometry.clone();
         let ctx = ctx.clone();
@@ -1346,8 +1363,8 @@ impl MeshingJob {
         let cancelled = Arc::clone(&cancel);
         std::thread::spawn(move || {
             let result = match WORKER.get() {
-                Some(program) => mesh_in_worker(program, geometry, parts, &cancelled),
-                None => mesh_parts(&geometry, parts),
+                Some(program) => mesh_in_worker(program, geometry, matching, parts, &cancelled),
+                None => mesh_parts(&geometry, &matching, parts),
             };
             let _ = sender.send(result);
             ctx.request_repaint();
@@ -1418,12 +1435,12 @@ mod tests {
         let mut view = loaded.geometry_view.unwrap();
         geometry.meshing.max_size = 5.0;
         geometry.set_suppressed(&["SOLID-1".into()], true);
-        let meshed = mesh_parts(&geometry, None).unwrap();
+        let meshed = mesh_parts(&geometry, &[], None).unwrap();
         let names: Vec<&str> = (meshed.meshes.iter())
             .flat_map(|m| m.mesh.parts.iter().map(|p| p.name.as_str()))
             .collect();
         assert_eq!(names, ["SOLID-2"]);
-        let asked = mesh_parts(&geometry, Some(vec!["SOLID-1".into()])).unwrap();
+        let asked = mesh_parts(&geometry, &[], Some(vec!["SOLID-1".into()])).unwrap();
         assert!(asked.meshes.is_empty());
         // In the view it is drawn as its edges and a click goes through it.
         assert!(view.mark_suppressed(&geometry));
