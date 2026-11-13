@@ -478,6 +478,15 @@ pub fn status_tabs(
     clicked
 }
 
+/// A hand on a mouse jitters: egui's 6 px between press and release, and 0.3 s between two
+/// clicks, drop many double clicks (tree rows, blocks). Windows allows 0.5 s.
+pub fn click_tolerance(ctx: &egui::Context) {
+    ctx.options_mut(|o| {
+        o.input_options.max_click_dist = 10.0;
+        o.input_options.max_double_click_delay = 0.5;
+    });
+}
+
 #[cfg(test)]
 mod tests {
     /// Heights of an unselected and a selected label; the selected one is framed like a hovered
@@ -521,13 +530,4 @@ mod tests {
             "INTERACT_HEIGHT no longer covers the text"
         );
     }
-}
-
-/// A hand on a mouse jitters: egui's 6 px between press and release, and 0.3 s between two
-/// clicks, drop many double clicks (tree rows, blocks). Windows allows 0.5 s.
-pub fn click_tolerance(ctx: &egui::Context) {
-    ctx.options_mut(|o| {
-        o.input_options.max_click_dist = 10.0;
-        o.input_options.max_double_click_delay = 0.5;
-    });
 }
