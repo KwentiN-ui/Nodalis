@@ -3221,8 +3221,18 @@ impl Workbench {
         }
         let was_results = self.tree_view == TreeView::Results;
         if was_results == (view == TreeView::Results) {
-            // Geometry and FE model share the camera; the scene changes.
+            // Geometry and FE model share the camera; the scene changes. Each model draws
+            // relative to its own origin (the centre of its bounds), so the camera target
+            // moves by the difference to keep looking at the same place.
+            let before = self.shown().map(Model::origin);
             self.tree_view = view;
+            let after = self.shown().map(Model::origin);
+            if let (Some(before), Some(after)) = (before, after) {
+                self.viewport.shift_target((before - after).as_vec3());
+            }
+            if let Some(bounds) = self.shown().and_then(Model::visible_bounds) {
+                self.viewport.cover(bounds);
+            }
             self.results_changed = true;
             return;
         }
