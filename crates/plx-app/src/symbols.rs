@@ -829,7 +829,15 @@ fn face_geometry(model: &Model, region: &Region, visible: &Visible) -> Vec<FaceG
         let Some(mut normal) = normal.try_normalize() else {
             continue;
         };
-        if normal.dot(center - centroid) < 0.0 {
+        if element.is_shell() && face <= 2 && corners.len() >= 3 {
+            // Bottom (S1) and top (S2) of a shell share its corners, so the centroid cannot
+            // tell them apart. The outward normal of the bottom points against the element
+            // normal (node order), so a positive pressure on S1 pushes along the element
+            // normal, as the solver applies it, and on S2 against it.
+            if face == 1 {
+                normal = -normal;
+            }
+        } else if normal.dot(center - centroid) < 0.0 {
             normal = -normal;
         }
         faces.push(FaceGeometry {
@@ -1237,6 +1245,44 @@ mod tests {
                 .all(|a| a.shape == SymbolShape::Arrow && a.scale == 1.0)
         );
         assert!(symbols_with(&mut model, "0").is_empty());
+    }
+
+    #[test]
+    fn shell_pressure_pushes_along_the_element_normal_from_the_bottom() {
+        // Two S4 elements in z = 0, one with its normal along +z and one along -z.
+        let dir =
+            std::env::temp_dir().join(format!("nodalis-shell-pressure-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("plate.inp");
+        std::fs::write(
+            &path,
+            "*Node\n1, 0, 0, 0\n2, 1, 0, 0\n3, 1, 1, 0\n4, 0, 1, 0\n\
+             5, 2, 0, 0\n6, 2, 1, 0\n\
+             *Element, type=S4, elset=PLATE\n1, 1, 2, 3, 4\n2, 2, 3, 6, 5\n",
+        )
+        .unwrap();
+        let mesh = plx_io::inp::read_inp(&path).unwrap().mesh;
+        let model = Model::new(&path, mesh);
+        let ids: Vec<ElementId> = model.mesh.elements().iter().map(|e| e.id).collect();
+        let arrow = |element: ElementId, face: u8| {
+            let item = Item {
+                kind: Kind::Load(LoadKind::Pressure(1.0)),
+                region: Region::Faces(vec![(element, face)]),
+                system: None,
+                distribution: None,
+                selected: false,
+            };
+            let symbols = build(&model, &[item]);
+            assert_eq!(symbols.len(), 1);
+            assert_eq!(symbols[0].shape, SymbolShape::ArrowOnto);
+            symbols[0].direction
+        };
+        // Every element of a face shows its arrows on the same side, whatever the roundoff.
+        assert!(arrow(ids[0], 1).z > 0.99);
+        assert!(arrow(ids[0], 2).z < -0.99);
+        assert!(arrow(ids[1], 1).z < -0.99);
+        assert!(arrow(ids[1], 2).z > 0.99);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
