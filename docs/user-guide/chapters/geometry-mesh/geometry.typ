@@ -148,6 +148,8 @@ confirms, Escape cancels), and #ui("Dissolve"), which makes its parts parts of t
   renamed there drops out of the compound. Only with a linked #ui("Mesh") they are read-only,
   because the mesh comes already joined.
 
+#screenshot("linked-compound-part.png", [Two linked parts joined into a compound part in an analysis whose geometry comes from a file block])
+
 #note[The pieces keep their own nodes on the faces they share, as with a bonded contact. Where
 the meshes of the pieces are very different in size, the tie interpolates between them; the
 stresses right at the cut are then less accurate than inside a piece.]
