@@ -424,7 +424,7 @@ impl FormulaEditor {
                 ui.strong("Writing formulas");
                 ui.weak(
                     "+ - * / and ^ (or **) for powers, parentheses, numbers such as 2.5 or \
-                     1e-3, units in brackets such as 5[mm] or 210[GPa], and pi. Values are \
+                     1e-3, numbers with units such as 10mm, 210GPa, 10N/mm^2 or 5[mm], and pi. Values are \
                      in SI units. Series go element by element, like NumPy arrays; a number \
                      goes with every value of a series. Sums need numbers of one unit; \
                      products and powers combine units.",

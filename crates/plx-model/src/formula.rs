@@ -1,6 +1,6 @@
 //! The formula of a Formula block of the project schematic: an expression in its inputs
-//! a, b, c, ... with the operators `+ - * / ^`, numbers with units such as `2[mm]` and
-//! functions such as `sqrt` and `max`. Numbers and series go together like the arrays of
+//! a, b, c, ... with the operators `+ - * / ^`, numbers with units such as `2mm`,
+//! `10*N/mm^2` or `2[mm]` and functions such as `sqrt` and `max`. Numbers and series go together like the arrays of
 //! NumPy, element by element, a single number with every value of a series. Units go
 //! through the formula: a force over a length is a force per length, a square root halves
 //! the powers of the units, and a sum takes numbers of one unit.
@@ -8,7 +8,7 @@
 use std::fmt;
 
 use crate::ValueKind;
-use crate::units::{Dimension, parse_unit};
+use crate::units::{Dimension, UnitSystem, parse_unit};
 
 /// The most inputs a Formula block has: one for each letter.
 pub const MAX_INPUTS: usize = 26;
@@ -35,9 +35,21 @@ pub fn rename_inputs(text: &str, rename: &dyn Fn(usize) -> Option<usize>) -> Str
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
+    // As the parser reads units after a number: whether a name now is a unit, such as the m
+    // of 2m, whether a unit came last, after which / and ^ go on with units, and whether an
+    // exponent of a unit comes.
+    let mut after_number = false;
+    let mut in_unit = false;
+    let mut unit_power = false;
     while i < chars.len() {
         let c = chars[i];
+        if c.is_whitespace() {
+            out.push(c);
+            i += 1;
+            continue;
+        }
         if c == '[' {
+            (after_number, in_unit, unit_power) = (false, false, false);
             // A unit such as [mm] keeps its letters.
             let end = (i..chars.len())
                 .find(|&j| chars[j] == ']')
@@ -55,8 +67,10 @@ pub fn rename_inputs(text: &str, rename: &dyn Fn(usize) -> Option<usize>) -> Str
             }
             let name: String = chars[start..i].iter().collect();
             let call = chars[i..].iter().find(|c| !c.is_whitespace()) == Some(&'(');
+            let unit = after_number && !call && unit_name(&name).is_some();
+            (after_number, in_unit, unit_power) = (unit, unit, false);
             match input_index(&name) {
-                Some(index) if !call => match rename(index) {
+                Some(index) if !call && !unit => match rename(index) {
                     Some(new) => out.push(input_letter(new)),
                     None => out.push('?'),
                 },
@@ -83,7 +97,15 @@ pub fn rename_inputs(text: &str, rename: &dyn Fn(usize) -> Option<usize>) -> Str
                 }
             }
             out.extend(&chars[start..i]);
+            (after_number, in_unit) = (true, unit_power);
+            unit_power = false;
             continue;
+        }
+        match c {
+            '/' if in_unit => (after_number, in_unit, unit_power) = (true, false, false),
+            '^' if in_unit => (after_number, in_unit, unit_power) = (false, false, true),
+            '-' | '+' if unit_power => {}
+            _ => (after_number, in_unit, unit_power) = (false, false, false),
         }
         out.push(c);
         i += 1;
@@ -406,32 +428,49 @@ fn describe(dimension: Dimension) -> String {
 pub enum Expr {
     /// A number in SI units with its unit, such as `2[mm]`, 0.002 m.
     Number(f64, Dimension),
+    /// A unit as written, such as `mm`, `N` or `[N/mm^2]`, which is its size in SI units:
+    /// 0.001 m. `10mm` is the product of 10 and the unit, as is `10*mm`.
+    Unit(String, f64, Dimension),
     /// The input of a letter, by index.
     Input(usize),
     Negate(Box<Expr>),
-    /// `+ - * / ^` of two expressions.
+    /// `+ - * / ^` of two expressions; ` ` is the product of a number and the unit written
+    /// right after it, as in `10mm`, which goes together before any other operator.
     Binary(char, Box<Expr>, Box<Expr>),
     Call(Function, Vec<Expr>),
 }
 
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let operand = |e: &Expr, f: &mut fmt::Formatter<'_>| match e {
+        // A sum goes in parentheses, but not a number with its unit in a sum.
+        let operand = |e: &Expr, in_sum: bool, f: &mut fmt::Formatter<'_>| match e {
+            _ if e.is_unit_power() => write!(f, "{e}"),
+            _ if in_sum && e.is_quantity() => write!(f, "{e}"),
             Expr::Binary(..) | Expr::Negate(_) => write!(f, "({e})"),
             _ => write!(f, "{e}"),
         };
         match self {
             Self::Number(value, dimension) if dimension.is_none() => write!(f, "{value}"),
             Self::Number(value, dimension) => write!(f, "{value}[{}]", dimension.si()),
+            Self::Unit(name, ..) if name.chars().all(char::is_alphabetic) => write!(f, "{name}"),
+            Self::Unit(name, ..) => write!(f, "[{name}]"),
             Self::Input(index) => write!(f, "{}", input_letter(*index)),
+            Self::Binary(' ', a, b) => {
+                operand(a, a.is_quantity(), f)?;
+                write!(f, " ")?;
+                operand(b, false, f)
+            }
+            Self::Binary('^', a, b) if self.is_unit_power() => write!(f, "{a}^{b}"),
             Self::Negate(e) => {
                 write!(f, "-")?;
-                operand(e, f)
+                operand(e, false, f)
             }
             Self::Binary(op, a, b) => {
-                operand(a, f)?;
+                let in_sum = matches!(op, '+' | '-');
+                // 10 N / mm^3 is one quantity and needs no parentheses.
+                operand(a, in_sum || self.is_quantity(), f)?;
                 write!(f, " {op} ")?;
-                operand(b, f)
+                operand(b, in_sum, f)
             }
             Self::Call(function, args) => {
                 write!(f, "{}(", function.name())?;
@@ -524,6 +563,26 @@ impl Expr {
         }
     }
 
+    /// Whether it is a unit or a power of one, such as `mm^2`.
+    fn is_unit_power(&self) -> bool {
+        match self {
+            Self::Unit(..) => true,
+            Self::Binary('^', a, b) => {
+                matches!(**a, Self::Unit(..)) && matches!(**b, Self::Number(..) | Self::Negate(_))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether it is a number with units written after it, such as `10 N / mm^3`.
+    fn is_quantity(&self) -> bool {
+        match self {
+            Self::Binary(' ', ..) => true,
+            Self::Binary('*' | '/', a, b) => a.is_quantity() && b.is_unit_power(),
+            _ => false,
+        }
+    }
+
     /// The indices of the inputs it uses, in order and each once.
     pub fn inputs(&self) -> Vec<usize> {
         let mut used = Vec::new();
@@ -538,7 +597,7 @@ impl Expr {
 
     fn visit_inputs(&self, f: &mut dyn FnMut(usize)) {
         match self {
-            Self::Number(..) => {}
+            Self::Number(..) | Self::Unit(..) => {}
             Self::Input(i) => f(*i),
             Self::Negate(e) => e.visit_inputs(f),
             Self::Binary(_, a, b) => {
@@ -562,7 +621,7 @@ impl Expr {
     /// not go together: a force plus a length.
     pub fn dimension(&self, inputs: &[Dimension]) -> Result<Dimension, String> {
         match self {
-            Self::Number(_, dimension) => Ok(*dimension),
+            Self::Number(_, dimension) | Self::Unit(_, _, dimension) => Ok(*dimension),
             Self::Input(i) => inputs
                 .get(*i)
                 .copied()
@@ -575,15 +634,28 @@ impl Expr {
                 }
                 let db = b.dimension(inputs)?;
                 match op {
-                    '*' => checked(da.times(db), self),
+                    '*' | ' ' => checked(da.times(db), self),
                     '/' => checked(da.over(db), self),
                     _ if da == db => Ok(da),
-                    _ => Err(format!(
-                        "{self} {} {} and {}",
-                        if *op == '+' { "adds" } else { "subtracts" },
-                        describe(da),
-                        describe(db)
-                    )),
+                    _ => {
+                        let mut message = format!(
+                            "{self} {} {} and {}",
+                            if *op == '+' { "adds" } else { "subtracts" },
+                            describe(da),
+                            describe(db)
+                        );
+                        // A number typed without its unit: say how to give it one.
+                        let bare = [(a, db), (b, da)].into_iter().find(|(e, other)| {
+                            matches!(***e, Self::Number(_, d) if d.is_none()) && !other.is_none()
+                        });
+                        if let Some((number, unit)) = bare {
+                            message.push_str(&format!(
+                                ": write the unit after the number, such as {}",
+                                with_unit(number, unit)
+                            ));
+                        }
+                        Err(message)
+                    }
                 }
             }
             Self::Call(function, args) => {
@@ -599,7 +671,7 @@ impl Expr {
     /// single numbers: a function of one series that makes one number of it is not.
     pub fn gives_series(&self, series: &[bool]) -> bool {
         match self {
-            Self::Number(..) => false,
+            Self::Number(..) | Self::Unit(..) => false,
             Self::Input(i) => series.get(*i).copied().unwrap_or(false),
             Self::Negate(e) => e.gives_series(series),
             Self::Binary(_, a, b) => a.gives_series(series) || b.gives_series(series),
@@ -618,7 +690,7 @@ impl Expr {
     fn values(&self, inputs: &[(&[f64], bool)]) -> Result<Values, String> {
         let what = || self.to_string();
         match self {
-            Self::Number(value, _) => Ok(Values::number(*value)),
+            Self::Number(value, _) | Self::Unit(_, value, _) => Ok(Values::number(*value)),
             Self::Input(i) => {
                 let (values, series) = inputs
                     .get(*i)
@@ -643,7 +715,7 @@ impl Expr {
                 elementwise(&[&a, &b], &what, |x| match op {
                     '+' => x[0] + x[1],
                     '-' => x[0] - x[1],
-                    '*' => x[0] * x[1],
+                    '*' | ' ' => x[0] * x[1],
                     '/' if x[1] == 0.0 => f64::NAN,
                     '/' => x[0] / x[1],
                     _ => x[0].powf(x[1]),
@@ -917,25 +989,63 @@ impl Parser {
         self.at += 1;
         match token {
             Token::Number(value) => {
-                let (factor, dimension) = match self.peek() {
+                let number = match self.peek() {
+                    // A unit in brackets goes with the number: 10[mm]^2 is (10 mm)^2.
                     Some(Token::Unit(unit)) => {
                         let unit = unit.clone();
                         self.at += 1;
-                        read_unit(&unit)?
+                        let (factor, dimension) = read_unit(&unit)?;
+                        return Ok(Expr::Binary(
+                            ' ',
+                            Box::new(Expr::Number(value, Dimension::default())),
+                            Box::new(Expr::Unit(unit, factor, dimension)),
+                        ));
                     }
-                    _ => (1.0, Dimension::default()),
+                    _ => Expr::Number(value, Dimension::default()),
                 };
-                if let Some(Token::Name(name)) = self.peek() {
-                    return Err(format!(
-                        "{value}{name}: write {value}*{name} for a product, or a unit in \
-                         brackets: {value}[mm]"
-                    ));
+                // Units written right after the number, each with its power, go with it:
+                // 10mm^2 is ten square millimetres, 5 kN m five kilonewton metres and
+                // a / 10N/mm^2 divides by a pressure.
+                let mut expr = number;
+                while let Some(unit) = self.unit_after_number() {
+                    expr = Expr::Binary(' ', Box::new(expr), Box::new(unit?));
                 }
-                Ok(Expr::Number(value * factor, dimension))
+                if matches!(expr, Expr::Binary(' ', ..)) {
+                    loop {
+                        if let Some(unit) = self.unit_after_number() {
+                            expr = Expr::Binary('*', Box::new(expr), Box::new(unit?));
+                            continue;
+                        }
+                        let slash = self.peek() == Some(&Token::Operator('/'));
+                        let unit_follows = matches!(self.tokens.get(self.at + 1),
+                            Some(Token::Name(n)) if unit_name(n).is_some()
+                                && self.tokens.get(self.at + 2) != Some(&Token::Open));
+                        if !(slash && unit_follows) {
+                            break;
+                        }
+                        self.at += 1;
+                        let unit = self.unit_after_number().expect("a unit follows")?;
+                        expr = Expr::Binary('/', Box::new(expr), Box::new(unit));
+                    }
+                }
+                if let Some(Token::Name(name)) = self.peek() {
+                    return Err(if input_index(name).is_some() {
+                        format!(
+                            "{value}{name}: write {value}*{name} for a product with input \
+                             {name}"
+                        )
+                    } else {
+                        format!(
+                            "{value}{name}: {name} is not a unit; units are written like \
+                             {value}mm, {value}N/mm^2 or {value}[N/mm^2]"
+                        )
+                    });
+                }
+                Ok(expr)
             }
             Token::Unit(unit) => {
                 let (factor, dimension) = read_unit(&unit)?;
-                Ok(Expr::Number(factor, dimension))
+                Ok(Expr::Unit(unit, factor, dimension))
             }
             Token::Open => {
                 let expr = self.sum()?;
@@ -950,6 +1060,27 @@ impl Parser {
             Token::Comma => Err("a , comes where a value is expected".into()),
             Token::Operator(c) => Err(format!("{c} comes where a value is expected")),
         }
+    }
+
+    /// The unit written right after a number, with its power, if one comes: a name that is a
+    /// unit and no function call.
+    fn unit_after_number(&mut self) -> Option<Result<Expr, String>> {
+        let Some(Token::Name(name)) = self.peek() else {
+            return None;
+        };
+        if self.tokens.get(self.at + 1) == Some(&Token::Open) {
+            return None;
+        }
+        let (factor, dimension) = unit_name(name)?;
+        let unit = Expr::Unit(name.clone(), factor, dimension);
+        self.at += 1;
+        if self.operator("^").is_none() {
+            return Some(Ok(unit));
+        }
+        Some(
+            self.unary()
+                .map(|exponent| Expr::Binary('^', Box::new(unit), Box::new(exponent))),
+        )
     }
 
     fn name(&mut self, name: &str) -> Result<Expr, String> {
@@ -993,12 +1124,44 @@ impl Parser {
         if let Some(index) = input_index(name) {
             return Ok(Expr::Input(index));
         }
+        if let Some((factor, dimension)) = unit_name(name) {
+            return Ok(Expr::Unit(name.to_owned(), factor, dimension));
+        }
         if Function::of_name(name).is_some() {
             return Err(format!("{name} is a function: write {name}(...)"));
         }
         Err(format!(
-            "{name} is not an input: the inputs are single letters a, b, c, ..."
+            "{name} is neither an input nor a unit: the inputs are single letters a, b, c, \
+             ...; units are written like 10mm, 10*N/mm^2 or 10[N/mm^2]"
         ))
+    }
+}
+
+/// The size in SI units and the dimension of a unit written as a name, such as `mm`, `kN`
+/// or `MPa`; `None` when the name is no unit.
+fn unit_name(name: &str) -> Option<(f64, Dimension)> {
+    let parsed = parse_unit(name).ok()?;
+    parsed
+        .zero
+        .is_none()
+        .then_some((parsed.factor, parsed.dimension))
+}
+
+/// `number` written with a common unit of `dimension`, for messages: 10mm, 10N/mm²,
+/// 10[N·mm].
+fn with_unit(number: &Expr, dimension: Dimension) -> String {
+    let unit = match dimension.quantity() {
+        Some(quantity) => UnitSystem::MmTonSC.unit(quantity).to_owned(),
+        None => dimension.si(),
+    };
+    let bare = !unit.is_empty()
+        && unit.chars().next().is_some_and(char::is_alphabetic)
+        && unit.chars().all(|c| c.is_alphabetic() || "/²³".contains(c))
+        && parse_unit(&unit).is_ok();
+    if bare {
+        format!("{number}{unit}")
+    } else {
+        format!("{number}[{unit}]")
     }
 }
 
@@ -1117,6 +1280,129 @@ mod tests {
     }
 
     #[test]
+    fn units_can_be_written_after_numbers_and_as_names() {
+        use Quantity::*;
+        let a: &[f64] = &[0.05];
+        let inputs = [(a, false)];
+        let near = |text: &str, expected: f64| {
+            let got = eval(text, &inputs)[0];
+            assert!(
+                (got - expected).abs() <= 1e-12 * expected.abs().max(1.0),
+                "{text}: {got}"
+            );
+        };
+        let d = |text: &str| Expr::parse(text).unwrap().dimension(&[dim(Length)]);
+        near("a - 10mm", 0.04);
+        near("a - 10 mm", 0.04);
+        near("a - 10*mm", 0.04);
+        near("a - 10[mm]", 0.04);
+        near("a - 1.5e1mm", 0.035);
+        near("2m", 2.0);
+        near("10N/mm^2", 1e7);
+        near("10*N/mm^2", 1e7);
+        near("10[N/mm^2]", 1e7);
+        near("10N/mm²", 1e7);
+        near("210GPa", 210e9);
+        near("10mm^2", 1e-5);
+        near("10[mm]^2", 1e-4);
+        near("(10mm)^2", 1e-4);
+        near("5 kN m", 5e3);
+        near("a / 10mm", 5.0);
+        near("1 / 10N/mm^2", 1e-7);
+        near("2 / 4mm/s", 500.0);
+        near("2[N]/mm", 2e3);
+        near("2 min", 120.0);
+        near("sin(30deg)", 0.5);
+        assert_eq!(d("a - 10mm"), Ok(dim(Length)));
+        assert_eq!(d("10N/mm^2"), Ok(dim(Pressure)));
+        assert_eq!(d("a * 10N"), Ok(dim(Moment)));
+        assert_eq!(d("a / 10mm"), Ok(Dimension::default()));
+        assert_eq!(d("10mm^2"), Ok(dim(Area)));
+        assert_eq!(
+            d("a / 10N/mm^2"),
+            Ok(dim(Pressure).powi(-1).times(dim(Length)))
+        );
+        assert_eq!(d("10mm/s"), Ok(dim(Velocity)));
+        assert_eq!(d("5 kN m"), Ok(dim(Moment)));
+        assert_eq!(Expr::parse("10mm/b").unwrap().inputs(), vec![1]);
+        assert_eq!(Expr::parse("5 kN m").unwrap().to_string(), "5 kN m");
+        assert_eq!(
+            Expr::parse("a/10N/mm^2").unwrap().to_string(),
+            "a / (10 N / mm^2)"
+        );
+        assert_eq!(d("min(a, 10mm)"), Ok(dim(Length)));
+        // A single lowercase letter alone is an input; right after a number, a unit.
+        assert_eq!(Expr::parse("2*m").unwrap().inputs(), vec![12]);
+        assert!(Expr::parse("2m").unwrap().inputs().is_empty());
+        // Messages show the units as written.
+        let err = |text: &str| {
+            Expr::parse(text)
+                .unwrap()
+                .dimension(&[dim(Length)])
+                .unwrap_err()
+        };
+        assert_eq!(
+            err("a - 10"),
+            "a - 10 subtracts a length and a number without unit: write the unit after the \
+             number, such as 10mm"
+        );
+        assert_eq!(err("a + 10N"), "a + 10 N adds a length and a force");
+        assert_eq!(
+            err("a + 10[N]^2"),
+            "a + ((10 N) ^ 2) adds a length and a number in kg² m²/s^4"
+        );
+        assert_eq!(
+            err("a + 2[N/mm^2]"),
+            "a + 2 [N/mm^2] adds a length and a pressure"
+        );
+        assert_eq!(
+            Expr::parse("a")
+                .unwrap()
+                .dimension(&[dim(Pressure)])
+                .map_err(|_| ()),
+            Ok(dim(Pressure))
+        );
+        let pressure = |text: &str| {
+            Expr::parse(text)
+                .unwrap()
+                .dimension(&[dim(Pressure)])
+                .unwrap_err()
+        };
+        assert!(
+            pressure("a + 3").ends_with("such as 3MPa"),
+            "{}",
+            pressure("a + 3")
+        );
+        assert!(pressure("2 - a").ends_with("such as 2MPa"));
+        assert_eq!(
+            pressure("a - 10N/mm^3"),
+            "a - 10 N / mm^3 subtracts a pressure and a force per volume"
+        );
+        let moment = Expr::parse("a + 1")
+            .unwrap()
+            .dimension(&[dim(Moment)])
+            .unwrap_err();
+        assert!(moment.ends_with("such as 1[N·mm]"), "{moment}");
+        // Names that are neither inputs nor units.
+        let parse = |text: &str| Expr::parse(text).unwrap_err();
+        assert!(
+            parse("2 foo").contains("foo is not a unit"),
+            "{}",
+            parse("2 foo")
+        );
+        assert!(parse("a + foo").contains("neither an input nor a unit"));
+    }
+
+    #[test]
+    fn units_after_numbers_are_not_renamed_as_inputs() {
+        let down = |i: usize| Some(i + 1);
+        assert_eq!(rename_inputs("a - 2m + 3 s + m", &down), "b - 2m + 3 s + n");
+        assert_eq!(rename_inputs("2 * m - 1e3 g", &down), "2 * n - 1e3 g");
+        assert_eq!(rename_inputs("2N/m + 4/m", &down), "2N/m + 4/n");
+        assert_eq!(rename_inputs("2mm^-2/s * s", &down), "2mm^-2/s * t");
+    }
+
+    #[test]
     fn inputs_are_renamed_but_not_functions_units_or_exponents() {
         let down = |i: usize| match i {
             1 => None,
@@ -1143,7 +1429,7 @@ mod tests {
         assert_eq!(err("(a + b"), "a ( has no )");
         assert_eq!(err("a + b)"), "there is a ) without (");
         assert!(err("foo(a)").contains("no function foo"));
-        assert!(err("ab").contains("not an input"));
+        assert!(err("ab").contains("neither an input nor a unit"));
         assert!(err("2a").contains("2*a"));
         assert!(err("sqrt(a, b)").contains("takes one value"));
         assert!(err("max()").contains("one series or several"));
