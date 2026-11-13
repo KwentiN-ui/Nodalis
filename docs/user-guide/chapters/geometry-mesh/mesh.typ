@@ -172,7 +172,8 @@ triangles are then joined to quadrilaterals, which is faster and less regular.
   split cylinder, picked with one click in the #ui("Surface angle") mode])
 
 #ui("OK") stores the item. #ui("OK & Remesh") stores it and meshes again the parts it names.
-A Local Mesh Size item is picked on faces and edges, so it meshes all parts again.
+A Local Mesh Size item is picked on faces and edges: #ui("OK & Remesh") meshes again only the parts that hold them,
+and the other parts keep their mesh, still up to date.
 
 === Extrude mesh <extrude-mesh>
 
