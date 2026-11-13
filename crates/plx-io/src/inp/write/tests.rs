@@ -3790,11 +3790,12 @@ fn a_bolt_follows_the_actions_of_its_steps() {
     model.steps[1].bolt_changes.push(plx_model::BoltChange {
         bolt: named("Bolt-1"),
         action: plx_model::BoltAction::Open,
-        auto: false,
         amplitude: None,
     });
     let (lowered, _) = model.lower_bolts(&mesh);
     assert_eq!(lowered.steps[1].loads, []);
+    // An adjustment shortens the bolt beyond its length at the end of the previous step:
+    // a lock with a shortening.
     model.steps[1].bolt_changes[0].action = plx_model::BoltAction::Adjust(0.01);
     let (lowered, _) = model.lower_bolts(&mesh);
     assert!(matches!(
@@ -3802,13 +3803,16 @@ fn a_bolt_follows_the_actions_of_its_steps() {
         LoadKind::PreTension {
             value: 0.01,
             by_displacement: true,
-            lock: false,
+            lock: true,
             ..
         }
     ));
-    // A step that takes no forces is skipped: the preload goes into the next one.
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Boundary, Fixed\n"), "{text}");
+    // A step that takes no forces has no action; a step without one locks the bolt.
     model.steps[1].bolt_changes.clear();
     model.steps.insert(0, Step::new_frequency("Modes"));
+    assert!(!model.takes_bolt_action(0));
     assert_eq!(model.bolt_action(&model.bolts[0], 0), None);
     assert_eq!(
         model.bolt_action(&model.bolts[0], 1),
@@ -3832,12 +3836,12 @@ fn the_model_check_reports_what_keeps_a_bolt_from_working() {
     };
     let (mesh, mut model) = shank_bolt(1000.0);
     assert_eq!(problems(&model, &mesh), []);
-    model.bolts[0].preload = plx_model::Preload::Force(0.0);
+    preload_bolt(&mut model, plx_model::BoltAction::Load(0.0));
     assert_eq!(
         problems(&model, &mesh),
         [(ModelItem::Bolt(0), Problem::BoltWithoutPreload)]
     );
-    model.bolts[0].preload = plx_model::Preload::Force(1000.0);
+    preload_bolt(&mut model, plx_model::BoltAction::Load(1000.0));
     let cut = model.resolve_bolt(&model.bolts[0], &mesh).unwrap();
     let mut tie = plx_model::Tie::new("Tie-1");
     tie.master = Region::Faces(cut.cut_faces.clone());
@@ -11225,9 +11229,61 @@ fn shank_sectors(preload: f64, sectors: usize, head: usize) -> (FeMesh, FeModel)
         ..plx_model::Bolt::new("Bolt-1")
     };
     bolt.surface = Region::Faces(shank);
-    bolt.preload = plx_model::Preload::Force(preload);
     model.bolts.push(bolt);
+    preload_bolt(&mut model, plx_model::BoltAction::Load(preload));
     (mesh, model)
+}
+
+/// Preloads the bolt Bolt-1 in the first step by `action`; the steps after it lock it.
+fn preload_bolt(model: &mut FeModel, action: plx_model::BoltAction) {
+    let changes = &mut model.steps[0].bolt_changes;
+    changes.retain(|c| c.bolt != named("Bolt-1"));
+    changes.push(plx_model::BoltChange {
+        bolt: named("Bolt-1"),
+        action,
+        amplitude: None,
+    });
+}
+
+/// Adjustments add up: shortened by 0.001 in the first step and by 0.002 beyond that in the
+/// second, the bolt pulls as hard as one shortened by 0.003 at once.
+#[test]
+fn adjustments_of_a_bolt_add_up_over_its_steps() {
+    let pull = |first: f64, second: plx_model::BoltAction, name: &str| -> Option<f64> {
+        let (mesh, mut model) = shank_bolt(0.0);
+        preload_bolt(&mut model, plx_model::BoltAction::Adjust(first));
+        model.steps[1].bolt_changes.push(plx_model::BoltChange {
+            bolt: named("Bolt-1"),
+            action: second,
+            amplitude: None,
+        });
+        let text = write_inp(&mesh, &model, "").unwrap();
+        let frd = run_solver(name, &text)?;
+        Some(
+            (mesh.node_sets["FIX"].iter())
+                .map(|&node| {
+                    let f = ["F1", "F2", "F3"].map(|c| node_value(&frd, "FORC", c, node));
+                    f.iter().map(|v| v * v).sum::<f64>().sqrt()
+                })
+                .sum(),
+        )
+    };
+    let Some(added) = pull(
+        0.001,
+        plx_model::BoltAction::Adjust(0.002),
+        "schraube-nachstellen",
+    ) else {
+        return;
+    };
+    let Some(once) = pull(0.003, plx_model::BoltAction::Lock, "schraube-einmal") else {
+        return;
+    };
+    let Some(first) = pull(0.001, plx_model::BoltAction::Lock, "schraube-erster") else {
+        return;
+    };
+    assert!(once > 0.0, "{once}");
+    assert!((added - once).abs() < 1e-6 * once, "{added} {once}");
+    assert!((once - 3.0 * first).abs() < 1e-6 * once, "{once} {first}");
 }
 
 /// Picked by the cylindrical faces of its shank, a bolt is cut across the middle along the
@@ -12659,8 +12715,8 @@ fn bolt_with_thread(shortening: f64) -> (FeMesh, FeModel) {
     };
     bolt.surface = Region::Faces(outer_faces(&mesh, 1..=8));
     bolt.thread = Region::Faces(vec![face_at(9, 42.0)]);
-    bolt.preload = plx_model::Preload::Shortening(shortening);
     model.bolts.push(bolt);
+    preload_bolt(&mut model, plx_model::BoltAction::Adjust(shortening));
     (mesh, model)
 }
 
@@ -12679,12 +12735,7 @@ fn a_bolt_screwed_into_its_thread_pulls_the_plate() {
     let mut amplitude = plx_model::Amplitude::new("Smooth");
     amplitude.id = named("Smooth");
     model.amplitudes.push(amplitude);
-    model.steps[0].bolt_changes.push(plx_model::BoltChange {
-        bolt: named("Bolt-1"),
-        action: plx_model::BoltAction::Lock,
-        auto: true,
-        amplitude: Some(named("Smooth")),
-    });
+    model.steps[0].bolt_changes[0].amplitude = Some(named("Smooth"));
     let (lowered, origin) = model.lower_bolts(&mesh);
     let tie = &lowered.ties[0];
     assert_eq!(tie.name, "Bolt-1_Thread");
@@ -12695,12 +12746,12 @@ fn a_bolt_screwed_into_its_thread_pulls_the_plate() {
         load.kind,
         LoadKind::PreTension {
             by_displacement: true,
-            lock: false,
+            lock: true,
             ..
         }
     ));
     assert_eq!(load.amplitude, Some(named("Smooth")));
-    model.steps[0].bolt_changes.clear();
+    model.steps[0].bolt_changes[0].amplitude = None;
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("Name=BOLT-1_THREAD"), "{text}");
     let Some((frd, _)) = run_frd_dat("schraube-gewinde", &text) else {
@@ -12846,8 +12897,8 @@ fn bolt_through_tapped_ring(shortening: f64) -> (FeMesh, FeModel) {
     };
     bolt.surface = Region::Faces(shank);
     bolt.thread = Region::Faces(bore);
-    bolt.preload = plx_model::Preload::Shortening(shortening);
     model.bolts.push(bolt);
+    preload_bolt(&mut model, plx_model::BoltAction::Adjust(shortening));
     (mesh, model)
 }
 

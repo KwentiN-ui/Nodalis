@@ -548,11 +548,12 @@ export leaves it out.
 A bolt tightens a bolt or screw with a preload. Create it with #menu("Connections", "Bolt")
 or #ui("Create Bolt ...") in the context menu of #ui("Connections"); it is listed under
 #ui("Connections") #sym.arrow.r #ui("Bolts"). You pick two regions, the surface of the bolt and
-the thread it is screwed into, and give the preload; Nodalis cuts the bolt and works out the
-rest. The bolt is not cut in the CAD geometry.
+the thread it is screwed into, and say in each step what the bolt does; Nodalis cuts the bolt
+and works out the rest. The bolt is not cut in the CAD geometry.
 
 #screenshot("bolt-dialog.png", [A screw through a plate into a tapped block: the whole screw is
-  the bolt surface, the bore of the block the thread])
+  the bolt surface, the bore of the block the thread. Loaded with 10 kN in Step-1, it is
+  shortened by another 0.1 mm in Step-2])
 
 #fields(
   [Bolt surface region], [Faces of the bolt: the cylindrical face of its shank, or the whole
@@ -562,34 +563,33 @@ rest. The bolt is not cut in the CAD geometry.
   [Thread region], [The faces of the internal thread of the nut or of the part the bolt is
     screwed into, e.g. the bore of a tapped hole, see below. Left empty, join the bolt there
     with a contact region or a joint yourself.],
-  [Preload by], [#ui("Force") pulls the bolt together with the preload, #ui("Shortening")
-    shortens it by a length.],
   [Axis], [The direction of the bolt axis. Unticked, Nodalis uses the axis of the shank;
     #ui("Given") takes the components #ui("X"), #ui("Y"), #ui("Z").],
-  [Steps], [What the bolt does in each step that takes loads and, for a load or an
-    adjustment, the #ui("Amplitude") it follows over the step (@amplitudes); #ui("Default")
-    is the step's ramp.],
+  [Steps], [What the bolt does in each step that takes loads, with the force or length and,
+    for a load or an adjustment, the #ui("Amplitude") it follows over the step
+    (@amplitudes); #ui("Default") is the step's ramp.],
   [Exported as], [How Nodalis writes the bolt for CalculiX: where it cuts the shank and how
     many faces of the bolt it ties to the thread.],
 )
 
 ==== Steps of a bolt
 
-#ui("Auto") does what a bolted joint usually needs: the bolt is tightened with the preload in
-the first step that takes loads and locked at its length in all steps after it, so its force
-then follows the other loads. Steps before the preload step leave it loose. A step can choose
-an action of its own instead:
+Each step that takes loads has one action for the bolt. A new bolt is loaded in the first such
+step and locked in the steps after it, which is what a bolted joint usually needs: its force
+then follows the other loads. Enter the preload there, or choose another action:
 
 #fields(
-  [Load], [Pulled together by a force, by default the preload.],
-  [Adjustment], [Shortened by a length since the start of the analysis.],
-  [Lock], [Kept at its length at the end of the previous step (`*BOUNDARY, FIXED`).],
+  [Load], [Pulled together by a force.],
+  [Adjustment], [Shortened by a length beyond its length at the end of the previous step.],
+  [Lock], [Kept at its length at the end of the previous step (`*BOUNDARY, FIXED`). A step
+    without an action of its own locks the bolt.],
   [Open], [Loose: no preload, the cut carries no force.],
 )
 
-To feed a screw by a given length, as when it is tightened to pull a part, choose
-#ui("Preload by") #ui("Shortening"): the shortening is the feed. Several steps with growing
-#ui("Adjustment") values tighten it in stages, a #ui("Lock") afterwards keeps it there.
+Adjustments add up: #ui("Adjustment") 1 mm in the first step and 2 mm in the second shorten
+the bolt by 3 mm in all. To feed a screw by a given length, as when it is tightened to pull a
+part, give the feed as an adjustment; several steps with adjustments tighten it in stages, the
+steps after them lock it there. Frequency and heat transfer steps take no preload.
 
 ==== Thread
 
@@ -623,7 +623,8 @@ region holds it at its cut; make that region frictional or frictionless.
 ==== What Nodalis writes
 
 The preload is the first degree of freedom of a new node per bolt (`*CLOAD` for a force,
-`*BOUNDARY` for a shortening or a lock). Nodalis separates every element on one side of the
+`*BOUNDARY, FIXED` for a lock, and with the length for an adjustment: the solver adds it to the
+shortening of the previous step, where CalculiX would ignore it). Nodalis separates every element on one side of the
 cut, also one that touches the cut with only an edge or a corner, so a tetrahedral mesh needs
 no layer of wedge elements at the cut, as CalculiX's `*PRE-TENSION SECTION` would. The model
 check warns when a bonded or rough region holds the bolt at its cut, and when two bolts or a

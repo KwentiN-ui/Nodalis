@@ -213,7 +213,8 @@ impl Spc {
 
     /// `*BOUNDARY, FIXED`: the DOFs keep the displacement they had at the end of the previous
     /// step (`previous`, global components; at nodes with a local system the local
-    /// component, `rotation` gives the system).
+    /// component, `rotation` gives the system), plus the value [`Spc::of_step`] gave them
+    /// (zero without one): a bolt adjusted beyond its length.
     pub fn apply_fixed(
         &mut self,
         model: &Model,
@@ -237,7 +238,7 @@ impl Spc {
                     };
                     let value = previous_component(dofs, previous, rotation, index, d as usize - 1);
                     if let Ok(pos) = self.dofs.binary_search(&dof) {
-                        self.values[pos] = value;
+                        self.values[pos] += value;
                     }
                 }
             }

@@ -707,9 +707,9 @@ impl Problem {
                  faces of solid elements too, on a part other than the bolt."
             }
             Problem::BoltWithoutPreload => {
-                "The bolt is preloaded in the first step that takes forces. Its preload is \
-                 zero, or no step takes one (frequency and heat transfer steps do not), so the \
-                 bolt only holds its two halves together."
+                "The steps of the bolt give it no load or adjustment other than zero, or no \
+                 step takes one (frequency and heat transfer steps do not), so the bolt only \
+                 holds its two halves together."
             }
             Problem::BoltFacesUsedTwice => {
                 "The bolt joins the two sides of its cut itself. A tie or contact pair on the \
@@ -1189,7 +1189,8 @@ impl Problem {
                  elements."
             }
             Problem::BoltWithoutPreload => {
-                "Enter the preload of the bolt, and add a static step if the analysis has none."
+                "Give the bolt a load or an adjustment in one of its steps, and add a static \
+                 step if the analysis has none."
             }
             Problem::BoltFacesUsedTwice => {
                 "Deactivate or delete the tie or contact pair on the faces of the cut; the bolt \
@@ -2283,10 +2284,16 @@ impl FeModel {
         let mut preloaded = std::collections::BTreeSet::new();
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             for (i, load) in step.loads.iter().enumerate().filter(|(_, l)| l.active) {
-                let LoadKind::PreTension { lock, .. } = load.kind else {
+                let LoadKind::PreTension {
+                    lock,
+                    by_displacement,
+                    ..
+                } = load.kind
+                else {
                     continue;
                 };
-                if lock && !preloaded.contains(&load.name) {
+                // Locked by displacement, the bolt is shortened beyond its length.
+                if lock && !by_displacement && !preloaded.contains(&load.name) {
                     findings.push(Finding::new(
                         ModelItem::Load(s, i),
                         Problem::LockWithoutPreload,

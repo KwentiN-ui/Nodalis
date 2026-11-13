@@ -535,7 +535,8 @@ pub struct Boundary {
     /// Prescribed value; `None` means zero (homogeneous).
     pub value: Option<f64>,
     pub amplitude: Option<String>,
-    /// `FIXED`: the node keeps the value it had at the end of the previous step.
+    /// `FIXED`: the node keeps the value it had at the end of the previous step; a value
+    /// (times its amplitude) is added to it. CalculiX ignores the value.
     pub fixed: bool,
     /// `SUBMODEL, STEP=<n>`: the value comes from the global model's results of step n.
     pub submodel_step: Option<u32>,

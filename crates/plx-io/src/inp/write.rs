@@ -4202,10 +4202,15 @@ fn step_block<'f>(
             } => {
                 // The preload is the first degree of freedom of the pre-tension node: a
                 // force, or the shortening of the bolt since the start as a prescribed
-                // displacement. Locked, the node keeps the shortening of the previous step.
+                // displacement. Locked, the node keeps the shortening of the previous step, or
+                // by displacement adds the value to it.
                 let node = NodeRef::Node(sets.pre_tension_nodes[&load.name]);
                 if lock {
-                    let mut item = boundary(node, 1, 1, None, None);
+                    let mut item = if by_displacement {
+                        boundary(node, 1, 1, Some(value), amplitude)
+                    } else {
+                        boundary(node, 1, 1, None, None)
+                    };
                     item.fixed = true;
                     vec![Card::Boundary {
                         op_new: false,

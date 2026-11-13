@@ -1,9 +1,9 @@
 //! Bolts preloaded across a cut through their shank, Ansys' bolt pretension: the user picks
-//! the surface of the bolt, the thread it is screwed into and the preload, Nodalis derives
-//! the rest when the input file is written ([`FeModel::lower_bolts`]): the shank and its
-//! axis, the cut across its free part along the element faces, the tie of the bolt to the
-//! thread, the pre-tension load in every step (the preload in the first step that takes
-//! loads, locked at its length after it).
+//! the surface of the bolt and the thread it is screwed into, and what the bolt does in each
+//! step; Nodalis derives the rest when the input file is written ([`FeModel::lower_bolts`]):
+//! the shank and its axis, the cut across its free part along the element faces, the tie of
+//! the bolt to the thread, the pre-tension load in every step (locked where a step gives no
+//! action).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{FeModel, Load, LoadKind, ModelItem, Region, Step, Tie};
 
-/// A bolt cut through its shank: the faces of the bolt, the thread and its preload.
+/// A bolt cut through its shank: the faces of the bolt and the thread. What it does in each
+/// step, its preload among it, the steps keep ([`BoltChange`]).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Bolt {
     /// The internal identity other items refer to; the user sees only the name.
@@ -23,8 +24,6 @@ pub struct Bolt {
     /// Faces of the bolt that take in its shank: the cylindrical face of the shank, or the
     /// whole bolt with its head. Nodalis finds the shank among them and cuts it.
     pub surface: Region,
-    /// The preload in the first step that takes loads.
-    pub preload: Preload,
     /// Direction of the preload; `None` takes the normal of the cut.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis: Option<[f64; 3]>,
@@ -47,7 +46,6 @@ impl Bolt {
             name: name.into(),
             active: true,
             surface: Region::Faces(Vec::new()),
-            preload: Preload::Force(0.0),
             axis: None,
             thread: no_faces(),
             color: [230, 140, 0],
@@ -64,29 +62,12 @@ impl Bolt {
     }
 }
 
-/// How a bolt is tightened.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub enum Preload {
-    /// The force pulling the two sides of the cut together.
-    Force(f64),
-    /// The length the bolt is shortened by.
-    Shortening(f64),
-}
-
-impl Preload {
-    pub fn value(self) -> f64 {
-        match self {
-            Preload::Force(v) | Preload::Shortening(v) => v,
-        }
-    }
-}
-
 /// What a bolt does in a step, Ansys' "Define By" of a bolt pretension.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BoltAction {
     /// Pulled by a force.
     Load(f64),
-    /// Shortened by a length since the start of the analysis.
+    /// Shortened by a length beyond its length at the end of the previous step.
     Adjust(f64),
     /// Kept at the length it had at the end of the previous step.
     Lock,
@@ -105,24 +86,12 @@ impl BoltAction {
     }
 }
 
-impl From<Preload> for BoltAction {
-    fn from(preload: Preload) -> Self {
-        match preload {
-            Preload::Force(f) => BoltAction::Load(f),
-            Preload::Shortening(u) => BoltAction::Adjust(u),
-        }
-    }
-}
-
-/// What a bolt does in one step instead of the automatic action ([`FeModel::bolt_action`]),
+/// What a bolt does in one step other than keeping its length ([`FeModel::bolt_action`]),
 /// and the amplitude its load or adjustment follows there.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BoltChange {
     pub bolt: crate::Id,
     pub action: BoltAction,
-    /// The step keeps the automatic action; the change only gives the amplitude.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub auto: bool,
     /// The amplitude of the load or adjustment; `None` is the step's default ramp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amplitude: Option<crate::Id>,
@@ -188,14 +157,17 @@ impl ResolvedBolt {
 }
 
 impl FeModel {
-    /// What the bolt does in the step `index`: the change of the step, else
-    /// [`FeModel::auto_bolt_action`]. `None` when the step takes no pre-tension or the bolt
+    /// What the bolt does in the step `index`: the change of the step, else it keeps its
+    /// length ([`BoltAction::Lock`]). `None` when the step takes no pre-tension or the bolt
     /// is open.
     pub fn bolt_action(&self, bolt: &Bolt, index: usize) -> Option<BoltAction> {
-        let auto = self.auto_bolt_action(bolt, index)?;
-        let action = (self.steps[index].bolt_changes.iter())
-            .find(|c| c.bolt == bolt.id && !c.auto)
-            .map_or(auto, |c| c.action);
+        let step = self.steps.get(index)?;
+        if !step.active || !takes_pre_tension(step) {
+            return None;
+        }
+        let action = (step.bolt_changes.iter())
+            .find(|c| c.bolt == bolt.id)
+            .map_or(BoltAction::Lock, |c| c.action);
         (action != BoltAction::Open).then_some(action)
     }
 
@@ -206,23 +178,11 @@ impl FeModel {
             .amplitude
     }
 
-    /// What the bolt does in the step `index` without a change: the preload in the first
-    /// active step that takes it, the lock after it and nothing before it. `None` when the
-    /// step takes no pre-tension.
-    pub fn auto_bolt_action(&self, bolt: &Bolt, index: usize) -> Option<BoltAction> {
-        let step = self.steps.get(index)?;
-        if !step.active || !takes_pre_tension(step) {
-            return None;
-        }
-        let first = self
-            .steps
-            .iter()
-            .position(|s| s.active && takes_pre_tension(s))?;
-        Some(match index.cmp(&first) {
-            std::cmp::Ordering::Less => BoltAction::Open,
-            std::cmp::Ordering::Equal => bolt.preload.into(),
-            std::cmp::Ordering::Greater => BoltAction::Lock,
-        })
+    /// Whether step `index` takes a bolt's pre-tension: an active step that takes forces.
+    pub fn takes_bolt_action(&self, index: usize) -> bool {
+        self.steps
+            .get(index)
+            .is_some_and(|step| step.active && takes_pre_tension(step))
     }
 
     /// Where the bolt is cut: across the middle of the free part of its shank, beside the
@@ -468,9 +428,11 @@ impl FeModel {
                     BoltAction::Load(_) | BoltAction::Adjust(_) => self.bolt_amplitude(bolt, s),
                     _ => None,
                 };
+                // An adjustment adds to the length at the end of the previous step: a lock
+                // with a shortening.
                 let (value, by_displacement, lock) = match action {
                     BoltAction::Load(f) => (f, false, false),
-                    BoltAction::Adjust(u) => (u, true, false),
+                    BoltAction::Adjust(u) => (u, true, true),
                     BoltAction::Lock => (0.0, false, true),
                     BoltAction::Open => continue,
                 };
