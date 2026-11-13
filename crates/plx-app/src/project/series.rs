@@ -22,6 +22,11 @@ fn gives_series_at(nodes: &[Node], links: &[Link], id: u64, item: &[String], dep
     let Some(node) = nodes.iter().find(|n| n.id == id) else {
         return false;
     };
+    // A column of a parameter study gives its values at all points.
+    if let Some(study) = node.as_study() {
+        return matches!(item, [cell, name] if cell == links::VALUE
+            && study.table.inputs.iter().chain(&study.table.outputs).any(|c| &c.name == name));
+    }
     if let Some(measure) = node.as_measure() {
         return match item {
             [cell, name] if cell == links::VALUE && name == RESULT => measure.kind.is_series(),
@@ -133,6 +138,9 @@ impl ProjectApp {
     /// Math block computing element by element with one; `None` for one number.
     pub(super) fn series_of(&self, id: u64, item: &[String]) -> Option<Vec<f64>> {
         let node = self.nodes.iter().find(|n| n.id == id)?;
+        if let Some(study) = node.as_study() {
+            return study_values(&study.table, item);
+        }
         if let Some(measure) = node.as_measure() {
             if !measure.kind.is_series() || self.measure_state(id) != CellState::UpToDate {
                 return None;
@@ -281,6 +289,31 @@ pub(super) fn shown_series(series: &[f64], kind: Option<ValueKind>, units: UnitS
         ),
         _ => format!("{} values", series.len()),
     }
+}
+
+/// The values of the column `item`, `["Value", name]`, of a study at all its points, in the
+/// order of the table: the inputs as given, the outputs as they came out, not a number where
+/// a point gave none, so that the values of two columns stay paired point by point.
+pub(super) fn study_values(table: &plx_model::StudyTable, item: &[String]) -> Option<Vec<f64>> {
+    let [cell, name] = item else {
+        return None;
+    };
+    if cell != links::VALUE {
+        return None;
+    }
+    if let Some(column) = table.input(name) {
+        return Some(
+            (table.points.iter())
+                .map(|p| p.inputs.get(column).copied().unwrap_or(f64::NAN))
+                .collect(),
+        );
+    }
+    let column = table.outputs.iter().position(|c| &c.name == name)?;
+    Some(
+        (table.points.iter())
+            .map(|p| p.outputs.get(column).copied().flatten().unwrap_or(f64::NAN))
+            .collect(),
+    )
 }
 
 #[cfg(test)]

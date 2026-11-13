@@ -303,6 +303,14 @@ pub trait SnarlViewer<T> {
         snarl.connect(from.id, to.id);
     }
 
+    /// Asks the viewer to link two input pins: a wire dragged from one input pin was dropped
+    /// on another (Nodalis: the inputs of a parameter study, whose pins are on the left).
+    /// Does nothing by default.
+    #[inline]
+    fn connect_inputs(&mut self, from: &InPin, to: &InPin, snarl: &mut Snarl<T>) {
+        let _ = (from, to, snarl);
+    }
+
     /// Asks the viewer to disconnect two pins.
     #[inline]
     fn disconnect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<T>) {
