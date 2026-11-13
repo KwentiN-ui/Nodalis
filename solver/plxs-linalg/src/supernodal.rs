@@ -252,6 +252,44 @@ struct Context<'a> {
     pool: &'a Workspace,
     /// The run's token, looked at before every supernode.
     cancel: Option<plxs_core::CancelToken>,
+    /// With `PLXS_LDLT_TRACE`: the start of the factorization and the timings of the large
+    /// supernodes (those whose updates run in parallel).
+    trace: Option<(std::time::Instant, Mutex<Vec<LargeNode>>)>,
+}
+
+/// Timings of one large supernode for `PLXS_LDLT_TRACE`, in seconds since the start.
+struct LargeNode {
+    columns: usize,
+    rows: usize,
+    start: f64,
+    updates: f64,
+    front: f64,
+    update_flops: f64,
+    front_flops: f64,
+}
+
+/// Prints the timings of the large supernodes of a factorization (`PLXS_LDLT_TRACE`).
+fn report(clock: std::time::Instant, mut nodes: Vec<LargeNode>) {
+    let total = clock.elapsed().as_secs_f64();
+    let first = nodes.iter().map(|n| n.start).fold(total, f64::min);
+    let updates: f64 = nodes.iter().map(|n| n.updates).sum();
+    let fronts: f64 = nodes.iter().map(|n| n.front).sum();
+    let update_flops: f64 = nodes.iter().map(|n| n.update_flops).sum();
+    let front_flops: f64 = nodes.iter().map(|n| n.front_flops).sum();
+    eprintln!(
+        "ldlt: numeric factorization {total:.2} s; {} large supernodes from {first:.2} s on: \
+         updates {updates:.2} s ({:.1} GFlop/s each), fronts {fronts:.2} s ({:.1} GFlop/s each)",
+        nodes.len(),
+        update_flops / updates.max(1e-9) * 1e-9,
+        front_flops / fronts.max(1e-9) * 1e-9,
+    );
+    nodes.sort_by(|a, b| (b.updates + b.front).total_cmp(&(a.updates + a.front)));
+    for n in nodes.iter().take(8) {
+        eprintln!(
+            "ldlt:   {} x {}: from {:.2} s, updates {:.2} s ({:.2e} flops), front {:.2} s ({:.2e} flops)",
+            n.rows, n.columns, n.start, n.updates, n.update_flops, n.front, n.front_flops
+        );
+    }
 }
 
 /// Why a factorization ended without a factor.
@@ -366,6 +404,9 @@ pub fn factorize<'a>(
         parallel_subtree: (tree.total_work / (16.0 * threads as f64)).max(MIN_PARALLEL_SUBTREE),
         pool: workspace,
         cancel: plxs_core::CancelToken::current(),
+        trace: std::env::var("PLXS_LDLT_TRACE")
+            .is_ok()
+            .then(|| (std::time::Instant::now(), Mutex::new(Vec::new()))),
     };
     let counts: Vec<usize> = if threads > 1 {
         tree.roots
@@ -378,6 +419,9 @@ pub fn factorize<'a>(
             .map(|&r| subtree(&ctx, r as usize))
             .collect::<Result<_, _>>()?
     };
+    if let Some((clock, nodes)) = ctx.trace {
+        report(clock, nodes.into_inner().unwrap_or_else(|e| e.into_inner()));
+    }
     Ok(counts.into_iter().sum())
 }
 
@@ -453,7 +497,9 @@ fn node(ctx: &Context<'_>, s: usize) -> Result<usize, FactorError> {
 
     // Updates from the descendants, those of a large supernode in parallel.
     let parallel = ctx.threads > 1 && tree.incoming_work[s] >= PARALLEL_NODE;
+    let started = std::time::Instant::now();
     apply_updates(ctx, s, tree.updaters(s), ls_values, parallel);
+    let updated = std::time::Instant::now();
     let mut ls = MatMut::from_column_major_slice_mut(&mut *ls_values, c + p, c);
 
     let node_par = if ctx.par.degree() > 1 && tree.node_work[s] >= PARALLEL_NODE {
@@ -462,6 +508,18 @@ fn node(ctx: &Context<'_>, s: usize) -> Result<usize, FactorError> {
         Par::Seq
     };
     let count = factor_front(ctx, s_start, c, p, ls.rb_mut(), node_par)?;
+    if let Some((clock, nodes)) = ctx.trace.as_ref().filter(|_| parallel) {
+        let record = LargeNode {
+            columns: c,
+            rows: c + p,
+            start: (started - *clock).as_secs_f64(),
+            updates: (updated - started).as_secs_f64(),
+            front: updated.elapsed().as_secs_f64(),
+            update_flops: tree.incoming_work[s],
+            front_flops: tree.node_work[s],
+        };
+        nodes.lock().unwrap_or_else(|e| e.into_inner()).push(record);
+    }
     let shared: &[f64] = ls_values;
     // The factor outlives the factorization; the reference is only read by ancestors.
     let _ = ctx.done[s].set(shared);
