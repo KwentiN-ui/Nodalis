@@ -434,6 +434,30 @@ linked in the schematic (@results-links):
   no results yet. Nodalis copies the global results next to the input file and writes
   `*SUBMODEL` and `*BOUNDARY, SUBMODEL`.
 
+The dialog of a #ui("Submodel") boundary condition shows where its displacements come from.
+#ui("Global results") names the step and the analysis linked to the #ui("Global results") input
+of its step. #ui("Displacements") names the field outputs of that global step that request U: a
+global step without a node field output of its own keeps those of the step before it, as the
+solver does. The displacements at the end of the global step are read; U requested by several
+field outputs is written only once, so it makes no difference. The dialog shows in red what
+keeps the submodel from running:
+
+- nothing is linked to the step of the boundary condition,
+- the global step writes no displacements: no active node field output requests U,
+- the global step computes mode shapes, temperatures or sensitivities, not the displacements of
+  a load,
+- steps of the submodel take results of different global analyses; a submodel reads one global
+  results file.
+
+For the results of a file block the dialog cannot tell which field outputs wrote them; a file
+without displacements of the step stops the run with a message.
+
+#screenshot("submodel-bc-source.png", [The boundary condition reads the displacements of Step-1
+  of the analysis Global, which NF-Output-1 writes])
+
+#screenshot("submodel-bc-no-displacements.png", [The field outputs of the global step do not
+  request U])
+
 In the Results workspace of the submodel, #ui("Global Contours") on the #ui("Display") tab,
 next to #ui("Show Undeformed"), draws the edges of the global model around the results, read from
 the global results the submodel took: at the global increment the submodel follows and deformed by
