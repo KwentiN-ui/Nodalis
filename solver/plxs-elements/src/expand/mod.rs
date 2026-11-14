@@ -1385,8 +1385,13 @@ impl Expander {
     }
 }
 
-/// Normals within this angle (degrees) count as one.
-const NORMAL_ANGLE: f64 = 0.5;
+/// Normals (and beam tangents) within this angle (degrees) of the reference element's
+/// count as one. The CalculiX manual ("Shell elements", "Beam elements") takes 0.5° only
+/// for normals the user gave with `*NORMAL`, which plxs does not read, and 20° for the
+/// normals computed from the geometry: with 0.5° nearly every node of a curved quadratic
+/// shell mesh became a knot (adjacent elements' normals differ by several degrees), which
+/// multiplied the nodes and constraints of the expanded model.
+const NORMAL_ANGLE: f64 = 20.0;
 
 /// A range of degrees of freedom, first and last.
 type DofRange = Option<(u8, u8)>;
