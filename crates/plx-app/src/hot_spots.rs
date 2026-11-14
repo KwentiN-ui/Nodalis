@@ -35,7 +35,7 @@ fn surface_faces(model: &Model) -> Vec<&SkinFace> {
 /// selected.
 pub fn paths(model: &Model, hot_spot: &HotSpot) -> Vec<HotSpotPath> {
     let hot_spot = hot_spot.in_units(units(model));
-    hot_spot::hot_spot_paths(&model.mesh, surface_faces(model), &hot_spot).0
+    hot_spot::hot_spot_paths(model.mesh(), surface_faces(model), &hot_spot).0
 }
 
 /// The unit system of the results, which IIW's millimetre distances are converted to.
@@ -72,7 +72,7 @@ pub fn evaluate(model: &Model) -> Vec<HotSpotReport> {
         .map(|h| h.in_units(units(model)))
         .collect();
     hot_spot::evaluate(
-        &model.mesh,
+        model.mesh(),
         &surface_faces(model),
         &definitions,
         &view.increments,
@@ -217,11 +217,11 @@ impl Located {
     pub fn plot(&mut self, model: &Model, hot_spot: &HotSpot) -> Result<HotSpotPlot, String> {
         let view = model.results.as_ref().ok_or("No results loaded.")?;
         let hot_spot = hot_spot.in_units(units(model));
-        let coords = model.mesh.coords();
+        let coords = model.mesh().coords();
         let mesh = Some((coords.as_ptr() as usize, coords.len()));
         if self.key.as_ref() != Some(&hot_spot) || self.mesh != mesh {
             (self.paths, self.warnings) =
-                hot_spot::hot_spot_paths(&model.mesh, surface_faces(model), &hot_spot);
+                hot_spot::hot_spot_paths(model.mesh(), surface_faces(model), &hot_spot);
             self.key = Some(hot_spot.clone());
             self.mesh = mesh;
             self.curve = None;
@@ -229,7 +229,7 @@ impl Located {
         if self.paths.is_empty() {
             return Err(match self.warnings.first() {
                 Some(warning) => warning.clone(),
-                None if hot_spot.toe.nodes(&model.mesh).is_empty() => {
+                None if hot_spot.toe.nodes(model.mesh()).is_empty() => {
                     "Select a node at the weld toe.".into()
                 }
                 None => "No path could be placed.".into(),
@@ -248,8 +248,13 @@ impl Located {
         let path = &self.paths[k];
         let reach = CURVE_REACH * distances.iter().copied().fold(0.0, f64::max);
         if self.curve.as_ref().is_none_or(|(index, _)| *index != k) {
-            let points =
-                hot_spot::path_curve(&model.mesh, surface_faces(model), path, reach, CURVE_POINTS);
+            let points = hot_spot::path_curve(
+                model.mesh(),
+                surface_faces(model),
+                path,
+                reach,
+                CURVE_POINTS,
+            );
             self.curve = Some((k, points));
         }
         let curve = self.curve.as_ref().map_or(&[][..], |(_, c)| c.as_slice());
@@ -311,10 +316,10 @@ mod tests {
 
     /// Node of the beam mesh at a point.
     fn node_at(model: &Model, point: [f64; 3]) -> u32 {
-        let index = (model.mesh.coords().iter())
+        let index = (model.mesh().coords().iter())
             .position(|p| (0..3).all(|k| (p[k] - point[k]).abs() < 1e-9))
             .unwrap();
-        model.mesh.node_ids()[index]
+        model.mesh().node_ids()[index]
     }
 
     #[test]
@@ -437,7 +442,7 @@ mod tests {
         };
         let mut plot = crate::path_plot::PathPlot::hot_spot("Hot_Spot-1".into());
         let shown = plot.hot_spot_box(0, &results, &hot_spot).unwrap();
-        let toe_index = results.mesh.node_index(toe[0]).unwrap();
+        let toe_index = results.mesh().node_index(toe[0]).unwrap();
         let drawn = results.node_position(toe_index).unwrap();
         let undeformed = results.to_render([40.0, 5.0, 10.0]);
         assert!(

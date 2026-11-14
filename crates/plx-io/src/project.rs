@@ -1,7 +1,6 @@
 //! Project files (`.ndl`): the analyses of a project, each with its geometry, mesh, FE model
 //! in RON, written by serde, and the results the user bound to it.
 
-use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -731,10 +730,10 @@ pub struct ProjectAnalysis {
     pub mesh: FeMesh,
     #[serde(default)]
     pub model: FeModel,
-    /// Fingerprint of the meshing inputs of each part of the geometry when it was meshed,
-    /// see [`plx_model::fingerprint::mesh_input`].
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub mesh_inputs: BTreeMap<String, u64>,
+    /// What each part of the mesh is the mesh of: a part of the geometry or an imported
+    /// mesh, which is a geometry object of its own ([`plx_model::PartOrigins`]).
+    #[serde(default, skip_serializing_if = "plx_model::PartOrigins::is_empty")]
+    pub origins: plx_model::PartOrigins,
     /// Results of a finished run the analysis keeps, restored when it is opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub results: Option<BoundResults>,
@@ -949,7 +948,7 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
 
 /// The oldest format that can still be opened. While Nodalis is being designed, a new
 /// format is not converted: older projects are refused.
-pub const FIRST_PROJECT_FORMAT: u32 = 21;
+pub const FIRST_PROJECT_FORMAT: u32 = 42;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
@@ -1003,6 +1002,8 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
     let mut project: Project = ron::from_str(&text).map_err(format_error)?;
     for analysis in project.analyses_mut() {
         analysis.model.migrate();
+        // Every part of the mesh belongs to a geometry object.
+        analysis.origins.reconcile(&analysis.mesh);
     }
     Ok(project)
 }
@@ -2327,8 +2328,8 @@ mod tests {
         };
         let mut saved = single(Some(&geometry), &mesh, &model, None);
         (saved.analyses_mut().next().unwrap())
-            .mesh_inputs
-            .insert("SOLID-1".into(), 42);
+            .origins
+            .set_meshed("SOLID-1", 42);
         // A second, empty analysis next to it.
         saved
             .nodes
@@ -2383,7 +2384,11 @@ mod tests {
         assert_eq!(project.mesh.elements(), mesh.elements());
         assert_eq!(project.mesh.coords(), mesh.coords());
         assert_eq!(project.mesh.node_sets, mesh.node_sets);
-        assert_eq!(project.mesh_inputs["SOLID-1"], 42);
+        // The origin of a part that the mesh does not have goes when the project is read.
+        assert_eq!(
+            project.origins.made_from("SOLID-1"),
+            (project.mesh.parts.iter().any(|p| p.name == "SOLID-1")).then_some(42)
+        );
 
         let newer = std::fs::read_to_string(&path).unwrap().replacen(
             &format!("format:{PROJECT_FORMAT}"),

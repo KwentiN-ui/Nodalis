@@ -405,7 +405,7 @@ struct LinkedModel {
     geometry: Option<plx_model::Geometry>,
     mesh: plx_mesh::FeMesh,
     fe: plx_model::FeModel,
-    mesh_inputs: BTreeMap<String, u64>,
+    origins: plx_model::PartOrigins,
 }
 
 impl LinkedModel {
@@ -414,7 +414,7 @@ impl LinkedModel {
             geometry: self.geometry.as_ref(),
             mesh: &self.mesh,
             fe: &self.fe,
-            mesh_inputs: &self.mesh_inputs,
+            origins: &self.origins,
         }
     }
 
@@ -423,7 +423,7 @@ impl LinkedModel {
             geometry: &mut self.geometry,
             mesh: &mut self.mesh,
             fe: &mut self.fe,
-            mesh_inputs: &mut self.mesh_inputs,
+            origins: &mut self.origins,
         }
     }
 }
@@ -433,7 +433,7 @@ struct ModelMut<'a> {
     geometry: &'a mut Option<plx_model::Geometry>,
     mesh: &'a mut plx_mesh::FeMesh,
     fe: &'a mut plx_model::FeModel,
-    mesh_inputs: &'a mut BTreeMap<String, u64>,
+    origins: &'a mut plx_model::PartOrigins,
 }
 
 impl ModelMut<'_> {
@@ -442,7 +442,7 @@ impl ModelMut<'_> {
         let links::MeshCopy {
             geometry,
             mesh,
-            mesh_inputs,
+            origins,
             mesh_sets,
             element_types,
             mesh_operations,
@@ -452,7 +452,7 @@ impl ModelMut<'_> {
         }
         *self.geometry = geometry;
         *self.mesh = mesh;
-        *self.mesh_inputs = mesh_inputs;
+        *self.origins = origins;
         self.fe.mesh_sets = mesh_sets;
         self.fe.element_types = element_types;
         self.fe.mesh_operations = mesh_operations;
@@ -1209,8 +1209,16 @@ impl Node {
             return Err("no file is chosen".into());
         }
         let file = export_file(&export.path, base);
-        let text = plx_io::inp::write_inp(&export.model.mesh, &export.model.fe, &name)
-            .map_err(|e| e.to_string())?;
+        // Suppressed geometry objects are not written.
+        let model = &export.model;
+        let active = plx_model::active_model(
+            &model.mesh,
+            &model.fe,
+            model.geometry.as_ref(),
+            &model.origins,
+        );
+        let text =
+            plx_io::inp::write_inp(&active.mesh, &active.fe, &name).map_err(|e| e.to_string())?;
         std::fs::write(&file, text).map_err(|e| format!("{} not written: {e}", file.display()))?;
         export.written = Some(print);
         Ok(file)
@@ -1711,7 +1719,7 @@ impl Node {
                 data.geometry.as_ref(),
                 &data.mesh,
                 &data.model,
-                &data.mesh_inputs,
+                &data.origins,
                 data.results.as_ref(),
                 &analysis.upstream,
                 analysis.solving,
@@ -1727,15 +1735,15 @@ impl Node {
             Block::Analysis(analysis) => match (&analysis.window, &analysis.data) {
                 (Some(window), _) => window.model().map(|m| links::Data {
                     geometry: m.geometry.as_ref(),
-                    mesh: &m.mesh,
+                    mesh: m.mesh(),
                     fe: &m.fe,
-                    mesh_inputs: &m.mesh_inputs,
+                    origins: m.origins(),
                 }),
                 (None, Some(data)) => Some(links::Data {
                     geometry: data.geometry.as_ref(),
                     mesh: &data.mesh,
                     fe: &data.model,
-                    mesh_inputs: &data.mesh_inputs,
+                    origins: &data.origins,
                 }),
                 _ => None,
             },
@@ -1772,7 +1780,7 @@ impl Node {
                     geometry: &mut data.geometry,
                     mesh: &mut data.mesh,
                     fe: &mut data.model,
-                    mesh_inputs: &mut data.mesh_inputs,
+                    origins: &mut data.origins,
                 })
             }
             Block::Materials(m) | Block::CrossSections(m) => Some(m.model.data_mut()),
@@ -4354,7 +4362,9 @@ impl ProjectApp {
             .join(crate::analysis::job_name(&self.project_name()))
             .join(crate::analysis::job_dir(id));
         let solver = &self.settings.solver;
-        window.start(solver, (data.mesh, data.fe), dir, keep)
+        // Suppressed geometry objects are not swept.
+        let active = data.active();
+        window.start(solver, (&active.mesh, &active.fe), dir, keep)
     }
 
     /// Takes the finished speeds of the Campbell blocks and shows their open diagrams.
@@ -5558,7 +5568,7 @@ impl ProjectApp {
             // What the solve made belongs to the mesh it started from: a mesh made or linked
             // meanwhile keeps the analysis out of date instead.
             let mesh = match (&analysis.window, &analysis.data) {
-                (Some(window), _) => window.model().map(|m| m.mesh.fingerprint()),
+                (Some(window), _) => window.model().map(|m| m.mesh().fingerprint()),
                 (None, Some(data)) => Some(data.mesh.fingerprint()),
                 (None, None) => None,
             };
@@ -5575,9 +5585,9 @@ impl ProjectApp {
             match (&mut analysis.window, &mut analysis.data) {
                 (Some(window), _) => window.take_solved(solved),
                 (None, Some(data)) => {
-                    if let Some((mesh, mesh_inputs)) = solved.meshed {
+                    if let Some((mesh, origins)) = solved.meshed {
                         data.mesh = mesh;
-                        data.mesh_inputs = mesh_inputs;
+                        data.origins = origins;
                         // Reference points at the centre of a selection follow the new mesh.
                         data.model.update_reference_points(&data.mesh);
                     }
@@ -7171,7 +7181,10 @@ impl ProjectApp {
             {
                 let input = (self.campbell_source(target))
                     .and_then(Node::link_data)
-                    .map(|d| crate::campbell::sweep_fingerprint(d.mesh, d.fe));
+                    .map(|d| {
+                        let active = d.active();
+                        crate::campbell::sweep_fingerprint(&active.mesh, &active.fe)
+                    });
                 if let Some(campbell) = self.node(target).and_then(Node::as_campbell_mut) {
                     campbell.input = input;
                 }
@@ -7677,9 +7690,12 @@ impl ProjectApp {
         match payload {
             Payload::Setup(fe) => links::apply_setup(data.fe, &fe, path),
             Payload::Geometry(geometry) => {
-                if let Some(tags) = links::take_geometry(data.geometry, geometry, true)
-                    && let Some(lost) = links::follow_geometry(data.fe, Some(data.mesh), &tags)
-                {
+                let lost = links::take_geometry(data.geometry, geometry, true)
+                    .and_then(|tags| links::follow_geometry(data.fe, Some(data.mesh), &tags));
+                // A part the geometry no longer has goes with its mesh.
+                let geometry = data.geometry.as_ref();
+                plx_model::drop_orphans(data.mesh, data.fe, geometry, data.origins);
+                if let Some(lost) = lost {
                     let line = format!("{}: {lost}.", node.name);
                     self.output.push(line);
                 }
@@ -10185,7 +10201,7 @@ fn read_source(path: &Path, units: UnitSystem) -> Result<FileRead, String> {
         }
         FileKind::Mesh => {
             let loaded = crate::model::load(path, units)?;
-            let mesh = loaded.model.mesh;
+            let mesh = loaded.model.into_mesh();
             let space = ModelSpace::of_mesh(&mesh);
             let summary = format!(
                 "{} nodes and {} elements read from {}",
@@ -13808,10 +13824,11 @@ mod tests {
         };
         let mesh = MeshPrimitive::default_box().generate(ModelSpace::ThreeD, "Solid-1");
         let space = ModelSpace::ThreeD;
-        let mesh_inputs = BTreeMap::from([(
-            "SOLID-1".to_owned(),
+        let mut origins = plx_model::PartOrigins::default();
+        origins.set_meshed(
+            "SOLID-1",
             plx_model::fingerprint::mesh_input(&geometry, &[], space, "SOLID-1"),
-        )]);
+        );
         let mut model = plx_model::FeModel::default();
         model.properties.space = space;
         let data = ProjectAnalysis {
@@ -13820,7 +13837,7 @@ mod tests {
             geometry: Some(geometry),
             mesh,
             model,
-            mesh_inputs,
+            origins,
             ..Default::default()
         };
         let mut nodes = vec![
@@ -13904,7 +13921,7 @@ mod tests {
                 geometry: None,
                 mesh: &mesh,
                 fe: &fe,
-                mesh_inputs: &BTreeMap::new(),
+                origins: &Default::default(),
             };
             let regions = measure_regions(&data);
             // The face picked on the box is its side X+ on the coarse and the fine mesh.
@@ -15006,7 +15023,7 @@ mod tests {
             signatures: Vec::new(),
         };
         let fe = plx_model::FeModel::default();
-        let inputs = std::collections::BTreeMap::new();
+        let inputs = plx_model::PartOrigins::default();
         let mut meshed = plx_mesh::FeMesh::default();
         meshed.set_node(1, [0.0; 3]);
         let print = |geometry: &plx_model::Geometry, mesh: &plx_mesh::FeMesh, kind| {
@@ -15014,7 +15031,7 @@ mod tests {
                 geometry: Some(geometry),
                 mesh,
                 fe: &fe,
-                mesh_inputs: &inputs,
+                origins: &inputs,
             };
             study_analysis_print(data, kind, |_| false)
         };

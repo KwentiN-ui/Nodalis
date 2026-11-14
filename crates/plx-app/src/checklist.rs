@@ -25,7 +25,7 @@ pub enum Clicked {
 /// The steps of the Geometry workspace.
 pub fn geometry(geometry: Option<&Model>, model: Option<&Model>) -> Vec<Step> {
     let has_geometry = geometry.is_some_and(|g| !g.parts.is_empty());
-    let has_mesh = model.is_some_and(|m| m.mesh.element_count() > 0);
+    let has_mesh = model.is_some_and(|m| m.mesh().element_count() > 0);
     vec![
         Step {
             text: "Import a STEP, IGES or BREP file.",

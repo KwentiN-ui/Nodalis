@@ -130,7 +130,7 @@ impl MotionPreview {
     pub fn new(now: f64, model: &Model) -> Self {
         Self {
             started: now,
-            model_size: model.mesh.bounds().map_or(1.0, model_size),
+            model_size: model.mesh().bounds().map_or(1.0, model_size),
             nodes: None,
             last: None,
         }
@@ -146,7 +146,7 @@ impl MotionPreview {
         motion: &Motion,
     ) -> Vec<(usize, [f64; 3])> {
         if self.nodes.as_ref().is_none_or(|(r, _)| *r != region) {
-            let mesh = &model.mesh;
+            let mesh = &model.mesh();
             let indices = (region.nodes(mesh).into_iter())
                 .filter_map(|id| mesh.node_index(id))
                 .collect();

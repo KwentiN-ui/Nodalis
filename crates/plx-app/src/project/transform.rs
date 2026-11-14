@@ -171,7 +171,7 @@ fn moved_mesh(copy: &links::MeshCopy, transform: &MeshTransform) -> Result<Linke
         geometry,
         mesh,
         fe,
-        mesh_inputs: BTreeMap::new(),
+        origins: Default::default(),
     })
 }
 
@@ -232,7 +232,7 @@ pub(super) fn take_transform_input(nodes: &mut [Node], all: &[Link], id: u64) {
                         mesh_operations: copy.mesh_operations.clone(),
                         ..Default::default()
                     },
-                    mesh_inputs: &copy.mesh_inputs,
+                    origins: &copy.origins,
                 };
                 print.add(&links::fingerprint(data, &[links::MESH.to_owned()]).to_le_bytes());
                 print.add_debug(&copy.geometry.as_ref().map(|g| &g.brep));
@@ -690,7 +690,7 @@ mod tests {
             geometry: None,
             mesh,
             model: Default::default(),
-            mesh_inputs: BTreeMap::new(),
+            origins: Default::default(),
             results: None,
         };
         Node::analysis(id, "Tet".into(), data)

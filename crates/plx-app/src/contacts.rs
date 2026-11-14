@@ -322,7 +322,7 @@ impl CyclicSectors {
             let mut sides = Tie::new("");
             (sides.master, sides.slave) = (key.0.clone(), key.1.clone());
             sides.cyclic = Some(key.2.clone());
-            self.sectors = sides.cyclic_sectors(&model.mesh);
+            self.sectors = sides.cyclic_sectors(model.mesh());
             self.key = Some(key);
         }
         self.sectors.as_ref()

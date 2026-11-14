@@ -275,7 +275,7 @@ fn amplitude_choice(
 /// the thread.
 fn exported_as(model: &Model, bolt: &Bolt) -> String {
     let fe = &model.fe;
-    let resolved = match fe.resolve_bolt(bolt, &model.mesh) {
+    let resolved = match fe.resolve_bolt(bolt, model.mesh()) {
         Ok(resolved) => resolved,
         Err(reason) => return format!("Not exported: {reason}."),
     };
@@ -292,7 +292,7 @@ fn exported_as(model: &Model, bolt: &Bolt) -> String {
             units.unit(Quantity::Length)
         ));
     }
-    match fe.resolve_thread(bolt, &model.mesh) {
+    match fe.resolve_thread(bolt, model.mesh()) {
         Ok(Some(thread)) => text.push_str(&format!(
             "\nThe thread is tied to {} face{} of the bolt where they are{}.",
             thread.bolt_faces.len(),

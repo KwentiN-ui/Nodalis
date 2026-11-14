@@ -1339,7 +1339,7 @@ mod tests {
                 geometry,
                 mesh: Default::default(),
                 model: Default::default(),
-                mesh_inputs: BTreeMap::new(),
+                origins: Default::default(),
                 results: None,
             };
             Node::analysis(id, "Bracket".into(), data)

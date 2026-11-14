@@ -184,7 +184,7 @@ pub fn geometry_check(space: ModelSpace, geometry: &Model) -> Result<Vec<i32>, S
             geometry.geometry_solids
         ));
     }
-    let Some((min, max)) = geometry.mesh.bounds() else {
+    let Some((min, max)) = geometry.mesh().bounds() else {
         return Ok(Vec::new());
     };
     let diagonal = (0..3)
@@ -208,14 +208,14 @@ pub fn geometry_check(space: ModelSpace, geometry: &Model) -> Result<Vec<i32>, S
     }
     // The display triangles of a face follow its orientation.
     let mut turn: BTreeMap<i32, f64> = BTreeMap::new();
-    for element in geometry.mesh.elements() {
+    for element in geometry.mesh().elements() {
         let (Some(CadEntity::Face(face)), ElementShape::Tri3) =
             (geometry.cad_entity(element.id), element.shape)
         else {
             continue;
         };
         let points: Vec<[f64; 3]> = (element.nodes.iter())
-            .filter_map(|&id| geometry.mesh.node(id))
+            .filter_map(|&id| geometry.mesh().node(id))
             .collect();
         if let [a, b, c] = points[..] {
             let cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);

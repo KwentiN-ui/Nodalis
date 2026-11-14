@@ -581,6 +581,36 @@ impl FeMesh {
         self.remove_flagged(&removed, true);
     }
 
+    /// Removes the meshes of the geometry objects `names` (in any case): parts of one body
+    /// of that name, and bodies of compound parts, each with its elements and the nodes no
+    /// other element uses. A compound part left without bodies goes. Sets, surfaces and the
+    /// CAD map lose them too; the rest keep their numbers.
+    pub fn remove_bodies(&mut self, names: &[String]) {
+        let named = |name: &str| names.iter().any(|n| name.eq_ignore_ascii_case(n));
+        let mut ids: BTreeSet<ElementId> = BTreeSet::new();
+        for part in &mut self.parts {
+            if part.bodies.is_empty() {
+                if named(&part.name) {
+                    ids.extend(part.elements.iter().copied());
+                }
+                continue;
+            }
+            for body in part.bodies.iter().filter(|b| named(&b.name)) {
+                ids.extend(body.elements.iter().copied());
+            }
+        }
+        if ids.is_empty() {
+            return;
+        }
+        let removed: Vec<bool> = self.elements.iter().map(|e| ids.contains(&e.id)).collect();
+        for part in &mut self.parts {
+            part.elements.retain(|id| !ids.contains(id));
+            part.bodies.retain(|b| !named(&b.name));
+        }
+        self.parts.retain(|p| !p.elements.is_empty());
+        self.remove_flagged(&removed, true);
+    }
+
     /// Removes the elements `ids` from the mesh, its parts, sets, surfaces and CAD map but
     /// keeps every node, so that results of the nodes keep their order; parts left empty go.
     pub fn remove_elements(&mut self, ids: &BTreeSet<ElementId>) {

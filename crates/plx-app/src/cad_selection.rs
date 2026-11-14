@@ -158,8 +158,8 @@ impl CadIndex {
     fn nearest_vertex(&self, model: &Model, edge: i32, point: Vec3, precision: f32) -> Option<i32> {
         (self.edge_vertices.get(&edge)?.iter())
             .filter_map(|&v| {
-                let node = *model.mesh.cad.nodes.get(&CadEntity::Vertex(v))?.first()?;
-                let position = model.render_position(model.mesh.node_index(node)?);
+                let node = *model.mesh().cad.nodes.get(&CadEntity::Vertex(v))?.first()?;
+                let position = model.render_position(model.mesh().node_index(node)?);
                 Some((v, position.distance(point)))
             })
             .filter(|&(_, d)| d <= precision)
@@ -199,8 +199,8 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
             .then_some(CadEntity::Edge(edge));
     }
     let skin_face = model.skin(hit.part).faces.get(hit.face)?;
-    let element = model.mesh.elements()[skin_face.element].id;
-    let face = index.face(&model.mesh, (element, skin_face.face as u8 + 1))?;
+    let element = model.mesh().elements()[skin_face.element].id;
+    let face = index.face(model.mesh(), (element, skin_face.face as u8 + 1))?;
     let edges = index.face_edges.get(&face).map_or(&[][..], Vec::as_slice);
     let nearest_edge = || {
         (edges.iter())
@@ -212,7 +212,8 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
         // An edge of a shell near the click, else the face.
         Target::Surfaces => match nearest_edge() {
             Some((edge, d))
-                if d <= precision && !model.mesh.cad_faces(&[CadEntity::Edge(edge)]).is_empty() =>
+                if d <= precision
+                    && !model.mesh().cad_faces(&[CadEntity::Edge(edge)]).is_empty() =>
             {
                 Some(CadEntity::Edge(edge))
             }
@@ -227,8 +228,8 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
                 .collect();
             let vertex = (vertices.into_iter())
                 .filter_map(|v| {
-                    let node = *model.mesh.cad.nodes.get(&CadEntity::Vertex(v))?.first()?;
-                    let position = model.render_position(model.mesh.node_index(node)?);
+                    let node = *model.mesh().cad.nodes.get(&CadEntity::Vertex(v))?.first()?;
+                    let position = model.render_position(model.mesh().node_index(node)?);
                     Some((v, position.distance(hit.point)))
                 })
                 .filter(|&(_, d)| d <= precision)
@@ -284,8 +285,8 @@ pub fn pick_edge_angle(
         line_edge(model, hit)?
     } else {
         let skin_face = model.skin(hit.part).faces.get(hit.face)?;
-        let element = model.mesh.elements()[skin_face.element].id;
-        let face = index.face(&model.mesh, (element, skin_face.face as u8 + 1))?;
+        let element = model.mesh().elements()[skin_face.element].id;
+        let face = index.face(model.mesh(), (element, skin_face.face as u8 + 1))?;
         (index.face_edges.get(&face)?.iter())
             .filter_map(|&edge| Some((edge, edge_distance(model, edge, hit.point)?)))
             .min_by(|a, b| a.1.total_cmp(&b.1))?
@@ -294,15 +295,15 @@ pub fn pick_edge_angle(
     // An edge belongs to the part of its nodes; hidden parts are left out.
     let visible = |edge: i32| {
         let node =
-            (model.mesh.cad.segments.get(&edge)).and_then(|segments| Some(segments.first()?[0]));
+            (model.mesh().cad.segments.get(&edge)).and_then(|segments| Some(segments.first()?[0]));
         node.and_then(|n| model.node_part(n))
             .is_none_or(|p| model.parts.get(p).is_some_and(|info| info.visible))
     };
-    let edges = index.smooth_edges(&model.mesh, start, angle.to_radians(), visible);
+    let edges = index.smooth_edges(model.mesh(), start, angle.to_radians(), visible);
     let entities: BTreeSet<CadEntity> = if target == Target::Surfaces {
         (edges.into_iter())
             .map(CadEntity::Edge)
-            .filter(|e| !model.mesh.cad_faces(&[*e]).is_empty())
+            .filter(|e| !model.mesh().cad_faces(&[*e]).is_empty())
             .collect()
     } else {
         edges.into_iter().map(CadEntity::Edge).collect()
@@ -312,7 +313,7 @@ pub fn pick_edge_angle(
 
 /// The CAD face an element face lies on.
 pub fn face_of(model: &Model, face: (ElementId, u8)) -> Option<i32> {
-    model.cad_index().face(&model.mesh, face)
+    model.cad_index().face(model.mesh(), face)
 }
 
 /// The CAD vertex nearest to a click, whatever its distance: of the edge for a line part,
@@ -323,8 +324,8 @@ pub fn nearest_corner(model: &Model, hit: &Hit) -> Option<i32> {
         vec![line_edge(model, hit)?]
     } else {
         let skin_face = model.skin(hit.part).faces.get(hit.face)?;
-        let element = model.mesh.elements()[skin_face.element].id;
-        let face = index.face(&model.mesh, (element, skin_face.face as u8 + 1))?;
+        let element = model.mesh().elements()[skin_face.element].id;
+        let face = index.face(model.mesh(), (element, skin_face.face as u8 + 1))?;
         index.face_edges.get(&face)?.clone()
     };
     let vertices: BTreeSet<i32> = (edges.iter())
@@ -334,8 +335,8 @@ pub fn nearest_corner(model: &Model, hit: &Hit) -> Option<i32> {
         .collect();
     (vertices.into_iter())
         .filter_map(|v| {
-            let node = *model.mesh.cad.nodes.get(&CadEntity::Vertex(v))?.first()?;
-            let position = model.render_position(model.mesh.node_index(node)?);
+            let node = *model.mesh().cad.nodes.get(&CadEntity::Vertex(v))?.first()?;
+            let position = model.render_position(model.mesh().node_index(node)?);
             Some((v, position.distance(hit.point)))
         })
         .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -345,7 +346,7 @@ pub fn nearest_corner(model: &Model, hit: &Hit) -> Option<i32> {
 /// The CAD edge of a hit line segment: the edge an element of the geometry display shows,
 /// else the edge of the mesh the element's segment lies along, by the CAD map.
 fn line_edge(model: &Model, hit: &Hit) -> Option<i32> {
-    let element = &model.mesh.elements()[*model.skin(hit.part).line_elements.get(hit.face)?];
+    let element = &model.mesh().elements()[*model.skin(hit.part).line_elements.get(hit.face)?];
     if let Some(entity) = model.cad_entity(element.id) {
         return match entity {
             CadEntity::Edge(edge) => Some(edge),
@@ -377,9 +378,9 @@ fn segment_positions<'a>(
     model: &'a Model,
     edges: &'a [i32],
 ) -> impl Iterator<Item = [Vec3; 2]> + 'a {
-    let position = |id| Some(model.render_position(model.mesh.node_index(id)?));
+    let position = |id| Some(model.render_position(model.mesh().node_index(id)?));
     (edges.iter())
-        .filter_map(|e| model.mesh.cad.segments.get(e))
+        .filter_map(|e| model.mesh().cad.segments.get(e))
         .flatten()
         .filter_map(move |&[a, b]| Some([position(a)?, position(b)?]))
 }
@@ -408,7 +409,7 @@ pub fn preview(model: &Model, entities: &BTreeSet<CadEntity>) -> Preview {
     Preview {
         lines: segment_positions(model, &edges).collect(),
         points: vertex_nodes(model, entities)
-            .filter_map(|n| model.mesh.node_index(n))
+            .filter_map(|n| model.mesh().node_index(n))
             .map(|n| model.render_position(n))
             .collect(),
     }
@@ -420,7 +421,7 @@ fn vertex_nodes<'a>(
 ) -> impl Iterator<Item = NodeId> + 'a {
     (entities.iter())
         .filter(|e| matches!(e, CadEntity::Vertex(_)))
-        .filter_map(|e| model.mesh.cad.nodes.get(e))
+        .filter_map(|e| model.mesh().cad.nodes.get(e))
         .flatten()
         .copied()
 }
@@ -437,7 +438,7 @@ pub fn highlight(model: &Model, entities: &[CadEntity]) -> Highlight {
     if !faces.is_empty() {
         let on_faces: BTreeSet<(ElementId, u8)> = (faces.iter())
             .filter_map(|e| match e {
-                CadEntity::Face(tag) => model.mesh.cad.faces.get(tag),
+                CadEntity::Face(tag) => model.mesh().cad.faces.get(tag),
                 _ => None,
             })
             .flatten()
@@ -451,7 +452,7 @@ pub fn highlight(model: &Model, entities: &[CadEntity]) -> Highlight {
                 on_faces.contains(f)
                     || (elements.contains(&f.0)
                         && model
-                            .mesh
+                            .mesh()
                             .element(f.0)
                             .is_some_and(|e| e.shape.faces().len() == 1))
             })
@@ -464,7 +465,7 @@ pub fn highlight(model: &Model, entities: &[CadEntity]) -> Highlight {
         })
         .collect();
     highlight.lines = (edges.iter())
-        .filter_map(|e| model.mesh.cad.segments.get(e))
+        .filter_map(|e| model.mesh().cad.segments.get(e))
         .flatten()
         .copied()
         .collect();
@@ -610,9 +611,9 @@ mod tests {
         let edge = click(&model, Target::Nodes, [-50.0, 5.0, 9.95], Vec3::X);
         assert!(matches!(&edge, Region::Geometry(e) if matches!(e[..], [CadEntity::Edge(_)])));
         let corner = click(&model, Target::Nodes, [-50.0, 0.05, 9.95], Vec3::X);
-        assert_eq!(corner.nodes(&model.mesh).len(), 1, "{corner:?}");
+        assert_eq!(corner.nodes(model.mesh()).len(), 1, "{corner:?}");
         assert_eq!(
-            coords(&model.mesh, &corner.nodes(&model.mesh)),
+            coords(model.mesh(), &corner.nodes(model.mesh())),
             [[0.0, 0.0, 10.0]]
         );
 
@@ -625,12 +626,12 @@ mod tests {
             matches!(&point, crate::selection::Items::Geometry(e) if matches!(e.first(), Some(CadEntity::Vertex(_)))),
             "{point:?}"
         );
-        let crate::selection::Items::Nodes(point) = point.resolved(&model.mesh, Target::Point)
+        let crate::selection::Items::Nodes(point) = point.resolved(model.mesh(), Target::Point)
         else {
             panic!("a point resolves to nodes");
         };
         let point: Vec<NodeId> = point.into_iter().collect();
-        assert_eq!(coords(&model.mesh, &point), [[0.0, 0.0, 10.0]]);
+        assert_eq!(coords(model.mesh(), &point), [[0.0, 0.0, 10.0]]);
 
         // The surface angle mode picks CAD faces too, not the nodes it grows over; the end
         // face meets its neighbours at right angles, so it is the only one.
@@ -666,16 +667,16 @@ mod tests {
         );
 
         // Mixed with picked nodes the geometry turns into nodes; undo goes back to it.
-        let mut draft = RegionDraft::from_region(&fixed, NODE_SOURCES, Target::Nodes, &model.mesh);
-        let extra = model.mesh.node_ids()[0];
+        let mut draft = RegionDraft::from_region(&fixed, NODE_SOURCES, Target::Nodes, model.mesh());
+        let extra = model.mesh().node_ids()[0];
         let items = crate::selection::Items::Nodes(std::collections::BTreeSet::from([extra]));
-        draft.take(&model.mesh, items, Operation::Add);
-        let mut expected = fixed.nodes(&model.mesh);
+        draft.take(model.mesh(), items, Operation::Add);
+        let mut expected = fixed.nodes(model.mesh());
         expected.push(extra);
         expected.sort_unstable();
         expected.dedup();
         assert_eq!(draft.region(), Region::Nodes(expected));
-        let mut draft = RegionDraft::from_region(&fixed, NODE_SOURCES, Target::Nodes, &model.mesh);
+        let mut draft = RegionDraft::from_region(&fixed, NODE_SOURCES, Target::Nodes, model.mesh());
         let hit = model
             .pick(model.to_render([150.0, 5.0, 5.0]), Vec3::NEG_X)
             .unwrap();
@@ -744,7 +745,7 @@ mod tests {
         });
 
         let check = |model: &Model| {
-            let mesh = &model.mesh;
+            let mesh = &model.mesh();
             let nodes = fixed.nodes(mesh);
             assert!(fixed.missing_reference(mesh).is_none());
             assert!(coords(mesh, &nodes).iter().all(|c| c[0].abs() < 1e-9));
@@ -772,7 +773,7 @@ mod tests {
             },
         });
         let part = plx_mesher::generate_part_mesh(&geometry, "SOLID-1").unwrap();
-        let mesh = plx_mesher::merge_part(&model.mesh, part.mesh);
+        let mesh = plx_mesher::merge_part(model.mesh(), part.mesh);
         model.set_mesh(mesh);
         let fine = check(&model);
         assert!(
@@ -819,7 +820,7 @@ mod tests {
         let mut geometry = model.geometry.clone().unwrap();
         geometry.meshing.max_size = 20.0;
         model.set_mesh(plx_mesher::generate_mesh(&geometry).unwrap().mesh);
-        let lines: Vec<String> = model.mesh.parts.iter().map(|p| p.name.clone()).collect();
+        let lines: Vec<String> = model.mesh().parts.iter().map(|p| p.name.clone()).collect();
         assert_eq!(lines.len(), 1, "{lines:?}");
 
         // Looking down onto the lines at x, within 1 of them.
@@ -932,7 +933,7 @@ mod tests {
         });
 
         let check = |model: &Model| {
-            let mesh = &model.mesh;
+            let mesh = &model.mesh();
             for (region, x, count) in [(&fixed, 0.0, 1), (&tied, 60.0, 1), (&pulled, 100.0, 1)] {
                 assert!(region.missing_reference(mesh).is_none(), "{region:?}");
                 let nodes = region.nodes(mesh);
@@ -963,7 +964,7 @@ mod tests {
         }
         for part in &lines {
             let fine = plx_mesher::generate_part_mesh(&geometry, part).unwrap();
-            let mesh = plx_mesher::merge_part(&model.mesh, fine.mesh);
+            let mesh = plx_mesher::merge_part(model.mesh(), fine.mesh);
             model.set_mesh(mesh);
         }
         let fine = check(&model);
@@ -984,11 +985,11 @@ mod tests {
 
     /// The largest downward displacement CalculiX computes, if ccx is installed.
     fn tip_deflection(model: &Model) -> Option<f32> {
-        let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Kragarm").unwrap();
+        let inp = plx_io::inp::write_inp(model.mesh(), &model.fe, "Kragarm").unwrap();
         let dir = std::env::temp_dir().join(format!(
             "nodalis-lines-remesh-{}-{}",
             std::process::id(),
-            model.mesh.element_count()
+            model.mesh().element_count()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("kragarm.inp"), inp).unwrap();
@@ -1002,11 +1003,11 @@ mod tests {
 
     /// The largest displacement along x CalculiX computes, if ccx is installed.
     fn elongation(model: &Model) -> Option<f32> {
-        let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Platte").unwrap();
+        let inp = plx_io::inp::write_inp(model.mesh(), &model.fe, "Platte").unwrap();
         let dir = std::env::temp_dir().join(format!(
             "nodalis-remesh-{}-{}",
             std::process::id(),
-            model.mesh.element_count()
+            model.mesh().element_count()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("platte.inp"), inp).unwrap();

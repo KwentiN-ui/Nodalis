@@ -429,9 +429,11 @@ impl Analysis {
             return Err("Analysis not started: all steps are deactivated.".into());
         }
         // What the run solves, before anything of the run (linked results) is added.
-        let prints = crate::solve_fingerprint::fingerprints(&model.mesh, &model.fe);
+        // A suppressed geometry object takes part in nothing, with its geometry and its mesh.
+        let active = model.active();
+        let prints = crate::solve_fingerprint::fingerprints(&active.mesh, &active.fe);
         let heading = format!("Nodalis: {}", model.file_name());
-        let mut fe = model.fe.clone();
+        let mut fe = active.fe.clone().into_owned();
         let job_name = job_name(name);
         stage_global_results(&mut fe, work_dir, &job_name)?;
         let initial = stage_linked_results(&fe, work_dir, &job_name)?;
@@ -440,7 +442,7 @@ impl Analysis {
         // supports.
         let dependent = &continuation.dependent_steps;
         let mut lowered =
-            plx_io::inp::lower_with_sets_unvalidated(&model.mesh, &fe, &heading, dependent)
+            plx_io::inp::lower_with_sets_unvalidated(&active.mesh, &fe, &heading, dependent)
                 .map_err(|e| StartError {
                     message: format!("Analysis not set up: {e}"),
                     item: e.item,
@@ -871,7 +873,7 @@ mod tests {
         let diagnostics = analysis.diagnostics().expect("typed diagnostics");
         let findings = plx_model::diagnose_solver_check(
             &diagnostics,
-            &model.mesh,
+            model.mesh(),
             &model.fe,
             analysis.origins(),
         );
@@ -903,11 +905,13 @@ mod tests {
     #[test]
     fn the_model_check_points_at_the_part_without_a_section() {
         let mut model = pulled_cubes(0.03);
-        model.mesh.parts[0].elements = vec![1, 2];
-        model.mesh.parts.push(plx_mesh::Part {
-            bodies: Vec::new(),
-            name: "Solid-2".into(),
-            elements: vec![3],
+        model.edit_mesh(|mesh, _| {
+            mesh.parts[0].elements = vec![1, 2];
+            mesh.parts.push(plx_mesh::Part {
+                bodies: Vec::new(),
+                name: "Solid-2".into(),
+                elements: vec![3],
+            });
         });
         let solver = Solver::default();
         let dir = std::env::temp_dir().join(format!("nodalis-unsectioned-{}", std::process::id()));
@@ -924,7 +928,7 @@ mod tests {
         let diagnostics = analysis.diagnostics().expect("typed diagnostics");
         let findings = plx_model::diagnose_solver_check(
             &diagnostics,
-            &model.mesh,
+            model.mesh(),
             &model.fe,
             analysis.origins(),
         );
@@ -1172,7 +1176,7 @@ mod tests {
         let value = |node: u32| initial.values.iter().find(|(n, _)| *n == node).unwrap().1;
         assert!((value(1) - 100.0).abs() < 1e-3 && (value(16) - 20.0).abs() < 1e-3);
         assert!((value(8) - 100.0 + 80.0 / 3.0).abs() < 1e-2, "{initial:?}");
-        let mut lowered = plx_io::inp::lower_unvalidated(&cubes().mesh, &fe, "Start").unwrap();
+        let mut lowered = plx_io::inp::lower_unvalidated(cubes().mesh(), &fe, "Start").unwrap();
         initial.apply(&mut lowered.analysis).unwrap();
         let temperatures = &lowered.analysis.model.initial.temperatures;
         assert_eq!(temperatures.len(), 16);

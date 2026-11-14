@@ -128,6 +128,36 @@ impl Geometry {
         renamed
     }
 
+    /// Renames the part `old` of the geometry to `new`, with what refers to it by name: its
+    /// compound, its suppression and the mesh setup items. False if the geometry has no part
+    /// of that name: its names are not known without Gmsh, see [`Geometry::part_names`].
+    pub fn rename_part(&mut self, old: &str, new: &str) -> bool {
+        let Some(at) = (self.part_names.iter()).position(|p| p.eq_ignore_ascii_case(old)) else {
+            return false;
+        };
+        self.part_names[at] = new.to_owned();
+        self.rename_compound_member(old, new);
+        for part in &mut self.suppressed {
+            if part.eq_ignore_ascii_case(old) {
+                *part = new.to_owned();
+            }
+        }
+        for item in &mut self.mesh_items {
+            for part in item.kind.parts_mut().into_iter().flatten() {
+                if part.eq_ignore_ascii_case(old) {
+                    *part = new.to_owned();
+                }
+            }
+        }
+        true
+    }
+
+    /// The parts of the geometry whose names are known: all of them since the geometry was
+    /// imported or changed, empty for a geometry Gmsh names, see [`Geometry::part_names`].
+    pub fn known_parts(&self) -> &[String] {
+        &self.part_names
+    }
+
     /// Whether the part `part` is suppressed.
     pub fn is_suppressed(&self, part: &str) -> bool {
         names(&self.suppressed, part)
@@ -392,6 +422,17 @@ impl MeshSetupKind {
             MeshSetupKind::TetrahedralGmsh { .. } => "Tetrahedral_Gmsh",
             MeshSetupKind::ExtrudeMesh(_) => "Extrude_Mesh",
             MeshSetupKind::ThickenShellMesh(_) => "Thicken_Shell_Mesh",
+        }
+    }
+
+    /// [`MeshSetupKind::parts`] to change.
+    pub fn parts_mut(&mut self) -> Option<&mut Vec<String>> {
+        match self {
+            MeshSetupKind::MeshingParameters { parts, .. }
+            | MeshSetupKind::TetrahedralGmsh { parts, .. } => Some(parts),
+            MeshSetupKind::ExtrudeMesh(extrude) => Some(&mut extrude.parts),
+            MeshSetupKind::ThickenShellMesh(thicken) => Some(&mut thicken.parts),
+            MeshSetupKind::LocalMeshSize { .. } => None,
         }
     }
 

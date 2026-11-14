@@ -141,7 +141,7 @@ impl TransformationDialog {
         space: ModelSpace,
     ) -> Self {
         let (min, max) = model
-            .mesh
+            .mesh()
             .bounds()
             .map_or((DVec3::ZERO, DVec3::ONE), |(a, b)| (a.into(), b.into()));
         let size = ((max - min).length() * 0.5).max(1e-9);
@@ -263,7 +263,7 @@ impl TransformationDialog {
             return;
         };
         let picked = self.picker.pick(model, hit, Target::Nodes, precision);
-        if let Items::Nodes(nodes) = picked.resolved(&model.mesh, Target::Nodes) {
+        if let Items::Nodes(nodes) = picked.resolved(model.mesh(), Target::Nodes) {
             self.take(model, nodes);
         }
     }
@@ -276,7 +276,7 @@ impl TransformationDialog {
     /// One node is itself the point; an edge or a face gives its centre, e.g. that of a hole.
     fn take(&mut self, model: &Model, nodes: BTreeSet<NodeId>) {
         let positions: Vec<DVec3> = (nodes.iter())
-            .filter_map(|&id| model.mesh.node(id))
+            .filter_map(|&id| model.mesh().node(id))
             .map(DVec3::from)
             .collect();
         let (Some(slot), false) = (self.picking, positions.is_empty()) else {
@@ -298,7 +298,7 @@ impl TransformationDialog {
             PickerAction::Undo | PickerAction::Clear => self.marked.clear(),
             PickerAction::Ids(Operation::Add, ids) => {
                 let nodes = (ids.into_iter())
-                    .filter(|&id| model.mesh.node_index(id).is_some())
+                    .filter(|&id| model.mesh().node_index(id).is_some())
                     .collect();
                 self.take(model, nodes);
             }

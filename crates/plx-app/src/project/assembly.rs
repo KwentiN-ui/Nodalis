@@ -239,11 +239,20 @@ impl ProjectApp {
             copies.pop()?
         } else {
             let name = self.name_of(target);
-            let geometries: Option<Vec<plx_model::Geometry>> =
-                copies.iter().map(|c| c.geometry.clone()).collect();
-            let merged = match geometries {
-                Some(geometries) => match self.merged(target, links::MESH, geometries, print)? {
-                    Ok(merged) => Some(merged),
+            // The geometries of the meshes that have one are put together; a mesh without,
+            // such as one of a mesh block, joins as an imported mesh, a geometry object of
+            // its own.
+            let with: Vec<usize> = (copies.iter().enumerate())
+                .filter(|(_, c)| c.geometry.is_some())
+                .map(|(i, _)| i)
+                .collect();
+            let geometries: Vec<plx_model::Geometry> = (with.iter())
+                .filter_map(|&i| copies[i].geometry.clone())
+                .collect();
+            let merged = match geometries.is_empty() {
+                true => None,
+                false => match self.merged(target, links::MESH, geometries, print)? {
+                    Ok(merged) => Some(spread(merged, &with, copies.len())),
                     Err(why) => {
                         self.warn_once(format!(
                             "{name}: the geometries of the meshes are not put together: {why}; \
@@ -252,7 +261,6 @@ impl ProjectApp {
                         None
                     }
                 },
-                None => None,
             };
             let (copy, renamed) = links::merge_meshes(copies, merged);
             for (renamed, from) in renamed.iter().zip(&names) {
@@ -340,4 +348,25 @@ fn geometry_print(inputs: &[plx_model::Geometry]) -> u64 {
         print.add_debug(&geometry.compounds);
     }
     print.finish()
+}
+
+/// The geometry put together of the meshes `with` of `count`, with their new tags and names
+/// given to each of them, by index: those without geometry keep theirs.
+fn spread(merged: MergedGeometry, with: &[usize], count: usize) -> MergedGeometry {
+    let MergedGeometry {
+        geometry,
+        tags,
+        renamed,
+    } = merged;
+    let mut all_tags = vec![Default::default(); count];
+    let mut all_renamed = vec![Default::default(); count];
+    for ((&index, tags), renamed) in with.iter().zip(tags).zip(renamed) {
+        all_tags[index] = tags;
+        all_renamed[index] = renamed;
+    }
+    MergedGeometry {
+        geometry,
+        tags: all_tags,
+        renamed: all_renamed,
+    }
 }

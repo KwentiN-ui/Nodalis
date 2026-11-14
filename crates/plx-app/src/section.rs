@@ -237,7 +237,7 @@ impl SectionDialog {
     /// Edits the current section view, or starts one facing away from the viewer.
     pub fn new(current: Option<SectionView>, model: &Model, view_direction: DVec3) -> Self {
         let (min, max) = model
-            .mesh
+            .mesh()
             .bounds()
             .map_or((DVec3::ZERO, DVec3::ZERO), |(a, b)| (a.into(), b.into()));
         let center = (min + max) * 0.5;
@@ -299,7 +299,7 @@ impl SectionDialog {
             return;
         }
         let picked = self.picker.pick(model, hit, Target::Nodes, precision);
-        if let Items::Nodes(nodes) = picked.resolved(&model.mesh, Target::Nodes) {
+        if let Items::Nodes(nodes) = picked.resolved(model.mesh(), Target::Nodes) {
             self.take(model, nodes);
         }
     }
@@ -319,7 +319,7 @@ impl SectionDialog {
         // view.
         let positions: Vec<DVec3> = nodes
             .iter()
-            .filter_map(|&id| model.node_position(model.mesh.node_index(id)?))
+            .filter_map(|&id| model.node_position(model.mesh().node_index(id)?))
             .map(|p| p.as_dvec3() + model.origin())
             .collect();
         if positions.is_empty() {
@@ -361,7 +361,7 @@ impl SectionDialog {
             PickerAction::Ids(Operation::Add, ids) => {
                 let nodes = ids
                     .into_iter()
-                    .filter(|&id| model.mesh.node_index(id).is_some())
+                    .filter(|&id| model.mesh().node_index(id).is_some())
                     .collect();
                 self.take(model, nodes);
             }

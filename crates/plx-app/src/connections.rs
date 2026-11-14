@@ -34,7 +34,7 @@ impl RegionView {
         let stale =
             !matches!(self.resolved.as_deref(), Some((r, d, _)) if r == region && d == defaults);
         if stale {
-            let resolved = model.fe.resolve_contact(region, &model.mesh);
+            let resolved = model.fe.resolve_contact(region, model.mesh());
             self.resolved = Some(Box::new((region.clone(), defaults.clone(), resolved)));
         }
         &self.resolved.as_ref().expect("resolved above").2
@@ -45,7 +45,7 @@ impl RegionView {
         let stale =
             !matches!(self.check.as_deref(), Some((r, d, _)) if r == region && d == defaults);
         if stale {
-            let check = model.fe.check_contact(region, &model.mesh);
+            let check = model.fe.check_contact(region, model.mesh());
             self.check = Some(Box::new((region.clone(), defaults.clone(), check)));
         }
         self.check.as_ref().expect("checked above").2.as_ref()
@@ -158,12 +158,12 @@ impl DetectionScope {
         filter: &plx_model::PartFilter,
         previous: Option<&DetectionScope>,
     ) -> Self {
-        let context = crate::part_filter_ui::cached_context(ctx, &model.fe, &geometry.mesh);
+        let context = crate::part_filter_ui::cached_context(ctx, &model.fe, geometry.mesh());
         let visible = detection_visibility(model, geometry);
         let searched = filter.searched(&context, &visible);
         let tolerance = match previous {
             Some(p) if p.auto.0 == searched => p.auto.1,
-            _ => auto_geometry_detection_tolerance(&geometry.mesh, geometry.skins(), &searched),
+            _ => auto_geometry_detection_tolerance(geometry.mesh(), geometry.skins(), &searched),
         };
         Self {
             context,
@@ -176,10 +176,10 @@ impl DetectionScope {
 /// geometry, if every meshed part comes from it. Detecting on the geometry finds the
 /// regions before the parts are meshed and keeps them to whole CAD faces.
 pub fn detection_display<'a>(model: &Model, geometry: Option<&'a Model>) -> Option<&'a Model> {
-    let geometry = geometry.filter(|g| g.is_geometry() && !g.mesh.parts.is_empty())?;
+    let geometry = geometry.filter(|g| g.is_geometry() && !g.mesh().parts.is_empty())?;
     let from_geometry =
-        |name: &str| (geometry.mesh.parts.iter()).any(|p| p.name.eq_ignore_ascii_case(name));
-    (model.mesh.parts.iter())
+        |name: &str| (geometry.mesh().parts.iter()).any(|p| p.name.eq_ignore_ascii_case(name));
+    (model.mesh().parts.iter())
         .all(|p| from_geometry(&p.name))
         .then_some(geometry)
 }
@@ -195,11 +195,11 @@ pub fn detect(
         Some(display) => {
             let visible = detection_visibility(model, display);
             let dimensions = display.part_dimensions();
-            let compounds: Vec<Option<usize>> = (display.mesh.parts.iter())
+            let compounds: Vec<Option<usize>> = (display.mesh().parts.iter())
                 .map(|p| model.geometry.as_ref()?.compound_of(&p.name))
                 .collect();
             let geometry = plx_model::DetectionGeometry {
-                mesh: &display.mesh,
+                mesh: display.mesh(),
                 skins: display.skins(),
                 entities: display.cad_entities(),
                 face_edges: display.face_edges(),
@@ -210,14 +210,14 @@ pub fn detect(
             // Line ends are tied by their nodes, which only the mesh has.
             let visible: Vec<bool> = model.parts.iter().map(|p| p.visible).collect();
             let mut fe = std::mem::take(&mut model.fe);
-            fe.detect_line_ends(index, &model.mesh, &visible, &mut report);
+            fe.detect_line_ends(index, model.mesh(), &visible, &mut report);
             model.fe = fe;
             Some(report)
         }
         None => {
             let visible: Vec<bool> = model.parts.iter().map(|p| p.visible).collect();
             let mut fe = std::mem::take(&mut model.fe);
-            let report = fe.detect_contacts(index, &model.mesh, model.skins(), &visible);
+            let report = fe.detect_contacts(index, model.mesh(), model.skins(), &visible);
             model.fe = fe;
             report
         }
@@ -227,9 +227,9 @@ pub fn detect(
 /// Whether each part of the geometry display is shown: as in the FE model once it is
 /// meshed, else as in the Geometry tab.
 pub fn detection_visibility(model: &Model, geometry: &Model) -> Vec<bool> {
-    (geometry.mesh.parts.iter().zip(&geometry.parts))
+    (geometry.mesh().parts.iter().zip(&geometry.parts))
         .map(|(part, shown)| {
-            (model.mesh.parts.iter().zip(&model.parts))
+            (model.mesh().parts.iter().zip(&model.parts))
                 .find(|(p, _)| p.name.eq_ignore_ascii_case(&part.name))
                 .map_or(shown.visible, |(_, s)| s.visible)
         })
@@ -248,7 +248,7 @@ pub fn detection_form(
     let units = model.fe.properties.units;
     let context = match scope {
         Some(scope) => scope.context.clone(),
-        None => crate::part_filter_ui::cached_context(ui.ctx(), &model.fe, &model.mesh),
+        None => crate::part_filter_ui::cached_context(ui.ctx(), &model.fe, model.mesh()),
     };
     ui.label("Search in").on_hover_text(
         "The parts searched. Without parts to include, all visible parts are searched, less \
@@ -374,8 +374,8 @@ fn auto_tolerance(
     let searched = filter.searched(context, &visible);
     let key = (
         searched.clone(),
-        model.mesh.coords().len(),
-        model.mesh.elements().len(),
+        model.mesh().coords().len(),
+        model.mesh().elements().len(),
     );
     let id = crate::ids::window(ui.ctx(), "detection auto tolerance");
     let cached: Option<(Vec<bool>, usize, usize, f64)> = ui.data(|d| d.get_temp(id));
@@ -384,7 +384,7 @@ fn auto_tolerance(
     {
         return value;
     }
-    let value = auto_detection_tolerance(&model.mesh, model.skins(), &searched);
+    let value = auto_detection_tolerance(model.mesh(), model.skins(), &searched);
     ui.data_mut(|d| d.insert_temp(id, (key.0, key.1, key.2, value)));
     value
 }
@@ -595,7 +595,7 @@ fn rule_counts(
         r.id.hash(&mut hasher);
         r.edited.hash(&mut hasher);
     }
-    model.mesh.elements().len().hash(&mut hasher);
+    model.mesh().elements().len().hash(&mut hasher);
     format!("{:?}", fe.part_groups).hash(&mut hasher);
     let key = hasher.finish();
     let id = ui.id().with(("detection rule counts", detection.id));
@@ -604,7 +604,7 @@ fn rule_counts(
     {
         return Some(counts);
     }
-    let counts = fe.rule_counts(detection, &model.mesh, context);
+    let counts = fe.rule_counts(detection, model.mesh(), context);
     ui.data_mut(|d| d.insert_temp(id, (key, counts.clone())));
     Some(counts)
 }
@@ -1055,7 +1055,7 @@ fn resolved_contacts(ctx: &egui::Context, model: &Model) -> std::sync::Arc<Resol
     {
         return cache.1.clone();
     }
-    let resolved = std::sync::Arc::new(model.fe.resolve_contacts(&model.mesh));
+    let resolved = std::sync::Arc::new(model.fe.resolve_contacts(model.mesh()));
     let cache: Cache = std::sync::Arc::new((model.fe.clone(), resolved.clone()));
     ctx.data_mut(|d| d.insert_temp(id, cache));
     resolved
@@ -1068,8 +1068,8 @@ fn contact_checks(ctx: &egui::Context, model: &Model) -> std::sync::Arc<Vec<Opti
     let id = crate::ids::window(ctx, "contact worksheet checks");
     let key = (
         model.fe.clone(),
-        model.mesh.coords().len(),
-        model.mesh.elements().len(),
+        model.mesh().coords().len(),
+        model.mesh().elements().len(),
     );
     let cached: Option<Cache> = ctx.data(|d| d.get_temp(id));
     if let Some(cache) = cached
@@ -1077,7 +1077,7 @@ fn contact_checks(ctx: &egui::Context, model: &Model) -> std::sync::Arc<Vec<Opti
     {
         return cache.1.clone();
     }
-    let checks = std::sync::Arc::new(model.fe.check_contacts(&model.mesh));
+    let checks = std::sync::Arc::new(model.fe.check_contacts(model.mesh()));
     let cache: Cache = std::sync::Arc::new((key, checks.clone()));
     ctx.data_mut(|d| d.insert_temp(id, cache));
     checks
@@ -1221,7 +1221,7 @@ pub fn solved_contacts(
                 max_open: 0.0,
             };
             for id in slave.nodes(mesh) {
-                let Some(index) = results.mesh.node_index(id) else {
+                let Some(index) = results.mesh().node_index(id) else {
                     continue;
                 };
                 solved.slave_nodes += 1;
@@ -1297,7 +1297,7 @@ pub fn worksheet(
         .collect();
     let resolved = resolved_contacts(ctx, model);
     let checks = contact_checks(ctx, model);
-    let solved = results.map(|r| solved_contacts(&model.fe, &model.mesh, &resolved, r));
+    let solved = results.map(|r| solved_contacts(&model.fe, model.mesh(), &resolved, r));
     let units = model.fe.properties.units;
     let mut change = None;
     let mu_id = crate::ids::window(ctx, "contact worksheet mu");
@@ -1538,7 +1538,8 @@ pub(crate) fn change_regions(
     change: Change,
     tree: &mut TreeState,
 ) {
-    let fe = &mut model.fe;
+    let split = model.split();
+    let (fe, mesh) = (split.fe, split.mesh);
     if let Change::Delete = change {
         let mut indices = selected;
         indices.sort_unstable();
@@ -1566,7 +1567,7 @@ pub(crate) fn change_regions(
             Change::Friction(mu) => region.set_behavior(ContactBehavior::Frictional { mu }),
             Change::Flip => region.flip(),
             Change::Active(active) => region.active = active,
-            Change::Rename => region.name = region.name_from_definition(&model.mesh),
+            Change::Rename => region.name = region.name_from_definition(mesh),
             Change::Delete => {}
         }
         // A detected region the user changed is kept when detecting again.
@@ -1703,15 +1704,15 @@ mod tests {
     fn faces_where(view: &Model, part: usize, on: impl Fn([f64; 3]) -> bool) -> Vec<CadEntity> {
         let mut faces: Vec<CadEntity> = Vec::new();
         let mut off = std::collections::BTreeSet::new();
-        for &id in &view.mesh.parts[part].elements {
+        for &id in &view.mesh().parts[part].elements {
             let Some(CadEntity::Face(tag)) = view.cad_entity(id) else {
                 continue;
             };
-            let element = view.mesh.element(id).unwrap();
+            let element = view.mesh().element(id).unwrap();
             if element
                 .nodes
                 .iter()
-                .all(|&n| on(view.mesh.node(n).unwrap()))
+                .all(|&n| on(view.mesh().node(n).unwrap()))
             {
                 faces.push(CadEntity::Face(tag));
             } else {
@@ -1726,11 +1727,11 @@ mod tests {
 
     /// The largest displacement against `component` CalculiX computes, if ccx is installed.
     fn settlement(model: &Model, component: &str) -> Option<f32> {
-        let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Block").unwrap();
+        let inp = plx_io::inp::write_inp(model.mesh(), &model.fe, "Block").unwrap();
         let dir = std::env::temp_dir().join(format!(
             "nodalis-geometry-detection-{}-{}",
             std::process::id(),
-            model.mesh.element_count()
+            model.mesh().element_count()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("block.inp"), &inp).unwrap();
@@ -1764,7 +1765,7 @@ mod tests {
         let loaded = crate::model::load_geometry(&[file], UnitSystem::Unitless).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let (mut model, view) = (loaded.model, loaded.geometry_view.unwrap());
-        let names: Vec<String> = view.mesh.parts.iter().map(|p| p.name.clone()).collect();
+        let names: Vec<String> = view.mesh().parts.iter().map(|p| p.name.clone()).collect();
         assert_eq!(names.len(), 2, "{names:?}");
         let plate_top = faces_where(&view, 0, |p| (p[2] - 5.0).abs() < 1e-6);
         let block_bottom = faces_where(&view, 1, |p| (p[2] - 5.0).abs() < 1e-6);
@@ -1856,14 +1857,15 @@ mod tests {
         assert_eq!(model.fe.contact_regions, found);
         let region = &model.fe.contact_regions[0];
         let coarse =
-            region.side_a.faces(&model.mesh).len() + region.side_b.faces(&model.mesh).len();
+            region.side_a.faces(model.mesh()).len() + region.side_b.faces(model.mesh()).len();
         assert!(coarse > 0);
         let coarse_settlement = settlement(&model, "U3");
 
         geometry.meshing.max_size = 2.5;
         model.set_mesh(plx_mesher::generate_mesh(&geometry).unwrap().mesh);
         let region = &model.fe.contact_regions[0];
-        let fine = region.side_a.faces(&model.mesh).len() + region.side_b.faces(&model.mesh).len();
+        let fine =
+            region.side_a.faces(model.mesh()).len() + region.side_b.faces(model.mesh()).len();
         assert!(fine > 2 * coarse, "{coarse} -> {fine}");
         let fine_settlement = settlement(&model, "U3");
 
@@ -1881,15 +1883,15 @@ mod tests {
     fn edges_where(view: &Model, part: usize, on: impl Fn([f64; 3]) -> bool) -> Vec<CadEntity> {
         let mut edges: Vec<CadEntity> = Vec::new();
         let mut off = std::collections::BTreeSet::new();
-        for &id in &view.mesh.parts[part].elements {
+        for &id in &view.mesh().parts[part].elements {
             let Some(CadEntity::Edge(tag)) = view.cad_entity(id) else {
                 continue;
             };
-            let element = view.mesh.element(id).unwrap();
+            let element = view.mesh().element(id).unwrap();
             if element
                 .nodes
                 .iter()
-                .all(|&n| on(view.mesh.node(n).unwrap()))
+                .all(|&n| on(view.mesh().node(n).unwrap()))
             {
                 edges.push(CadEntity::Edge(tag));
             } else {
@@ -1924,7 +1926,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         let (mut model, view) = (loaded.model, loaded.geometry_view.unwrap());
         model.fe.properties.space = plx_model::ModelSpace::PlaneStress;
-        let names: Vec<String> = view.mesh.parts.iter().map(|p| p.name.clone()).collect();
+        let names: Vec<String> = view.mesh().parts.iter().map(|p| p.name.clone()).collect();
         assert_eq!(names.len(), 2, "{names:?}");
         let beam_bottom = edges_where(&view, 0, |p| p[1].abs() < 1e-6);
         let block_top = edges_where(&view, 1, |p| p[1].abs() < 1e-6);
@@ -2006,13 +2008,13 @@ mod tests {
         model.set_mesh(mesh);
         let region = &model.fe.contact_regions[0];
         for side in [&region.side_a, &region.side_b] {
-            let faces = side.faces(&model.mesh);
+            let faces = side.faces(model.mesh());
             assert!(!faces.is_empty(), "{side:?}");
-            let nodes = Region::Faces(faces).nodes(&model.mesh);
+            let nodes = Region::Faces(faces).nodes(model.mesh());
             assert!(
                 nodes
                     .iter()
-                    .all(|&n| model.mesh.node(n).unwrap()[1].abs() < 1e-6)
+                    .all(|&n| model.mesh().node(n).unwrap()[1].abs() < 1e-6)
             );
         }
         if let Some(value) = settlement(&model, "U2") {

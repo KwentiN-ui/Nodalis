@@ -124,7 +124,7 @@ const MIN_PLOT_HEIGHT: f32 = 150.0;
 impl FeatureDialog {
     pub fn create(kind: FeatureKind, results: Option<usize>, model: &Model) -> Self {
         let fe = &model.fe;
-        let (min, max) = model.mesh.bounds().unwrap_or(([0.0; 3], [1.0; 3]));
+        let (min, max) = model.mesh().bounds().unwrap_or(([0.0; 3], [1.0; 3]));
         let center = [0, 1, 2].map(|k| (min[k] + max[k]) * 0.5);
         let draft = match kind {
             FeatureKind::ReferencePoint => Draft::ReferencePoint(ReferencePoint::new(
@@ -192,7 +192,7 @@ impl FeatureDialog {
     }
 
     fn new(draft: Draft, index: Option<usize>, results: Option<usize>, model: &Model) -> Self {
-        let size = model.mesh.bounds().map_or(1.0, |(min, max)| {
+        let size = model.mesh().bounds().map_or(1.0, |(min, max)| {
             (0..3).map(|k| max[k] - min[k]).fold(0.0, f64::max)
         });
         let target = face_target(&model.fe);
@@ -202,11 +202,11 @@ impl FeatureDialog {
                     PointDefinition::CenterOfGravity(region)
                     | PointDefinition::BoundingBoxCenter(region),
                 ..
-            }) => RegionDraft::from_region(region, FACE_SOURCES, target, &model.mesh),
+            }) => RegionDraft::from_region(region, FACE_SOURCES, target, model.mesh()),
             Draft::CoordinateSystem(CoordinateSystem {
                 attached: Some(region),
                 ..
-            }) => RegionDraft::from_region(region, MOVING_SOURCES, target, &model.mesh),
+            }) => RegionDraft::from_region(region, MOVING_SOURCES, target, model.mesh()),
             Draft::CoordinateSystem(_) => RegionDraft::new(MOVING_SOURCES, target),
             _ => RegionDraft::new(FACE_SOURCES, target),
         };
@@ -365,7 +365,7 @@ impl FeatureDialog {
             return;
         };
         let picked = self.picker.pick(model, hit, Target::Point, precision);
-        if let Items::Nodes(nodes) = picked.resolved(&model.mesh, Target::Point) {
+        if let Items::Nodes(nodes) = picked.resolved(model.mesh(), Target::Point) {
             self.take(model, nodes);
         }
     }
@@ -386,7 +386,10 @@ impl FeatureDialog {
     }
 
     fn take(&mut self, model: &Model, nodes: BTreeSet<NodeId>) {
-        let positions: Vec<[f64; 3]> = nodes.iter().filter_map(|&id| model.mesh.node(id)).collect();
+        let positions: Vec<[f64; 3]> = nodes
+            .iter()
+            .filter_map(|&id| model.mesh().node(id))
+            .collect();
         let (Some(slot), false) = (self.picking, positions.is_empty()) else {
             return;
         };
@@ -450,7 +453,7 @@ impl FeatureDialog {
             PickerAction::Undo | PickerAction::Clear => self.marked.clear(),
             PickerAction::Ids(Operation::Add, ids) => {
                 let nodes = (ids.into_iter())
-                    .filter(|&id| model.mesh.node_index(id).is_some())
+                    .filter(|&id| model.mesh().node_index(id).is_some())
                     .collect();
                 self.take(model, nodes);
             }
@@ -729,7 +732,7 @@ impl FeatureDialog {
         if self.located.as_ref().is_none_or(|l| l.path != *path) {
             let points = path
                 .samples(&model.fe)
-                .map(|samples| path::path_points(&model.mesh, &samples));
+                .map(|samples| path::path_points(model.mesh(), &samples));
             self.located = Some(Located {
                 path: path.clone(),
                 points,
@@ -869,7 +872,7 @@ impl FeatureDialog {
                 Some(plane) => plane.resolve(fe).map(|_| ()),
                 None => Err("Please select a Plane.".into()),
             },
-            Draft::ReferencePoint(point) => point.resolve(fe, &model.mesh).map(|_| ()),
+            Draft::ReferencePoint(point) => point.resolve(fe, model.mesh()).map(|_| ()),
         }
     }
 
@@ -947,7 +950,7 @@ impl FeatureDialog {
         match &self.draft {
             Draft::ReferencePoint(r) => {
                 let mut r = r.clone();
-                r.position = r.resolve(&model.fe, &model.mesh).ok()?;
+                r.position = r.resolve(&model.fe, model.mesh()).ok()?;
                 Some(point_mark(model, &r, true))
             }
             Draft::CoordinateSystem(c) => {
@@ -1065,7 +1068,7 @@ pub fn marks(
 fn plane_mark(model: &Model, plane: &Plane, selected: bool) -> Option<FeatureMark> {
     use glam::DVec3;
     let (point, normal) = plane.resolve(&model.fe).ok()?;
-    let (min, max) = model.mesh.bounds()?;
+    let (min, max) = model.mesh().bounds()?;
     let (point, normal) = (DVec3::from(point), DVec3::from(normal));
     let (min, max) = (DVec3::from(min), DVec3::from(max));
     let center = (min + max) * 0.5;
@@ -1246,11 +1249,11 @@ fn system_mark(
     let attachment = system.attachment(systems);
     if let Some(region) = attachment {
         let coords = model.shown_coords();
-        let undeformed = model.mesh.coords();
+        let undeformed = model.mesh().coords();
         if coords.as_ref() != undeformed {
             // The exploded view moves parts without deforming them: take the motion from
             // the coordinates as drawn, relative to the undeformed ones.
-            frame = frame.moved_with(region, &model.mesh, &coords);
+            frame = frame.moved_with(region, model.mesh(), &coords);
         }
     }
     let axes = frame.axes().ok()?;
@@ -1503,7 +1506,7 @@ fn reference_point_rows(
     ui.end_row();
     if chosen != kind {
         // The point stays where it is when it changes to coordinates.
-        let at = point.resolve(fe, &model.mesh).unwrap_or(point.position);
+        let at = point.resolve(fe, model.mesh()).unwrap_or(point.position);
         point.definition = match chosen {
             CENTER_OF_GRAVITY => PointDefinition::CenterOfGravity(region.region()),
             BOUNDING_BOX => PointDefinition::BoundingBoxCenter(region.region()),
@@ -1530,7 +1533,7 @@ fn reference_point_rows(
     ui.end_row();
     if chosen_system != system {
         // The point keeps its place; its coordinates change to the new system.
-        let at = point.resolve(fe, &model.mesh).unwrap_or(point.position);
+        let at = point.resolve(fe, model.mesh()).unwrap_or(point.position);
         point.position = at;
         point.definition = match chosen_system.and_then(|c| fe.coordinate_system_or_global(Some(c)))
         {
@@ -1635,7 +1638,7 @@ fn coupling_rows(ui: &mut Ui, coupling: &mut Option<RemoteBehavior>) {
 /// The global position a reference point resolves to, or why it has none.
 fn position_row(ui: &mut Ui, point: &ReferencePoint, model: &Model) {
     ui.label("Global position");
-    match point.resolve(&model.fe, &model.mesh) {
+    match point.resolve(&model.fe, model.mesh()) {
         Ok(p) => {
             let p = p.map(|c| model.shown(c, plx_model::Quantity::Length));
             ui.weak(format!(

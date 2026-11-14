@@ -163,7 +163,7 @@ impl MaterialSetEditor {
     fn edit(&mut self, index: usize) {
         self.selected = Some(index);
         let item = self.collection.tree_item(index);
-        self.item = Editor::edit(&item, &self.model.fe, &self.model.mesh);
+        self.item = Editor::edit(&item, &self.model.fe, self.model.mesh());
     }
 
     pub fn show(&mut self, ctx: &egui::Context) -> MaterialSetResult {

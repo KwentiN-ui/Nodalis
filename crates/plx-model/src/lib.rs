@@ -45,6 +45,7 @@ mod mesh_operation;
 mod mesh_set;
 mod moving_load;
 mod number;
+mod origin;
 pub mod overview;
 mod parameter;
 mod part_filter;
@@ -134,6 +135,10 @@ pub use mesh_operation::{MeshOperation, MeshOperationKind};
 pub use mesh_set::{MeshSet, SetKind};
 pub use moving_load::{AXIS_LABELS, LoadStations, MovingFrame, MovingLoad, Wheel, load_stations};
 pub use number::{MathOp, apply_series, switch};
+pub use origin::{
+    Active, PartOrigin, PartOrigins, active_model, bodies as part_bodies, drop_orphans, orphans,
+    suppressed_bodies,
+};
 pub use overview::{Cell, OverviewGroup, OverviewRow, StepItemKey, StepOverview};
 pub use parameter::{Parameter, ValueKind};
 pub use part_filter::{PartContext, PartFilter, PartGroup, PartTerm, name_matches};
@@ -221,8 +226,11 @@ use serde::{Deserialize, Serialize};
 /// system and named variables ([`Distribution::system`], [`Distribution::variables`]);
 /// formats 21 to 39 read as they are. Format 41 gives a distribution its own length unit
 /// ([`Distribution::length`]), so that changing the project's units leaves its factors as
-/// they are; formats 21 to 40 read as they are, in millimeters.
-pub const PROJECT_FORMAT: u32 = 41;
+/// they are; formats 21 to 40 read as they are, in millimeters. Format 42 binds every mesh to
+/// a geometry object: the origin of each part of the mesh is recorded
+/// ([`PartOrigins`]), imported meshes are geometry objects of their own; older projects are
+/// refused.
+pub const PROJECT_FORMAT: u32 = 42;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -78,7 +78,14 @@ pub struct Data<'a> {
     pub geometry: Option<&'a Geometry>,
     pub mesh: &'a FeMesh,
     pub fe: &'a FeModel,
-    pub mesh_inputs: &'a BTreeMap<String, u64>,
+    pub origins: &'a plx_model::PartOrigins,
+}
+
+impl<'a> Data<'a> {
+    /// What the solver gets of it: without the suppressed geometry objects.
+    pub fn active(&self) -> plx_model::Active<'a> {
+        plx_model::active_model(self.mesh, self.fe, self.geometry, self.origins)
+    }
 }
 
 /// A mesh with what belongs to it, taken over by a link of the mesh.
@@ -86,7 +93,7 @@ pub struct MeshCopy {
     /// The geometry it was meshed from.
     pub geometry: Option<Geometry>,
     pub mesh: FeMesh,
-    pub mesh_inputs: BTreeMap<String, u64>,
+    pub origins: plx_model::PartOrigins,
     pub mesh_sets: Vec<plx_model::MeshSet>,
     pub element_types: Vec<plx_model::PartElementType>,
     /// The operations the mesh has applied, so that the copy meshes alike.
@@ -98,7 +105,7 @@ impl MeshCopy {
         Self {
             geometry: data.geometry.cloned(),
             mesh: data.mesh.clone(),
-            mesh_inputs: data.mesh_inputs.clone(),
+            origins: data.origins.clone(),
             mesh_sets: data.fe.mesh_sets.clone(),
             element_types: data.fe.element_types.clone(),
             mesh_operations: data.fe.mesh_operations.clone(),
@@ -109,15 +116,16 @@ impl MeshCopy {
 /// Meshes of several sources put together into one, in their order, for the Mesh row of an
 /// analysis that takes several mesh links. Node and element numbers of each mesh are
 /// shifted past those before it; parts, sets and surfaces whose names an earlier mesh has
-/// get "-2", "-3" …; `merged` is the geometry of all, put together from theirs, with the new
-/// tags of each one's CAD entities: without it, where one has no geometry, the meshes have
-/// none either. The parts stay as meshed, see [`MeshCopy::mesh_inputs`]. Returns the mesh with the renamings, by mesh, for the output.
+/// get "-2", "-3" …; `merged` is the geometry of those that have one, put together from theirs,
+/// with the new tags of each one's CAD entities, by mesh: the meshes of its parts are linked
+/// meshes, those of the others imported meshes, geometry objects of their own. Returns the
+/// mesh with the renamings, by mesh, for the output.
 pub fn merge_meshes(
     copies: Vec<MeshCopy>,
     merged: Option<plx_mesher::MergedGeometry>,
 ) -> (MeshCopy, Vec<BTreeMap<String, String>>) {
     use plx_mesh::{Part, SurfaceDefinition};
-    use plx_model::Region;
+    use plx_model::{PartOrigin, Region};
     use std::collections::BTreeSet;
     let unique = |name: &str, used: &BTreeSet<String>| {
         (1..)
@@ -139,7 +147,7 @@ pub fn merge_meshes(
     let mut out = MeshCopy {
         geometry,
         mesh: FeMesh::default(),
-        mesh_inputs: BTreeMap::new(),
+        origins: Default::default(),
         mesh_sets: Vec::new(),
         element_types: Vec::new(),
         mesh_operations: Vec::new(),
@@ -225,8 +233,22 @@ pub fn merge_meshes(
                     .renumbered(entity_tags),
             );
         }
-        // No mesh inputs: the parts stay as they are, like parts read from an input file,
-        // and are out of date only with the meshes they come from.
+        // The meshes of parts of the geometry are made by the blocks they come from: out of
+        // date only with them. Without a geometry of all, every part is an imported mesh.
+        let has_geometry = out.geometry.is_some() && copy.geometry.is_some();
+        for (body, origin) in copy.origins.iter() {
+            let name = (geometry_renamed.get(index))
+                .and_then(|r| r.get(body))
+                .or_else(|| parts.get(body))
+                .cloned()
+                .unwrap_or_else(|| body.to_owned());
+            let origin = match origin {
+                PartOrigin::Meshed(_) | PartOrigin::Linked if has_geometry => PartOrigin::Linked,
+                PartOrigin::Imported { suppressed } => PartOrigin::Imported { suppressed },
+                _ => PartOrigin::Imported { suppressed: false },
+            };
+            out.origins.insert(&name, origin);
+        }
         for mut set_item in copy.mesh_sets {
             set_item.name = set(&set_item.name);
             set_item.region = match set_item.region {
@@ -1015,7 +1037,7 @@ pub fn fingerprint(data: Data, path: &[String]) -> u64 {
             // A refine mesh block gives geometry to mesh with other sizes.
             let refinement = data.geometry.map(|g| g.refinement.to_bits());
             hash.add_debug(&refinement);
-            hash.add_debug(data.mesh_inputs);
+            hash.add_debug(data.origins);
             hash.add_debug(&data.fe.mesh_sets);
             hash.add_debug(&data.fe.element_types);
             hash.add_debug(&data.fe.mesh_operations);
@@ -1732,7 +1754,11 @@ mod tests {
             MeshCopy {
                 geometry: None,
                 mesh,
-                mesh_inputs: BTreeMap::from([("BLOCK".to_owned(), 7)]),
+                origins: {
+                    let mut origins = plx_model::PartOrigins::default();
+                    origins.set_meshed("BLOCK", 7);
+                    origins
+                },
                 mesh_sets: vec![plx_model::MeshSet::new(
                     set,
                     plx_model::SetKind::Nodes,
@@ -1756,10 +1782,41 @@ mod tests {
         assert_eq!(merged.mesh_sets[1].name, "FIX-2");
         assert_eq!(merged.mesh_sets[1].region, Region::Nodes(vec![5, 6]));
         assert_eq!(merged.element_types[1].part, "BLOCK-2");
-        // Parts as meshed: not out of date with a geometry of their own.
-        assert!(merged.mesh_inputs.is_empty());
+        // Without a geometry of all, the parts are imported meshes.
+        assert!(merged.origins.is_imported("BLOCK"));
+        assert!(merged.origins.is_imported("BLOCK-2"));
         assert!(renamed[0].is_empty());
         assert_eq!(renamed[1]["BLOCK"], "BLOCK-2");
+
+        // A mesh of geometry and one without, of a mesh block: the geometry of the first is
+        // kept, and the second joins as an imported mesh.
+        let geometry = plx_model::Geometry {
+            source: "a.step".into(),
+            brep: String::new(),
+            meshing: Default::default(),
+            mesh_items: Vec::new(),
+            part_names: vec!["BLOCK".into()],
+            refinement: 1.0,
+            signatures: Vec::new(),
+            compounds: Vec::new(),
+            suppressed: Vec::new(),
+        };
+        let mut meshed = tet(0.0, "FIX");
+        meshed.geometry = Some(geometry.clone());
+        let mut block = tet(5.0, "FIX");
+        block.origins = plx_model::PartOrigins::imported(&block.mesh);
+        let merged_geometry = plx_mesher::MergedGeometry {
+            geometry,
+            tags: vec![Default::default(), Default::default()],
+            renamed: vec![Default::default(), Default::default()],
+        };
+        let (merged, _) = merge_meshes(vec![meshed, block], Some(merged_geometry));
+        assert!(merged.geometry.is_some());
+        assert_eq!(
+            merged.origins.get("BLOCK"),
+            Some(plx_model::PartOrigin::Linked)
+        );
+        assert!(merged.origins.is_imported("BLOCK-2"));
     }
 
     fn path(parts: &[&str]) -> Vec<String> {
@@ -1767,12 +1824,12 @@ mod tests {
     }
 
     fn fp(fe: &FeModel, path: &[String]) -> u64 {
-        let (mesh, inputs) = (FeMesh::default(), BTreeMap::new());
+        let (mesh, inputs) = (FeMesh::default(), plx_model::PartOrigins::default());
         let data = Data {
             geometry: None,
             mesh: &mesh,
             fe,
-            mesh_inputs: &inputs,
+            origins: &inputs,
         };
         fingerprint(data, path)
     }
@@ -1804,12 +1861,16 @@ mod tests {
         own.refinement = 2.0;
         // The setup of the target counts as nothing the link takes.
         let print = |geometry: &Geometry| {
-            let (mesh, fe, inputs) = (FeMesh::default(), FeModel::default(), BTreeMap::new());
+            let (mesh, fe, inputs) = (
+                FeMesh::default(),
+                FeModel::default(),
+                plx_model::PartOrigins::default(),
+            );
             let data = Data {
                 geometry: Some(geometry),
                 mesh: &mesh,
                 fe: &fe,
-                mesh_inputs: &inputs,
+                origins: &inputs,
             };
             fingerprint(data, &path(&[GEOMETRY]))
         };

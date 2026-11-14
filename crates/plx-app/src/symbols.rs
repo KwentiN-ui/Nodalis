@@ -295,7 +295,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
             // joint, a ball at it, and arrows along the frame axes for free translations
             // and moment arrows about them for free rotations.
             Kind::Joint(ref joint) => {
-                let Ok((origin, axes)) = model.fe.joint_frame(&model.mesh, joint) else {
+                let Ok((origin, axes)) = model.fe.joint_frame(model.mesh(), joint) else {
                     continue;
                 };
                 let origin = DVec3::from(origin);
@@ -316,7 +316,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     let Some(region) = end.region() else {
                         continue;
                     };
-                    let points = match model.fe.point_position(&model.mesh, region) {
+                    let points = match model.fe.point_position(model.mesh(), region) {
                         Some(point) => vec![DVec3::from(point)],
                         None => node_points(model, region, &visible),
                     };
@@ -435,7 +435,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     None => {
                         let none = Default::default();
                         let point = remote.point();
-                        let Ok(point) = point.resolve(&model.fe, &model.mesh, &item.region, &none)
+                        let Ok(point) = point.resolve(&model.fe, model.mesh(), &item.region, &none)
                         else {
                             continue;
                         };
@@ -542,7 +542,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     each_node: true,
                     ..
                 }
-            ) && !item.region.faces(&model.mesh).is_empty() =>
+            ) && !item.region.faces(model.mesh()).is_empty() =>
             {
                 let faces = face_geometry(model, &item.region, &visible);
                 let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
@@ -583,7 +583,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
             // A cone along the normal of the plane and plates about its in-plane axes.
             Kind::Boundary(BoundaryKind::Symmetry { normal, .. }) => {
                 let space = model.fe.properties.space;
-                let plane = symmetry_plane(&model.mesh, &item.region, space, normal);
+                let plane = symmetry_plane(model.mesh(), &item.region, space, normal);
                 if let (Ok(plane), Some(center)) =
                     (plane, region_center(model, &item.region, &visible))
                 {
@@ -599,12 +599,12 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
             // nodes spread over the region, like a rigid body's.
             Kind::Boundary(BoundaryKind::Displacement(ref remote))
                 if matches!(
-                    remote.formulation(&model.fe, &model.mesh, &item.region, "", ""),
+                    remote.formulation(&model.fe, model.mesh(), &item.region, "", ""),
                     plx_model::Formulation::Point(_)
                 ) =>
             {
                 let none = Default::default();
-                let Ok(point) = remote.resolve(&model.fe, &model.mesh, &item.region, &none) else {
+                let Ok(point) = remote.resolve(&model.fe, model.mesh(), &item.region, &none) else {
                     continue;
                 };
                 let centre = DVec3::from(point.position);
@@ -731,7 +731,7 @@ impl Visible {
                 nodes: None,
             };
         }
-        let hidden_elements = (model.parts.iter().zip(&model.mesh.parts))
+        let hidden_elements = (model.parts.iter().zip(&model.mesh().parts))
             .filter(|(info, _)| !info.visible)
             .flat_map(|(_, part)| part.elements.iter().copied())
             .collect();
@@ -759,17 +759,17 @@ fn node_points(model: &Model, region: &Region, visible: &Visible) -> Vec<DVec3> 
     }
     // The point of a boundary condition or remote force, at the centre of its region.
     if let Region::RemotePoint(id) = region {
-        return (model.fe.remote_point_of(&model.mesh, *id).into_iter())
-            .filter_map(|(region, _)| region.centroid(&model.mesh))
+        return (model.fe.remote_point_of(model.mesh(), *id).into_iter())
+            .filter_map(|(region, _)| region.centroid(model.mesh()))
             .map(DVec3::from)
             .collect();
     }
     let coords = model.exploded_coords();
     region
-        .nodes(&model.mesh)
+        .nodes(model.mesh())
         .into_iter()
         .filter(|&id| visible.node(id))
-        .filter_map(|id| model.mesh.node_index(id))
+        .filter_map(|id| model.mesh().node_index(id))
         .map(|index| DVec3::from(coords[index]))
         .collect()
 }
@@ -783,7 +783,7 @@ struct FaceGeometry {
 
 /// Centre, outward normal and area of each element face of the region.
 fn face_geometry(model: &Model, region: &Region, visible: &Visible) -> Vec<FaceGeometry> {
-    let mesh = &model.mesh;
+    let mesh = &model.mesh();
     let coords = model.exploded_coords();
     let position = |id: NodeId| mesh.node_index(id).map(|i| DVec3::from(coords[i]));
     let mut faces = Vec::new();
@@ -1261,7 +1261,7 @@ mod tests {
         .unwrap();
         let mesh = plx_io::inp::read_inp(&path).unwrap().mesh;
         let model = Model::new(&path, mesh);
-        let ids: Vec<ElementId> = model.mesh.elements().iter().map(|e| e.id).collect();
+        let ids: Vec<ElementId> = model.mesh().elements().iter().map(|e| e.id).collect();
         let arrow = |element: ElementId, face: u8| {
             let item = Item {
                 kind: Kind::Load(LoadKind::Pressure(1.0)),

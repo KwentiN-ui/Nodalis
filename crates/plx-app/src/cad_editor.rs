@@ -620,7 +620,7 @@ impl CadOperationEditor {
             let edges = match (self.shown, &self.view) {
                 (Shown::Input, Some(view)) => (view.highlight.lines.iter())
                     .filter_map(|ends| {
-                        let [a, b] = ends.map(|id| view.node_position(view.mesh.node_index(id)?));
+                        let [a, b] = ends.map(|id| view.node_position(view.mesh().node_index(id)?));
                         Some([a?, b?])
                     })
                     .collect(),
