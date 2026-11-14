@@ -24,7 +24,10 @@
 //!    is a minimum vertex cover of the edges between the sides (König's theorem on a maximum
 //!    matching of the boundary graph), never larger than the smaller boundary, and is then
 //!    refined by moving its vertices into a side where fewer vertices of the other side have
-//!    to take their place (the greedy part of Fiduccia-Mattheyses).
+//!    to take their place: first greedily, then by Fiduccia-Mattheyses passes, which take
+//!    the best move also when it makes the separator heavier for a while and return to the
+//!    lightest separator met, so that a separator can leave the plane of its cut where a
+//!    curved one is lighter.
 //! 3. Both sides are ordered recursively and the separator is numbered after them; small
 //!    subgraphs are ordered breadth first (Cuthill-McKee), which keeps their small profile.
 //!
@@ -33,6 +36,14 @@
 //! the memory); the choice of axis and position and the vertex cover 740 million, the
 //! refinement 690 million, leaves of 60 instead of 240 DOFs 650 million (5.2 GB, factorized
 //! in 12 s on 4 threads); PaStiX with Scotch 387 million.
+//!
+//! The Fiduccia-Mattheyses passes, measured on Quentin's point-mass model (562k equations,
+//! C3D20 with ties): 935 → 865 million nonzeros and 2.91 → 2.45 × 10¹² flops (METIS 823
+//! million and 2.2 × 10¹², Scotch 897 million and 2.6 × 10¹²), for about 0.5 s more ordering
+//! time; the bracket above 523 → 509 million nonzeros, 1.05 → 1.00 × 10¹² flops; a regular
+//! hexahedral block unchanged (its plane cuts are already the best). Refining several cut
+//! candidates instead of the lightest one reached 839 million but cost five times the
+//! ordering time.
 //!
 //! Disconnected subgraphs are ordered component by component without a separator. The
 //! dissection keeps its pending subgraphs in a work list instead of recursing: a graph that
@@ -46,6 +57,12 @@ use crate::Pattern;
 
 /// Subgraphs with at most this many DOFs are ordered breadth first instead of dissected.
 const LEAF_WEIGHT: usize = 60;
+
+/// Passes of [`Dissection::fm`], moves without improvement before a pass ends, and the
+/// smallest share of the subgraph's weight a side keeps.
+const FM_PASSES: usize = 8;
+const FM_PATIENCE: usize = 300;
+const FM_BALANCE: f64 = 0.3;
 
 /// Where along an axis a geometric cut is tried (fraction of the weight on the lower
 /// side); the cut with the smallest separator wins.
@@ -297,6 +314,11 @@ struct Dissection<'a> {
     /// of the whole graph for every subgraph.
     seen: Vec<u32>,
     search: u32,
+    /// Gains of the separator vertices in [`Self::fm`] (moving into side A, side B), and
+    /// the pass in which a vertex last moved.
+    gain: Vec<[i64; 2]>,
+    moved: Vec<u32>,
+    pass: u32,
 }
 
 /// Work left for [`Dissection::order`], done last in, first out.
@@ -321,6 +343,9 @@ impl<'a> Dissection<'a> {
             right_slot: vec![u32::MAX; graph.len()],
             seen: vec![0; graph.len()],
             search: 0,
+            gain: vec![[0; 2]; graph.len()],
+            moved: vec![0; graph.len()],
+            pass: 0,
         }
     }
 
@@ -550,6 +575,190 @@ impl<'a> Dissection<'a> {
         }
     }
 
+    /// Fiduccia-Mattheyses refinement of a vertex separator (disjoint `a`, `b`,
+    /// `separator`): a separator vertex moves into a side and its neighbors on the other
+    /// side enter the separator; the best move by separator weight is taken, also when it
+    /// makes the separator heavier, which lets the separator climb out of a local
+    /// minimum; every vertex moves at most once per pass, and the pass returns to the
+    /// lightest separator it met. Sides stay within [`FM_BALANCE`] of each other.
+    fn fm(&mut self, a: &mut Vec<u32>, b: &mut Vec<u32>, separator: &mut Vec<u32>) {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+        if separator.is_empty() || a.is_empty() || b.is_empty() {
+            return;
+        }
+        let side_of = |k: usize| if k == 0 { Side::A } else { Side::B };
+        for &v in a.iter() {
+            self.side[v as usize] = Side::A;
+        }
+        for &v in b.iter() {
+            self.side[v as usize] = Side::B;
+        }
+        for &v in separator.iter() {
+            self.side[v as usize] = Side::S;
+        }
+        let weight = |this: &Self, v: u32| this.graph.weight[v as usize] as i64;
+        let mut sides: [i64; 2] = [
+            a.iter().map(|&v| weight(self, v)).sum(),
+            b.iter().map(|&v| weight(self, v)).sum(),
+        ];
+        let mut ws: i64 = separator.iter().map(|&v| weight(self, v)).sum();
+        let total = sides[0] + sides[1] + ws;
+        let floor = (FM_BALANCE * total as f64) as i64;
+        let all: Vec<u32> = (a.iter().chain(b.iter()).chain(separator.iter()))
+            .copied()
+            .collect();
+        // Gain of moving separator vertex v into side k: its weight less that of its
+        // neighbors on the other side, which enter the separator.
+        let compute = |this: &mut Self, v: u32| {
+            let (mut in_a, mut in_b) = (0, 0);
+            for &u in this.graph.neighbors(v) {
+                if this.selected(u) {
+                    match this.side[u as usize] {
+                        Side::A => in_a += weight(this, u),
+                        Side::B => in_b += weight(this, u),
+                        _ => {}
+                    }
+                }
+            }
+            let wv = weight(this, v);
+            this.gain[v as usize] = [wv - in_b, wv - in_a];
+        };
+        for _ in 0..FM_PASSES {
+            self.pass = self.pass.wrapping_add(1);
+            if self.pass == 0 {
+                self.moved.iter_mut().for_each(|m| *m = 0);
+                self.pass = 1;
+            }
+            let pass = self.pass;
+            let mut heaps = [BinaryHeap::new(), BinaryHeap::new()];
+            for &v in separator.iter() {
+                compute(self, v);
+                for (k, heap) in heaps.iter_mut().enumerate() {
+                    heap.push((self.gain[v as usize][k], Reverse(v)));
+                }
+            }
+            let start = ws;
+            let mut best = ws;
+            let mut moves: Vec<(u32, usize, Vec<u32>)> = Vec::new();
+            let mut best_len = 0;
+            let mut since_best = 0;
+            while since_best < FM_PATIENCE {
+                let mut pick: Option<(i64, u32, usize)> = None;
+                for (k, heap) in heaps.iter_mut().enumerate() {
+                    while let Some(&(g, Reverse(v))) = heap.peek() {
+                        let vi = v as usize;
+                        if self.side[vi] != Side::S || self.moved[vi] == pass {
+                            heap.pop();
+                            continue;
+                        }
+                        if self.gain[vi][k] != g {
+                            heap.pop();
+                            continue; // a fresher entry is in the heap
+                        }
+                        let pulled = weight(self, v) - g;
+                        if sides[1 - k] - pulled < floor {
+                            break;
+                        }
+                        if pick.is_none_or(|(pg, ..)| g > pg) {
+                            pick = Some((g, v, k));
+                        }
+                        break;
+                    }
+                }
+                let Some((g, v, k)) = pick else {
+                    break;
+                };
+                let (own, other) = (side_of(k), side_of(1 - k));
+                let wv = weight(self, v);
+                let pulled: Vec<u32> = (self.graph.neighbors(v).iter())
+                    .copied()
+                    .filter(|&u| self.selected(u) && self.side[u as usize] == other)
+                    .collect();
+                self.side[v as usize] = own;
+                self.moved[v as usize] = pass;
+                sides[k] += wv;
+                sides[1 - k] -= wv - g;
+                ws -= g;
+                // v left the separator for `own`: its separator neighbors lose gain
+                // toward the other side (v would now be pulled).
+                for i in 0..self.graph.neighbors(v).len() {
+                    let x = self.graph.neighbors(v)[i];
+                    if self.selected(x) && self.side[x as usize] == Side::S {
+                        self.gain[x as usize][1 - k] -= wv;
+                        heaps[1 - k].push((self.gain[x as usize][1 - k], Reverse(x)));
+                    }
+                }
+                for &u in &pulled {
+                    self.side[u as usize] = Side::S;
+                }
+                for &u in &pulled {
+                    let wu = weight(self, u);
+                    // u is no longer on the other side: its separator neighbors gain
+                    // toward `own` (except the pulled ones, computed fresh below).
+                    for i in 0..self.graph.neighbors(u).len() {
+                        let x = self.graph.neighbors(u)[i];
+                        if self.selected(x)
+                            && self.side[x as usize] == Side::S
+                            && !pulled.contains(&x)
+                        {
+                            self.gain[x as usize][k] += wu;
+                            heaps[k].push((self.gain[x as usize][k], Reverse(x)));
+                        }
+                    }
+                }
+                for &u in &pulled {
+                    compute(self, u);
+                    for (kk, heap) in heaps.iter_mut().enumerate() {
+                        heap.push((self.gain[u as usize][kk], Reverse(u)));
+                    }
+                }
+                moves.push((v, k, pulled));
+                if ws < best {
+                    best = ws;
+                    best_len = moves.len();
+                    since_best = 0;
+                } else {
+                    since_best += 1;
+                }
+            }
+            // Back to the lightest separator of the pass.
+            while moves.len() > best_len {
+                let (v, k, pulled) = moves.pop().expect("a move");
+                let wv = weight(self, v);
+                let wp: i64 = pulled.iter().map(|&u| weight(self, u)).sum();
+                for &u in &pulled {
+                    self.side[u as usize] = side_of(1 - k);
+                }
+                self.side[v as usize] = Side::S;
+                sides[k] -= wv;
+                sides[1 - k] += wp;
+                ws += wv - wp;
+            }
+            separator.clear();
+            separator.extend(
+                all.iter()
+                    .copied()
+                    .filter(|&v| self.side[v as usize] == Side::S),
+            );
+            if best >= start {
+                break;
+            }
+        }
+        a.clear();
+        b.clear();
+        separator.clear();
+        for v in all {
+            match self.side[v as usize] {
+                Side::A => a.push(v),
+                Side::B => b.push(v),
+                Side::S => separator.push(v),
+                Side::Out => {}
+            }
+            self.side[v as usize] = Side::Out;
+        }
+    }
+
     /// Orders a subgraph split into the sides `a` and `b` with the given `separator`
     /// (vertices of either side): both sides without it recursively, the separator last.
     fn order_split(&mut self, a: Vec<u32>, b: Vec<u32>, separator: Vec<u32>, work: &mut Vec<Task>) {
@@ -733,6 +942,7 @@ impl<'a> Dissection<'a> {
         }) = best
         {
             self.refine(&mut a, &mut b, &mut separator);
+            self.fm(&mut a, &mut b, &mut separator);
             self.order_split(a, b, separator, work);
             return;
         }
@@ -789,6 +999,7 @@ impl<'a> Dissection<'a> {
         let (mut a, mut b) = (a, b);
         let (mut separator, _) = self.separator(&a, &b);
         self.refine(&mut a, &mut b, &mut separator);
+        self.fm(&mut a, &mut b, &mut separator);
         self.order_split(a, b, separator, work);
     }
 
@@ -1072,6 +1283,48 @@ mod tests {
             .flat_map(|&v| members[v as usize].iter().copied())
             .collect();
         assert_eq!(parallel, sequential);
+    }
+
+    #[test]
+    fn fiduccia_mattheyses_keeps_a_valid_balanced_separator() {
+        // A plane cut of a 14³ grid, made heavier by a ragged band around it: the passes
+        // must not leave an edge between the sides, keep the sides balanced and make the
+        // separator no heavier.
+        let n = 14;
+        let pattern = grid_pattern(n, n, n, 1);
+        let graph = Graph::from_pattern(&pattern);
+        let mut dissection = Dissection::new(&graph, None);
+        let all: Vec<u32> = (0..graph.len() as u32).collect();
+        dissection.select(&all);
+        let x = |v: u32| v as usize / (n * n);
+        let y = |v: u32| (v as usize / n) % n;
+        let (mut a, mut b): (Vec<u32>, Vec<u32>) =
+            all.iter().partition(|&&v| x(v) + (y(v) % 3) < n / 2);
+        let (mut separator, _) = dissection.separator(&a, &b);
+        let before = separator.len();
+        dissection.refine(&mut a, &mut b, &mut separator);
+        dissection.fm(&mut a, &mut b, &mut separator);
+        assert_eq!(a.len() + b.len() + separator.len(), all.len());
+        assert!(separator.len() <= before, "{} > {before}", separator.len());
+        let floor = (FM_BALANCE * all.len() as f64) as usize;
+        assert!(
+            a.len() >= floor && b.len() >= floor,
+            "{} {}",
+            a.len(),
+            b.len()
+        );
+        let mut side = vec![0u8; all.len()];
+        for &v in &b {
+            side[v as usize] = 1;
+        }
+        for &v in &separator {
+            side[v as usize] = 2;
+        }
+        for &v in &a {
+            for &u in graph.neighbors(v) {
+                assert_ne!(side[u as usize], 1, "edge {v}-{u} between the sides");
+            }
+        }
     }
 
     #[test]

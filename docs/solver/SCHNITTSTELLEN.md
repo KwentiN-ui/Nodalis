@@ -1788,3 +1788,24 @@ war besser als 23 bis 25 s.
 Offen: das Ordering. METIS ordnet diesen Graphen mit 823 Mio. Nichtnullen und 24 % weniger
 Flops, Scotch mit 897 Mio., unsere Dissektion mit 935 Mio. Schnitte in 13 statt 3 Richtungen
 sparen 7 % Flops, kosten aber die vierfache Ordnungszeit. Die Blattgröße ist ohne Einfluss.
+
+### Nachtrag: Fiduccia-Mattheyses in der Dissektion (2026-11-13)
+
+`Dissection::fm` verfeinert jeden geometrischen Separator nach der gierigen Verfeinerung
+mit FM-Durchgängen: Der jeweils beste Zug (Separatorknoten auf eine Seite, seine Nachbarn der
+anderen Seite in den Separator) wird auch dann genommen, wenn er den Separator schwerer
+macht. Am Ende eines Durchgangs geht es zurück zum leichtesten Separator. Die Gewinne werden
+inkrementell gepflegt, es gibt bis zu 8 Durchgänge, einen Abbruch nach 300 Zügen ohne
+Verbesserung, und jede Seite behält mindestens 30 % des Gewichts.
+
+| Modell | Nichtnullen vorher → nachher | Flops | Ordnungszeit |
+|---|---|---|---|
+| Punktmasse C3D20, 562k | 935 → 865 Mio. | 2.91 → 2.45e12 | +0.5 s |
+| Bracket C3D10, 591k | 523 → 509 Mio. | 1.05 → 1.00e12 | ±0 |
+| Hex-Block C3D8, 173k | unverändert | unverändert | |
+
+Die numerische Faktorisierung der Punktmasse sinkt in der Cloud (4 Kerne) von 18.5 auf etwa
+13 s. Vergleich: METIS 823 Mio. / 2.2e12, Scotch 897 Mio. / 2.6e12. Mehrere Schnittkandidaten
+zu verfeinern brachte bis 839 Mio., kostete aber das Fünffache an Ordnungszeit und wurde
+verworfen. Die Geduld (300 bis 3000 Züge) und die Zahl der Durchgänge ändern das Ergebnis
+nicht mehr.
