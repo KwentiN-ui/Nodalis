@@ -45,6 +45,9 @@ icon and drawn there as its outline (its feature edges, or its bounding box when
 It can be renamed, suppressed and deleted like a CAD part, but not meshed again. Several imported
 meshes can be merged into one; merging an imported mesh with CAD parts is refused.
 
+#screenshot("imported-mesh-outline.png", [An imported beam mesh (EALL, selected) drawn as its outline
+  beside the parts of a STEP file, one of them suppressed])
+
 #screenshot("imported-mesh-outline.png", [The imported mesh EALL in the Geometry workspace, drawn
   as its outline next to the parts of a STEP file])
 
