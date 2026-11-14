@@ -39,6 +39,15 @@ parts*, for example a mesh written by #menu("File", "Export", "Deformed Mesh (.i
 (@export-deformed) to use a buckling mode as imperfection. Select the files in the file dialog
 (the filter #ui("Input file") shows only those) and the parts appear in the FE Model workspace.
 
+Every mesh belongs to an object of the geometry. A part read from an input file has no CAD
+geometry, so it becomes an *imported mesh*: it is listed in the Geometry workspace with the mesh
+icon and drawn there as its outline (its feature edges, or its bounding box when it has none).
+It can be renamed, suppressed and deleted like a CAD part, but not meshed again. Several imported
+meshes can be merged into one; merging an imported mesh with CAD parts is refused.
+
+#screenshot("imported-mesh-outline.png", [The imported mesh EALL in the Geometry workspace, drawn
+  as its outline next to the parts of a STEP file])
+
 - A model is never replaced. If it already has parts, the imported nodes and elements are
   numbered after the highest numbers it has, so nothing that refers to the existing parts changes.
 - A part, set or surface whose name is already taken gets a number appended: the second `PART-1`
@@ -58,11 +67,13 @@ not belong to a face become line parts (for beams and trusses). Faces that share
 shell part, as a surface split into several faces in the CAD program. Part names are taken from the
 CAD file where it has names, otherwise they are `SOLID-1`, `SHELL-1`, `LINE-1` and so on.
 
-The context menu of a geometry part has #ui("Create Mesh"), #ui("Suppress") (@suppressed-parts),
+The context menu of a geometry part has #ui("Create Mesh"), #ui("Clear Mesh"), #ui("Suppress") (@suppressed-parts),
 the entries of the compound parts (@compound-parts), #ui("Properties ..."),
 #ui("Hide")/#ui("Show") and #ui("Delete").
-Deleting a geometry part keeps a mesh that was already
-created from it.
+A mesh always belongs to its geometry part: deleting the part, in the Geometry or in the FE
+Model workspace, deletes its mesh too, and renaming it renames the mesh. #ui("Clear Mesh") deletes
+only the mesh and keeps the part. A part without a mesh makes the mesh out of date, unless it is
+suppressed. #ui("Edit") > #ui("Undo") brings a deleted part back with its mesh.
 
 === Split faces
 
@@ -181,8 +192,11 @@ meshed or changed now, for example a screw that is meshed later or not at all.
   view it is drawn as its edges only and a click goes through it. Its check box still shows or
   hides it.
 - #ui("Mesh All Parts") (also in the mesh setup dialog), #ui("Create Mesh") and the meshing
-  before a solve leave suppressed parts out. A mesh the part already has stays in the FE
-  model as it is and does not count as out of date.
+  before a solve leave suppressed parts out. A mesh the part already has is kept but left out of
+  the solve and the input file export, and it does not count as out of date. Suppressing is the
+  only way to leave a part out without deleting it.
+- #ui("Suppress") is also in the context menu of a part in the FE Model workspace and works on
+  imported meshes too.
 - #ui("Split by Plane") never cuts a suppressed part, also not when it is selected.
   #ui("Defeature") finds no fillets on it, and edges or faces of a suppressed part cannot be
   picked for a fillet, chamfer, push/pull, hole ring or defeaturing.
