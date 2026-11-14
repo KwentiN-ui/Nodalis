@@ -142,7 +142,10 @@ confirms, Escape cancels), and #ui("Dissolve"), which makes its parts parts of t
   bridged, not closed, so the nodes stay in place and no element is pulled inside out. These
   ties do not appear in the tree; problems the model check finds on them are shown on the
   compound part.
-- Changing a compound joins the existing mesh anew at once, without meshing again. Sections and
+- Changing a compound joins the existing mesh anew at once, without meshing again; the
+  meshes of its parts are then out of date (like after a change of their mesh setup), and
+  #ui("Solve") or the project's #ui("Update") meshes them again, shells together. Until
+  then the parts keep their own nodes and are tied. Sections and
   other items on a part that joins a compound move to the compound; when a compound is dissolved,
   they apply to each of its parts.
 - Renaming the compound part in the FE Model workspace (#ui("Properties ...")) renames the
