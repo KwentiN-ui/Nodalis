@@ -511,6 +511,9 @@ fn rectangle(origin: [f64; 3], size: [f64; 2], radius: f64) -> Geometry {
         part_names: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     }
 }
 
@@ -687,6 +690,9 @@ fn box_and_lines() -> Geometry {
         part_names: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     }
 }
 
@@ -720,6 +726,9 @@ fn a_long_thin_round_bar_is_displayed_with_few_triangles() {
         part_names: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     };
     let display = tessellate(&geometry).unwrap();
     let triangles = display
@@ -1119,6 +1128,9 @@ fn beam_on_block() -> Geometry {
         part_names: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     }
 }
 
@@ -1217,6 +1229,9 @@ fn detection_on_geometry_keeps_to_the_faces_that_touch() {
         part_names: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     };
     let display = tessellate(&geometry).unwrap();
     let skins: Vec<_> = (display.mesh.parts.iter())
@@ -1716,6 +1731,9 @@ fn revolved(origin: [f64; 3], size: [f64; 2], radius: f64, angle: f64) -> Geomet
         part_names: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     }
 }
 
@@ -1892,6 +1910,9 @@ fn plate_and_cube(size: [f64; 3], cube_first: bool) -> Geometry {
         part_names: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     })
     .unwrap()
 }
@@ -1977,6 +1998,9 @@ fn cube() -> Geometry {
         part_names: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     })
     .unwrap()
 }
@@ -2123,6 +2147,9 @@ fn corners_of_flat_faces_are_rounded_and_bevelled() {
         part_names: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     })
     .unwrap();
     let vertex = |geometry: &Geometry, x: f64, y: f64| {
@@ -2235,6 +2262,9 @@ fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
         part_names: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     };
     let display = tessellate(&geometry).unwrap();
     let skins: Vec<_> = (display.mesh.parts.iter())
@@ -2373,6 +2403,9 @@ fn cut_block() -> Geometry {
         signatures: Vec::new(),
         compounds: Vec::new(),
         suppressed: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     })
     .unwrap();
     geometry.compounds.push(plx_model::CompoundPart {
@@ -3229,6 +3262,9 @@ fn rounded_plate() -> Geometry {
         part_names: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     })
     .unwrap();
     let upright: Vec<CadEntity> = (input.signatures.iter())
@@ -3373,6 +3409,9 @@ fn defeaturing_keeps_the_round_ends_of_slots_and_removes_pocket_corners() {
         part_names: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     })
     .unwrap();
     let found = find_blends(&input, 3.0).unwrap();
@@ -3467,6 +3506,9 @@ fn bracket() -> Geometry {
         part_names: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     })
     .unwrap()
 }
@@ -3865,6 +3907,9 @@ fn a_square_bar_is_swept_along_its_length_with_the_size_asked_for() {
         part_names: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     };
     let generated = generate_part_mesh(&geometry, "SOLID-1").unwrap();
     let mesh = generated.mesh;

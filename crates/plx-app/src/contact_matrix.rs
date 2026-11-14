@@ -21,8 +21,8 @@ fn region_parts(
 ) -> Arc<Vec<(BTreeSet<usize>, BTreeSet<usize>)>> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    model.mesh.elements().len().hash(&mut hasher);
-    model.mesh.parts.len().hash(&mut hasher);
+    model.mesh().elements().len().hash(&mut hasher);
+    model.mesh().parts.len().hash(&mut hasher);
     for r in &model.fe.contact_regions {
         r.id.hash(&mut hasher);
         format!("{:?}{:?}", r.side_a, r.side_b)
@@ -39,7 +39,7 @@ fn region_parts(
     }
     let parts: Arc<Vec<_>> = Arc::new(
         (model.fe.contact_regions.iter())
-            .map(|r| r.parts(&model.mesh))
+            .map(|r| r.parts(model.mesh()))
             .collect(),
     );
     ctx.data_mut(|d| d.insert_temp(id, (key, parts.clone())));
@@ -58,7 +58,7 @@ struct Axes {
 
 fn axes(ctx: &egui::Context, model: &Model) -> Axes {
     let fe = &model.fe;
-    let context = crate::part_filter_ui::cached_context(ctx, fe, &model.mesh);
+    let context = crate::part_filter_ui::cached_context(ctx, fe, model.mesh());
     if fe.part_groups.is_empty() {
         return Axes {
             names: context.names.clone(),

@@ -483,6 +483,40 @@ impl FeMesh {
     pub fn append(&mut self, other: FeMesh) -> Vec<String> {
         let node_offset = self.node_ids.iter().copied().max().unwrap_or(0);
         let element_offset = self.elements.iter().map(|e| e.id).max().unwrap_or(0);
+        self.append_shifted(other, node_offset, element_offset)
+    }
+
+    /// [`Self::append`], but the other mesh keeps its node and element numbers if this one
+    /// uses none of them; else it is numbered after this mesh's numbers.
+    pub fn append_keeping(&mut self, other: FeMesh) -> Vec<String> {
+        let nodes_free = !(other.node_ids.iter()).any(|n| self.node_lookup.contains_key(n));
+        let elements_free =
+            !(other.elements.iter()).any(|e| self.element_lookup.contains_key(&e.id));
+        if nodes_free && elements_free {
+            return self.append_shifted(other, 0, 0);
+        }
+        let start = |own: Option<u32>, other: Option<u32>| {
+            let from = own.unwrap_or(0);
+            // The other's lowest number lands just above.
+            from.saturating_sub(other.unwrap_or(1).saturating_sub(1))
+        };
+        let node_offset = start(
+            self.node_ids.iter().copied().max(),
+            other.node_ids.iter().copied().min(),
+        );
+        let element_offset = start(
+            self.elements.iter().map(|e| e.id).max(),
+            other.elements.iter().map(|e| e.id).min(),
+        );
+        self.append_shifted(other, node_offset, element_offset)
+    }
+
+    fn append_shifted(
+        &mut self,
+        other: FeMesh,
+        node_offset: NodeId,
+        element_offset: ElementId,
+    ) -> Vec<String> {
         let mut used: BTreeSet<String> = (self.parts.iter().map(|p| &p.name))
             .chain(self.node_sets.keys())
             .chain(self.element_sets.keys())
@@ -520,8 +554,14 @@ impl FeMesh {
             let name = fresh(&part.name);
             renamed.insert(part.name.clone(), name.clone());
             added.push(name.clone());
+            let bodies = (part.bodies.iter())
+                .map(|b| Body {
+                    name: b.name.clone(),
+                    elements: shifted(&b.elements),
+                })
+                .collect();
             self.parts.push(Part {
-                bodies: Vec::new(),
+                bodies,
                 name,
                 elements: shifted(&part.elements),
             });
@@ -578,6 +618,36 @@ impl FeMesh {
             }
         }
         self.parts.retain(|p| !gone(p));
+        self.remove_flagged(&removed, true);
+    }
+
+    /// Removes the meshes of the geometry objects `names` (in any case): parts of one body
+    /// of that name, and bodies of compound parts, each with its elements and the nodes no
+    /// other element uses. A compound part left without bodies goes. Sets, surfaces and the
+    /// CAD map lose them too; the rest keep their numbers.
+    pub fn remove_bodies(&mut self, names: &[String]) {
+        let named = |name: &str| names.iter().any(|n| name.eq_ignore_ascii_case(n));
+        let mut ids: BTreeSet<ElementId> = BTreeSet::new();
+        for part in &mut self.parts {
+            if part.bodies.is_empty() {
+                if named(&part.name) {
+                    ids.extend(part.elements.iter().copied());
+                }
+                continue;
+            }
+            for body in part.bodies.iter().filter(|b| named(&b.name)) {
+                ids.extend(body.elements.iter().copied());
+            }
+        }
+        if ids.is_empty() {
+            return;
+        }
+        let removed: Vec<bool> = self.elements.iter().map(|e| ids.contains(&e.id)).collect();
+        for part in &mut self.parts {
+            part.elements.retain(|id| !ids.contains(id));
+            part.bodies.retain(|b| !named(&b.name));
+        }
+        self.parts.retain(|p| !p.elements.is_empty());
         self.remove_flagged(&removed, true);
     }
 
@@ -1149,6 +1219,13 @@ mod tests {
         assert_eq!(empty.append(beam(5, 7, "BEAM")), ["BEAM"]);
         assert_eq!(empty.node_ids(), [5, 6]);
         assert!(empty.element(7).is_some());
+        // Kept where the numbers are free, else numbered after.
+        let mut mesh = beam(1, 1, "BEAM");
+        mesh.append_keeping(beam(5, 5, "OWN"));
+        assert_eq!(mesh.node_ids(), [1, 2, 5, 6]);
+        mesh.append_keeping(beam(1, 1, "OTHER"));
+        assert_eq!(mesh.parts[2].elements, [6]);
+        assert_eq!(mesh.element(6).unwrap().nodes, [7, 8]);
     }
 
     #[test]

@@ -616,10 +616,10 @@ mod tests {
             &Region::Nodes(vec![1, 99]),
             NODE_SOURCES,
             Target::Nodes,
-            &model.mesh,
+            model.mesh(),
         );
         let output = dialog.output().unwrap();
-        let mesh = model.mesh.clone();
+        let mesh = model.mesh().clone();
         let view = model.results.as_mut().unwrap();
         view.set_history_output(None, output.clone(), &mesh)
             .unwrap();
@@ -651,7 +651,7 @@ mod tests {
             .unwrap()
             .model;
         // A toe on the top face near the fixed end, the paths along the beam.
-        let toe = (model.mesh.node_ids().iter().zip(model.mesh.coords()))
+        let toe = (model.mesh().node_ids().iter().zip(model.mesh().coords()))
             .find(|(_, c)| **c == [10.0, 5.0, 10.0])
             .map(|(id, _)| *id)
             .unwrap();
@@ -664,7 +664,7 @@ mod tests {
             load: "Crane-1".into(),
             steps: vec![(1, 50.0)],
         };
-        let mesh = model.mesh.clone();
+        let mesh = model.mesh().clone();
         let view = model.results.as_mut().unwrap();
         view.set_history_sources(reports, vec![stations], &mesh);
 

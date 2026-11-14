@@ -272,7 +272,7 @@ impl GeometryIndex {
     }
 
     fn edge_distance(&self, model: &Model, edge: i32, point: glam::Vec3) -> Option<f32> {
-        let position = |id: NodeId| Some(model.render_position(model.mesh.node_index(id)?));
+        let position = |id: NodeId| Some(model.render_position(model.mesh().node_index(id)?));
         let points: Vec<glam::Vec3> = (self.edge_points.get(&edge)?.iter())
             .filter_map(|&id| position(id))
             .collect();
@@ -326,7 +326,7 @@ pub fn face_at(model: &Model, hit: &Hit) -> Option<i32> {
         return None;
     }
     let face = model.skin(hit.part).faces.get(hit.face)?;
-    match model.cad_entity(model.mesh.elements()[face.element].id)? {
+    match model.cad_entity(model.mesh().elements()[face.element].id)? {
         CadEntity::Face(tag) => Some(tag),
         _ => None,
     }
@@ -336,7 +336,7 @@ pub fn face_at(model: &Model, hit: &Hit) -> Option<i32> {
 pub fn edge_at(model: &Model, hit: &Hit) -> Option<i32> {
     if hit.line {
         let element = *model.skin(hit.part).line_elements.get(hit.face)?;
-        return match model.cad_entity(model.mesh.elements()[element].id)? {
+        return match model.cad_entity(model.mesh().elements()[element].id)? {
             CadEntity::Edge(tag) => Some(tag),
             _ => None,
         };
@@ -358,7 +358,7 @@ pub fn pick(
     let index = model.geometry_index();
     match picker.select_by {
         SelectBy::GeometryPart => {
-            let part = &model.mesh.parts[hit.part];
+            let part = &model.mesh().parts[hit.part];
             (part.elements.iter())
                 .filter_map(|&id| model.cad_entity(id))
                 .filter(|e| match e {
@@ -373,7 +373,7 @@ pub fn pick(
             .map(|face| {
                 let visible = |p: usize| model.parts.get(p).is_some_and(|info| info.visible);
                 (index
-                    .smooth_faces(&model.mesh, face, picker.angle(), visible)
+                    .smooth_faces(model.mesh(), face, picker.angle(), visible)
                     .into_iter())
                 .map(CadEntity::Face)
                 .collect()
@@ -382,7 +382,7 @@ pub fn pick(
         SelectBy::GeometryEdgeAngle if edges => edge_at(model, hit)
             .map(|edge| {
                 (index
-                    .smooth_edges(&model.mesh, edge, picker.angle(), |p| {
+                    .smooth_edges(model.mesh(), edge, picker.angle(), |p| {
                         model.parts.get(p).is_some_and(|info| info.visible)
                     })
                     .into_iter())
@@ -405,21 +405,21 @@ pub fn pick(
 pub fn pick_box(model: &Model, area: &BoxSelect) -> BTreeSet<CadEntity> {
     // For each face whether all and whether any of its corners lie inside.
     let mut inside: BTreeMap<i32, (bool, bool)> = BTreeMap::new();
-    for (part, info) in model.mesh.parts.iter().zip(&model.parts) {
+    for (part, info) in model.mesh().parts.iter().zip(&model.parts) {
         if !info.visible {
             continue;
         }
         for element in part
             .elements
             .iter()
-            .filter_map(|&id| model.mesh.element(id))
+            .filter_map(|&id| model.mesh().element(id))
         {
             let Some(CadEntity::Face(tag)) = model.cad_entity(element.id) else {
                 continue;
             };
             let state = inside.entry(tag).or_insert((true, false));
             for &id in &element.nodes {
-                let Some(n) = model.mesh.node_index(id) else {
+                let Some(n) = model.mesh().node_index(id) else {
                     continue;
                 };
                 let contained = area.contains(model.render_position(n));
@@ -436,7 +436,7 @@ pub fn pick_box(model: &Model, area: &BoxSelect) -> BTreeSet<CadEntity> {
 
 /// The faces of the visible parts.
 pub fn visible_faces(model: &Model) -> BTreeSet<CadEntity> {
-    (model.mesh.parts.iter().zip(&model.parts))
+    (model.mesh().parts.iter().zip(&model.parts))
         .filter(|(_, info)| info.visible)
         .flat_map(|(part, _)| &part.elements)
         .filter_map(|&id| model.cad_entity(id))
@@ -481,7 +481,7 @@ mod tests {
             return;
         };
         let index = view.geometry_index();
-        let mesh = &view.mesh;
+        let mesh = &view.mesh();
         let cylinder = BTreeSet::from([4, 5, 6]);
         for face in [4, 5, 6] {
             assert_eq!(index.smooth_faces(mesh, face, 30.0, |_| true), cylinder);

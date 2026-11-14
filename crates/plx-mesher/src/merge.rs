@@ -149,19 +149,34 @@ pub fn merge_geometries(inputs: &[Geometry]) -> Result<MergedGeometry, GmshError
             }
         }
     }
+    // Each part keeps the id it has in its input, under its new name.
+    let mut ids: Vec<plx_model::PartId> = Vec::new();
+    for (input, geometry) in inputs.iter().enumerate() {
+        for entry in &geometry.ids {
+            let name = rename(input, &entry.name);
+            if names.contains(&name) && !ids.iter().any(|p| p.id == entry.id || p.name == name) {
+                ids.push(plx_model::PartId { name, id: entry.id });
+            }
+        }
+    }
     let first = &inputs[0];
+    let mut geometry = Geometry {
+        source: sources.join(", "),
+        brep,
+        meshing: first.meshing,
+        mesh_items: Vec::new(),
+        part_names: names,
+        refinement: first.refinement,
+        signatures: new_signatures,
+        compounds,
+        suppressed: Vec::new(),
+        own_meshes: Vec::new(),
+        ids,
+        from_link: false,
+    };
+    geometry.ensure_ids();
     Ok(MergedGeometry {
-        geometry: Geometry {
-            source: sources.join(", "),
-            brep,
-            meshing: first.meshing,
-            mesh_items: Vec::new(),
-            part_names: names,
-            refinement: first.refinement,
-            signatures: new_signatures,
-            compounds,
-            suppressed: Vec::new(),
-        },
+        geometry,
         tags,
         renamed,
     })

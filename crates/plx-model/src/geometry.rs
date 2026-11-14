@@ -42,6 +42,27 @@ pub struct Geometry {
     /// they were not there, until they are unsuppressed. A mesh they have already stays.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suppressed: Vec<String>,
+    /// Names of the parts this analysis meshes itself although a link brings their mesh
+    /// with them: the link's mesh of them is left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub own_meshes: Vec<String>,
+    /// The identity of each part, by its name: a renamed part keeps its id, so that an
+    /// analysis taking the geometry through a link renames what it has of the part with it
+    /// instead of losing it, see [`Geometry::renames_since`]. Made with the parts, see
+    /// [`Geometry::ensure_ids`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ids: Vec<PartId>,
+    /// Whether a link brings the shapes: the analysis then takes the mesh of each part the
+    /// link brings meshed, unless it meshes the part itself ([`Geometry::own_meshes`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_link: bool,
+}
+
+/// The id of a part of the geometry, see [`Geometry::ids`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PartId {
+    pub name: String,
+    pub id: crate::Id,
 }
 
 /// Cut faces of a cyclic symmetric sector, whose meshes have to match: the slave faces are
@@ -128,6 +149,42 @@ impl Geometry {
         renamed
     }
 
+    /// Renames the part `old` of the geometry to `new`, with what refers to it by name: its
+    /// compound, its suppression and the mesh setup items. False if the geometry has no part
+    /// of that name: its names are not known without Gmsh, see [`Geometry::part_names`].
+    pub fn rename_part(&mut self, old: &str, new: &str) -> bool {
+        let Some(at) = (self.part_names.iter()).position(|p| p.eq_ignore_ascii_case(old)) else {
+            return false;
+        };
+        self.ensure_ids();
+        self.part_names[at] = new.to_owned();
+        self.rename_compound_member(old, new);
+        for entry in &mut self.ids {
+            if entry.name.eq_ignore_ascii_case(old) {
+                entry.name = new.to_owned();
+            }
+        }
+        for part in self.suppressed.iter_mut().chain(&mut self.own_meshes) {
+            if part.eq_ignore_ascii_case(old) {
+                *part = new.to_owned();
+            }
+        }
+        for item in &mut self.mesh_items {
+            for part in item.kind.parts_mut().into_iter().flatten() {
+                if part.eq_ignore_ascii_case(old) {
+                    *part = new.to_owned();
+                }
+            }
+        }
+        true
+    }
+
+    /// The parts of the geometry whose names are known: all of them since the geometry was
+    /// imported or changed, empty for a geometry Gmsh names, see [`Geometry::part_names`].
+    pub fn known_parts(&self) -> &[String] {
+        &self.part_names
+    }
+
     /// Whether the part `part` is suppressed.
     pub fn is_suppressed(&self, part: &str) -> bool {
         names(&self.suppressed, part)
@@ -146,6 +203,75 @@ impl Geometry {
             self.suppressed.retain(|p| !names(parts, p));
         }
         self.suppressed.len() != before
+    }
+
+    /// The id of the part `name`, if it has one, see [`Geometry::ids`].
+    pub fn part_id(&self, name: &str) -> Option<crate::Id> {
+        (self.ids.iter())
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+            .map(|p| p.id)
+    }
+
+    /// Gives every part of known name an id, and drops the ids of parts that went.
+    pub fn ensure_ids(&mut self) {
+        if self.part_names.is_empty() {
+            return;
+        }
+        let names = &self.part_names;
+        self.ids
+            .retain(|p| names.iter().any(|n| n.eq_ignore_ascii_case(&p.name)));
+        for name in &self.part_names {
+            if !self.ids.iter().any(|p| p.name.eq_ignore_ascii_case(name)) {
+                self.ids.push(PartId {
+                    name: name.clone(),
+                    id: crate::Id::new(),
+                });
+            }
+        }
+    }
+
+    /// Takes the ids of the parts of `from` that this geometry has by the same name, e.g.
+    /// after a CAD operation made it of `from`; the other parts get new ones.
+    pub fn inherit_ids(&mut self, from: &Geometry) {
+        for entry in &from.ids {
+            if self.part_id(&entry.name).is_none() && names(&self.part_names, &entry.name) {
+                self.ids.push(entry.clone());
+            }
+        }
+        self.ensure_ids();
+    }
+
+    /// The parts renamed since `before`, an older copy of the same shapes, as (old, new)
+    /// names: found by their ids.
+    pub fn renames_since(&self, before: &Geometry) -> Vec<(String, String)> {
+        (self.ids.iter())
+            .filter_map(|now| {
+                let old = before.ids.iter().find(|p| p.id == now.id)?;
+                (!old.name.eq_ignore_ascii_case(&now.name))
+                    .then(|| (old.name.clone(), now.name.clone()))
+            })
+            .collect()
+    }
+
+    /// Whether this analysis meshes the part `part` itself although a link brings its mesh.
+    pub fn meshes_itself(&self, part: &str) -> bool {
+        names(&self.own_meshes, part)
+    }
+
+    /// Has this analysis mesh the parts `parts` itself, or take their mesh from the link
+    /// that brings them again; true if that changed anything.
+    pub fn set_own_meshes(&mut self, parts: &[String], own: bool) -> bool {
+        let before = self.own_meshes.len();
+        if own {
+            for part in parts {
+                if !self.meshes_itself(part) {
+                    self.own_meshes.push(part.clone());
+                }
+            }
+        } else {
+            self.own_meshes.retain(|p| !names(parts, p));
+        }
+        self.own_meshes.len() != before
     }
 
     /// Takes parts out of their compounds; compounds left empty go.
@@ -395,6 +521,17 @@ impl MeshSetupKind {
         }
     }
 
+    /// [`MeshSetupKind::parts`] to change.
+    pub fn parts_mut(&mut self) -> Option<&mut Vec<String>> {
+        match self {
+            MeshSetupKind::MeshingParameters { parts, .. }
+            | MeshSetupKind::TetrahedralGmsh { parts, .. } => Some(parts),
+            MeshSetupKind::ExtrudeMesh(extrude) => Some(&mut extrude.parts),
+            MeshSetupKind::ThickenShellMesh(thicken) => Some(&mut thicken.parts),
+            MeshSetupKind::LocalMeshSize { .. } => None,
+        }
+    }
+
     /// The parts the item applies to; `None` for a local mesh size, which applies to faces
     /// and edges of any part.
     pub fn parts(&self) -> Option<&[String]> {
@@ -606,6 +743,9 @@ mod tests {
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let parts = ["SOLID-1".to_owned(), "solid-1".to_owned()];
         assert!(geometry.set_suppressed(&parts, true));
@@ -657,6 +797,9 @@ mod tests {
             part_names: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         assert_eq!(geometry.parameters("solid-1"), fine);
         assert_eq!(geometry.parameters("SOLID-2").max_size, 5.0);
@@ -743,6 +886,9 @@ mod tests {
             part_names: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         assert!(geometry.extrusion("a").is_some());
         assert!(geometry.extrusion("C").is_none());

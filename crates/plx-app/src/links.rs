@@ -37,7 +37,6 @@ use plx_model::{
 use crate::tree::{CROSS_SECTIONS, TreeItem};
 
 pub const GEOMETRY: &str = "Geometry";
-pub const MESH: &str = "Mesh";
 pub const SETUP: &str = "Setup";
 pub const RESULTS: &str = "Results";
 pub const STATE: &str = "State";
@@ -78,15 +77,23 @@ pub struct Data<'a> {
     pub geometry: Option<&'a Geometry>,
     pub mesh: &'a FeMesh,
     pub fe: &'a FeModel,
-    pub mesh_inputs: &'a BTreeMap<String, u64>,
+    pub origins: &'a plx_model::PartOrigins,
 }
 
-/// A mesh with what belongs to it, taken over by a link of the mesh.
+impl<'a> Data<'a> {
+    /// What the solver gets of it: without the suppressed geometry objects.
+    pub fn active(&self) -> plx_model::Active<'a> {
+        plx_model::active_model(self.mesh, self.fe, self.geometry, self.origins)
+    }
+}
+
+/// Geometry objects as a Geometry link brings them: the CAD shapes, the mesh the source has
+/// of them and of its objects without shapes, with what belongs to the mesh.
 pub struct MeshCopy {
     /// The geometry it was meshed from.
     pub geometry: Option<Geometry>,
     pub mesh: FeMesh,
-    pub mesh_inputs: BTreeMap<String, u64>,
+    pub origins: plx_model::PartOrigins,
     pub mesh_sets: Vec<plx_model::MeshSet>,
     pub element_types: Vec<plx_model::PartElementType>,
     /// The operations the mesh has applied, so that the copy meshes alike.
@@ -94,11 +101,23 @@ pub struct MeshCopy {
 }
 
 impl MeshCopy {
+    /// CAD shapes without a mesh, such as some parts of a file.
+    pub fn shapes(geometry: Geometry) -> Self {
+        Self {
+            geometry: Some(geometry),
+            mesh: FeMesh::default(),
+            origins: Default::default(),
+            mesh_sets: Vec::new(),
+            element_types: Vec::new(),
+            mesh_operations: Vec::new(),
+        }
+    }
+
     pub fn of(data: Data) -> Self {
         Self {
             geometry: data.geometry.cloned(),
             mesh: data.mesh.clone(),
-            mesh_inputs: data.mesh_inputs.clone(),
+            origins: data.origins.clone(),
             mesh_sets: data.fe.mesh_sets.clone(),
             element_types: data.fe.element_types.clone(),
             mesh_operations: data.fe.mesh_operations.clone(),
@@ -106,18 +125,19 @@ impl MeshCopy {
     }
 }
 
-/// Meshes of several sources put together into one, in their order, for the Mesh row of an
+/// Meshes of several sources put together into one, in their order, for the Geometry row of an
 /// analysis that takes several mesh links. Node and element numbers of each mesh are
 /// shifted past those before it; parts, sets and surfaces whose names an earlier mesh has
-/// get "-2", "-3" …; `merged` is the geometry of all, put together from theirs, with the new
-/// tags of each one's CAD entities: without it, where one has no geometry, the meshes have
-/// none either. The parts stay as meshed, see [`MeshCopy::mesh_inputs`]. Returns the mesh with the renamings, by mesh, for the output.
+/// get "-2", "-3" …; `merged` is the geometry of those that have one, put together from theirs,
+/// with the new tags of each one's CAD entities, by mesh: the meshes of its parts are linked
+/// meshes, those of the others imported meshes, geometry objects of their own. Returns the
+/// mesh with the renamings, by mesh, for the output.
 pub fn merge_meshes(
     copies: Vec<MeshCopy>,
     merged: Option<plx_mesher::MergedGeometry>,
 ) -> (MeshCopy, Vec<BTreeMap<String, String>>) {
     use plx_mesh::{Part, SurfaceDefinition};
-    use plx_model::Region;
+    use plx_model::{PartOrigin, Region};
     use std::collections::BTreeSet;
     let unique = |name: &str, used: &BTreeSet<String>| {
         (1..)
@@ -139,7 +159,7 @@ pub fn merge_meshes(
     let mut out = MeshCopy {
         geometry,
         mesh: FeMesh::default(),
-        mesh_inputs: BTreeMap::new(),
+        origins: Default::default(),
         mesh_sets: Vec::new(),
         element_types: Vec::new(),
         mesh_operations: Vec::new(),
@@ -225,8 +245,25 @@ pub fn merge_meshes(
                     .renumbered(entity_tags),
             );
         }
-        // No mesh inputs: the parts stay as they are, like parts read from an input file,
-        // and are out of date only with the meshes they come from.
+        // The meshes of parts of the geometry are made by the blocks they come from: out of
+        // date only with them. Without a geometry of all, every part is an imported mesh.
+        let has_geometry = out.geometry.is_some() && copy.geometry.is_some();
+        for (body, origin) in copy.origins.iter() {
+            let name = (geometry_renamed.get(index))
+                .and_then(|r| r.get(body))
+                .or_else(|| parts.get(body))
+                .cloned()
+                .unwrap_or_else(|| body.to_owned());
+            let origin = match origin {
+                PartOrigin::Meshed(_) | PartOrigin::Linked if has_geometry => PartOrigin::Linked,
+                imported @ PartOrigin::Imported { .. } => imported,
+                _ => PartOrigin::Imported {
+                    suppressed: false,
+                    linked: false,
+                },
+            };
+            out.origins.insert(&name, origin);
+        }
         for mut set_item in copy.mesh_sets {
             set_item.name = set(&set_item.name);
             set_item.region = match set_item.region {
@@ -375,10 +412,10 @@ pub fn is_collection(path: &[String]) -> bool {
     matches!(path, [cell, category] if cell == SETUP && CATEGORIES.contains(&category.as_str()))
 }
 
-/// Whether the row of `path` puts the geometries or meshes of several links together when it
-/// is a row of an analysis: its Geometry and its Mesh row.
+/// Whether the row of `path` puts the geometry objects of several links together when it
+/// is a row of an analysis: its Geometry row.
 pub fn assembles(path: &[String]) -> bool {
-    matches!(path, [cell] if cell == GEOMETRY || cell == MESH)
+    matches!(path, [cell] if cell == GEOMETRY)
 }
 
 /// The category of the setup a link of a category or of one of its items fills.
@@ -471,7 +508,7 @@ pub fn filled_paths(link: &Link, source: &str) -> Vec<(Vec<String>, String)> {
     if !is_state(link) {
         return vec![(slot(link).to_vec(), source.to_owned())];
     }
-    let mut paths = vec![path(&[STATE]), path(&[GEOMETRY]), path(&[MESH])];
+    let mut paths = vec![path(&[STATE]), path(&[GEOMETRY])];
     for category in CATEGORIES.iter().filter(|c| **c != "Steps") {
         paths.push(path(&[SETUP, category]));
     }
@@ -910,8 +947,7 @@ pub fn entries(fe: &FeModel, category: &str) -> Vec<String> {
 /// Whether the analysis has what the path names, so that a link can take it.
 pub fn exists(data: Data, path: &[String]) -> bool {
     match path {
-        [cell] if cell == GEOMETRY => data.geometry.is_some(),
-        [cell] if cell == MESH => data.mesh.element_count() > 0,
+        [cell] if cell == GEOMETRY => data.geometry.is_some() || data.mesh.element_count() > 0,
         [cell] if cell == SETUP => true,
         [cell, category] if cell == SETUP => CATEGORIES.contains(&category.as_str()),
         [cell, category, name] if cell == SETUP => entries(data.fe, category).contains(name),
@@ -920,9 +956,9 @@ pub fn exists(data: Data, path: &[String]) -> bool {
     }
 }
 
-/// Takes over the shapes of a geometry link's source: the mesh setup, the default meshing
-/// parameters and the refinement stay those the target has, so that each analysis meshes
-/// the same geometry its own way. A target without geometry starts from the source's setup.
+/// Takes over the shapes of a geometry link's source: the mesh setup and the default meshing
+/// parameters stay those the target has, so that each analysis meshes the same geometry its
+/// own way; the refinement of a refine mesh block comes with the shapes. A target without geometry starts from the source's setup.
 ///
 /// When the shapes changed, Gmsh's tags did with them: the local mesh sizes are renumbered
 /// here, and the returned tags are for the selections on the old shapes, see
@@ -943,8 +979,9 @@ pub fn take_geometry(
             let mut taken = Geometry {
                 meshing: own.meshing,
                 mesh_items: own.mesh_items,
-                refinement: own.refinement,
                 suppressed: own.suppressed,
+                own_meshes: own.own_meshes,
+                from_link: own.from_link,
                 ..source
             };
             if let Some(tags) = &tags {
@@ -967,6 +1004,225 @@ pub fn take_geometry(
         (_, source) => source,
     };
     tags
+}
+
+/// Renames what the analysis has of the parts the source renamed since the analysis took
+/// its shapes, found by the parts' ids ([`Geometry::renames_since`]): the part in its own
+/// geometry with its suppression, mesh setup and compound, its mesh, and the sections,
+/// boundary conditions and other items of the FE model on it. Returns the renames, as (old,
+/// new) names.
+pub fn follow_renames(
+    geometry: &mut Option<Geometry>,
+    source: Option<&Geometry>,
+    mesh: &mut FeMesh,
+    origins: &mut plx_model::PartOrigins,
+    fe: &mut FeModel,
+) -> Vec<(String, String)> {
+    let (Some(own), Some(source)) = (geometry.as_mut(), source) else {
+        return Vec::new();
+    };
+    let renames = source.renames_since(own);
+    // A mesh up to date stays so under the new name.
+    let (space, matching) = (fe.properties.space, fe.matching_faces());
+    let input = |geometry: &Geometry, name: &str| {
+        plx_model::fingerprint::mesh_input(geometry, &matching, space, name)
+    };
+    let up_to_date: Vec<bool> = (renames.iter())
+        .map(|(old, _)| origins.made_from(old) == Some(input(own, old)))
+        .collect();
+    // Through names of no part, so that parts that swap names keep theirs apart.
+    let parked: Vec<String> = (0..renames.len()).map(|i| format!("\u{1}{i}")).collect();
+    let steps = (renames.iter().zip(&parked))
+        .map(|((old, _), park)| (old.as_str(), park.as_str()))
+        .chain((renames.iter().zip(&parked)).map(|((_, new), park)| (park.as_str(), new.as_str())));
+    for (old, new) in steps.collect::<Vec<_>>() {
+        own.rename_part(old, new);
+        for index in 0..mesh.parts.len() {
+            if mesh.parts[index].name.eq_ignore_ascii_case(old) {
+                mesh.rename_part(index, new);
+            }
+            for body in &mut mesh.parts[index].bodies {
+                if body.name.eq_ignore_ascii_case(old) {
+                    body.name = new.to_owned();
+                }
+            }
+        }
+        fe.rename_part(old, new);
+        origins.rename(old, new);
+    }
+    for ((_, new), up_to_date) in renames.iter().zip(up_to_date) {
+        if up_to_date {
+            origins.set_meshed(new, input(own, new));
+        }
+    }
+    renames
+}
+
+/// The mesh of an analysis after [`take_objects`], with the origins of its parts.
+pub struct Taken {
+    pub mesh: FeMesh,
+    pub origins: plx_model::PartOrigins,
+    /// Says how many selections on CAD entities were not found in the new shapes, if any.
+    pub lost: Option<String>,
+    /// The parts the source renamed, as (old, new) names, see [`follow_renames`].
+    pub renames: Vec<(String, String)>,
+    /// Lines for the output, e.g. on own sets renamed for sets the link brings.
+    pub notes: Vec<String>,
+}
+
+/// What an analysis has after a Geometry link brought `copy` in place of what it had: the
+/// shapes of the link with the analysis' own mesh setup ([`take_geometry`]), and the mesh of
+/// every object as the link brings it, but of the parts the analysis meshes itself
+/// ([`Geometry::own_meshes`]). Its own meshes of parts the link brings no mesh of stay, as
+/// far as the parts are still there, and so do the meshes it imported itself; parts of the
+/// geometry without a mesh are meshed by the analysis.
+pub fn take_objects(
+    geometry: &mut Option<Geometry>,
+    mesh: &FeMesh,
+    origins: &plx_model::PartOrigins,
+    fe: &mut FeModel,
+    copy: MeshCopy,
+) -> Taken {
+    use plx_model::{PartOrigin, part_bodies};
+    let MeshCopy {
+        geometry: shapes,
+        mesh: mut incoming,
+        origins: incoming_origins,
+        mesh_sets,
+        element_types,
+        mesh_operations,
+    } = copy;
+    // What the analysis has of parts the source renamed takes their new names first.
+    let mut mesh = mesh.clone();
+    let mut origins = origins.clone();
+    let renames = follow_renames(geometry, shapes.as_ref(), &mut mesh, &mut origins, fe);
+    let (mesh, origins) = (&mesh, &origins);
+    // The link's meshes of CAD parts come with the compound parts they were joined to.
+    let cad_meshes = (incoming_origins.iter())
+        .any(|(_, o)| matches!(o, PartOrigin::Meshed(_) | PartOrigin::Linked));
+    let tags = take_geometry(geometry, shapes, !cad_meshes);
+    if let Some(geometry) = geometry {
+        geometry.from_link = true;
+    }
+    let lost = tags
+        .as_ref()
+        .and_then(|tags| follow_geometry(fe, None, tags));
+    let geometry = geometry.as_ref();
+    // The link's meshes, but of the parts meshed here.
+    let mut linked = incoming_origins.linked(origins);
+    let own: Vec<String> = (incoming.parts.iter().flat_map(part_bodies))
+        .filter(|b| geometry.is_some_and(|g| g.meshes_itself(b)))
+        .map(str::to_owned)
+        .collect();
+    if !own.is_empty() {
+        incoming.remove_bodies(&own);
+    }
+    linked.reconcile(&incoming);
+    // Of what it had, its own meshes of parts still there that the link brings none of, and
+    // the meshes it imported itself.
+    let brought = |name: &str| linked.get(name).is_some();
+    let known = |name: &str| {
+        geometry.is_some_and(|g| g.known_parts().iter().any(|p| p.eq_ignore_ascii_case(name)))
+    };
+    let keep = |name: &str| match origins.get(name) {
+        Some(PartOrigin::Meshed(_)) => known(name) && !brought(name),
+        Some(PartOrigin::Imported { linked: false, .. }) => !brought(name),
+        _ => false,
+    };
+    let dropped: Vec<String> = (mesh.parts.iter().flat_map(part_bodies))
+        .filter(|b| !keep(b))
+        .map(str::to_owned)
+        .collect();
+    let mut kept = mesh.clone();
+    kept.remove_bodies(&dropped);
+    if let Some(tags) = &tags {
+        kept.cad = kept.cad.renumbered(tags);
+    }
+    let mut kept_origins = origins.clone();
+    kept_origins.reconcile(&kept);
+    let before = mesh;
+    let (mesh, origins) = if kept.parts.is_empty() {
+        (incoming, linked)
+    } else if incoming.parts.is_empty() {
+        (kept, kept_origins)
+    } else {
+        // The link's mesh keeps its numbers, so that results of the same mesh fit; the own
+        // meshes keep theirs where the link's mesh leaves them free.
+        let names: Vec<String> = kept.parts.iter().map(|p| p.name.clone()).collect();
+        let mut both = incoming;
+        let added = both.append_keeping(kept);
+        let mut origins = linked;
+        for (old, new) in names.iter().zip(&added) {
+            if let Some(origin) = kept_origins.get(old) {
+                origins.insert(new, origin);
+            }
+        }
+        for (body, origin) in kept_origins.iter() {
+            if origins.get(body).is_none() {
+                origins.insert(body, origin);
+            }
+        }
+        origins.reconcile(&both);
+        (both, origins)
+    };
+    // What was picked by node or element numbers on an object whose mesh stays the same
+    // follows its new numbers: within the object a node keeps its local number.
+    let (nodes, elements) = before.renumbering_to(&mesh);
+    if !nodes.is_empty() || !elements.is_empty() {
+        fe.renumber(&nodes, &elements);
+    }
+    let mut notes = Vec::new();
+    // What the FE model says about the link's meshes comes with them; its own stays.
+    if cad_meshes || !mesh_sets.is_empty() || !element_types.is_empty() {
+        // The sets the link brought last time go, the analysis' own stay; one whose name
+        // the link brings now is renamed.
+        let mut incoming_sets = mesh_sets;
+        for set in &mut incoming_sets {
+            set.linked = true;
+        }
+        let mut own_sets: Vec<_> = (fe.mesh_sets.drain(..)).filter(|s| !s.linked).collect();
+        let taken = |sets: &[plx_model::MeshSet], kind, name: &str| {
+            (sets.iter()).any(|s| s.kind == kind && s.name.eq_ignore_ascii_case(name))
+        };
+        for index in 0..own_sets.len() {
+            let (kind, old) = (own_sets[index].kind, own_sets[index].name.clone());
+            if !taken(&incoming_sets, kind, &old) {
+                continue;
+            }
+            let new = (2..)
+                .map(|n| format!("{old}-{n}"))
+                .find(|n| !taken(&incoming_sets, kind, n) && !taken(&own_sets, kind, n))
+                .unwrap_or_default();
+            fe.rename_set(kind, &old, &new);
+            notes.push(format!(
+                "{} {old} renamed to {new}: the linked source has one of that name",
+                kind.label()
+            ));
+            own_sets[index].name = new;
+        }
+        fe.mesh_sets = incoming_sets;
+        fe.mesh_sets.extend(own_sets);
+        let own_types: Vec<_> = (fe.element_types.drain(..))
+            .filter(|own| !element_types.iter().any(|t| t.part == own.part))
+            .collect();
+        fe.element_types = element_types;
+        fe.element_types.extend(own_types);
+        let own_operations: Vec<_> = (fe.mesh_operations.drain(..))
+            .filter(|own| !mesh_operations.iter().any(|o| o.name == own.name))
+            .collect();
+        let mut operations = mesh_operations;
+        operations.extend(own_operations);
+        fe.mesh_operations = operations;
+    }
+    let mut origins = origins;
+    origins.settle(geometry);
+    Taken {
+        mesh,
+        origins,
+        lost,
+        renames,
+        notes,
+    }
 }
 
 /// Where the shapes of `old` are in `new`, which takes their place with its own mesh, e.g.
@@ -1003,19 +1259,19 @@ pub fn fingerprint(data: Data, path: &[String]) -> u64 {
     let mut hash = Fnv::new();
     match path {
         [cell] if cell == GEOMETRY => {
-            // The shapes only: the mesh setup stays the target's own, see [`take_geometry`].
+            // The shapes, the mesh setup stays the target's own, see [`take_geometry`], and
+            // the meshes with what belongs to them.
             if let Some(geometry) = data.geometry {
                 hash.add_str(&geometry.source);
                 hash.add_str(&geometry.brep);
                 hash.add_debug(&geometry.part_names);
+                hash.add_debug(&geometry.compounds);
             }
-        }
-        [cell] if cell == MESH => {
             hash.add(&data.mesh.input_fingerprint().to_le_bytes());
             // A refine mesh block gives geometry to mesh with other sizes.
             let refinement = data.geometry.map(|g| g.refinement.to_bits());
             hash.add_debug(&refinement);
-            hash.add_debug(data.mesh_inputs);
+            hash.add_debug(data.origins);
             hash.add_debug(&data.fe.mesh_sets);
             hash.add_debug(&data.fe.element_types);
             hash.add_debug(&data.fe.mesh_operations);
@@ -1310,8 +1566,8 @@ pub fn clear_submodel(fe: &mut FeModel) {
 /// What flows through the pin of a row: the type a link checks before anything is copied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DataType {
+    /// Geometry objects with or without a mesh.
     Geometry,
-    Mesh,
     /// The setup of a model or a part of it: materials, steps and the like.
     Setup,
     /// The results of a step, also where a row takes them: the State row, a measure.
@@ -1329,7 +1585,6 @@ impl DataType {
     pub fn of(path: &[String]) -> Option<Self> {
         Some(match path.first()?.as_str() {
             GEOMETRY => Self::Geometry,
-            MESH => Self::Mesh,
             SETUP if is_step_input(path) => Self::Results,
             SETUP => Self::Setup,
             RESULTS | STATE | MEASURE | STEP_RESULT | GLOBAL_RESULTS => Self::Results,
@@ -1349,7 +1604,6 @@ impl DataType {
     pub fn label(self) -> &'static str {
         match self {
             Self::Geometry => "geometry",
-            Self::Mesh => "mesh",
             Self::Setup => "setup",
             Self::Results => "results",
             Self::Number => "number",
@@ -1465,7 +1719,7 @@ pub fn tree_items(fe: &FeModel, path: &[String]) -> Vec<TreeItem> {
         items
     };
     match path {
-        [cell] if cell == MESH => vec![TreeItem::Mesh],
+        [cell] if cell == GEOMETRY => vec![TreeItem::Mesh],
         [cell] if cell == SETUP => CATEGORIES.iter().flat_map(|c| all(c)).collect(),
         [cell, category] if cell == SETUP => all(category),
         [cell, category, name] if cell == SETUP => category_items(fe, category, Some(name)),
@@ -1611,8 +1865,8 @@ pub fn path_of(fe: &FeModel, item: &TreeItem) -> Option<Vec<String>> {
         | TreeItem::Part(_)
         | TreeItem::NodeSet(_)
         | TreeItem::ElementSet(_)
-        | TreeItem::Surface(_) => Some(vec![MESH.to_owned()]),
-        TreeItem::MeshItem(_) | TreeItem::MeshOperation(_) => Some(vec![MESH.to_owned()]),
+        | TreeItem::Surface(_) => Some(vec![GEOMETRY.to_owned()]),
+        TreeItem::MeshItem(_) | TreeItem::MeshOperation(_) => Some(vec![GEOMETRY.to_owned()]),
         TreeItem::Material(i) => entry("Materials", &fe.materials.get(*i)?.name),
         TreeItem::CrossSection(i) => entry(CROSS_SECTIONS, &fe.cross_sections.get(*i)?.name),
         TreeItem::Section(i) => entry("Sections", &fe.sections.get(*i)?.name),
@@ -1704,6 +1958,297 @@ mod tests {
         assert!(!writers(&fe, "Shake").load_case);
     }
 
+    /// A tetrahedron of one part `name`, its nodes from `first` on.
+    fn tet_part(name: &str, first: u32, offset: f64) -> FeMesh {
+        use plx_mesh::{Element, ElementShape, Part};
+        let mut mesh = FeMesh::default();
+        let corners = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        for (i, p) in corners.iter().enumerate() {
+            mesh.set_node(first + i as u32, [p[0] + offset, p[1], p[2]]);
+        }
+        mesh.add_element(Element {
+            id: first,
+            type_name: "C3D4".into(),
+            shape: ElementShape::Tet4,
+            nodes: (first..first + 4).collect(),
+        })
+        .unwrap();
+        mesh.parts.push(Part::new(name, vec![first]));
+        mesh
+    }
+
+    fn two_parts(names: &[&str]) -> Geometry {
+        Geometry {
+            source: "a.step".into(),
+            brep: "shapes".into(),
+            meshing: Default::default(),
+            mesh_items: Vec::new(),
+            part_names: names.iter().map(|n| n.to_string()).collect(),
+            refinement: 1.0,
+            signatures: Vec::new(),
+            compounds: Vec::new(),
+            suppressed: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
+        }
+    }
+
+    #[test]
+    fn a_geometry_link_brings_objects_with_their_meshes() {
+        use plx_model::{PartOrigin, PartOrigins};
+        // The source: SOLID-1 meshed, SOLID-2 not, and a mesh without shapes.
+        let mut mesh = tet_part("SOLID-1", 1, 0.0);
+        mesh.append(tet_part("BLOCK", 1, 5.0));
+        let mut origins = PartOrigins::default();
+        origins.set_meshed("SOLID-1", 7);
+        origins.reconcile(&mesh);
+        let copy = || MeshCopy {
+            geometry: Some(two_parts(&["SOLID-1", "SOLID-2"])),
+            mesh: mesh.clone(),
+            origins: origins.clone(),
+            mesh_sets: Vec::new(),
+            element_types: Vec::new(),
+            mesh_operations: Vec::new(),
+        };
+        // A new analysis takes the objects with their meshes, made where they come from.
+        let (mut geometry, mut fe) = (None, FeModel::default());
+        let taken = take_objects(
+            &mut geometry,
+            &FeMesh::default(),
+            &PartOrigins::default(),
+            &mut fe,
+            copy(),
+        );
+        assert_eq!(taken.mesh.parts.len(), 2);
+        assert_eq!(taken.origins.get("SOLID-1"), Some(PartOrigin::Linked));
+        assert!(taken.origins.is_imported("BLOCK") && taken.origins.is_linked("BLOCK"));
+        // SOLID-2 has no mesh: the analysis meshes it.
+        let status = |geometry: &Option<Geometry>, taken: &Taken| {
+            crate::status::analysis_status(
+                geometry.as_ref(),
+                &taken.mesh,
+                &FeModel::default(),
+                &taken.origins,
+                None,
+                &Default::default(),
+                false,
+                None,
+            )
+        };
+        assert_eq!(status(&geometry, &taken).stale_parts, ["SOLID-2"]);
+        // It meshes SOLID-2 itself, and SOLID-1 too in place of the linked mesh: both are
+        // meshed here from now on, as meshing them makes them.
+        let mut own = taken.mesh.clone();
+        own.append(tet_part("SOLID-2", 1, 10.0));
+        let mut own_origins = taken.origins.clone();
+        let input = plx_model::fingerprint::mesh_input(
+            geometry.as_ref().unwrap(),
+            &[],
+            fe.properties.space,
+            "SOLID-2",
+        );
+        own_origins.set_meshed("SOLID-2", input);
+        own_origins.reconcile(&own);
+        geometry
+            .as_mut()
+            .unwrap()
+            .set_own_meshes(&["SOLID-1".into(), "SOLID-2".into()], true);
+        // The link brings its objects again: SOLID-1's linked mesh is left out, the own
+        // mesh of SOLID-2 stays, and so does a mesh the analysis imported itself.
+        own.append(tet_part("PLATE", 1, 20.0));
+        own_origins.reconcile(&own);
+        let taken = take_objects(&mut geometry, &own, &own_origins, &mut fe, copy());
+        let names: Vec<&str> = taken.mesh.parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["BLOCK", "SOLID-2", "PLATE"]);
+        assert_eq!(
+            taken.origins.get("SOLID-2"),
+            Some(PartOrigin::Meshed(input))
+        );
+        assert!(taken.origins.is_imported("PLATE") && !taken.origins.is_linked("PLATE"));
+        assert_eq!(status(&geometry, &taken).stale_parts, ["SOLID-1"]);
+        // The link's mesh keeps its numbers, the own ones come after.
+        assert_eq!(taken.mesh.elements()[0].nodes, [5, 6, 7, 8]);
+        // Taking the linked mesh again drops the own mesh of SOLID-1, if any.
+        geometry
+            .as_mut()
+            .unwrap()
+            .set_own_meshes(&["SOLID-1".into()], false);
+        let taken = take_objects(&mut geometry, &taken.mesh, &taken.origins, &mut fe, copy());
+        assert_eq!(taken.origins.get("SOLID-1"), Some(PartOrigin::Linked));
+        assert!(status(&geometry, &taken).stale_parts.is_empty());
+    }
+
+    #[test]
+    fn what_an_analysis_has_of_a_part_follows_a_rename_in_the_source() {
+        use plx_model::{MeshSet, PartOrigins, Region, SetKind};
+        let mut shapes = two_parts(&["SOLID-1", "SOLID-2"]);
+        shapes.ensure_ids();
+        let source_set = MeshSet::new("Node_Set-1", SetKind::Nodes, Region::Nodes(vec![1]));
+        let copy = |shapes: &Geometry, mesh: FeMesh| {
+            let mut origins = PartOrigins::default();
+            for part in &mesh.parts {
+                origins.set_meshed(&part.name, 7);
+            }
+            origins.reconcile(&mesh);
+            MeshCopy {
+                geometry: Some(shapes.clone()),
+                mesh,
+                origins,
+                mesh_sets: vec![source_set.clone()],
+                element_types: Vec::new(),
+                mesh_operations: Vec::new(),
+            }
+        };
+        let (mut geometry, mut fe) = (None, FeModel::default());
+        let first = copy(&shapes, tet_part("SOLID-1", 1, 0.0));
+        let taken = take_objects(
+            &mut geometry,
+            &FeMesh::default(),
+            &Default::default(),
+            &mut fe,
+            first,
+        );
+        assert!(geometry.as_ref().unwrap().from_link);
+        assert!(fe.mesh_sets[0].linked);
+        // The analysis meshes SOLID-2 itself, numbered after the linked mesh, and has a set
+        // of its own on it, by the name of the source's set.
+        let mut own = taken.mesh.clone();
+        own.append_keeping(tet_part("SOLID-2", 1, 10.0));
+        let mut origins = taken.origins.clone();
+        origins.set_meshed("SOLID-2", 9);
+        origins.reconcile(&own);
+        let geometry_mut = geometry.as_mut().unwrap();
+        geometry_mut.set_own_meshes(&["SOLID-2".into()], true);
+        geometry_mut.set_suppressed(&["SOLID-2".into()], true);
+        fe.mesh_sets.push(MeshSet::new(
+            "Node_Set-1",
+            SetKind::Elements,
+            Region::Parts(vec!["SOLID-2".into()]),
+        ));
+        fe.mesh_sets.push(MeshSet::new(
+            "Node_Set-1",
+            SetKind::Nodes,
+            Region::Nodes(vec![5]),
+        ));
+        let own_nodes = own.elements()[1].nodes.clone();
+        assert_eq!(own_nodes, [5, 6, 7, 8]);
+        let picked = own.node(5).unwrap();
+        // The source renames both parts, swapping SOLID-1 to SOLID-2, and meshes anew with
+        // more nodes.
+        shapes.rename_part("SOLID-2", "WING");
+        shapes.rename_part("SOLID-1", "SOLID-2");
+        let mut grown = tet_part("SOLID-2", 1, 0.0);
+        grown.append(tet_part("SOLID-2X", 1, 3.0));
+        grown.parts.truncate(1);
+        let taken = take_objects(&mut geometry, &own, &origins, &mut fe, copy(&shapes, grown));
+        let geometry = geometry.unwrap();
+        assert_eq!(
+            taken.renames,
+            [
+                ("SOLID-1".to_string(), "SOLID-2".to_string()),
+                ("SOLID-2".to_string(), "WING".to_string())
+            ]
+        );
+        // The own mesh of the part is under its new name, numbered after the larger linked
+        // mesh, and so are its suppression and the analysis meshing it itself.
+        let wing = (taken.mesh.parts.iter())
+            .find(|p| p.name == "WING")
+            .unwrap();
+        let element = taken.mesh.element(wing.elements[0]).unwrap();
+        assert_eq!(element.nodes, [9, 10, 11, 12]);
+        assert!(geometry.meshes_itself("WING") && geometry.is_suppressed("WING"));
+        assert!(!geometry.meshes_itself("SOLID-2"));
+        assert_eq!(
+            taken.origins.get("WING"),
+            Some(plx_model::PartOrigin::Meshed(9))
+        );
+        assert_eq!(
+            taken.origins.get("SOLID-2"),
+            Some(plx_model::PartOrigin::Linked)
+        );
+        // The own element set on it follows; the own node set by the name the source's set
+        // has is renamed and follows its node to its new number, the source's comes with
+        // the link.
+        let set = |kind, name: &str| fe.mesh_set(kind, name).map(|s| s.region.clone());
+        assert_eq!(
+            set(SetKind::Elements, "Node_Set-1"),
+            Some(Region::Parts(vec!["WING".into()]))
+        );
+        assert_eq!(
+            set(SetKind::Nodes, "Node_Set-1"),
+            Some(Region::Nodes(vec![1]))
+        );
+        assert_eq!(
+            set(SetKind::Nodes, "Node_Set-1-2"),
+            Some(Region::Nodes(vec![9]))
+        );
+        assert_eq!(taken.mesh.node(9), Some(picked));
+        assert_eq!(taken.notes.len(), 1);
+    }
+
+    #[test]
+    fn picks_on_a_linked_mesh_follow_its_new_numbers() {
+        use plx_model::{PartOrigins, Region};
+        let copy = |mesh: FeMesh| {
+            let mut origins = PartOrigins::default();
+            origins.reconcile(&mesh);
+            MeshCopy {
+                geometry: None,
+                mesh,
+                origins,
+                mesh_sets: Vec::new(),
+                element_types: Vec::new(),
+                mesh_operations: Vec::new(),
+            }
+        };
+        let (mut geometry, mut fe) = (None, FeModel::default());
+        let taken = take_objects(
+            &mut geometry,
+            &FeMesh::default(),
+            &Default::default(),
+            &mut fe,
+            copy(tet_part("BLOCK", 1, 5.0)),
+        );
+        // Picked on the linked BLOCK: its second node and its element's first face.
+        use plx_model::{MeshSet, SetKind};
+        fe.mesh_sets
+            .push(MeshSet::new("N", SetKind::Nodes, Region::Nodes(vec![2])));
+        fe.mesh_sets.push(MeshSet::new(
+            "F",
+            SetKind::Surface,
+            Region::Faces(vec![(1, 1)]),
+        ));
+        // The source puts another mesh in front: BLOCK is the same, numbered on.
+        let mut source = tet_part("PLATE", 1, 20.0);
+        source.append(tet_part("BLOCK", 1, 5.0));
+        let taken = take_objects(
+            &mut geometry,
+            &taken.mesh,
+            &taken.origins,
+            &mut fe,
+            copy(source),
+        );
+        assert_eq!(fe.mesh_sets[0].region, Region::Nodes(vec![6]));
+        assert_eq!(fe.mesh_sets[1].region, Region::Faces(vec![(2, 1)]));
+        assert_eq!(taken.mesh.node(6), Some([6.0, 0.0, 0.0]));
+        // A mesh made anew is another mesh: picks on it are not carried over.
+        let taken_again = take_objects(
+            &mut geometry,
+            &taken.mesh,
+            &taken.origins,
+            &mut fe,
+            copy(tet_part("BLOCK", 1, 9.0)),
+        );
+        assert_eq!(fe.mesh_sets[0].region, Region::Nodes(vec![6]));
+        assert!(taken_again.mesh.node(6).is_none());
+    }
+
     #[test]
     fn meshes_put_together_keep_their_own_nodes_and_names() {
         use plx_mesh::{Element, ElementShape, Part};
@@ -1732,7 +2277,11 @@ mod tests {
             MeshCopy {
                 geometry: None,
                 mesh,
-                mesh_inputs: BTreeMap::from([("BLOCK".to_owned(), 7)]),
+                origins: {
+                    let mut origins = plx_model::PartOrigins::default();
+                    origins.set_meshed("BLOCK", 7);
+                    origins
+                },
                 mesh_sets: vec![plx_model::MeshSet::new(
                     set,
                     plx_model::SetKind::Nodes,
@@ -1756,10 +2305,44 @@ mod tests {
         assert_eq!(merged.mesh_sets[1].name, "FIX-2");
         assert_eq!(merged.mesh_sets[1].region, Region::Nodes(vec![5, 6]));
         assert_eq!(merged.element_types[1].part, "BLOCK-2");
-        // Parts as meshed: not out of date with a geometry of their own.
-        assert!(merged.mesh_inputs.is_empty());
+        // Without a geometry of all, the parts are imported meshes.
+        assert!(merged.origins.is_imported("BLOCK"));
+        assert!(merged.origins.is_imported("BLOCK-2"));
         assert!(renamed[0].is_empty());
         assert_eq!(renamed[1]["BLOCK"], "BLOCK-2");
+
+        // A mesh of geometry and one without, of a mesh block: the geometry of the first is
+        // kept, and the second joins as an imported mesh.
+        let geometry = plx_model::Geometry {
+            source: "a.step".into(),
+            brep: String::new(),
+            meshing: Default::default(),
+            mesh_items: Vec::new(),
+            part_names: vec!["BLOCK".into()],
+            refinement: 1.0,
+            signatures: Vec::new(),
+            compounds: Vec::new(),
+            suppressed: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
+        };
+        let mut meshed = tet(0.0, "FIX");
+        meshed.geometry = Some(geometry.clone());
+        let mut block = tet(5.0, "FIX");
+        block.origins = plx_model::PartOrigins::imported(&block.mesh);
+        let merged_geometry = plx_mesher::MergedGeometry {
+            geometry,
+            tags: vec![Default::default(), Default::default()],
+            renamed: vec![Default::default(), Default::default()],
+        };
+        let (merged, _) = merge_meshes(vec![meshed, block], Some(merged_geometry));
+        assert!(merged.geometry.is_some());
+        assert_eq!(
+            merged.origins.get("BLOCK"),
+            Some(plx_model::PartOrigin::Linked)
+        );
+        assert!(merged.origins.is_imported("BLOCK-2"));
     }
 
     fn path(parts: &[&str]) -> Vec<String> {
@@ -1767,12 +2350,12 @@ mod tests {
     }
 
     fn fp(fe: &FeModel, path: &[String]) -> u64 {
-        let (mesh, inputs) = (FeMesh::default(), BTreeMap::new());
+        let (mesh, inputs) = (FeMesh::default(), plx_model::PartOrigins::default());
         let data = Data {
             geometry: None,
             mesh: &mesh,
             fe,
-            mesh_inputs: &inputs,
+            origins: &inputs,
         };
         fingerprint(data, path)
     }
@@ -1789,6 +2372,9 @@ mod tests {
             part_names: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let mut own = shapes("old");
         own.meshing.max_size = 2.0;
@@ -1801,15 +2387,18 @@ mod tests {
                 depth: 0.0,
             },
         });
-        own.refinement = 2.0;
         // The setup of the target counts as nothing the link takes.
         let print = |geometry: &Geometry| {
-            let (mesh, fe, inputs) = (FeMesh::default(), FeModel::default(), BTreeMap::new());
+            let (mesh, fe, inputs) = (
+                FeMesh::default(),
+                FeModel::default(),
+                plx_model::PartOrigins::default(),
+            );
             let data = Data {
                 geometry: Some(geometry),
                 mesh: &mesh,
                 fe: &fe,
-                mesh_inputs: &inputs,
+                origins: &inputs,
             };
             fingerprint(data, &path(&[GEOMETRY]))
         };
@@ -1821,7 +2410,8 @@ mod tests {
         assert_eq!(taken.brep, "new");
         assert_eq!(taken.meshing, own.meshing);
         assert_eq!(taken.mesh_items, own.mesh_items);
-        assert_eq!(taken.refinement, 2.0);
+        // The refinement comes with the shapes, from a refine mesh block.
+        assert_eq!(taken.refinement, 1.0);
         // Without geometry yet, the target starts from the source's; unlinked, it has none.
         let mut target = None;
         take_geometry(&mut target, Some(own.clone()), true);
@@ -1842,6 +2432,9 @@ mod tests {
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let compound = |name: &str, parts: &[&str]| plx_model::CompoundPart {
             name: name.into(),
@@ -1893,6 +2486,9 @@ mod tests {
             part_names: Vec::new(),
             refinement: 1.0,
             signatures,
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         // The bottom face 1 is now 7; the top face 2 went away.
         let own = shapes("old", vec![face(Face(1), 0.0), face(Face(2), 1.0)]);
@@ -2206,7 +2802,7 @@ mod tests {
                 .iter()
                 .any(|(p, _)| *p == path(&["Setup", "Steps", "Bolts"]))
         );
-        assert!(filled.iter().any(|(p, _)| *p == path(&["Mesh"])));
+        assert!(filled.iter().any(|(p, _)| *p == path(&["Geometry"])));
         assert!(
             !filled
                 .iter()

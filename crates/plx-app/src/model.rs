@@ -62,12 +62,20 @@ pub struct PartInfo {
     /// A suppressed part of the geometry: drawn as its edges only, and not picked in the
     /// 3D view.
     pub suppressed: bool,
+    /// A part of a geometry view that is an imported mesh, a geometry object of its own
+    /// shown as its outline ([`Model::with_imported`]).
+    pub imported: bool,
+    /// A part of the geometry this analysis meshes itself although a link brings its mesh
+    /// ([`plx_model::Geometry::own_meshes`]).
+    pub own_mesh: bool,
 }
 
 /// A loaded input file with everything the GUI shows about it.
 pub struct Model {
     pub path: PathBuf,
-    pub mesh: FeMesh,
+    /// The mesh; changed only through [`Model::set_mesh`] and [`Model::edit_mesh`], which
+    /// keep [`Model::origins`] complete for it.
+    mesh: FeMesh,
     pub parts: Vec<PartInfo>,
     pub warnings: Vec<String>,
     /// What was changed on reading, printed as notes in the output.
@@ -85,9 +93,10 @@ pub struct Model {
     pub geometry: Option<Geometry>,
     /// Results of the analysis bound to the project, saved with it.
     pub bound_results: Option<plx_io::project::BoundResults>,
-    /// Fingerprint of the meshing inputs of each part of the geometry when it was last
-    /// meshed; a part whose inputs differ now has an out-of-date mesh.
-    pub mesh_inputs: BTreeMap<String, u64>,
+    /// What each part of the mesh is the mesh of: a part of the geometry, with the
+    /// fingerprint of its meshing inputs when it was last meshed, or an imported mesh, which
+    /// is a geometry object of its own. Complete for the mesh at all times.
+    origins: plx_model::PartOrigins,
     /// Where the bound results were written to be opened, once they were.
     pub bound_results_file: Option<PathBuf>,
     /// The display of CAD geometry rather than a mesh: element edges are not drawn.
@@ -148,6 +157,8 @@ pub struct Model {
     checks: std::sync::Mutex<Option<Checks>>,
     /// What the user changed, to undo and redo it.
     pub history: crate::undo::History,
+    /// Counts the replacements of the mesh ([`Model::set_mesh`]).
+    mesh_revision: u64,
     /// Counts the changes of the FE model, the meshing settings and the mesh, see
     /// [`crate::undo::record`]; the project brings its links up to date when it changes.
     pub revision: u64,
@@ -162,6 +173,35 @@ pub struct Model {
     input_sections: InputSections,
     /// The global results of a submodel, see [`ResultsView::show_global_contours`].
     pub global: Option<Box<GlobalModel>>,
+}
+
+/// Marks the parts of `mesh` whose geometry objects are all suppressed, see
+/// [`Model::mark_suppressed_objects`].
+fn mark_suppressed(
+    parts: &mut [PartInfo],
+    mesh: &FeMesh,
+    geometry: Option<&Geometry>,
+    origins: &plx_model::PartOrigins,
+) -> bool {
+    let mut changed = false;
+    for (info, part) in parts.iter_mut().zip(&mesh.parts) {
+        let suppressed = (plx_model::part_bodies(part).iter()).all(|body| {
+            origins.is_suppressed(body) || geometry.is_some_and(|g| g.is_suppressed(body))
+        });
+        changed |= info.suppressed != suppressed;
+        info.suppressed = suppressed;
+        info.own_mesh = geometry.is_some_and(|g| g.meshes_itself(&part.name));
+    }
+    changed
+}
+
+/// The fields of a [`Model`] that are changed while its mesh is read, see [`Model::split`].
+pub struct Split<'a> {
+    pub fe: &'a mut FeModel,
+    pub results: &'a mut Option<ResultsView>,
+    pub geometry: &'a mut Option<Geometry>,
+    pub mesh: &'a FeMesh,
+    pub origins: &'a plx_model::PartOrigins,
 }
 
 /// The results of the global model of a submodel, whose deformed mesh can be drawn as a
@@ -645,7 +685,7 @@ pub fn load_analysis(path: &Path, analysis: plx_io::project::ProjectAnalysis) ->
         geometry,
         mesh,
         model: fe,
-        mesh_inputs,
+        origins,
         results,
         ..
     } = analysis;
@@ -665,7 +705,7 @@ pub fn load_analysis(path: &Path, analysis: plx_io::project::ProjectAnalysis) ->
     model.fe = fe;
     model.geometry = geometry;
     model.bound_results = results;
-    model.mesh_inputs = mesh_inputs;
+    model.set_origins(origins);
     model.warnings = warnings;
     let render_meshes = match &geometry_view {
         Some(view) if model.mesh.element_count() == 0 => view.render_meshes(),
@@ -808,8 +848,11 @@ impl Model {
                 contours: true,
                 suppressed: false,
                 dimension: None,
+                imported: false,
+                own_mesh: false,
             });
         }
+        let origins = plx_model::PartOrigins::imported(&mesh);
         let mut model = Self {
             path: path.to_path_buf(),
             mesh,
@@ -823,7 +866,7 @@ impl Model {
             fe: FeModel::default(),
             geometry: None,
             bound_results: None,
-            mesh_inputs: BTreeMap::new(),
+            origins,
             bound_results_file: None,
             is_geometry: false,
             cad_entities: Vec::new(),
@@ -851,6 +894,7 @@ impl Model {
             checks: Default::default(),
             cad_index: Default::default(),
             history: Default::default(),
+            mesh_revision: 0,
             revision: 0,
             thick_shells: Vec::new(),
             thick_lines: Vec::new(),
@@ -883,6 +927,28 @@ impl Model {
             part.suppressed = suppressed;
         }
         changed
+    }
+
+    /// Marks the parts whose geometry objects are all suppressed: by `geometry` for its
+    /// parts, by `origins` for imported meshes; true if any changed. A suppressed part is
+    /// drawn as its edges and not picked.
+    pub fn mark_suppressed_objects(
+        &mut self,
+        geometry: Option<&Geometry>,
+        origins: &plx_model::PartOrigins,
+    ) -> bool {
+        mark_suppressed(&mut self.parts, &self.mesh, geometry, origins)
+    }
+
+    /// [`Model::mark_suppressed_objects`] by the model's own geometry and origins, for the
+    /// parts of its mesh.
+    pub fn mark_own_suppressed(&mut self) -> bool {
+        mark_suppressed(
+            &mut self.parts,
+            &self.mesh,
+            self.geometry.as_ref(),
+            &self.origins,
+        )
     }
 
     /// [`Model::geometry_view`] with the skins of the parts already extracted; their faces
@@ -963,6 +1029,152 @@ impl Model {
             return None;
         }
         Some(Self::geometry_view_with_skins(&path, display, kept_skins))
+    }
+
+    /// A geometry view of nothing, which the outlines of imported meshes join
+    /// ([`Model::with_imported`]) where an analysis has no CAD geometry.
+    pub fn empty_geometry_view(path: &Path) -> Self {
+        Self::geometry_view(
+            path,
+            GeometryDisplay {
+                mesh: FeMesh::default(),
+                entities: Vec::new(),
+                part_dimensions: Vec::new(),
+                solids: 0,
+                faces: 0,
+                edges: 0,
+                topology: Default::default(),
+            },
+        )
+    }
+
+    /// The names of the imported meshes this geometry view shows.
+    pub fn imported_names(&self) -> Vec<String> {
+        (self.parts.iter())
+            .filter(|p| p.imported)
+            .map(|p| p.name.clone())
+            .collect()
+    }
+
+    /// The outline of the part `index` of the mesh, as an imported mesh shows in the
+    /// Geometry workspace: its feature edges and line elements, or its bounding box where it
+    /// has none, e.g. a smooth closed surface.
+    pub fn outline(&self, index: usize) -> Vec<[[f64; 3]; 2]> {
+        let coords = self.mesh.coords();
+        let mut segments = Vec::new();
+        if let Some(skin) = self.skins.get(index) {
+            for edge in skin.edges.iter().filter(|e| e.feature) {
+                match edge.mid {
+                    Some(mid) => {
+                        segments.push([coords[edge.a], coords[mid]]);
+                        segments.push([coords[mid], coords[edge.b]]);
+                    }
+                    None => segments.push([coords[edge.a], coords[edge.b]]),
+                }
+            }
+            segments.extend(skin.lines.iter().map(|&[a, b]| [coords[a], coords[b]]));
+        }
+        if !segments.is_empty() {
+            return segments;
+        }
+        let Some(part) = self.mesh.parts.get(index) else {
+            return segments;
+        };
+        let mut points = (part.elements.iter())
+            .filter_map(|&id| self.mesh.element(id))
+            .flat_map(|e| e.nodes.iter())
+            .filter_map(|&id| self.mesh.node(id));
+        let Some(first) = points.next() else {
+            return segments;
+        };
+        let (mut min, mut max) = (first, first);
+        for p in points {
+            for k in 0..3 {
+                min[k] = min[k].min(p[k]);
+                max[k] = max[k].max(p[k]);
+            }
+        }
+        let corner = |i: usize| {
+            [
+                if i & 1 == 0 { min[0] } else { max[0] },
+                if i & 2 == 0 { min[1] } else { max[1] },
+                if i & 4 == 0 { min[2] } else { max[2] },
+            ]
+        };
+        for i in 0..8 {
+            for bit in [1, 2, 4] {
+                if i & bit == 0 {
+                    segments.push([corner(i), corner(i | bit)]);
+                }
+            }
+        }
+        segments
+    }
+
+    /// The geometry view with the imported meshes `outlines` (name, segments) as parts of
+    /// their own after the parts of the geometry, in place of those it showed: every mesh
+    /// belongs to a geometry object, and an imported mesh is one of its own. The parts of
+    /// the geometry keep their triangles and skins.
+    pub fn with_imported(mut self, outlines: Vec<(String, Vec<[[f64; 3]; 2]>)>) -> Self {
+        let path = self.path.clone();
+        let shown = self.imported_names();
+        let cad_parts = self.parts.len() - shown.len();
+        let colors: Vec<_> = self.parts.iter().map(|p| (p.color, p.visible)).collect();
+        let suppressed: Vec<bool> = self.parts.iter().map(|p| p.suppressed).collect();
+        let mut skins = std::mem::take(&mut self.skins);
+        skins.truncate(cad_parts);
+        let mut display = self.into_geometry_display();
+        if !shown.is_empty() {
+            // They come last: the nodes and elements of the geometry keep their places.
+            display.mesh.remove_parts(&shown);
+            display.part_dimensions.truncate(cad_parts);
+        }
+        let mut node = display.mesh.node_ids().iter().copied().max().unwrap_or(0);
+        let mut element = display
+            .mesh
+            .elements()
+            .iter()
+            .map(|e| e.id)
+            .max()
+            .unwrap_or(0);
+        let count = outlines.len();
+        for (name, segments) in outlines {
+            let mut elements = Vec::with_capacity(segments.len());
+            for [a, b] in segments {
+                display.mesh.set_node(node + 1, a);
+                display.mesh.set_node(node + 2, b);
+                element += 1;
+                let _ = display.mesh.add_element(plx_mesh::Element {
+                    id: element,
+                    type_name: "B31".into(),
+                    shape: ElementShape::Line2,
+                    nodes: vec![node + 1, node + 2],
+                });
+                node += 2;
+                elements.push(element);
+            }
+            let part = plx_mesh::Part::new(name, elements);
+            skins.push(extract_part_skin(&display.mesh, &part, 180.0));
+            display.mesh.parts.push(part);
+            display.part_dimensions.push(1);
+        }
+        let mut view = Self::geometry_view_with_skins(&path, display, skins);
+        let first = view.parts.len() - count;
+        for (index, part) in view.parts.iter_mut().enumerate() {
+            if index >= first {
+                part.imported = true;
+                part.dimension = None;
+            }
+            // The parts of the geometry stay as they were shown.
+            if index < cad_parts
+                && let Some(&(color, visible)) = colors.get(index)
+            {
+                part.color = color;
+                part.visible = visible;
+                part.suppressed = suppressed[index];
+            }
+        }
+        view
     }
 
     /// The geometry display this view was made from, see [`Model::geometry_view`].
@@ -1151,7 +1363,115 @@ impl Model {
         true
     }
 
-    /// Replaces the mesh, e.g. by a newly generated one; the FE model stays.
+    /// Changes the mesh in place without rebuilding what the GUI derives from it, for
+    /// changes that keep its parts, nodes and elements, such as of its sets. The parts must
+    /// stay the parts they were, which debug builds check.
+    pub fn edit_mesh_in_place<T>(
+        &mut self,
+        edit: impl FnOnce(&mut FeMesh, &mut FeModel) -> T,
+    ) -> T {
+        let result = edit(&mut self.mesh, &mut self.fe);
+        debug_assert!(
+            self.origins.complete_for(&self.mesh),
+            "a change in place changed the parts of the mesh"
+        );
+        result
+    }
+
+    /// The fields of the model that change with the mesh as it is: to change one while
+    /// reading the mesh.
+    pub fn split(&mut self) -> Split<'_> {
+        Split {
+            fe: &mut self.fe,
+            results: &mut self.results,
+            geometry: &mut self.geometry,
+            mesh: &self.mesh,
+            origins: &self.origins,
+        }
+    }
+
+    /// Counts the replacements of the mesh, to tell what was made of it is out of date.
+    pub fn mesh_revision(&self) -> u64 {
+        self.mesh_revision
+    }
+
+    /// The mesh, the model given up.
+    pub fn into_mesh(self) -> FeMesh {
+        self.mesh
+    }
+
+    /// The mesh with the origins of its parts, the model given up.
+    pub fn into_mesh_with_origins(self) -> (FeMesh, plx_model::PartOrigins) {
+        (self.mesh, self.origins)
+    }
+
+    /// What the solver gets: the mesh and the FE model without the suppressed geometry
+    /// objects, see [`plx_model::active_model`].
+    pub fn active(&self) -> plx_model::Active<'_> {
+        plx_model::active_model(&self.mesh, &self.fe, self.geometry.as_ref(), &self.origins)
+    }
+
+    /// The mesh, with the suppressed parts.
+    pub fn mesh(&self) -> &FeMesh {
+        &self.mesh
+    }
+
+    /// What each part of the mesh is the mesh of, see [`plx_model::PartOrigins`].
+    pub fn origins(&self) -> &plx_model::PartOrigins {
+        &self.origins
+    }
+
+    /// Notes that the part `name` of the geometry is meshed from inputs with the
+    /// fingerprint `input`; for a part of the mesh being made, before [`Model::set_mesh`].
+    pub fn set_meshed(&mut self, name: &str, input: u64) {
+        self.origins.set_meshed(name, input);
+    }
+
+    /// Takes over the origins of the parts, e.g. with a mesh taken over through a link;
+    /// completed for the mesh.
+    pub fn set_origins(&mut self, origins: plx_model::PartOrigins) {
+        self.origins = origins;
+        self.origins.reconcile(&self.mesh);
+        self.origins.settle(self.geometry.as_ref());
+    }
+
+    /// Settles the origins after the parts the analysis meshes itself changed, see
+    /// [`plx_model::PartOrigins::settle`].
+    pub fn settle_origins(&mut self) {
+        self.origins.settle(self.geometry.as_ref());
+    }
+
+    /// Deletes the meshes of parts that the geometry no longer has, see
+    /// [`plx_model::drop_orphans`]; returns their names.
+    pub fn drop_orphan_meshes(&mut self) -> Vec<String> {
+        if plx_model::orphans(self.geometry.as_ref(), &self.origins).is_empty() {
+            return Vec::new();
+        }
+        // Rare: the geometry is copied rather than taken, so that the mesh is drawn with it.
+        let geometry = self.geometry.clone();
+        let mut origins = self.origins.clone();
+        let mut gone = Vec::new();
+        self.edit_mesh(|mesh, fe| {
+            gone = plx_model::drop_orphans(mesh, fe, geometry.as_ref(), &mut origins);
+        });
+        gone
+    }
+
+    /// Suppresses the imported meshes among `names`, or unsuppresses them; true if that
+    /// changed anything.
+    pub fn set_imported_suppressed(&mut self, names: &[String], suppressed: bool) -> bool {
+        self.origins.set_suppressed(names, suppressed)
+    }
+
+    /// Replaces the mesh with the origins of its parts, e.g. the mesh as it was before a
+    /// change being undone.
+    pub fn set_mesh_with(&mut self, mesh: FeMesh, origins: plx_model::PartOrigins) {
+        self.origins = origins;
+        self.set_mesh(mesh);
+    }
+
+    /// Replaces the mesh, e.g. by a newly generated one; the FE model stays. A part whose
+    /// origin is not known is an imported mesh ([`plx_model::PartOrigins::reconcile`]).
     pub fn set_mesh(&mut self, mut mesh: FeMesh) {
         // The user's sets are found on the new mesh by their selections, and its parts get
         // the element types chosen for them, also when they were meshed anew.
@@ -1159,8 +1479,13 @@ impl Model {
         self.fe.apply_element_types(&mut mesh);
         let mut fresh = Self::new(&self.path, mesh);
         std::mem::swap(&mut self.mesh, &mut fresh.mesh);
-        self.history.mesh_replaced(std::mem::take(&mut fresh.mesh));
+        let replaced = std::mem::take(&mut fresh.mesh);
+        let origins = self.origins.clone();
+        self.origins.reconcile(&self.mesh);
+        self.origins.settle(self.geometry.as_ref());
+        self.history.mesh_replaced(replaced, origins);
         self.revision += 1;
+        self.mesh_revision += 1;
         self.parts = fresh.parts;
         self.skins = fresh.skins;
         self.origin = fresh.origin;
@@ -1184,6 +1509,8 @@ impl Model {
         } else {
             self.explosion.show(Vec::new(), false);
         }
+        // Suppressed geometry objects are drawn as their edges.
+        self.mark_own_suppressed();
     }
 
     /// Problems of the FE model that make CalculiX abort or give useless results. The checks
@@ -2103,16 +2430,35 @@ impl Model {
             return Err(format!("The name {name} is already used."));
         }
         if self.history.follows() {
-            self.history.mesh_replaced(self.mesh.clone());
+            self.history
+                .mesh_replaced(self.mesh.clone(), self.origins.clone());
         }
         if let Some(old) = self.mesh.rename_part(index, &name) {
             self.fe.rename_part(&old, &name);
-            // A compound part keeps its name when it is meshed anew.
+            // The name is the geometry object's: a compound part keeps it when it is meshed
+            // anew, a part of the geometry is renamed with its mesh, an imported mesh is its
+            // own geometry object.
+            let (space, matching) = (self.fe.properties.space, self.fe.matching_faces());
             if let Some(geometry) = &mut self.geometry
                 && let Some(c) = geometry.compound_named(&old)
             {
                 geometry.compounds[c].name.clone_from(&name);
+            } else if let Some(geometry) = &mut self.geometry
+                && self.origins.is_cad(&old)
+            {
+                let before = plx_model::fingerprint::mesh_input(geometry, &matching, space, &old);
+                if geometry.rename_part(&old, &name) {
+                    // The mesh stays as up to date as it was.
+                    let up_to_date = self.origins.made_from(&old) == Some(before);
+                    self.origins.rename(&old, &name);
+                    if up_to_date {
+                        let now =
+                            plx_model::fingerprint::mesh_input(geometry, &matching, space, &name);
+                        self.origins.set_meshed(&name, now);
+                    }
+                }
             }
+            self.origins.rename(&old, &name);
         }
         self.parts[index].name = name;
         Ok(())

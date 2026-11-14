@@ -406,7 +406,7 @@ impl RegionDraft {
             Source::Selection => match pick {
                 Some((hit, precision)) => {
                     let items = picker.pick(model, hit, self.target, precision);
-                    self.take(&model.mesh, items, operation);
+                    self.take(model.mesh(), items, operation);
                 }
                 // Nodalis clears the selection on a plain click into empty space.
                 None if operation == Operation::Replace => self.clear(),
@@ -537,7 +537,7 @@ impl RegionDraft {
             PickerAction::Undo if self.geometry.can_undo() => return self.geometry.undo(),
             PickerAction::Undo | PickerAction::Clear => {}
             // The buttons work on nodes and faces.
-            _ => self.geometry_to_ids(&model.mesh),
+            _ => self.geometry_to_ids(model.mesh()),
         }
         match (action, self.target) {
             (PickerAction::Undo, Target::Nodes | Target::Point) => self.nodes.undo(),
@@ -595,7 +595,7 @@ impl RegionDraft {
             (PickerAction::Ids(operation, ids), Target::Nodes | Target::Point) => {
                 let ids = ids
                     .into_iter()
-                    .filter(|&id| model.mesh.node_index(id).is_some())
+                    .filter(|&id| model.mesh().node_index(id).is_some())
                     .collect();
                 self.nodes.push(operation, ids);
             }
@@ -662,7 +662,7 @@ impl RegionDraft {
             wanted |= self.source != source;
             if self.source != source {
                 self.locked = false;
-                self.prefill(&model.fe, &model.mesh);
+                self.prefill(&model.fe, model.mesh());
             }
             match self.source {
                 Source::Selection => {
@@ -691,7 +691,7 @@ impl RegionDraft {
                         if ui.button("Clear Selection").clicked() {
                             self.clear();
                         }
-                        let missing = self.missing_entities(&model.mesh);
+                        let missing = self.missing_entities(model.mesh());
                         if !missing.is_empty()
                             && ui
                                 .add(
@@ -726,9 +726,9 @@ impl RegionDraft {
                 }
                 Source::NodeSet | Source::ElementSet | Source::Surface => {
                     let names: Vec<&String> = match self.source {
-                        Source::NodeSet => model.mesh.node_sets.keys().collect(),
-                        Source::ElementSet => model.mesh.element_sets.keys().collect(),
-                        _ => model.mesh.surfaces.keys().collect(),
+                        Source::NodeSet => model.mesh().node_sets.keys().collect(),
+                        Source::ElementSet => model.mesh().element_sets.keys().collect(),
+                        _ => model.mesh().surfaces.keys().collect(),
                     };
                     if names.is_empty() {
                         ui.weak("The mesh contains no such sets.");
@@ -821,7 +821,7 @@ impl RegionDraft {
             .map(|p| (p.id, p.name.as_str()))
             .collect();
         let (remotes, forces) = if self.sources.contains(&Source::RemotePoint) {
-            model.fe.remote_points(&model.mesh)
+            model.fe.remote_points(model.mesh())
         } else {
             Default::default()
         };
@@ -894,7 +894,7 @@ impl RegionDraft {
         match self.source {
             Source::Selection => {
                 let items = picker.pick_box(model, area, self.target);
-                self.take(&model.mesh, items, operation);
+                self.take(model.mesh(), items, operation);
             }
             Source::Parts => self.parts.box_select(model, area, operation),
             _ => {}
@@ -1315,7 +1315,7 @@ pub fn shown_faces(
     let mut shown = HashSet::new();
     let mut edges = BTreeSet::new();
     for (element, face) in faces {
-        match model.mesh.element(element) {
+        match model.mesh().element(element) {
             Some(e) if e.is_shell() && face >= 3 => {
                 edges.insert((element, face));
             }
@@ -1342,7 +1342,7 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
         }
         Region::Edges(_) => {
             // Split at the midside node, as the edges of 2D elements.
-            for line in region.edges(&model.mesh) {
+            for line in region.edges(model.mesh()) {
                 match line[..] {
                     [a, b, m] => highlight.lines.extend([[a, m], [m, b]]),
                     [a, b] => highlight.lines.push([a, b]),
@@ -1352,20 +1352,20 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
         }
         Region::Faces(_) | Region::Surface(_) if model.is_plane() => {
             // The faces of 2D elements are edges, drawn as lines.
-            let faces = region.faces(&model.mesh).into_iter().collect();
+            let faces = region.faces(model.mesh()).into_iter().collect();
             highlight.lines = crate::selection::edge_lines(model, &faces);
             if highlight.lines.is_empty() {
-                highlight.nodes = region.nodes(&model.mesh);
+                highlight.nodes = region.nodes(model.mesh());
             }
         }
         Region::Faces(_) | Region::Surface(_) => {
-            (highlight.faces, highlight.lines) = shown_faces(model, region.faces(&model.mesh));
+            (highlight.faces, highlight.lines) = shown_faces(model, region.faces(model.mesh()));
             if highlight.faces.is_empty() && highlight.lines.is_empty() {
-                highlight.nodes = region.nodes(&model.mesh);
+                highlight.nodes = region.nodes(model.mesh());
             }
         }
         Region::ElementSet(_) => {
-            let elements: BTreeSet<ElementId> = region.elements(&model.mesh).into_iter().collect();
+            let elements: BTreeSet<ElementId> = region.elements(model.mesh()).into_iter().collect();
             highlight.faces = model
                 .skin_faces()
                 .filter(|(element, _)| elements.contains(element))
@@ -1381,12 +1381,12 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
         Region::ReferencePoint(_) => {}
         // The point of a remote displacement exists only in the input file; its region shows.
         Region::RemotePoint(id) => {
-            if let Some((region, _)) = model.fe.remote_point_of(&model.mesh, *id) {
+            if let Some((region, _)) = model.fe.remote_point_of(model.mesh(), *id) {
                 return region_highlight(model, region);
             }
         }
         Region::Nodes(_) | Region::NodeSet(_) => {
-            highlight.nodes = region.nodes(&model.mesh);
+            highlight.nodes = region.nodes(model.mesh());
             // Faces whose corners are all selected show as faces, as for
             // picked surfaces.
             let selected: std::collections::HashSet<NodeId> =
@@ -1626,7 +1626,7 @@ fn displacement_rows(
             }
         });
     ui.end_row();
-    let formulation = remote.formulation(fe, &model.mesh, region, names.0, names.1);
+    let formulation = remote.formulation(fe, model.mesh(), region, names.0, names.1);
     let point = matches!(formulation, Formulation::Point(_));
     ui.label("");
     ui.add(
@@ -1734,7 +1734,7 @@ fn point_rows(
         if ui.radio(remote.location.is_some(), "Coordinates").clicked() && remote.location.is_none()
         {
             // Starts from the centroid, in the coordinates of the system.
-            let centre = region.centroid(&model.mesh).unwrap_or([0.0; 3]);
+            let centre = region.centroid(model.mesh()).unwrap_or([0.0; 3]);
             let local = (system.as_ref())
                 .and_then(|s| s.local(centre).ok())
                 .unwrap_or(centre);
@@ -1767,7 +1767,7 @@ fn point_rows(
         }
     }
     ui.label("Point");
-    match remote.resolve(fe, &model.mesh, region, &Default::default()) {
+    match remote.resolve(fe, model.mesh(), region, &Default::default()) {
         Ok(point) => {
             let [x, y, z] = point
                 .position
@@ -1779,7 +1779,7 @@ fn point_rows(
                 "Global position of the point, followed by {nodes} nodes"
             ));
         }
-        Err(error) if region.nodes(&model.mesh).is_empty() => {
+        Err(error) if region.nodes(model.mesh()).is_empty() => {
             let _ = error;
             ui.weak("Select faces, edges or nodes");
         }
@@ -1804,11 +1804,11 @@ fn point_rows(
                 ..remote.clone()
             };
             let farthest = all
-                .resolve(fe, &model.mesh, region, &Default::default())
+                .resolve(fe, model.mesh(), region, &Default::default())
                 .ok()
                 .map(|point| {
                     (point.nodes.iter())
-                        .filter_map(|&n| model.mesh.node(n))
+                        .filter_map(|&n| model.mesh().node(n))
                         .map(|x| {
                             let d: [f64; 3] = std::array::from_fn(|i| x[i] - point.position[i]);
                             (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
@@ -1859,8 +1859,8 @@ fn formulation_hint(
                 .to_string()
         }
         Formulation::Nodes => {
-            let nodes = region.nodes(&model.mesh);
-            let expanded = plx_model::expanded_nodes(&model.mesh);
+            let nodes = region.nodes(model.mesh());
+            let expanded = plx_model::expanded_nodes(model.mesh());
             let solid = nodes.iter().any(|n| !expanded.contains(n));
             let turned = displacement.values[3..]
                 .iter()
@@ -1890,7 +1890,7 @@ fn symmetry_rows(
     model: &Model,
 ) {
     let space = model.fe.properties.space;
-    let plane = symmetry_plane(&model.mesh, region, space, *normal);
+    let plane = symmetry_plane(model.mesh(), region, space, *normal);
     ui.label("Plane normal");
     crate::layout::wrapped_row(ui, |ui| {
         if ui.radio(normal.is_none(), "From selection").clicked() {
@@ -1940,7 +1940,7 @@ fn symmetry_rows(
                 beams lying on it.";
     ui.add(egui::Label::new(egui::RichText::new(text).weak()).wrap());
     ui.end_row();
-    let beams = model.fe.beams_on_plane(&model.mesh, region);
+    let beams = model.fe.beams_on_plane(model.mesh(), region);
     if beams.total > 0 {
         ui.label("Beams on the plane");
         ui.checkbox(halve_beams, "Halve their section");
@@ -3367,14 +3367,14 @@ impl Editor {
             }
             Draft::Step(step, region) => {
                 let sectors = (model.fe.cyclic_tie())
-                    .and_then(|t| t.cyclic_sectors(&model.mesh))
+                    .and_then(|t| t.cyclic_sectors(model.mesh()))
                     .and_then(Result::ok);
-                step_form(ui, step, self.index, &model.fe, &model.mesh, sectors);
+                step_form(ui, step, self.index, &model.fe, model.mesh(), sectors);
                 crate::connections::step_contacts(ui, &model.fe, step, self.index);
                 // The kind may have changed: the region picks what the new kind takes.
                 let (sources, target) = step_region_picks(&step.kind, &model.fe);
                 if region.sources != sources {
-                    *region = region.converted(sources, target, &model.mesh).0;
+                    *region = region.converted(sources, target, model.mesh()).0;
                 }
                 match step.kind {
                     StepKind::Sensitivity(_) => {
@@ -3610,7 +3610,7 @@ impl Editor {
                                 if moved {
                                     let (sources, target) = load_picks(&load.kind, &model.fe);
                                     let (kept, dropped) =
-                                        region.converted(sources, target, &model.mesh);
+                                        region.converted(sources, target, model.mesh());
                                     *region = kept;
                                     dropped_note(ui, dropped);
                                 }
@@ -4170,7 +4170,7 @@ impl Editor {
                         .clicked()
                     {
                         (region.side_a, region.side_b) = sides.regions();
-                        region.name = region.name_from_definition(&model.mesh);
+                        region.name = region.name_from_definition(model.mesh());
                     }
                 });
                 ui.end_row();
@@ -4194,7 +4194,9 @@ impl Editor {
                 name_row(ui, &mut group.name);
                 let context = match &self.detection_scope {
                     Some(scope) => scope.context.clone(),
-                    None => crate::part_filter_ui::cached_context(ui.ctx(), &model.fe, &model.mesh),
+                    None => {
+                        crate::part_filter_ui::cached_context(ui.ctx(), &model.fe, model.mesh())
+                    }
                 };
                 ui.label("Parts");
                 crate::part_filter_ui::filter_editor(
@@ -4571,10 +4573,10 @@ impl Editor {
         let own = (self.index.and_then(|i| model.fe.mesh_sets.get(i)))
             .map(|o| o.name.as_str())
             .or(replaces.as_deref());
-        let mut taken = set_names(set.kind, &model.fe, &model.mesh);
+        let mut taken = set_names(set.kind, &model.fe, model.mesh());
         taken.retain(|n| Some(*n) != own);
         if set.kind == SetKind::Elements {
-            taken.extend(model.mesh.parts.iter().map(|p| p.name.as_str()));
+            taken.extend(model.mesh().parts.iter().map(|p| p.name.as_str()));
         }
         if taken.iter().any(|n| n.eq_ignore_ascii_case(&set.name)) {
             return Err(format!("The name {} is already used.", set.name));
@@ -5121,7 +5123,7 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
     // A mesh operation shows the parts it changes.
     if let TreeItem::MeshOperation(i) = *item {
         return (fe.mesh_operations.get(i))
-            .map(|o| Highlight::parts(o.part_indices(&model.mesh)))
+            .map(|o| Highlight::parts(o.part_indices(model.mesh())))
             .unwrap_or_default();
     }
     let master_slave = match *item {
@@ -5173,7 +5175,7 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
 /// `parts`: those with a region on them. A click on a part in the 3D view marks them in the
 /// tree.
 pub fn acting_on_parts(model: &Model, parts: &BTreeSet<usize>) -> BTreeSet<TreeItem> {
-    let mesh = &model.mesh;
+    let mesh = &model.mesh();
     let names: HashSet<&str> = (parts.iter())
         .filter_map(|&p| mesh.parts.get(p))
         .map(|p| p.name.as_str())
@@ -5317,7 +5319,7 @@ fn history_output_form(
             let selected = kind.prefix() == current;
             if ui.radio(selected, kind.label()).clicked() && !selected {
                 let (sources, target) = history_picks(&kind, &model.fe);
-                let (kept, dropped) = region.converted(sources, target, &model.mesh);
+                let (kept, dropped) = region.converted(sources, target, model.mesh());
                 *region = kept;
                 dropped_note(ui, dropped);
                 let defaults = match &kind {
@@ -5409,7 +5411,7 @@ fn history_output_form(
         }
         _ => {
             region.ui(ui, model);
-            if let Some(hint) = point_hint(&region.region(), &model.fe, &model.mesh) {
+            if let Some(hint) = point_hint(&region.region(), &model.fe, model.mesh()) {
                 ui.label("");
                 ui.weak(hint);
                 ui.end_row();
@@ -8185,7 +8187,7 @@ fn pulled_masses_row(ui: &mut Ui, region: &Region, model: &Model) {
     if matches!(region, Region::ReferencePoint(_)) {
         return;
     }
-    let pulled = model.fe.point_masses_pulled(region, &model.mesh);
+    let pulled = model.fe.point_masses_pulled(region, model.mesh());
     if pulled.is_empty() {
         return;
     }
@@ -9113,7 +9115,7 @@ mod tests {
         let mesh = plx_io::inp::read_inp(&path).unwrap().mesh;
         let mut model = Model::new(&path, mesh);
         let part = |name: &str| {
-            (model.mesh.parts.iter())
+            (model.mesh().parts.iter())
                 .position(|p| p.name == name)
                 .unwrap()
         };
@@ -9201,10 +9203,10 @@ mod tests {
             .join("../../testdata/kragbalken_c3d8.inp");
         let mesh = plx_io::inp::read_inp(&path).unwrap().mesh;
         let mut model = Model::new(&path, mesh);
-        let part = model.mesh.parts[0].name.clone();
+        let part = model.mesh().parts[0].name.clone();
 
         // A new element set of the whole part.
-        let mut editor = Editor::create_set(SetKind::Elements, &model.fe, &model.mesh);
+        let mut editor = Editor::create_set(SetKind::Elements, &model.fe, model.mesh());
         let Draft::MeshSet(set, region, _) = &mut editor.draft else {
             panic!("set dialog expected");
         };
@@ -9223,9 +9225,9 @@ mod tests {
         }
         let sets = model.fe.mesh_sets.clone();
         editor.apply(&mut model.fe);
-        model.fe.sync_mesh_sets(&sets, &mut model.mesh);
-        let elements = model.mesh.element_sets["Beam"].len();
-        assert_eq!(elements, model.mesh.element_count());
+        model.edit_mesh_in_place(|mesh, fe| fe.sync_mesh_sets(&sets, mesh));
+        let elements = model.mesh().element_sets["Beam"].len();
+        assert_eq!(elements, model.mesh().element_count());
 
         // A section on the set follows its new name.
         model.fe.sections.push(Section {
@@ -9237,43 +9239,43 @@ mod tests {
             kind: SectionKind::Solid,
         });
         let item = TreeItem::ElementSet("Beam".into());
-        let mut editor = Editor::edit(&item, &model.fe, &model.mesh).unwrap();
+        let mut editor = Editor::edit(&item, &model.fe, model.mesh()).unwrap();
         if let Draft::MeshSet(set, ..) = &mut editor.draft {
             set.name = "Cantilever".into();
         }
         assert_eq!(editor.validate_set(&model), Ok(()));
         let sets = model.fe.mesh_sets.clone();
         editor.apply(&mut model.fe);
-        model.fe.sync_mesh_sets(&sets, &mut model.mesh);
-        assert!(!model.mesh.element_sets.contains_key("Beam"));
-        assert_eq!(model.mesh.element_sets["Cantilever"].len(), elements);
+        model.edit_mesh_in_place(|mesh, fe| fe.sync_mesh_sets(&sets, mesh));
+        assert!(!model.mesh().element_sets.contains_key("Beam"));
+        assert_eq!(model.mesh().element_sets["Cantilever"].len(), elements);
         assert_eq!(
             model.fe.sections[0].region,
             Region::ElementSet("Cantilever".into())
         );
 
         // A node set of the input file keeps its nodes and becomes the user's.
-        let (name, nodes) = (model.mesh.node_sets.iter().next())
+        let (name, nodes) = (model.mesh().node_sets.iter().next())
             .map(|(n, ids)| (n.clone(), ids.clone()))
             .unwrap();
         let item = TreeItem::NodeSet(name.clone());
-        let editor = Editor::edit(&item, &model.fe, &model.mesh).unwrap();
+        let editor = Editor::edit(&item, &model.fe, model.mesh()).unwrap();
         assert_eq!(editor.replaced_set(), Some((SetKind::Nodes, name.as_str())));
         assert_eq!(editor.validate_set(&model), Ok(()));
         let sets = model.fe.mesh_sets.clone();
         editor.apply(&mut model.fe);
-        model.fe.sync_mesh_sets(&sets, &mut model.mesh);
+        model.edit_mesh_in_place(|mesh, fe| fe.sync_mesh_sets(&sets, mesh));
         assert_eq!(
             model.fe.mesh_set(SetKind::Nodes, &name).unwrap().region,
             Region::Nodes(nodes.clone())
         );
-        assert_eq!(model.mesh.node_sets[&name], nodes);
+        assert_eq!(model.mesh().node_sets[&name], nodes);
 
         // A new mesh gets the sets again.
-        let mut mesh = model.mesh.clone();
+        let mut mesh = model.mesh().clone();
         mesh.element_sets.remove("Cantilever");
         model.set_mesh(mesh);
-        assert_eq!(model.mesh.element_sets["Cantilever"].len(), elements);
+        assert_eq!(model.mesh().element_sets["Cantilever"].len(), elements);
     }
 
     #[test]

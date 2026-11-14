@@ -339,7 +339,7 @@ impl QueryWindow {
                 PickerAction::Clear => self.picked.clear(),
                 PickerAction::Ids(Operation::Add, ids) => {
                     for id in ids {
-                        if model.mesh.node_index(id).is_some() {
+                        if model.mesh().node_index(id).is_some() {
                             self.add_point(model, id, output);
                         }
                     }
@@ -359,7 +359,7 @@ impl QueryWindow {
                         faces.retain(|f| !picked.contains(f));
                     }
                     let items = Items::Geometry(faces);
-                    self.selection.take(&model.mesh, items, Operation::Replace);
+                    self.selection.take(model.mesh(), items, Operation::Replace);
                 }
                 PickerAction::Undo | PickerAction::Clear => self.selection.action(model, action),
                 // The buttons that work on nodes and faces of the mesh have nothing to do on
@@ -399,7 +399,7 @@ impl QueryWindow {
         }
         let items = self.pick(model, hit, precision);
         match items {
-            Some(items) => self.selection.take(&model.mesh, items, operation),
+            Some(items) => self.selection.take(model.mesh(), items, operation),
             None => {
                 let pick = Some((hit, precision));
                 self.selection.click(model, &self.picker, pick, operation);
@@ -425,7 +425,7 @@ impl QueryWindow {
                 return false;
             }
             let items = Items::Geometry(crate::geometry_selection::pick_box(model, area));
-            self.selection.take(&model.mesh, items, operation);
+            self.selection.take(model.mesh(), items, operation);
         } else {
             self.selection
                 .box_select(model, &self.picker, area, operation);
@@ -459,7 +459,7 @@ impl QueryWindow {
         // Line elements have no faces to pick; the hit segment is its element.
         if self.kind == QueryKind::Element && hit.line {
             let element = model.hit_element(hit)?;
-            let id = model.mesh.elements().get(element)?.id;
+            let id = model.mesh().elements().get(element)?.id;
             return Some(Items::Faces(BTreeSet::from([(id, 1)])));
         }
         let key = |[a, b]: [NodeId; 2]| [a.min(b), a.max(b)];
@@ -474,7 +474,7 @@ impl QueryWindow {
             // A CAD edge the mesh has no segments for, as on results of a mesh from
             // geometry, is taken along the mesh's own edges.
             let entities: Vec<CadEntity> = entities.into_iter().collect();
-            if crate::selection::cad_segments(&model.mesh, &entities).is_empty() {
+            if crate::selection::cad_segments(model.mesh(), &entities).is_empty() {
                 let segments = crate::selection::edge_segments(model, hit.part, hit.point);
                 return Some(Items::Edges(segments.into_iter().map(key).collect()));
             }
@@ -487,12 +487,12 @@ impl QueryWindow {
     fn point(&self, model: &Model, hit: &Hit, precision: f32) -> Option<NodeId> {
         let items = (self.picker)
             .pick(model, hit, Target::Point, precision)
-            .resolved(&model.mesh, Target::Point);
+            .resolved(model.mesh(), Target::Point);
         let Items::Nodes(nodes) = items else {
             return None;
         };
         let distance = |id: &NodeId| {
-            let index = model.mesh.node_index(*id);
+            let index = model.mesh().node_index(*id);
             index
                 .and_then(|i| model.node_position(i))
                 .map_or(f32::INFINITY, |p| p.distance(hit.point))
@@ -554,7 +554,7 @@ impl QueryWindow {
 
     /// The annotation of the selection; `None` while nothing is selected.
     fn annotation(&self, model: &Model) -> Option<Annotation> {
-        let mesh = &model.mesh;
+        let mesh = &model.mesh();
         let region = self.selection.region();
         let annotation = match self.kind {
             QueryKind::Node => Annotation::Nodes(region.nodes(mesh)),
@@ -656,7 +656,7 @@ fn selected_faces(model: &Model, region: &Region) -> BTreeSet<(ElementId, u8)> {
                 .collect();
             model.cad_face_items(&tags).into_iter().collect()
         }
-        Region::Geometry(entities) => model.mesh.cad_faces(entities).into_iter().collect(),
+        Region::Geometry(entities) => model.mesh().cad_faces(entities).into_iter().collect(),
         _ => BTreeSet::new(),
     }
 }
@@ -675,7 +675,7 @@ fn selected_segments(model: &Model, region: &Region) -> Vec<[NodeId; 2]> {
             model.cad_edge_segments(&tags)
         }
         Region::Geometry(entities) => {
-            (crate::selection::cad_segments(&model.mesh, entities).into_iter()).collect()
+            (crate::selection::cad_segments(model.mesh(), entities).into_iter()).collect()
         }
         _ => Vec::new(),
     }
@@ -683,8 +683,8 @@ fn selected_segments(model: &Model, region: &Region) -> Vec<[NodeId; 2]> {
 
 /// The corner nodes of the faces on the skins of the parts that are among `faces`.
 fn face_corners(model: &Model, faces: &BTreeSet<(ElementId, u8)>) -> Vec<Vec<NodeId>> {
-    let ids = model.mesh.node_ids();
-    let elements = model.mesh.elements();
+    let ids = model.mesh().node_ids();
+    let elements = model.mesh().elements();
     (0..model.parts.len())
         .flat_map(|part| model.skin(part).faces.iter())
         .filter(|face| faces.contains(&(elements[face.element].id, face.face as u8 + 1)))
@@ -695,7 +695,7 @@ fn face_corners(model: &Model, faces: &BTreeSet<(ElementId, u8)>) -> Vec<Vec<Nod
 /// The annotations and the nodes picked so far, in render coordinates of the shown model.
 pub fn marks(model: &Model, picked: &[NodeId]) -> QueryMarks {
     let mut marks = QueryMarks::default();
-    let position = |id: NodeId| model.node_position(model.mesh.node_index(id)?);
+    let position = |id: NodeId| model.node_position(model.mesh().node_index(id)?);
     let shown = |id: NodeId| Some(DVec3::from(model.shown_node(id)?));
     // Lengths and areas in true scale, as the output pane has them.
     let true_position = |id: NodeId| {
@@ -746,7 +746,7 @@ pub fn marks(model: &Model, picked: &[NodeId]) -> QueryMarks {
                 };
                 let text = match elements.as_slice() {
                     [index] => {
-                        let Some(element) = model.mesh.elements().get(*index) else {
+                        let Some(element) = model.mesh().elements().get(*index) else {
                             continue;
                         };
                         format!("Element id: {}\n{}", element.id, element.type_name)
@@ -926,14 +926,14 @@ fn xyz(p: DVec3) -> Vec<String> {
 fn field_value(model: &Model, node: NodeId) -> Option<(String, String)> {
     let view = model.results.as_ref()?;
     let (field, component) = view.current()?;
-    let index = model.mesh.node_index(node)?;
+    let index = model.mesh().node_index(node)?;
     let value = *component.values.get(index)?;
     let unit = field_unit(&field.name, &component.name, view.units).unwrap_or_default();
     Some((format_value(value), unit))
 }
 
 fn node_lines(model: &Model, node: NodeId) -> Vec<String> {
-    let Some(base) = model.mesh.node(node).map(DVec3::from) else {
+    let Some(base) = model.mesh().node(node).map(DVec3::from) else {
         return Vec::new();
     };
     let length = model.units().unit(Quantity::Length);
@@ -952,7 +952,7 @@ fn node_lines(model: &Model, node: NodeId) -> Vec<String> {
         let displacement = (view.current_increment())
             .and_then(|increment| increment.field("DISP"))
             .and_then(|field| {
-                let index = model.mesh.node_index(node)?;
+                let index = model.mesh().node_index(node)?;
                 let component = |name: &str| field.component(name).map_or(0.0, |c| c.values[index]);
                 Some(DVec3::new(
                     component("U1") as f64,
@@ -977,7 +977,7 @@ fn node_lines(model: &Model, node: NodeId) -> Vec<String> {
 }
 
 fn element_lines(model: &Model, index: usize) -> Vec<String> {
-    let Some(element) = model.mesh.elements().get(index) else {
+    let Some(element) = model.mesh().elements().get(index) else {
         return Vec::new();
     };
     let item = if model.is_geometry() {
@@ -1046,7 +1046,7 @@ fn field_extremes(model: &Model, nodes: &[NodeId]) -> Option<((f32, NodeId), (f3
     let (_, component) = model.results.as_ref()?.current()?;
     let mut extremes: Option<((f32, NodeId), (f32, NodeId))> = None;
     for &node in nodes {
-        let Some(&value) = (model.mesh.node_index(node)).and_then(|i| component.values.get(i))
+        let Some(&value) = (model.mesh().node_index(node)).and_then(|i| component.values.get(i))
         else {
             continue;
         };
@@ -1088,7 +1088,7 @@ fn elements_lines(model: &Model, elements: &[usize]) -> Vec<String> {
         let mut types: Vec<(String, usize)> = Vec::new();
         for element in elements
             .iter()
-            .filter_map(|&e| model.mesh.elements().get(e))
+            .filter_map(|&e| model.mesh().elements().get(e))
         {
             match types.iter_mut().find(|(n, _)| *n == element.type_name) {
                 Some((_, count)) => *count += 1,
@@ -1147,7 +1147,7 @@ fn assembly_lines(model: &Model) -> Vec<String> {
         String::new(),
         "Assembly".to_string(),
         format!("Number of parts: {}", model.parts.len()),
-        format!("{elements} {}", model.mesh.element_count()),
+        format!("{elements} {}", model.mesh().element_count()),
     ];
     if !model.is_geometry() {
         let mut types: Vec<(String, usize)> = Vec::new();
@@ -1159,7 +1159,7 @@ fn assembly_lines(model: &Model) -> Vec<String> {
         }
         lines.extend(element_type_lines(&types));
     }
-    lines.push(format!("{nodes} {}", model.mesh.node_count()));
+    lines.push(format!("{nodes} {}", model.mesh().node_count()));
     lines.push(String::new());
     lines
 }
@@ -1190,11 +1190,11 @@ fn bounding_box_lines(model: &Model) -> Vec<String> {
 
 /// The base and, with results, the true-scale deformed position of a node.
 fn base_and_deformed(model: &Model, node: NodeId) -> Option<(DVec3, Option<DVec3>)> {
-    let base = DVec3::from(model.mesh.node(node)?);
+    let base = DVec3::from(model.mesh().node(node)?);
     let deformed = model.results.as_ref().and_then(|view| {
         let increment = view.current_increment()?;
         let field = increment.field("DISP")?;
-        let index = model.mesh.node_index(node)?;
+        let index = model.mesh().node_index(node)?;
         let component = |name: &str| field.component(name).map_or(0.0, |c| c.values[index]) as f64;
         Some(base + DVec3::new(component("U1"), component("U2"), component("U3")))
     });
@@ -1343,7 +1343,7 @@ fn pick_edge(model: &Model, hit: &Hit, precision: f32) -> Vec<[NodeId; 2]> {
             crate::cad_selection::pick(model, hit, Target::Edges, precision)
     {
         return model
-            .mesh
+            .mesh()
             .cad
             .segments
             .get(&tag)
@@ -1373,11 +1373,11 @@ fn pick_edge(model: &Model, hit: &Hit, precision: f32) -> Vec<[NodeId; 2]> {
     };
     // A CAD edge is drawn as the line elements of one entity; a beam part as a whole.
     let entity_of = |segment: usize| {
-        let element = model.mesh.elements().get(skin.line_elements[segment])?;
+        let element = model.mesh().elements().get(skin.line_elements[segment])?;
         model.cad_entity(element.id)
     };
     let entity = entity_of(segment);
-    let ids = model.mesh.node_ids();
+    let ids = model.mesh().node_ids();
     (0..skin.lines.len())
         .filter(|&i| entity.is_none() || entity_of(i) == entity)
         .map(|i| skin.lines[i].map(|n| ids[n]))
@@ -1401,7 +1401,7 @@ fn outline(faces: &[Vec<NodeId>]) -> Vec<[NodeId; 2]> {
 }
 
 fn render_segments(model: &Model, segments: &[[NodeId; 2]]) -> Vec<[Vec3; 2]> {
-    let position = |id: NodeId| model.node_position(model.mesh.node_index(id)?);
+    let position = |id: NodeId| model.node_position(model.mesh().node_index(id)?);
     (segments.iter())
         .filter_map(|&[a, b]| Some([position(a)?, position(b)?]))
         .collect()
@@ -1438,7 +1438,7 @@ fn surface_center(model: &Model, faces: &[Vec<NodeId>]) -> Option<Vec3> {
     let centers: Vec<Vec3> = (faces.iter())
         .filter_map(|face| {
             let corners = (face.iter())
-                .map(|&n| model.node_position(model.mesh.node_index(n)?))
+                .map(|&n| model.node_position(model.mesh().node_index(n)?))
                 .collect::<Option<Vec<_>>>()?;
             Some(corners.iter().sum::<Vec3>() / corners.len().max(1) as f32)
         })
@@ -1561,7 +1561,7 @@ mod tests {
         let model = crate::model::load(&path, plx_model::UnitSystem::Unitless)
             .unwrap()
             .model;
-        let p = model.mesh.coords()[0];
+        let p = model.mesh().coords()[0];
         let first = Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32);
         let origin = Vec3::new(x, y, 50.0) - first + model.render_position(0);
         let hit = model.pick(origin, Vec3::NEG_Z).unwrap();

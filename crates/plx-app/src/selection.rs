@@ -613,10 +613,10 @@ impl Picker {
                 // The nodes of the whole part, inside a solid too: an initial velocity or
                 // temperature of the part on its skin alone left the inside at rest (a
                 // projectile struck from within at the first increment).
-                let elements = model.mesh.elements();
+                let elements = model.mesh().elements();
                 return Items::Nodes(
-                    (model.mesh.parts[hit.part].elements.iter())
-                        .filter_map(|&id| model.mesh.element_index(id))
+                    (model.mesh().parts[hit.part].elements.iter())
+                        .filter_map(|&id| model.mesh().element_index(id))
                         .flat_map(|e| elements[e].nodes.iter().copied())
                         .collect(),
                 );
@@ -628,7 +628,7 @@ impl Picker {
                     Some(edge) => edges_by_angle_across(model, hit.part, edge, angle),
                     None => BTreeMap::new(),
                 };
-                let ids = model.mesh.node_ids();
+                let ids = model.mesh().node_ids();
                 let mut nodes = BTreeSet::new();
                 for (&part, edges) in &chains {
                     let skin = &model.skin(part).edges;
@@ -664,7 +664,7 @@ impl Picker {
             SelectBy::Element => {
                 let element = picker.faces()[face].element;
                 if target == Target::Nodes {
-                    let element = &model.mesh.elements()[element];
+                    let element = &model.mesh().elements()[element];
                     return Items::Nodes(element.nodes.iter().copied().collect());
                 }
                 (0..picker.faces().len())
@@ -718,7 +718,7 @@ impl Picker {
             Target::Faces | Target::Surfaces | Target::Edges => Items::Faces(ids().collect()),
             Target::Lines => Items::Edges(BTreeSet::new()),
             Target::Nodes | Target::Point => {
-                let ids = model.mesh.node_ids();
+                let ids = model.mesh().node_ids();
                 Items::Nodes(
                     (faces.iter())
                         .flat_map(|&(part, face)| MeshPicker::new(model, part).face_nodes(face))
@@ -765,7 +765,7 @@ impl Picker {
             line_end_near(model, hit, f32::INFINITY)
         } else {
             let picker = MeshPicker::new(model, hit.part);
-            (picker.corner_of_patch(hit.face, hit.point)).map(|n| model.mesh.node_ids()[n])
+            (picker.corner_of_patch(hit.face, hit.point)).map(|n| model.mesh().node_ids()[n])
         };
         // A part without corners, like a sphere, has no point but its nodes.
         Items::Nodes(BTreeSet::from([
@@ -789,7 +789,7 @@ impl Picker {
             return Items::Faces(BTreeSet::new());
         }
         let skin = model.skin(hit.part);
-        let elements = model.mesh.elements();
+        let elements = model.mesh().elements();
         let part_nodes = || -> BTreeSet<NodeId> {
             (skin.line_elements.iter())
                 .flat_map(|&e| elements[e].nodes.iter().copied())
@@ -812,7 +812,7 @@ impl Picker {
     }
 
     fn pick_box_inner(&self, model: &Model, area: &BoxSelect, target: Target) -> Items {
-        let mesh = &model.mesh;
+        let mesh = &model.mesh();
         if target == Target::Lines {
             let mut edges = BTreeSet::new();
             for part in (0..model.parts.len()).filter(|&p| model.parts[p].visible) {
@@ -1056,7 +1056,7 @@ impl PartPicks {
 
 /// Whether the part lies inside the box, or crosses it for a box dragged to the left.
 fn part_in_box(model: &Model, part: usize, area: &BoxSelect) -> bool {
-    let mesh = &model.mesh;
+    let mesh = &model.mesh();
     let picker = MeshPicker::new(model, part);
     let elements = mesh.elements();
     let mut nodes: Vec<usize> = (0..picker.faces().len())
@@ -1088,14 +1088,14 @@ pub fn preview(model: &Model, items: &Items) -> Preview {
         Items::Nodes(nodes) => {
             preview.points = nodes
                 .iter()
-                .filter_map(|&id| model.mesh.node_index(id))
+                .filter_map(|&id| model.mesh().node_index(id))
                 .map(|n| model.render_position(n))
                 .collect();
             // Segments of line elements between two of the nodes, so a picked line shows.
             preview.lines = (model.line_segments())
                 .filter(|(_, line)| line.iter().all(|n| nodes.contains(n)))
                 .filter_map(|(_, [a, b])| {
-                    let position = |id| Some(model.render_position(model.mesh.node_index(id)?));
+                    let position = |id| Some(model.render_position(model.mesh().node_index(id)?));
                     Some([position(a)?, position(b)?])
                 })
                 .collect();
@@ -1103,7 +1103,7 @@ pub fn preview(model: &Model, items: &Items) -> Preview {
         Items::Edges(edges) => {
             preview.lines = (edges.iter())
                 .filter_map(|&[a, b]| {
-                    let position = |id| Some(model.render_position(model.mesh.node_index(id)?));
+                    let position = |id| Some(model.render_position(model.mesh().node_index(id)?));
                     Some([position(a)?, position(b)?])
                 })
                 .collect();
@@ -1112,7 +1112,7 @@ pub fn preview(model: &Model, items: &Items) -> Preview {
             preview.lines = edge_lines(model, faces)
                 .into_iter()
                 .filter_map(|[a, b]| {
-                    let position = |id| Some(model.render_position(model.mesh.node_index(id)?));
+                    let position = |id| Some(model.render_position(model.mesh().node_index(id)?));
                     Some([position(a)?, position(b)?])
                 })
                 .collect();
@@ -1135,7 +1135,7 @@ pub fn preview(model: &Model, items: &Items) -> Preview {
             // Edges of shells, which have no face of their own on the skin.
             let shell_edges: BTreeSet<(ElementId, u8)> = (faces.iter())
                 .filter(|&&(e, face)| {
-                    face >= 3 && model.mesh.element(e).is_some_and(|e| e.is_shell())
+                    face >= 3 && model.mesh().element(e).is_some_and(|e| e.is_shell())
                 })
                 .copied()
                 .collect();
@@ -1146,7 +1146,7 @@ pub fn preview(model: &Model, items: &Items) -> Preview {
                         .into_iter()
                         .filter_map(|[a, b]| {
                             let position =
-                                |id| Some(model.render_position(model.mesh.node_index(id)?));
+                                |id| Some(model.render_position(model.mesh().node_index(id)?));
                             Some([position(a)?, position(b)?])
                         }),
                 );
@@ -1200,7 +1200,7 @@ pub fn outline_edges_within(
 pub fn edge_lines(model: &Model, faces: &BTreeSet<(ElementId, u8)>) -> Vec<[NodeId; 2]> {
     let mut lines = Vec::new();
     for &(element, face) in faces {
-        let Some(element) = model.mesh.element(element) else {
+        let Some(element) = model.mesh().element(element) else {
             continue;
         };
         let Some(edge) = (usize::from(face).checked_sub(1)).and_then(|f| element.faces().get(f))
@@ -1264,7 +1264,7 @@ impl<'a> MeshPicker<'a> {
 
     /// Skin edges by the ids of their end nodes, the smaller first.
     fn segments(&self, edges: impl IntoIterator<Item = usize>) -> BTreeSet<[NodeId; 2]> {
-        let ids = self.model.mesh.node_ids();
+        let ids = self.model.mesh().node_ids();
         let skin = &self.model.skin(self.part).edges;
         (edges.into_iter())
             .map(|e| {
@@ -1277,7 +1277,7 @@ impl<'a> MeshPicker<'a> {
     fn face_id(&self, face: usize) -> (ElementId, u8) {
         let face = &self.faces()[face];
         (
-            self.model.mesh.elements()[face.element].id,
+            self.model.mesh().elements()[face.element].id,
             face.face as u8 + 1,
         )
     }
@@ -1288,7 +1288,7 @@ impl<'a> MeshPicker<'a> {
     }
 
     fn node_ids(&self, nodes: impl IntoIterator<Item = usize>) -> BTreeSet<NodeId> {
-        let ids = self.model.mesh.node_ids();
+        let ids = self.model.mesh().node_ids();
         nodes.into_iter().map(|n| ids[n]).collect()
     }
 
@@ -1485,7 +1485,7 @@ pub fn edge_segments(model: &Model, part: usize, point: Vec3) -> Vec<[NodeId; 2]
     let Some(start) = picker.nearest_edge(point) else {
         return Vec::new();
     };
-    let ids = model.mesh.node_ids();
+    let ids = model.mesh().node_ids();
     let edges = &model.skin(part).edges;
     (picker.chain_edges(start, None).into_iter())
         .flat_map(|e| {
@@ -1509,7 +1509,7 @@ fn faces_by_angle_across(
     start: usize,
     angle: f64,
 ) -> Vec<(usize, usize)> {
-    let coords = model.mesh.coords();
+    let coords = model.mesh().coords();
     let cos_limit = angle.cos();
     let across = !model.is_plane();
     let seams = across.then(|| model.seams());
@@ -1576,7 +1576,7 @@ fn edges_by_angle_across(
         at_node: HashMap<usize, Vec<usize>>,
         by_nodes: HashMap<(usize, usize), usize>,
     }
-    let coords = model.mesh.coords();
+    let coords = model.mesh().coords();
     let point = |n: usize| DVec3::from(coords[n]);
     let cos_limit = angle.cos();
     let seams = (!model.is_plane()).then(|| model.seams());
@@ -1654,7 +1654,7 @@ fn corner_edges(corners: &[usize]) -> impl Iterator<Item = (usize, usize)> + '_ 
 /// its line elements uses, like a corner point of a solid.
 fn line_end_near(model: &Model, hit: &Hit, precision: f32) -> Option<NodeId> {
     let skin = model.skin(hit.part);
-    let elements = model.mesh.elements();
+    let elements = model.mesh().elements();
     let mut uses: BTreeMap<NodeId, usize> = BTreeMap::new();
     // The skin lists an element once per segment it is drawn with.
     let line_elements: BTreeSet<usize> = skin.line_elements.iter().copied().collect();
@@ -1667,7 +1667,7 @@ fn line_end_near(model: &Model, hit: &Hit, precision: f32) -> Option<NodeId> {
     (uses.into_iter())
         .filter(|&(_, count)| count == 1)
         .filter_map(|(n, _)| {
-            let position = model.render_position(model.mesh.node_index(n)?);
+            let position = model.render_position(model.mesh().node_index(n)?);
             Some((n, position.distance(hit.point)))
         })
         .filter(|&(_, d)| d <= precision)
@@ -1721,7 +1721,7 @@ mod tests {
         .unwrap()
         .model;
         // Render coordinates are relative to the model centre.
-        let p = model.mesh.coords()[0];
+        let p = model.mesh().coords()[0];
         let first = Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32);
         let origin = Vec3::new(x, y, 50.0) - first + model.render_position(0);
         let hit = model.pick(origin, Vec3::NEG_Z).unwrap();
@@ -1798,7 +1798,7 @@ mod tests {
     fn the_part_mode_picks_the_nodes_inside_a_solid_too() {
         let (model, hit) = beam_hit(95.0, 5.0);
         let picked = nodes(picker(SelectBy::Part).pick(&model, &hit, Target::Nodes, 0.5));
-        let all: BTreeSet<NodeId> = model.mesh.node_ids().iter().copied().collect();
+        let all: BTreeSet<NodeId> = model.mesh().node_ids().iter().copied().collect();
         // 11 x 3 x 3 nodes, 11 of them inside the 2 x 2 elements across.
         assert_eq!(all.len(), 99);
         assert_eq!(picked, all);
@@ -1828,8 +1828,10 @@ mod tests {
         let pick = |x, y, mode| {
             let (model, hit) = beam_hit(x, y);
             let nodes = nodes(picker(mode).pick(&model, &hit, Target::Nodes, 0.5));
-            let coords: Vec<[f64; 3]> =
-                nodes.iter().map(|&n| model.mesh.node(n).unwrap()).collect();
+            let coords: Vec<[f64; 3]> = nodes
+                .iter()
+                .map(|&n| model.mesh().node(n).unwrap())
+                .collect();
             coords
         };
         // Inside a face the geometry mode takes the whole top: 11 x 3 nodes.
@@ -1867,7 +1869,10 @@ mod tests {
         let top = edges(&picker(SelectBy::Geometry));
         assert_eq!(top.len(), 10);
         for [a, b] in &top {
-            let (p, q) = (model.mesh.node(*a).unwrap(), model.mesh.node(*b).unwrap());
+            let (p, q) = (
+                model.mesh().node(*a).unwrap(),
+                model.mesh().node(*b).unwrap(),
+            );
             assert!(p[1] == 0.0 && q[1] == 0.0 && p[2] == 10.0 && q[2] == 10.0);
         }
         assert_eq!(edges(&picker(SelectBy::EdgeAngle)), top);
@@ -1876,7 +1881,7 @@ mod tests {
         assert!(!SelectBy::Node.allowed(Target::Lines));
         // The region takes the edges and spreads a load over all of them by length.
         let region = Region::Edges(top.into_iter().collect());
-        let lines = region.edges(&model.mesh);
+        let lines = region.edges(model.mesh());
         assert_eq!(lines.len(), 10);
     }
 
@@ -1960,7 +1965,7 @@ mod tests {
 
     /// A click from above at x, y onto the blocks of [`two_blocks`].
     fn block_hit(model: &Model, x: f32, y: f32) -> Hit {
-        let p = model.mesh.coords()[0];
+        let p = model.mesh().coords()[0];
         let first = Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32);
         let origin = Vec3::new(x, y, 50.0) - first + model.render_position(0);
         model.pick(origin, Vec3::NEG_Z).unwrap()
@@ -2070,7 +2075,7 @@ mod tests {
             elements,
         });
         let model = Model::new(std::path::Path::new("platte.inp"), mesh);
-        let p = model.mesh.coords()[0];
+        let p = model.mesh().coords()[0];
         let first = Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32);
         let origin = Vec3::new(55.0, 1.0, 50.0) - first + model.render_position(0);
         let hit = model.pick(origin, Vec3::NEG_Z).unwrap();
@@ -2083,7 +2088,7 @@ mod tests {
             edges
                 .iter()
                 .flatten()
-                .all(|&n| model.mesh.node(n).unwrap()[1] == 0.0)
+                .all(|&n| model.mesh().node(n).unwrap()[1] == 0.0)
         );
     }
 
@@ -2255,9 +2260,9 @@ mod tests {
         let (model, hit) = beam_hit(55.0, 5.0);
         let picked = nodes(picker(SelectBy::Geometry).pick(&model, &hit, Target::Point, 0.5));
         assert_eq!(picked.len(), 1);
-        let position = model.mesh.node(*picked.first().unwrap()).unwrap();
+        let position = model.mesh().node(*picked.first().unwrap()).unwrap();
         // A corner of the top face the click hit.
-        let top = (model.mesh.coords().iter())
+        let top = (model.mesh().coords().iter())
             .map(|p| p[2])
             .fold(f64::MIN, f64::max);
         assert_eq!((position[0], position[2]), (100.0, top), "{position:?}");

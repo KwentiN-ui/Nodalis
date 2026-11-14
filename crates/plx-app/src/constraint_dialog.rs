@@ -224,7 +224,7 @@ impl NewPoint {
             old.definition == point.definition && old.position == point.position
         });
         if !current {
-            let position = point.resolve(&model.fe, &model.mesh);
+            let position = point.resolve(&model.fe, model.mesh());
             if let Ok(p) = position {
                 point.position = p;
             }
@@ -537,7 +537,7 @@ impl ConstraintDraft {
         if picks.is_empty() || picks.is_world() {
             return false;
         }
-        let mesh = &model.mesh;
+        let mesh = &model.mesh();
         let faces = face_target(&model.fe);
         let (draft, dropped) = if kind.has_ends() {
             // A spring's first end takes nodes, or faces where the picks are some; a
@@ -738,7 +738,7 @@ fn joint_rows(ui: &mut Ui, model: &Model, joint: &mut Joint, pair: &mut MasterSl
         }
         if ui.radio(joint.location.is_some(), "Coordinates").clicked() && joint.location.is_none() {
             // Starts from the centre, in the coordinates of the system.
-            let centre = (fe.joint_origin(&model.mesh, joint)).unwrap_or([0.0; 3]);
+            let centre = (fe.joint_origin(model.mesh(), joint)).unwrap_or([0.0; 3]);
             let local = (system.as_ref())
                 .and_then(|s| s.local(centre).ok())
                 .unwrap_or(centre);
@@ -768,7 +768,7 @@ fn joint_rows(ui: &mut Ui, model: &Model, joint: &mut Joint, pair: &mut MasterSl
         }
     }
     ui.label("Joint");
-    match fe.joint_origin(&model.mesh, joint) {
+    match fe.joint_origin(model.mesh(), joint) {
         Ok(origin) => {
             let [x, y, z] = origin
                 .map(|v| crate::results::format_value(units.shown(v, Quantity::Length) as f32));
@@ -832,14 +832,14 @@ fn axis_rows(ui: &mut Ui, model: &Model, joint: &mut Joint) {
         }
     }
     ui.label("Axis direction");
-    match fe.joint_frame(&model.mesh, joint) {
+    match fe.joint_frame(model.mesh(), joint) {
         Ok((_, axes)) => {
             let [x, y, z] = axes[2].map(|v| crate::results::format_value(v as f32));
             ui.label(format!("({x}, {y}, {z})"))
                 .on_hover_text("Global direction of the joint axis");
         }
         // The origin's error shows in the Joint row.
-        Err(_) if fe.joint_origin(&model.mesh, joint).is_err() => {
+        Err(_) if fe.joint_origin(model.mesh(), joint).is_err() => {
             ui.weak("Choose the ends");
         }
         Err(error) => {
@@ -1275,15 +1275,16 @@ mod tests {
     fn switching_the_type_keeps_the_picks_the_new_type_takes() {
         let model = empty_model();
         let mut draft = ConstraintDraft::new(&model.fe);
-        draft
-            .pair
-            .slave
-            .take(&model.mesh, Items::Nodes([1, 2].into()), Operation::Replace);
+        draft.pair.slave.take(
+            model.mesh(),
+            Items::Nodes([1, 2].into()),
+            Operation::Replace,
+        );
         // Nodes are no faces: the compression only support starts empty.
         assert!(draft.switch(Type::CompressionOnly, &[], &model));
         assert!(draft.region.is_empty());
         draft.region.take(
-            &model.mesh,
+            model.mesh(),
             Items::Faces([(1, 2)].into()),
             Operation::Replace,
         );
@@ -1303,7 +1304,7 @@ mod tests {
         let mut draft = ConstraintDraft::new(&fe);
         draft.switch(Type::RigidBody, &[], &model);
         draft.region.take(
-            &model.mesh,
+            model.mesh(),
             Items::Faces([(1, 2)].into()),
             Operation::Replace,
         );
@@ -1343,7 +1344,7 @@ mod tests {
         assert_eq!(draft.name(), "Point_Mass-1");
         assert!(draft.validate(&fe).is_err(), "no region");
         draft.region.take(
-            &model.mesh,
+            model.mesh(),
             Items::Faces([(1, 2)].into()),
             Operation::Replace,
         );
@@ -1391,7 +1392,8 @@ mod tests {
         fe.constraints.push(Constraint::RigidBody(body));
         let mut mass = PointMass::new("Point_Mass-1", id);
         mass.mass = 1.0;
-        let draft = ConstraintDraft::edit(&Constraint::PointMass(mass), Target::Faces, &model.mesh);
+        let draft =
+            ConstraintDraft::edit(&Constraint::PointMass(mass), Target::Faces, model.mesh());
         assert_eq!(draft.validate(&fe), Ok(()));
         let Constraint::PointMass(mass) = draft.finish() else {
             unreachable!()

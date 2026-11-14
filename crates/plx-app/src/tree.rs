@@ -382,10 +382,14 @@ pub struct TreeResponse {
     pub symbol_visibility: Vec<(TreeItem, bool)>,
     /// Mesh one part of the geometry, by index.
     pub mesh_part: Option<usize>,
+    /// Use Linked Mesh on a part of the geometry, by index.
+    pub linked_mesh: Option<usize>,
     /// Transform a mesh part (translate, rotate, mirror, scale), by index.
     pub transform_part: Option<usize>,
     /// Merge the selected mesh parts into one.
     pub merge_parts: bool,
+    /// Discard the mesh of a part of the geometry, by index: the part stays.
+    pub clear_mesh: Option<usize>,
     /// Make, change or dissolve a compound part of the geometry.
     pub compound: Option<CompoundAction>,
     /// Suppress (`true`) or unsuppress parts of the geometry, by index.
@@ -918,6 +922,10 @@ fn part_icon(part: &PartInfo) -> TreeIcon {
     if !part.visible {
         return TreeIcon::Hidden;
     }
+    // An imported mesh is a geometry object of its own.
+    if part.imported {
+        return TreeIcon::Mesh;
+    }
     match part.dimension {
         Some(3) => return TreeIcon::Solid,
         Some(2) => return TreeIcon::Shell,
@@ -949,13 +957,15 @@ pub fn part_menu(
     visible: bool,
     contours: bool,
     suppressed: bool,
+    imported: bool,
+    own_mesh: bool,
     view: TreeView,
     selected: &BTreeSet<usize>,
     compounds: &[(String, Vec<usize>)],
     response: &mut TreeResponse,
 ) {
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-    if view == TreeView::Geometry {
+    if view == TreeView::Geometry && !imported {
         if ui
             .add_enabled(!suppressed, egui::Button::new("Create Mesh"))
             .on_disabled_hover_text("The part is suppressed: unsuppress it to mesh it.")
@@ -963,6 +973,23 @@ pub fn part_menu(
         {
             response.mesh_part = Some(index);
         }
+        if ui
+            .button("Clear Mesh")
+            .on_hover_text(CLEAR_MESH_TIP)
+            .clicked()
+        {
+            response.clear_mesh = Some(index);
+        }
+        if own_mesh
+            && ui
+                .button("Use Linked Mesh")
+                .on_hover_text(LINKED_MESH_TIP)
+                .clicked()
+        {
+            response.linked_mesh = Some(index);
+        }
+    }
+    if view != TreeView::Results {
         let label = if suppressed { "Unsuppress" } else { "Suppress" };
         if ui.button(label).on_hover_text(SUPPRESS_TIP).clicked() {
             let parts = if selected.contains(&index) {
@@ -973,6 +1000,8 @@ pub fn part_menu(
             response.suppress = Some((parts, !suppressed));
         }
         ui.separator();
+    }
+    if view == TreeView::Geometry && !imported {
         compound_menu_items(ui, index, selected, compounds, response);
         ui.separator();
     }
@@ -1070,9 +1099,19 @@ fn compound_menu_items(
 }
 
 /// What suppressing a part of the geometry does, for its tooltips.
-pub const SUPPRESS_TIP: &str = "A suppressed part is left alone by meshing (Mesh All Parts, \
-    solving) and by the CAD tools (splits, Defeature, fillets), as if it were not there, \
-    until it is unsuppressed. A mesh it has already stays. It is drawn as its edges only.";
+pub const SUPPRESS_TIP: &str = "A suppressed part takes part in nothing, with its geometry and its \
+    mesh: meshing, the CAD tools (splits, Defeature, fillets) and the solver leave it out, as if \
+    it were not there, until it is unsuppressed. A mesh it has already is kept for then. It is \
+    drawn as its edges only.";
+
+/// What Clear Mesh does, for its tooltip.
+pub const CLEAR_MESH_TIP: &str = "Discards the mesh of the part; the part stays and is meshed \
+    again by Create Mesh or by Solve, here also when a link brought its mesh. To leave the \
+    part out, suppress it.";
+
+/// What Use Linked Mesh does, for its tooltip.
+pub const LINKED_MESH_TIP: &str = "Takes the mesh of the part from the link that brings the \
+    part again, in place of the mesh made here.";
 
 /// What a compound part is, for its tooltips.
 pub const COMPOUND_TIP: &str = "Joins the parts into one part of the FE model. Each is \
@@ -1936,6 +1975,8 @@ impl Tree<'_> {
                 part.visible,
                 part.contours,
                 part.suppressed,
+                part.imported,
+                part.own_mesh,
                 view,
                 &selected,
                 compounds,
@@ -1997,7 +2038,7 @@ impl Tree<'_> {
                     .collect();
                 tree.container(ui, MESH_OPERATIONS, operations);
             }
-            let mesh = &model.mesh;
+            let mesh = &model.mesh();
             // The user's sets are listed even when their selection finds nothing on the mesh.
             let names = |kind: SetKind| -> Vec<String> {
                 let mut names: BTreeSet<String> =

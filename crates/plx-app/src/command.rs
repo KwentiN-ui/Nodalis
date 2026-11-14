@@ -1271,7 +1271,8 @@ fn build() -> Vec<Command> {
         "Import",
         Tool(Icon::Import),
         "",
-        "Imports the mesh of an input file as parts.",
+        "Imports the mesh of an input file as parts: each is a geometry object of its own, \
+         shown in the Geometry workspace as its outline.",
     ));
     let t = "Material";
     add(command(

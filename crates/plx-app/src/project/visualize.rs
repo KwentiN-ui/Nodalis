@@ -150,15 +150,12 @@ pub(super) const PREVIEW_INPUT: &str = "Input";
 /// The key of the number or series a Preview block shows.
 pub(super) const PREVIEW_VALUE: &str = "Input";
 
-/// The row a link to the Preview block `target` goes to: the Mesh row for a mesh, the
-/// Geometry row for a geometry or a part of one, the value row for anything else. `None` if `target` is no Preview block.
+/// The row a link to the Preview block `target` goes to: the Geometry row for geometry
+/// objects or a part of one, the value row for anything else. `None` if `target` is no Preview block.
 pub(super) fn preview_slot(nodes: &[Node], target: u64, item: &[String]) -> Option<Vec<String>> {
     nodes.iter().find(|n| n.id == target)?.as_preview()?;
-    let mesh = [links::MESH.to_owned()];
     let geometry = [links::GEOMETRY.to_owned()];
-    Some(if links::compatible(item, &mesh) {
-        mesh.to_vec()
-    } else if links::compatible(item, &geometry) {
+    Some(if links::compatible(item, &geometry) {
         geometry.to_vec()
     } else {
         vec![links::PARAMETERS.to_owned(), PREVIEW_VALUE.to_owned()]
@@ -170,7 +167,6 @@ pub(super) fn preview_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> V
     let Some(preview) = node.as_preview() else {
         return Vec::new();
     };
-    let mesh = [links::MESH.to_owned()];
     let geometry = [links::GEOMETRY.to_owned()];
     let value = [links::PARAMETERS.to_owned(), PREVIEW_VALUE.to_owned()];
     let from = |path: &[String]| {
@@ -178,16 +174,19 @@ pub(super) fn preview_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> V
             .find(|(slot, _)| links::covers(slot, path))
             .map(|(_, source)| source.clone())
     };
-    let (path, text, icon, linked_from, tip) = if let Some(source) = from(&mesh) {
+    let meshed = preview.model.mesh.element_count() > 0;
+    let (path, text, icon, linked_from, tip) = if let Some(source) = from(&geometry)
+        && meshed
+    {
         let count = preview.model.mesh.element_count();
         let tip = format!(
-            "Mesh: {count} elements and {} nodes, seen from the side the views of the \
-             analysis call isometric.",
+            "Geometry: its mesh, {count} elements and {} nodes, seen from the side the views \
+             of the analysis call isometric.",
             preview.model.mesh.node_count()
         );
         (
-            mesh.to_vec(),
-            links::MESH.to_owned(),
+            geometry.to_vec(),
+            links::GEOMETRY.to_owned(),
             NodeIcon::Mesh,
             Some(source),
             tip,
@@ -234,7 +233,7 @@ pub(super) fn preview_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> V
             PREVIEW_INPUT.to_owned(),
             NodeIcon::Picture,
             None,
-            "Input: drag a geometry, a part of one, a mesh, a number or a series here to see it."
+            "Input: drag a geometry, meshed or not, a part of one, a number or a series here to see it."
                 .to_owned(),
         )
     };
@@ -325,13 +324,12 @@ impl Shape<'_> {
 /// link has brought nothing yet.
 pub(super) fn preview_shape<'a>(node: &'a Node, all: &[Link]) -> Option<Shape<'a>> {
     let preview = node.as_preview()?;
-    let link = (all.iter()).find(|l| {
-        l.target == node.id
-            && (l.item.first()).is_some_and(|c| c == links::MESH || c == links::GEOMETRY)
-    })?;
-    if link.item[0] == links::MESH {
-        let mesh = &preview.model.mesh;
-        (mesh.element_count() > 0).then_some(Shape::Mesh(mesh))
+    (all.iter())
+        .find(|l| l.target == node.id && (l.item.first()).is_some_and(|c| c == links::GEOMETRY))?;
+    // Meshed objects are drawn as their mesh, else as their shapes.
+    let mesh = &preview.model.mesh;
+    if mesh.element_count() > 0 {
+        Some(Shape::Mesh(mesh))
     } else {
         preview.model.geometry.as_ref().map(Shape::Geometry)
     }
@@ -1339,7 +1337,7 @@ mod tests {
                 geometry,
                 mesh: Default::default(),
                 model: Default::default(),
-                mesh_inputs: BTreeMap::new(),
+                origins: Default::default(),
                 results: None,
             };
             Node::analysis(id, "Bracket".into(), data)
@@ -1354,16 +1352,17 @@ mod tests {
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let mut preview = Node::new(2, "Preview".into(), Block::Preview(Box::default()));
         let nodes = vec![analysis(1, Some(geometry.clone())), preview_clone(&preview)];
-        // A geometry or a part of it goes to the Geometry row, a mesh to the Mesh row.
+        // A geometry, meshed or not, or a part of it goes to the Geometry row.
         let whole = [links::GEOMETRY.to_owned()];
         let part = [links::GEOMETRY.to_owned(), "BOLT".to_owned()];
-        let mesh = [links::MESH.to_owned()];
         assert_eq!(preview_slot(&nodes, 2, &whole), Some(whole.to_vec()));
         assert_eq!(preview_slot(&nodes, 2, &part), Some(whole.to_vec()));
-        assert_eq!(preview_slot(&nodes, 2, &mesh), Some(mesh.to_vec()));
         assert_eq!(preview_slot(&nodes, 1, &whole), None);
         let slot = preview_slot(&nodes, 2, &whole).unwrap();
         assert!(refusal(&nodes, &[], 1, &whole, 2, &slot).is_none());
@@ -1387,7 +1386,7 @@ mod tests {
             preview_shape(&preview, &links),
             Some(Shape::Geometry(g)) if g.source == "bracket.step"
         ));
-        // A mesh it took before is not drawn while the geometry is linked.
+        // Nothing is drawn without a link.
         assert!(preview_shape(&preview, &[]).is_none());
     }
 

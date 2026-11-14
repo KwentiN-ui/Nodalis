@@ -150,8 +150,8 @@ the state of another analysis (@data-links).
   a program bring its own window to the front; there the taskbar marks the window instead.
   While the analysis is solved in the background, it opens once the solve is done. The header
   of an open analysis says #ui("(open)").
-  Double-clicking a row opens the analysis in the matching workspace: #ui("Geometry") and
-  #ui("Mesh") in the Geometry workspace, #ui("Setup") and its categories in the FE Model
+  Double-clicking a row opens the analysis in the matching workspace: #ui("Geometry") in the
+  Geometry workspace, #ui("Setup") and its categories in the FE Model
   workspace, the rows of the steps likewise with the step selected in the tree, and #ui("Results") in the Results workspace.
 - *Drag* a block by its header to move it. Drag the background to select the blocks in a
   rectangle, and click it to clear the selection. Drag with the middle mouse button to pan,

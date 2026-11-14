@@ -285,7 +285,7 @@ impl PathPlot {
         if self.located.as_ref().is_none_or(|(p, _)| p != path) {
             let points = path
                 .samples(&model.fe)
-                .map(|samples| path::path_points(&model.mesh, &samples));
+                .map(|samples| path::path_points(model.mesh(), &samples));
             self.located = Some((path.clone(), points));
         }
         let points = self.located.as_ref()?.1.as_ref().ok()?;

@@ -282,6 +282,48 @@ impl FeMesh {
         replaced
     }
 
+    /// The elements of each geometry object of the mesh, by name: the bodies of a compound
+    /// part, else the part itself.
+    pub fn object_elements(&self) -> Vec<(&str, &[ElementId])> {
+        (self.parts.iter())
+            .flat_map(|part| match part.bodies.is_empty() {
+                true => vec![(part.name.as_str(), part.elements.as_slice())],
+                false => (part.bodies.iter())
+                    .map(|b| (b.name.as_str(), b.elements.as_slice()))
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// Where the node and element numbers of this mesh went in `new`, for each geometry
+    /// object whose mesh `new` has unchanged but numbered anew, e.g. the mesh a link brings
+    /// again after the source's mesh was put together differently. A node or element is
+    /// known within its object by its local number: its place among the object's nodes or
+    /// elements in ascending order of their numbers, which a renumbering keeps. An object
+    /// whose mesh changed, or that `new` lacks, is left out: what was picked on it is of a
+    /// mesh that is gone. Only changed numbers are listed.
+    pub fn renumbering_to(
+        &self,
+        new: &FeMesh,
+    ) -> (BTreeMap<NodeId, NodeId>, BTreeMap<ElementId, ElementId>) {
+        let (mut nodes, mut elements) = (BTreeMap::new(), BTreeMap::new());
+        let theirs = new.object_elements();
+        for (name, old_elements) in self.object_elements() {
+            let Some((_, new_elements)) =
+                (theirs.iter()).find(|(n, _)| n.eq_ignore_ascii_case(name))
+            else {
+                continue;
+            };
+            if let Some((node_map, element_map)) =
+                same_object(self, old_elements, new, new_elements)
+            {
+                nodes.extend(node_map.into_iter().filter(|(a, b)| a != b));
+                elements.extend(element_map.into_iter().filter(|(a, b)| a != b));
+            }
+        }
+        (nodes, elements)
+    }
+
     /// Numbers the nodes and elements anew from the start numbers, in ascending order of
     /// their old ids, and returns the old to new maps so that regions outside the mesh can
     /// follow.
@@ -358,6 +400,74 @@ impl FeMesh {
         };
         (nodes, elements)
     }
+}
+
+/// The local numbers of one geometry object in two meshes matched up, if its mesh is the
+/// same in both: as many nodes and elements, at the same places, joined alike. See
+/// [`FeMesh::renumbering_to`].
+#[allow(clippy::type_complexity)]
+fn same_object(
+    old: &FeMesh,
+    old_elements: &[ElementId],
+    new: &FeMesh,
+    new_elements: &[ElementId],
+) -> Option<(Vec<(NodeId, NodeId)>, Vec<(ElementId, ElementId)>)> {
+    if old_elements.len() != new_elements.len() {
+        return None;
+    }
+    let sorted = |ids: &[ElementId]| {
+        let mut ids = ids.to_vec();
+        ids.sort_unstable();
+        ids
+    };
+    let (old_elements, new_elements) = (sorted(old_elements), sorted(new_elements));
+    let nodes_of = |mesh: &FeMesh, elements: &[ElementId]| -> Option<Vec<NodeId>> {
+        let mut nodes = BTreeSet::new();
+        for &e in elements {
+            nodes.extend(mesh.element(e)?.nodes.iter().copied());
+        }
+        Some(nodes.into_iter().collect())
+    };
+    let old_nodes = nodes_of(old, &old_elements)?;
+    let new_nodes = nodes_of(new, &new_elements)?;
+    if old_nodes.len() != new_nodes.len() {
+        return None;
+    }
+    let node_map: BTreeMap<NodeId, NodeId> = old_nodes
+        .iter()
+        .copied()
+        .zip(new_nodes.iter().copied())
+        .collect();
+    // The same places: within a millionth of the object's size.
+    let (low, high) = (old_nodes.iter()).filter_map(|&n| old.node(n)).fold(
+        ([f64::MAX; 3], [f64::MIN; 3]),
+        |(lo, hi), p| {
+            (
+                [lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])],
+                [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])],
+            )
+        },
+    );
+    let size = (0..3)
+        .map(|i| (high[i] - low[i]).max(0.0))
+        .fold(0.0, f64::max);
+    let tolerance = 1e-6 * size.max(f64::MIN_POSITIVE);
+    for (&a, &b) in &node_map {
+        let (p, q) = (old.node(a)?, new.node(b)?);
+        if (0..3).any(|i| (p[i] - q[i]).abs() > tolerance) {
+            return None;
+        }
+    }
+    // Joined alike.
+    for (&a, &b) in old_elements.iter().zip(&new_elements) {
+        let (x, y) = (old.element(a)?, new.element(b)?);
+        let mapped = x.nodes.iter().map(|n| node_map.get(n).copied());
+        if x.shape != y.shape || !mapped.eq(y.nodes.iter().map(|&n| Some(n))) {
+            return None;
+        }
+    }
+    let element_map = old_elements.into_iter().zip(new_elements).collect();
+    Some((node_map.into_iter().collect(), element_map))
 }
 
 #[cfg(test)]

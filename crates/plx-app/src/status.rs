@@ -4,8 +4,6 @@
 //! was made from, or when a cell it is made from is out of date; Solve then makes only those
 //! cells again.
 
-use std::collections::BTreeMap;
-
 use egui::{Color32, Painter, Rect, Shape, Stroke, pos2};
 use plx_io::project::BoundResults;
 use plx_mesh::FeMesh;
@@ -111,7 +109,7 @@ pub fn analysis_status(
     geometry: Option<&Geometry>,
     mesh: &FeMesh,
     fe: &FeModel,
-    mesh_inputs: &BTreeMap<String, u64>,
+    origins: &plx_model::PartOrigins,
     results: Option<&BoundResults>,
     upstream: &Upstream,
     running: bool,
@@ -139,8 +137,8 @@ pub fn analysis_status(
                 // Suppressed parts keep the mesh they have.
                 let stale = bodies.into_iter().any(|body| {
                     !geometry.is_suppressed(body)
-                        && mesh_inputs.get(body).is_some_and(|made_from| {
-                            fingerprint::mesh_input(geometry, &matching, space, body) != *made_from
+                        && origins.made_from(body).is_some_and(|made_from| {
+                            fingerprint::mesh_input(geometry, &matching, space, body) != made_from
                         })
                 });
                 stale.then(|| part.name.clone())
@@ -148,6 +146,24 @@ pub fn analysis_status(
             .collect(),
         None => Vec::new(),
     };
+    // A part of the geometry that takes part has a mesh: one without is out of date, so
+    // that Solve meshes it rather than leaving it out, also one whose mesh a link would
+    // bring that this analysis meshes itself.
+    let mut stale_parts = stale_parts;
+    if let Some(geometry) = geometry
+        && meshed
+    {
+        for part in geometry.known_parts() {
+            let fe_part = geometry.fe_part_name(part);
+            if geometry.is_suppressed(part)
+                || origins.get(part).is_some()
+                || stale_parts.iter().any(|p| p.eq_ignore_ascii_case(fe_part))
+            {
+                continue;
+            }
+            stale_parts.push(fe_part.to_owned());
+        }
+    }
     // A mesh taken from a mesh block is out of date with the block.
     let mesh_state = if !meshed {
         CellState::Missing
@@ -164,9 +180,16 @@ pub fn analysis_status(
     // Lowering a large model for its fingerprints takes seconds: after a change it runs in
     // the background, and the states found before stand until it is done. Without states
     // found before there is nothing to show meanwhile.
-    let prints = results.map(|_| match previous {
-        Some(_) => crate::solve_fingerprint::fingerprints_soon(mesh, fe),
-        None => Some(crate::solve_fingerprint::fingerprints(mesh, fe)),
+    // The solution is of the mesh and the model without the suppressed geometry objects.
+    let prints = results.map(|_| {
+        let active = plx_model::active_model(mesh, fe, geometry, origins);
+        match previous {
+            Some(_) => crate::solve_fingerprint::fingerprints_soon(&active.mesh, &active.fe),
+            None => Some(crate::solve_fingerprint::fingerprints(
+                &active.mesh,
+                &active.fe,
+            )),
+        }
     });
     if let (Some(None), Some(previous)) = (&prints, previous) {
         return AnalysisStatus {
@@ -314,7 +337,7 @@ mod tests {
         fe.steps.push(Step::new_static("Step-1"));
         let solved = results(crate::solve_fingerprint::solve_input(&mesh, &fe));
         let status = |fe: &FeModel, previous: Option<&AnalysisStatus>| {
-            let inputs = BTreeMap::new();
+            let inputs = plx_model::PartOrigins::default();
             let upstream = Upstream::default();
             analysis_status(
                 None,
@@ -367,7 +390,7 @@ mod tests {
             None,
             &mesh,
             &fe,
-            &BTreeMap::new(),
+            &plx_model::PartOrigins::default(),
             Some(&solved),
             &Upstream::default(),
             false,
@@ -389,7 +412,7 @@ mod tests {
             None,
             &mesh,
             &fe,
-            &BTreeMap::new(),
+            &plx_model::PartOrigins::default(),
             Some(&solved),
             &Upstream::default(),
             false,
@@ -402,7 +425,7 @@ mod tests {
             None,
             &mesh,
             &fe,
-            &BTreeMap::new(),
+            &plx_model::PartOrigins::default(),
             Some(&solved),
             &Upstream::default(),
             false,
@@ -414,7 +437,7 @@ mod tests {
             None,
             &mesh,
             &fe,
-            &BTreeMap::new(),
+            &plx_model::PartOrigins::default(),
             Some(&solved),
             &Upstream::default(),
             false,
@@ -424,6 +447,51 @@ mod tests {
         assert_eq!(status.solution, CellState::OutOfDate);
         assert_eq!(status.results, CellState::OutOfDate);
         assert!(status.needs_solve());
+    }
+
+    #[test]
+    fn a_part_of_the_geometry_without_a_mesh_is_meshed_unless_suppressed() {
+        let mesh = block();
+        let part = mesh.parts[0].name.clone();
+        let mut geometry = Geometry {
+            compounds: Vec::new(),
+            suppressed: Vec::new(),
+            source: "block.step".into(),
+            brep: "shapes".into(),
+            meshing: MeshingParameters::default(),
+            mesh_items: Vec::new(),
+            part_names: vec![part.clone(), "SOLID-2".into()],
+            refinement: 1.0,
+            signatures: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
+        };
+        let fe = FeModel::default();
+        let space = fe.properties.space;
+        let mut inputs = plx_model::PartOrigins::default();
+        inputs.set_meshed(&part, fingerprint::mesh_input(&geometry, &[], space, &part));
+        let status = |geometry: &Geometry| {
+            analysis_status(
+                Some(geometry),
+                &mesh,
+                &fe,
+                &inputs,
+                None,
+                &Upstream::default(),
+                false,
+                None,
+            )
+        };
+        // Not left out without a word: Solve meshes it.
+        let found = status(&geometry);
+        assert_eq!(found.mesh, CellState::OutOfDate);
+        assert_eq!(found.stale_parts, ["SOLID-2"]);
+        // Suppressed, it takes part in nothing.
+        geometry.suppressed.push("SOLID-2".into());
+        let found = status(&geometry);
+        assert_eq!(found.mesh, CellState::UpToDate);
+        assert!(found.stale_parts.is_empty());
     }
 
     #[test]
@@ -440,13 +508,14 @@ mod tests {
             part_names: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let fe = FeModel::default();
         let space = fe.properties.space;
-        let inputs = BTreeMap::from([(
-            part.clone(),
-            fingerprint::mesh_input(&geometry, &[], space, &part),
-        )]);
+        let mut inputs = plx_model::PartOrigins::default();
+        inputs.set_meshed(&part, fingerprint::mesh_input(&geometry, &[], space, &part));
         let solved = results(crate::solve_fingerprint::solve_input(&mesh, &fe));
         let status = analysis_status(
             Some(&geometry),
@@ -483,7 +552,7 @@ mod tests {
         let mut fe = FeModel::default();
         fe.steps.push(Step::new_static("Step-1"));
         let solved = results(crate::solve_fingerprint::solve_input(&mesh, &fe));
-        let inputs = BTreeMap::new();
+        let inputs = plx_model::PartOrigins::default();
         let status = analysis_status(
             None,
             &mesh,
@@ -530,7 +599,7 @@ mod tests {
             ..Default::default()
         };
         assert!(!upstream.is_ready());
-        let inputs = BTreeMap::new();
+        let inputs = plx_model::PartOrigins::default();
         let status = analysis_status(
             None,
             &mesh,
@@ -554,7 +623,7 @@ mod tests {
             None,
             &FeMesh::default(),
             &FeModel::default(),
-            &BTreeMap::new(),
+            &plx_model::PartOrigins::default(),
             None,
             &Upstream::default(),
             false,
@@ -567,7 +636,7 @@ mod tests {
             None,
             &FeMesh::default(),
             &FeModel::default(),
-            &BTreeMap::new(),
+            &plx_model::PartOrigins::default(),
             None,
             &Upstream::default(),
             true,

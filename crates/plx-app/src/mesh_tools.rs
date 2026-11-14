@@ -139,7 +139,7 @@ pub struct MeshToolDialog {
 impl MeshToolDialog {
     pub fn new(tool: MeshTool, model: &Model) -> Self {
         // A tolerance of a thousandth of the mesh size.
-        let size = model.mesh.bounds().map_or(1.0, |(min, max)| {
+        let size = model.mesh().bounds().map_or(1.0, |(min, max)| {
             (0..3)
                 .map(|k| max[k] - min[k])
                 .fold(0.0, f64::max)
@@ -375,8 +375,8 @@ impl MeshToolDialog {
                     kind: MeshOperationKind::Transform(self.transform.transform()),
                 };
                 let nodes = model
-                    .mesh
-                    .part_nodes(&operation.part_indices(&model.mesh))
+                    .mesh()
+                    .part_nodes(&operation.part_indices(model.mesh()))
                     .len();
                 if nodes == 0 {
                     return Err("The parts have no nodes.".into());
@@ -399,7 +399,7 @@ impl MeshToolDialog {
                 })
             }
             MeshTool::MergeNodes => {
-                let replaced = model.mesh.coincident_nodes(&[], self.tolerance);
+                let replaced = model.mesh().coincident_nodes(&[], self.tolerance);
                 if replaced.is_empty() {
                     return Err(format!(
                         "No nodes lie within {} {} of another one.",
@@ -422,7 +422,7 @@ impl MeshToolDialog {
             }
             MeshTool::Renumber => {
                 let (first_node, first_element) = (self.first_node, self.first_element);
-                let (nodes, elements) = (model.mesh.node_count(), model.mesh.element_count());
+                let (nodes, elements) = (model.mesh().node_count(), model.mesh().element_count());
                 model.edit_mesh(|mesh, fe| {
                     let (node_map, element_map) = mesh.renumber(first_node, first_element);
                     fe.renumber(&node_map, &element_map);
@@ -620,8 +620,8 @@ mod tests {
 
     /// The smallest x of the nodes of a part.
     fn min_x(model: &Model, part: usize) -> f64 {
-        (model.mesh.part_nodes(&[part]).iter())
-            .map(|&n| model.mesh.node(n).unwrap()[0])
+        (model.mesh().part_nodes(&[part]).iter())
+            .map(|&n| model.mesh().node(n).unwrap()[0])
             .fold(f64::INFINITY, f64::min)
     }
 

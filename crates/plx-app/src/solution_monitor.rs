@@ -64,7 +64,7 @@ impl Outcome {
 pub struct Solved {
     /// The new mesh with the fingerprints of what its parts were made from, when the solve
     /// meshed the geometry first.
-    pub meshed: Option<(plx_mesh::FeMesh, std::collections::BTreeMap<String, u64>)>,
+    pub meshed: Option<(plx_mesh::FeMesh, plx_model::PartOrigins)>,
     pub results: Option<BoundResults>,
     /// Problems the solver reported when the run failed.
     pub findings: Vec<Finding>,
@@ -118,21 +118,21 @@ impl BackgroundSolve {
                 geometry,
                 mesh,
                 model: fe,
-                mesh_inputs,
+                origins,
                 results,
                 ..
             } = data;
             let mut model = Model::new(&path, mesh);
             model.fe = fe;
             model.geometry = geometry;
-            model.mesh_inputs = mesh_inputs;
+            model.set_origins(origins);
             model.bound_results = results;
-            let findings = if model.mesh.element_count() > 0 {
+            let findings = if model.mesh().element_count() > 0 {
                 model.findings()
             } else {
                 Vec::new()
             };
-            let mesh_print = model.mesh.fingerprint();
+            let mesh_print = model.mesh().fingerprint();
             let _ = sender.send(Loaded {
                 model,
                 mesh_print,
@@ -257,8 +257,8 @@ impl BackgroundSolve {
         if self.active() {
             return None;
         }
-        let meshed = (self.meshed.then(|| self.model.take()).flatten())
-            .map(|model| (model.mesh.clone(), model.mesh_inputs.clone()));
+        let meshed =
+            (self.meshed.then(|| self.model.take()).flatten()).map(Model::into_mesh_with_origins);
         self.meshed = false;
         Some(Solved {
             meshed,
@@ -367,9 +367,9 @@ impl BackgroundSolve {
         };
         let status = crate::status::analysis_status(
             model.geometry.as_ref(),
-            &model.mesh,
+            model.mesh(),
             &model.fe,
-            &model.mesh_inputs,
+            model.origins(),
             model.bound_results.as_ref(),
             // The project makes the mesh blocks it takes its mesh from before it starts.
             &Default::default(),
@@ -458,7 +458,7 @@ impl BackgroundSolve {
         {
             let findings = plx_model::diagnose_solver_check(
                 &diagnostics,
-                &model.mesh,
+                model.mesh(),
                 &model.fe,
                 analysis.origins(),
             );
@@ -477,7 +477,7 @@ impl BackgroundSolve {
         } else if matches!(status, JobStatus::Failed | JobStatus::FailedWithResults)
             && let Some(model) = &self.model
         {
-            let findings = plx_model::diagnose_solver_output(analysis.output(), &model.mesh);
+            let findings = plx_model::diagnose_solver_output(analysis.output(), model.mesh());
             for finding in (findings.iter()).filter(|f| f.item == plx_model::ModelItem::Analysis) {
                 self.after.push(format!(
                     "Possible cause: {}. {}",
@@ -610,7 +610,7 @@ mod tests {
             None,
             &data.mesh,
             &data.model,
-            &data.mesh_inputs,
+            &data.origins,
             Some(&results),
             &Default::default(),
             false,

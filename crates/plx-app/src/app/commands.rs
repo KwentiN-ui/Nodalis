@@ -153,7 +153,7 @@ impl AnalysisWindow {
         let setup = w.setup_model();
         let has_setup = setup.is_some();
         let has_geometry = w.model.as_ref().is_some_and(|m| m.geometry.is_some());
-        let has_mesh = setup.is_some_and(|m| m.mesh.element_count() > 0);
+        let has_mesh = setup.is_some_and(|m| m.mesh().element_count() > 0);
         let last_step = (w.active_step()).and_then(|i| setup?.fe.steps.get(i));
         let parts = self.selected_parts();
         let shown = w.shown().is_some();
@@ -450,7 +450,7 @@ impl AnalysisWindow {
             Cmd::StepOverview => w.step_overview = true,
             Cmd::ConnectionSettings => {
                 if let Some(model) = w.setup_model() {
-                    w.editor = Editor::edit(&TreeItem::Group("Contacts"), &model.fe, &model.mesh);
+                    w.editor = Editor::edit(&TreeItem::Group("Contacts"), &model.fe, model.mesh());
                 }
             }
             Cmd::Step => w.create(NewItem::Step),

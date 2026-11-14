@@ -251,7 +251,7 @@ impl DistributionView {
             return None;
         };
         // Factors of a mesh that changed since do not fit it.
-        (same_factors(found, distribution) && factors.at_nodes.len() == model.mesh.coords().len())
+        (same_factors(found, distribution) && factors.at_nodes.len() == model.mesh().coords().len())
             .then(|| crate::model::DistributionPreview {
                 name: distribution.name.clone(),
                 factors: factors.at_nodes.clone(),
@@ -511,7 +511,7 @@ fn variable_rows(ui: &mut Ui, variables: &mut Vec<plx_model::DistributionVariabl
 /// The factors at the nodes of the mesh, with the smallest and largest.
 fn factor_range(distribution: &Distribution, model: &Model) -> FactorRange {
     let sampler = distribution.sampler(&model.fe.coordinate_systems)?;
-    let factors: Vec<f64> = (model.mesh.coords().iter())
+    let factors: Vec<f64> = (model.mesh().coords().iter())
         .map(|&p| sampler.factor(p))
         .collect();
     if factors.is_empty() {

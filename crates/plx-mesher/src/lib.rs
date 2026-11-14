@@ -249,7 +249,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
     })?;
     let brep = std::fs::read_to_string(&brep_file.0)
         .map_err(|e| GmshError::Other(format!("{}: {e}", brep_file.0.display())))?;
-    let geometry = Geometry {
+    let mut geometry = Geometry {
         source: file_names(paths),
         brep,
         meshing: MeshingParameters::for_diagonal(diagonal),
@@ -259,7 +259,11 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         signatures,
         compounds: Vec::new(),
         suppressed: Vec::new(),
+        own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     };
+    geometry.ensure_ids();
     let display = tessellate(&geometry)?;
     Ok(CadImport {
         geometry,
@@ -556,6 +560,7 @@ pub fn add_cad_files(
         ..geometry.clone()
     };
     combined.renumber_mesh_items(&renumbered);
+    combined.ensure_ids();
     let display = tessellate(&combined)?;
     Ok(CadAddition {
         import: CadImport {
@@ -1219,6 +1224,7 @@ pub fn delete_parts_renumbered(
     smaller.renumber_mesh_items(&renumbered);
     smaller.remove_from_compounds(deleted);
     smaller.set_suppressed(deleted, false);
+    smaller.ensure_ids();
     Ok((Some(smaller), renumbered))
 }
 

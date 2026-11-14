@@ -1017,7 +1017,7 @@ pub fn parts_of_entities(
     if faces.is_empty() && edges.is_empty() {
         return Vec::new();
     }
-    (view.mesh.parts.iter().zip(&view.parts))
+    (view.mesh().parts.iter().zip(&view.parts))
         .filter(|(part, _)| {
             part.elements.iter().any(|&id| match view.cad_entity(id) {
                 Some(CadEntity::Face(tag)) => faces.contains(&tag),
@@ -1031,7 +1031,7 @@ pub fn parts_of_entities(
 
 /// The CAD edge near the hit point, else the CAD face under it.
 pub fn cad_pick(view: &Model, hit: &Hit, precision: f32) -> Option<CadEntity> {
-    let mesh = &view.mesh;
+    let mesh = &view.mesh();
     if hit.line {
         let element = view.skin(hit.part).line_elements[hit.face];
         return view.cad_entity(mesh.elements()[element].id);
@@ -1095,7 +1095,7 @@ pub fn entities_preview(view: &Model, entities: &BTreeSet<CadEntity>) -> Preview
             &crate::selection::Items::Faces(faces.into_iter().collect()),
         );
     }
-    let position = |id| view.mesh.node_index(id).map(|n| view.render_position(n));
+    let position = |id| view.mesh().node_index(id).map(|n| view.render_position(n));
     preview.lines.extend(
         (edge_segments(view, &edges).into_iter())
             .filter_map(|[a, b]| Some([position(a)?, position(b)?])),

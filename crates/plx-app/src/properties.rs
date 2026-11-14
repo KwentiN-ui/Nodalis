@@ -148,7 +148,7 @@ fn element_type_combo(
 }
 
 fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)>) {
-    let mesh = &model.mesh;
+    let mesh = &model.mesh();
     match item {
         TreeItem::Group(_)
         | TreeItem::Mesh

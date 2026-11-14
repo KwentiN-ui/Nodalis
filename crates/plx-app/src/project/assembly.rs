@@ -1,14 +1,13 @@
-//! The Geometry and Mesh rows of an analysis as collections: the geometries, single parts or
-//! meshes of several links put together into one assembly, like an assembly read from a
-//! file. A part that a CAD operation or a transform changed takes the place of the same part of the file
+//! The Geometry row of an analysis as a collection: the geometry objects of several links,
+//! whole blocks or single parts, with their meshes, put together into one assembly, like an
+//! assembly read from a file. A part that a CAD operation or a transform changed takes the place of the same part of the file
 //! linked unchanged, so that the assembly does not have it twice.
 
 use plx_mesher::MergedGeometry;
 
 use super::*;
 
-/// Geometries being put together on a worker thread for the Geometry or Mesh row of an
-/// analysis, by analysis and row, with the fingerprint of what they are made from.
+/// Geometries being put together on a worker thread for the Geometry row of an analysis, by analysis and row, with the fingerprint of what they are made from.
 pub(super) type Merges = HashMap<(u64, String), (u64, Merge)>;
 
 pub(super) enum Merge {
@@ -81,10 +80,10 @@ impl ProjectApp {
         }
     }
 
-    /// The geometry the Geometry row of analysis `link.target` takes from all its links,
-    /// carried by the first of them; `None` when it is up to date, or while a part is still
-    /// being made.
-    pub(super) fn assembled_geometry(&mut self, link: &Link) -> Option<Payload> {
+    /// The geometry objects the Geometry row of analysis `link.target` takes from all its
+    /// links, with the meshes they bring, carried by the first of them; `None` when they are
+    /// up to date, or while a part is still being made or the geometries put together.
+    pub(super) fn assembled_objects(&mut self, link: &Link) -> Option<Payload> {
         let target = link.target;
         let first = (self.links.iter())
             .find(|l| l.target == target && l.item.first().is_some_and(|c| c == links::GEOMETRY));
@@ -92,7 +91,7 @@ impl ProjectApp {
             return None;
         }
         let mut pieces = pieces(&self.links, target);
-        // An analysis loading in its window gives its geometry once it has loaded; a block
+        // An analysis loading in its window gives its objects once it has loaded; a block
         // that has none, such as a CAD operation with nothing picked, gives nothing.
         for (source, _) in &pieces {
             let node = self.nodes.iter().find(|n| n.id == *source)?;
@@ -100,11 +99,12 @@ impl ProjectApp {
                 return None;
             }
         }
+        let path = [links::GEOMETRY.to_owned()];
         pieces.retain(|(source, _)| {
             (self.nodes.iter()).any(|n| {
                 n.id == *source
                     && (n.kind() == Kind::File
-                        || n.link_data().is_some_and(|d| d.geometry.is_some()))
+                        || n.link_data().is_some_and(|d| links::exists(d, &path)))
             })
         });
         // The parts of files that come changed through another link.
@@ -127,12 +127,16 @@ impl ProjectApp {
             }
         }
         let name = self.name_of(target);
-        let mut inputs = Vec::new();
+        let mut copies = Vec::new();
+        let mut names = Vec::new();
+        let mut print = plx_mesh::Fnv::new();
         for (source, parts) in pieces {
             let from = self.name_of(source);
             let node = self.node(source)?;
-            if let Some(file) = node.as_file_mut() {
-                file.read?;
+            if let Some(file) = node.as_file_mut()
+                && file.model.geometry.is_some()
+            {
+                let read = file.read?;
                 let all = parts.unwrap_or_else(|| file.parts.clone());
                 let (kept, left): (Vec<String>, Vec<String>) =
                     (all.into_iter()).partition(|p| !changed.contains(&(source, p.clone())));
@@ -151,7 +155,12 @@ impl ProjectApp {
                 match made {
                     Ok(None) => {}
                     Ok(Some(None)) => return None,
-                    Ok(Some(Some(geometry))) => inputs.push(geometry),
+                    Ok(Some(Some(geometry))) => {
+                        print.add(&read.to_le_bytes());
+                        print.add_debug(&kept);
+                        copies.push(links::MeshCopy::shapes(geometry));
+                        names.push(from);
+                    }
                     Err(why) => {
                         self.warn_once(format!("{from}: the parts linked are not taken: {why}."));
                         return None;
@@ -159,77 +168,24 @@ impl ProjectApp {
                 }
                 continue;
             }
-            if let Some(geometry) = node.link_data().and_then(|d| d.geometry) {
-                inputs.push(geometry.clone());
-            }
-        }
-        if inputs.is_empty() {
-            return None;
-        }
-        let print = geometry_print(&inputs);
-        let key = (target, vec![links::GEOMETRY.to_owned()]);
-        if self.applied.get(&key) == Some(&print) {
-            return None;
-        }
-        let geometry = if inputs.len() == 1 {
-            inputs.pop()?
-        } else {
-            match self.merged(target, links::GEOMETRY, inputs, print)? {
-                Ok(merged) => {
-                    self.report_renamed(&name, &merged.renamed);
-                    merged.geometry
-                }
-                Err(why) => {
-                    self.warn_once(format!(
-                        "{name}: the geometries are not put together: {why}."
-                    ));
-                    return None;
-                }
-            }
-        };
-        self.applied.insert(key, print);
-        Some(Payload::Geometry(Some(geometry)))
-    }
-
-    /// The mesh the Mesh row of analysis `link.target` takes from all its links, carried by
-    /// the first of them, as [`Self::assembled_geometry`].
-    pub(super) fn assembled_mesh(&mut self, link: &Link) -> Option<Payload> {
-        let target = link.target;
-        let mine: Vec<u64> = (self.links.iter())
-            .filter(|l| l.target == target && l.item.first().is_some_and(|c| c == links::MESH))
-            .map(|l| l.source)
-            .collect();
-        if mine.first() != Some(&link.source) || !links::assembles(&link.item) {
-            return None;
-        }
-        let mut sources: Vec<u64> = Vec::new();
-        for source in mine {
-            if !sources.contains(&source) {
-                sources.push(source);
-            }
-        }
-        let path = [links::MESH.to_owned()];
-        let mut print = plx_mesh::Fnv::new();
-        let mut copies = Vec::new();
-        let mut names = Vec::new();
-        for &source in &sources {
-            let node = self.nodes.iter().find(|n| n.id == source)?;
-            let data = node.link_data()?;
+            let Some(data) = node.link_data() else {
+                continue;
+            };
             if !links::exists(data, &path) {
                 continue;
             }
             print.add(&links::fingerprint(data, &path).to_le_bytes());
-            print.add_debug(
-                &data
-                    .geometry
-                    .map(|g| (&g.brep, &g.part_names, &g.compounds)),
-            );
             copies.push(links::MeshCopy::of(data));
-            names.push(node.name.clone());
+            names.push(from);
         }
         if copies.is_empty() {
             return None;
         }
+        // The parts the analysis meshes itself leave the link's meshes of them out.
+        let own = (self.nodes.iter().find(|n| n.id == target))
+            .and_then(Node::link_data)
+            .and_then(|d| d.geometry.map(|g| g.own_meshes.clone()));
+        print.add_debug(&own);
         let print = print.finish();
         let key = (target, path.to_vec());
         if self.applied.get(&key) == Some(&print) {
@@ -238,35 +194,44 @@ impl ProjectApp {
         let copy = if copies.len() == 1 {
             copies.pop()?
         } else {
-            let name = self.name_of(target);
-            let geometries: Option<Vec<plx_model::Geometry>> =
-                copies.iter().map(|c| c.geometry.clone()).collect();
-            let merged = match geometries {
-                Some(geometries) => match self.merged(target, links::MESH, geometries, print)? {
-                    Ok(merged) => Some(merged),
+            // The geometries of the objects that have one are put together; a mesh without,
+            // such as one of a mesh block, joins as an imported mesh, a geometry object of
+            // its own.
+            let with: Vec<usize> = (copies.iter().enumerate())
+                .filter(|(_, c)| c.geometry.is_some())
+                .map(|(i, _)| i)
+                .collect();
+            let geometries: Vec<plx_model::Geometry> = (with.iter())
+                .filter_map(|&i| copies[i].geometry.clone())
+                .collect();
+            let merged = match geometries.len() {
+                0 => None,
+                _ => match self.merged(target, links::GEOMETRY, geometries, print)? {
+                    Ok(merged) => Some(spread(merged, &with, copies.len())),
                     Err(why) => {
                         self.warn_once(format!(
-                            "{name}: the geometries of the meshes are not put together: {why}; \
-                             the mesh has no geometry."
+                            "{name}: the geometries are not put together: {why}."
                         ));
-                        None
+                        return None;
                     }
                 },
-                None => None,
             };
+            if let Some(merged) = &merged {
+                self.report_renamed(&name, &merged.renamed);
+            }
             let (copy, renamed) = links::merge_meshes(copies, merged);
             for (renamed, from) in renamed.iter().zip(&names) {
                 for (old, new) in renamed {
                     self.warn_once(format!(
-                        "{name}: {old} of {from} is called {new} there, since another mesh has \
-                         one of the name."
+                        "{name}: {old} of {from} is called {new} there, since another object \
+                         has one of the name."
                     ));
                 }
             }
             copy
         };
         self.applied.insert(key, print);
-        Some(Payload::Mesh(Box::new(copy)))
+        Some(Payload::Objects(Box::new(copy)))
     }
 
     /// The geometries put together for row `cell` of `target`, from `inputs` of fingerprint
@@ -330,14 +295,23 @@ impl ProjectApp {
     }
 }
 
-/// Fingerprint of the shapes of the geometries put together.
-fn geometry_print(inputs: &[plx_model::Geometry]) -> u64 {
-    let mut print = plx_mesh::Fnv::new();
-    for geometry in inputs {
-        print.add_str(&geometry.source);
-        print.add_str(&geometry.brep);
-        print.add_debug(&geometry.part_names);
-        print.add_debug(&geometry.compounds);
+/// The geometry put together of the meshes `with` of `count`, with their new tags and names
+/// given to each of them, by index: those without geometry keep theirs.
+fn spread(merged: MergedGeometry, with: &[usize], count: usize) -> MergedGeometry {
+    let MergedGeometry {
+        geometry,
+        tags,
+        renamed,
+    } = merged;
+    let mut all_tags = vec![Default::default(); count];
+    let mut all_renamed = vec![Default::default(); count];
+    for ((&index, tags), renamed) in with.iter().zip(tags).zip(renamed) {
+        all_tags[index] = tags;
+        all_renamed[index] = renamed;
     }
-    print.finish()
+    MergedGeometry {
+        geometry,
+        tags: all_tags,
+        renamed: all_renamed,
+    }
 }

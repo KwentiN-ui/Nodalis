@@ -14,7 +14,7 @@
 //! system) cannot be undone; the history starts anew after them.
 
 use plx_mesh::FeMesh;
-use plx_model::{FeModel, Geometry, MeshSetupItem, MeshingParameters};
+use plx_model::{FeModel, Geometry, MeshSetupItem, MeshingParameters, PartOrigins};
 
 use crate::model::Model;
 
@@ -75,7 +75,8 @@ impl Shapes {
 struct State {
     fe: FeModel,
     meshing: Option<Meshing>,
-    mesh: Option<FeMesh>,
+    /// The mesh with the origins of its parts.
+    mesh: Option<(FeMesh, PartOrigins)>,
     /// The whole geometry, for a change of its shapes; `meshing` is part of it then.
     geometry: Option<Geometry>,
 }
@@ -94,8 +95,9 @@ pub struct History {
     redo: Vec<State>,
     /// `None` until the history follows the model, from the first [`record`] on.
     seen: Option<Seen>,
-    /// The mesh before it was first replaced since the last [`record`].
-    replaced_mesh: Option<FeMesh>,
+    /// The mesh before it was first replaced since the last [`record`], with the origins
+    /// of its parts.
+    replaced_mesh: Option<(FeMesh, PartOrigins)>,
     /// The data before a change of the geometry's shapes that [`record`] is to keep.
     shape_change: Option<State>,
     shapes_restored: bool,
@@ -117,9 +119,9 @@ impl History {
 
     /// Keeps the mesh a new one replaced, for undoing the change; only for a model the
     /// history follows.
-    pub fn mesh_replaced(&mut self, old: FeMesh) {
+    pub fn mesh_replaced(&mut self, old: FeMesh, origins: PartOrigins) {
         if self.seen.is_some() && self.replaced_mesh.is_none() {
-            self.replaced_mesh = Some(old);
+            self.replaced_mesh = Some((old, origins));
         }
     }
 
@@ -197,7 +199,7 @@ pub fn before_shape_change(model: &mut Model) {
     model.history.shape_change = Some(State {
         fe: model.fe.clone(),
         meshing: None,
-        mesh: Some(model.mesh.clone()),
+        mesh: Some((model.mesh().clone(), model.origins().clone())),
         geometry: model.geometry.clone(),
     });
 }
@@ -244,12 +246,12 @@ fn restore(model: &mut Model, state: State) -> State {
         geometry.suppressed = restored.suppressed;
     }
     let mesh = match state.mesh {
-        Some(mesh) => {
+        Some((mesh, origins)) => {
             // Parts that stay keep their colour and visibility.
             let kept: Vec<(String, [f32; 3], bool)> = (model.parts.iter())
                 .map(|p| (p.name.clone(), p.color, p.visible))
                 .collect();
-            model.set_mesh(mesh);
+            model.set_mesh_with(mesh, origins);
             for part in &mut model.parts {
                 if let Some((_, color, visible)) = kept.iter().find(|k| k.0 == part.name) {
                     part.color = *color;
@@ -261,7 +263,7 @@ fn restore(model: &mut Model, state: State) -> State {
         }
         None => {
             if model.fe.mesh_sets != sets {
-                model.fe.sync_mesh_sets(&sets, &mut model.mesh);
+                model.edit_mesh_in_place(|mesh, fe| fe.sync_mesh_sets(&sets, mesh));
             }
             None
         }
@@ -279,13 +281,18 @@ fn restore(model: &mut Model, state: State) -> State {
 }
 
 /// Puts the geometry with its shapes, the mesh and the FE model back; returns what they were.
-fn restore_shapes(model: &mut Model, fe: FeModel, geometry: Geometry, mesh: FeMesh) -> State {
+fn restore_shapes(
+    model: &mut Model,
+    fe: FeModel,
+    geometry: Geometry,
+    (mesh, origins): (FeMesh, PartOrigins),
+) -> State {
     let fe = std::mem::replace(&mut model.fe, fe);
     let current = model.geometry.replace(geometry);
     let kept: Vec<(String, [f32; 3], bool)> = (model.parts.iter())
         .map(|p| (p.name.clone(), p.color, p.visible))
         .collect();
-    model.set_mesh(mesh);
+    model.set_mesh_with(mesh, origins);
     for part in &mut model.parts {
         if let Some((_, color, visible)) = kept.iter().find(|k| k.0 == part.name) {
             part.color = *color;
@@ -395,6 +402,97 @@ mod tests {
         assert!(!model.history.can_redo());
     }
 
+    /// A geometry of the parts `parts`, without shapes: enough for what refers to parts by
+    /// name.
+    fn geometry(parts: &[&str]) -> Geometry {
+        Geometry {
+            source: "test.step".into(),
+            brep: String::new(),
+            meshing: MeshingParameters::default(),
+            mesh_items: Vec::new(),
+            part_names: parts.iter().map(|p| p.to_string()).collect(),
+            refinement: 1.0,
+            signatures: Vec::new(),
+            compounds: Vec::new(),
+            suppressed: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
+        }
+    }
+
+    /// The model with PART-1 meshed from a part of its geometry.
+    fn meshed_model() -> Model {
+        let mut model = model();
+        let geometry = geometry(&["PART-1"]);
+        let space = model.fe.properties.space;
+        let input = plx_model::fingerprint::mesh_input(&geometry, &[], space, "PART-1");
+        model.geometry = Some(geometry);
+        let mut origins = PartOrigins::default();
+        origins.set_meshed("PART-1", input);
+        model.set_origins(origins);
+        record(&mut model);
+        model
+    }
+
+    #[test]
+    fn a_mesh_read_without_geometry_is_an_imported_mesh() {
+        let model = model();
+        assert!(model.origins().is_imported("PART-1"));
+        assert!(model.origins().complete_for(model.mesh()));
+    }
+
+    #[test]
+    fn a_deleted_mesh_comes_back_with_its_origin() {
+        let mut model = meshed_model();
+        let made_from = model.origins().made_from("PART-1");
+        assert!(made_from.is_some());
+        model.edit_mesh(|mesh, _| mesh.remove_bodies(&["PART-1".into()]));
+        record(&mut model);
+        assert_eq!(model.origins().get("PART-1"), None);
+        assert!(undo(&mut model));
+        assert_eq!(model.origins().made_from("PART-1"), made_from);
+        assert!(redo(&mut model));
+        assert!(model.origins().is_empty());
+    }
+
+    #[test]
+    fn a_suppressed_imported_mesh_is_not_solved() {
+        let mut model = model();
+        assert_eq!(model.active().mesh.element_count(), 1);
+        assert!(model.set_imported_suppressed(&["part-1".into()], true));
+        assert!(model.mark_own_suppressed());
+        assert!(model.parts[0].suppressed);
+        let active = model.active();
+        assert_eq!(active.mesh.element_count(), 0);
+        assert_eq!(active.left_out, ["PART-1"]);
+        // The mesh is kept for when it is unsuppressed.
+        assert_eq!(model.mesh().element_count(), 1);
+    }
+
+    #[test]
+    fn a_renamed_part_of_the_geometry_is_renamed_with_its_mesh() {
+        let mut model = meshed_model();
+        model.rename_part(0, "BRACKET").unwrap();
+        let geometry = model.geometry.as_ref().unwrap();
+        assert_eq!(geometry.part_names, ["BRACKET"]);
+        let space = model.fe.properties.space;
+        let now = plx_model::fingerprint::mesh_input(geometry, &[], space, "BRACKET");
+        // Still up to date: the part is not meshed again for its name.
+        assert_eq!(model.origins().made_from("BRACKET"), Some(now));
+        assert_eq!(model.origins().get("PART-1"), None);
+    }
+
+    #[test]
+    fn the_mesh_of_a_part_the_geometry_no_longer_has_goes() {
+        let mut model = meshed_model();
+        assert!(model.drop_orphan_meshes().is_empty());
+        model.geometry = Some(geometry(&["PART-1-1", "PART-1-2"]));
+        assert_eq!(model.drop_orphan_meshes(), ["PART-1"]);
+        assert_eq!(model.mesh().element_count(), 0);
+        assert!(model.origins().is_empty());
+    }
+
     #[test]
     fn a_renamed_part_gets_its_name_back() {
         let mut model = model();
@@ -403,9 +501,9 @@ mod tests {
         assert_eq!(model.parts[0].name, "BRACKET");
         assert!(undo(&mut model));
         assert_eq!(model.parts[0].name, "PART-1");
-        assert_eq!(model.mesh.parts[0].name, "PART-1");
+        assert_eq!(model.mesh().parts[0].name, "PART-1");
         assert!(redo(&mut model));
-        assert_eq!(model.mesh.parts[0].name, "BRACKET");
+        assert_eq!(model.mesh().parts[0].name, "BRACKET");
     }
 
     #[test]
@@ -433,6 +531,9 @@ mod tests {
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         });
         record(&mut model);
         assert!(!model.history.can_undo());
