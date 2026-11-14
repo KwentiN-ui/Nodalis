@@ -13,10 +13,8 @@ impl AnalysisWindow {
     pub(super) fn open_cad_tool(&mut self, kind: CadOperationKind) {
         let w = &mut self.workbench;
         // A link would bring its geometry back over the changed one.
-        let linked = (w.incoming.paths.iter()).find(|(path, _)| {
-            path.first()
-                .is_some_and(|p| p == crate::links::GEOMETRY || p == crate::links::MESH)
-        });
+        let linked = (w.incoming.paths.iter())
+            .find(|(path, _)| path.first().is_some_and(|p| p == crate::links::GEOMETRY));
         if let Some((_, source)) = linked {
             let line = format!(
                 "The geometry comes from {source}: change it there, or put a CAD Operation \

@@ -437,7 +437,17 @@ struct ModelMut<'a> {
 }
 
 impl ModelMut<'_> {
-    /// Takes over a mesh with what belongs to it.
+    /// Takes over the geometry objects a Geometry link brings, see [`links::take_objects`];
+    /// says how many selections were not found in the new shapes, if any.
+    fn take_objects(&mut self, copy: links::MeshCopy) -> Option<String> {
+        let taken = links::take_objects(self.geometry, self.mesh, self.origins, self.fe, copy);
+        *self.mesh = taken.mesh;
+        *self.origins = taken.origins;
+        taken.lost
+    }
+
+    /// Takes over a mesh with what belongs to it, as a state link does: the mesh the steps
+    /// continue on.
     fn take_mesh(&mut self, copy: links::MeshCopy) {
         let links::MeshCopy {
             geometry,
@@ -452,7 +462,7 @@ impl ModelMut<'_> {
         }
         *self.geometry = geometry;
         *self.mesh = mesh;
-        *self.origins = origins;
+        *self.origins = origins.linked(self.origins);
         self.fe.mesh_sets = mesh_sets;
         self.fe.element_types = element_types;
         self.fe.mesh_operations = mesh_operations;
@@ -478,7 +488,7 @@ struct MeshBlock {
 struct RefineBlock {
     model: LinkedModel,
     factor: f64,
-    /// What the link of its Mesh row brings, found by [`ProjectApp::sync_links`].
+    /// What the link of its Geometry row brings, found by [`ProjectApp::sync_links`].
     input: Option<RefineInput>,
     /// Fingerprint of the divisions its mesh was made from, see [`MeshPrimitive::fingerprint`].
     generated: Option<u64>,
@@ -645,7 +655,7 @@ struct FileRead {
 /// The geometry of a file block with only some of its parts.
 enum Subset {
     Making(Receiver<Result<plx_model::Geometry, String>>),
-    Made(plx_model::Geometry),
+    Made(Box<plx_model::Geometry>),
     Failed(String),
 }
 
@@ -677,7 +687,7 @@ impl FileBlock {
             .cloned()
             .collect();
         match self.subsets.get(&key) {
-            Some(Subset::Made(geometry)) => return Ok(Some(geometry.clone())),
+            Some(Subset::Made(geometry)) => return Ok(Some((**geometry).clone())),
             Some(Subset::Failed(why)) => return Err(why.clone()),
             Some(Subset::Making(_)) => return Ok(None),
             None => {}
@@ -704,7 +714,7 @@ impl FileBlock {
         for subset in self.subsets.values_mut() {
             if let Subset::Making(receiver) = subset {
                 *subset = match receiver.try_recv() {
-                    Ok(Ok(geometry)) => Subset::Made(geometry),
+                    Ok(Ok(geometry)) => Subset::Made(Box::new(geometry)),
                     Ok(Err(why)) => Subset::Failed(why),
                     Err(std::sync::mpsc::TryRecvError::Empty) => continue,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -1177,7 +1187,7 @@ impl Node {
             return None;
         }
         let mut hash = plx_mesh::Fnv::new();
-        hash.add(&links::fingerprint(data, &[links::MESH.to_owned()]).to_le_bytes());
+        hash.add(&links::fingerprint(data, &[links::GEOMETRY.to_owned()]).to_le_bytes());
         hash.add_str(&export.path);
         Some(hash.finish())
     }
@@ -1202,7 +1212,7 @@ impl Node {
     fn write_export(&mut self, base: Option<&Path>) -> Result<PathBuf, String> {
         let print = self
             .export_print()
-            .ok_or("no mesh is linked to it, drag the mesh of a block to its Mesh row")?;
+            .ok_or("no mesh is linked to it, drag the mesh of a block to its Geometry row")?;
         let name = self.name.clone();
         let export = self.as_export_mut().ok_or("not a mesh export block")?;
         if export.path.trim().is_empty() {
@@ -1256,8 +1266,8 @@ impl Node {
         if let Some(refine) = self.as_refine() {
             return match &refine.input {
                 None | Some(RefineInput::Fixed(_)) => CellState::Missing,
-                _ if refine.model.mesh.element_count() == 0 => CellState::OutOfDate,
                 Some(RefineInput::Geometry { .. }) => CellState::UpToDate,
+                _ if refine.model.mesh.element_count() == 0 => CellState::OutOfDate,
                 Some(RefineInput::Primitive { .. }) => {
                     let made = refine.meshed().map(|(p, space)| p.fingerprint(space));
                     if made.is_some() && made == refine.generated {
@@ -1972,8 +1982,9 @@ enum Payload {
         names: Vec<String>,
         ahead: Vec<String>,
     },
-    Geometry(Option<plx_model::Geometry>),
-    Mesh(Box<links::MeshCopy>),
+    /// What a Geometry link brings: geometry objects with their meshes, see
+    /// [`links::take_objects`].
+    Objects(Box<links::MeshCopy>),
     /// The step of the source's results and their file, see [`links::apply_results`].
     Results(u32, PathBuf),
     /// What a state link takes: the mesh with its geometry when it changed, the source's
@@ -2544,7 +2555,7 @@ impl ProjectApp {
         ));
         self.graph.insert_node(position, id);
         self.output.push(format!(
-            "{name} created: drag the mesh of a mesh block or of an analysis to its Mesh row, \
+            "{name} created: drag the mesh of a mesh block or of an analysis to its Geometry row, \
              and its mesh on to analyses."
         ));
         id
@@ -3198,8 +3209,7 @@ impl ProjectApp {
                     let remeshed = (self.links.iter()).any(|l| {
                         l.target == at
                             && body.contains(&l.source)
-                            && (l.item.first())
-                                .is_some_and(|c| c == links::MESH || c == links::GEOMETRY)
+                            && (l.item.first()).is_some_and(|c| c == links::GEOMETRY)
                     });
                     let mesh = if node.collection().is_some() {
                         StudyMesh::None
@@ -3935,7 +3945,7 @@ impl ProjectApp {
             .push(Node::mesh_export(id, name.clone(), String::new(), None));
         self.graph.insert_node(position, id);
         self.output.push(format!(
-            "{name} created: drag the mesh of a block to its Mesh row and type the file to \
+            "{name} created: drag the mesh of a block to its Geometry row and type the file to \
              write; Update Project writes it."
         ));
         id
@@ -6632,7 +6642,7 @@ impl ProjectApp {
         };
         let assembles = (self.nodes.iter()).any(|n| n.id == target && n.kind() == Kind::Analysis);
         let assembled = |path: &[String]| match path {
-            [cell] if cell == links::GEOMETRY || cell == links::MESH => Some(cell.clone()),
+            [cell] if cell == links::GEOMETRY => Some(cell.clone()),
             _ => None,
         };
         let usage = |link: &Link| links::ResultsUse::of(link);
@@ -6667,10 +6677,10 @@ impl ProjectApp {
             if part && links::is_geometry_part(link) && link.source == source {
                 return link.item == item;
             }
-            // The Geometry and Mesh rows of an analysis are collections: the geometries or
-            // meshes of other sources stay, and it takes either geometries or meshes.
-            if assembles && let (Some(a), Some(b)) = (assembled(other), assembled(&slot)) {
-                return a != b || link.source == source;
+            // The Geometry row of an analysis is a collection: the geometry objects of other
+            // sources stay.
+            if assembles && let (Some(_), Some(_)) = (assembled(other), assembled(&slot)) {
+                return link.source == source;
             }
             // A category is a collection: links of categories and items of it from other
             // sources stay, and the later one wins an item both have.
@@ -6686,14 +6696,7 @@ impl ProjectApp {
                         _ => false,
                     };
             }
-            let mesh_and_geometry = |a: &[String], b: &[String]| {
-                a.first().is_some_and(|c| c == links::MESH)
-                    && b.first().is_some_and(|c| c == links::GEOMETRY)
-            };
-            links::covers(other, &slot)
-                || links::covers(&slot, other)
-                || mesh_and_geometry(other, &slot)
-                || mesh_and_geometry(&slot, other)
+            links::covers(other, &slot) || links::covers(&slot, other)
         };
         let replaced: Vec<Link> = self.links.iter().filter(|l| overlaps(l)).cloned().collect();
         self.links.retain(|l| !overlaps(l));
@@ -7157,7 +7160,6 @@ impl ProjectApp {
             }
             if (self.nodes.iter()).any(|n| n.id == target && n.kind() == Kind::Transform) {
                 transform::take_transform_input(&mut self.nodes, &self.links, target);
-                self.retype_transform_links(target);
                 continue;
             }
             let to_target: Vec<Link> = (self.links.iter())
@@ -7323,8 +7325,7 @@ impl ProjectApp {
         let data = source.link_data();
         let path = &link.item;
         match path.first().map(String::as_str) {
-            Some(links::GEOMETRY) if assembles => self.assembled_geometry(link),
-            Some(links::MESH) if assembles => self.assembled_mesh(link),
+            Some(links::GEOMETRY) if assembles => self.assembled_objects(link),
             Some(links::RESULTS) if source.as_file().is_some() => {
                 let file = source.as_file()?;
                 let step = path.get(1)?;
@@ -7489,10 +7490,8 @@ impl ProjectApp {
                 let (data, own) = (data?, target.link_data()?);
                 let step = links::state_step(data.fe, link)?;
                 let mut print = plx_mesh::Fnv::new();
-                for cell in [links::GEOMETRY, links::MESH] {
-                    let path = [cell.to_owned()];
-                    print.add(&links::fingerprint(data, &path).to_le_bytes());
-                }
+                let path = [links::GEOMETRY.to_owned()];
+                print.add(&links::fingerprint(data, &path).to_le_bytes());
                 // The mesh copy carries the mesh setup too.
                 print.add_debug(&data.geometry.map(|g| (&g.meshing, &g.mesh_items)));
                 let print = print.finish();
@@ -7539,9 +7538,11 @@ impl ProjectApp {
                     return None;
                 }
                 self.applied.insert(key, print);
-                Some(Payload::Geometry(Some(geometry)))
+                Some(Payload::Objects(Box::new(links::MeshCopy::shapes(
+                    geometry,
+                ))))
             }
-            Some(links::GEOMETRY | links::MESH) => {
+            Some(links::GEOMETRY) => {
                 let data = data?;
                 if !links::exists(data, path) {
                     return None;
@@ -7552,11 +7553,7 @@ impl ProjectApp {
                     return None;
                 }
                 self.applied.insert(key, print);
-                Some(if path[0] == links::MESH {
-                    Payload::Mesh(Box::new(links::MeshCopy::of(data)))
-                } else {
-                    Payload::Geometry(data.geometry.cloned())
-                })
+                Some(Payload::Objects(Box::new(links::MeshCopy::of(data))))
             }
             Some(links::SETUP) => {
                 let (data, own) = (data?, target.link_data()?);
@@ -7673,13 +7670,9 @@ impl ProjectApp {
                     window.apply_setup(&fe, path);
                     window.message(format!("{} taken from {source}", links::label(path)));
                 }
-                Payload::Geometry(geometry) => {
-                    window.apply_geometry(geometry);
+                Payload::Objects(copy) => {
+                    window.apply_objects(*copy);
                     window.message(format!("Geometry taken from {source}"));
-                }
-                Payload::Mesh(mesh) => {
-                    window.apply_mesh(*mesh);
-                    window.message(format!("Mesh taken from {source}"));
                 }
                 Payload::Results(global, file) => window.apply_results(link, global, file),
                 Payload::Chain { .. } | Payload::Bundle { .. } => {}
@@ -7689,18 +7682,12 @@ impl ProjectApp {
         let mut data = node.closed_model_mut()?;
         match payload {
             Payload::Setup(fe) => links::apply_setup(data.fe, &fe, path),
-            Payload::Geometry(geometry) => {
-                let lost = links::take_geometry(data.geometry, geometry, true)
-                    .and_then(|tags| links::follow_geometry(data.fe, Some(data.mesh), &tags));
-                // A part the geometry no longer has goes with its mesh.
-                let geometry = data.geometry.as_ref();
-                plx_model::drop_orphans(data.mesh, data.fe, geometry, data.origins);
-                if let Some(lost) = lost {
+            Payload::Objects(copy) => {
+                if let Some(lost) = data.take_objects(*copy) {
                     let line = format!("{}: {lost}.", node.name);
                     self.output.push(line);
                 }
             }
-            Payload::Mesh(mesh) => data.take_mesh(*mesh),
             Payload::Results(global, file) => {
                 links::apply_results(data.fe, link, global, file);
             }
@@ -8514,7 +8501,7 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
 fn workspace_of(path: &[String]) -> Option<Show> {
     let show = |view| Some(Show { view, step: None });
     match path.first().map(String::as_str) {
-        Some(links::GEOMETRY | links::MESH) => show(TreeView::Geometry),
+        Some(links::GEOMETRY) => show(TreeView::Geometry),
         // A step of the setup and its inputs select the step.
         Some(links::SETUP) if path.len() > 2 && path[1] == links::STEPS => Some(Show {
             view: TreeView::FeModel,
@@ -9207,34 +9194,45 @@ fn block_rows(
             path: vec![links::GLOBAL_RESULTS.to_owned()],
         });
     }
-    let mut geometry = cell(links::GEOMETRY, NodeIcon::Geometry, status.geometry, true);
+    // One row for the geometry objects and their meshes: to be meshed is out of date.
+    let objects = match (status.geometry, status.mesh) {
+        (_, CellState::OutOfDate) | (CellState::UpToDate, CellState::Missing) => {
+            CellState::OutOfDate
+        }
+        (_, CellState::UpToDate) => CellState::UpToDate,
+        (geometry, CellState::Missing) => geometry,
+        (_, mesh) => mesh,
+    };
+    let mut geometry = cell(links::GEOMETRY, NodeIcon::Geometry, objects, true);
+    geometry.tip = match objects {
+        CellState::Missing => "Geometry: nothing imported or linked yet".to_owned(),
+        CellState::UpToDate => "Geometry: up to date, every part meshed".to_owned(),
+        CellState::OutOfDate => {
+            "Geometry: parts to be meshed (again): Solve meshes them".to_owned()
+        }
+        state => format!("Geometry: {}", state.text()),
+    };
     if !status.stale_parts.is_empty() {
         (geometry.tip).push_str(&format!(" ({})", status.stale_parts.join(", ")));
     }
-    let mut mesh = cell(links::MESH, NodeIcon::Mesh, status.mesh, true);
-    // Collections: the geometries or meshes of several links are put together.
-    for row in [&mut geometry, &mut mesh] {
-        let mut sources: Vec<&str> = Vec::new();
-        for (slot, source) in incoming {
-            if links::covers(slot, &row.path) && !sources.contains(&source.as_str()) {
-                sources.push(source);
-            }
+    // A collection: the geometry objects of several links are put together.
+    let mut sources: Vec<&str> = Vec::new();
+    for (slot, source) in incoming {
+        if links::covers(slot, &geometry.path) && !sources.contains(&source.as_str()) {
+            sources.push(source);
         }
-        if sources.len() > 1 {
-            row.linked_from = Some(sources.join(", "));
-        }
-        row.collection = true;
-        row.tip.push_str(if row.path[0] == links::GEOMETRY {
-            "\nA collection: link the geometries of several blocks, or single parts, to put \
-             them together into one assembly. A part a CAD operation or a transform changed \
-             takes the place of the same part linked unchanged."
-        } else {
-            "\nA collection: link the meshes of several blocks to put them together into one \
-             assembly, each with its own nodes."
-        });
     }
+    if sources.len() > 1 {
+        geometry.linked_from = Some(sources.join(", "));
+    }
+    geometry.collection = true;
+    geometry.tip.push_str(
+        "\nA collection: link the geometries of several blocks, meshed or not, or single \
+         parts, to put them together into one assembly. Objects that come meshed keep their \
+         mesh; Create Mesh meshes one here instead. A part a CAD operation or a transform \
+         changed takes the place of the same part linked unchanged.",
+    );
     rows.push(geometry);
-    rows.push(mesh);
     let setup = vec![links::SETUP.to_owned()];
     let setup_open = expanded.contains(&setup);
     let mut row = cell(links::SETUP, NodeIcon::Setup, status.setup, true);
@@ -9580,12 +9578,12 @@ fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
     if count > 0 {
         tip.push_str(&format!(
             "\n{count} elements {element}, sides {sides} as node sets and surfaces.\nDrag it \
-             to the Mesh row of an analysis to link it."
+             to the Geometry row of an analysis to link it."
         ));
     }
     let mut rows = vec![Row {
-        path: vec![links::MESH.to_owned()],
-        text: links::MESH.to_owned(),
+        path: vec![links::GEOMETRY.to_owned()],
+        text: "Mesh".to_owned(),
         depth: 0,
         icon,
         state: Some(state),
@@ -9642,7 +9640,7 @@ fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
 }
 
 /// Brings what the refine mesh block `id` refines up to date with the block linked to
-/// its Mesh row. The parameters of a mesh block it meshes itself, with its factor on the
+/// its Geometry row. The parameters of a mesh block it meshes itself, with its factor on the
 /// divisions; geometry it gives on with the element sizes divided by its factor, for the
 /// analysis the mesh goes to to mesh it.
 fn take_refine_input(nodes: &mut [Node], links: &[Link], id: u64) {
@@ -9654,7 +9652,7 @@ fn take_refine_input(nodes: &mut [Node], links: &[Link], id: u64) {
     };
     let link = links
         .iter()
-        .find(|l| l.target == id && l.item.first().is_some_and(|c| c == links::MESH));
+        .find(|l| l.target == id && l.item.first().is_some_and(|c| c == links::GEOMETRY));
     let mut copy = None;
     let input = match link.and_then(|l| nodes.iter().find(|n| n.id == l.source)) {
         None => None,
@@ -9684,9 +9682,9 @@ fn take_refine_input(nodes: &mut [Node], links: &[Link], id: u64) {
             // An analysis loading in its window is taken once it has loaded.
             let data = source.link_data()?;
             Some(match data.geometry {
-                Some(geometry) if data.mesh.element_count() > 0 => {
+                Some(geometry) => {
                     let mut print = plx_mesh::Fnv::new();
-                    let path = [links::MESH.to_owned()];
+                    let path = [links::GEOMETRY.to_owned()];
                     print.add(&links::fingerprint(data, &path).to_le_bytes());
                     print.add(&own_factor.to_bits().to_le_bytes());
                     let print = print.finish();
@@ -9696,7 +9694,7 @@ fn take_refine_input(nodes: &mut [Node], links: &[Link], id: u64) {
                         refinement: geometry.refinement,
                     }
                 }
-                _ => RefineInput::Fixed(source.name.clone()),
+                None => RefineInput::Fixed(source.name.clone()),
             })
         }),
     };
@@ -9712,6 +9710,14 @@ fn take_refine_input(nodes: &mut [Node], links: &[Link], id: u64) {
                 if let Some(geometry) = &mut copy.geometry {
                     geometry.refinement = refinement * refine.factor;
                 }
+                // The parts of the geometry are meshed anew with the finer sizes by the
+                // analysis the geometry goes to: their meshes are not given on.
+                let cad: Vec<String> = (copy.origins.iter())
+                    .filter(|(name, _)| copy.origins.is_cad(name))
+                    .map(|(name, _)| name.to_owned())
+                    .collect();
+                copy.mesh.remove_bodies(&cad);
+                copy.origins.reconcile(&copy.mesh);
                 refine.model.data_mut().take_mesh(copy);
                 refine.model.fe.properties.space = *space;
                 refine.taken = Some(print);
@@ -9752,7 +9758,7 @@ fn refine_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
     let mesh = &block.model.mesh;
     let count = mesh.element_count();
     let mut tip = "Mesh: drag the mesh of a mesh block or of an analysis that meshes geometry \
-                   here; drag the pin on the right to the Mesh row of an analysis for the \
+                   here; drag the pin on the right to the Geometry row of an analysis for the \
                    refined mesh."
         .to_owned();
     match &block.input {
@@ -9779,17 +9785,17 @@ fn refine_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
             }
         }
     }
-    let path = vec![links::MESH.to_owned()];
+    let path = vec![links::GEOMETRY.to_owned()];
     let factor = vec![PARAMETERS.to_owned(), REFINEMENT.to_owned()];
     vec![
         Row {
-            text: links::MESH.to_owned(),
+            text: "Mesh".to_owned(),
             depth: 0,
             icon: NodeIcon::Mesh,
             state: (block.input.is_some()).then_some(state),
             expander: None,
             input: true,
-            output: count > 0,
+            output: count > 0 || matches!(block.input, Some(RefineInput::Geometry { .. })),
             linked_from: linked(&path),
             collection: false,
             partial: false,
@@ -9889,7 +9895,7 @@ fn refusal(
         return (source_node.kind() != Kind::Analysis)
             .then(|| format!("{to} deforms the mesh of an analysis, and {from} is none."));
     }
-    if target_node.kind() == Kind::RefineMesh && first == Some(links::MESH) {
+    if target_node.kind() == Kind::RefineMesh && first == Some(links::GEOMETRY) {
         let remeshed = matches!(source_node.kind(), Kind::Mesh | Kind::RefineMesh)
             || source_node
                 .link_data()
@@ -9906,7 +9912,7 @@ fn refusal(
     if refines_geometry && target_node.kind() == Kind::MeshExport {
         return Some(format!(
             "{from} refines geometry, which the analysis its mesh goes to meshes; link the \
-             Mesh of that analysis to {to}."
+             Geometry of that analysis to {to}."
         ));
     }
     if first == Some(links::ANALYSIS) {
@@ -10387,7 +10393,7 @@ fn file_rows(node: &Node, base: Option<&Path>) -> Vec<Row> {
             if ready {
                 status.push_str(&format!(
                     ": {} nodes, {} elements, {} node sets and {} surfaces. Drag it to the \
-                     Mesh row of an analysis to link it.",
+                     Geometry row of an analysis to link it.",
                     mesh.node_count(),
                     mesh.element_count(),
                     mesh.node_sets.len(),
@@ -10395,8 +10401,8 @@ fn file_rows(node: &Node, base: Option<&Path>) -> Vec<Row> {
                 ));
             }
             rows.push(row(
-                vec![links::MESH.to_owned()],
-                links::MESH.to_owned(),
+                vec![links::GEOMETRY.to_owned()],
+                "Mesh".to_owned(),
                 NodeIcon::Mesh,
                 Some(state),
                 ready,
@@ -10454,7 +10460,7 @@ fn export_rows(node: &Node, base: Option<&Path>, incoming: &[(Vec<String>, Strin
     let Some(export) = node.as_export() else {
         return Vec::new();
     };
-    let mesh = [links::MESH.to_owned()];
+    let mesh = [links::GEOMETRY.to_owned()];
     let source = (incoming.iter())
         .find(|(slot, _)| links::covers(slot, &mesh))
         .map(|(_, source)| source.clone());
@@ -10481,7 +10487,7 @@ fn export_rows(node: &Node, base: Option<&Path>, incoming: &[(Vec<String>, Strin
     vec![
         Row {
             path: mesh.to_vec(),
-            text: links::MESH.to_owned(),
+            text: "Mesh".to_owned(),
             depth: 0,
             icon: NodeIcon::Mesh,
             state: Some(state),
@@ -13425,7 +13431,6 @@ mod tests {
         let view = |view| Some(Show { view, step: None });
         let path = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(workspace_of(&path(&["Geometry"])), view(TreeView::Geometry));
-        assert_eq!(workspace_of(&path(&["Mesh"])), view(TreeView::Geometry));
         assert_eq!(
             workspace_of(&path(&["Setup", "Steps"])),
             view(TreeView::FeModel)
@@ -13599,7 +13604,7 @@ mod tests {
         assert_eq!(node.generate(), Ok(40));
         assert_eq!(node.mesh_state(), CellState::UpToDate);
         let data = node.link_data().unwrap();
-        let mesh = vec![links::MESH.to_owned()];
+        let mesh = vec![links::GEOMETRY.to_owned()];
         assert!(links::exists(data, &mesh));
         assert_eq!(links::MeshCopy::of(data).mesh.node_sets.len(), 6);
         let rows = mesh_rows(&node, &[]);
@@ -13729,7 +13734,7 @@ mod tests {
         Link {
             source,
             target,
-            item: vec![links::MESH.to_owned()],
+            item: vec![links::GEOMETRY.to_owned()],
             ..Default::default()
         }
     }
@@ -13821,6 +13826,7 @@ mod tests {
             part_names: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
+            own_meshes: Vec::new(),
         };
         let mesh = MeshPrimitive::default_box().generate(ModelSpace::ThreeD, "Solid-1");
         let space = ModelSpace::ThreeD;
@@ -13874,9 +13880,9 @@ mod tests {
         let print = links::fingerprint(given, &links[1].item);
         let copy = links::MeshCopy::of(given);
         let mut analysis = nodes[2].closed_model_mut().unwrap();
-        analysis.take_mesh(copy);
+        analysis.take_objects(copy);
         nodes[2].refresh_closed();
-        assert_eq!(nodes[2].status().unwrap().mesh, CellState::OutOfDate);
+        assert_eq!(nodes[2].status().unwrap().mesh, CellState::Missing);
         // A new factor gives a new mesh to the links.
         nodes[1].set_refinement(3.0);
         take_refine_input(&mut nodes, &links, 4);
@@ -14655,7 +14661,7 @@ mod tests {
         let link = |source, target| Link {
             source,
             target,
-            item: vec![links::MESH.to_owned()],
+            item: vec![links::GEOMETRY.to_owned()],
             ..Default::default()
         };
         // Analysis-2 takes the mesh of Analysis-1, which takes that of the block.
@@ -14732,15 +14738,15 @@ mod tests {
             refusal(&nodes, &[], source, &path(item), target, &path(slot))
         };
         // The mesh of a plane stress block goes to the plane stress analysis, not to the 3D one.
-        assert_eq!(why(3, &["Mesh"], 2, &["Mesh"]), None);
-        let space = why(3, &["Mesh"], 1, &["Mesh"]).unwrap();
+        assert_eq!(why(3, &["Geometry"], 2, &["Geometry"]), None);
+        let space = why(3, &["Geometry"], 1, &["Geometry"]).unwrap();
         assert!(space.contains("same model space"), "{space}");
         assert!(why(2, &["Setup"], 1, &["Setup"]).is_some());
         // A pin of another type refuses it, whatever the model space.
-        let kind = why(3, &["Mesh"], 2, &["Setup"]).unwrap();
+        let kind = why(3, &["Geometry"], 2, &["Setup"]).unwrap();
         assert_eq!(
             kind,
-            "Mesh of Plate is a mesh and Setup of Analysis-2 takes a setup."
+            "Geometry of Plate is a geometry and Setup of Analysis-2 takes a setup."
         );
         // A number has no model space: it goes to a length of the mesh block.
         let width = path(&["Value", "Width"]);
@@ -14751,10 +14757,17 @@ mod tests {
         let link = Link {
             source: 3,
             target: 2,
-            item: path(&["Mesh"]),
+            item: path(&["Geometry"]),
             ..Default::default()
         };
-        let back = refusal(&nodes, &[link], 2, &path(&["Mesh"]), 3, &path(&["Mesh"]));
+        let back = refusal(
+            &nodes,
+            &[link],
+            2,
+            &path(&["Geometry"]),
+            3,
+            &path(&["Geometry"]),
+        );
         assert!(back.is_some());
     }
 
@@ -14894,7 +14907,6 @@ mod tests {
         // A part goes to the Geometry row of an analysis, and only there.
         let first = part(&read.parts[0]);
         assert!(links::compatible(&first, &geometry));
-        assert!(!links::compatible(&first, &[links::MESH.to_owned()]));
         assert!(!links::compatible(&first, &first));
         // The parts linked from the same source go together, in the order of the links.
         let link = |source, item: Vec<String>| Link {
@@ -15021,6 +15033,7 @@ mod tests {
             part_names: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
+            own_meshes: Vec::new(),
         };
         let fe = plx_model::FeModel::default();
         let inputs = plx_model::PartOrigins::default();

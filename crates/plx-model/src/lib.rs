@@ -229,8 +229,10 @@ use serde::{Deserialize, Serialize};
 /// they are; formats 21 to 40 read as they are, in millimeters. Format 42 binds every mesh to
 /// a geometry object: the origin of each part of the mesh is recorded
 /// ([`PartOrigins`]), imported meshes are geometry objects of their own; older projects are
-/// refused.
-pub const PROJECT_FORMAT: u32 = 42;
+/// refused. Format 43 has one kind of link for geometry and meshes: a Geometry link brings
+/// geometry objects with the meshes they have, and an analysis can mesh a part itself
+/// ([`Geometry::own_meshes`]); older projects are refused.
+pub const PROJECT_FORMAT: u32 = 43;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

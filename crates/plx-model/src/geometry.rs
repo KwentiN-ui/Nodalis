@@ -42,6 +42,10 @@ pub struct Geometry {
     /// they were not there, until they are unsuppressed. A mesh they have already stays.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suppressed: Vec<String>,
+    /// Names of the parts this analysis meshes itself although a link brings their mesh
+    /// with them: the link's mesh of them is left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub own_meshes: Vec<String>,
 }
 
 /// Cut faces of a cyclic symmetric sector, whose meshes have to match: the slave faces are
@@ -137,7 +141,7 @@ impl Geometry {
         };
         self.part_names[at] = new.to_owned();
         self.rename_compound_member(old, new);
-        for part in &mut self.suppressed {
+        for part in self.suppressed.iter_mut().chain(&mut self.own_meshes) {
             if part.eq_ignore_ascii_case(old) {
                 *part = new.to_owned();
             }
@@ -176,6 +180,27 @@ impl Geometry {
             self.suppressed.retain(|p| !names(parts, p));
         }
         self.suppressed.len() != before
+    }
+
+    /// Whether this analysis meshes the part `part` itself although a link brings its mesh.
+    pub fn meshes_itself(&self, part: &str) -> bool {
+        names(&self.own_meshes, part)
+    }
+
+    /// Has this analysis mesh the parts `parts` itself, or take their mesh from the link
+    /// that brings them again; true if that changed anything.
+    pub fn set_own_meshes(&mut self, parts: &[String], own: bool) -> bool {
+        let before = self.own_meshes.len();
+        if own {
+            for part in parts {
+                if !self.meshes_itself(part) {
+                    self.own_meshes.push(part.clone());
+                }
+            }
+        } else {
+            self.own_meshes.retain(|p| !names(parts, p));
+        }
+        self.own_meshes.len() != before
     }
 
     /// Takes parts out of their compounds; compounds left empty go.
@@ -647,6 +672,7 @@ mod tests {
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
+            own_meshes: Vec::new(),
         };
         let parts = ["SOLID-1".to_owned(), "solid-1".to_owned()];
         assert!(geometry.set_suppressed(&parts, true));
@@ -698,6 +724,7 @@ mod tests {
             part_names: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
+            own_meshes: Vec::new(),
         };
         assert_eq!(geometry.parameters("solid-1"), fine);
         assert_eq!(geometry.parameters("SOLID-2").max_size, 5.0);
@@ -784,6 +811,7 @@ mod tests {
             part_names: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
+            own_meshes: Vec::new(),
         };
         assert!(geometry.extrusion("a").is_some());
         assert!(geometry.extrusion("C").is_none());

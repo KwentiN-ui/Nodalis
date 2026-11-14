@@ -1,6 +1,6 @@
 //! The Deformed Mesh block of the project schematic: the mesh of the analysis whose step
 //! results are linked to it, each node moved by its displacement in one increment or mode of
-//! that step times a factor. Its mesh goes on to the Mesh row of another analysis, e.g. a
+//! that step times a factor. Its mesh goes on to the Geometry row of another analysis, e.g. a
 //! buckling mode as the imperfection of a nonlinear static analysis, which PrePoMax does by
 //! exporting the deformed mesh and importing it into another model.
 //!
@@ -210,7 +210,7 @@ pub(super) fn wanted<'a>(nodes: &'a [Node], links: &'a [Link], id: u64) -> Optio
     print.add(&step.to_le_bytes());
     print.add(&block.increment.to_le_bytes());
     print.add(&block.factor.to_bits().to_le_bytes());
-    print.add(&links::fingerprint(data, &[links::MESH.to_owned()]).to_le_bytes());
+    print.add(&links::fingerprint(data, &[links::GEOMETRY.to_owned()]).to_le_bytes());
     print.add_debug(&data.fe.properties.space);
     Some(Wanted {
         source,
@@ -321,7 +321,7 @@ impl ProjectApp {
         self.graph.insert_node(position, id);
         self.output.push(format!(
             "{name} created: drag the results of a step to its Step Result row, e.g. of a \
-             buckle step, and its mesh to the Mesh row of the analysis that starts from it."
+             buckle step, and its mesh to the Geometry row of the analysis that starts from it."
         ));
         id
     }
@@ -470,9 +470,9 @@ pub(super) fn deformed_rows(
     let results = vec![links::STEP_RESULT.to_owned()];
     let factor = vec![links::PARAMETERS.to_owned(), DEFORM_FACTOR.to_owned()];
     let increment = vec![links::PARAMETERS.to_owned(), DEFORM_INCREMENT.to_owned()];
-    let mesh = vec![links::MESH.to_owned()];
+    let mesh = vec![links::GEOMETRY.to_owned()];
     let count = block.model.mesh.element_count();
-    let mut tip = "The deformed mesh: drag its pin to the Mesh row of an analysis, which \
+    let mut tip = "The deformed mesh: drag its pin to the Geometry row of an analysis, which \
                    starts from it, e.g. a nonlinear static analysis with a buckling mode as \
                    its imperfection. It keeps the parts and sets of the analysis it comes \
                    from."
@@ -499,7 +499,7 @@ pub(super) fn deformed_rows(
             crate::results::format_value(units.shown(largest, Quantity::Length) as f32),
             units.unit(Quantity::Length)
         ),
-        _ => links::MESH.to_owned(),
+        _ => "Mesh".to_owned(),
     };
     if count > 0 {
         tip.push_str(&format!(
@@ -648,7 +648,7 @@ mod tests {
         let mut links = vec![Link {
             source: 2,
             target: 3,
-            item: vec![links::MESH.into()],
+            item: vec![links::GEOMETRY.into()],
             ..Default::default()
         }];
         // Nothing to deform yet.
@@ -659,7 +659,7 @@ mod tests {
         let results = vec![links::RESULTS.to_owned(), "Step-1".to_owned()];
         let slot = vec![links::STEP_RESULT.to_owned()];
         assert!(links::compatible(&results, &slot));
-        assert!(!links::compatible(&[links::MESH.to_owned()], &slot));
+        assert!(!links::compatible(&[links::GEOMETRY.to_owned()], &slot));
         assert!(refusal(&nodes, &links, 1, &results, 2, &slot).is_none());
         links.push(Link {
             source: 1,
@@ -720,7 +720,7 @@ mod tests {
         assert_eq!(paths[0], [links::STEP_RESULT]);
         assert_eq!(paths[1], [links::PARAMETERS, DEFORM_INCREMENT]);
         assert_eq!(paths[2], [links::PARAMETERS, DEFORM_FACTOR]);
-        assert_eq!(paths[3], [links::MESH]);
+        assert_eq!(paths[3], [links::GEOMETRY]);
         assert!(rows[0].input && rows[0].linked_from.as_deref() == Some("Buckle"));
         assert!(rows[3].output && !rows[3].input);
         assert_eq!(rows[3].text, "Mesh, max. 2 mm");

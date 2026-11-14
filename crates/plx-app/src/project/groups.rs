@@ -124,7 +124,6 @@ fn free_socket(group: &NodeGroup) -> u32 {
 fn icon_of(kind: &[String]) -> NodeIcon {
     match links::DataType::of(kind) {
         Some(links::DataType::Geometry) => NodeIcon::Geometry,
-        Some(links::DataType::Mesh) => NodeIcon::Mesh,
         Some(links::DataType::Results | links::DataType::Number) => NodeIcon::Results,
         Some(links::DataType::Analysis) => NodeIcon::Solution,
         _ => NodeIcon::Setup,

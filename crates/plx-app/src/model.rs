@@ -65,6 +65,9 @@ pub struct PartInfo {
     /// A part of a geometry view that is an imported mesh, a geometry object of its own
     /// shown as its outline ([`Model::with_imported`]).
     pub imported: bool,
+    /// A part of the geometry this analysis meshes itself although a link brings its mesh
+    /// ([`plx_model::Geometry::own_meshes`]).
+    pub own_mesh: bool,
 }
 
 /// A loaded input file with everything the GUI shows about it.
@@ -187,6 +190,7 @@ fn mark_suppressed(
         });
         changed |= info.suppressed != suppressed;
         info.suppressed = suppressed;
+        info.own_mesh = geometry.is_some_and(|g| g.meshes_itself(&part.name));
     }
     changed
 }
@@ -197,6 +201,7 @@ pub struct Split<'a> {
     pub results: &'a mut Option<ResultsView>,
     pub geometry: &'a mut Option<Geometry>,
     pub mesh: &'a FeMesh,
+    pub origins: &'a plx_model::PartOrigins,
 }
 
 /// The results of the global model of a submodel, whose deformed mesh can be drawn as a
@@ -844,6 +849,7 @@ impl Model {
                 suppressed: false,
                 dimension: None,
                 imported: false,
+                own_mesh: false,
             });
         }
         let origins = plx_model::PartOrigins::imported(&mesh);
@@ -1380,6 +1386,7 @@ impl Model {
             results: &mut self.results,
             geometry: &mut self.geometry,
             mesh: &self.mesh,
+            origins: &self.origins,
         }
     }
 

@@ -147,13 +147,11 @@ pub fn analysis_status(
         None => Vec::new(),
     };
     // A part of the geometry that takes part has a mesh: one without is out of date, so
-    // that Solve meshes it rather than leaving it out. Not for a mesh taken through a link,
-    // which the block it comes from makes.
+    // that Solve meshes it rather than leaving it out, also one whose mesh a link would
+    // bring that this analysis meshes itself.
     let mut stale_parts = stale_parts;
-    let linked = (origins.iter()).any(|(_, o)| o == plx_model::PartOrigin::Linked);
     if let Some(geometry) = geometry
         && meshed
-        && !linked
     {
         for part in geometry.known_parts() {
             let fe_part = geometry.fe_part_name(part);
@@ -465,6 +463,7 @@ mod tests {
             part_names: vec![part.clone(), "SOLID-2".into()],
             refinement: 1.0,
             signatures: Vec::new(),
+            own_meshes: Vec::new(),
         };
         let fe = FeModel::default();
         let space = fe.properties.space;
@@ -507,6 +506,7 @@ mod tests {
             part_names: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
+            own_meshes: Vec::new(),
         };
         let fe = FeModel::default();
         let space = fe.properties.space;

@@ -504,19 +504,39 @@ impl AnalysisWindow {
         }
     }
 
-    /// Takes over the geometry of another analysis, shown on the Geometry tab.
-    pub fn apply_geometry(&mut self, geometry: Option<plx_model::Geometry>) {
-        self.take_geometry(geometry, true);
-    }
-
-    /// [`Self::apply_geometry`]; `follow` has the selections and the mesh follow changed
-    /// shapes, which a mesh taken with them does not need.
-    fn take_geometry(&mut self, geometry: Option<plx_model::Geometry>, follow: bool) {
+    /// Takes over the geometry objects a Geometry link brings, with their meshes, see
+    /// [`crate::links::take_objects`].
+    pub fn apply_objects(&mut self, copy: crate::links::MeshCopy) {
         let workbench = &mut self.workbench;
         let Some(model) = &mut workbench.model else {
             return;
         };
-        // The analysis keeps its own mesh setup.
+        let had_mesh = model.mesh().element_count() > 0;
+        let mut geometry = model.geometry.take();
+        let taken = {
+            let split = model.split();
+            crate::links::take_objects(&mut geometry, split.mesh, split.origins, split.fe, copy)
+        };
+        model.geometry = geometry;
+        model.set_mesh_with(taken.mesh, taken.origins);
+        if let Some(lost) = taken.lost {
+            (workbench.output).push(format!("{lost}."));
+        }
+        workbench.symbols_shown = None;
+        workbench.refresh_geometry_view();
+        workbench.after_parts_changed();
+        if !had_mesh {
+            workbench.view_command = Some(ViewCommand::Fit);
+        }
+    }
+
+    /// Takes new shapes, e.g. made by a CAD tool, keeping the mesh setup: the selections and
+    /// the meshes follow them when `follow`; a part they no longer have goes with its mesh.
+    pub(crate) fn take_geometry(&mut self, geometry: Option<plx_model::Geometry>, follow: bool) {
+        let workbench = &mut self.workbench;
+        let Some(model) = &mut workbench.model else {
+            return;
+        };
         let mut own = model.geometry.take();
         if let Some(tags) = crate::links::take_geometry(&mut own, geometry, follow)
             && follow
@@ -530,7 +550,6 @@ impl AnalysisWindow {
             workbench.symbols_shown = None;
         }
         model.geometry = own;
-        // A part the geometry no longer has goes with its mesh.
         let gone = model.drop_orphan_meshes();
         if !gone.is_empty() {
             (workbench.output).push(format!(
@@ -542,7 +561,7 @@ impl AnalysisWindow {
         workbench.after_parts_changed();
     }
 
-    /// Takes over the mesh of another analysis with the geometry it was meshed from.
+    /// Takes over the mesh a state link brings with the geometry it was meshed from.
     pub fn apply_mesh(&mut self, mesh: crate::links::MeshCopy) {
         let crate::links::MeshCopy {
             geometry,
@@ -552,7 +571,8 @@ impl AnalysisWindow {
             element_types,
             mesh_operations,
         } = mesh;
-        let Some(model) = &mut self.workbench.model else {
+        let workbench = &mut self.workbench;
+        let Some(model) = &mut workbench.model else {
             return;
         };
         // The new mesh is of the new shapes already: only the selections follow them.
@@ -563,9 +583,14 @@ impl AnalysisWindow {
         model.fe.mesh_sets = mesh_sets;
         model.fe.element_types = element_types;
         model.fe.mesh_operations = mesh_operations;
+        let origins = origins.linked(model.origins());
+        let mut own = model.geometry.take();
+        crate::links::take_geometry(&mut own, geometry, false);
+        model.geometry = own;
         model.set_mesh_with(mesh, origins);
-        self.take_geometry(geometry, false);
-        self.workbench.view_command = Some(ViewCommand::Fit);
+        workbench.refresh_geometry_view();
+        workbench.after_parts_changed();
+        workbench.view_command = Some(ViewCommand::Fit);
     }
 
     /// Shows the project's solve of the analysis in the Analysis tab, as far as it got.
@@ -2351,33 +2376,25 @@ impl Workbench {
         for (path, source) in &self.incoming.paths {
             let items = match view {
                 TreeView::Results => Vec::new(),
-                TreeView::Geometry
-                    if path[0] == crate::links::GEOMETRY || path[0] == crate::links::MESH =>
-                {
+                // The objects a Geometry link brings: their shapes and names in the
+                // Geometry workspace, their meshes in the FE Model workspace. The mesh setup
+                // and the meshes of the parts meshed here stay this analysis' own.
+                TreeView::Geometry if path[0] == crate::links::GEOMETRY => {
                     let mut items = vec![TreeItem::Group("Parts")];
+                    let parts = self.geometry.as_ref().map(|g| g.parts.as_slice());
                     items.extend(
-                        (0..self.geometry.as_ref().map_or(0, |g| g.parts.len()))
-                            .map(TreeItem::Part),
+                        (parts.unwrap_or(&[]).iter().enumerate())
+                            .filter(|(_, p)| !p.imported || model.origins().is_linked(&p.name))
+                            .map(|(i, _)| TreeItem::Part(i)),
                     );
-                    // A geometry link takes the shapes only, the mesh setup stays this
-                    // analysis' own; a mesh link takes the setup it was meshed with too.
-                    if path[0] == crate::links::MESH {
-                        items.push(TreeItem::Group("Mesh Setup"));
-                        let setup = model.geometry.as_ref().map_or(0, |g| g.mesh_items.len());
-                        items.extend((0..setup).map(TreeItem::MeshItem));
-                    }
                     items
                 }
                 TreeView::Geometry => Vec::new(),
-                TreeView::FeModel if path[0] == crate::links::MESH => {
-                    let mut items = vec![TreeItem::Mesh, TreeItem::Group("Parts")];
-                    items.extend((0..model.parts.len()).map(TreeItem::Part));
-                    // The mesh operations come with the mesh they were applied to.
-                    items.push(TreeItem::Group(tree::MESH_OPERATIONS));
-                    let operations = model.fe.mesh_operations.len();
-                    items.extend((0..operations).map(TreeItem::MeshOperation));
-                    items
-                }
+                TreeView::FeModel if path[0] == crate::links::GEOMETRY => (model.parts.iter())
+                    .enumerate()
+                    .filter(|(_, p)| model.origins().is_linked(&p.name))
+                    .map(|(i, _)| TreeItem::Part(i))
+                    .collect(),
                 TreeView::FeModel => crate::links::tree_items(&model.fe, path),
             };
             for item in items {
@@ -2391,13 +2408,7 @@ impl Workbench {
     fn linked_source(&self, view: TreeView, item: &TreeItem) -> Option<(Vec<String>, String)> {
         let source = self.tree.linked.get(item)?;
         let path = match view {
-            // The mesh setup is linked only with the mesh.
-            TreeView::Geometry => match item {
-                TreeItem::Group("Mesh Setup") | TreeItem::MeshItem(_) => {
-                    vec![crate::links::MESH.to_owned()]
-                }
-                _ => vec![crate::links::GEOMETRY.to_owned()],
-            },
+            TreeView::Geometry => vec![crate::links::GEOMETRY.to_owned()],
             _ => (self.model.as_ref()).and_then(|m| crate::links::path_of(&m.fe, item))?,
         };
         // The link that covers it: a whole category rather than the item in it.
@@ -2451,29 +2462,37 @@ impl Workbench {
         {
             response.create = None;
         }
-        let mesh_linked =
-            (self.incoming.paths.iter()).any(|(path, _)| path[0] == crate::links::MESH);
-        let mesh = TreeItem::Mesh;
-        let meshing = response.mesh_part.is_some()
-            || response.transform_part.is_some()
-            || response.merge_parts
-            || response.suppress.is_some();
-        if meshing && (check(Some(&mesh), self) || mesh_linked) {
+        // A mesh a link brings is changed where it comes from; its part can be meshed here
+        // instead (Create Mesh), not moved or joined.
+        let model = self.model.as_ref();
+        let linked_mesh = |index: usize| {
+            model
+                .and_then(|m| Some((m, m.mesh().parts.get(index)?)))
+                .is_some_and(|(m, p)| {
+                    plx_model::part_bodies(p)
+                        .iter()
+                        .any(|b| m.origins().is_linked(b))
+                })
+        };
+        let any_linked =
+            model.is_some_and(|m| m.origins().iter().any(|(n, _)| m.origins().is_linked(n)));
+        let transform_linked = response.transform_part.is_some_and(linked_mesh);
+        if transform_linked || (response.merge_parts && any_linked) {
             if refused.is_none() {
-                refused = Some("The mesh comes from another analysis: mesh it there.".into());
+                refused = Some(
+                    "The mesh comes from another block: change it there, or mesh the part \
+                     here with Create Mesh."
+                        .into(),
+                );
             }
-            response.mesh_part = None;
             response.transform_part = None;
             response.merge_parts = false;
-            response.suppress = None;
         }
-        // Compound parts join meshes only, the linked shapes stay as they are: they are
-        // this analysis' own, unless a mesh link brings a mesh already joined.
-        if response.compound.is_some() && mesh_linked {
+        // Compound parts join meshes only; meshes a link brings come joined as they are.
+        if response.compound.is_some() && any_linked {
             response.compound = None;
             if refused.is_none() {
-                refused =
-                    Some("The mesh comes from another analysis: join its parts there.".into());
+                refused = Some("The mesh comes from another block: join its parts there.".into());
             }
         }
         if let Some(line) = refused {
@@ -2683,6 +2702,15 @@ impl Workbench {
                 vec![index]
             };
             self.clear_meshes(&indices);
+        }
+        if let Some(index) = response.linked_mesh {
+            let selected = self.tree.selected_parts(view);
+            let indices: Vec<usize> = if selected.contains(&index) {
+                selected.into_iter().collect()
+            } else {
+                vec![index]
+            };
+            self.use_linked_meshes(&indices);
         }
         if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
             // Several selected items all take the state the clicked one changes to.
@@ -3645,9 +3673,62 @@ impl Workbench {
 
     /// Meshes the named parts of the geometry, or all with `None`, on a worker thread;
     /// [`Self::poll_meshing`] takes the result.
-    fn generate_mesh(&mut self, ctx: &egui::Context, parts: Option<Vec<String>>) {
+    fn generate_mesh(&mut self, ctx: &egui::Context, mut parts: Option<Vec<String>>) {
         if self.meshing.is_some() {
             return;
+        }
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        // Parts whose mesh a link brings: Mesh All leaves them as they come, a part meshed
+        // on its own is meshed here from now on.
+        let linked: Vec<String> = (model.origins().iter())
+            .filter(|(name, origin)| *origin == plx_model::PartOrigin::Linked && !name.is_empty())
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        if !linked.is_empty() {
+            match &parts {
+                Some(asked) => {
+                    let own: Vec<String> = (linked.iter())
+                        .filter(|l| {
+                            asked.iter().any(|a| {
+                                a.eq_ignore_ascii_case(l)
+                                    || model.geometry.as_ref().is_some_and(|g| {
+                                        g.parts_of_fe_part(a)
+                                            .iter()
+                                            .any(|p| p.eq_ignore_ascii_case(l))
+                                    })
+                            })
+                        })
+                        .cloned()
+                        .collect();
+                    if let Some(geometry) = &mut model.geometry {
+                        geometry.set_own_meshes(&own, true);
+                    }
+                }
+                None => {
+                    let rest: Vec<String> = (self.geometry.as_ref())
+                        .map(|g| {
+                            (g.parts.iter())
+                                .filter(|p| {
+                                    !p.imported
+                                        && !linked.iter().any(|l| l.eq_ignore_ascii_case(&p.name))
+                                })
+                                .map(|p| p.name.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if rest.is_empty() {
+                        self.output.push(
+                            "Nothing to mesh: the meshes come with the geometry linked. Create \
+                             Mesh on a part meshes it here instead."
+                                .into(),
+                        );
+                        return;
+                    }
+                    parts = Some(rest);
+                }
+            }
         }
         let Some(geometry) = self.model.as_ref().and_then(|m| m.geometry.clone()) else {
             return;
@@ -4649,6 +4730,7 @@ impl Workbench {
                 info.contours,
                 info.suppressed,
                 info.imported,
+                info.own_mesh,
             ))
         });
         let mut tree_response = TreeResponse::default();
@@ -4657,7 +4739,7 @@ impl Workbench {
         let compounds = self.tree.compounds.clone();
         response.context_menu(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            if let Some((index, visible, contours, suppressed, imported)) = part {
+            if let Some((index, visible, contours, suppressed, imported, own_mesh)) = part {
                 let view = self.tree_view;
                 tree::part_menu(
                     ui,
@@ -4666,6 +4748,7 @@ impl Workbench {
                     contours,
                     suppressed,
                     imported,
+                    own_mesh,
                     view,
                     &selected,
                     &compounds,
@@ -5686,10 +5769,38 @@ impl Workbench {
         if names.is_empty() {
             return;
         }
+        // A part whose mesh a link brings is meshed here from now on.
+        let linked: Vec<String> = (names.iter())
+            .filter(|n| model.origins().is_linked(n))
+            .cloned()
+            .collect();
+        if let Some(geometry) = &mut model.geometry {
+            geometry.set_own_meshes(&linked, true);
+        }
         model.edit_mesh(|mesh, _| mesh.remove_bodies(&names));
         self.output
             .push(format!("Mesh of {} discarded", names.join(", ")));
         self.after_parts_changed();
+    }
+
+    /// Has the parts of the geometry, by index in the geometry view, take their mesh from the
+    /// link that brings them again rather than be meshed here: the project brings it.
+    fn use_linked_meshes(&mut self, indices: &[usize]) {
+        let (Some(model), Some(view)) = (self.model.as_mut(), self.geometry.as_ref()) else {
+            return;
+        };
+        let names: Vec<String> = (indices.iter())
+            .filter_map(|&i| view.parts.get(i))
+            .map(|p| p.name.clone())
+            .collect();
+        let Some(geometry) = &mut model.geometry else {
+            return;
+        };
+        if geometry.set_own_meshes(&names, false) {
+            self.output
+                .push(format!("{} takes the linked mesh again", names.join(", ")));
+            self.sync_suppressed();
+        }
     }
 
     /// Deleting a mesh operation: it is undone on the mesh, and the parts are no longer
@@ -8315,6 +8426,7 @@ mod tests {
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
+            own_meshes: Vec::new(),
         });
         model.fe.sections.push(plx_model::Section {
             orientation: None,

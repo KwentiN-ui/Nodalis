@@ -21,14 +21,19 @@ pub enum PartOrigin {
     /// Meshed from a part of the CAD geometry, from the meshing inputs with this
     /// fingerprint ([`crate::fingerprint::mesh_input`]); out of date once they differ.
     Meshed(u64),
-    /// The mesh of a part of the CAD geometry taken over through a mesh link: the block it
-    /// comes from makes it, so it is never out of date here.
+    /// The mesh of a part of the CAD geometry brought by a link with the part: the block it
+    /// comes from makes it, so it is never out of date here. The analysis can mesh the part
+    /// itself instead ([`crate::Geometry::own_meshes`]).
     Linked,
-    /// A mesh read without geometry, which is its own geometry object.
+    /// A mesh without CAD shapes, which is its own geometry object: read from a file, made
+    /// by a mesh block, or brought by a link.
     Imported {
         /// Whether it is suppressed: left out of the solver input until unsuppressed. Parts
         /// of the CAD geometry are suppressed in [`crate::Geometry::suppressed`].
         suppressed: bool,
+        /// Whether a link brings it, so that it changes in the block it comes from.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        linked: bool,
     },
 }
 
@@ -96,7 +101,10 @@ impl PartOrigins {
     pub fn is_suppressed(&self, name: &str) -> bool {
         matches!(
             self.get(name),
-            Some(PartOrigin::Imported { suppressed: true })
+            Some(PartOrigin::Imported {
+                suppressed: true,
+                ..
+            })
         )
     }
 
@@ -134,7 +142,7 @@ impl PartOrigins {
     pub fn set_suppressed(&mut self, names: &[String], suppressed: bool) -> bool {
         let mut changed = false;
         for (key, origin) in &mut self.0 {
-            if let PartOrigin::Imported { suppressed: s } = origin
+            if let PartOrigin::Imported { suppressed: s, .. } = origin
                 && names.iter().any(|n| n.eq_ignore_ascii_case(key))
                 && *s != suppressed
             {
@@ -154,19 +162,31 @@ impl PartOrigins {
         }
     }
 
-    /// The origins as a mesh link hands them on: the meshes of CAD parts are made by the
-    /// source, so they are linked meshes in the target.
-    pub fn linked(&self) -> Self {
+    /// The origins as a link hands them on to an analysis that had `before`: the meshes of
+    /// CAD parts are made by the source, so they are linked meshes in the target, and meshes
+    /// without CAD shapes are linked imported meshes, suppressed there as they were.
+    pub fn linked(&self, before: &Self) -> Self {
         Self(
             (self.0.iter())
                 .map(|(k, o)| {
                     let o = match o {
-                        PartOrigin::Meshed(_) => PartOrigin::Linked,
-                        other => *other,
+                        PartOrigin::Meshed(_) | PartOrigin::Linked => PartOrigin::Linked,
+                        PartOrigin::Imported { .. } => PartOrigin::Imported {
+                            suppressed: before.is_suppressed(k),
+                            linked: true,
+                        },
                     };
                     (k.clone(), o)
                 })
                 .collect(),
+        )
+    }
+
+    /// Whether a link brings the mesh of `name`.
+    pub fn is_linked(&self, name: &str) -> bool {
+        matches!(
+            self.get(name),
+            Some(PartOrigin::Linked | PartOrigin::Imported { linked: true, .. })
         )
     }
 
@@ -182,7 +202,10 @@ impl PartOrigins {
                     Some(key) => self.0[&key],
                     None => {
                         added.push(body.to_owned());
-                        PartOrigin::Imported { suppressed: false }
+                        PartOrigin::Imported {
+                            suppressed: false,
+                            linked: false,
+                        }
                     }
                 };
                 present.insert(body.to_owned(), origin);
@@ -403,6 +426,7 @@ mod tests {
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: vec!["A".into()],
+            own_meshes: Vec::new(),
         };
         let fe = crate::FeModel::default();
         let solved = active_model(&compound, &fe, Some(&geometry), &origins);
@@ -450,6 +474,7 @@ mod tests {
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
+            own_meshes: Vec::new(),
         };
         let solved = active_model(&mesh, &fe, Some(&geometry), &origins);
         assert!(matches!(solved.mesh, Cow::Borrowed(_)));
@@ -486,6 +511,7 @@ mod tests {
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
+            own_meshes: Vec::new(),
         };
         let mut fe = crate::FeModel::default();
         let gone = drop_orphans(&mut mesh, &mut fe, Some(&geometry), &mut origins);
@@ -504,9 +530,14 @@ mod tests {
         let mut origins = PartOrigins::default();
         origins.set_meshed("SOLID-1", 7);
         origins.reconcile(&mesh(&["SOLID-1", "PART-1"]));
-        let linked = origins.linked();
+        let mut before = PartOrigins::imported(&mesh(&["PART-1"]));
+        before.set_suppressed(&["PART-1".into()], true);
+        let linked = origins.linked(&before);
         assert_eq!(linked.get("SOLID-1"), Some(PartOrigin::Linked));
         assert!(linked.is_imported("PART-1"));
+        assert!(linked.is_linked("PART-1") && linked.is_linked("SOLID-1"));
+        // The target keeps its own suppression of a linked object.
+        assert!(linked.is_suppressed("PART-1"));
         assert_eq!(linked.made_from("SOLID-1"), None);
     }
 }

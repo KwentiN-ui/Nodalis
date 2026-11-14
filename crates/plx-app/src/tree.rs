@@ -382,6 +382,8 @@ pub struct TreeResponse {
     pub symbol_visibility: Vec<(TreeItem, bool)>,
     /// Mesh one part of the geometry, by index.
     pub mesh_part: Option<usize>,
+    /// Use Linked Mesh on a part of the geometry, by index.
+    pub linked_mesh: Option<usize>,
     /// Transform a mesh part (translate, rotate, mirror, scale), by index.
     pub transform_part: Option<usize>,
     /// Merge the selected mesh parts into one.
@@ -956,6 +958,7 @@ pub fn part_menu(
     contours: bool,
     suppressed: bool,
     imported: bool,
+    own_mesh: bool,
     view: TreeView,
     selected: &BTreeSet<usize>,
     compounds: &[(String, Vec<usize>)],
@@ -976,6 +979,14 @@ pub fn part_menu(
             .clicked()
         {
             response.clear_mesh = Some(index);
+        }
+        if own_mesh
+            && ui
+                .button("Use Linked Mesh")
+                .on_hover_text(LINKED_MESH_TIP)
+                .clicked()
+        {
+            response.linked_mesh = Some(index);
         }
     }
     if view != TreeView::Results {
@@ -1095,7 +1106,12 @@ pub const SUPPRESS_TIP: &str = "A suppressed part takes part in nothing, with it
 
 /// What Clear Mesh does, for its tooltip.
 pub const CLEAR_MESH_TIP: &str = "Discards the mesh of the part; the part stays and is meshed \
-    again by Create Mesh or by Solve. To leave the part out, suppress it.";
+    again by Create Mesh or by Solve, here also when a link brought its mesh. To leave the \
+    part out, suppress it.";
+
+/// What Use Linked Mesh does, for its tooltip.
+pub const LINKED_MESH_TIP: &str = "Takes the mesh of the part from the link that brings the \
+    part again, in place of the mesh made here.";
 
 /// What a compound part is, for its tooltips.
 pub const COMPOUND_TIP: &str = "Joins the parts into one part of the FE model. Each is \
@@ -1960,6 +1976,7 @@ impl Tree<'_> {
                 part.contours,
                 part.suppressed,
                 part.imported,
+                part.own_mesh,
                 view,
                 &selected,
                 compounds,

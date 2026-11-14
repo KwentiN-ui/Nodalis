@@ -460,6 +460,7 @@ mod tests {
             part_names: Vec::new(),
             refinement: 1.0,
             signatures,
+            own_meshes: Vec::new(),
         }
     }
 

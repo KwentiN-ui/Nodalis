@@ -161,6 +161,7 @@ pub fn merge_geometries(inputs: &[Geometry]) -> Result<MergedGeometry, GmshError
             signatures: new_signatures,
             compounds,
             suppressed: Vec::new(),
+            own_meshes: Vec::new(),
         },
         tags,
         renamed,

@@ -520,8 +520,14 @@ impl FeMesh {
             let name = fresh(&part.name);
             renamed.insert(part.name.clone(), name.clone());
             added.push(name.clone());
+            let bodies = (part.bodies.iter())
+                .map(|b| Body {
+                    name: b.name.clone(),
+                    elements: shifted(&b.elements),
+                })
+                .collect();
             self.parts.push(Part {
-                bodies: Vec::new(),
+                bodies,
                 name,
                 elements: shifted(&part.elements),
             });

@@ -28,7 +28,7 @@ pub(super) struct TransformBlock {
 
 /// What a transform block takes: a geometry, or a mesh with what belongs to it.
 enum Input {
-    Geometry(plx_model::Geometry),
+    Geometry(Box<plx_model::Geometry>),
     Mesh(Box<links::MeshCopy>),
 }
 
@@ -171,26 +171,24 @@ fn moved_mesh(copy: &links::MeshCopy, transform: &MeshTransform) -> Result<Linke
         geometry,
         mesh,
         fe,
-        origins: Default::default(),
+        origins: copy.origins.clone(),
     })
 }
 
 /// Brings what the transform block `id` takes up to date with the block linked to its
-/// Geometry or Mesh row, and makes its result when that or the transform changed.
+/// Geometry row, and makes its result when that or the transform changed: the shapes, and
+/// the mesh with them when the block linked has one.
 pub(super) fn take_transform_input(nodes: &mut [Node], all: &[Link], id: u64) {
-    let link = all.iter().find(|l| {
-        l.target == id
-            && l.item
-                .first()
-                .is_some_and(|c| c == links::GEOMETRY || c == links::MESH)
-    });
+    let link = all
+        .iter()
+        .find(|l| l.target == id && l.item.first().is_some_and(|c| c == links::GEOMETRY));
     let input = match link {
         Some(link) if links::is_geometry_part(link) => {
             let parts = links::linked_parts(all, link.source, id);
             let file = (nodes.iter_mut().find(|n| n.id == link.source)).and_then(Node::as_file_mut);
             match file.map(|f| f.subset(&parts)) {
                 Some(Ok(None)) => return,
-                Some(Ok(Some(geometry))) => Some(Input::Geometry(geometry)),
+                Some(Ok(Some(geometry))) => Some(Input::Geometry(Box::new(geometry))),
                 _ => None,
             }
         }
@@ -200,12 +198,13 @@ pub(super) fn take_transform_input(nodes: &mut [Node], all: &[Link], id: u64) {
             if source.is_some_and(|n| n.link_data().is_none() && n.kind() == Kind::Analysis) {
                 return;
             }
-            let data = source.and_then(Node::link_data);
-            if link.item[0] == links::MESH {
-                (data.filter(|d| d.mesh.element_count() > 0))
-                    .map(|d| Input::Mesh(Box::new(links::MeshCopy::of(d))))
-            } else {
-                data.and_then(|d| d.geometry.cloned()).map(Input::Geometry)
+            match source.and_then(Node::link_data) {
+                Some(d) if d.mesh.element_count() > 0 => {
+                    Some(Input::Mesh(Box::new(links::MeshCopy::of(d))))
+                }
+                data => {
+                    (data.and_then(|d| d.geometry.cloned())).map(|g| Input::Geometry(Box::new(g)))
+                }
             }
         }
         None => None,
@@ -234,7 +233,7 @@ pub(super) fn take_transform_input(nodes: &mut [Node], all: &[Link], id: u64) {
                     },
                     origins: &copy.origins,
                 };
-                print.add(&links::fingerprint(data, &[links::MESH.to_owned()]).to_le_bytes());
+                print.add(&links::fingerprint(data, &[links::GEOMETRY.to_owned()]).to_le_bytes());
                 print.add_debug(&copy.geometry.as_ref().map(|g| &g.brep));
             }
         }
@@ -373,21 +372,10 @@ pub(super) fn set_transform_value(transform: &mut MeshTransform, key: &str, valu
     }
 }
 
-/// Whether the pin of a transform block takes what a row of path `cell` gives: a geometry,
-/// a part of one or a mesh.
+/// Whether the pin of a transform block takes what a row of path `cell` gives: geometry
+/// objects, with or without a mesh, or a part of a geometry.
 pub(super) fn takes(cell: &str) -> bool {
-    cell == links::GEOMETRY || cell == links::MESH
-}
-
-/// The cell what transform block `id` gives goes out as, by the link to it: Mesh for a
-/// mesh, else Geometry; `None` without a link.
-pub(super) fn given(all: &[Link], id: u64) -> Option<&'static str> {
-    let link = (all.iter()).find(|l| l.target == id && l.item.first().is_some_and(|c| takes(c)))?;
-    Some(if link.item[0] == links::MESH {
-        links::MESH
-    } else {
-        links::GEOMETRY
-    })
+    cell == links::GEOMETRY
 }
 
 /// The rows of a transform block: the one pin that takes a geometry or a mesh and gives it
@@ -402,18 +390,18 @@ pub(super) fn transform_rows(
     };
     let state = block.state();
     let mut rows = Vec::new();
-    // One pin takes a geometry or a mesh, the links being typed, and gives the same kind on.
-    // The pin is of the kind of the link to it: Mesh for a mesh, else Geometry.
+    // One pin takes geometry objects, with their meshes, and gives them on moved.
     let linked = (incoming.iter()).find(|(slot, _)| slot.first().is_some_and(|c| takes(c)));
-    let mesh = linked.is_some_and(|(slot, _)| slot[0] == links::MESH);
+    let mesh = matches!(block.input, Some((_, Input::Mesh(_))));
     let (cell, icon) = if mesh {
-        (links::MESH, NodeIcon::Mesh)
+        (links::GEOMETRY, NodeIcon::Mesh)
     } else {
         (links::GEOMETRY, NodeIcon::Geometry)
     };
     let used = block.input.is_some();
-    let mut tip = "Geometry or mesh: drag the geometry, a part or the mesh of a block here; \
-                   drag the pin on the right to an analysis or another block for it moved."
+    let mut tip = "Geometry: drag the geometry of a block, with its mesh if it has one, or a \
+                   part here; drag the pin on the right to an analysis or another block for it \
+                   moved."
         .to_owned();
     if used {
         match block.error() {
@@ -424,12 +412,7 @@ pub(super) fn transform_rows(
         }
     }
     rows.push(Row {
-        text: if linked.is_some() {
-            cell
-        } else {
-            "Geometry or Mesh"
-        }
-        .to_owned(),
+        text: cell.to_owned(),
         depth: 0,
         icon,
         state: used.then_some(state),
@@ -571,37 +554,10 @@ impl ProjectApp {
         ));
         self.graph.insert_node(position, id);
         self.output.push(format!(
-            "{name} created: drag a geometry or a mesh to it, set its numbers in the block \
+            "{name} created: drag a geometry, meshed or not, to it, set its numbers in the block \
              or double-click it to choose the kind of transform, and drag its output on to analyses."
         ));
         id
-    }
-
-    /// Gives the links from transform block `id` to analyses and transform blocks the kind
-    /// it gives now, a geometry or a mesh, as its one pin gives what it takes.
-    pub(super) fn retype_transform_links(&mut self, id: u64) {
-        let Some(cell) = given(&self.links, id) else {
-            return;
-        };
-        let takes_both: BTreeSet<u64> = (self.nodes.iter())
-            .filter(|n| matches!(n.kind(), Kind::Analysis | Kind::Transform))
-            .map(|n| n.id)
-            .collect();
-        let mut changed = false;
-        for link in self.links.iter_mut().filter(|l| {
-            l.source == id
-                && takes_both.contains(&l.target)
-                && matches!(l.item.as_slice(), [c] if takes(c) && c != cell)
-        }) {
-            link.item = vec![cell.to_owned()];
-            if !link.slot.is_empty() {
-                link.slot = vec![cell.to_owned()];
-            }
-            changed = true;
-        }
-        if changed {
-            self.sync_due = true;
-        }
     }
 
     pub(super) fn edit_transform(&mut self, id: u64) {
@@ -705,19 +661,19 @@ mod tests {
         ];
         let rows = transform_rows(&nodes[1], &[], UnitSystem::default());
         assert!(rows.iter().all(|r| r.state.is_none() && !r.output));
-        assert_eq!(rows[0].text, "Geometry or Mesh");
+        assert_eq!(rows[0].text, "Geometry");
         assert_eq!(rows[1].text, "Translate");
         assert!(rows[1].tip.starts_with("Translate by (0, 0, 2000) mm"));
         // Each number is a row that takes a number link.
         assert_eq!(rows[4].path, [links::PARAMETERS, "dz"]);
         assert!(rows[4].input);
         // The one pin takes a mesh as well as a geometry.
-        let mesh = [links::MESH.to_owned()];
+        let mesh = [links::GEOMETRY.to_owned()];
         assert!(refusal(&nodes, &[], 1, &mesh, 2, &rows[0].path).is_none());
         let link = Link {
             source: 1,
             target: 2,
-            item: vec![links::MESH.to_owned()],
+            item: vec![links::GEOMETRY.to_owned()],
             ..Default::default()
         };
         take_transform_input(&mut nodes, std::slice::from_ref(&link), 2);
@@ -726,13 +682,14 @@ mod tests {
         let data = block.link_data().unwrap();
         assert_eq!(data.mesh.node(4), Some([0.0, 0.0, 3.0]));
         assert_eq!(data.mesh.parts[0].name, "TET");
-        // The one pin gives the mesh on, as a mesh.
+        // The one pin gives the meshed object on.
         let rows = transform_rows(
             &nodes[1],
             &[(mesh.to_vec(), "Tet".to_owned())],
             UnitSystem::default(),
         );
-        assert_eq!(rows[0].text, "Mesh");
+        assert_eq!(rows[0].text, "Geometry");
+        assert_eq!(rows[0].icon, NodeIcon::Mesh);
         assert!(rows[0].output);
         assert_eq!(rows[0].path, mesh);
         assert_eq!(rows[0].state, Some(CellState::UpToDate));
@@ -756,7 +713,7 @@ mod tests {
         let link = Link {
             source: 1,
             target: 2,
-            item: vec![links::MESH.to_owned()],
+            item: vec![links::GEOMETRY.to_owned()],
             ..Default::default()
         };
         take_transform_input(&mut nodes, &[link], 2);

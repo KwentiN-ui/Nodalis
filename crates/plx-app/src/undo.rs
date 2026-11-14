@@ -415,6 +415,7 @@ mod tests {
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
+            own_meshes: Vec::new(),
         }
     }
 
@@ -528,6 +529,7 @@ mod tests {
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
+            own_meshes: Vec::new(),
         });
         record(&mut model);
         assert!(!model.history.can_undo());

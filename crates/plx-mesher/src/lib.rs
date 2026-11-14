@@ -259,6 +259,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         signatures,
         compounds: Vec::new(),
         suppressed: Vec::new(),
+        own_meshes: Vec::new(),
     };
     let display = tessellate(&geometry)?;
     Ok(CadImport {
