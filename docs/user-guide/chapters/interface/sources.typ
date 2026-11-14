@@ -287,6 +287,18 @@ imported itself stay when a link brings its objects anew.
 #screenshot("linked-meshes.png", [The parts of Analysis-1 come meshed from the link. OBEN is
   meshed here, so its menu offers Use Linked Mesh.])
 
+Each part of the geometry keeps an identity of its own, whatever its name. When a part is
+renamed where the link comes from, the analysis renames what it has of the part with it: its
+own mesh, its suppression, and the sections, sets, boundary conditions and loads on it. The
+output says which parts were renamed. The meshes an analysis makes of linked shapes, and the
+meshes it imports beside them, are numbered from 100,000,001 on, apart from the linked mesh:
+when the linked mesh changes, the node and element numbers of the own meshes stay, and so do
+selections made of them. A set of the analysis whose name a set brought by the link has is
+renamed, and the output says so.
+
+#screenshot("linked-rename.png", [STUETZE was renamed to TRAEGER in benannte_teile: Analysis-1
+  keeps the mesh it made of the part, under the new name.])
+
 #screenshot("file-block.png", [The results of a CalculiX run made elsewhere drive a submodel])
 
 The #ui("File") row holds the path: type it, or double-click the block or use

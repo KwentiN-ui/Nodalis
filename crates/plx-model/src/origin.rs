@@ -215,6 +215,25 @@ impl PartOrigins {
         added
     }
 
+    /// Makes the origins of the CAD parts agree with who meshes them: in a geometry a link
+    /// brings ([`crate::Geometry::from_link`]) the analysis meshes the parts of
+    /// [`crate::Geometry::own_meshes`], so a linked mesh of one of them is out of date until
+    /// it is meshed here, and the link makes the meshes of the others, so they are linked.
+    /// Whether a part's mesh is linked thus follows from the geometry alone.
+    pub fn settle(&mut self, geometry: Option<&crate::Geometry>) {
+        let Some(geometry) = geometry.filter(|g| g.from_link) else {
+            return;
+        };
+        for (name, origin) in &mut self.0 {
+            let own = geometry.meshes_itself(name);
+            match *origin {
+                PartOrigin::Linked if own => *origin = PartOrigin::Meshed(0),
+                PartOrigin::Meshed(_) if !own => *origin = PartOrigin::Linked,
+                _ => {}
+            }
+        }
+    }
+
     /// Whether every part of `mesh` has its origin and no origin is without its part.
     pub fn complete_for(&self, mesh: &FeMesh) -> bool {
         let names: Vec<&str> = mesh.parts.iter().flat_map(bodies).collect();
@@ -427,6 +446,8 @@ mod tests {
             compounds: Vec::new(),
             suppressed: vec!["A".into()],
             own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let fe = crate::FeModel::default();
         let solved = active_model(&compound, &fe, Some(&geometry), &origins);
@@ -475,6 +496,8 @@ mod tests {
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let solved = active_model(&mesh, &fe, Some(&geometry), &origins);
         assert!(matches!(solved.mesh, Cow::Borrowed(_)));
@@ -512,6 +535,8 @@ mod tests {
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let mut fe = crate::FeModel::default();
         let gone = drop_orphans(&mut mesh, &mut fe, Some(&geometry), &mut origins);
@@ -539,5 +564,36 @@ mod tests {
         // The target keeps its own suppression of a linked object.
         assert!(linked.is_suppressed("PART-1"));
         assert_eq!(linked.made_from("SOLID-1"), None);
+    }
+
+    #[test]
+    fn in_linked_shapes_the_own_meshes_decide_what_is_linked() {
+        let mut geometry = crate::Geometry {
+            source: String::new(),
+            brep: String::new(),
+            meshing: Default::default(),
+            mesh_items: Vec::new(),
+            part_names: vec!["OWN".into(), "OTHER".into()],
+            refinement: 1.0,
+            signatures: Vec::new(),
+            compounds: Vec::new(),
+            suppressed: Vec::new(),
+            own_meshes: vec!["OWN".into()],
+            ids: Vec::new(),
+            from_link: true,
+        };
+        let mut origins = PartOrigins::default();
+        origins.insert("OWN", PartOrigin::Linked);
+        origins.insert("OTHER", PartOrigin::Meshed(3));
+        origins.settle(Some(&geometry));
+        // The link's mesh of a part meshed here is out of date, the own mesh of a part the
+        // link meshes is the link's.
+        assert_eq!(origins.get("OWN"), Some(PartOrigin::Meshed(0)));
+        assert_eq!(origins.get("OTHER"), Some(PartOrigin::Linked));
+        // Shapes of the analysis' own leave the origins alone.
+        geometry.from_link = false;
+        origins.insert("OTHER", PartOrigin::Meshed(3));
+        origins.settle(Some(&geometry));
+        assert_eq!(origins.get("OTHER"), Some(PartOrigin::Meshed(3)));
     }
 }

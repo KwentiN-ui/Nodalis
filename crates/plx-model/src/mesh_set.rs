@@ -69,6 +69,10 @@ pub struct MeshSet {
     pub kind: SetKind,
     /// What the user picked: nodes, faces, CAD entities or whole parts.
     pub region: Region,
+    /// Whether a Geometry link brought the set with the meshes: it changes where it comes
+    /// from, and goes when the link brings the meshes again, unlike the analysis' own sets.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linked: bool,
 }
 
 impl MeshSet {
@@ -77,6 +81,7 @@ impl MeshSet {
             name: name.into(),
             kind,
             region,
+            linked: false,
         }
     }
 

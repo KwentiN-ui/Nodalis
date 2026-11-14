@@ -249,7 +249,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
     })?;
     let brep = std::fs::read_to_string(&brep_file.0)
         .map_err(|e| GmshError::Other(format!("{}: {e}", brep_file.0.display())))?;
-    let geometry = Geometry {
+    let mut geometry = Geometry {
         source: file_names(paths),
         brep,
         meshing: MeshingParameters::for_diagonal(diagonal),
@@ -260,7 +260,10 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         compounds: Vec::new(),
         suppressed: Vec::new(),
         own_meshes: Vec::new(),
+        ids: Vec::new(),
+        from_link: false,
     };
+    geometry.ensure_ids();
     let display = tessellate(&geometry)?;
     Ok(CadImport {
         geometry,
@@ -557,6 +560,7 @@ pub fn add_cad_files(
         ..geometry.clone()
     };
     combined.renumber_mesh_items(&renumbered);
+    combined.ensure_ids();
     let display = tessellate(&combined)?;
     Ok(CadAddition {
         import: CadImport {
@@ -1220,6 +1224,7 @@ pub fn delete_parts_renumbered(
     smaller.renumber_mesh_items(&renumbered);
     smaller.remove_from_compounds(deleted);
     smaller.set_suppressed(deleted, false);
+    smaller.ensure_ids();
     Ok((Some(smaller), renumbered))
 }
 
@@ -2269,14 +2274,26 @@ fn generate_faces(
 /// numbers the mesh had, so that nothing that referred to the old part points into the new
 /// one.
 pub fn merge_part(mesh: &FeMesh, part_mesh: FeMesh) -> FeMesh {
+    merge_part_from(mesh, part_mesh, 0)
+}
+
+/// [`merge_part`], the new part numbered from above `floor` at least, see
+/// [`plx_mesh::OWN_NUMBERS`].
+pub fn merge_part_from(mesh: &FeMesh, part_mesh: FeMesh, floor: u32) -> FeMesh {
     let replaced: Vec<String> = part_mesh.parts.iter().map(|p| p.name.clone()).collect();
     let is_replaced = |p: &Part| replaced.iter().any(|r| r.eq_ignore_ascii_case(&p.name));
     let removed: BTreeSet<ElementId> = (mesh.parts.iter())
         .filter(|p| is_replaced(p))
         .flat_map(|p| p.elements.iter().copied())
         .collect();
-    let node_offset = mesh.node_ids().iter().copied().max().unwrap_or(0);
-    let element_offset = mesh.elements().iter().map(|e| e.id).max().unwrap_or(0);
+    let node_offset = mesh
+        .node_ids()
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .max(floor);
+    let element_offset = (mesh.elements().iter().map(|e| e.id).max().unwrap_or(0)).max(floor);
 
     let mut merged = FeMesh::default();
     let kept: Vec<&Element> = (mesh.elements().iter())

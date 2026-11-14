@@ -461,6 +461,8 @@ mod tests {
             refinement: 1.0,
             signatures,
             own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         }
     }
 

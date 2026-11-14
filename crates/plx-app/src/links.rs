@@ -981,6 +981,7 @@ pub fn take_geometry(
                 mesh_items: own.mesh_items,
                 suppressed: own.suppressed,
                 own_meshes: own.own_meshes,
+                from_link: own.from_link,
                 ..source
             };
             if let Some(tags) = &tags {
@@ -1005,12 +1006,68 @@ pub fn take_geometry(
     tags
 }
 
+/// Renames what the analysis has of the parts the source renamed since the analysis took
+/// its shapes, found by the parts' ids ([`Geometry::renames_since`]): the part in its own
+/// geometry with its suppression, mesh setup and compound, its mesh, and the sections,
+/// boundary conditions and other items of the FE model on it. Returns the renames, as (old,
+/// new) names.
+pub fn follow_renames(
+    geometry: &mut Option<Geometry>,
+    source: Option<&Geometry>,
+    mesh: &mut FeMesh,
+    origins: &mut plx_model::PartOrigins,
+    fe: &mut FeModel,
+) -> Vec<(String, String)> {
+    let (Some(own), Some(source)) = (geometry.as_mut(), source) else {
+        return Vec::new();
+    };
+    let renames = source.renames_since(own);
+    // A mesh up to date stays so under the new name.
+    let (space, matching) = (fe.properties.space, fe.matching_faces());
+    let input = |geometry: &Geometry, name: &str| {
+        plx_model::fingerprint::mesh_input(geometry, &matching, space, name)
+    };
+    let up_to_date: Vec<bool> = (renames.iter())
+        .map(|(old, _)| origins.made_from(old) == Some(input(own, old)))
+        .collect();
+    // Through names of no part, so that parts that swap names keep theirs apart.
+    let parked: Vec<String> = (0..renames.len()).map(|i| format!("\u{1}{i}")).collect();
+    let steps = (renames.iter().zip(&parked))
+        .map(|((old, _), park)| (old.as_str(), park.as_str()))
+        .chain((renames.iter().zip(&parked)).map(|((_, new), park)| (park.as_str(), new.as_str())));
+    for (old, new) in steps.collect::<Vec<_>>() {
+        own.rename_part(old, new);
+        for index in 0..mesh.parts.len() {
+            if mesh.parts[index].name.eq_ignore_ascii_case(old) {
+                mesh.rename_part(index, new);
+            }
+            for body in &mut mesh.parts[index].bodies {
+                if body.name.eq_ignore_ascii_case(old) {
+                    body.name = new.to_owned();
+                }
+            }
+        }
+        fe.rename_part(old, new);
+        origins.rename(old, new);
+    }
+    for ((_, new), up_to_date) in renames.iter().zip(up_to_date) {
+        if up_to_date {
+            origins.set_meshed(new, input(own, new));
+        }
+    }
+    renames
+}
+
 /// The mesh of an analysis after [`take_objects`], with the origins of its parts.
 pub struct Taken {
     pub mesh: FeMesh,
     pub origins: plx_model::PartOrigins,
     /// Says how many selections on CAD entities were not found in the new shapes, if any.
     pub lost: Option<String>,
+    /// The parts the source renamed, as (old, new) names, see [`follow_renames`].
+    pub renames: Vec<(String, String)>,
+    /// Lines for the output, e.g. on own sets renamed for sets the link brings.
+    pub notes: Vec<String>,
 }
 
 /// What an analysis has after a Geometry link brought `copy` in place of what it had: the
@@ -1035,10 +1092,18 @@ pub fn take_objects(
         element_types,
         mesh_operations,
     } = copy;
+    // What the analysis has of parts the source renamed takes their new names first.
+    let mut mesh = mesh.clone();
+    let mut origins = origins.clone();
+    let renames = follow_renames(geometry, shapes.as_ref(), &mut mesh, &mut origins, fe);
+    let (mesh, origins) = (&mesh, &origins);
     // The link's meshes of CAD parts come with the compound parts they were joined to.
     let cad_meshes = (incoming_origins.iter())
         .any(|(_, o)| matches!(o, PartOrigin::Meshed(_) | PartOrigin::Linked));
     let tags = take_geometry(geometry, shapes, !cad_meshes);
+    if let Some(geometry) = geometry {
+        geometry.from_link = true;
+    }
     let lost = tags
         .as_ref()
         .and_then(|tags| follow_geometry(fe, None, tags));
@@ -1080,11 +1145,11 @@ pub fn take_objects(
     } else if incoming.parts.is_empty() {
         (kept, kept_origins)
     } else {
-        // The link's mesh keeps its numbers, so that results of the same mesh fit; the own
-        // meshes come after it.
+        // The link's mesh keeps its numbers, so that results of the same mesh fit, and so do
+        // the own meshes, numbered apart from it (see `plx_mesh::OWN_NUMBERS`).
         let names: Vec<String> = kept.parts.iter().map(|p| p.name.clone()).collect();
         let mut both = incoming;
-        let added = both.append(kept);
+        let added = both.append_keeping(kept, plx_mesh::OWN_NUMBERS);
         let mut origins = linked;
         for (old, new) in names.iter().zip(&added) {
             if let Some(origin) = kept_origins.get(old) {
@@ -1099,12 +1164,36 @@ pub fn take_objects(
         origins.reconcile(&both);
         (both, origins)
     };
+    let mut notes = Vec::new();
     // What the FE model says about the link's meshes comes with them; its own stays.
     if cad_meshes || !mesh_sets.is_empty() || !element_types.is_empty() {
-        let own_sets: Vec<_> = (fe.mesh_sets.drain(..))
-            .filter(|own| !mesh_sets.iter().any(|s| s.name == own.name))
-            .collect();
-        fe.mesh_sets = mesh_sets;
+        // The sets the link brought last time go, the analysis' own stay; one whose name
+        // the link brings now is renamed.
+        let mut incoming_sets = mesh_sets;
+        for set in &mut incoming_sets {
+            set.linked = true;
+        }
+        let mut own_sets: Vec<_> = (fe.mesh_sets.drain(..)).filter(|s| !s.linked).collect();
+        let taken = |sets: &[plx_model::MeshSet], kind, name: &str| {
+            (sets.iter()).any(|s| s.kind == kind && s.name.eq_ignore_ascii_case(name))
+        };
+        for index in 0..own_sets.len() {
+            let (kind, old) = (own_sets[index].kind, own_sets[index].name.clone());
+            if !taken(&incoming_sets, kind, &old) {
+                continue;
+            }
+            let new = (2..)
+                .map(|n| format!("{old}-{n}"))
+                .find(|n| !taken(&incoming_sets, kind, n) && !taken(&own_sets, kind, n))
+                .unwrap_or_default();
+            fe.rename_set(kind, &old, &new);
+            notes.push(format!(
+                "{} {old} renamed to {new}: the linked source has one of that name",
+                kind.label()
+            ));
+            own_sets[index].name = new;
+        }
+        fe.mesh_sets = incoming_sets;
         fe.mesh_sets.extend(own_sets);
         let own_types: Vec<_> = (fe.element_types.drain(..))
             .filter(|own| !element_types.iter().any(|t| t.part == own.part))
@@ -1118,10 +1207,14 @@ pub fn take_objects(
         operations.extend(own_operations);
         fe.mesh_operations = operations;
     }
+    let mut origins = origins;
+    origins.settle(geometry);
     Taken {
         mesh,
         origins,
         lost,
+        renames,
+        notes,
     }
 }
 
@@ -1894,6 +1987,8 @@ mod tests {
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         }
     }
 
@@ -1940,7 +2035,8 @@ mod tests {
             )
         };
         assert_eq!(status(&geometry, &taken).stale_parts, ["SOLID-2"]);
-        // It meshes SOLID-2 itself, and SOLID-1 too in place of the linked mesh.
+        // It meshes SOLID-2 itself, and SOLID-1 too in place of the linked mesh: both are
+        // meshed here from now on, as meshing them makes them.
         let mut own = taken.mesh.clone();
         own.append(tet_part("SOLID-2", 1, 10.0));
         let mut own_origins = taken.origins.clone();
@@ -1955,7 +2051,7 @@ mod tests {
         geometry
             .as_mut()
             .unwrap()
-            .set_own_meshes(&["SOLID-1".into()], true);
+            .set_own_meshes(&["SOLID-1".into(), "SOLID-2".into()], true);
         // The link brings its objects again: SOLID-1's linked mesh is left out, the own
         // mesh of SOLID-2 stays, and so does a mesh the analysis imported itself.
         own.append(tet_part("PLATE", 1, 20.0));
@@ -1979,6 +2075,112 @@ mod tests {
         let taken = take_objects(&mut geometry, &taken.mesh, &taken.origins, &mut fe, copy());
         assert_eq!(taken.origins.get("SOLID-1"), Some(PartOrigin::Linked));
         assert!(status(&geometry, &taken).stale_parts.is_empty());
+    }
+
+    #[test]
+    fn what_an_analysis_has_of_a_part_follows_a_rename_in_the_source() {
+        use plx_mesh::OWN_NUMBERS;
+        use plx_model::{MeshSet, PartOrigins, Region, SetKind};
+        let mut shapes = two_parts(&["SOLID-1", "SOLID-2"]);
+        shapes.ensure_ids();
+        let source_set = MeshSet::new("Node_Set-1", SetKind::Nodes, Region::Nodes(vec![1]));
+        let copy = |shapes: &Geometry, mesh: FeMesh| {
+            let mut origins = PartOrigins::default();
+            for part in &mesh.parts {
+                origins.set_meshed(&part.name, 7);
+            }
+            origins.reconcile(&mesh);
+            MeshCopy {
+                geometry: Some(shapes.clone()),
+                mesh,
+                origins,
+                mesh_sets: vec![source_set.clone()],
+                element_types: Vec::new(),
+                mesh_operations: Vec::new(),
+            }
+        };
+        let (mut geometry, mut fe) = (None, FeModel::default());
+        let first = copy(&shapes, tet_part("SOLID-1", 1, 0.0));
+        let taken = take_objects(
+            &mut geometry,
+            &FeMesh::default(),
+            &Default::default(),
+            &mut fe,
+            first,
+        );
+        assert!(geometry.as_ref().unwrap().from_link);
+        assert!(fe.mesh_sets[0].linked);
+        // The analysis meshes SOLID-2 itself, numbered apart from the linked mesh, and has a
+        // set of its own on it, by the name of the source's set.
+        let mut own = taken.mesh.clone();
+        own.append_keeping(tet_part("SOLID-2", 1, 10.0), OWN_NUMBERS);
+        let mut origins = taken.origins.clone();
+        origins.set_meshed("SOLID-2", 9);
+        origins.reconcile(&own);
+        let geometry_mut = geometry.as_mut().unwrap();
+        geometry_mut.set_own_meshes(&["SOLID-2".into()], true);
+        geometry_mut.set_suppressed(&["SOLID-2".into()], true);
+        fe.mesh_sets.push(MeshSet::new(
+            "Node_Set-1",
+            SetKind::Elements,
+            Region::Parts(vec!["SOLID-2".into()]),
+        ));
+        fe.mesh_sets.push(MeshSet::new(
+            "Node_Set-1",
+            SetKind::Nodes,
+            Region::Nodes(vec![OWN_NUMBERS + 1]),
+        ));
+        let own_nodes = own.elements()[1].nodes.clone();
+        assert_eq!(own_nodes[0], OWN_NUMBERS + 1);
+        // The source renames both parts, swapping SOLID-1 to SOLID-2, and meshes anew with
+        // more nodes.
+        shapes.rename_part("SOLID-2", "WING");
+        shapes.rename_part("SOLID-1", "SOLID-2");
+        let mut grown = tet_part("SOLID-2", 1, 0.0);
+        grown.append(tet_part("SOLID-2X", 1, 3.0));
+        grown.parts.truncate(1);
+        let taken = take_objects(&mut geometry, &own, &origins, &mut fe, copy(&shapes, grown));
+        let geometry = geometry.unwrap();
+        assert_eq!(
+            taken.renames,
+            [
+                ("SOLID-1".to_string(), "SOLID-2".to_string()),
+                ("SOLID-2".to_string(), "WING".to_string())
+            ]
+        );
+        // The own mesh of the part is under its new name, with its numbers, and so are its
+        // suppression and the analysis meshing it itself.
+        let wing = (taken.mesh.parts.iter())
+            .find(|p| p.name == "WING")
+            .unwrap();
+        let element = taken.mesh.element(wing.elements[0]).unwrap();
+        assert_eq!(element.nodes, own_nodes);
+        assert!(geometry.meshes_itself("WING") && geometry.is_suppressed("WING"));
+        assert!(!geometry.meshes_itself("SOLID-2"));
+        assert_eq!(
+            taken.origins.get("WING"),
+            Some(plx_model::PartOrigin::Meshed(9))
+        );
+        assert_eq!(
+            taken.origins.get("SOLID-2"),
+            Some(plx_model::PartOrigin::Linked)
+        );
+        // The own element set on it follows; the own node set by the name the source's set
+        // has is renamed, the source's comes with the link.
+        let set = |kind, name: &str| fe.mesh_set(kind, name).map(|s| s.region.clone());
+        assert_eq!(
+            set(SetKind::Elements, "Node_Set-1"),
+            Some(Region::Parts(vec!["WING".into()]))
+        );
+        assert_eq!(
+            set(SetKind::Nodes, "Node_Set-1"),
+            Some(Region::Nodes(vec![1]))
+        );
+        assert_eq!(
+            set(SetKind::Nodes, "Node_Set-1-2"),
+            Some(Region::Nodes(vec![OWN_NUMBERS + 1]))
+        );
+        assert_eq!(taken.notes.len(), 1);
     }
 
     #[test]
@@ -2056,6 +2258,8 @@ mod tests {
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let mut meshed = tet(0.0, "FIX");
         meshed.geometry = Some(geometry.clone());
@@ -2103,6 +2307,8 @@ mod tests {
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let mut own = shapes("old");
         own.meshing.max_size = 2.0;
@@ -2161,6 +2367,8 @@ mod tests {
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let compound = |name: &str, parts: &[&str]| plx_model::CompoundPart {
             name: name.into(),
@@ -2213,6 +2421,8 @@ mod tests {
             refinement: 1.0,
             signatures,
             own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         // The bottom face 1 is now 7; the top face 2 went away.
         let own = shapes("old", vec![face(Face(1), 0.0), face(Face(2), 1.0)]);

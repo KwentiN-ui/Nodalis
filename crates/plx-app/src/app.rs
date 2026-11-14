@@ -522,6 +522,10 @@ impl AnalysisWindow {
         if let Some(lost) = taken.lost {
             (workbench.output).push(format!("{lost}."));
         }
+        for (old, new) in &taken.renames {
+            (workbench.output).push(format!("{old} renamed to {new}, as in the linked source"));
+        }
+        (workbench.output).extend(taken.notes);
         workbench.symbols_shown = None;
         workbench.refresh_geometry_view();
         workbench.after_parts_changed();
@@ -585,7 +589,19 @@ impl AnalysisWindow {
         model.fe.mesh_operations = mesh_operations;
         let origins = origins.linked(model.origins());
         let mut own = model.geometry.take();
+        // The FE model follows parts the source renamed; the mesh is the source's anyway.
+        let (mut scratch, mut scratch_origins) = (plx_mesh::FeMesh::default(), Default::default());
+        crate::links::follow_renames(
+            &mut own,
+            geometry.as_ref(),
+            &mut scratch,
+            &mut scratch_origins,
+            &mut model.fe,
+        );
         crate::links::take_geometry(&mut own, geometry, false);
+        if let Some(own) = &mut own {
+            own.from_link = true;
+        }
         model.geometry = own;
         model.set_mesh_with(mesh, origins);
         workbench.refresh_geometry_view();
@@ -1239,6 +1255,11 @@ pub(crate) fn merge_part_meshes(
     let mut output = Vec::new();
     let had_mesh = model.mesh().element_count() > 0;
     let mut mesh = model.mesh().clone();
+    // Meshes made here of shapes a link brings are numbered apart from the linked mesh.
+    let floor = match model.geometry.as_ref().is_some_and(|g| g.from_link) {
+        true => plx_mesh::OWN_NUMBERS,
+        false => 0,
+    };
     // Compound parts take their bodies' meshes apart, so that a body meshed anew replaces
     // its own mesh; joined again after.
     mesh.split_compounds();
@@ -1250,6 +1271,15 @@ pub(crate) fn merge_part_meshes(
         // The mesh operations are part of making the mesh: a part meshed anew gets them
         // again rather than losing them.
         model.fe.apply_mesh_operations(&mut part.mesh);
+        // In shapes a link brings, a part meshed here is meshed here from now on, also when
+        // the link brings a mesh of it later.
+        if let Some(own) = model.geometry.as_mut().filter(|g| g.from_link) {
+            let names: Vec<String> = (part.mesh.parts.iter())
+                .flat_map(plx_model::part_bodies)
+                .map(str::to_owned)
+                .collect();
+            own.set_own_meshes(&names, true);
+        }
         // What each part is meshed from, to tell when its mesh is out of date.
         for p in &part.mesh.parts {
             let matching = model.fe.matching_faces();
@@ -1280,7 +1310,7 @@ pub(crate) fn merge_part_meshes(
                 units.unit(plx_model::Quantity::Length),
             ));
         }
-        mesh = plx_mesher::merge_part(&mesh, part.mesh);
+        mesh = plx_mesher::merge_part_from(&mesh, part.mesh, floor);
     }
     mesh.compose_compounds(&geometry.compound_members());
     mesh.unshare_parts();
@@ -5616,7 +5646,14 @@ impl Workbench {
             }
             let (nodes, elements) = (import.mesh.node_count(), import.mesh.element_count());
             let mut added = Vec::new();
-            model.edit_mesh(|mesh, _| added = mesh.append(import.mesh));
+            // Next to shapes a link brings, the mesh is numbered apart from the linked mesh.
+            let linked = model.geometry.as_ref().is_some_and(|g| g.from_link);
+            model.edit_mesh(|mesh, _| {
+                added = match linked {
+                    true => mesh.append_keeping(import.mesh, plx_mesh::OWN_NUMBERS),
+                    false => mesh.append(import.mesh),
+                }
+            });
             self.output.push(format!(
                 "{name} imported: {nodes} nodes, {elements} elements, {} part(s) added ({})",
                 added.len(),
@@ -5797,15 +5834,8 @@ impl Workbench {
             return;
         };
         if geometry.set_own_meshes(&names, false) {
-            // Until the link brings the mesh again, the mesh made here counts as linked, so
-            // Mesh All does not mesh the parts here once more.
-            let mut origins = model.origins().clone();
-            for name in &names {
-                if matches!(origins.get(name), Some(plx_model::PartOrigin::Meshed(_))) {
-                    origins.insert(name, plx_model::PartOrigin::Linked);
-                }
-            }
-            model.set_origins(origins);
+            // Until the link brings the mesh again, the mesh made here counts as linked.
+            model.settle_origins();
             self.output
                 .push(format!("{} takes the linked mesh again", names.join(", ")));
             self.sync_suppressed();
@@ -8436,6 +8466,8 @@ mod tests {
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         });
         model.fe.sections.push(plx_model::Section {
             orientation: None,

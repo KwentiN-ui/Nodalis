@@ -1353,6 +1353,8 @@ mod tests {
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let mut preview = Node::new(2, "Preview".into(), Block::Preview(Box::default()));
         let nodes = vec![analysis(1, Some(geometry.clone())), preview_clone(&preview)];

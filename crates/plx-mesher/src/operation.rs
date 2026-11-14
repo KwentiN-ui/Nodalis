@@ -113,12 +113,14 @@ pub fn apply_operation(
     let brep = std::fs::read_to_string(&result.0)
         .map_err(|e| fail(format!("{}: {e}", result.0.display())))?;
     let (part_names, signatures) = names;
-    Ok(Geometry {
+    let mut geometry = Geometry {
         brep,
         part_names,
         signatures,
         ..input.clone()
-    })
+    };
+    geometry.ensure_ids();
+    Ok(geometry)
 }
 
 /// The names of the parts of the model: each keeps the name of the one of `before` it was
@@ -172,13 +174,15 @@ fn apply_split(
     compounds.retain(|c| !c.parts.is_empty());
     let brep = std::fs::read_to_string(&result.0)
         .map_err(|e| GmshError::Other(format!("{}: {e}", result.0.display())))?;
-    Ok(Geometry {
+    let mut geometry = Geometry {
         brep,
         part_names,
         signatures,
         compounds,
         ..input.clone()
-    })
+    };
+    geometry.ensure_ids();
+    Ok(geometry)
 }
 
 /// Rounds or bevels the edges among `entities`; returns the new solids.

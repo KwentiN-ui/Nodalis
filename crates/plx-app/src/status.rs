@@ -464,6 +464,8 @@ mod tests {
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let fe = FeModel::default();
         let space = fe.properties.space;
@@ -507,6 +509,8 @@ mod tests {
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let fe = FeModel::default();
         let space = fe.properties.space;

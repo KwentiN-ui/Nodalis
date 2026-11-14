@@ -185,13 +185,15 @@ pub fn defeature(
     };
     let brep = std::fs::read_to_string(&result.0)
         .map_err(|e| fail(format!("{}: {e}", result.0.display())))?;
+    let mut geometry = Geometry {
+        brep,
+        part_names,
+        signatures,
+        ..input.clone()
+    };
+    geometry.ensure_ids();
     Ok(Defeatured {
-        geometry: Geometry {
-            brep,
-            part_names,
-            signatures,
-            ..input.clone()
-        },
+        geometry,
         removed,
         kept,
     })

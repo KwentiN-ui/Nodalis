@@ -1432,6 +1432,13 @@ impl Model {
     pub fn set_origins(&mut self, origins: plx_model::PartOrigins) {
         self.origins = origins;
         self.origins.reconcile(&self.mesh);
+        self.origins.settle(self.geometry.as_ref());
+    }
+
+    /// Settles the origins after the parts the analysis meshes itself changed, see
+    /// [`plx_model::PartOrigins::settle`].
+    pub fn settle_origins(&mut self) {
+        self.origins.settle(self.geometry.as_ref());
     }
 
     /// Deletes the meshes of parts that the geometry no longer has, see
@@ -1475,6 +1482,7 @@ impl Model {
         let replaced = std::mem::take(&mut fresh.mesh);
         let origins = self.origins.clone();
         self.origins.reconcile(&self.mesh);
+        self.origins.settle(self.geometry.as_ref());
         self.history.mesh_replaced(replaced, origins);
         self.revision += 1;
         self.mesh_revision += 1;

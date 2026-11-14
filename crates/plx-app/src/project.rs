@@ -13827,6 +13827,8 @@ mod tests {
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let mesh = MeshPrimitive::default_box().generate(ModelSpace::ThreeD, "Solid-1");
         let space = ModelSpace::ThreeD;
@@ -15034,6 +15036,8 @@ mod tests {
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         };
         let fe = plx_model::FeModel::default();
         let inputs = plx_model::PartOrigins::default();
