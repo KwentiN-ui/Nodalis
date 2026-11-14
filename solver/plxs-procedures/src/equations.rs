@@ -790,6 +790,8 @@ pub fn displacement_unknowns(model: &plxs_core::Model, free: &[u32]) -> Unknowns
     Unknowns::from_free(free, 3, &model.nodes.coordinates)
         .with_bodies(&model.node_bodies())
         .with_midsides(&model.midside_ends())
+        .with_fibres(&model.fibre_of_nodes())
+        .with_roles(&model.node_roles())
 }
 
 pub fn factor_exceeds_memory(

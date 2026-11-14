@@ -163,6 +163,8 @@ pub(crate) fn cyclic_frequency(
                     .collect(),
                 body: Vec::new(),
                 midside: Vec::new(),
+                fibre: Vec::new(),
+                role: Vec::new(),
             },
             progress,
         )?;

@@ -58,7 +58,21 @@ pub struct Unknowns {
     /// not known. The multigrid of a mesh of quadratic elements coarsens to the corner
     /// nodes first (see [`Amg`]).
     pub midside: Vec<[u32; 2]>,
+    /// For the unknowns of a node of an expanded shell the fibre through the thickness its
+    /// node belongs to (any dense numbering), `u32::MAX` for those of any other node; empty
+    /// when there are no fibres. The multigrid of expanded shells coarsens every fibre to
+    /// one node with the motion of a shell first (see [`Amg`]).
+    pub fibre: Vec<u32>,
+    /// What every unknown is for the rigid body modes: 0 a translation (component
+    /// `component` of its node), 1 a rotation (the component of a rotation vector), 2
+    /// neither (no rigid body motion moves it); empty: all translations.
+    pub role: Vec<u8>,
 }
+
+/// [`Unknowns::role`] of a rotation.
+pub const ROLE_ROTATION: u8 = 1;
+/// [`Unknowns::role`] of an unknown no rigid body motion moves.
+pub const ROLE_NONE: u8 = 2;
 
 impl Unknowns {
     /// The unknowns `free` (ascending global DOF numbers, DOF = node · `per_node` +
@@ -74,6 +88,8 @@ impl Unknowns {
                 .collect(),
             body: Vec::new(),
             midside: Vec::new(),
+            fibre: Vec::new(),
+            role: Vec::new(),
         }
     }
 
@@ -87,6 +103,39 @@ impl Unknowns {
             .map(|&n| of_node.get(n as usize).copied().unwrap_or([u32::MAX; 2]))
             .collect();
         self
+    }
+
+    /// The same unknowns, with the fibre of every node (`of_node`, by the node numbers of
+    /// [`Self::node`], `u32::MAX` for nodes outside fibres); see [`Self::fibre`]. Without
+    /// any fibre the unknowns stay without.
+    pub fn with_fibres(mut self, of_node: &[u32]) -> Self {
+        if of_node.iter().any(|&f| f != u32::MAX) {
+            self.fibre = self
+                .node
+                .iter()
+                .map(|&n| of_node.get(n as usize).copied().unwrap_or(u32::MAX))
+                .collect();
+        }
+        self
+    }
+
+    /// The same unknowns, with the role of every node's unknowns (`of_node`, by the node
+    /// numbers of [`Self::node`]); see [`Self::role`]. Without any rotation or other role
+    /// the unknowns stay without.
+    pub fn with_roles(mut self, of_node: &[u8]) -> Self {
+        if of_node.iter().any(|&r| r != 0) {
+            self.role = self
+                .node
+                .iter()
+                .map(|&n| of_node.get(n as usize).copied().unwrap_or(0))
+                .collect();
+        }
+        self
+    }
+
+    /// The role of unknown `i`.
+    fn role_of(&self, i: usize) -> u8 {
+        self.role.get(i).copied().unwrap_or(0)
     }
 
     /// The same unknowns, with the body of every node (`of_node`, by the node numbers of
@@ -123,6 +172,9 @@ pub struct AmgOptions {
     /// Whether a mesh of quadratic elements is coarsened to its corner nodes first, see
     /// [`Amg::build`].
     pub corners: bool,
+    /// Whether the fibres of expanded shells are coarsened to shell nodes first, see
+    /// [`Amg::build`] (`PLXS_AMG_FIBRES`).
+    pub fibres: bool,
     /// Whether a region where the cycle is slow gets a direct solve of its own, see
     /// [`crate::patch`] (`PLXS_AMG_PATCH`).
     pub patch: bool,
@@ -197,6 +249,7 @@ impl Default for AmgOptions {
             gpu: GpuMode::from_environment(),
             adaptive: env("PLXS_AMG_ADAPTIVE", 0),
             corners: env("PLXS_AMG_CORNERS", 1) != 0,
+            fibres: env("PLXS_AMG_FIBRES", 1) != 0,
             patch: env("PLXS_AMG_PATCH", 1) != 0,
         }
     }
@@ -371,10 +424,17 @@ impl Amg {
                 last = now;
             }
         };
-        let corners = unknowns
-            .filter(|u| options.corners && u.midside.len() == n)
-            .and_then(|u| corner_prolongator(a, u));
-        let corners = corners.as_ref();
+        let fibres = unknowns
+            .filter(|u| options.fibres && u.fibre.len() == n)
+            .and_then(|u| Fibres::new(a, u));
+        let first = match fibres {
+            Some(f) => Some(First::Fibres(f)),
+            None => unknowns
+                .filter(|u| options.corners && u.midside.len() == n)
+                .and_then(|u| corner_prolongator(a, u))
+                .map(First::Corners),
+        };
+        let corners = first.as_ref();
         let mut amg = Self::assemble(
             a,
             &nullspace,
@@ -514,7 +574,7 @@ impl Amg {
         a: &Bsr,
         nullspace: &Nullspace,
         mut bodies: Option<Vec<u32>>,
-        corners: Option<&Corners>,
+        corners: Option<&First>,
         options: AmgOptions,
         trace: bool,
         lap: &mut impl FnMut(&str, usize),
@@ -537,29 +597,16 @@ impl Amg {
             let coarsest = n_l <= options.coarse_size || levels.len() + 1 >= options.max_levels;
             let coarser = if coarsest {
                 None
-            } else if let Some(corners) = corners.filter(|_| levels.is_empty()) {
-                let k = nullspace.k;
-                let size = a_l.br * k;
-                let ns_c = Nullspace {
-                    k,
-                    vectors: (corners.blocks.iter())
-                        .flat_map(|&b| {
-                            let b = b as usize;
-                            nullspace.vectors[b * size..(b + 1) * size].iter().copied()
-                        })
-                        .collect(),
-                };
-                let bodies_c = bodies.as_ref().map(|b| {
-                    corners
-                        .blocks
-                        .iter()
-                        .map(|&c| b[c as usize])
-                        .collect::<Vec<u32>>()
-                });
-                let p = corners.p.clone();
+            } else if let Some(first) = corners.filter(|_| levels.is_empty()) {
+                let (ns_c, bodies_c) = first.coarse(&nullspace, bodies.as_deref());
+                let p = first.p().clone();
                 let pt = p.transpose();
-                lap("corner prolongator", n_l);
-                let a_c = galerkin(a_l, &p, &pt);
+                lap(first.name(), n_l);
+                let mut a_c = galerkin(a_l, &p, &pt);
+                // Rotations a fibre does not have (about its own axis) and the rotations
+                // of nodes outside fibres are unknowns no fine unknown moves: unit
+                // diagonal, decoupled.
+                unit_empty_diagonal(&mut a_c);
                 lap("galerkin product", n_l);
                 if trace {
                     eprintln!(
@@ -1065,6 +1112,15 @@ fn rigid_body_modes(u: &Unknowns) -> Nullspace {
         let c = u.component[i] as usize;
         let x = [0, 1, 2].map(|d| (u.coordinates[i][d] - centre[d]) * scale);
         let row = &mut vectors[i * k..(i + 1) * k];
+        if u.role_of(i) == ROLE_NONE {
+            continue;
+        }
+        if u.role_of(i) == ROLE_ROTATION && c < 3 {
+            // A rotation vector turns with the body (the rotations are scaled like the
+            // positions).
+            row[3 + c] = scale;
+            continue;
+        }
         if c < 3 {
             row[c] = 1.0;
             // Rotation about axis d moves component c by (e_d × x)_c.
@@ -1093,6 +1149,413 @@ struct Corners {
     /// The interpolation of the linear elements on the same corners: a corner node takes
     /// its own value, a midside node the mean of the ends of its edge.
     p: Bsr,
+}
+
+/// The first coarse level of a hierarchy, when it is not built by aggregation.
+enum First {
+    Corners(Corners),
+    Fibres(Fibres),
+}
+
+impl First {
+    fn p(&self) -> &Bsr {
+        match self {
+            First::Corners(c) => &c.p,
+            First::Fibres(f) => &f.p,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            First::Corners(_) => "corner prolongator",
+            First::Fibres(_) => "fibre prolongator",
+        }
+    }
+
+    /// The near-nullspace and the bodies of the coarse level.
+    fn coarse(&self, ns: &Nullspace, bodies: Option<&[u32]>) -> (Nullspace, Option<Vec<u32>>) {
+        match self {
+            First::Corners(corners) => {
+                let size = corners.p.br * ns.k;
+                let vectors = (corners.blocks.iter())
+                    .flat_map(|&b| {
+                        let b = b as usize;
+                        ns.vectors[b * size..(b + 1) * size].iter().copied()
+                    })
+                    .collect();
+                let bodies_c = bodies.map(|b| {
+                    (corners.blocks.iter())
+                        .map(|&c| b[c as usize])
+                        .collect::<Vec<u32>>()
+                });
+                (Nullspace { k: ns.k, vectors }, bodies_c)
+            }
+            First::Fibres(fibres) => (
+                fibres.restrict(ns),
+                bodies.map(|b| {
+                    (fibres.first_block.iter())
+                        .map(|&f| b[f as usize])
+                        .collect::<Vec<u32>>()
+                }),
+            ),
+        }
+    }
+}
+
+/// The first coarsening of expanded shells: the nodes of every fibre through the thickness
+/// become one node with the motion of a shell, three translations and the two rotations
+/// about axes across the fibre (`u = u_c + θ × r` on a member `r` from the fibre's
+/// centre), the nodes outside fibres stay as they are. Through the thickness of a thin
+/// shell the nodes are coupled hundreds of times more stiffly than along it, so the
+/// aggregation of the solid's nodes only ever groups a fibre, the rigid body modes of so
+/// slender an aggregate barely span its bending, and the coarse levels stay large and
+/// grow dense (a corrugated tube of 0.3 mm, 2.1 million unknowns, did not converge in 1000
+/// iterations). On the shell nodes the aggregation and its rigid body modes fit as on any
+/// surface of nodes with rotations. The coarse blocks have six unknowns; the rotation about
+/// the fibre's axis (and the rotations of nodes outside fibres) moves no fine unknown and
+/// stays a decoupled unit row.
+struct Fibres {
+    /// `3 × 6` blocks, one per fine block.
+    p: Bsr,
+    /// The first fine block of every coarse node (its body and position).
+    first_block: Vec<u32>,
+    /// Per fine block its coarse node, `u32::MAX` for a block interpolated from two.
+    coarse_of: Vec<u32>,
+}
+
+/// Fibres take the first coarse level when at least this share of the blocks lies in
+/// fibres.
+const FIBRE_SHARE: f64 = 0.5;
+
+impl Fibres {
+    fn new(a: &Bsr, u: &Unknowns) -> Option<Fibres> {
+        const NONE: u32 = u32::MAX;
+        let (blocks, br) = (a.brows, a.br);
+        if br != 3 || a.bc != 3 || blocks == 0 {
+            return None;
+        }
+        let fibre_of = |b: usize| u.fibre[b * br];
+        let role = |b: usize| u.role_of(b * br);
+        // Members per fibre (only fibres of at least two blocks become shell nodes).
+        let mut members: std::collections::HashMap<u32, Vec<u32>> = Default::default();
+        for b in 0..blocks {
+            if fibre_of(b) != NONE {
+                members.entry(fibre_of(b)).or_default().push(b as u32);
+            }
+        }
+        members.retain(|_, m| m.len() >= 2);
+        let in_fibres: usize = members.values().map(Vec::len).sum();
+        if (in_fibres as f64) < FIBRE_SHARE * blocks as f64 {
+            return None;
+        }
+        let in_fibre = |b: usize| fibre_of(b) != NONE && members.contains_key(&fibre_of(b));
+        // A block of a quadratic mesh in the midside of an edge along the shell (its ends
+        // in other fibres) follows the shell nodes of the ends, as the corner level of a
+        // solid does: the shell nodes of the corners alone carry the coarse level.
+        let block_of: std::collections::HashMap<u32, u32> =
+            (0..blocks).map(|b| (u.node[b * br], b as u32)).collect();
+        let midside = u.midside.len() == u.node.len();
+        let ends_of = |b: usize| -> Option<[usize; 2]> {
+            if !midside || !in_fibre(b) {
+                return None;
+            }
+            let ends = u.midside[b * br];
+            if ends == [NONE; 2] {
+                return None;
+            }
+            let e = ends.map(|n| block_of.get(&n).map(|&e| e as usize));
+            match e {
+                [Some(x), Some(y)]
+                    if in_fibre(x)
+                        && in_fibre(y)
+                        && fibre_of(x) != fibre_of(b)
+                        && fibre_of(y) != fibre_of(b) =>
+                {
+                    Some([x, y])
+                }
+                _ => None,
+            }
+        };
+        let along: Vec<Option<[usize; 2]>> = (0..blocks).into_par_iter().map(ends_of).collect();
+        // A fibre whose members all lie in the middle of edges along the shell is
+        // interpolated; any other fibre (and any block outside fibres) is a coarse node.
+        let mut interpolated: std::collections::HashSet<u32> = members
+            .iter()
+            .filter(|(_, m)| m.iter().all(|&b| along[b as usize].is_some()))
+            .map(|(&f, _)| f)
+            .collect();
+        if interpolated.len() * 2 > members.len() * 3 {
+            interpolated.clear();
+        }
+        let mut coarse_of = vec![NONE; blocks];
+        let mut first_block = Vec::new();
+        for b in 0..blocks {
+            if coarse_of[b] != NONE
+                || (in_fibre(b) && interpolated.contains(&fibre_of(b)))
+                || (!in_fibre(b) && role(b) == ROLE_NONE)
+            {
+                continue;
+            }
+            let c = first_block.len() as u32;
+            first_block.push(b as u32);
+            if in_fibre(b) {
+                members[&fibre_of(b)]
+                    .iter()
+                    .for_each(|&x| coarse_of[x as usize] = c);
+            } else {
+                coarse_of[b] = c;
+            }
+        }
+        let position = |b: usize| u.coordinates[b * br];
+        // Per coarse node its centre and the axis of its fibre.
+        let coarse = first_block.len();
+        let mut centre = vec![[0.0f64; 3]; coarse];
+        let mut count = vec![0usize; coarse];
+        // Whether a coarse node turns with a rotation vector of its own (a knot, a helper
+        // node of rotations): its rotations are the vector's, about the global axes.
+        let mut turns = vec![false; coarse];
+        for (b, &c) in coarse_of.iter().enumerate().take(blocks) {
+            if c == NONE {
+                continue;
+            }
+            let c = c as usize;
+            if role(b) == ROLE_ROTATION {
+                turns[c] = true;
+            }
+            if role(b) != 0 {
+                continue;
+            }
+            let x = position(b);
+            for d in 0..3 {
+                centre[c][d] += x[d];
+            }
+            count[c] += 1;
+        }
+        for (x, &n) in centre.iter_mut().zip(&count) {
+            for v in x.iter_mut() {
+                *v /= n.max(1) as f64;
+            }
+        }
+        // The fibre's axis: from the member farthest from the centre.
+        let mut axis = vec![[0.0f64; 3]; coarse];
+        let mut reach = vec![0.0f64; coarse];
+        for (b, &c) in coarse_of.iter().enumerate().take(blocks) {
+            if c == NONE || !in_fibre(b) || role(b) != 0 {
+                continue;
+            }
+            let c = c as usize;
+            let x = position(b);
+            let r = [0, 1, 2].map(|d| x[d] - centre[c][d]);
+            let l = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt();
+            if l > reach[c] {
+                reach[c] = l;
+                axis[c] = r.map(|v| v / l);
+            }
+        }
+        let across = |n: [f64; 3]| -> [[f64; 3]; 2] {
+            // Any unit vector across n, and n × it.
+            let k = if n[0].abs() <= n[1].abs() && n[0].abs() <= n[2].abs() {
+                [1.0, 0.0, 0.0]
+            } else if n[1].abs() <= n[2].abs() {
+                [0.0, 1.0, 0.0]
+            } else {
+                [0.0, 0.0, 1.0]
+            };
+            let t1 = cross(n, k);
+            let l = (t1[0] * t1[0] + t1[1] * t1[1] + t1[2] * t1[2]).sqrt();
+            let t1 = t1.map(|v| v / l);
+            [t1, cross(n, t1)]
+        };
+        // The axes of the coarse rotations: the global ones for a node with a rotation
+        // vector, the two across the fibre for a fibre, none else.
+        let rotations: Vec<Vec<[f64; 3]>> = (0..coarse)
+            .map(|c| {
+                if turns[c] {
+                    vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+                } else if reach[c] > 0.0 {
+                    across(axis[c]).to_vec()
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
+        // The rows of block `b` moved by coarse node `c` with weight `w`: `w [I | t × r]`
+        // for translations, `w [0 | t]` for a rotation vector, nothing for the rest.
+        let block = |b: usize, c: usize, w: f64, val: &mut Vec<f64>| {
+            let x = position(b);
+            let r = [0, 1, 2].map(|d| x[d] - centre[c][d]);
+            for row in 0..3 {
+                let padding = u.component[b * br + row] == u8::MAX;
+                for col in 0..6usize {
+                    let axis = col.checked_sub(3).and_then(|j| rotations[c].get(j));
+                    let v = if padding || role(b) == ROLE_NONE {
+                        0.0
+                    } else if role(b) == ROLE_ROTATION {
+                        axis.map_or(0.0, |t| w * t[row])
+                    } else if col < 3 {
+                        if row == col { w } else { 0.0 }
+                    } else if let Some(t) = axis {
+                        // (t × r)_row for the rotation about t.
+                        w * cross(*t, r)[row]
+                    } else {
+                        0.0
+                    };
+                    val.push(v);
+                }
+            }
+        };
+        let mut ptr = Vec::with_capacity(blocks + 1);
+        let mut col = Vec::with_capacity(blocks);
+        let mut val = Vec::with_capacity(blocks * 18);
+        ptr.push(0);
+        for b in 0..blocks {
+            if coarse_of[b] != NONE {
+                col.push(coarse_of[b]);
+                block(b, coarse_of[b] as usize, 1.0, &mut val);
+            } else if along[b].is_none() {
+                // Moved by no coarse node (the expansion of a knot).
+            } else {
+                let ends = along[b].expect("an interpolated block lies on an edge");
+                let mut cs = ends.map(|e| coarse_of[e]);
+                cs.sort_unstable();
+                if cs[0] == cs[1] {
+                    col.push(cs[0]);
+                    block(b, cs[0] as usize, 1.0, &mut val);
+                } else {
+                    for c in cs {
+                        col.push(c);
+                        block(b, c as usize, 0.5, &mut val);
+                    }
+                }
+            }
+            ptr.push(col.len());
+        }
+        Some(Fibres {
+            p: Bsr {
+                brows: blocks,
+                bcols: coarse,
+                br,
+                bc: 6,
+                ptr,
+                col,
+                val,
+            },
+            first_block,
+            coarse_of,
+        })
+    }
+
+    /// The near-nullspace on the shell nodes: per coarse node the least-squares fit
+    /// `(Pᵀ P)⁻¹ Pᵀ v` of every vector over its members (exact for the rigid body modes,
+    /// which the shell motion contains), zero on the unknowns no fine one moves.
+    fn restrict(&self, ns: &Nullspace) -> Nullspace {
+        let (br, bc, k) = (self.p.br, self.p.bc, ns.k);
+        let coarse = self.first_block.len();
+        let mut normal = vec![0.0; coarse * bc * bc];
+        let mut rhs = vec![0.0; coarse * bc * k];
+        for (b, &c) in self.coarse_of.iter().enumerate() {
+            if c == u32::MAX {
+                continue;
+            }
+            let c = c as usize;
+            let k0 = self.p.ptr[b];
+            let p = &self.p.val[k0 * br * bc..(k0 + 1) * br * bc];
+            let v = &ns.vectors[b * br * k..(b + 1) * br * k];
+            for i in 0..bc {
+                for j in 0..bc {
+                    let mut sum = 0.0;
+                    for r in 0..br {
+                        sum += p[r * bc + i] * p[r * bc + j];
+                    }
+                    normal[c * bc * bc + i * bc + j] += sum;
+                }
+                for m in 0..k {
+                    let mut sum = 0.0;
+                    for r in 0..br {
+                        sum += p[r * bc + i] * v[r * k + m];
+                    }
+                    rhs[c * bc * k + i * k + m] += sum;
+                }
+            }
+        }
+        let mut vectors = vec![0.0; coarse * bc * k];
+        for c in 0..coarse {
+            let m = &mut normal[c * bc * bc..(c + 1) * bc * bc];
+            let x = &mut vectors[c * bc * k..(c + 1) * bc * k];
+            x.copy_from_slice(&rhs[c * bc * k..(c + 1) * bc * k]);
+            solve_small(m, bc, x, k);
+        }
+        Nullspace { k, vectors }
+    }
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// Solves `M X = B` in place (`M` symmetric positive semidefinite `n × n`, `B` `n × k`,
+/// row major) by Gaussian elimination; unknowns with a zero pivot (no fine unknown moves
+/// them) are zero.
+fn solve_small(m: &mut [f64], n: usize, b: &mut [f64], k: usize) {
+    let scale = (0..n).map(|i| m[i * n + i].abs()).fold(0.0_f64, f64::max);
+    let tiny = 1e-12 * scale.max(f64::MIN_POSITIVE);
+    let mut dead = vec![false; n];
+    for p in 0..n {
+        if m[p * n + p].abs() <= tiny {
+            dead[p] = true;
+            continue;
+        }
+        for i in p + 1..n {
+            let f = m[i * n + p] / m[p * n + p];
+            if f == 0.0 {
+                continue;
+            }
+            for j in p..n {
+                m[i * n + j] -= f * m[p * n + j];
+            }
+            for j in 0..k {
+                b[i * k + j] -= f * b[p * k + j];
+            }
+        }
+    }
+    for p in (0..n).rev() {
+        if dead[p] {
+            b[p * k..(p + 1) * k].iter_mut().for_each(|v| *v = 0.0);
+            continue;
+        }
+        for j in 0..k {
+            let mut sum = b[p * k + j];
+            for q in p + 1..n {
+                sum -= m[p * n + q] * b[q * k + j];
+            }
+            b[p * k + j] = sum / m[p * n + p];
+        }
+    }
+}
+
+/// Puts 1 on the diagonal of unknowns whose diagonal entry is zero (relative to their
+/// block), which no fine unknown moves; their rows and columns are zero.
+fn unit_empty_diagonal(a: &mut Bsr) {
+    let br = a.br;
+    let size = br * br;
+    for b in 0..a.brows {
+        let Some(k) = a.diagonal_block(b) else {
+            continue;
+        };
+        let block = &mut a.val[size * k..size * (k + 1)];
+        let scale = (0..br)
+            .map(|i| block[i * br + i].abs())
+            .fold(0.0_f64, f64::max);
+        for i in 0..br {
+            if block[i * br + i].abs() <= 1e-12 * scale || scale == 0.0 {
+                block[i * br + i] = 1.0;
+            }
+        }
+    }
 }
 
 /// A midside node is held from outside when the blocks of its row within its body add up
@@ -1501,11 +1964,14 @@ fn block_lower_transposed(inv_chol: &[f64], br: usize, x: &[f64], y: &mut [f64])
 
 /// `λ_max(D⁻¹ A)` by Lanczos, with a margin (`PLXS_AMG_MARGIN` for measurements).
 fn largest_eigenvalue(a: &Bsr, inv_chol: &[f64]) -> f64 {
-    let margin: f64 = std::env::var("PLXS_AMG_MARGIN")
+    largest_eigenvalue_lanczos(a, inv_chol, EIGENVALUE_STEPS) * eigenvalue_margin()
+}
+
+fn eigenvalue_margin() -> f64 {
+    std::env::var("PLXS_AMG_MARGIN")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(EIGENVALUE_MARGIN);
-    largest_eigenvalue_lanczos(a, inv_chol, EIGENVALUE_STEPS) * margin
+        .unwrap_or(EIGENVALUE_MARGIN)
 }
 
 /// Lanczos steps of the eigenvalue estimate of a level.
@@ -1515,11 +1981,27 @@ const EIGENVALUE_STEPS: usize = 30;
 /// extreme eigenvalue converges in a few dozen steps where the power iteration needs
 /// hundreds.
 fn largest_eigenvalue_lanczos(a: &Bsr, inv_chol: &[f64], steps: usize) -> f64 {
+    let br = a.br;
+    lanczos_largest(
+        a,
+        |x, y| block_lower_transposed(inv_chol, br, x, y),
+        |x, y| block_lower(inv_chol, br, x, y),
+        steps,
+    )
+}
+
+/// The largest eigenvalue of `L⁻¹ A L⁻ᵀ` by `steps` Lanczos steps, `lower_t` and `lower`
+/// applying `L⁻ᵀ` and `L⁻¹`.
+fn lanczos_largest(
+    a: &Bsr,
+    lower_t: impl Fn(&[f64], &mut [f64]),
+    lower: impl Fn(&[f64], &mut [f64]),
+    steps: usize,
+) -> f64 {
     let n = a.rows();
     if n == 0 {
         return 1.0;
     }
-    let br = a.br;
     let mut v: Vec<f64> = (0..n)
         .map(|i| 1.0 + 0.5 * ((i * 7919 % 1000) as f64 / 1000.0))
         .collect();
@@ -1533,10 +2015,10 @@ fn largest_eigenvalue_lanczos(a: &Bsr, inv_chol: &[f64], steps: usize) -> f64 {
     let mut beta = 0.0;
     for _ in 0..steps {
         // w = L⁻¹ A L⁻ᵀ v
-        block_lower_transposed(inv_chol, br, &v, &mut t);
+        lower_t(&v, &mut t);
         a.multiply(&t, &mut w);
         let mut scaled_w = vec![0.0; n];
-        block_lower(inv_chol, br, &w, &mut scaled_w);
+        lower(&w, &mut scaled_w);
         w.copy_from_slice(&scaled_w);
         let alpha: f64 = w.iter().zip(&v).map(|(w, v)| w * v).sum();
         w.iter_mut()
@@ -1942,6 +2424,8 @@ mod tests {
             coordinates: (0..6).flat_map(|i| [[i as f64, 0.0, 0.0]; 2]).collect(),
             body: Vec::new(),
             midside: ends.iter().flat_map(|&e| [e, e]).collect(),
+            fibre: Vec::new(),
+            role: Vec::new(),
         };
         // A chain of springs between neighbours, free at both ends: no translation is
         // resisted. `ground` is a spring to the ground on one node.

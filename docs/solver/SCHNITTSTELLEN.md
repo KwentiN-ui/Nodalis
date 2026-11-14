@@ -1824,3 +1824,37 @@ in 15 GB nicht mehr rechenbar. `NORMAL_ANGLE` ist jetzt 20°. Faktor fast gleich
 Offen: Der iterative Solver taugt für expandierte dünne Schalen weiterhin nicht. Auf diesem
 Modell verdichten sich die Grobgitter (Ebene 3: 84k Blockzeilen mit 7,7 Mio. 6×6-Blöcken), der
 Aufbau dauert minutenlang. Die automatische Wahl rechnet expandierte Modelle direkt.
+
+### Nachtrag: Multigrid über die Schalenfasern (2026-11-14)
+
+Auf expandierten Schalen glätteten die Aggregate der expandierten Knoten die Biegung weg: die
+Iterationen wuchsen mit der Schlankheit h/t der Elemente, Quentins Wellrohr konvergierte nicht.
+Jetzt ist die erste Stufe des Multigrids (vor der über die Eckknoten) eine über die Fasern:
+
+- Die Expansion merkt sich ihre Knots (`Model::shell_knots`: Originalknoten, Rotationshelfer,
+  Expansionshelfer, ein Folgeknoten). `Model::fibre_of_nodes` gibt jedem Knoten seine Faser
+  (`shell_fibres`, danach die Knots), `Model::node_roles` die Rolle (0 Verschiebung,
+  1 Rotationsvektor eines Knots, 2 dessen Expansion). `node_bodies` zählt die Helfer zum Körper
+  ihrer Schale (sonst blieben sie Einzelaggregate und die Vergröberung stockte).
+- Jede Faser wird ein Grobknoten mit 6 Freiheitsgraden, u = u_c + θ × r mit den zwei Drehungen
+  quer zur Faser; die Drillung ist tot und bekommt eine Eins auf der Diagonale. Knots drehen um
+  die globalen Achsen (ihr Rotationsvektor). Fasern an Seitenmitten werden aus den beiden
+  Endfasern interpoliert (Gewicht 0,5), so bleibt die Stufe dünn. Die Starrkörpermoden werden
+  pro Grobknoten per kleinster Quadrate eingeschränkt.
+- `PLXS_AMG_FIBRES=0` schaltet für Messungen ab.
+
+| Modell (S8R, t = 0,3) | Iterationen vorher → nachher |
+|---|---|
+| Wellrohr 120×80 Elemente | 2236 → 510 (64 → 15 s) |
+| dasselbe, Rotationen gehalten | 2465 → 427 |
+| glatter Zylinder 120×80 | 1700 → 465 |
+| Wellrohr 40×30 | 4905 → 773 |
+| Wellrohr 24×16 (Test `shell_multigrid`) | 5278 → 1081 |
+| Quentins Wellrohr, 2,18 Mio. Unbekannte | keine Konvergenz → 1133 (617 s, Cloud, 4 Threads, CPU) |
+
+Hierarchie des großen Rohrs: 2176548 > 1168806 > 90186 > 20136 > 14256, 0,97× die Matrix,
+Aufbau 32 s. Verworfen: ein Block-Jacobi-Glätter über ganze Fasern (−32 % Iterationen auf
+groben Netzen, −6 % auf feinen, aber nicht auf der GPU). Offen: die Iterationen wachsen
+weiter mit h/t (zwei Stufen mit exakter Faserebene brauchen noch 171 bis 576), die GPU mit
+der neuen Stufe ist ungetestet, die automatische Wahl rechnet expandierte Modelle weiter
+direkt.

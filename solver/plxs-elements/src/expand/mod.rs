@@ -333,6 +333,19 @@ impl Expander {
         let mut model = std::mem::take(&mut self.analysis.model);
         model.constraints.equations.append(&mut self.equations);
         model.expanded_structure = !self.structural.is_empty();
+        model.shell_knots = self
+            .knots
+            .iter()
+            .filter_map(|(&node, &(rotation, expansion))| {
+                let member = self.groups[&node]
+                    .iter()
+                    .flat_map(|g| g.nodes.iter().zip(&g.used))
+                    .find(|(_, u)| **u)
+                    .map(|(&n, _)| n)?;
+                Some([node, rotation, expansion, member])
+            })
+            .collect();
+        model.shell_knots.sort_unstable();
         model.shell_fibres = self
             .groups
             .values()
