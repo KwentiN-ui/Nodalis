@@ -8,9 +8,11 @@
 
 use std::sync::Mutex;
 
+use std::collections::HashSet;
+
 use plx_mesh::{
-    FeMesh, Fnv, GeometryFilter, GroupBy, Part, PartSkin, SearchParameters, extract_part_skin,
-    facing_faces, find_contact_pairs,
+    ElementId, FeMesh, Fnv, GeometryFilter, GroupBy, NodeId, Part, PartSkin, SearchParameters,
+    extract_part_skin, facing_faces, find_contact_pairs,
 };
 
 use crate::{ContactBehavior, ContactRegion, FeModel, Region};
@@ -126,6 +128,11 @@ impl FeModel {
                     tolerance,
                     ANGLE_DEG,
                 );
+                // Where the bodies share their nodes (shells of a compound meshed together
+                // meet at a common edge) they are joined already; a tie there would tie the
+                // nodes to themselves. Only the faces across a gap or a mesh that does not
+                // match are tied.
+                let (master, slave) = (apart(mesh, &master, &slave), apart(mesh, &slave, &master));
                 if master.is_empty() || slave.is_empty() {
                     continue;
                 }
@@ -143,6 +150,33 @@ impl FeModel {
         }
         ties
     }
+}
+
+/// The faces of `faces` not lying on nodes of the elements of `other`: those whose corners
+/// all are nodes the two sides share go.
+fn apart(
+    mesh: &FeMesh,
+    faces: &[(ElementId, u8)],
+    other: &[(ElementId, u8)],
+) -> Vec<(ElementId, u8)> {
+    let across: HashSet<NodeId> = (other.iter())
+        .filter_map(|&(e, _)| mesh.element(e))
+        .flat_map(|e| e.nodes.iter().copied())
+        .collect();
+    if across.is_empty() {
+        return faces.to_vec();
+    }
+    (faces.iter().copied())
+        .filter(|&(e, face)| {
+            let Some(element) = mesh.element(e) else {
+                return true;
+            };
+            let Some(topology) = element.faces().get(usize::from(face).saturating_sub(1)) else {
+                return true;
+            };
+            !(topology.corners.iter()).all(|&k| across.contains(&element.nodes[k]))
+        })
+        .collect()
 }
 
 /// What the ties of the compound parts depend on: their bodies, the nodes of their elements
@@ -164,6 +198,10 @@ fn key(mesh: &FeMesh, stiffness: &[Option<f64>], plane: bool) -> u64 {
             for element in body.elements.iter().filter_map(|&e| mesh.element(e)) {
                 hash.add(&element.id.to_le_bytes());
                 hash.add_str(&element.type_name);
+                // Shared nodes join bodies, see [`apart`].
+                for node in &element.nodes {
+                    hash.add(&node.to_le_bytes());
+                }
                 for p in element.nodes.iter().filter_map(|&n| mesh.node(n)) {
                     for x in p {
                         hash.add(&x.to_le_bytes());

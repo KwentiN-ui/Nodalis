@@ -1245,6 +1245,7 @@ pub(crate) fn merge_part_meshes(
         mesh = plx_mesher::merge_part(&mesh, part.mesh);
     }
     mesh.compose_compounds(&geometry.compound_members());
+    mesh.unshare_parts();
     model.set_mesh(mesh);
     let applied: Vec<&str> = (model.fe.mesh_operations.iter())
         .filter(|o| !o.part_indices(&model.mesh).is_empty())
@@ -1297,6 +1298,9 @@ pub(crate) fn apply_compounds(model: &mut Model, before: &[plx_model::CompoundPa
             }
         }
         mesh.compose_compounds(&members);
+        // Shells meshed together in a compound share nodes; parts no longer joined get
+        // nodes of their own.
+        mesh.unshare_parts();
         for compound in &after {
             for part in &compound.parts {
                 fe.rename_part(part, &compound.name);

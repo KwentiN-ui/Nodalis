@@ -231,6 +231,13 @@ gmsh_api! {
     field_remove = "gmshModelMeshFieldRemove": fn(c_int, Ierr);
     mesh_clear = "gmshModelMeshClear": fn(*const c_int, usize, Ierr);
     mesh_generate = "gmshModelMeshGenerate": fn(c_int, Ierr);
+    mesh_set_transfinite_automatic = "gmshModelMeshSetTransfiniteAutomatic": fn(
+        *const c_int,
+        usize,
+        c_double,
+        c_int,
+        Ierr,
+    );
     mesh_set_order = "gmshModelMeshSetOrder": fn(c_int, Ierr);
     mesh_import_stl = "gmshModelMeshImportStl": fn(Ierr);
     mesh_get_nodes = "gmshModelMeshGetNodes": fn(

@@ -890,8 +890,14 @@ fn angle(a: [f64; 3], b: [f64; 3]) -> f64 {
 pub fn generate_mesh(geometry: &Geometry) -> Result<GeneratedMesh, GmshError> {
     let mut mesh = FeMesh::default();
     let mut warnings = Vec::new();
+    let mut meshed: Vec<String> = Vec::new();
     for name in part_names(geometry)? {
+        // The shells of a compound come together, with the first of them.
+        if meshed.iter().any(|m| m.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
         let part = generate_part_mesh(geometry, &name)?;
+        meshed.extend(part.mesh.parts.iter().map(|p| p.name.clone()));
         mesh = merge_part(&mesh, part.mesh);
         warnings.extend(part.warnings);
     }
@@ -1436,7 +1442,17 @@ pub fn generate_part_mesh_matching(
         };
         let volume = match shape.dim {
             3 => shape.tags[0],
-            2 => return shell_part_mesh(gmsh, geometry, part, &shape.tags),
+            2 => {
+                if let Some(members) = shell_compound(gmsh, geometry, part)? {
+                    if let Some(mesh) = shell_compound_mesh(gmsh, geometry, &members, &file.0)? {
+                        return Ok(mesh);
+                    }
+                    // Not joined: each shell is meshed alone and tied to the others.
+                    gmsh.clear()?;
+                    gmsh.import_shapes(&file.0)?;
+                }
+                return shell_part_mesh(gmsh, geometry, part, &shape.tags, &file.0);
+            }
             _ => return line_part_mesh(gmsh, geometry, part, &shape.tags),
         };
         // The other solids go, so that only this one is meshed.
@@ -1525,20 +1541,188 @@ fn shell_part_mesh(
     geometry: &Geometry,
     part: &str,
     shell: &[i32],
+    file: &Path,
 ) -> Result<GeneratedMesh, GmshError> {
-    let faces = free_faces(gmsh)?;
-    // Only the shell stays, so that only it is meshed.
-    let others: Vec<(i32, i32)> = (gmsh.entities(3)?.into_iter().map(|v| (3, v)))
-        .chain(faces.iter().filter(|f| !shell.contains(f)).map(|&f| (2, f)))
-        .chain(free_edges(gmsh)?.into_iter().map(|e| (1, e)))
-        .collect();
-    if !others.is_empty() {
-        gmsh.remove(&others)?;
+    shell_alone(gmsh, shell)?;
+    let members = [(part.to_string(), shell.to_vec())];
+    let mut generated = shell_mesh(gmsh, geometry, &members, &|gmsh| {
+        gmsh.import_shapes(file)?;
+        shell_alone(gmsh, shell)
+    })?;
+    if let Some(thickening) = geometry.thickening(part) {
+        generated.mesh = thicken::thicken(&generated.mesh, part, thickening)
+            .map_err(|reason| GmshError::Other(format!("{part}: {reason}")))?;
     }
+    Ok(generated)
+}
+
+/// A part of the geometry by name, with its faces.
+type Member = (String, Vec<i32>);
+
+/// The shells of a compound part that are meshed together, so that they share the nodes
+/// along the edges where they meet, as one shell would: the members of the compound of
+/// `part` with their faces, if all are shells meshed alike (the same meshing parameters
+/// and Gmsh algorithms, none thickened) and there are two or more.
+fn shell_compound(
+    gmsh: &Gmsh,
+    geometry: &Geometry,
+    part: &str,
+) -> Result<Option<Vec<Member>>, GmshError> {
+    let Some(compound) = geometry.compound_of(part) else {
+        return Ok(None);
+    };
+    let shapes = parts(gmsh, geometry)?;
+    let mut members = Vec::new();
+    for member in &geometry.compounds[compound].parts {
+        if geometry.is_suppressed(member) {
+            continue;
+        }
+        let Some((shape, name)) = shapes.iter().find(|(_, n)| n.eq_ignore_ascii_case(member))
+        else {
+            continue;
+        };
+        let alike = geometry.parameters(name) == geometry.parameters(part)
+            && geometry.chosen_algorithms(name) == geometry.chosen_algorithms(part)
+            && geometry.thickening(name).is_none();
+        if shape.dim != 2 || !alike {
+            return Ok(None);
+        }
+        members.push((name.clone(), shape.tags.clone()));
+    }
+    Ok((members.len() > 1).then_some(members))
+}
+
+/// Meshes the shells of a compound part together, see [`shell_compound`]: the edges they
+/// have twice, once in each shell, are merged first, so that the faces on either side
+/// share one mesh of the edge. The mesh holds one part per member. Selections made on a
+/// merged edge or vertex reach the one that stays. `None` if merging changed the faces.
+fn shell_compound_mesh(
+    gmsh: &Gmsh,
+    geometry: &Geometry,
+    members: &[(String, Vec<i32>)],
+    file: &Path,
+) -> Result<Option<GeneratedMesh>, GmshError> {
+    let faces: Vec<i32> = members
+        .iter()
+        .flat_map(|(_, f)| f.iter().copied())
+        .collect();
+    shell_alone(gmsh, &faces)?;
+    let before = boundary_entities(gmsh, &faces)?;
+    gmsh.remove_all_duplicates()?;
+    let kept: BTreeSet<i32> = gmsh.entities(2)?.into_iter().collect();
+    if !faces.iter().all(|f| kept.contains(f)) {
+        return Ok(None);
+    }
+    let mut generated = shell_mesh(gmsh, geometry, members, &|gmsh| {
+        gmsh.import_shapes(file)?;
+        shell_alone(gmsh, &faces)?;
+        gmsh.remove_all_duplicates()
+    })?;
+    let after = boundary_entities(gmsh, &faces)?;
+    let cad = &mut generated.mesh.cad;
+    for (entity, place) in &before {
+        if after.iter().any(|(e, _)| e == entity) {
+            continue;
+        }
+        let Some((stays, _)) = after
+            .iter()
+            .find(|(e, p)| same_kind(*e, *entity) && p.same(place))
+        else {
+            continue;
+        };
+        if let Some(nodes) = cad.nodes.get(stays).cloned() {
+            cad.nodes.insert(*entity, nodes);
+        }
+        if let (CadEntity::Edge(old), CadEntity::Edge(new)) = (*entity, *stays)
+            && let Some(segments) = cad.segments.get(&new).cloned()
+        {
+            cad.segments.insert(old, segments);
+        }
+    }
+    Ok(Some(generated))
+}
+
+/// Where an edge or vertex lies, to find the one that stays when duplicates are merged.
+#[derive(Clone, Copy)]
+struct Place {
+    centre: [f64; 3],
+    length: f64,
+}
+
+impl Place {
+    fn same(&self, other: &Place) -> bool {
+        let scale = self.length.abs().max(other.length.abs()).max(1e-12);
+        distance(self.centre, other.centre) <= 1e-6 * scale.max(1e-3)
+            && (self.length - other.length).abs() <= 1e-6 * scale
+    }
+}
+
+fn same_kind(a: CadEntity, b: CadEntity) -> bool {
+    matches!(
+        (a, b),
+        (CadEntity::Edge(_), CadEntity::Edge(_)) | (CadEntity::Vertex(_), CadEntity::Vertex(_))
+    )
+}
+
+/// The edges and vertices of the faces, with where they lie.
+fn boundary_entities(gmsh: &Gmsh, faces: &[i32]) -> Result<Vec<(CadEntity, Place)>, GmshError> {
+    let mut edges = BTreeSet::new();
+    for &face in faces {
+        edges.extend(gmsh.adjacencies(2, face)?.1.into_iter().map(i32::abs));
+    }
+    let mut vertices = BTreeSet::new();
+    let mut out = Vec::new();
+    for &edge in &edges {
+        vertices.extend(gmsh.adjacencies(1, edge)?.1.into_iter().map(i32::abs));
+        let place = Place {
+            centre: gmsh.center_of_mass(1, edge)?,
+            length: gmsh.mass(1, edge)?,
+        };
+        out.push((CadEntity::Edge(edge), place));
+    }
+    for &vertex in &vertices {
+        let (min, _) = gmsh.entity_bounding_box(0, vertex)?;
+        out.push((
+            CadEntity::Vertex(vertex),
+            Place {
+                centre: min,
+                length: 0.0,
+            },
+        ));
+    }
+    Ok(out)
+}
+
+/// Meshes the faces of `members` (part names with their faces, all that is left in
+/// `gmsh`) after the meshing parameters of the first: the elements of each member's faces
+/// become its part. `reload` reads the faces anew, for a second try after a grid was
+/// refused.
+fn shell_mesh(
+    gmsh: &Gmsh,
+    geometry: &Geometry,
+    members: &[(String, Vec<i32>)],
+    reload: &dyn Fn(&Gmsh) -> Result<(), GmshError>,
+) -> Result<GeneratedMesh, GmshError> {
+    let part = members[0].0.as_str();
+    let faces: Vec<i32> = members
+        .iter()
+        .flat_map(|(_, f)| f.iter().copied())
+        .collect();
     let mut options = MeshOptions::of_faces(geometry, part);
     let mut notes = Vec::new();
-    let sizes = local_sizes(gmsh, geometry, &shell.iter().copied().collect())?;
-    generate_faces(gmsh, &mut options, shell, &sizes, &mut notes)?;
+    let sizes = local_sizes(gmsh, geometry, &faces.iter().copied().collect())?;
+    // Quadrilaterals in rows where every face has four sides, unless a Gmsh item chose the
+    // algorithm; otherwise, or if the grid comes out distorted, the geometry is read anew,
+    // as Gmsh keeps the faces transfinite.
+    let gridded =
+        options.quads && geometry.chosen_algorithms(part).is_none() && four_sided(gmsh, &faces)?;
+    if !(gridded && transfinite_faces(gmsh, &mut options, &faces, &sizes)?) {
+        if gridded {
+            gmsh.clear()?;
+            reload(gmsh)?;
+        }
+        generate_faces(gmsh, &mut options, &faces, &sizes, &mut notes)?;
+    }
     let coords = node_coords(gmsh)?;
     let types: [(i32, ElementShape, &str); 2] = if options.order == 2 {
         [
@@ -1552,51 +1736,120 @@ fn shell_part_mesh(
         ]
     };
     let mut mesh = FeMesh::default();
-    let mut part_elements = Part {
-        bodies: Vec::new(),
-        name: part.to_string(),
-        elements: Vec::new(),
-    };
-    let kinds = shell
-        .iter()
-        .flat_map(|&face| types.map(|kind| (face, kind)));
-    for (face, (gmsh_type, shape, type_name)) in kinds {
-        let (_, nodes) = gmsh.elements(gmsh_type, face)?;
-        // Gmsh numbers the nodes of triangles and quadrilaterals as CalculiX does.
-        for element in nodes.chunks_exact(shape.node_count()) {
-            let mut ids = Vec::with_capacity(element.len());
-            for &tag in element {
-                let position = coords
-                    .get(&tag)
-                    .ok_or_else(|| GmshError::Other(format!("Node {tag} is missing")))?;
-                let id = node_id(tag)?;
-                mesh.set_node(id, *position);
-                ids.push(id);
+    for (name, shell) in members {
+        let mut part_elements = Part {
+            bodies: Vec::new(),
+            name: name.clone(),
+            elements: Vec::new(),
+        };
+        let kinds = shell
+            .iter()
+            .flat_map(|&face| types.map(|kind| (face, kind)));
+        for (face, (gmsh_type, shape, type_name)) in kinds {
+            let (_, nodes) = gmsh.elements(gmsh_type, face)?;
+            // Gmsh numbers the nodes of triangles and quadrilaterals as CalculiX does.
+            for element in nodes.chunks_exact(shape.node_count()) {
+                let mut ids = Vec::with_capacity(element.len());
+                for &tag in element {
+                    let position = coords
+                        .get(&tag)
+                        .ok_or_else(|| GmshError::Other(format!("Node {tag} is missing")))?;
+                    let id = node_id(tag)?;
+                    mesh.set_node(id, *position);
+                    ids.push(id);
+                }
+                let id = ElementId::try_from(mesh.element_count() + 1)
+                    .map_err(|_| GmshError::Other("too many elements".into()))?;
+                mesh.add_element(Element {
+                    id,
+                    type_name: type_name.into(),
+                    shape,
+                    nodes: ids,
+                })
+                .map_err(|e| GmshError::Other(e.to_string()))?;
+                part_elements.elements.push(id);
             }
-            let id = ElementId::try_from(mesh.element_count() + 1)
-                .map_err(|_| GmshError::Other("too many elements".into()))?;
-            mesh.add_element(Element {
-                id,
-                type_name: type_name.into(),
-                shape,
-                nodes: ids,
-            })
-            .map_err(|e| GmshError::Other(e.to_string()))?;
-            part_elements.elements.push(id);
         }
+        if part_elements.elements.is_empty() {
+            return Err(GmshError::Other(format!(
+                "{name}: Gmsh created no elements"
+            )));
+        }
+        mesh.parts.push(part_elements);
     }
-    if part_elements.elements.is_empty() {
-        return Err(GmshError::Other("Gmsh created no elements".into()));
-    }
-    mesh.parts.push(part_elements);
-    mesh.cad = cad_map(gmsh, &mesh, shell, options.order, true)?;
-    if let Some(thickening) = geometry.thickening(part) {
-        mesh = thicken::thicken(&mesh, part, thickening)
-            .map_err(|reason| GmshError::Other(format!("{part}: {reason}")))?;
-    }
+    mesh.cad = cad_map(gmsh, &mesh, &faces, options.order, true)?;
     let mut warnings = gmsh.warnings()?;
     warnings.extend(notes.into_iter().map(|note| format!("{part}: {note}")));
     Ok(GeneratedMesh { mesh, warnings })
+}
+
+/// Removes everything but the faces of `shell`, so that only they are meshed.
+fn shell_alone(gmsh: &Gmsh, shell: &[i32]) -> Result<(), GmshError> {
+    let faces = free_faces(gmsh)?;
+    let others: Vec<(i32, i32)> = (gmsh.entities(3)?.into_iter().map(|v| (3, v)))
+        .chain(faces.iter().filter(|f| !shell.contains(f)).map(|&f| (2, f)))
+        .chain(free_edges(gmsh)?.into_iter().map(|e| (1, e)))
+        .collect();
+    if !others.is_empty() {
+        gmsh.remove(&others)?;
+    }
+    Ok(())
+}
+
+/// Whether every face is bounded by four edges, so that a structured grid may fit it.
+fn four_sided(gmsh: &Gmsh, faces: &[i32]) -> Result<bool, GmshError> {
+    for &face in faces {
+        let edges: BTreeSet<i32> = (gmsh.adjacencies(2, face)?.1.into_iter())
+            .map(i32::abs)
+            .collect();
+        if edges.len() != 4 {
+            return Ok(false);
+        }
+    }
+    Ok(!faces.is_empty())
+}
+
+/// Largest turn of a face's boundary that still counts as running on along the same
+/// side, not as a corner (Gmsh's default, 135°).
+const GRID_CORNER_ANGLE: f64 = 2.35;
+
+/// Meshes four-sided faces as transfinite grids of quadrilaterals: rows of elements between
+/// opposite edges, the same count on edges opposite each other across the faces. A
+/// surface of revolution sliced into four-sided faces (a bellows, a pipe bend) so gets its
+/// elements in rings, as a free mesh does not, whose element shapes vary around the axis
+/// and with them the stresses. False if Gmsh refused a face or the grid is distorted or
+/// far coarser than the sizes; then the options are as they were.
+fn transfinite_faces(
+    gmsh: &Gmsh,
+    options: &mut MeshOptions,
+    faces: &[i32],
+    sizes: &[LocalSize],
+) -> Result<bool, GmshError> {
+    let mut grid = options.clone();
+    // The sizes as asked for: the quasi-structured algorithm's halving does not apply.
+    grid.algorithms.0 = Algorithm2d::FrontalDelaunay;
+    grid.apply(gmsh)?;
+    let fields = size_fields(gmsh, sizes, grid.size_factor())?;
+    gmsh.set_transfinite_automatic(faces, GRID_CORNER_ANGLE, true)?;
+    let result = gmsh.generate(2);
+    for field in fields.into_iter().rev() {
+        gmsh.remove_field(field)?;
+    }
+    if result.is_err() {
+        return Ok(false);
+    }
+    let triangle = if grid.order == 2 { TRI6 } else { TRI3 };
+    for &face in faces {
+        if !gmsh.elements(triangle, face)?.1.is_empty() {
+            return Ok(false);
+        }
+    }
+    let quality = worst_quad(gmsh, faces, grid.order)?;
+    if quality.is_none_or(|q| q < DISTORTED_QUAD) || too_coarse(gmsh, faces, grid.max_size)? {
+        return Ok(false);
+    }
+    *options = grid;
+    Ok(true)
 }
 
 /// Meshes an edge outside the faces with 2- or 3-node lines, typed as beams (`B31`, `B32`);
@@ -2151,6 +2404,7 @@ pub fn self_test() -> Result<(LibraryInfo, usize), GmshError> {
 }
 
 /// The meshing options nodalis sets.
+#[derive(Clone)]
 struct MeshOptions {
     max_size: f64,
     min_size: f64,

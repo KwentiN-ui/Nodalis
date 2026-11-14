@@ -1260,6 +1260,28 @@ impl Gmsh {
         self.call(|e| unsafe { (self.api.mesh_import_stl)(e) })
     }
 
+    /// Makes the faces among `faces` that have four corners (and the volumes bounded by
+    /// such faces) transfinite, as structured grids between their opposite edges, with
+    /// quadrilaterals if `recombine`. Corners are where the boundary turns by more than
+    /// `corner_angle` (radians). The numbers of nodes follow the element sizes on the edges.
+    pub fn set_transfinite_automatic(
+        &self,
+        faces: &[i32],
+        corner_angle: f64,
+        recombine: bool,
+    ) -> Result<(), GmshError> {
+        let flat: Vec<c_int> = faces.iter().flat_map(|&t| [2, t]).collect();
+        self.call(|e| unsafe {
+            (self.api.mesh_set_transfinite_automatic)(
+                flat.as_ptr(),
+                flat.len(),
+                corner_angle,
+                c_int::from(recombine),
+                e,
+            )
+        })
+    }
+
     pub fn set_order(&self, order: i32) -> Result<(), GmshError> {
         self.call(|e| unsafe { (self.api.mesh_set_order)(order, e) })
     }

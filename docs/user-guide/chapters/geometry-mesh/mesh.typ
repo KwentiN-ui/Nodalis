@@ -117,7 +117,18 @@ values and meshes at once.
 
 === Quadrilaterals on faces <quad-faces>
 
-Faces are meshed with Gmsh's quasi-structured algorithm. It lays the quadrilaterals in a grid
+A face with four sides is meshed as a grid: rows of quadrilaterals from one side to the
+opposite one, with as many elements on opposite sides. Where such faces meet, the rows run on
+across the shared edge. A surface of revolution sliced into four-sided faces, such as a
+bellows or a pipe bend, so gets its elements in rings around the axis, all of the same shape,
+and the stresses of a load that is the same all around come out the same all around. If a
+grid would be badly distorted or Gmsh refuses one, the faces are meshed as below. This holds
+for all faces of a part (or of the shells of a compound part, @compound-parts) at once: the
+grid is used only if every face has four sides.
+
+#screenshot("grid-faces.png", [A bellows sliced into four-sided faces, meshed as grids])
+
+Other faces are meshed with Gmsh's quasi-structured algorithm. It lays the quadrilaterals in a grid
 that follows the outline and the holes, so that nearly every inner node joins four elements,
 and it leaves no triangles. The element sizes are those of the meshing parameters and the
 local mesh sizes; next to a rounded outline the grid may come out finer than asked for.

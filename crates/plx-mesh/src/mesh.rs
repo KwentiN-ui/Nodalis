@@ -734,6 +734,58 @@ impl FeMesh {
         self.parts = parts;
     }
 
+    /// Gives every part nodes of its own: a node that elements of several parts share (the
+    /// shells of a compound part meshed together share the nodes where they meet) stays
+    /// with the first of them, the others get copies at the same place. For parts that were
+    /// joined in a compound part and are no longer, so that they are not joined unseen. The
+    /// copies also lie on the CAD entities of the node. Returns the number of copies.
+    pub fn unshare_parts(&mut self) -> usize {
+        let mut owner: BTreeMap<NodeId, usize> = BTreeMap::new();
+        let mut shared: Vec<(BTreeSet<ElementId>, BTreeSet<NodeId>)> =
+            vec![Default::default(); self.parts.len()];
+        for (index, part) in self.parts.iter().enumerate() {
+            for element in part.elements.iter().filter_map(|&e| self.element(e)) {
+                for &node in &element.nodes {
+                    let first = *owner.entry(node).or_insert(index);
+                    if first != index {
+                        shared[index].0.insert(element.id);
+                        shared[index].1.insert(node);
+                    }
+                }
+            }
+        }
+        let mut next = self.node_ids.iter().copied().max().unwrap_or(0);
+        let mut count = 0;
+        for (elements, nodes) in shared {
+            if nodes.is_empty() {
+                continue;
+            }
+            let copies: BTreeMap<NodeId, NodeId> = (nodes.into_iter())
+                .map(|n| {
+                    next += 1;
+                    (n, next)
+                })
+                .collect();
+            count += copies.len();
+            self.split_nodes(&elements, &copies);
+            for list in self.cad.nodes.values_mut() {
+                let added: Vec<NodeId> =
+                    list.iter().filter_map(|n| copies.get(n)).copied().collect();
+                list.extend(added);
+            }
+            for list in self.cad.segments.values_mut() {
+                let added: Vec<[NodeId; 2]> = (list.iter())
+                    .filter_map(|&[a, b]| match (copies.get(&a), copies.get(&b)) {
+                        (None, None) => None,
+                        (x, y) => Some([*x.unwrap_or(&a), *y.unwrap_or(&b)]),
+                    })
+                    .collect();
+                list.extend(added);
+            }
+        }
+        count
+    }
+
     /// Joins parts into compound parts: of each `(name, members)`, the parts named by the
     /// members become the bodies of one part `name`, in the place of the first of them.
     /// Members without a part are left out; a compound with none is not made.

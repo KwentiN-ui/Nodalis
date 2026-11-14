@@ -225,6 +225,18 @@ pub fn mesh_input(
             hash.add_debug(&item.kind);
         }
     }
+    // The shells of a compound part are meshed together and share the nodes where they
+    // meet: joining a part into a compound, taking it out or changing the compound's
+    // members leaves its mesh out of date. Without a compound the input stays what it was.
+    if let Some(compound) = geometry.compound_of(part) {
+        let mut members: Vec<String> = (geometry.compounds[compound].parts.iter())
+            .filter(|p| !geometry.is_suppressed(p))
+            .map(|p| p.to_ascii_lowercase())
+            .collect();
+        members.sort();
+        hash.add_str("compound");
+        hash.add_debug(&members);
+    }
     // The cut faces of cyclic symmetries are meshed alike; a mesh made before the tie is
     // out of date. Without any the input stays what it was.
     if !matching.is_empty() {
@@ -250,6 +262,27 @@ mod tests {
             refinement: 1.0,
             signatures: Vec::new(),
         }
+    }
+
+    #[test]
+    fn joining_a_compound_leaves_the_mesh_out_of_date() {
+        let space = ModelSpace::default();
+        let mut joined = geometry();
+        let alone = mesh_input(&joined, &[], space, "SOLID-1");
+        joined.compounds.push(crate::CompoundPart {
+            name: "COMPOUND-1".into(),
+            parts: vec!["SOLID-1".into(), "SOLID-2".into()],
+        });
+        let first = mesh_input(&joined, &[], space, "SOLID-1");
+        assert_ne!(alone, first);
+        // Another member changes it too, a part outside the compound stays.
+        let outside = mesh_input(&joined, &[], space, "SOLID-3");
+        joined.compounds[0].parts.push("SOLID-4".into());
+        assert_ne!(first, mesh_input(&joined, &[], space, "SOLID-1"));
+        assert_eq!(outside, mesh_input(&joined, &[], space, "SOLID-3"));
+        // Dissolved, the input is what it was.
+        joined.compounds.clear();
+        assert_eq!(alone, mesh_input(&joined, &[], space, "SOLID-1"));
     }
 
     #[test]
