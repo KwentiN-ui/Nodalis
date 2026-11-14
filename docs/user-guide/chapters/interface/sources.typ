@@ -71,8 +71,9 @@ change of kind, expose the new dimensions again.
 A mesh block makes a structured mesh from a few numbers, without geometry and without Gmsh:
 #menu("Sources", "Box Mesh") meshes a box with hexahedra for 3D analyses,
 #menu("Sources", "Rectangle Mesh") a rectangle in the X-Y plane with quadrilaterals for
-2D analyses. Link its #ui("Mesh") row to the #ui("Mesh") row of analyses of the same model
-space; several analyses can share one mesh block.
+2D analyses. Link its #ui("Mesh") row to the #ui("Geometry") row of analyses of the same model
+space, where the mesh is a geometry object of its own (@mesh-import); several analyses can
+share one mesh block.
 
 #screenshot("mesh-block.png", [A box linked to an analysis, its parameters in the block])
 
@@ -130,9 +131,9 @@ and their solutions are out of date.
 
 A Refine Mesh block makes the mesh linked to it again, finer or coarser by a factor, and gives
 the new mesh on. Add it with #menu("Modify", "Refine Mesh"), drag the
-#ui("Mesh") of a mesh block or of an analysis with imported geometry to the pin on the left of
-its #ui("Mesh") row, and drag the pin on the right of that row to the #ui("Mesh") row of the
-analyses that are to use the refined mesh. The mesh it refines stays as it is.
+#ui("Mesh") of a mesh block, or the #ui("Geometry") of a file or an analysis with CAD geometry,
+to the pin on the left of its #ui("Mesh") row, and drag the pin on the right of that row to the
+#ui("Geometry") row of the analyses that are to use the refined mesh. The mesh it refines stays as it is.
 
 #screenshot("refine-mesh.png", [A box refined by 1.5 for the analysis Fine: the Factor takes the
   dashed wire of a parameter study, which varies it])
@@ -151,7 +152,7 @@ What the factor does depends on where the mesh comes from:
   block makes this mesh itself: once the factor or the mesh block changes, its #ui("Mesh") row
   is out of date and #ui("Update Project") or #ui("Generate Mesh") in its context menu makes it
   again.
-- From an analysis with imported geometry: it gives the geometry with its mesh setup on, every
+- From CAD geometry, of a file or an analysis: it gives the geometry with its mesh setup on, without its mesh, every
   element size divided by the factor (the max. and min. element size of the meshing
   parameters, those of Meshing Parameters items and the local mesh sizes). The analysis that
   takes it meshes the geometry with these sizes when it is solved; the sizes as set in the mesh
@@ -169,8 +170,8 @@ mode of a buckle step, scaled to a small amplitude, as the starting geometry of 
 nonlinear static analysis, which then shows how the imperfect structure deflects and fails below
 the ideal buckling load. Add it with #menu("Project", "Add Mesh", "Deformed Mesh"), drag the pin of
 a step under #ui("Results") of an analysis to its #ui("Step Result") row, and drag the pin on the
-right of its #ui("Mesh") row to the #ui("Mesh") row of the analysis that starts from the deformed
-mesh. The pin is there before anything is solved, so the whole chain can be linked first.
+right of its #ui("Mesh") row to the #ui("Geometry") row of the analysis that starts from the
+deformed mesh. The pin is there before anything is solved, so the whole chain can be linked first.
 
 #screenshot("deformed-mesh-block.png", [The first buckling mode of the analysis Buckle, at half
   its size, is the mesh of the analysis Nonlinear, which takes its materials and sections from
@@ -215,7 +216,8 @@ dialog asks for the file at once. Its rows depend on the file:
 
 - results: #ui("Results") with a row per step of the file, whose pins link like the steps of
   an analysis, for example to the #ui("Global results") row of a submodel (@submodel);
-- an input file: #ui("Mesh"), to link to the #ui("Mesh") row of analyses;
+- an input file: #ui("Mesh"), to link to the #ui("Geometry") row of analyses, where each part
+  is a geometry object of its own (@mesh-import);
 - geometry: #ui("Geometry"), to link to the #ui("Geometry") row of analyses.
 
 ==== Single parts of an assembly <file-block-parts>
@@ -238,9 +240,9 @@ output pane, and the analysis keeps the geometry it had.
 
 ==== Assemblies from several links <geometry-assembly>
 
-The #ui("Geometry") and #ui("Mesh") rows of an analysis have the tall pin of a collection
-(@links): they take any number of wires and put what comes through them together into one
-assembly. Link the parts of a file that stay as they are and the output of a
+The #ui("Geometry") row of an analysis has the tall pin of a collection (@links): it takes any
+number of wires and puts the geometry objects that come through them, meshed or not, together
+into one assembly. Link the parts of a file that stay as they are and the output of a
 #ui("CAD Operation") that changes one of them, or the geometry of several files, and the
 analysis meshes all parts together, each a part of its own as in an assembly read from one
 file.
@@ -260,11 +262,30 @@ of SOLID-2 of File").
 both, the second named with "-2" appended, which the output pane reports as well. Putting the
 geometries together is done in the background; the analysis is out of date until it is done.
 
-Several meshes linked to the #ui("Mesh") row are put together in the same way, each with its
-own nodes and elements, numbered after those before it. Their parts, sets and surfaces keep
-their names unless an earlier mesh has one of the name. The geometries of the meshes are put
-together too, so that picks on the geometry find their nodes. An analysis takes either
-geometry or meshes: a geometry link replaces its mesh links and the other way round.
+Meshes that come with the objects are put together in the same way, each with its own nodes
+and elements, numbered after those before it. Their parts, sets and surfaces keep their names
+unless an earlier mesh has one of the name. CAD geometry and meshes without geometry mix
+freely: the shapes are put together, so that picks on the geometry find their nodes, and a mesh
+of a mesh block or an input file joins as a geometry object of its own.
+
+==== Objects that come meshed <linked-meshes>
+
+There is one kind of link for geometry and meshes: a geometry object has a mesh or not, and a
+link brings it as it is. A part of a file comes without a mesh, and the analysis meshes it with
+its own mesh setup. A part linked from an analysis that meshed it comes with that mesh, so
+that a second analysis solves on the very same nodes, e.g. to take its temperatures or modes.
+The mesh changes where it comes from; in the analysis that takes it, the part's mesh is shown
+as linked and cannot be moved or deleted there.
+
+To mesh such a part with the analysis' own setup instead, use #ui("Create Mesh") or
+#ui("Clear Mesh") on it in the Geometry workspace: from then on the analysis leaves the linked
+mesh of that part out and meshes it itself, also when the link brings the part again.
+#ui("Use Linked Mesh") in the same menu takes the linked mesh again. #ui("Mesh All Parts")
+meshes only the parts without a linked mesh. The own meshes of the analysis and the meshes it
+imported itself stay when a link brings its objects anew.
+
+#screenshot("linked-meshes.png", [The parts of Analysis-1 come meshed from the link. OBEN is
+  meshed here, so its menu offers Use Linked Mesh.])
 
 #screenshot("file-block.png", [The results of a CalculiX run made elsewhere drive a submodel])
 
@@ -483,14 +504,15 @@ that:
 
 === Transform <transform-block>
 
-A Transform block moves the geometry or the mesh linked to it as a whole and gives it on:
+A Transform block moves the geometry objects linked to it, with their meshes, as a whole and
+gives them on:
 #ui("Translate") by a vector, #ui("Rotate") by an angle about an axis through a point,
 #ui("Mirror") at a plane through a point, or #ui("Scale") about a center by a factor per axis,
 the same transforms as the Transform of mesh parts under FE Model (@mesh-tools). Add it
-with #menu("Modify", "Transform") or from the picker, and drag the #ui("Geometry"), a part or
-the #ui("Mesh") of a file block, an analysis, a CAD Operation or another block to the pin on the
-left of its first row. That one pin takes either: the row is then called #ui("Geometry") or
-#ui("Mesh") after what it takes, and the pin on its right gives the same on to analyses.
+with #menu("Modify", "Transform") or from the picker, and drag the #ui("Geometry") or a part of
+a file block, an analysis, a CAD Operation, or the #ui("Mesh") of a mesh block, to the pin on
+the left of its #ui("Geometry") row. The shapes and the mesh they come with move together, and
+the pin on its right gives them on to analyses.
 Double-click the block to choose the kind of transform; the numbers of that kind, such as
 #ui("Offset X") to #ui("Offset Z") of a translation or the point, the axis and the
 #ui("Angle") in degrees of a rotation, are rows of the block. Type them there, or drag the pin
@@ -505,7 +527,7 @@ Linked to the #ui("Geometry") row of an analysis together with the unmoved geome
 (@geometry-assembly), it places a second copy of a part, or moves one part of an assembly: a
 part the transform moved takes the place of the same part of the file linked unchanged. With
 meshes it works the same way: the mesh of an analysis and its moved copy linked to the
-#ui("Mesh") row of another analysis give that one both, each with its own nodes.
+#ui("Geometry") row of another analysis give that one both, each with its own nodes.
 
 #screenshot("transform-block.png", [SOLID-2 of the file lifted by the parameter Lift: the
   analysis takes SOLID-1 as in the file and SOLID-2 moved])
@@ -826,8 +848,8 @@ CalculiX writes as lines are left out; those written as solids (the default) cou
 A mesh export block is the opposite of a source: it takes a mesh and writes it to a file, as
 a CalculiX input file (`.inp`) with the nodes, the elements, and the node sets and surfaces
 of the mesh. Add it with #menu("Evaluate", "Mesh Export") or from the picker under
-#ui("Export"), and drag the #ui("Mesh") row of a mesh block or an analysis to its #ui("Mesh")
-row. Several export blocks may take the same mesh.
+#ui("Export"), and drag the #ui("Mesh") row of a mesh block or the #ui("Geometry") row of an
+analysis to its #ui("Mesh") row. Several export blocks may take the same mesh.
 
 #screenshot("mesh-export.png", [A box whose mesh is written to box.inp])
 
@@ -888,8 +910,9 @@ it takes the name of what it shows:
     dark, a suppressed part is grey; it is seen along the diagonal like the isometric view, a
     flat 2D geometry from the front. The geometry is triangulated in the background whenever
     it changes; if that fails, the block says so and its tooltip tells why.],
-  [Mesh], [A small picture of the mesh: drag the #ui("Mesh") of an analysis or of a mesh
-    block there. The parts have the colors of the analysis, seen along the diagonal like the
+  [Mesh], [A small picture of the mesh, shown in the #ui("Geometry") row when the objects
+    linked have one: drag the #ui("Geometry") of an analysis or the #ui("Mesh") of a mesh block
+    there. The parts have the colors of the analysis, seen along the diagonal like the
     isometric view; a 2D mesh is seen from the front. The picture is drawn anew in the
     background whenever the mesh changes.],
   [Value], [A number, drawn large with its unit and the name of the block that gives it.

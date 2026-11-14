@@ -168,8 +168,8 @@ confirms, Escape cancels), and #ui("Dissolve"), which makes its parts parts of t
 - Compound parts can be made of linked parts too (@links): they join meshes and change no
   shape, so they are part of the analysis' own setup like the mesh setup. They stay when the
   source changes, as long as their parts are still in the geometry; a part that is gone or
-  renamed there drops out of the compound. Only with a linked #ui("Mesh") they are read-only,
-  because the mesh comes already joined.
+  renamed there drops out of the compound. When the link brings the parts meshed, they are
+  read-only, because the mesh comes already joined.
 
 #screenshot("linked-compound-part.png", [Two linked parts joined into a compound part in an analysis whose geometry comes from a file block])
 

@@ -65,17 +65,17 @@ keeps a copy of what it took, which it can edit from then on.
 === Linking data <data-links>
 
 A data link makes the target use what the source has, live: a change in the source reaches the
-target at once. Whole cells can be linked (#ui("Geometry"), #ui("Mesh")), a whole category of
+target at once. Whole cells can be linked (#ui("Geometry")), a whole category of
 the setup (open #ui("Setup") with the arrow in front of it: #ui("Materials"), #ui("Sections"),
 #ui("Constraints") and so on) or a single item of a category (open the category: one material,
 one contact pair, one step). A linked category also passes on items added to it later.
 
-A linked #ui("Geometry") takes the shapes only: the parts are read-only, but the mesh setup on
-the Geometry workspace (#ui("Default Mesh Parameters ..."), the #ui("Mesh Setup") items) stays
-the target's own, and the target meshes the geometry itself. Several analyses can so mesh the
-same geometry, from another analysis or from a file block (@file-block), each its own way. A
-target without geometry starts from the mesh setup of the source. A linked #ui("Mesh") takes the
-mesh with the setup it was made with; both are read-only then.
+A linked #ui("Geometry") takes the geometry objects with the meshes they have
+(@linked-meshes): the parts are read-only, but the mesh setup on the Geometry workspace
+(#ui("Default Mesh Parameters ..."), the #ui("Mesh Setup") items) stays the target's own, and
+the target meshes the parts that come without a mesh itself. Several analyses can so mesh the
+same geometry of a file block (@file-block), each its own way, or share the mesh of an analysis
+that meshed it. A target without geometry starts from the mesh setup of the source.
 
 #screenshot("linked-geometry-mesh-setup.png", [Geometry linked from a file block: the parts carry
   the link sign, the Meshing Parameters item belongs to the analysis])
@@ -127,8 +127,8 @@ The pins on the left of the rows have two shapes, like the sockets of a node edi
   [Tall, rounded], [A collection: the categories of the setup (#ui("Materials"),
     #ui("Sections"), #ui("Steps") and so on). It takes any number of wires, from one analysis
     or from several, and the items of the target that are its own stay. The #ui("Geometry")
-    and #ui("Mesh") rows of an analysis are collections as well: they put the geometries or
-    meshes of several blocks together into one assembly (@geometry-assembly).],
+    row of an analysis is a collection as well: it puts the geometry objects of several
+    blocks, meshed or not, together into one assembly (@geometry-assembly).],
   [Green square], [The state after a step of another analysis (@state-links).],
 )
 

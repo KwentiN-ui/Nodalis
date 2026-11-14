@@ -5797,6 +5797,15 @@ impl Workbench {
             return;
         };
         if geometry.set_own_meshes(&names, false) {
+            // Until the link brings the mesh again, the mesh made here counts as linked, so
+            // Mesh All does not mesh the parts here once more.
+            let mut origins = model.origins().clone();
+            for name in &names {
+                if matches!(origins.get(name), Some(plx_model::PartOrigin::Meshed(_))) {
+                    origins.insert(name, plx_model::PartOrigin::Linked);
+                }
+            }
+            model.set_origins(origins);
             self.output
                 .push(format!("{} takes the linked mesh again", names.join(", ")));
             self.sync_suppressed();
