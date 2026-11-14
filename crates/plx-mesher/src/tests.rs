@@ -2697,12 +2697,14 @@ fn shells_split_by_a_plane_become_a_compound_or_lose_a_side() {
     areas.sort_by(f64::total_cmp);
     assert_eq!(areas.len(), 2);
     assert!((areas[0] - 50.0).abs() < 1e-6 && (areas[1] - 150.0).abs() < 1e-6);
-    // The pieces share nothing: one part of two bodies, tied along the cut.
+    // One part of two bodies meshed together: they share the nodes along the cut and
+    // need no tie.
     let mesh = generate_mesh(&both).unwrap().mesh;
     assert_eq!(mesh.parts.len(), 1);
     assert_eq!(mesh.parts[0].bodies.len(), 2);
+    assert!(!body_nodes(&mesh, 0, 0).is_disjoint(&body_nodes(&mesh, 0, 1)));
     let ties = plx_model::FeModel::default().compound_ties(&mesh);
-    assert_eq!(ties.len(), 1);
+    assert!(ties.is_empty());
     // Each a part of its own.
     let apart = plx_model::CadOperation {
         compound: false,
@@ -2952,8 +2954,9 @@ fn faces_too_fine_for_the_quasi_structured_algorithm_are_recombined() {
     if !gmsh_available() {
         return;
     }
-    // About 21 000 quadrilaterals, just above the limit of 20 000.
-    let mut geometry = rectangle([0.0; 3], [300.0, 70.0], 0.0);
+    // About 21 000 quadrilaterals, just above the limit of 20 000; rounded corners, so
+    // that the face has eight sides and no grid fits it.
+    let mut geometry = rectangle([0.0; 3], [300.0, 70.0], 5.0);
     geometry.meshing.second_order = false;
     geometry.meshing.max_size = 1.0;
     geometry.meshing.min_size = 0.0;
@@ -3958,4 +3961,101 @@ fn the_cut_faces_of_a_cyclic_symmetry_are_meshed_alike() {
             );
         }
     }
+}
+
+/// The nodes of the elements of a body of a part.
+fn body_nodes(mesh: &FeMesh, part: usize, body: usize) -> BTreeSet<NodeId> {
+    (mesh.parts[part].bodies[body].elements.iter())
+        .flat_map(|&id| mesh.element(id).unwrap().nodes.clone())
+        .collect()
+}
+
+#[test]
+fn four_sided_faces_get_rows_of_quadrilaterals() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = rectangle([0.0; 3], [20.0, 10.0], 0.0);
+    geometry.meshing.second_order = false;
+    geometry.meshing.max_size = 1.0;
+    geometry.meshing.min_size = 0.0;
+    let mesh = generate_mesh(&geometry).unwrap().mesh;
+    // A grid: every element a rectangle along the axes, as many in each row.
+    let mut xs = BTreeSet::new();
+    let mut ys = BTreeSet::new();
+    for element in mesh.elements() {
+        assert_eq!(element.nodes.len(), 4);
+        let at = |k: usize, d: usize| mesh.node(element.nodes[k]).unwrap()[d];
+        let x: BTreeSet<i64> = (0..4).map(|k| (at(k, 0) * 1e6).round() as i64).collect();
+        let y: BTreeSet<i64> = (0..4).map(|k| (at(k, 1) * 1e6).round() as i64).collect();
+        assert_eq!((x.len(), y.len()), (2, 2));
+        xs.extend(x);
+        ys.extend(y);
+    }
+    assert_eq!(mesh.element_count(), (xs.len() - 1) * (ys.len() - 1));
+    assert!((20..=22).contains(&(xs.len() - 1)) && (10..=11).contains(&(ys.len() - 1)));
+}
+
+/// Two shells side by side in the x-y plane, 20 x 10 each, `gap` apart along x, joined in
+/// a compound part.
+fn two_plates(gap: f64) -> Geometry {
+    let mut geometry = made_geometry(|gmsh| {
+        gmsh.add_rectangle([0.0; 3], [20.0, 10.0], 0.0)?;
+        gmsh.add_rectangle([20.0 + gap, 0.0, 0.0], [20.0, 10.0], 0.0)?;
+        Ok(())
+    });
+    geometry.meshing.max_size = 2.0;
+    geometry.meshing.min_size = 0.0;
+    let parts = part_names(&geometry).unwrap();
+    assert_eq!(parts.len(), 2);
+    geometry.compounds.push(plx_model::CompoundPart {
+        name: "COMPOUND-1".into(),
+        parts,
+    });
+    geometry
+}
+
+#[test]
+fn shells_of_a_compound_share_the_nodes_where_they_meet() {
+    if !gmsh_available() {
+        return;
+    }
+    let mesh = generate_mesh(&two_plates(0.0)).unwrap().mesh;
+    assert_eq!(mesh.parts.len(), 1);
+    assert_eq!(mesh.parts[0].bodies.len(), 2);
+    // The edge at x = 20 has its nodes once, in both bodies.
+    let shared: BTreeSet<NodeId> = (body_nodes(&mesh, 0, 0).intersection(&body_nodes(&mesh, 0, 1)))
+        .copied()
+        .collect();
+    let on_edge: BTreeSet<NodeId> = (body_nodes(&mesh, 0, 0).into_iter())
+        .filter(|&n| (mesh.node(n).unwrap()[0] - 20.0).abs() < 1e-9)
+        .collect();
+    assert!(on_edge.len() >= 11);
+    assert_eq!(shared, on_edge);
+    assert!(
+        plx_model::FeModel::default()
+            .compound_ties(&mesh)
+            .is_empty()
+    );
+    // Dissolved, each part gets nodes of its own again.
+    let mut apart = mesh.clone();
+    apart.split_compounds();
+    assert_eq!(apart.unshare_parts(), shared.len());
+    let nodes = |p: &plx_mesh::Part| -> BTreeSet<NodeId> {
+        (p.elements.iter())
+            .flat_map(|&id| apart.element(id).unwrap().nodes.clone())
+            .collect()
+    };
+    assert!(nodes(&apart.parts[0]).is_disjoint(&nodes(&apart.parts[1])));
+}
+
+#[test]
+fn shells_of_a_compound_with_a_gap_are_tied() {
+    if !gmsh_available() {
+        return;
+    }
+    let mesh = generate_mesh(&two_plates(0.1)).unwrap().mesh;
+    assert_eq!(mesh.parts[0].bodies.len(), 2);
+    assert!(body_nodes(&mesh, 0, 0).is_disjoint(&body_nodes(&mesh, 0, 1)));
+    assert_eq!(plx_model::FeModel::default().compound_ties(&mesh).len(), 1);
 }

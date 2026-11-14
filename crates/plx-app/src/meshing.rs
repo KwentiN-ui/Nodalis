@@ -1208,8 +1208,14 @@ fn mesh_parts(
     let parts: Vec<String> = (parts.into_iter())
         .filter(|p| !geometry.is_suppressed(p))
         .collect();
-    let mut meshes = Vec::with_capacity(parts.len());
+    let mut meshes: Vec<plx_mesher::GeneratedMesh> = Vec::with_capacity(parts.len());
     for part in parts {
+        // The shells of a compound part are meshed together, with the first of them.
+        let done =
+            (meshes.iter().flat_map(|m| &m.mesh.parts)).any(|p| p.name.eq_ignore_ascii_case(&part));
+        if done {
+            continue;
+        }
         let mesh = plx_mesher::generate_part_mesh_matching(geometry, &part, matching)
             .map_err(|e| e.to_string())?;
         meshes.push(mesh);

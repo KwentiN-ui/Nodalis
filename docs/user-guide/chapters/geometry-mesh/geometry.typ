@@ -126,7 +126,13 @@ submenu of the compound parts, and #ui("Remove from Compound") for a part that i
 context menu of the compound part has #ui("Create Mesh"), #ui("Rename..."), which asks for the new name in a small dialog (Enter
 confirms, Escape cancels), and #ui("Dissolve"), which makes its parts parts of their own again.
 
-- Each part of a compound is meshed on its own, with its own mesh setup, as before. In the FE
+- Shells of a compound are meshed together if they share their meshing parameters and
+  Gmsh algorithms and none is thickened: an edge that two of them have, lying exactly on each
+  other, is meshed once, and the shells share its nodes as one shell would. Selections made
+  on such an edge or its vertices still work. Shells with a gap between them keep their own
+  nodes there and are tied as below. Dissolving the compound, or taking a shell out of it,
+  gives each shell nodes of its own again.
+- Each other part of a compound is meshed on its own, with its own mesh setup, as before. In the FE
   Model workspace the compound is *one* part: sections, loads, boundary conditions and the
   contact detection see one part.
 - Where the pieces touch, the input file ties them, as a bonded contact region does
@@ -150,7 +156,8 @@ confirms, Escape cancels), and #ui("Dissolve"), which makes its parts parts of t
 
 #screenshot("linked-compound-part.png", [Two linked parts joined into a compound part in an analysis whose geometry comes from a file block])
 
-#note[The pieces keep their own nodes on the faces they share, as with a bonded contact. Where
+#note[Solids, and shells meshed on their own, keep their own nodes on the faces they share,
+as with a bonded contact. Where
 the meshes of the pieces are very different in size, the tie interpolates between them; the
 stresses right at the cut are then less accurate than inside a piece.]
 
