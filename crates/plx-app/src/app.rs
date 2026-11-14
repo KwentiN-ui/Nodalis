@@ -584,6 +584,11 @@ impl AnalysisWindow {
         {
             crate::links::follow_geometry(&mut model.fe, None, &tags);
         }
+        // Picks by number on objects whose mesh stays follow their new numbers.
+        let (nodes, elements) = model.mesh().renumbering_to(&mesh);
+        if !nodes.is_empty() || !elements.is_empty() {
+            model.fe.renumber(&nodes, &elements);
+        }
         model.fe.mesh_sets = mesh_sets;
         model.fe.element_types = element_types;
         model.fe.mesh_operations = mesh_operations;
@@ -1255,11 +1260,6 @@ pub(crate) fn merge_part_meshes(
     let mut output = Vec::new();
     let had_mesh = model.mesh().element_count() > 0;
     let mut mesh = model.mesh().clone();
-    // Meshes made here of shapes a link brings are numbered apart from the linked mesh.
-    let floor = match model.geometry.as_ref().is_some_and(|g| g.from_link) {
-        true => plx_mesh::OWN_NUMBERS,
-        false => 0,
-    };
     // Compound parts take their bodies' meshes apart, so that a body meshed anew replaces
     // its own mesh; joined again after.
     mesh.split_compounds();
@@ -1310,7 +1310,7 @@ pub(crate) fn merge_part_meshes(
                 units.unit(plx_model::Quantity::Length),
             ));
         }
-        mesh = plx_mesher::merge_part_from(&mesh, part.mesh, floor);
+        mesh = plx_mesher::merge_part(&mesh, part.mesh);
     }
     mesh.compose_compounds(&geometry.compound_members());
     mesh.unshare_parts();
@@ -5646,14 +5646,7 @@ impl Workbench {
             }
             let (nodes, elements) = (import.mesh.node_count(), import.mesh.element_count());
             let mut added = Vec::new();
-            // Next to shapes a link brings, the mesh is numbered apart from the linked mesh.
-            let linked = model.geometry.as_ref().is_some_and(|g| g.from_link);
-            model.edit_mesh(|mesh, _| {
-                added = match linked {
-                    true => mesh.append_keeping(import.mesh, plx_mesh::OWN_NUMBERS),
-                    false => mesh.append(import.mesh),
-                }
-            });
+            model.edit_mesh(|mesh, _| added = mesh.append(import.mesh));
             self.output.push(format!(
                 "{name} imported: {nodes} nodes, {elements} elements, {} part(s) added ({})",
                 added.len(),

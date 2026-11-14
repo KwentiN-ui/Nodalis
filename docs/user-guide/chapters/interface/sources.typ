@@ -290,11 +290,14 @@ imported itself stay when a link brings its objects anew.
 Each part of the geometry keeps an identity of its own, whatever its name. When a part is
 renamed where the link comes from, the analysis renames what it has of the part with it: its
 own mesh, its suppression, and the sections, sets, boundary conditions and loads on it. The
-output says which parts were renamed. The meshes an analysis makes of linked shapes, and the
-meshes it imports beside them, are numbered from 100,000,001 on, apart from the linked mesh:
-when the linked mesh changes, the node and element numbers of the own meshes stay, and so do
-selections made of them. A set of the analysis whose name a set brought by the link has is
-renamed, and the output says so.
+output says which parts were renamed. Nodes, faces and edges picked by their numbers belong
+to a geometry object: within it each node and element keeps its place, whatever number the
+whole mesh gives it. When the link brings its objects again numbered otherwise, for example
+because the source's mesh grew in front of them or the own meshes of the analysis had to move
+behind a larger linked mesh, the picks on every object whose mesh stayed the same follow it to
+its new numbers. Picks on a mesh that was made anew are of a mesh that is gone and have to be
+made again, as after meshing anew in the analysis itself. A set of the analysis whose name a
+set brought by the link has is renamed, and the output says so.
 
 #screenshot("linked-rename.png", [STUETZE was renamed to TRAEGER in benannte_teile: Analysis-1
   keeps the mesh it made of the part, under the new name.])

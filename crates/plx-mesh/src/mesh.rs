@@ -7,11 +7,6 @@ use crate::element::{ElementFamily, ElementShape, FaceTopology};
 use crate::fast_map::FastMap;
 
 pub type NodeId = u32;
-
-/// Node and element numbers from here on are for the meshes an analysis makes itself of
-/// shapes a link brings: the linked mesh keeps its numbers below, so that neither moves
-/// the other's when it changes.
-pub const OWN_NUMBERS: u32 = 100_000_000;
 pub type ElementId = u32;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -492,9 +487,8 @@ impl FeMesh {
     }
 
     /// [`Self::append`], but the other mesh keeps its node and element numbers if this one
-    /// uses none of them, so that selections of its nodes stay valid; else it is numbered
-    /// from above `floor` and this mesh's numbers on.
-    pub fn append_keeping(&mut self, other: FeMesh, floor: u32) -> Vec<String> {
+    /// uses none of them; else it is numbered after this mesh's numbers.
+    pub fn append_keeping(&mut self, other: FeMesh) -> Vec<String> {
         let nodes_free = !(other.node_ids.iter()).any(|n| self.node_lookup.contains_key(n));
         let elements_free =
             !(other.elements.iter()).any(|e| self.element_lookup.contains_key(&e.id));
@@ -502,7 +496,7 @@ impl FeMesh {
             return self.append_shifted(other, 0, 0);
         }
         let start = |own: Option<u32>, other: Option<u32>| {
-            let from = own.unwrap_or(0).max(floor);
+            let from = own.unwrap_or(0);
             // The other's lowest number lands just above.
             from.saturating_sub(other.unwrap_or(1).saturating_sub(1))
         };
@@ -1225,16 +1219,13 @@ mod tests {
         assert_eq!(empty.append(beam(5, 7, "BEAM")), ["BEAM"]);
         assert_eq!(empty.node_ids(), [5, 6]);
         assert!(empty.element(7).is_some());
-        // Kept where the numbers are free, else numbered from above the floor.
+        // Kept where the numbers are free, else numbered after.
         let mut mesh = beam(1, 1, "BEAM");
-        mesh.append_keeping(beam(OWN_NUMBERS + 1, OWN_NUMBERS + 1, "OWN"), OWN_NUMBERS);
-        assert_eq!(mesh.node_ids(), [1, 2, OWN_NUMBERS + 1, OWN_NUMBERS + 2]);
-        mesh.append_keeping(beam(1, 1, "OTHER"), OWN_NUMBERS);
-        assert_eq!(mesh.parts[2].elements, [OWN_NUMBERS + 2]);
-        assert_eq!(
-            mesh.element(OWN_NUMBERS + 2).unwrap().nodes,
-            [OWN_NUMBERS + 3, OWN_NUMBERS + 4]
-        );
+        mesh.append_keeping(beam(5, 5, "OWN"));
+        assert_eq!(mesh.node_ids(), [1, 2, 5, 6]);
+        mesh.append_keeping(beam(1, 1, "OTHER"));
+        assert_eq!(mesh.parts[2].elements, [6]);
+        assert_eq!(mesh.element(6).unwrap().nodes, [7, 8]);
     }
 
     #[test]

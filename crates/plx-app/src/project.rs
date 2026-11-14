@@ -460,6 +460,11 @@ impl ModelMut<'_> {
         if let Some(tags) = links::geometry_tags(self.geometry.as_ref(), geometry.as_ref()) {
             links::follow_geometry(self.fe, None, &tags);
         }
+        // Picks by number on objects whose mesh stays follow their new numbers.
+        let (nodes, elements) = self.mesh.renumbering_to(&mesh);
+        if !nodes.is_empty() || !elements.is_empty() {
+            self.fe.renumber(&nodes, &elements);
+        }
         *self.geometry = geometry;
         *self.mesh = mesh;
         *self.origins = origins.linked(self.origins);

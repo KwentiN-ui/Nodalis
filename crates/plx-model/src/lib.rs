@@ -233,8 +233,7 @@ use serde::{Deserialize, Serialize};
 /// geometry objects with the meshes they have, and an analysis can mesh a part itself
 /// ([`Geometry::own_meshes`]); older projects are refused. Format 44 gives the parts of the
 /// geometry ids ([`Geometry::ids`]), so that an analysis follows a part renamed where its
-/// link comes from, marks linked shapes and sets, and numbers the meshes an analysis makes of
-/// linked shapes apart ([`plx_mesh::OWN_NUMBERS`]); older projects are refused.
+/// link comes from, and marks linked shapes and sets; older projects are refused.
 pub const PROJECT_FORMAT: u32 = 44;
 
 /// Everything besides the mesh that makes up an analysis.
