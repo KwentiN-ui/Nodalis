@@ -950,18 +950,28 @@ impl PcgSolver {
                 if let Some(&midside) = u.midside.get(i) {
                     renumbered.midside[slot] = midside;
                 }
+                if let Some(&fibre) = u.fibre.get(i) {
+                    renumbered.fibre[slot] = fibre;
+                }
+                if let Some(&role) = u.role.get(i) {
+                    renumbered.role[slot] = role;
+                }
             }
             return Some(renumbered);
         }
         let nodes = self.padded / 3;
         let bodies_known = u.body.len() == u.node.len();
         let midsides_known = u.midside.len() == u.node.len();
+        let fibres_known = u.fibre.len() == u.node.len();
+        let roles_known = u.role.len() == u.node.len();
         let mut padded = Unknowns {
             node: (0..nodes as u32).flat_map(|b| [b, b, b]).collect(),
             component: vec![u8::MAX; self.padded],
             coordinates: vec![[0.0; 3]; self.padded],
             body: vec![0; if bodies_known { self.padded } else { 0 }],
             midside: vec![[u32::MAX; 2]; if midsides_known { self.padded } else { 0 }],
+            fibre: vec![u32::MAX; if fibres_known { self.padded } else { 0 }],
+            role: vec![0; if roles_known { self.padded } else { 0 }],
         };
         // The padded numbering has its own nodes: the ends of the edges are renumbered.
         let block_of: std::collections::HashMap<u32, u32> = if midsides_known {
@@ -979,6 +989,12 @@ impl PcgSolver {
                 padded.coordinates[3 * node + c] = u.coordinates[i];
                 if bodies_known {
                     padded.body[3 * node + c] = u.body[i];
+                }
+                if fibres_known {
+                    padded.fibre[3 * node + c] = u.fibre[i];
+                }
+                if roles_known {
+                    padded.role[3 * node + c] = u.role[i];
                 }
                 if midsides_known && u.midside[i] != [u32::MAX; 2] {
                     // An end without unknowns is held: it gets a number no node has.

@@ -1809,3 +1809,52 @@ Die numerische Faktorisierung der Punktmasse sinkt in der Cloud (4 Kerne) von 18
 zu verfeinern brachte bis 839 Mio., kostete aber das Fünffache an Ordnungszeit und wurde
 verworfen. Die Geduld (300 bis 3000 Züge) und die Zahl der Durchgänge ändern das Ergebnis
 nicht mehr.
+
+### Nachtrag: Normalenwinkel der Schalen-Expansion (2026-11-14)
+
+Die Expansion fasste die Normalen der Schalen an einem Knoten nur innerhalb von 0,5° zusammen.
+Das ccx-Handbuch nimmt 0,5° aber nur für Normalen aus `*NORMAL` (liest plxs nicht) und 20° für
+die aus der Geometrie berechneten. Bei Quentins Wellrohr (102k S8R, 0,3 mm, Netz gröber als die
+Wellenradien, benachbarte Elementnormalen im Median 9,5° auseinander) wurden so 292k von 309k
+Knoten zu Knots: 2,25 Mio. statt 1,15 Mio. Knoten, 8,5 Mio. statt 3,7 Mio. DOFs, 2,15 Mrd.
+statt 0,27 Mrd. Produkte in `Tᵀ K T`, Constraint-Reduktion 49,7 s statt 9,2 s (Cloud, 4 Threads),
+in 15 GB nicht mehr rechenbar. `NORMAL_ANGLE` ist jetzt 20°. Faktor fast gleich (1,17 statt
+1,12 Mrd. Einträge), max. Verschiebung 12,63 statt 12,77 mm. Test `shell_normals`.
+
+Offen: Der iterative Solver taugt für expandierte dünne Schalen weiterhin nicht. Auf diesem
+Modell verdichten sich die Grobgitter (Ebene 3: 84k Blockzeilen mit 7,7 Mio. 6×6-Blöcken), der
+Aufbau dauert minutenlang. Die automatische Wahl rechnet expandierte Modelle direkt.
+
+### Nachtrag: Multigrid über die Schalenfasern (2026-11-14)
+
+Auf expandierten Schalen glätteten die Aggregate der expandierten Knoten die Biegung weg: die
+Iterationen wuchsen mit der Schlankheit h/t der Elemente, Quentins Wellrohr konvergierte nicht.
+Jetzt ist die erste Stufe des Multigrids (vor der über die Eckknoten) eine über die Fasern:
+
+- Die Expansion merkt sich ihre Knots (`Model::shell_knots`: Originalknoten, Rotationshelfer,
+  Expansionshelfer, ein Folgeknoten). `Model::fibre_of_nodes` gibt jedem Knoten seine Faser
+  (`shell_fibres`, danach die Knots), `Model::node_roles` die Rolle (0 Verschiebung,
+  1 Rotationsvektor eines Knots, 2 dessen Expansion). `node_bodies` zählt die Helfer zum Körper
+  ihrer Schale (sonst blieben sie Einzelaggregate und die Vergröberung stockte).
+- Jede Faser wird ein Grobknoten mit 6 Freiheitsgraden, u = u_c + θ × r mit den zwei Drehungen
+  quer zur Faser; die Drillung ist tot und bekommt eine Eins auf der Diagonale. Knots drehen um
+  die globalen Achsen (ihr Rotationsvektor). Fasern an Seitenmitten werden aus den beiden
+  Endfasern interpoliert (Gewicht 0,5), so bleibt die Stufe dünn. Die Starrkörpermoden werden
+  pro Grobknoten per kleinster Quadrate eingeschränkt.
+- `PLXS_AMG_FIBRES=0` schaltet für Messungen ab.
+
+| Modell (S8R, t = 0,3) | Iterationen vorher → nachher |
+|---|---|
+| Wellrohr 120×80 Elemente | 2236 → 510 (64 → 15 s) |
+| dasselbe, Rotationen gehalten | 2465 → 427 |
+| glatter Zylinder 120×80 | 1700 → 465 |
+| Wellrohr 40×30 | 4905 → 773 |
+| Wellrohr 24×16 (Test `shell_multigrid`) | 5278 → 1081 |
+| Quentins Wellrohr, 2,18 Mio. Unbekannte | keine Konvergenz → 1133 (617 s, Cloud, 4 Threads, CPU) |
+
+Hierarchie des großen Rohrs: 2176548 > 1168806 > 90186 > 20136 > 14256, 0,97× die Matrix,
+Aufbau 32 s. Verworfen: ein Block-Jacobi-Glätter über ganze Fasern (−32 % Iterationen auf
+groben Netzen, −6 % auf feinen, aber nicht auf der GPU). Offen: die Iterationen wachsen
+weiter mit h/t (zwei Stufen mit exakter Faserebene brauchen noch 171 bis 576), die GPU mit
+der neuen Stufe ist ungetestet, die automatische Wahl rechnet expandierte Modelle weiter
+direkt.

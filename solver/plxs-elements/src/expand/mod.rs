@@ -333,6 +333,19 @@ impl Expander {
         let mut model = std::mem::take(&mut self.analysis.model);
         model.constraints.equations.append(&mut self.equations);
         model.expanded_structure = !self.structural.is_empty();
+        model.shell_knots = self
+            .knots
+            .iter()
+            .filter_map(|(&node, &(rotation, expansion))| {
+                let member = self.groups[&node]
+                    .iter()
+                    .flat_map(|g| g.nodes.iter().zip(&g.used))
+                    .find(|(_, u)| **u)
+                    .map(|(&n, _)| n)?;
+                Some([node, rotation, expansion, member])
+            })
+            .collect();
+        model.shell_knots.sort_unstable();
         model.shell_fibres = self
             .groups
             .values()
@@ -1385,8 +1398,13 @@ impl Expander {
     }
 }
 
-/// Normals within this angle (degrees) count as one.
-const NORMAL_ANGLE: f64 = 0.5;
+/// Normals (and beam tangents) within this angle (degrees) of the reference element's
+/// count as one. The CalculiX manual ("Shell elements", "Beam elements") takes 0.5° only
+/// for normals the user gave with `*NORMAL`, which plxs does not read, and 20° for the
+/// normals computed from the geometry: with 0.5° nearly every node of a curved quadratic
+/// shell mesh became a knot (adjacent elements' normals differ by several degrees), which
+/// multiplied the nodes and constraints of the expanded model.
+const NORMAL_ANGLE: f64 = 20.0;
 
 /// A range of degrees of freedom, first and last.
 type DofRange = Option<(u8, u8)>;

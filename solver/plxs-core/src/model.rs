@@ -47,6 +47,11 @@ pub struct Model {
     /// explicit steps. Set by the expansion, empty otherwise.
     #[serde(default)]
     pub shell_fibres: Vec<Vec<NodeId>>,
+    /// The knots of expanded shells and beams: the original node, the helper node of its
+    /// rotation vector, the one of its expansion and one of the expanded nodes that follow
+    /// it (see the expansion). Set by the expansion, empty otherwise.
+    #[serde(default)]
+    pub shell_knots: Vec<[NodeId; 4]>,
     /// Whether shells, membranes, beams or trusses were expanded into solids: the
     /// translations of the expanded model carry bending through thin elements, which the
     /// multigrid of the iterative solver does not fit (the automatic equation solver stays
@@ -160,15 +165,22 @@ impl Model {
             }
             i
         }
-        for element in &self.elements {
-            if matches!(
-                element.kind.family(),
-                crate::element::ElementFamily::Spring | crate::element::ElementFamily::Gap
-            ) {
-                continue;
-            }
+        // A knot's original and helper nodes belong to the body of the expanded nodes that
+        // follow them (they have no element of their own).
+        let knots = self.shell_knots.iter().map(|k| &k[..]);
+        let elements = self
+            .elements
+            .iter()
+            .filter(|element| {
+                !matches!(
+                    element.kind.family(),
+                    crate::element::ElementFamily::Spring | crate::element::ElementFamily::Gap
+                )
+            })
+            .map(|element| &element.nodes[..]);
+        for nodes in elements.chain(knots) {
             let mut first: Option<u32> = None;
-            for &id in &element.nodes {
+            for &id in nodes {
                 let Some(i) = self.nodes.index(id) else {
                     continue;
                 };
@@ -194,6 +206,44 @@ impl Model {
             number[i as usize] = number[r];
         }
         number
+    }
+
+    /// The fibre of every node (by node index) in [`Self::shell_fibres`], `u32::MAX` for
+    /// nodes outside fibres. A knot is a fibre of its original node and the helper node of
+    /// its rotation (numbered after the fibres).
+    pub fn fibre_of_nodes(&self) -> Vec<u32> {
+        let mut out = vec![u32::MAX; self.nodes.len()];
+        for (f, fibre) in self.shell_fibres.iter().enumerate() {
+            for &id in fibre {
+                if let Some(i) = self.nodes.index(id) {
+                    out[i as usize] = f as u32;
+                }
+            }
+        }
+        let first = self.shell_fibres.len();
+        for (k, &[original, rotation, _, _]) in self.shell_knots.iter().enumerate() {
+            for id in [original, rotation] {
+                if let Some(i) = self.nodes.index(id) {
+                    out[i as usize] = (first + k) as u32;
+                }
+            }
+        }
+        out
+    }
+
+    /// What the DOFs of every node (by node index) are for the multigrid's rigid body
+    /// modes: 0 translations, 1 the rotation vector of a knot, 2 the expansion of a knot
+    /// (no rigid body motion moves it).
+    pub fn node_roles(&self) -> Vec<u8> {
+        let mut out = vec![0u8; self.nodes.len()];
+        for &[_, rotation, expansion, _] in &self.shell_knots {
+            for (id, role) in [(rotation, 1), (expansion, 2)] {
+                if let Some(i) = self.nodes.index(id) {
+                    out[i as usize] = role;
+                }
+            }
+        }
+        out
     }
 
     /// For every node (by index) that is the midside node of an edge of a quadratic

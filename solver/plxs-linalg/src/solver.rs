@@ -304,11 +304,12 @@ impl LdltSolver {
         trace(
             &clock,
             &format!(
-                "supernodal tree ({} supernodes)",
+                "supernodal tree ({} supernodes, {} factor entries)",
                 match symbolic.raw() {
                     SymbolicCholeskyRaw::Supernodal(raw) => raw.n_supernodes(),
                     SymbolicCholeskyRaw::Simplicial(_) => 0,
-                }
+                },
+                symbolic.len_val()
             ),
         );
         self.symbolic = Some(symbolic);
