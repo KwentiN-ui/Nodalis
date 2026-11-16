@@ -49,7 +49,6 @@ mod origin;
 pub mod overview;
 mod parameter;
 mod part_filter;
-pub mod particle;
 mod plot;
 mod primitive;
 mod properties;
@@ -236,9 +235,8 @@ use serde::{Deserialize, Serialize};
 /// geometry ids ([`Geometry::ids`]), so that an analysis follows a part renamed where its
 /// link comes from, and marks linked shapes and sets; older projects are refused. Format 45
 /// keeps the content of files, such as results, in a binary part behind the text of the
-/// project file instead of base64 in the text; older projects are refused. Format 46 adds the
-/// Particle Analysis block ([`particle::ParticleSetup`]); format 45 reads as it is.
-pub const PROJECT_FORMAT: u32 = 46;
+/// project file instead of base64 in the text; older projects are refused.
+pub const PROJECT_FORMAT: u32 = 45;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

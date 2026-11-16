@@ -70,7 +70,6 @@ mod output_news;
 mod overlay;
 mod parameter_set;
 mod part_filter_ui;
-mod particles;
 mod path_plot;
 mod pick_item;
 mod portable;

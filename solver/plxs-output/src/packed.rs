@@ -44,8 +44,6 @@ pub enum Array<'a> {
     /// Rows of three numbers, such as coordinates.
     F64x3(&'a mut Vec<[f64; 3]>),
     F32x3(&'a mut Vec<[f32; 3]>),
-    /// Single numbers in single precision, such as the fields of particles.
-    F32(&'a mut Vec<f32>),
 }
 
 /// A value the container stores: its arrays are visited by [`Packable::arrays`], always in
@@ -75,7 +73,6 @@ enum Encoding {
     F64,
     F64x3,
     F32x3,
-    F32,
 }
 
 impl Encoding {
@@ -88,7 +85,6 @@ impl Encoding {
             Encoding::F64 => 8,
             Encoding::F64x3 => 24,
             Encoding::F32x3 => 12,
-            Encoding::F32 => 4,
         }
     }
 
@@ -235,7 +231,6 @@ enum Taken {
     F64(Vec<f64>),
     F64x3(Vec<[f64; 3]>),
     F32x3(Vec<[f32; 3]>),
-    F32(Vec<f32>),
 }
 
 impl Taken {
@@ -245,7 +240,6 @@ impl Taken {
             Array::F64(values) => Taken::F64(std::mem::take(values)),
             Array::F64x3(rows) => Taken::F64x3(std::mem::take(rows)),
             Array::F32x3(rows) => Taken::F32x3(std::mem::take(rows)),
-            Array::F32(values) => Taken::F32(std::mem::take(values)),
         }
     }
 
@@ -263,10 +257,6 @@ impl Taken {
                     .flat_map(f32::to_le_bytes)
                     .collect(),
             ),
-            Taken::F32(v) => (
-                Encoding::F32,
-                v.iter().copied().flat_map(f32::to_le_bytes).collect(),
-            ),
         }
     }
 
@@ -276,7 +266,6 @@ impl Taken {
             (Taken::F64(v), Array::F64(values)) => *values = v,
             (Taken::F64x3(v), Array::F64x3(rows)) => *rows = v,
             (Taken::F32x3(v), Array::F32x3(rows)) => *rows = v,
-            (Taken::F32(v), Array::F32(values)) => *values = v,
             // `arrays` visits the same arrays in the same order every time.
             _ => {}
         }
@@ -744,10 +733,6 @@ fn encode_bytes(array: &Array<'_>) -> (Encoding, Vec<u8>) {
                 .flat_map(f32::to_le_bytes)
                 .collect(),
         ),
-        Array::F32(values) => (
-            Encoding::F32,
-            values.iter().copied().flat_map(f32::to_le_bytes).collect(),
-        ),
     }
 }
 
@@ -802,11 +787,6 @@ fn put_bytes(array: Array<'_>, encoding: Encoding, bytes: &[u8]) -> Result<(), P
                     let (numbers, _) = row.as_chunks::<4>();
                     std::array::from_fn(|k| f32::from_le_bytes(numbers[k]))
                 })
-                .collect();
-        }
-        (Array::F32(values), Encoding::F32) => {
-            *values = (bytes.as_chunks::<4>().0.iter())
-                .map(|&b| f32::from_le_bytes(b))
                 .collect();
         }
         _ => return Err(wrong()),

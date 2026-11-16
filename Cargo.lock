@@ -3554,7 +3554,6 @@ dependencies = [
  "plxs-core",
  "plxs-explicit",
  "plxs-linalg",
- "plxs-particles",
  "plxs-session",
  "png",
  "rfd",

@@ -26,7 +26,6 @@ impl BlockTile {
             Self::Measure => BlockKind::Measure,
             Self::Study => BlockKind::Study,
             Self::Campbell => BlockKind::Campbell,
-            Self::Particles => BlockKind::Particles,
             Self::MeshExport => BlockKind::MeshExport,
             Self::Note => BlockKind::Note,
             Self::Plot => BlockKind::Plot,
