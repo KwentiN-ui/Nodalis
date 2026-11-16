@@ -4253,7 +4253,7 @@ impl ProjectApp {
                 node.name,
                 embedded.name(),
                 crate::app::file_size(embedded.size()),
-                crate::app::file_size(embedded.file.data.len() as u64),
+                crate::app::file_size(embedded.file.data.len()),
             ));
             if let Some(file) = node.as_file_mut() {
                 file.path = path;
@@ -10343,7 +10343,7 @@ fn file_rows(node: &Node, base: Option<&Path>) -> Vec<Row> {
     if let Some(embedded) = &file.embedded {
         external_tip.push_str(&format!(
             " The copy takes {} in the project.",
-            crate::app::file_size(embedded.file.data.len() as u64)
+            crate::app::file_size(embedded.file.data.len())
         ));
     }
     let mut external_row = row(
@@ -14836,10 +14836,7 @@ mod tests {
         let embedded = file::EmbeddedFile::read(&original).unwrap();
         std::fs::remove_file(&original).unwrap();
         assert_eq!(embedded.name(), "global.frd");
-        assert!(
-            embedded.file.data.len() < embedded.size() as usize,
-            "compressed"
-        );
+        assert!(embedded.file.data.len() < embedded.size(), "compressed");
         let path = original.to_string_lossy().into_owned();
         let mut node = Node::file_block(1, "File".into(), path, UnitSystem::default(), None);
         node.as_file_mut().unwrap().embedded = Some(embedded.clone());

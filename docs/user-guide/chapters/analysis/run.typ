@@ -232,6 +232,13 @@ file is about 30 % smaller than without compression and opens just as fast. The 
 keeps this file as it is, without compressing it again, so keeping large results in the project
 takes a fraction of a second.
 
+A project file is the text of the project followed by a binary part with the files it keeps:
+kept results and files embedded by file blocks. Opening a project reads the text only; the
+kept files stay in the project file and are read from there when they are wanted, so neither
+an open project nor its kept results take memory for them. Results a run has just finished are
+copied aside until the project is saved. A project with 2.8 GB of kept results opens in a
+seventh of a second with 20 MB of memory and is saved again in less than 2 seconds.
+
 Results need not fit into memory. Opening them reads the mesh and the list of increments and
 fields only; the values of a field are read from the file when it is shown or used, a field
 at a time and with all its components. Fields read recently stay in memory for going back and
