@@ -416,7 +416,7 @@ impl EmbeddedFile {
         let file = BoundFile {
             name: name.to_owned(),
             size: content.len() as u64,
-            data: BASE64.encode(encoder.finish()?),
+            data: BASE64.encode(encoder.finish()?).into(),
         };
         Ok(Self {
             print: print.finish(),
@@ -447,12 +447,11 @@ impl EmbeddedFile {
     /// The content of the file.
     pub fn content(&self) -> Result<Vec<u8>, ProjectError> {
         let mut content = Vec::with_capacity(self.file.size as usize);
-        let compressed = BASE64
-            .decode(&self.file.data)
-            .map_err(|e| ProjectError::Format {
-                path: PathBuf::from(&self.file.name),
-                message: format!("embedded file: {e}"),
-            })?;
+        let data = self.file.data.as_bytes();
+        let compressed = BASE64.decode(data).map_err(|e| ProjectError::Format {
+            path: PathBuf::from(&self.file.name),
+            message: format!("embedded file: {e}"),
+        })?;
         DeflateDecoder::new(compressed.as_slice())
             .read_to_end(&mut content)
             .map_err(|e| ProjectError::Format {
@@ -796,13 +795,15 @@ pub struct BoundResults {
 
 /// A file of [`BoundResults`]: its name and its content, base64 encoded so that it is a
 /// string in the project's RON. The results of the built-in solver (`.ndlr`) are compressed
-/// already and stored as they are, the other files deflated.
+/// already and stored as they are, the other files deflated. The content is shared: results
+/// of a dynamic analysis take gigabytes, and the project copies its analyses to save or solve
+/// them without the window waiting for a copy of the content.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundFile {
     pub name: String,
     /// Size of the file itself.
     pub size: u64,
-    pub data: String,
+    pub data: std::sync::Arc<str>,
 }
 
 impl BoundResults {
@@ -925,7 +926,7 @@ fn unpack(file: &BoundFile, path: &Path) -> Result<Vec<u8>, ProjectError> {
         message,
     };
     let compressed = BASE64
-        .decode(&file.data)
+        .decode(file.data.as_bytes())
         .map_err(|e| format(format!("bound file {}: {e}", file.name)))?;
     if !deflated(Path::new(&file.name)) {
         return Ok(compressed);
@@ -1074,7 +1075,7 @@ pub fn bind_results(
         let file = BoundFile {
             name: file_name(path).unwrap_or_default(),
             size,
-            data: BASE64.encode(compressed),
+            data: BASE64.encode(compressed).into(),
         };
         if plx_results::solver::is_solver_results(path) {
             bound.solver = Some(file);
@@ -2885,7 +2886,7 @@ mod tests {
         let file = bound.solver.as_ref().unwrap();
         // Compressed by its own format already: stored as it is, not deflated again.
         let written = std::fs::read(&path).unwrap();
-        assert_eq!(BASE64.decode(&file.data).unwrap(), written);
+        assert_eq!(BASE64.decode(file.data.as_bytes()).unwrap(), written);
         assert_eq!(bound.solver_results().unwrap().unwrap(), solved);
         let restored = restore_results(&bound, &dir.join("restored")).unwrap();
         assert_eq!(std::fs::read(restored).unwrap(), written);
