@@ -262,18 +262,57 @@ impl LazyField {
         }
         let queue = queue();
         let mut waiting = queue.waiting.lock().unwrap_or_else(|e| e.into_inner());
-        if waiting.iter().any(|f| f.id == self.id) {
+        if waiting.now.iter().any(|f| f.id == self.id) {
             return;
         }
-        waiting.push_back(Arc::clone(self));
+        waiting.now.push_back(Arc::clone(self));
         queue.ready.notify_one();
     }
 }
 
-/// The fields [`Values::prefetch`] asked for, read in turn by [`READERS`] threads.
+/// The fields [`Values::prefetch`] asked for, read in turn by [`READERS`] threads, and after
+/// them those [`read_ahead`] asked for.
 struct Queue {
-    waiting: Mutex<std::collections::VecDeque<Arc<LazyField>>>,
+    waiting: Mutex<Waiting>,
     ready: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct Waiting {
+    /// Wanted now, in the order asked for.
+    now: std::collections::VecDeque<Arc<LazyField>>,
+    /// Wanted soon, nearest first; replaced by each [`read_ahead`].
+    ahead: std::collections::VecDeque<Arc<LazyField>>,
+}
+
+impl Waiting {
+    fn next(&mut self) -> Option<Arc<LazyField>> {
+        self.now.pop_front().or_else(|| self.ahead.pop_front())
+    }
+}
+
+/// Reads the lazy fields of `values` in the background, in this order, once the fields
+/// wanted now ([`Values::prefetch`]) are read: those an animation or a step through the
+/// increments shows next, so that they are at hand when they are shown. Replaces what the
+/// last call asked for and is not read yet.
+pub fn read_ahead<'a>(values: impl IntoIterator<Item = &'a Values>) {
+    let mut ahead = std::collections::VecDeque::new();
+    for values in values {
+        if let Repr::Lazy(field, _) = &values.0
+            && !field.is_cached()
+            && !ahead.iter().any(|f: &Arc<LazyField>| f.id == field.id)
+        {
+            ahead.push_back(Arc::clone(field));
+        }
+    }
+    let queue = queue();
+    let mut waiting = queue.waiting.lock().unwrap_or_else(|e| e.into_inner());
+    let wake = !ahead.is_empty();
+    waiting.ahead = ahead;
+    drop(waiting);
+    if wake {
+        queue.ready.notify_all();
+    }
 }
 
 /// The threads that read the fields asked for ahead; each reads the chunks of a field in
@@ -286,7 +325,7 @@ fn queue() -> &'static Queue {
         for _ in 0..READERS {
             let _ = std::thread::Builder::new()
                 .name("results reader".into())
-                .spawn(read_ahead);
+                .spawn(reader);
         }
         Queue {
             waiting: Mutex::new(Default::default()),
@@ -295,13 +334,13 @@ fn queue() -> &'static Queue {
     })
 }
 
-fn read_ahead() {
+fn reader() {
     let queue = queue();
     loop {
         let field = {
             let mut waiting = queue.waiting.lock().unwrap_or_else(|e| e.into_inner());
             loop {
-                match waiting.pop_front() {
+                match waiting.next() {
                     Some(field) => break field,
                     None => {
                         waiting = (queue.ready.wait(waiting)).unwrap_or_else(|e| e.into_inner());
@@ -309,8 +348,8 @@ fn read_ahead() {
                 }
             }
         };
-        // Wanted no more since: the results were closed.
-        if Arc::strong_count(&field) == 1 {
+        // Wanted no more since (the results were closed), or read meanwhile.
+        if Arc::strong_count(&field) == 1 || field.is_cached() {
             continue;
         }
         field.component(0);
@@ -493,6 +532,23 @@ mod tests {
         assert!(Values::lazy(&field, 0).get().iter().all(|v| v.is_nan()));
         let wrong = LazyField::new(2, 1, Box::new(|| Ok(vec![vec![1.0]])));
         assert!(Values::lazy(&wrong, 0).get().iter().all(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn fields_asked_for_ahead_are_read_in_the_background() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let (a, b) = (counted(&reads, 4), counted(&reads, 4));
+        let values = [Values::lazy(&a, 0), Values::lazy(&b, 1)];
+        read_ahead(&values);
+        let start = std::time::Instant::now();
+        while !values.iter().all(Values::is_ready) {
+            assert!(start.elapsed().as_secs() < 10, "not read ahead");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+        // At hand without another read.
+        assert_eq!(*values[1].get(), [2.0; 4]);
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
     }
 
     #[test]
