@@ -24,6 +24,9 @@ enum Stage {
     /// Building the model on a worker thread, and finding the default equation solver.
     Loading(Receiver<Loaded>),
     Meshing(Box<MeshingJob>),
+    /// Writing the input file and starting the solver on a worker thread, which lowers the
+    /// whole model and finds the steps it can take over from the last run.
+    Starting(Receiver<Started>),
     Running,
     /// Keeping the results in the project; compressing them takes a while.
     Keeping(Receiver<Result<BoundResults, String>>),
@@ -35,7 +38,93 @@ struct Loaded {
     /// Fingerprint of the mesh it started from.
     mesh_print: u64,
     solver: Solver,
-    findings: Vec<Finding>,
+    next: Next,
+}
+
+/// What a solve does once its model is built, found on the worker thread: finding the state
+/// of the analysis takes fingerprints of the whole model.
+enum Next {
+    /// Mesh the parts first: all of them (`None`) or those out of date.
+    Mesh(Option<Vec<String>>),
+    /// Nothing to solve: the results are up to date.
+    UpToDate,
+    /// The solver was started, or could not be.
+    Started(Box<Result<Analysis, crate::analysis::StartError>>),
+}
+
+/// The model back from the worker that put the new meshes into it and started the solver.
+struct Started {
+    model: Model,
+    /// The lines of the meshes put into the model, none without meshing; an error stops
+    /// the solve.
+    merged: Result<Vec<String>, String>,
+    /// `None` when the meshes could not be put into the model.
+    analysis: Option<Result<Analysis, crate::analysis::StartError>>,
+}
+
+/// Writes the input file of `model` and starts the solver: the work of the worker threads
+/// before the solver runs. Solve Again (`force`) computes every step, also those that did not
+/// change.
+fn start_solver(
+    model: &Model,
+    solver: &Solver,
+    findings: &[Finding],
+    work: &Work,
+) -> Result<Analysis, crate::analysis::StartError> {
+    if work.force {
+        crate::analysis::forget_steps(&work.dir, &crate::analysis::job_dir(work.id));
+    }
+    let mut analysis = Analysis::start(
+        solver,
+        model,
+        false,
+        &crate::analysis::job_dir(work.id),
+        &work.dir,
+        &work.continuation,
+    )?;
+    // Problems the checks found go first, so that an abort is explained even before the
+    // solver says anything.
+    for finding in findings.iter().filter(|f| f.severity() == Severity::Error) {
+        analysis.note(format!(
+            "Model check: {}: {}",
+            finding.problem.title(),
+            finding.detail
+        ));
+    }
+    Ok(analysis)
+}
+
+/// What the worker threads of a solve need to start the solver.
+#[derive(Clone)]
+struct Work {
+    id: u64,
+    dir: PathBuf,
+    continuation: Continuation,
+    force: bool,
+}
+
+/// What a built model needs, by the state of the analysis: meshing, nothing, or solving.
+fn next_for(model: &Model, solver: &Solver, findings: &[Finding], work: &Work) -> Next {
+    let status = crate::status::analysis_status(
+        model.geometry.as_ref(),
+        model.mesh(),
+        &model.fe,
+        model.origins(),
+        model.bound_results.as_ref(),
+        // The project makes the mesh blocks it takes its mesh from before it starts.
+        &Default::default(),
+        false,
+        None,
+    );
+    match status.mesh {
+        CellState::Missing => return Next::Mesh(None),
+        CellState::OutOfDate => return Next::Mesh(Some(status.stale_parts.clone())),
+        _ => {}
+    }
+    if !status.needs_solve() && !work.force {
+        return Next::UpToDate;
+    }
+    Next::Started(Box::new(start_solver(model, solver, findings, work)))
 }
 
 /// How a background solve ended.
@@ -113,6 +202,12 @@ impl BackgroundSolve {
         let (sender, receiver) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
         let probed = solver.clone();
+        let work = Work {
+            id: data.id,
+            dir: work_dir.clone(),
+            continuation: continuation.clone(),
+            force,
+        };
         std::thread::spawn(move || {
             let ProjectAnalysis {
                 geometry,
@@ -133,12 +228,20 @@ impl BackgroundSolve {
                 Vec::new()
             };
             let mesh_print = model.mesh().fingerprint();
-            let _ = sender.send(Loaded {
+            let next = next_for(&model, &probed, &findings, &work);
+            let loaded = Loaded {
                 model,
                 mesh_print,
                 solver: probed,
-                findings,
-            });
+                next,
+            };
+            // A solve stopped meanwhile does not take the solver started for it.
+            if let Err(std::sync::mpsc::SendError(loaded)) = sender.send(loaded)
+                && let Next::Started(started) = loaded.next
+                && let Ok(mut analysis) = *started
+            {
+                analysis.kill();
+            }
             ctx.request_repaint();
         });
         Self {
@@ -179,6 +282,7 @@ impl BackgroundSolve {
         match &self.stage {
             Stage::Loading(_) => "preparing",
             Stage::Meshing(_) => "meshing",
+            Stage::Starting(_) => "starting",
             Stage::Running => "running",
             Stage::Keeping(_) => "keeping results",
             Stage::Done(outcome) => outcome.text(),
@@ -288,12 +392,12 @@ impl BackgroundSolve {
                         model,
                         mesh_print,
                         solver,
-                        findings,
+                        next,
                     } = loaded;
                     self.model = Some(model);
                     self.mesh_print = Some(mesh_print);
                     self.solver = solver;
-                    self.mesh_or_run(ctx, findings);
+                    self.go_on(ctx, next);
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => self.fail("The model was not built.".into()),
@@ -303,29 +407,35 @@ impl BackgroundSolve {
                     return;
                 };
                 let (geometry, started) = (job.geometry.clone(), job.started);
-                let Some(model) = self.model.as_mut() else {
-                    return;
-                };
-                let merged = result.and_then(|generated| {
-                    crate::app::merge_part_meshes(model, &geometry, generated, Some(started))
-                });
-                match merged {
-                    Ok(lines) => {
-                        self.before.extend(lines);
-                        self.meshed = true;
-                        let findings = model.findings();
-                        self.run(findings);
-                    }
-                    Err(error) => {
-                        let error = if error.starts_with("Meshing") {
-                            error
-                        } else {
-                            format!("Meshing failed: {error}")
-                        };
-                        self.fail(error);
-                    }
+                match result {
+                    Ok(generated) => self.run(ctx, Some((geometry, generated, started))),
+                    Err(error) => self.meshing_failed(error),
                 }
             }
+            Stage::Starting(receiver) => match receiver.try_recv() {
+                Ok(Started {
+                    model,
+                    merged,
+                    analysis,
+                }) => {
+                    self.model = Some(model);
+                    match merged {
+                        Ok(lines) => {
+                            self.meshed |= !lines.is_empty();
+                            self.before.extend(lines);
+                        }
+                        Err(error) => return self.meshing_failed(error),
+                    }
+                    match analysis {
+                        Some(started) => self.take_started(started),
+                        None => self.fail("The solver was not started.".into()),
+                    }
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    self.fail("The solver was not started.".into());
+                }
+            },
             Stage::Running => self.poll_run(),
             Stage::Keeping(receiver) => match receiver.try_recv() {
                 Ok(Ok(bound)) => {
@@ -359,88 +469,105 @@ impl BackgroundSolve {
         }
     }
 
-    /// Meshes the geometry first if the mesh is missing or out of date; else starts
-    /// the solver.
-    fn mesh_or_run(&mut self, ctx: &egui::Context, findings: Vec<Finding>) {
-        let Some(model) = &self.model else {
-            return;
-        };
-        let status = crate::status::analysis_status(
-            model.geometry.as_ref(),
-            model.mesh(),
-            &model.fe,
-            model.origins(),
-            model.bound_results.as_ref(),
-            // The project makes the mesh blocks it takes its mesh from before it starts.
-            &Default::default(),
-            false,
-            None,
-        );
-        let parts = match status.mesh {
-            CellState::Missing => Some(None),
-            CellState::OutOfDate => Some(Some(status.stale_parts.clone())),
-            _ => None,
-        };
-        if let Some(parts) = parts {
-            let Some(geometry) = model.geometry.clone() else {
-                return self.fail("The model has no mesh and no geometry to mesh.".into());
-            };
-            let what = match &parts {
-                Some(parts) => parts.join(", "),
-                None => geometry.source.clone(),
-            };
-            self.before.push(format!("Meshing {what} …"));
-            self.stage = Stage::Meshing(Box::new(MeshingJob::start(
-                geometry,
-                model.fe.matching_faces(),
-                parts,
-                ctx,
-            )));
-            return;
+    /// Goes on with what the worker found the built model needs: meshing first, nothing,
+    /// or the solver it started.
+    fn go_on(&mut self, ctx: &egui::Context, next: Next) {
+        match next {
+            Next::Mesh(parts) => {
+                let Some(model) = &self.model else {
+                    return;
+                };
+                let Some(geometry) = model.geometry.clone() else {
+                    return self.fail("The model has no mesh and no geometry to mesh.".into());
+                };
+                let what = match &parts {
+                    Some(parts) => parts.join(", "),
+                    None => geometry.source.clone(),
+                };
+                self.before.push(format!("Meshing {what} …"));
+                self.stage = Stage::Meshing(Box::new(MeshingJob::start(
+                    geometry,
+                    model.fe.matching_faces(),
+                    parts,
+                    ctx,
+                )));
+            }
+            Next::UpToDate => {
+                self.before
+                    .push(format!("{} is up to date; nothing to solve.", self.name));
+                self.finish(Outcome::Solved);
+            }
+            Next::Started(started) => self.take_started(*started),
         }
-        if !status.needs_solve() && !self.force {
-            self.before
-                .push(format!("{} is up to date; nothing to solve.", self.name));
-            return self.finish(Outcome::Solved);
-        }
-        self.run(findings);
     }
 
-    /// Writes the input file and starts the solver.
-    fn run(&mut self, findings: Vec<Finding>) {
-        let Some(model) = &self.model else {
-            return;
+    fn meshing_failed(&mut self, error: String) {
+        let error = if error.starts_with("Meshing") {
+            error
+        } else {
+            format!("Meshing failed: {error}")
         };
-        // Solve Again computes every step, also those that did not change.
-        if self.force {
-            crate::analysis::forget_steps(&self.work_dir, &crate::analysis::job_dir(self.id));
-        }
-        let started = Analysis::start(
-            &self.solver,
-            model,
-            false,
-            &crate::analysis::job_dir(self.id),
-            &self.work_dir,
-            &self.continuation,
-        );
-        let mut analysis = match started {
-            Ok(analysis) => analysis,
+        self.fail(error);
+    }
+
+    /// The solver runs, or could not be started.
+    fn take_started(&mut self, started: Result<Analysis, crate::analysis::StartError>) {
+        match started {
+            Ok(analysis) => {
+                self.analysis = Some(analysis);
+                self.stage = Stage::Running;
+            }
             Err(error) => {
                 self.findings = error.finding().into_iter().collect();
-                return self.fail(error.message);
+                self.fail(error.message);
             }
-        };
-        // Problems the checks found go first, so that an abort is explained even before
-        // the solver says anything.
-        for finding in findings.iter().filter(|f| f.severity() == Severity::Error) {
-            analysis.note(format!(
-                "Model check: {}: {}",
-                finding.problem.title(),
-                finding.detail
-            ));
         }
-        self.analysis = Some(analysis);
-        self.stage = Stage::Running;
+    }
+
+    /// Puts the new meshes into the model, writes the input file and starts the solver, on
+    /// a worker thread: for a large model, each takes long enough to stop the window.
+    fn run(
+        &mut self,
+        ctx: &egui::Context,
+        meshed: Option<(plx_model::Geometry, crate::meshing::PartMeshes, Instant)>,
+    ) {
+        let Some(mut model) = self.model.take() else {
+            return;
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let solver = self.solver.clone();
+        let work = Work {
+            id: self.id,
+            dir: self.work_dir.clone(),
+            continuation: self.continuation.clone(),
+            force: self.force,
+        };
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let merged = match meshed {
+                Some((geometry, generated, started)) => {
+                    crate::app::merge_part_meshes(&mut model, &geometry, generated, Some(started))
+                }
+                None => Ok(Vec::new()),
+            };
+            let analysis = merged.is_ok().then(|| {
+                let findings = model.findings();
+                start_solver(&model, &solver, &findings, &work)
+            });
+            let started = Started {
+                model,
+                merged,
+                analysis,
+            };
+            // A solve stopped meanwhile does not take the solver started for it.
+            if let Err(std::sync::mpsc::SendError(started)) = sender.send(started)
+                && let Some(Ok(mut analysis)) = started.analysis
+            {
+                analysis.kill();
+            }
+            ctx.request_repaint();
+        });
+        self.stage = Stage::Starting(receiver);
     }
 
     fn poll_run(&mut self) {
@@ -658,5 +785,118 @@ mod tests {
         // What the worker still sends is not taken any more.
         solve.poll(&ctx);
         assert_eq!(solve.outcome(), Some(Outcome::Stopped));
+    }
+
+    /// Polls the solve until it is done and returns the longest poll, the time the
+    /// project window's frame waits for it.
+    fn longest_poll(solve: &mut BackgroundSolve, ctx: &egui::Context) -> Duration {
+        let started = Instant::now();
+        let mut longest = Duration::ZERO;
+        while solve.active() {
+            assert!(started.elapsed() < Duration::from_secs(1800), "solve hangs");
+            let poll = Instant::now();
+            let stage = solve.state_text();
+            solve.poll(ctx);
+            let took = poll.elapsed();
+            if took > Duration::from_millis(20) {
+                eprintln!("poll while {stage}: {took:?}");
+            }
+            longest = longest.max(took);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        longest
+    }
+
+    /// How long submitting a large dynamic analysis blocks the frame, and what saving its
+    /// results costs: `NODALIS_SUBMIT_BENCH=60 cargo test --release -p plx-app
+    /// submit_bench -- --ignored --nocapture` (elements along the beam).
+    #[test]
+    #[ignore]
+    fn submit_bench() {
+        use crate::solver_check::{LENGTH, beam_mesh_divided, beam_model, faces_where};
+        let along: u32 = (std::env::var("NODALIS_SUBMIT_BENCH").ok())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(40);
+        let mesh = beam_mesh_divided([along, along / 5, along / 5]);
+        let tip = faces_where(&mesh, |p| p[0] == LENGTH);
+        let mut fe = beam_model(
+            &mesh,
+            plx_model::LoadKind::force([0.0, 0.0, -1.0]),
+            plx_model::Region::Faces(tip),
+        );
+        for material in &mut fe.materials {
+            material.density = Some(7.85e-9);
+        }
+        let mut dynamic = plx_model::Step::new_dynamic("Step-1");
+        dynamic.boundary_conditions = std::mem::take(&mut fe.steps[0].boundary_conditions);
+        dynamic.loads = std::mem::take(&mut fe.steps[0].loads);
+        if let plx_model::StepKind::Dynamic(d) = &mut dynamic.kind {
+            d.duration = 1e-3;
+            d.frames = 40;
+        }
+        fe.steps = vec![dynamic];
+        eprintln!("{} nodes", mesh.node_count());
+        let data = ProjectAnalysis {
+            id: 7,
+            name: "Beam 1".into(),
+            mesh,
+            model: fe,
+            ..Default::default()
+        };
+        let dir = std::env::temp_dir().join(format!("nodalis-submit-{}", std::process::id()));
+        let solver = Solver {
+            work_dir: dir.display().to_string(),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let project = dir.join("project.ndl");
+        let work_dir = dir.join("project").join("Beam_1");
+        let start = |data: ProjectAnalysis| {
+            let started = Instant::now();
+            let solve = BackgroundSolve::start(
+                &ctx,
+                project.clone(),
+                data,
+                solver.clone(),
+                work_dir.clone(),
+                Continuation::default(),
+                true,
+            );
+            eprintln!("start: {:?}", started.elapsed());
+            solve
+        };
+        let mut solve = start(data.clone());
+        let longest = longest_poll(&mut solve, &ctx);
+        let output = solve.output().join("\n");
+        assert_eq!(solve.outcome(), Some(Outcome::Solved), "{output}");
+        eprintln!("first solve: longest poll {longest:?}");
+        let results = solve
+            .take_solved()
+            .and_then(|s| s.results)
+            .expect("results");
+        eprintln!("results {} MB", results.stored_size() / 1_000_000);
+        let data = ProjectAnalysis {
+            results: Some(results),
+            ..data
+        };
+        let cloned = Instant::now();
+        let copy = data.clone();
+        eprintln!(
+            "copy of the analysis with its results: {:?}",
+            cloned.elapsed()
+        );
+        if let Ok(path) = std::env::var("NODALIS_SUBMIT_BENCH_SAVE") {
+            let project = plx_io::project::Project {
+                nodes: vec![plx_io::project::ProjectNode::Analysis(Box::new(
+                    data.clone(),
+                ))],
+                ..Default::default()
+            };
+            plx_io::project::save_project(std::path::Path::new(&path), &project).unwrap();
+        }
+        let mut again = start(copy);
+        let longest = longest_poll(&mut again, &ctx);
+        eprintln!("solve again: longest poll {longest:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
