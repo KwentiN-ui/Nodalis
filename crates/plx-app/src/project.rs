@@ -2337,6 +2337,7 @@ impl ProjectApp {
         settings.upgrade();
         settings.solver.apply_gpu();
         crate::results::set_significant_digits(settings.post.digits);
+        plx_results::values::set_budget(settings.post.results_memory_bytes());
         crate::style::set_theme(&cc.egui_ctx, settings.graphics.theme);
         plx_mesher::set_library_path(settings.gmsh.library());
         let units = crate::units_menu::first(settings.new_model.units);
@@ -8318,6 +8319,7 @@ impl ProjectApp {
         if new.graphics.theme != self.settings.graphics.theme {
             crate::style::set_theme(ctx, new.graphics.theme);
         }
+        plx_results::values::set_budget(new.post.results_memory_bytes());
         // The View tab owns these toggles; the window's copy may be older than a click there.
         let mut new = new;
         let live = &self.settings.graphics;

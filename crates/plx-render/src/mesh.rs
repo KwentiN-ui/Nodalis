@@ -69,6 +69,22 @@ pub struct RenderMesh {
 }
 
 impl RenderMesh {
+    /// Bytes the mesh takes in memory.
+    pub fn bytes(&self) -> usize {
+        fn of<T>(items: &Vec<T>) -> usize {
+            items.capacity() * std::mem::size_of::<T>()
+        }
+        of(&self.vertices)
+            + of(&self.triangles)
+            + of(&self.feature_edges)
+            + of(&self.mesh_edges)
+            + of(&self.wireframe_edges)
+            + of(&self.wide_edges)
+            + of(&self.glyphs)
+            + of(&self.origins)
+            + of(&self.directions)
+    }
+
     /// Adds another mesh to this one, e.g. a transformed copy of a part.
     pub fn append(&mut self, other: RenderMesh) {
         let base = self.vertices.len() as u32;
