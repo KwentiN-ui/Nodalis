@@ -268,10 +268,14 @@ pub(crate) fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeMod
 
 /// The beam as 10 x 2 x 2 quadratic hexahedra (C3D20R), x along the length.
 pub(crate) fn beam_mesh() -> FeMesh {
-    const DIVISIONS: [u32; 3] = [10, 2, 2];
+    beam_mesh_divided([10, 2, 2])
+}
+
+/// The beam of [`beam_mesh`] with the given number of C3D20R elements along x, y and z.
+pub(crate) fn beam_mesh_divided(divisions: [u32; 3]) -> FeMesh {
     let size = [LENGTH, WIDTH, HEIGHT];
     // Nodes on a lattice of half element size; the id encodes the lattice position.
-    let points = DIVISIONS.map(|d| 2 * d + 1);
+    let points = divisions.map(|d| 2 * d + 1);
     let id = |p: [u32; 3]| 1 + p[0] + points[0] * (p[1] + points[1] * p[2]);
     let mut mesh = FeMesh::default();
     let add = |mesh: &mut FeMesh, p: [u32; 3]| {
@@ -303,9 +307,9 @@ pub(crate) fn beam_mesh() -> FeMesh {
         [0, 2, 1],
     ];
     let mut elements = Vec::new();
-    for k in 0..DIVISIONS[2] {
-        for j in 0..DIVISIONS[1] {
-            for i in 0..DIVISIONS[0] {
+    for k in 0..divisions[2] {
+        for j in 0..divisions[1] {
+            for i in 0..divisions[0] {
                 let corner = [2 * i, 2 * j, 2 * k];
                 let nodes = LOCAL
                     .iter()
