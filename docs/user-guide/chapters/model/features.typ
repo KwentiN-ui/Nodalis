@@ -51,6 +51,20 @@ nodes of a picked edge, element or surface, for example the centre of a hole.
 
 #screenshot("shared-coordinate-system.png", [A coordinate system created in the Results, shown in the FE Model])
 
+=== Hiding features <hide-features>
+
+#ui("Hide") in the context menu of a reference point, coordinate system or plane removes it from
+the 3D view, #ui("Show") brings it back; the tree marks a hidden feature with an eye. With several
+features selected, the menu hides or shows all of them. #ui("Hide All") and #ui("Show All") in the
+context menu of #ui("Reference Points"), #ui("Coordinate Systems") or #ui("Planes") do this
+for the whole group. This works in the FE Model and in the Results
+workspace alike; as both share the features, a feature hidden in one is hidden in the other.
+A hidden feature is still drawn while it is selected, and the setting is saved with the project.
+Hiding changes only the view, as for symbols of boundary conditions (@hide-symbols).
+
+#screenshot("hide-reference-points.png", [Hidden reference points in the Results and the context
+  menu of Reference Points])
+
 === Coordinate systems <coordinate-systems>
 
 A coordinate system is given in a base system and either stays fixed in space or moves with a
