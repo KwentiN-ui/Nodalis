@@ -16,6 +16,7 @@
 //! period.
 
 use crate::{Component, Field, FieldRank, Increment, TensorKind};
+use std::sync::Arc;
 
 /// The suffix of the field of the amplitudes of a field.
 pub const AMPLITUDE: &str = "_AMPLITUDE";
@@ -55,18 +56,18 @@ fn complex_fields(increment: &Increment) -> Vec<String> {
 
 /// The raw components of `real` with those of the same name in `imaginary` (zero where it
 /// has none).
-fn pairs<'a>(
-    real: &'a Field,
-    imaginary: Option<&'a Field>,
-) -> Vec<(&'a Component, Option<&'a [f32]>)> {
+/// Each with its own values and those of its partner.
+type Pair<'a> = (&'a Component, Arc<[f32]>, Option<Arc<[f32]>>);
+
+fn pairs<'a>(real: &'a Field, imaginary: Option<&'a Field>) -> Vec<Pair<'a>> {
     (real.components.iter())
         .filter(|c| !c.derived)
         .map(|c| {
             let partner = imaginary
                 .and_then(|f| f.component(&c.name))
                 .filter(|p| p.values.len() == c.values.len())
-                .map(|p| p.values.as_slice());
-            (c, partner)
+                .map(|p| p.values.get());
+            (c, c.values.get(), partner)
         })
         .collect()
 }
@@ -78,13 +79,14 @@ pub fn at_phase(real: &Field, imaginary: Option<&Field>, phase: f32) -> Field {
     let (cos, sin) = (phase.cos(), phase.sin());
     let components = pairs(real, imaginary)
         .into_iter()
-        .map(|(c, b)| Component {
+        .map(|(c, a, b)| Component {
             values: match b {
-                Some(b) => (c.values.iter().zip(b))
+                Some(b) => (a.iter().zip(b.iter()))
                     .map(|(a, b)| a * cos - b * sin)
-                    .collect(),
-                None => c.values.iter().map(|a| a * cos).collect(),
-            },
+                    .collect::<Vec<f32>>(),
+                None => a.iter().map(|a| a * cos).collect(),
+            }
+            .into(),
             ..c.clone()
         })
         .collect();
@@ -121,18 +123,18 @@ fn mises_form(a: [f64; 6], b: [f64; 6]) -> f64 {
 /// period.
 pub fn amplitudes(real: &Field, imaginary: Option<&Field>) -> Field {
     let pairs = pairs(real, imaginary);
-    let count = pairs.first().map_or(0, |(c, _)| c.values.len());
+    let count = pairs.first().map_or(0, |(c, _, _)| c.values.len());
     let column = |k: usize, b: bool| -> Vec<f64> {
-        let (c, im) = &pairs[k];
+        let (_, re, im) = &pairs[k];
         match (b, im) {
-            (false, _) => c.values.iter().map(|&v| f64::from(v)).collect(),
+            (false, _) => re.iter().map(|&v| f64::from(v)).collect(),
             (true, Some(im)) => im.iter().map(|&v| f64::from(v)).collect(),
             (true, None) => vec![0.0; count],
         }
     };
     let derived = |name: &str, values: Vec<f32>| Component {
         name: name.to_string(),
-        values,
+        values: values.into(),
         derived: true,
         out_of_plane: false,
     };
@@ -180,14 +182,15 @@ pub fn amplitudes(real: &Field, imaginary: Option<&Field>) -> Field {
         }
         _ => {}
     }
-    components.extend(pairs.iter().map(|(c, b)| {
+    components.extend(pairs.iter().map(|(c, a, b)| {
         Component {
             values: match b {
-                Some(b) => (c.values.iter().zip(*b))
+                Some(b) => (a.iter().zip(b.iter()))
                     .map(|(a, b)| a.hypot(*b))
-                    .collect(),
-                None => c.values.iter().map(|a| a.abs()).collect(),
-            },
+                    .collect::<Vec<f32>>(),
+                None => a.iter().map(|a| a.abs()).collect(),
+            }
+            .into(),
             ..(*c).clone()
         }
     }));
@@ -204,18 +207,18 @@ pub fn amplitudes(real: &Field, imaginary: Option<&Field>) -> Field {
 pub fn phases(real: &Field, imaginary: Option<&Field>) -> Field {
     let pairs = pairs(real, imaginary);
     let largest = (pairs.iter())
-        .flat_map(|(c, b)| {
-            (c.values.iter().enumerate()).map(move |(i, a)| a.hypot(b.map_or(0.0, |b| b[i])))
+        .flat_map(|(_, a, b)| {
+            (a.iter().enumerate()).map(move |(i, a)| a.hypot(b.as_ref().map_or(0.0, |b| b[i])))
         })
         .filter(|v| v.is_finite())
         .fold(0.0_f32, f32::max);
     let tiny = 1e-3 * largest;
     let components = pairs
         .iter()
-        .map(|(c, b)| Component {
-            values: (c.values.iter().enumerate())
+        .map(|(c, a, b)| Component {
+            values: (a.iter().enumerate())
                 .map(|(i, &a)| {
-                    let b = b.map_or(0.0, |b| b[i]);
+                    let b = b.as_ref().map_or(0.0, |b| b[i]);
                     if !(a.is_finite() && b.is_finite()) {
                         f32::NAN
                     } else if a.hypot(b) <= tiny {
@@ -224,7 +227,8 @@ pub fn phases(real: &Field, imaginary: Option<&Field>) -> Field {
                         -b.atan2(a).to_degrees()
                     }
                 })
-                .collect(),
+                .collect::<Vec<f32>>()
+                .into(),
             ..(*c).clone()
         })
         .collect();
@@ -265,7 +269,7 @@ mod tests {
     fn component(name: &str, values: Vec<f32>) -> Component {
         Component {
             name: name.into(),
-            values,
+            values: values.into(),
             derived: false,
             out_of_plane: false,
         }
@@ -318,18 +322,18 @@ mod tests {
         let names: Vec<&str> = increment.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["DISP_AMPLITUDE", "DISP_PHASE", "DISP", "DISPI"]);
         let amplitude = increment.field("DISP_AMPLITUDE").unwrap();
-        assert_eq!(amplitude.component("U1").unwrap().values, [2.0, 1.0]);
-        assert_eq!(amplitude.component("U2").unwrap().values, [0.0, 1.0]);
+        assert_eq!(amplitude.component("U1").unwrap().values, [2.0, 1.0].into());
+        assert_eq!(amplitude.component("U2").unwrap().values, [0.0, 1.0].into());
         // The circle has the radius 1 at every moment.
         let all = &amplitude.component("ALL").unwrap().values;
         assert!(
-            (all[0] - 2.0).abs() < 1e-6 && (all[1] - 1.0).abs() < 1e-6,
+            (all.get()[0] - 2.0).abs() < 1e-6 && (all.get()[1] - 1.0).abs() < 1e-6,
             "{all:?}"
         );
         let phase = increment.field("DISP_PHASE").unwrap();
         // b = -1: y = sin Ωt = cos(Ωt - 90°), a quarter period behind the load.
-        assert_eq!(phase.component("U2").unwrap().values, [0.0, 90.0]);
-        assert_eq!(phase.component("U1").unwrap().values, [0.0, 0.0]);
+        assert_eq!(phase.component("U2").unwrap().values, [0.0, 90.0].into());
+        assert_eq!(phase.component("U1").unwrap().values, [0.0, 0.0].into());
     }
 
     #[test]
@@ -340,9 +344,9 @@ mod tests {
         let quarter = at_phase(real, im, std::f32::consts::FRAC_PI_2);
         let u1 = &quarter.component("U1").unwrap().values;
         let u2 = &quarter.component("U2").unwrap().values;
-        assert!(u1.iter().all(|v| v.abs() < 1e-6), "{u1:?}");
-        assert!((u2[1] - 1.0).abs() < 1e-6, "{u2:?}");
-        assert!((quarter.component("ALL").unwrap().values[1] - 1.0).abs() < 1e-6);
+        assert!(u1.get().iter().all(|v| v.abs() < 1e-6), "{u1:?}");
+        assert!((u2.get()[1] - 1.0).abs() < 1e-6, "{u2:?}");
+        assert!((quarter.component("ALL").unwrap().values.get()[1] - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -365,10 +369,10 @@ mod tests {
         let peak = (0..3600)
             .map(|k| {
                 let field = at_phase(&real, Some(&im), k as f32 * 0.1_f32.to_radians());
-                field.component("MISES").unwrap().values[0]
+                field.component("MISES").unwrap().values.get()[0]
             })
             .fold(0.0, f32::max);
-        let mises = amplitude.component("MISES").unwrap().values[0];
+        let mises = amplitude.component("MISES").unwrap().values.get()[0];
         assert!((mises - peak).abs() < 1e-4, "{mises} vs {peak}");
     }
 }

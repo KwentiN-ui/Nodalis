@@ -998,7 +998,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         let disp = results.increments.last().unwrap().field("DISP").unwrap();
         let values = &disp.component("U3").unwrap().values;
-        Some(-values.iter().copied().fold(f32::MAX, f32::min))
+        Some(-values.get().iter().copied().fold(f32::MAX, f32::min))
     }
 
     /// The largest displacement along x CalculiX computes, if ccx is installed.
@@ -1016,6 +1016,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         let disp = results.increments.last().unwrap().field("DISP").unwrap();
         let values = &disp.component("U1").unwrap().values;
-        Some(values.iter().copied().fold(f32::MIN, f32::max))
+        Some(values.get().iter().copied().fold(f32::MIN, f32::max))
     }
 }

@@ -20,7 +20,7 @@
 //! table ([`Table`], postcard) at the end, so that a writer streams the chunks out as it
 //! compresses them and writes the table last. All numbers are little endian.
 
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use rayon::prelude::*;
 use serde::de::DeserializeOwned;
@@ -310,6 +310,190 @@ pub fn unpack<T: Packable>(magic: &[u8; 8], bytes: &[u8]) -> Result<T, PackError
     }
 }
 
+/// A source of the bytes of a container that [`Archive`] reads parts of.
+pub trait Source: std::io::Read + Seek + Send {}
+
+impl<T: std::io::Read + Seek + Send> Source for T {}
+
+/// Where a dataset is in the container.
+#[derive(Debug)]
+struct Located {
+    encoding: Encoding,
+    size: usize,
+    /// Offset of its first chunk from the start of the container.
+    at: u64,
+    chunks: Vec<u32>,
+}
+
+/// A container opened for reading its datasets one by one, as they are wanted, instead of
+/// all of it at once ([`unpack`]): the memory it takes is the table, and of a dataset read,
+/// its bytes while they are decoded. The arrays are numbered from 0 in the order of
+/// [`Packable::arrays`]; the skeleton is not among them.
+pub struct Archive {
+    source: std::sync::Mutex<Box<dyn Source>>,
+    /// Where the container starts in the source.
+    start: u64,
+    skeleton: Located,
+    arrays: Vec<Located>,
+}
+
+impl std::fmt::Debug for Archive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Archive")
+            .field("arrays", &self.arrays.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Archive {
+    /// Opens the container behind `magic` that starts at the current position of `source`:
+    /// reads its table, not its datasets.
+    pub fn open(magic: &[u8; 8], mut source: Box<dyn Source>) -> Result<Self, PackError> {
+        let error = |message: &str| PackError(message.to_owned());
+        let io = |e: std::io::Error| PackError(format!("results not readable: {e}"));
+        let start = source.stream_position().map_err(io)?;
+        let mut header = [0u8; 16];
+        source
+            .read_exact(&mut header)
+            .map_err(|_| error("results cut short"))?;
+        if &header[..8] != magic.as_slice() {
+            return Err(error("not results of this Nodalis version: solve again"));
+        }
+        let table_at = u64::from_le_bytes(header[8..].try_into().unwrap_or_default());
+        let end = source.seek(SeekFrom::End(0)).map_err(io)?;
+        if table_at < 16 || start + table_at > end {
+            return Err(error("results cut short"));
+        }
+        source.seek(SeekFrom::Start(start + table_at)).map_err(io)?;
+        let mut table = Vec::new();
+        source.read_to_end(&mut table).map_err(io)?;
+        let table: Table = postcard::from_bytes(&table)
+            .map_err(|e| PackError(format!("results not readable: {e}")))?;
+        let mut at = start + 16;
+        let mut located = Vec::with_capacity(table.datasets.len());
+        for dataset in table.datasets {
+            let size = usize::try_from(dataset.size).map_err(|_| error("results too large"))?;
+            let chunk = dataset.encoding.chunk();
+            if dataset.chunks.len() != size.div_ceil(chunk) || size > CHUNK * dataset.chunks.len() {
+                return Err(error("results not readable: chunks do not match"));
+            }
+            let length: u64 = dataset.chunks.iter().map(|&c| u64::from(c)).sum();
+            located.push(Located {
+                encoding: dataset.encoding,
+                size,
+                at,
+                chunks: dataset.chunks,
+            });
+            at += length;
+        }
+        if at > start + table_at {
+            return Err(error("results cut short"));
+        }
+        let mut datasets = located.into_iter();
+        let skeleton = datasets.next().ok_or_else(|| error("results are empty"))?;
+        Ok(Self {
+            source: std::sync::Mutex::new(source),
+            start,
+            skeleton,
+            arrays: datasets.collect(),
+        })
+    }
+
+    /// Opens the container `bytes` in memory.
+    pub fn from_bytes(magic: &[u8; 8], bytes: Vec<u8>) -> Result<Self, PackError> {
+        Self::open(magic, Box::new(std::io::Cursor::new(bytes)))
+    }
+
+    /// The number of arrays.
+    pub fn len(&self) -> usize {
+        self.arrays.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.arrays.is_empty()
+    }
+
+    /// Where the container starts in its source.
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    /// The stored value with all its arrays empty; [`Archive::read`] fills them in.
+    pub fn skeleton<T: Packable>(&self) -> Result<T, PackError> {
+        let bytes = self.bytes(&self.skeleton)?;
+        let mut value: T = postcard::from_bytes(&bytes)
+            .map_err(|e| PackError(format!("results not readable: {e}")))?;
+        let mut count = 0;
+        value.arrays(&mut |_| count += 1);
+        if count != self.arrays.len() {
+            return Err(PackError(
+                "results not readable: the arrays do not match".into(),
+            ));
+        }
+        Ok(value)
+    }
+
+    /// The skeleton with all its arrays read: what [`unpack`] gives.
+    pub fn read_all<T: Packable>(&self) -> Result<T, PackError> {
+        let mut value: T = self.skeleton()?;
+        let mut failed = None;
+        let mut index = 0;
+        value.arrays(&mut |array| {
+            if failed.is_none()
+                && let Err(e) = self.read(index, array)
+            {
+                failed = Some(e);
+            }
+            index += 1;
+        });
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(value),
+        }
+    }
+
+    /// Reads array `index` into `array`, which must be of its type.
+    pub fn read(&self, index: usize, array: Array<'_>) -> Result<(), PackError> {
+        let located = (self.arrays.get(index))
+            .ok_or_else(|| PackError("results not readable: an array is missing".into()))?;
+        let bytes = self.bytes(located)?;
+        put_bytes(array, located.encoding, &bytes)
+    }
+
+    /// The bytes of a dataset: its chunks read in one go, decompressed in parallel.
+    fn bytes(&self, located: &Located) -> Result<Vec<u8>, PackError> {
+        let length: usize = located.chunks.iter().map(|&c| c as usize).sum();
+        let mut compressed = vec![0; length];
+        {
+            let mut source = self.source.lock().unwrap_or_else(|e| e.into_inner());
+            (source.seek(SeekFrom::Start(located.at)))
+                .and_then(|_| source.read_exact(&mut compressed))
+                .map_err(|e| PackError(format!("results not readable: {e}")))?;
+        }
+        let mut out = vec![0; located.size];
+        let mut jobs: Vec<(&[u8], &mut [u8])> = Vec::with_capacity(located.chunks.len());
+        let mut rest = compressed.as_slice();
+        for (target, &length) in (out.chunks_mut(located.encoding.chunk())).zip(&located.chunks) {
+            let (chunk, after) = rest.split_at(length as usize);
+            rest = after;
+            jobs.push((chunk, target));
+        }
+        let encoding = located.encoding;
+        jobs.into_par_iter().try_for_each(|(compressed, target)| {
+            let shuffled = zstd::bulk::decompress(compressed, target.len())
+                .map_err(|e| PackError(format!("results not readable: {e}")))?;
+            if shuffled.len() != target.len() {
+                return Err(PackError(
+                    "results not readable: a chunk is cut short".into(),
+                ));
+            }
+            unshuffle(&shuffled, encoding.width(), target);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+}
+
 /// A Zstandard compressor at [`LEVEL`] whose frames carry a checksum, so that a damaged
 /// file is noticed instead of read as other values.
 fn compressor() -> Option<zstd::bulk::Compressor<'static>> {
@@ -577,6 +761,34 @@ mod tests {
                 "flipped at {at}"
             );
         }
+    }
+
+    #[test]
+    fn an_archive_reads_single_arrays() {
+        let original = results(300_001);
+        let bytes = pack(MAGIC, original.clone());
+        let mut prefixed = b"prefix".to_vec();
+        prefixed.extend(&bytes);
+        let mut source = std::io::Cursor::new(prefixed);
+        source.set_position(6);
+        let archive = Archive::open(MAGIC, Box::new(source)).unwrap();
+        assert_eq!(archive.start(), 6);
+        let skeleton: Results = archive.skeleton().unwrap();
+        assert!(skeleton.increments[0].fields[0].nodes.is_empty());
+        assert_eq!(skeleton.increments[0].fields[0].values.len(), 3);
+        // Arrays: DISP nodes, its three columns, EMPTY nodes and column, then the modes.
+        let mut column = Vec::new();
+        archive.read(2, Array::F64(&mut column)).unwrap();
+        assert_eq!(column, original.increments[0].fields[0].values[1]);
+        let mut ids = Vec::new();
+        archive.read(0, Array::Ids(&mut ids)).unwrap();
+        assert_eq!(ids, original.increments[0].fields[0].nodes);
+        assert!(archive.read(2, Array::Ids(&mut ids)).is_err(), "wrong type");
+        assert!(archive.read(99, Array::Ids(&mut ids)).is_err());
+        let all: Results = archive.read_all().unwrap();
+        assert!(same_bits(&all, &original));
+        assert!(Archive::from_bytes(b"OTHERMAG", bytes.clone()).is_err());
+        assert!(Archive::from_bytes(MAGIC, bytes[..bytes.len() / 2].to_vec()).is_err());
     }
 
     #[test]

@@ -570,8 +570,10 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
                 time,
                 ..
             } = if solver_results {
-                // Taken from memory as the solver left them, without a `.frd` file to parse.
-                let solved = plx_results::SolverResults::read(path).map_err(|e| e.to_string())?;
+                // Without a `.frd` file to parse: the mesh is read now, the fields from the
+                // file when they are wanted, so that the results need not fit into memory.
+                let (solved, file) =
+                    plx_results::SolverResults::open(path).map_err(|e| e.to_string())?;
                 step_records = Some((
                     solved.steps.clone(),
                     solved.convergence.clone(),
@@ -579,7 +581,7 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
                 ));
                 let input = companion_input(path).and_then(|p| std::fs::read_to_string(p).ok());
                 solver_history = Some(plx_io::solver::history(&solved, input.as_deref()));
-                plx_io::solver::import(&solved)
+                plx_io::solver::import_from(&solved, file)
             } else {
                 read_frd(path).map_err(|e| format!("{}: {e}", path.display()))?
             };
@@ -3701,7 +3703,7 @@ mod tests {
         // the hole raises the peak, CalculiX's extrapolation keeps it below a few times that.
         let stress = results.increments.last().unwrap().field("STRESS").unwrap();
         let sxx = &stress.component("S11").unwrap().values;
-        let max = sxx.iter().copied().fold(f32::MIN, f32::max);
+        let max = sxx.get().iter().copied().fold(f32::MIN, f32::max);
         assert!(max > 300.0 && max < 1500.0, "largest stress {max}");
     }
 
@@ -4117,7 +4119,7 @@ S
         let results = read_frd(&dir.join("membran.frd")).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let disp = results.increments.last().unwrap().field("DISP").unwrap();
-        let sag = (disp.component("U3").unwrap().values.iter())
+        let sag = (disp.component("U3").unwrap().values.get().iter())
             .copied()
             .fold(0.0f32, f32::min);
         // Centre deflection of a clamped circular plate: q a^4 / (64 D).

@@ -122,8 +122,13 @@ pub struct Run {
     name: String,
     work_dir: PathBuf,
     output: Arc<Mutex<Vec<String>>>,
-    /// The results, once the solver has finished with some.
+    /// The results, once the solver has finished with some, unless they are not kept in
+    /// memory ([`Run::keep_results_in_memory`]).
     solved: Arc<Mutex<Option<Arc<SolverResults>>>>,
+    /// Whether the results are kept in memory besides their file.
+    keep: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether results were written to the results file.
+    written: Arc<std::sync::atomic::AtomicBool>,
     live: LiveProgress,
     cancel: CancelToken,
     handle: Option<JoinHandle<Finished>>,
@@ -472,6 +477,9 @@ impl Run {
         };
         let solved = Arc::new(Mutex::new(None));
         let keep_results = Arc::clone(&solved);
+        let keep = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let written = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (keeping, writing) = (Arc::clone(&keep), Arc::clone(&written));
         let results_file = work_dir.join(format!("{name}.{}", plx_results::solver::EXTENSION));
         let diagnostics = Arc::new(Mutex::new(None));
         let found = Arc::clone(&diagnostics);
@@ -537,8 +545,11 @@ impl Run {
                     drop_preparation_steps(&mut results, &preparation);
                     match results.write(&results_file) {
                         Ok(()) => {
-                            *keep_results.lock().unwrap_or_else(|e| e.into_inner()) =
-                                Some(Arc::new(results));
+                            writing.store(true, std::sync::atomic::Ordering::Release);
+                            if keeping.load(std::sync::atomic::Ordering::Acquire) {
+                                *keep_results.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(Arc::new(results));
+                            }
                         }
                         Err(error) => say(format!(
                             "*ERROR: results not written to {}: {error}",
@@ -609,6 +620,8 @@ impl Run {
             work_dir: work_dir.to_owned(),
             output,
             solved,
+            keep,
+            written,
             live: LiveProgress::default(),
             cancel,
             handle: Some(handle),
@@ -707,6 +720,16 @@ impl Run {
         self.file(plx_results::solver::EXTENSION)
     }
 
+    /// Whether the results stay in memory besides their file, for [`Run::solver_results`]:
+    /// by default they do. Results that are shown are read from their file, field by field
+    /// as they are wanted, and need not be kept.
+    pub fn keep_results_in_memory(&self, keep: bool) {
+        self.keep.store(keep, std::sync::atomic::Ordering::Release);
+        if !keep {
+            *self.solved.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+
     /// The results in memory, once the solver has finished with some.
     pub fn solver_results(&self) -> Option<Arc<SolverResults>> {
         if self.status == JobStatus::Running {
@@ -731,11 +754,7 @@ impl Run {
 
     fn results_written(&self) -> bool {
         self.status != JobStatus::Running
-            && self
-                .solved
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_some()
+            && self.written.load(std::sync::atomic::Ordering::Acquire)
             && self.results_file().is_file()
     }
 
@@ -746,12 +765,7 @@ impl Run {
         let finished = handle.join().unwrap_or(Finished::Error);
         self.awake = None;
         // A model check computes no results.
-        let results = !self.check
-            && self
-                .solved
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_some();
+        let results = !self.check && self.written.load(std::sync::atomic::Ordering::Acquire);
         if self.check && finished == Finished::Done {
             self.status = JobStatus::Completed;
             return;
@@ -852,6 +866,37 @@ S
 *END STEP
 ";
 
+    /// Asserts that the results opened from the `.ndlr` file, whose fields are read when
+    /// they are wanted, are those in memory.
+    fn assert_lazy_reads_the_same(path: &std::path::Path, solved: &SolverResults) {
+        let (opened, file) = SolverResults::open(path).unwrap();
+        let lazy = plx_results::solver::from_source(&opened, file);
+        let eager = plx_results::from_solver(solved);
+        assert_eq!(lazy.mesh.node_count(), eager.mesh.node_count());
+        assert_eq!(lazy.increments.len(), eager.increments.len());
+        for (a, b) in lazy.increments.iter().zip(&eager.increments) {
+            assert_eq!((a.step, a.increment, a.kind), (b.step, b.increment, b.kind));
+            let names = |i: &plx_results::Increment| -> Vec<String> {
+                (i.fields.iter())
+                    .flat_map(|f| {
+                        f.components
+                            .iter()
+                            .map(move |c| format!("{}.{}", f.name, c.name))
+                    })
+                    .collect()
+            };
+            assert_eq!(names(a), names(b));
+            for (fa, fb) in a.fields.iter().zip(&b.fields) {
+                for (ca, cb) in fa.components.iter().zip(&fb.components) {
+                    assert!(ca.values.is_lazy());
+                    let (va, vb) = (ca.values.get(), cb.values.get());
+                    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                    assert_eq!(bits(&va), bits(&vb), "{}.{}", fa.name, ca.name);
+                }
+            }
+        }
+    }
+
     #[test]
     fn built_in_run_keeps_the_results_in_memory() {
         let dir = std::env::temp_dir().join(format!("plx-solve-{}", std::process::id()));
@@ -873,10 +918,11 @@ S
         assert_eq!(import.mesh.node_count(), 8);
         let disp = import.increments[0].field("DISP").unwrap();
         let u1 = disp.component("U1").unwrap();
-        assert!(u1.values.iter().all(|v| v.is_finite()));
-        assert!(u1.values.iter().any(|&v| v > 0.0));
+        assert!(u1.values.get().iter().all(|v| v.is_finite()));
+        assert!(u1.values.get().iter().any(|&v| v > 0.0));
         let read = SolverResults::read(&run.file("ndlr")).unwrap();
         assert_eq!(read, *solved);
+        assert_lazy_reads_the_same(&run.file("ndlr"), &solved);
         assert!(run.file("inp").is_file());
         assert!(run.file("sta").is_file());
         // Every run measures where its time went, with the size of the model.
@@ -886,6 +932,18 @@ S
         assert_eq!(profile.degrees_of_freedom, 24);
         assert!(profile.phases.count(Phase::Assembly) > 0);
         assert!(profile.total >= profile.writing);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn results_need_not_stay_in_memory() {
+        let dir = std::env::temp_dir().join(format!("plx-solve-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut run = Run::start(1, &dir, "Cube", CUBE).unwrap();
+        run.keep_results_in_memory(false);
+        assert_eq!(run.wait(), JobStatus::Completed);
+        assert!(run.solver_results().is_none());
+        assert_eq!(run.results(), Some(run.file("ndlr")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -947,6 +1005,7 @@ S
         // What `.ndlr` keeps reads back the same.
         let read = SolverResults::read(&run.file("ndlr")).unwrap();
         assert_eq!(read, *solved);
+        assert_lazy_reads_the_same(&run.file("ndlr"), &solved);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1207,7 +1266,7 @@ S
             .unwrap()
             .values
             .clone();
-        assert!(u1.iter().any(|&v| v > 0.0), "{u1:?}");
+        assert!(u1.get().iter().any(|&v| v > 0.0), "{u1:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

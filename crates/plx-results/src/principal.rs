@@ -211,7 +211,7 @@ impl VectorSource {
 
     /// The raw components the directions follow from, per node: x, y, z of a vector or the
     /// six components of a tensor. `None` if the increment has no such field.
-    pub fn raw_values<'a>(&self, increment: &'a Increment) -> Option<Vec<&'a [f32]>> {
+    pub fn raw_values(&self, increment: &Increment) -> Option<Vec<std::sync::Arc<[f32]>>> {
         let field = increment.field(self.field())?;
         let raw = field.raw_values();
         let fits = match self {
@@ -345,7 +345,7 @@ mod tests {
     fn increment() -> Increment {
         let column = |name: &str, values: [f32; 2]| Component {
             name: name.into(),
-            values: values.to_vec(),
+            values: values.to_vec().into(),
             derived: false,
             out_of_plane: false,
         };

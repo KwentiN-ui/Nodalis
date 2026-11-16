@@ -41,15 +41,12 @@ pub fn split_rotations(mut field: Field) -> Vec<Field> {
 /// the principal values last. Which ones follows from the field's rank.
 pub fn add_derived_components(field: &mut Field) {
     field.components.retain(|c| !c.derived && c.name != "ALL");
-    let base: Vec<&[f32]> = field
-        .components
-        .iter()
-        .map(|c| c.values.as_slice())
-        .collect();
+    let base: Vec<std::sync::Arc<[f32]>> =
+        field.components.iter().map(|c| c.values.get()).collect();
     let count = base.first().map_or(0, |c| c.len());
     let derived = |name: &str, values: Vec<f32>| Component {
         name: name.to_string(),
-        values,
+        values: values.into(),
         derived: true,
         out_of_plane: false,
     };
@@ -135,7 +132,7 @@ mod tests {
                 .iter()
                 .map(|&(n, v)| Component {
                     name: n.into(),
-                    values: vec![v],
+                    values: vec![v].into(),
                     derived: false,
                     out_of_plane: false,
                 })
@@ -144,7 +141,7 @@ mod tests {
     }
 
     fn value(field: &Field, name: &str) -> f32 {
-        field.component(name).unwrap().values[0]
+        field.component(name).unwrap().values.get()[0]
     }
 
     #[test]

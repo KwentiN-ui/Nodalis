@@ -835,6 +835,30 @@ impl BoundResults {
             })
     }
 
+    /// The results of the built-in solver opened in memory, to read their fields when they
+    /// are wanted ([`plx_results::SolverResults::open`]); `None` for results of CalculiX.
+    #[allow(clippy::type_complexity)]
+    pub fn open_solver_results(
+        &self,
+    ) -> Result<
+        Option<(
+            plx_results::SolverResults,
+            std::sync::Arc<plx_results::solver::ResultsFile>,
+        )>,
+        ProjectError,
+    > {
+        let Some(file) = &self.solver else {
+            return Ok(None);
+        };
+        let bytes = unpack(file, Path::new(&file.name))?;
+        plx_results::SolverResults::open_bytes(bytes)
+            .map(Some)
+            .map_err(|e| ProjectError::Format {
+                path: PathBuf::from(&file.name),
+                message: e.to_string(),
+            })
+    }
+
     /// The text of the bound file with extension `extension`, such as the input file.
     pub fn text(&self, extension: &str) -> Option<String> {
         let file = self.files.iter().find(|f| {
@@ -865,11 +889,12 @@ impl BoundResults {
     /// Reads the results in memory: those of the built-in solver directly, those of CalculiX
     /// from their files written into `dir` first.
     pub fn read(&self, dir: &Path) -> Result<ReadResults, String> {
-        if let Some(solved) = self.solver_results().map_err(|e| e.to_string())? {
+        if let Some((solved, file)) = self.open_solver_results().map_err(|e| e.to_string())? {
             let input = self.text("inp");
             let history = crate::solver::history(&solved, input.as_deref());
             return Ok(ReadResults {
-                results: crate::solver::import(&solved),
+                // The fields are read from the file in memory when they are wanted.
+                results: crate::solver::import_from(&solved, file),
                 history,
                 input,
             });

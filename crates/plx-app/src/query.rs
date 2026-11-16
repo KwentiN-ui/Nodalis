@@ -927,7 +927,7 @@ fn field_value(model: &Model, node: NodeId) -> Option<(String, String)> {
     let view = model.results.as_ref()?;
     let (field, component) = view.current()?;
     let index = model.mesh().node_index(node)?;
-    let value = *component.values.get(index)?;
+    let value = component.values.at(index)?;
     let unit = field_unit(&field.name, &component.name, view.units).unwrap_or_default();
     Some((format_value(value), unit))
 }
@@ -953,7 +953,8 @@ fn node_lines(model: &Model, node: NodeId) -> Vec<String> {
             .and_then(|increment| increment.field("DISP"))
             .and_then(|field| {
                 let index = model.mesh().node_index(node)?;
-                let component = |name: &str| field.component(name).map_or(0.0, |c| c.values[index]);
+                let component =
+                    |name: &str| field.component(name).map_or(0.0, |c| c.values.get()[index]);
                 Some(DVec3::new(
                     component("U1") as f64,
                     component("U2") as f64,
@@ -1046,7 +1047,7 @@ fn field_extremes(model: &Model, nodes: &[NodeId]) -> Option<((f32, NodeId), (f3
     let (_, component) = model.results.as_ref()?.current()?;
     let mut extremes: Option<((f32, NodeId), (f32, NodeId))> = None;
     for &node in nodes {
-        let Some(&value) = (model.mesh().node_index(node)).and_then(|i| component.values.get(i))
+        let Some(value) = (model.mesh().node_index(node)).and_then(|i| component.values.at(i))
         else {
             continue;
         };
@@ -1195,7 +1196,8 @@ fn base_and_deformed(model: &Model, node: NodeId) -> Option<(DVec3, Option<DVec3
         let increment = view.current_increment()?;
         let field = increment.field("DISP")?;
         let index = model.mesh().node_index(node)?;
-        let component = |name: &str| field.component(name).map_or(0.0, |c| c.values[index]) as f64;
+        let component =
+            |name: &str| field.component(name).map_or(0.0, |c| c.values.get()[index]) as f64;
         Some(base + DVec3::new(component("U1"), component("U2"), component("U3")))
     });
     Some((base, deformed))

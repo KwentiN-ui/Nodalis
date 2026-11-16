@@ -13,7 +13,8 @@ fn value(import: &FrdImport, field: &str, component: &str, node: u32) -> f32 {
         .unwrap()
         .component(component)
         .unwrap()
-        .values[index]
+        .values
+        .get()[index]
 }
 
 #[test]
@@ -109,7 +110,7 @@ fn binary_frd(import: &FrdImport, components: &[(&str, &str)], size: usize) -> V
         out.extend(format!(" -5  {frd_name:<8}    1    2{:>5}    0\n", k + 1).bytes());
     }
     out.extend(b" -5  ALL         1    2    0    0    1ALL\n");
-    let columns: Vec<&[f32]> = components
+    let columns: Vec<std::sync::Arc<[f32]>> = components
         .iter()
         .map(|(field, name)| {
             import.increments[0]
@@ -118,7 +119,7 @@ fn binary_frd(import: &FrdImport, components: &[(&str, &str)], size: usize) -> V
                 .component(name)
                 .unwrap()
                 .values
-                .as_slice()
+                .get()
         })
         .collect();
     for (index, &id) in mesh.node_ids().iter().enumerate() {

@@ -201,7 +201,7 @@ fn component_values(frd: &FrdImport, field: &str, component: &str, nodes: &[Node
         .last()
         .and_then(|i| i.field(field))
         .and_then(|f| f.component(component))
-        .map(|c| &c.values)
+        .map(|c| c.values.get())
     else {
         return vec![f64::NAN];
     };

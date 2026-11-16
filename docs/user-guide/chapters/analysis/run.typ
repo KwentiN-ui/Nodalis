@@ -232,6 +232,22 @@ file is about 30 % smaller than without compression and opens just as fast. The 
 keeps this file as it is, without compressing it again, so keeping large results in the project
 takes a fraction of a second.
 
+Results need not fit into memory. Opening them reads the mesh and the list of increments and
+fields only; the values of a field are read from the file when it is shown or used, a field
+at a time and with all its components. Fields read recently stay in memory for going back and
+forth between increments, up to 2 GB together; beyond that the ones used longest ago are dropped
+and read again when they are wanted. The values are read in the background: while they are, the
+status bar shows #ui("Reading results …") and the view keeps showing what it showed before. An
+increment animation first reads the displacements of all its frames, for the scale of the
+deformation. Results of a dynamic step with 400 frames and 44,000 nodes (a 2.8 GB results file)
+open in a tenth of a second with less than 30 MB of memory, where reading them as a whole took
+12 seconds and 6.8 GB.
+
+#figure(
+  image("../../images/results-reading.png", width: 70%),
+  caption: [The status bar while the displacements of an animation are read],
+)
+
 When an analysis with kept results is opened, Nodalis writes them to `Kept_Results` in the
 folder of the analysis and opens the results in the Results workspace. The project schematic
 and the app bar of the analysis show whether they are still up to date. Measure blocks,

@@ -68,7 +68,7 @@ pub fn evaluate_expanded(
             .ok_or_else(|| format!("step {step} has no field {field} in the results"))?;
         let values = (increment.field(field).and_then(|f| f.component(component)))
             .ok_or_else(|| format!("{field} has no component {component}"))?;
-        Ok::<_, String>(&values.values)
+        Ok::<_, String>(values.values.get())
     };
     match kind {
         MeasureKind::FieldValues {

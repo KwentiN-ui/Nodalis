@@ -208,23 +208,22 @@ fn from_field(
         {
             return Err(format!("The result {field}.{name} exists in no increment."));
         }
-        let entries = nodes
-            .iter()
-            .zip(&indices)
-            .map(|(id, index)| HistoryEntry {
+        // Increment by increment, so that each is read once.
+        let mut entries: Vec<HistoryEntry> = (nodes.iter())
+            .map(|id| HistoryEntry {
                 name: id.to_string(),
-                values: increments
-                    .iter()
-                    .map(|inc| {
-                        let values = inc.field(field).and_then(|f| f.component(name));
-                        match (values, index) {
-                            (Some(c), Some(i)) => c.values.get(*i).map_or(f64::NAN, |&v| v as f64),
-                            _ => f64::NAN,
-                        }
-                    })
-                    .collect(),
+                values: Vec::with_capacity(increments.len()),
             })
             .collect();
+        for inc in increments {
+            let values = (inc.field(field).and_then(|f| f.component(name))).map(|c| c.values.get());
+            for (entry, index) in entries.iter_mut().zip(&indices) {
+                entry.values.push(match (&values, index) {
+                    (Some(c), Some(i)) => c.get(*i).map_or(f64::NAN, |&v| v as f64),
+                    _ => f64::NAN,
+                });
+            }
+        }
         result.push(HistoryComponent {
             name: name.clone(),
             entries,

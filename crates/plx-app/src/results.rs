@@ -165,7 +165,11 @@ pub struct ResultsView {
     model_size: f64,
     /// [`max_deformation`] of each increment, once asked for: the toolbar wants it every frame
     /// and an increment animation for all its frames.
-    deformation_peaks: Vec<std::cell::OnceCell<Option<f32>>>,
+    /// Shared with the thread that finds them for an increment animation ahead, see
+    /// [`ResultsView::pending`].
+    deformation_peaks: std::sync::Arc<Vec<std::sync::OnceLock<Option<f32>>>>,
+    /// Whether a thread is finding the peaks of an increment animation.
+    peaks_job: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Several mode shapes overlaid at one moment, each scaled by its level and swinging at its
@@ -272,14 +276,17 @@ impl ResultsView {
             vector_display: Default::default(),
             units: UnitSystem::default(),
             model_size: bounds.map_or(1.0, model_size),
-            deformation_peaks: Vec::new(),
+            deformation_peaks: Default::default(),
+            peaks_job: Default::default(),
             harmonic_phase: 0.0,
             harmonic_cache: Default::default(),
         };
         view.mode_amplitude = round_significant(0.25 * view.model_size, 2);
-        view.deformation_peaks = (view.increments.iter())
-            .map(|_| Default::default())
-            .collect();
+        view.deformation_peaks = std::sync::Arc::new(
+            (view.increments.iter())
+                .map(|_| Default::default())
+                .collect(),
+        );
         view.increment = view.default_increment();
         view.contact =
             (view.increments.iter()).any(|i| i.fields.iter().any(|f| f.name == "CONTACT"));
@@ -1004,6 +1011,96 @@ impl ResultsView {
         }
     }
 
+    /// The values of what is shown that are still to be read from the results file: of the
+    /// shown field and the deformation in the shown increment and in the one an animation
+    /// blends towards. Read ahead on threads of their own ([`plx_results::Values::prefetch`])
+    /// while the scene stays as it is; the peak deformations an increment animation scales
+    /// by are found on a thread too. Empty when everything is at hand.
+    pub fn pending(&self) -> Vec<plx_results::Values> {
+        let mut pending = Vec::new();
+        let shown = self.current().map(|(field, _)| field.name.as_str());
+        let mut add = |increment: &Increment| {
+            let fields = (shown.and_then(|name| increment.field(name)).into_iter())
+                .chain(increment.deformation_field())
+                .chain(increment.field(plx_results::solver::MODE_PHASES));
+            for field in fields {
+                if let Some(component) = field.components.first()
+                    && !component.values.is_ready()
+                {
+                    pending.push(component.values.clone());
+                }
+            }
+        };
+        if let Some(increment) = self.current_increment() {
+            add(increment);
+        }
+        if let Some((next, _)) = self.interpolation() {
+            add(next);
+        }
+        pending
+    }
+
+    /// Whether what is shown waits for values from the results file: asks for them to be
+    /// read ahead (see [`ResultsView::pending`]), and the scene is built once they are.
+    pub fn loading(&self) -> bool {
+        let pending = self.pending();
+        for values in &pending {
+            values.prefetch();
+        }
+        let peaks = match &self.animation {
+            Some(animation)
+                if animation.kind.plays_increments()
+                    && self.peaks_missing(&animation.increments) =>
+            {
+                self.find_peaks(&animation.increments);
+                true
+            }
+            _ => false,
+        };
+        !pending.is_empty() || peaks
+    }
+
+    fn peaks_missing(&self, increments: &[usize]) -> bool {
+        (increments.iter())
+            .any(|&i| (self.deformation_peaks.get(i)).is_some_and(|p| p.get().is_none()))
+    }
+
+    /// Finds the peak deformations of `increments` on a thread, one increment after the
+    /// other, unless a thread does already.
+    fn find_peaks(&self, increments: &[usize]) {
+        use std::sync::atomic::Ordering;
+        if self.peaks_job.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let jobs: Vec<(usize, Increment)> = (increments.iter())
+            .filter(|&&i| {
+                self.deformation_peaks
+                    .get(i)
+                    .is_some_and(|p| p.get().is_none())
+            })
+            .filter_map(|&i| Some((i, self.increments.get(i)?.clone())))
+            .collect();
+        let (peaks, running) = (self.deformation_peaks.clone(), self.peaks_job.clone());
+        let spawned = std::thread::Builder::new()
+            .name("deformation peaks".into())
+            .spawn(move || {
+                for (index, increment) in jobs {
+                    // Results closed or replaced meanwhile.
+                    if std::sync::Arc::strong_count(&peaks) == 1 {
+                        break;
+                    }
+                    if let Some(peak) = peaks.get(index) {
+                        peak.get_or_init(|| max_deformation(&increment));
+                    }
+                }
+                running.store(false, Ordering::Release);
+                plx_results::values::loaded();
+            });
+        if spawned.is_err() {
+            self.peaks_job.store(false, Ordering::Release);
+        }
+    }
+
     /// Whether a mode is shown (or several overlaid): its shape is scaled arbitrarily, so it
     /// has a deformation setting of its own, [`ResultsView::mode_deformation`].
     pub fn shows_mode(&self) -> bool {
@@ -1120,15 +1217,30 @@ impl ResultsView {
     /// `u_k = MAG_k cos(phase + PHA_k)` per node.
     fn whirl_displacements(phase: f32, field: &Field) -> Vec<[f32; 3]> {
         let nodes = field.component("MAG1").map_or(0, |c| c.values.len());
+        let columns = Self::whirl_columns(field);
         (0..nodes)
-            .map(|i| Self::whirl_displacement(phase, field, i))
+            .map(|i| Self::whirl_at(phase, &columns, i))
             .collect()
+    }
+
+    /// The magnitudes and phases of a whirling mode, `MAG1`, `PHA1`, `MAG2`...
+    fn whirl_columns(field: &Field) -> [Option<std::sync::Arc<[f32]>>; 6] {
+        ["MAG1", "PHA1", "MAG2", "PHA2", "MAG3", "PHA3"]
+            .map(|name| field.component(name).map(|c| c.values.get()))
     }
 
     /// [`Self::whirl_displacements`] of one node.
     fn whirl_displacement(phase: f32, field: &Field, node: usize) -> [f32; 3] {
-        let value = |name: &str| field.component(name).map_or(f32::NAN, |c| c.values[node]);
-        [("MAG1", "PHA1"), ("MAG2", "PHA2"), ("MAG3", "PHA3")].map(|(mag, pha)| {
+        Self::whirl_at(phase, &Self::whirl_columns(field), node)
+    }
+
+    fn whirl_at(phase: f32, columns: &[Option<std::sync::Arc<[f32]>>; 6], node: usize) -> [f32; 3] {
+        let value = |k: usize| {
+            (columns[k].as_ref())
+                .and_then(|c| c.get(node).copied())
+                .unwrap_or(f32::NAN)
+        };
+        [(0, 1), (2, 3), (4, 5)].map(|(mag, pha)| {
             let (m, p) = (value(mag), value(pha));
             if m.is_finite() && p.is_finite() {
                 m * (phase + p.to_radians()).cos()
@@ -1171,16 +1283,16 @@ impl ResultsView {
                 .fold(0.0, |peak, (_, v)| f32::max(peak, v))
         };
         match component.name.as_str() {
-            "U1" => Some((-peak(magnitude[0]), peak(magnitude[0]))),
-            "U2" => Some((-peak(magnitude[1]), peak(magnitude[1]))),
-            "U3" => Some((-peak(magnitude[2]), peak(magnitude[2]))),
+            "U1" => Some((-peak(&magnitude[0].get()), peak(&magnitude[0].get()))),
+            "U2" => Some((-peak(&magnitude[1].get()), peak(&magnitude[1].get()))),
+            "U3" => Some((-peak(&magnitude[2].get()), peak(&magnitude[2].get()))),
             "ALL" => {
                 let norm = (0..magnitude[0].len())
                     .filter(|&i| !self.is_plain(i))
                     .map(|i| {
                         [0, 1, 2]
                             .iter()
-                            .map(|&k| magnitude[k][i].powi(2))
+                            .map(|&k| magnitude[k].get()[i].powi(2))
                             .sum::<f32>()
                     })
                     .filter(|v| v.is_finite())
@@ -1226,7 +1338,9 @@ impl ResultsView {
                     && plx_results::harmonic::add_amplitudes(increment)
                 {
                     added = true;
-                    if let Some(peak) = self.deformation_peaks.get_mut(index) {
+                    if let Some(peak) =
+                        std::sync::Arc::make_mut(&mut self.deformation_peaks).get_mut(index)
+                    {
                         *peak = Default::default();
                     }
                 }
@@ -1297,7 +1411,7 @@ impl ResultsView {
     fn harmonic_values(&self) -> Option<Vec<f32>> {
         let field = self.harmonic_field()?;
         let (_, component) = self.current()?;
-        Some(field.component(&component.name)?.values.clone())
+        Some(field.component(&component.name)?.values.to_vec())
     }
 
     /// The displacements at the shown phase angle of a steady state step.
@@ -1307,21 +1421,24 @@ impl ResultsView {
         let real = increment.field("DISP")?;
         let imaginary = plx_results::harmonic::imaginary(increment, "DISP");
         let (cos, sin) = (phase.cos(), phase.sin());
-        fn column<'a>(field: Option<&'a Field>, name: &str) -> Option<&'a [f32]> {
+        fn column(field: Option<&Field>, name: &str) -> Option<std::sync::Arc<[f32]>> {
             field
                 .and_then(|f| f.component(name))
-                .map(|c| c.values.as_slice())
+                .map(|c| c.values.get())
         }
         let [a, b] = [Some(real), imaginary].map(|f| ["U1", "U2", "U3"].map(|n| column(f, n)));
-        let nodes = a[0].map_or(0, <[f32]>::len);
+        let nodes = a[0].as_ref().map_or(0, |c| c.len());
         Some(
             (0..nodes)
                 .map(|i| {
                     [0, 1, 2].map(|k| {
-                        let value = |c: Option<&[f32]>| {
-                            c.and_then(|c| c.get(i)).copied().filter(|v| v.is_finite())
+                        let value = |c: &Option<std::sync::Arc<[f32]>>| {
+                            c.as_ref()
+                                .and_then(|c| c.get(i))
+                                .copied()
+                                .filter(|v| v.is_finite())
                         };
-                        value(a[k]).unwrap_or(0.0) * cos - value(b[k]).unwrap_or(0.0) * sin
+                        value(&a[k]).unwrap_or(0.0) * cos - value(&b[k]).unwrap_or(0.0) * sin
                     })
                 })
                 .collect(),
@@ -1345,7 +1462,7 @@ impl ResultsView {
             ))
             .and_then(|f| f.component(&component.name));
         if all_frames && let Some(amplitude) = amplitude {
-            let (_, peak) = self.range_of(&amplitude.values)?;
+            let (_, peak) = self.range_of(&amplitude.values.get())?;
             return Some(if component.is_invariant() {
                 (0.0, peak)
             } else {
@@ -1523,7 +1640,7 @@ impl ResultsView {
             Some(["U1", "U2", "U3"].map(|n| {
                 field
                     .component(n)
-                    .and_then(|c| c.values.get(node).copied())
+                    .and_then(|c| c.values.at(node))
                     .filter(|v| v.is_finite())
                     .unwrap_or(0.0)
             }))
@@ -1561,20 +1678,29 @@ impl ResultsView {
             return Some(std::borrow::Cow::Owned(values));
         }
         if let Some((towards, fraction)) = self.interpolated_component() {
-            let blended = (component.values.iter().zip(&towards.values))
-                .map(|(&a, &b)| {
-                    if a.is_finite() && b.is_finite() {
-                        a + fraction * (b - a)
-                    } else {
-                        a
-                    }
-                })
-                .collect();
+            let blended = (component
+                .values
+                .get()
+                .iter()
+                .zip(towards.values.get().iter()))
+            .map(|(&a, &b)| {
+                if a.is_finite() && b.is_finite() {
+                    a + fraction * (b - a)
+                } else {
+                    a
+                }
+            })
+            .collect();
             return Some(std::borrow::Cow::Owned(blended));
         }
         let amplitude = self.value_amplitude();
         Some(std::borrow::Cow::Owned(
-            component.values.iter().map(|v| v * amplitude).collect(),
+            component
+                .values
+                .get()
+                .iter()
+                .map(|v| v * amplitude)
+                .collect(),
         ))
     }
 
@@ -1638,7 +1764,7 @@ impl ResultsView {
 
     /// Range of a component over the results and all transformed copies.
     fn component_range(&self, field: &Field, component: usize) -> Option<(f32, f32)> {
-        let mut range = self.range_of(&field.components.get(component)?.values);
+        let mut range = self.range_of(&field.components.get(component)?.values.get());
         let mut rotations: Vec<DMat3> = Vec::new();
         for instance in self.instances().iter().skip(1) {
             let q = instance.matrix3;
@@ -1978,9 +2104,10 @@ pub fn convert_results(mesh: &mut FeMesh, increments: &mut [Increment], units: U
     for field in increments.iter_mut().flat_map(|i| i.fields.iter_mut()) {
         for component in &mut field.components {
             if let Some(measure) = field_measure(&field.name, &component.name) {
-                for value in &mut component.values {
-                    *value = shown_value(f64::from(*value), measure, units) as f32;
-                }
+                // Values read from the results file are converted as they are read.
+                component
+                    .values
+                    .map(move |value| shown_value(f64::from(value), measure, units) as f32);
             }
         }
     }
@@ -2019,7 +2146,8 @@ fn max_deformation(increment: &Increment) -> Option<f32> {
     {
         let [x, y, z] = ["U1", "U2", "U3"].map(|n| field.component(n));
         if let (Some(x), Some(y), Some(z)) = (x, y, z) {
-            let peak = (x.values.iter().zip(&y.values).zip(&z.values))
+            let (y, z) = (y.values.get(), z.values.get());
+            let peak = (x.values.get().iter().zip(y.iter()).zip(z.iter()))
                 .map(|((a, b), c)| a * a + b * b + c * c)
                 .filter(|v| v.is_finite())
                 .fold(0.0, f32::max);
@@ -2203,9 +2331,9 @@ mod tests {
             .field("DISP_CS_1")
             .expect("copy in step 1");
         let u = |c: &str| turned.component(c).unwrap().values.clone();
-        assert_eq!(u("U1"), [2.0; 2]);
-        assert_eq!(u("U2"), [-1.0; 2]);
-        assert_eq!(u("U3"), [3.0; 2]);
+        assert_eq!(u("U1"), [2.0; 2].into());
+        assert_eq!(u("U2"), [-1.0; 2].into());
+        assert_eq!(u("U3"), [3.0; 2].into());
         // The global results stay; the second step has no system.
         assert!(view.increments[0].field("DISP").is_some());
         assert!(view.increments[1].field("DISP_CS_1").is_none());
@@ -2234,7 +2362,7 @@ mod tests {
             "STRESS",
             vec![Component {
                 name: "SXX".into(),
-                values: vec![2.5e8],
+                values: vec![2.5e8].into(),
                 derived: false,
                 out_of_plane: false,
             }],
@@ -2242,9 +2370,9 @@ mod tests {
         convert_results(&mut mesh, &mut increments, UnitSystem::MmTonSC);
         assert_eq!(mesh.coords()[0], [1000.0, 500.0, 0.0]);
         let disp = increments[0].field("DISP").unwrap();
-        assert!((disp.components[0].values[0] - 1.0).abs() < 1e-5);
+        assert!((disp.components[0].values.get()[0] - 1.0).abs() < 1e-5);
         let stress = increments[0].field("STRESS").unwrap();
-        assert!((stress.components[0].values[0] - 250.0).abs() < 1e-3);
+        assert!((stress.components[0].values.get()[0] - 250.0).abs() < 1e-3);
     }
 
     #[test]
@@ -2516,7 +2644,7 @@ mod tests {
         let mut increment = increment(3, 1, AnalysisKind::ComplexFrequency, &[[0.0, 2.0, 0.0]]);
         let column = |name: &str, value: f32| Component {
             name: name.into(),
-            values: vec![value],
+            values: vec![value].into(),
             derived: false,
             out_of_plane: false,
         };

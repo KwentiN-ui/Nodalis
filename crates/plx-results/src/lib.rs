@@ -18,6 +18,7 @@ pub mod saved_view;
 pub mod solver;
 pub mod steps;
 pub mod transformation;
+pub mod values;
 
 pub use derived::{add_derived_components, principal_values, split_rotations};
 pub use equation::Equation;
@@ -25,6 +26,7 @@ pub use field_output::{FieldOutput, FieldOutputKind, LimitBasis};
 pub use principal::{Principal, VectorSource};
 pub use solver::{SolverResults, from_solver};
 pub use transformation::{Transformation, TransformationKind};
+pub use values::{LazyField, Values};
 
 use serde::{Deserialize, Serialize};
 
@@ -152,7 +154,9 @@ impl AnalysisKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Component {
     pub name: String,
-    pub values: Vec<f32>,
+    /// One value per node of the result mesh, in memory or read from the results file when
+    /// wanted, see [`values`].
+    pub values: Values,
     /// Computed by nodalis rather than read from the file.
     pub derived: bool,
     /// An out-of-plane component of a 2D model, zero everywhere: the built-in solver leaves
@@ -175,6 +179,7 @@ impl Component {
     /// Smallest and largest finite value, if any.
     pub fn range(&self) -> Option<(f32, f32)> {
         self.values
+            .get()
             .iter()
             .copied()
             .filter(|v| v.is_finite())
@@ -250,10 +255,10 @@ impl Field {
     }
 
     /// The values of the raw components, in their order.
-    pub fn raw_values(&self) -> Vec<&[f32]> {
+    pub fn raw_values(&self) -> Vec<std::sync::Arc<[f32]>> {
         (self.components.iter())
             .filter(|c| !c.derived)
-            .map(|c| c.values.as_slice())
+            .map(|c| c.values.get())
             .collect()
     }
 
@@ -298,11 +303,11 @@ impl Increment {
         let field = self.deformation_field()?;
         let [x, y, z] = ["U1", "U2", "U3"].map(|n| field.component(n));
         let (x, y, z) = (x?, y?, z?);
+        let (x, y, z) = (x.values.get(), y.values.get(), z.values.get());
         Some(
-            x.values
-                .iter()
-                .zip(&y.values)
-                .zip(&z.values)
+            x.iter()
+                .zip(y.iter())
+                .zip(z.iter())
                 .map(|((&x, &y), &z)| [x, y, z].map(|v| if v.is_finite() { v } else { 0.0 }))
                 .collect(),
         )

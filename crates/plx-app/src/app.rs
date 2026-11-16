@@ -158,6 +158,8 @@ struct Workbench {
     view_command: Option<ViewCommand>,
     /// The result selection or deformation changed; the scene must be rebuilt.
     results_changed: bool,
+    /// The scene waits for values read from the results file in the background.
+    results_reading: bool,
     /// The highlight of the shown scene changed, drawn differently on these parts: only
     /// their meshes are rebuilt, so that a click in a large assembly doesn't build all parts
     /// anew. Without any, only the highlighted nodes and lines over the scene changed.
@@ -347,6 +349,7 @@ impl AnalysisWindow {
                 analysis_tab: false,
                 view_command: None,
                 results_changed: false,
+                results_reading: false,
                 highlight_changed: None,
                 frame_changed: false,
                 frame_cache: Default::default(),
@@ -1047,6 +1050,11 @@ impl AnalysisWindow {
         if let Some(status) = crate::save_status::get(ui.ctx()) {
             ui.spinner();
             ui.label(status);
+            ui.separator();
+        }
+        if self.workbench.results_reading {
+            ui.spinner();
+            ui.label("Reading results …");
             ui.separator();
         }
         ui.horizontal(|ui| match (&self.loading, self.workbench.shown()) {
@@ -7725,8 +7733,20 @@ impl Workbench {
         self.results_changed = true;
     }
 
-    /// Rebuilds the scene after the result selection or deformation changed.
+    /// Rebuilds the scene after the result selection or deformation changed, once the
+    /// values it shows are read from the results file: until then the scene stays as it
+    /// was, and the values are read in the background.
     fn rebuild_if_results_changed(&mut self) {
+        let changed =
+            self.results_changed || self.frame_changed || self.highlight_changed.is_some();
+        self.results_reading = changed
+            && self.tree_view == TreeView::Results
+            && (self.results.get(self.current_result))
+                .and_then(|model| model.results.as_ref())
+                .is_some_and(|view| view.loading());
+        if self.results_reading {
+            return;
+        }
         let highlighted = self.highlight_changed.take();
         if !(self.results_changed || self.frame_changed)
             && let Some(parts) = highlighted

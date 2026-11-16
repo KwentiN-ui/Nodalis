@@ -223,10 +223,7 @@ pub fn transformed_values(field: &Field, index: usize, q: DMat3) -> Option<Vec<f
     if q == DMat3::IDENTITY {
         return None;
     }
-    let raw: Vec<&[f32]> = (field.components.iter())
-        .filter(|c| !c.derived)
-        .map(|c| c.values.as_slice())
-        .collect();
+    let raw = field.raw_values();
     // Row-major access to q: q.col(j)[i] is the element in row i, column j.
     let at = |row: usize, column: usize| q.col(column)[row];
     match component_kind(field, index) {
@@ -271,7 +268,7 @@ mod tests {
                 .iter()
                 .map(|&(name, value)| Component {
                     name: name.into(),
-                    values: vec![value],
+                    values: vec![value].into(),
                     derived: false,
                     out_of_plane: false,
                 })
