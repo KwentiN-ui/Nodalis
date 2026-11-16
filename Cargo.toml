@@ -24,7 +24,6 @@ plx-solve = { path = "crates/plx-solve" }
 plxs-core = { path = "solver/plxs-core" }
 plxs-input = { path = "solver/plxs-input" }
 plxs-verify = { path = "solver/plxs-verify" }
-plxs-cli = { path = "solver/plxs-cli" }
 plxs-linalg = { path = "solver/plxs-linalg" }
 plxs-elements = { path = "solver/plxs-elements" }
 plxs-materials = { path = "solver/plxs-materials" }
