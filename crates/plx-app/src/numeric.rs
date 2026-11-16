@@ -155,6 +155,9 @@ pub fn fitted(
             })
         };
         let response = ui.add(field);
+        if !editing && response.has_focus() {
+            select_all(ui, response.id);
+        }
         let tip = match shown.take() {
             Some((value, text)) if text != format_physical(value) => {
                 format!("{}{affix} (shown rounded)\n{tip}", format_physical(value))
@@ -170,6 +173,21 @@ pub fn fitted(
         }
     })
     .inner
+}
+
+/// Selects all text of the field `id` that just took the focus, so a click into it can be
+/// typed over, as in every other number field. The [`egui::DragValue`] selects only as many
+/// characters as it showed, which were the shortened ones of [`fitted`], while it is typed in
+/// with all digits; the end is clamped to the text.
+fn select_all(ui: &egui::Ui, id: egui::Id) {
+    let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0),
+            egui::text::CCursor::new(u32::MAX as usize),
+        )));
+    state.store(ui.ctx(), id);
 }
 
 /// The tooltip of a disabled field. egui's own one looks for the pointer in the layer of the
