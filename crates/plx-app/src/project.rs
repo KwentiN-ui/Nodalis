@@ -2317,6 +2317,9 @@ impl ProjectApp {
         crate::crash_log::watch_gpu(&render_state.device);
         crate::style::apply(&cc.egui_ctx);
         crate::solve_fingerprint::repaint_with(&cc.egui_ctx);
+        // Fields read from results files in the background are drawn once they are read.
+        let ctx = cc.egui_ctx.clone();
+        plx_results::values::on_loaded(move || ctx.request_repaint());
         (cc.egui_ctx).add_plugin(crate::screenshot::ImmediateCapture::new(
             render_state.clone(),
         ));

@@ -1198,7 +1198,11 @@ pub fn solved_contacts(
             .rev()
             .find_map(|i| i.field("CONTACT"))
     });
-    let component = |name: &str| field.and_then(|f| f.component(name)).map(|c| &c.values);
+    let component = |name: &str| {
+        field
+            .and_then(|f| f.component(name))
+            .map(|c| c.values.get())
+    };
     let (pressure, open) = (component("CPRESS"), component("COPEN"));
     let shear = [component("CSHEAR1"), component("CSHEAR2")];
     (fe.contact_regions.iter().zip(&resolved.items))
@@ -1206,7 +1210,7 @@ pub fn solved_contacts(
             let ResolvedKind::Pair { friction, .. } = &resolved.kind else {
                 return None;
             };
-            let pressure = pressure?;
+            let pressure = pressure.as_ref()?;
             let slave = if resolved.a_is_master {
                 &region.side_b
             } else {
@@ -1225,7 +1229,7 @@ pub fn solved_contacts(
                     continue;
                 };
                 solved.slave_nodes += 1;
-                let value = |values: Option<&Vec<f32>>| {
+                let value = |values: Option<&std::sync::Arc<[f32]>>| {
                     values
                         .and_then(|v| v.get(index).copied())
                         .filter(|v| v.is_finite())
@@ -1235,12 +1239,12 @@ pub fn solved_contacts(
                 if p > 0.0 {
                     solved.in_contact += 1;
                     solved.max_pressure = solved.max_pressure.max(p);
-                    let tau = value(shear[0]).hypot(value(shear[1]));
+                    let tau = value(shear[0].as_ref()).hypot(value(shear[1].as_ref()));
                     if mu.is_some_and(|mu| tau >= 0.98 * mu * p) {
                         solved.sliding += 1;
                     }
                 } else {
-                    solved.max_open = solved.max_open.max(value(open));
+                    solved.max_open = solved.max_open.max(value(open.as_ref()));
                 }
             }
             Some(solved)
@@ -1740,7 +1744,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         let disp = results.increments.last().unwrap().field("DISP").unwrap();
         let values = &disp.component(component).unwrap().values;
-        Some(-values.iter().copied().fold(f32::MAX, f32::min))
+        Some(-values.get().iter().copied().fold(f32::MAX, f32::min))
     }
 
     /// A block 10 x 10 x 10 standing on a plate 40 x 40 x 5, two solids that only touch.

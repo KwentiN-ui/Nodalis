@@ -402,7 +402,7 @@ pub fn stage_linked_results(
     Ok(Some(InitialTemperatures {
         source: format!("step {step} of {}", file.display()),
         values: (results.mesh.node_ids().iter().copied())
-            .zip(temperatures.values.iter().map(|&t| f64::from(t)))
+            .zip(temperatures.values.get().iter().map(|&t| f64::from(t)))
             .collect(),
     }))
 }

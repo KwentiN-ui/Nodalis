@@ -87,7 +87,7 @@ fn increment(step: u32, number: u32, value: f64, nodes: usize) -> Increment {
             component("ALL", 4.0, true),
         ],
     );
-    disp.components[0].values[0] = f32::NAN;
+    disp.components[0].values.make_mut()[0] = f32::NAN;
     Increment {
         nodal_diameter: None,
         step,

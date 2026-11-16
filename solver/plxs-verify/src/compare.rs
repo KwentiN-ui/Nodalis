@@ -435,7 +435,7 @@ pub fn compare_frd_with(
                 .components
                 .iter()
                 .filter(|c| !c.derived)
-                .map(|c| to_f64(&c.values))
+                .map(|c| to_f64(&c.values.get()))
                 .collect();
             let floor = largest(raw.iter().map(|v| v.as_slice()))
                 .max(noise.get(&rf.name).map_or(0.0, |n| n / tolerance));
@@ -449,8 +449,8 @@ pub fn compare_frd_with(
                 }
                 c.values(
                     &format!("{label}: {} {}", rf.name, rc.name),
-                    &to_f64(&rc.values),
-                    &to_f64(&kc.values),
+                    &to_f64(&rc.values.get()),
+                    &to_f64(&kc.values.get()),
                     tolerance,
                     floor,
                 );
@@ -479,11 +479,11 @@ fn compare_complex_mode(
         let mut out = Vec::new();
         let mags: Vec<Vec<f64>> = ["MAG1", "MAG2", "MAG3"]
             .iter()
-            .map(|n| field.component(n).map(|c| to_f64(&c.values)))
+            .map(|n| field.component(n).map(|c| to_f64(&c.values.get())))
             .collect::<Option<_>>()?;
         let phases: Vec<Vec<f64>> = ["PHA1", "PHA2", "PHA3"]
             .iter()
-            .map(|n| field.component(n).map(|c| to_f64(&c.values)))
+            .map(|n| field.component(n).map(|c| to_f64(&c.values.get())))
             .collect::<Option<_>>()?;
         for node in 0..mags[0].len() {
             for k in 0..3 {
@@ -542,7 +542,7 @@ fn compare_complex_mode(
     if let Some(disp) = reference.field("DISP") {
         let values: Option<Vec<Vec<f64>>> = ["D1", "D2", "D3"]
             .iter()
-            .map(|n| disp.component(n).map(|c| to_f64(&c.values)))
+            .map(|n| disp.component(n).map(|c| to_f64(&c.values.get())))
             .collect();
         if let Some(values) = values {
             let reference_re: Vec<f64> = (0..values[0].len())
@@ -574,7 +574,7 @@ fn compare_magnitude_phase(
         f.components
             .iter()
             .filter(|c| !c.derived)
-            .map(|c| to_f64(&c.values))
+            .map(|c| to_f64(&c.values.get()))
             .collect()
     };
     let (r, k) = (parts(reference), parts(candidate));
@@ -648,7 +648,7 @@ fn compare_sensitivities(
                 if undetermined.contains(&format!("{} {}", rf.name, rc.name)) {
                     continue;
                 }
-                let (rv, kv) = (to_f64(&rc.values), to_f64(&kc.values));
+                let (rv, kv) = (to_f64(&rc.values.get()), to_f64(&kc.values.get()));
                 let scale = scale_of(&rv);
                 c.values(
                     &format!(
@@ -678,7 +678,7 @@ fn compare_sensitivities(
         let mut total: Option<Vec<f64>> = None;
         for increment in increments {
             let field = increment.fields.iter().find(|f| f.name == "SENFREQ")?;
-            let values = to_f64(&field.component("DFDN")?.values);
+            let values = to_f64(&field.component("DFDN")?.values.get());
             match &mut total {
                 Some(t) if t.len() == values.len() => {
                     t.iter_mut().zip(&values).for_each(|(a, b)| *a += b)
@@ -778,7 +778,7 @@ fn compare_mode_cluster(
         let field = i.fields.iter().find(|f| f.name == "DISP")?;
         let mut v = Vec::new();
         for comp in field.components.iter().filter(|c| !c.derived) {
-            v.extend(comp.values.iter().map(|&x| f64::from(x)));
+            v.extend(comp.values.get().iter().map(|&x| f64::from(x)));
         }
         Some(v)
     };
@@ -865,7 +865,7 @@ fn compare_mode_cluster(
                 .iter()
                 .filter_map(|i| field(i, &rf.name))
                 .flat_map(|g| g.components.iter().filter(|c| !c.derived))
-                .map(|c| to_f64(&c.values))
+                .map(|c| to_f64(&c.values.get()))
                 .collect::<Vec<_>>()
                 .iter()
                 .map(|v| v.as_slice()),
@@ -880,7 +880,7 @@ fn compare_mode_cluster(
                 .map(|i| {
                     field(i, &rf.name)?
                         .component(&rc.name)
-                        .map(|c| to_f64(&c.values))
+                        .map(|c| to_f64(&c.values.get()))
                 })
                 .collect::<Option<Vec<_>>>()
             else {
@@ -895,7 +895,7 @@ fn compare_mode_cluster(
                 .map(|i| {
                     field(i, &rf.name)?
                         .component(&rc.name)
-                        .map(|c| to_f64(&c.values))
+                        .map(|c| to_f64(&c.values.get()))
                 })
                 .collect::<Option<Vec<_>>>()
             else {
@@ -937,7 +937,7 @@ fn raw_values(i: &Increment, name: &str) -> Option<Vec<f64>> {
     let field = i.fields.iter().find(|f| f.name == name)?;
     let mut v = Vec::new();
     for comp in field.components.iter().filter(|c| !c.derived) {
-        v.extend(comp.values.iter().map(|&x| f64::from(x)));
+        v.extend(comp.values.get().iter().map(|&x| f64::from(x)));
     }
     Some(v)
 }
@@ -1037,7 +1037,7 @@ fn compare_cyclic_mode(
                 .iter()
                 .chain(ri.iter().flat_map(|f| f.components.iter()))
                 .filter(|c| !c.derived)
-                .map(|c| to_f64(&c.values))
+                .map(|c| to_f64(&c.values.get()))
                 .collect::<Vec<_>>()
                 .iter()
                 .map(|v| v.as_slice()),
@@ -1048,13 +1048,15 @@ fn compare_cyclic_mode(
                 continue;
             }
             let component = |f: &Option<plx_results::Field>| -> Option<Vec<f64>> {
-                f.as_ref()?.component(&rc.name).map(|c| to_f64(&c.values))
+                f.as_ref()?
+                    .component(&rc.name)
+                    .map(|c| to_f64(&c.values.get()))
             };
-            let Some(k_re) = kf.component(&rc.name).map(|c| to_f64(&c.values)) else {
+            let Some(k_re) = kf.component(&rc.name).map(|c| to_f64(&c.values.get())) else {
                 c.fail(format!("{label}: {name} has no component {}", rc.name));
                 continue;
             };
-            let r_re = to_f64(&rc.values);
+            let r_re = to_f64(&rc.values.get());
             let k_im = component(&ki).unwrap_or_else(|| vec![0.0; k_re.len()]);
             if k_re.len() != r_re.len() || k_im.len() != r_re.len() {
                 c.fail(format!("{label}: {name} {} differs in size", rc.name));

@@ -285,11 +285,9 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
             }
             let noun = view.current_step().map_or("Increment", |s| s.entry_noun());
             rows.push((noun, view.entry_label(view.increment)));
+            let values = component.values.get();
             let extreme = |pick_max: bool| {
-                component
-                    .values
-                    .iter()
-                    .enumerate()
+                (values.iter().copied().enumerate())
                     .filter(|(_, v)| v.is_finite())
                     .reduce(|a, b| {
                         let better = if pick_max { b.1 > a.1 } else { b.1 < a.1 };
@@ -299,7 +297,7 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
             for (label, pick_max) in [("Maximum", true), ("Minimum", false)] {
                 if let Some((index, value)) = extreme(pick_max) {
                     let node = mesh.node_ids()[index];
-                    rows.push((label, format!("{} (node {node})", format_value(*value))));
+                    rows.push((label, format!("{} (node {node})", format_value(value))));
                 }
             }
             rows.push((

@@ -752,7 +752,7 @@ impl FeatureDialog {
             ui.weak("Select a component in the Results tree.");
             return;
         };
-        let values = path::interpolate(points, &component.values);
+        let values = path::interpolate(points, &component.values.get());
         let header = format!("{} {}", field.name, component.name);
         let inside = values.iter().filter(|v| v.is_finite()).count();
         ui.horizontal(|ui| {

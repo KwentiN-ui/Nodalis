@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use plx_mesh::FeMesh;
 
@@ -165,8 +166,8 @@ fn node_limits(
     Ok(node_limit)
 }
 
-fn component<'a>(increment: &'a Increment, field: &str, component: &str) -> Option<&'a [f32]> {
-    Some(&increment.field(field)?.component(component)?.values)
+fn component(increment: &Increment, field: &str, component: &str) -> Option<Arc<[f32]>> {
+    Some(increment.field(field)?.component(component)?.values.get())
 }
 
 /// The raw components of a vector or tensor field in local directions given per node; `None`
@@ -214,7 +215,7 @@ fn moved_source(source: &Field, motion: &plx_model::RigidMotion, mesh: &FeMesh) 
     for (n, p) in mesh.coords().iter().enumerate() {
         let carried = motion.point(*p);
         for (k, &c) in raw.iter().enumerate() {
-            if let Some(value) = moved.components[c].values.get_mut(n) {
+            if let Some(value) = moved.components[c].values.make_mut().get_mut(n) {
                 *value -= (carried[k] - p[k]) as f32;
             }
         }
@@ -316,11 +317,12 @@ fn transformed_field(source: &Field, name: &str, rotations: &[[[f64; 3]; 3]]) ->
     let components = (source.components.iter())
         .zip(&kinds)
         .map(|(component, kind)| {
+            let own = component.values.get();
             let rotated = |n: usize| {
                 let q = &rotations[n];
                 let value = |k: usize| raw[k][n] as f64;
                 match *kind {
-                    ComponentKind::Scalar => component.values[n] as f64,
+                    ComponentKind::Scalar => own[n] as f64,
                     ComponentKind::Vector(row) => (0..3).map(|k| q[row][k] * value(k)).sum(),
                     ComponentKind::Tensor(row, column) => {
                         let mut sum = 0.0;
@@ -339,7 +341,7 @@ fn transformed_field(source: &Field, name: &str, rotations: &[[[f64; 3]; 3]]) ->
             let out_of_plane = component.out_of_plane && values.iter().all(|v| *v == 0.0);
             Component {
                 name: component.name.clone(),
-                values,
+                values: values.into(),
                 derived: component.derived,
                 out_of_plane,
             }
@@ -360,7 +362,7 @@ fn new_field(name: &str, components: Vec<(&str, Vec<f32>)>) -> Field {
             .into_iter()
             .map(|(n, values)| Component {
                 name: n.to_string(),
-                values,
+                values: values.into(),
                 derived: true,
                 out_of_plane: false,
             })
@@ -412,7 +414,7 @@ pub fn compute(
             field,
             component: name,
         } => {
-            let sources: Vec<&[f32]> = increments
+            let sources: Vec<Arc<[f32]>> = increments
                 .iter()
                 .filter_map(|inc| component(inc, field, name))
                 .collect();
@@ -473,7 +475,7 @@ pub fn compute(
             increments
                 .iter()
                 .map(|inc| {
-                    let sources: Vec<&[f32]> = names
+                    let sources: Vec<Arc<[f32]>> = names
                         .iter()
                         .map(|(f, c)| component(inc, f, c))
                         .collect::<Option<_>>()?;
@@ -574,9 +576,9 @@ fn principal_field(name: &str, tensors: &[[f64; 6]], which: Principal) -> Field 
         }
     }
     let [all, x, y, z, value] = columns;
-    let component = |name: &str, values, derived| Component {
+    let component = |name: &str, values: Vec<f32>, derived| Component {
         name: name.to_string(),
-        values,
+        values: values.into(),
         derived,
         out_of_plane: false,
     };
@@ -647,12 +649,13 @@ mod tests {
         }
     }
 
-    fn values<'a>(inc: &'a Increment, field: &str, component: &str) -> &'a [f32] {
-        &inc.field(field)
+    fn values(inc: &Increment, field: &str, component: &str) -> Vec<f32> {
+        inc.field(field)
             .unwrap()
             .component(component)
             .unwrap()
             .values
+            .to_vec()
     }
 
     #[test]
@@ -761,7 +764,7 @@ mod tests {
             (components.iter())
                 .map(|(n, v)| Component {
                     name: n.to_string(),
-                    values: v.to_vec(),
+                    values: v.to_vec().into(),
                     derived: false,
                     out_of_plane: false,
                 })
@@ -849,12 +852,12 @@ mod tests {
         compute(&output("STRESS", "S_CS"), &mut incs, &mesh(), &systems).unwrap();
         compute(&output("DISP", "U_CS"), &mut incs, &mesh(), &systems).unwrap();
         let close = |a: &[f32], b: [f32; 3]| (0..3).all(|k| (a[k] - b[k]).abs() < 1e-5);
-        assert!(close(values(&incs[0], "S_CS", "S11"), [0.0; 3]));
-        assert!(close(values(&incs[0], "S_CS", "S22"), [10.0; 3]));
-        assert!(close(values(&incs[0], "U_CS", "U1"), [0.0, 0.0, 0.5]));
-        assert!(close(values(&incs[0], "U_CS", "U2"), [0.0; 3]));
+        assert!(close(&values(&incs[0], "S_CS", "S11"), [0.0; 3]));
+        assert!(close(&values(&incs[0], "S_CS", "S22"), [10.0; 3]));
+        assert!(close(&values(&incs[0], "U_CS", "U1"), [0.0, 0.0, 0.5]));
+        assert!(close(&values(&incs[0], "U_CS", "U2"), [0.0; 3]));
         // The magnitude is that of the relative displacements too.
-        assert!(close(values(&incs[0], "U_CS", "ALL"), [0.0, 0.0, 0.5]));
+        assert!(close(&values(&incs[0], "U_CS", "ALL"), [0.0, 0.0, 0.5]));
     }
 
     fn stress_increment(tensors: [[f32; 6]; 3]) -> Increment {

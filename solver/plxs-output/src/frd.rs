@@ -144,6 +144,14 @@ pub fn expand_sectors(model: &Model, results: &Results) -> Option<(Model, Result
     Some((expanded, results))
 }
 
+/// The fields of one increment of a cyclic symmetric model on all the sectors, as
+/// [`expand_sectors`] expands them: a field of a mode with a nodal diameter needs its
+/// partner (real or imaginary part) among the fields. The fields as they are for other
+/// models.
+pub fn expand_increment(model: &Model, increment: &ResultsIncrement) -> Vec<ResultField> {
+    Sectors::of(model).expand(increment)
+}
+
 fn io(path: &Path, e: std::io::Error) -> Error {
     Error::Io {
         path: path.display().to_string(),

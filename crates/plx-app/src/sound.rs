@@ -575,7 +575,7 @@ impl ShapeMix {
                         .zip(sums)
                         .map(|(name, values)| Component {
                             name: name.clone(),
-                            values,
+                            values: values.into(),
                             derived: false,
                             out_of_plane: false,
                         })
@@ -585,7 +585,7 @@ impl ShapeMix {
                 add_derived_components(&mut field);
                 (field.components.into_iter())
                     .find(|c| c.name == self.component)
-                    .map(|c| c.values)
+                    .map(|c| c.values.to_vec())
             }
         };
         Superposition {
@@ -602,7 +602,7 @@ impl ShapeMix {
 fn component_values(increment: &Increment, field: &str, component: &str) -> Vec<f32> {
     (increment.field(field))
         .and_then(|f| f.component(component))
-        .map(|c| c.values.clone())
+        .map(|c| c.values.to_vec())
         .unwrap_or_default()
 }
 
@@ -972,7 +972,7 @@ mod tests {
     ) -> Increment {
         let component = |name: &str, value: f32| Component {
             name: name.into(),
-            values: vec![value, 0.0],
+            values: vec![value, 0.0].into(),
             derived: false,
             out_of_plane: false,
         };

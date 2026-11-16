@@ -852,6 +852,37 @@ S
 *END STEP
 ";
 
+    /// Asserts that the results opened from the `.ndlr` file, whose fields are read when
+    /// they are wanted, are those in memory.
+    fn assert_lazy_reads_the_same(path: &std::path::Path, solved: &SolverResults) {
+        let (opened, file) = SolverResults::open(path).unwrap();
+        let lazy = plx_results::solver::from_source(&opened, file);
+        let eager = plx_results::from_solver(solved);
+        assert_eq!(lazy.mesh.node_count(), eager.mesh.node_count());
+        assert_eq!(lazy.increments.len(), eager.increments.len());
+        for (a, b) in lazy.increments.iter().zip(&eager.increments) {
+            assert_eq!((a.step, a.increment, a.kind), (b.step, b.increment, b.kind));
+            let names = |i: &plx_results::Increment| -> Vec<String> {
+                (i.fields.iter())
+                    .flat_map(|f| {
+                        f.components
+                            .iter()
+                            .map(move |c| format!("{}.{}", f.name, c.name))
+                    })
+                    .collect()
+            };
+            assert_eq!(names(a), names(b));
+            for (fa, fb) in a.fields.iter().zip(&b.fields) {
+                for (ca, cb) in fa.components.iter().zip(&fb.components) {
+                    assert!(ca.values.is_lazy());
+                    let (va, vb) = (ca.values.get(), cb.values.get());
+                    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                    assert_eq!(bits(&va), bits(&vb), "{}.{}", fa.name, ca.name);
+                }
+            }
+        }
+    }
+
     #[test]
     fn built_in_run_keeps_the_results_in_memory() {
         let dir = std::env::temp_dir().join(format!("plx-solve-{}", std::process::id()));
@@ -873,10 +904,11 @@ S
         assert_eq!(import.mesh.node_count(), 8);
         let disp = import.increments[0].field("DISP").unwrap();
         let u1 = disp.component("U1").unwrap();
-        assert!(u1.values.iter().all(|v| v.is_finite()));
-        assert!(u1.values.iter().any(|&v| v > 0.0));
+        assert!(u1.values.get().iter().all(|v| v.is_finite()));
+        assert!(u1.values.get().iter().any(|&v| v > 0.0));
         let read = SolverResults::read(&run.file("ndlr")).unwrap();
         assert_eq!(read, *solved);
+        assert_lazy_reads_the_same(&run.file("ndlr"), &solved);
         assert!(run.file("inp").is_file());
         assert!(run.file("sta").is_file());
         // Every run measures where its time went, with the size of the model.
@@ -947,6 +979,7 @@ S
         // What `.ndlr` keeps reads back the same.
         let read = SolverResults::read(&run.file("ndlr")).unwrap();
         assert_eq!(read, *solved);
+        assert_lazy_reads_the_same(&run.file("ndlr"), &solved);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1207,7 +1240,7 @@ S
             .unwrap()
             .values
             .clone();
-        assert!(u1.iter().any(|&v| v > 0.0), "{u1:?}");
+        assert!(u1.get().iter().any(|&v| v > 0.0), "{u1:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

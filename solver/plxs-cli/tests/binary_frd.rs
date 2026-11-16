@@ -68,11 +68,11 @@ fn check(area: &str, name: &str) {
                 if ca.derived {
                     continue;
                 }
-                let scale = (ca.values.iter())
+                let scale = (ca.values.get().iter())
                     .filter(|v| v.is_finite())
                     .fold(0.0f32, |m, v| m.max(v.abs()))
                     .max(1e-30);
-                for (x, y) in ca.values.iter().zip(&cb.values) {
+                for (x, y) in ca.values.get().iter().zip(cb.values.get().iter()) {
                     assert!(
                         x.is_nan() && y.is_nan() || (x - y).abs() <= 1e-5 * scale,
                         "{name} {} {}: {x} vs {y}",

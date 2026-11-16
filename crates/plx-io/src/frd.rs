@@ -152,7 +152,7 @@ impl<'a> Reader<'a> {
                     .zip(block_values(block, mesh))
                     .map(|(name, values)| Component {
                         name: name.clone(),
-                        values,
+                        values: values.into(),
                         derived: false,
                         out_of_plane: false,
                     })

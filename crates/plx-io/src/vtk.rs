@@ -146,8 +146,9 @@ fn point_arrays(increment: &Increment, nodes: usize) -> Vec<PointArray> {
             .collect();
         if !written.is_empty() {
             let mut values = Vec::with_capacity(nodes * written.len());
+            let columns: Vec<_> = written.iter().map(|c| c.values.get()).collect();
             for node in 0..nodes {
-                values.extend(written.iter().map(|c| c.values[node]));
+                values.extend(columns.iter().map(|c| c[node]));
             }
             arrays.push(PointArray {
                 name: field.name.clone(),
@@ -160,7 +161,7 @@ fn point_arrays(increment: &Increment, nodes: usize) -> Vec<PointArray> {
                 arrays.push(PointArray {
                     name: format!("{}_{}", field.name, component.name),
                     components: vec![component.name.clone()],
-                    values: component.values.clone(),
+                    values: component.values.to_vec(),
                 });
             }
         }

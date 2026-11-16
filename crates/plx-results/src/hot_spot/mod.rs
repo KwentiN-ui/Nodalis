@@ -371,13 +371,17 @@ pub fn readings(
     Some(read(&stress_columns(increment)?, points, component))
 }
 
-fn stress_columns(increment: &Increment) -> Option<Vec<&Vec<f32>>> {
+fn stress_columns(increment: &Increment) -> Option<Vec<std::sync::Arc<[f32]>>> {
     let field = increment.field("STRESS")?;
-    let columns = STRESS_COMPONENTS.map(|name| field.component(name).map(|c| &c.values));
+    let columns = STRESS_COMPONENTS.map(|name| field.component(name).map(|c| c.values.get()));
     columns.into_iter().collect()
 }
 
-fn read(columns: &[&Vec<f32>], points: &[ReadoutPoint], component: HotSpotComponent) -> Vec<f64> {
+fn read(
+    columns: &[std::sync::Arc<[f32]>],
+    points: &[ReadoutPoint],
+    component: HotSpotComponent,
+) -> Vec<f64> {
     points
         .iter()
         .map(|point| {
@@ -676,7 +680,8 @@ mod tests {
                     0 => column(&|p| s11(p[0])),
                     1 => column(&|_| 50.0),
                     _ => column(&|_| 0.0),
-                },
+                }
+                .into(),
                 derived: false,
                 out_of_plane: false,
             })

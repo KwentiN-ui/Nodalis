@@ -383,7 +383,7 @@ fn node_value(frd: &FrdImport, field: &str, component: &str, node: NodeId) -> f6
     let index = frd.mesh.node_index(node).unwrap();
     let increment = frd.increments.last().unwrap();
     let field = increment.field(field).unwrap();
-    f64::from(field.component(component).unwrap().values[index])
+    f64::from(field.component(component).unwrap().values.get()[index])
 }
 
 /// The value at a node of `mesh`, which CalculiX may have expanded: the mean over the nodes
@@ -405,7 +405,7 @@ fn expanded_value(
         .component(component)
         .unwrap()
         .values;
-    let total: f64 = indices.iter().map(|&i| f64::from(values[i])).sum();
+    let total: f64 = indices.iter().map(|&i| f64::from(values.get()[i])).sum();
     if sum {
         total
     } else {
@@ -2466,7 +2466,13 @@ fn tip_history(frd: &FrdImport) -> Vec<(f64, f64)> {
     (frd.increments.iter())
         .filter(|i| i.kind == plx_results::AnalysisKind::Dynamic)
         .map(|i| {
-            let u3 = i.field("DISP").unwrap().component("U3").unwrap().values[index];
+            let u3 = i
+                .field("DISP")
+                .unwrap()
+                .component("U3")
+                .unwrap()
+                .values
+                .get()[index];
             (i.value, f64::from(u3))
         })
         .collect()
@@ -2561,7 +2567,14 @@ fn solver_runs_short_dynamic_steps() {
     let tip = frd.mesh.node_index(99).unwrap();
     let static_u3 = (frd.increments.iter())
         .find(|i| i.kind == plx_results::AnalysisKind::Static)
-        .map(|i| i.field("DISP").unwrap().component("U3").unwrap().values[tip])
+        .map(|i| {
+            i.field("DISP")
+                .unwrap()
+                .component("U3")
+                .unwrap()
+                .values
+                .get()[tip]
+        })
         .unwrap();
     let swing = tip_history(&frd);
     assert_eq!(swing.len(), 4, "{swing:?}");
@@ -2920,7 +2933,14 @@ fn solver_superposes_the_stored_modes_of_the_cantilever() {
     let frd = run_solver("modal", &write_inp(&mesh, &model, "").unwrap()).unwrap();
     let index = frd.mesh.node_index(99).unwrap();
     let tip = |i: &plx_results::Increment| {
-        f64::from(i.field("DISP").unwrap().component("U3").unwrap().values[index])
+        f64::from(
+            i.field("DISP")
+                .unwrap()
+                .component("U3")
+                .unwrap()
+                .values
+                .get()[index],
+        )
     };
     let modes: Vec<f64> = (frd.increments.iter())
         .filter(|i| i.step == 1 && i.kind == plx_results::AnalysisKind::Frequency)
@@ -2941,7 +2961,7 @@ fn solver_superposes_the_stored_modes_of_the_cantilever() {
     let imaginary = |i: &plx_results::Increment| {
         (i.field("DISPI"))
             .and_then(|f| f.component("U3"))
-            .map_or(0.0, |c| f64::from(c.values[index]))
+            .map_or(0.0, |c| f64::from(c.values.get()[index]))
     };
     // Step 4 holds the eigenmodes of the Steady State Dynamics step, step 5 its response.
     let sweep: Vec<(f64, f64)> = (frd.increments.iter())
@@ -3561,8 +3581,8 @@ fn solver_runs_every_plane_element_type() {
             };
             let increment = frd.increments.last().unwrap();
             let values = &increment.field("DISP").unwrap().components[0].values;
-            assert!(values.iter().all(|v| v.is_finite()), "{written}");
-            assert!(values.iter().any(|v| *v != 0.0), "{written}");
+            assert!(values.get().iter().all(|v| v.is_finite()), "{written}");
+            assert!(values.get().iter().any(|v| *v != 0.0), "{written}");
         }
     }
 }
@@ -5795,7 +5815,7 @@ fn cantilever_deflection(f: f64, l: f64, inertia: f64) -> f64 {
 fn min_u2(frd: &FrdImport) -> f64 {
     let increment = frd.increments.last().unwrap();
     let u2 = increment.field("DISP").unwrap().component("U2").unwrap();
-    f64::from(u2.values.iter().copied().fold(f32::MAX, f32::min))
+    f64::from(u2.values.get().iter().copied().fold(f32::MAX, f32::min))
 }
 
 #[test]
@@ -6911,7 +6931,7 @@ fn solver_scales_a_load_by_its_amplitude() {
     let index = frd.mesh.node_index(99).unwrap();
     let u3: Vec<f64> = (frd.increments.iter())
         .filter_map(|i| i.field("DISP"))
-        .map(|f| f64::from(f.component("U3").unwrap().values[index]))
+        .map(|f| f64::from(f.component("U3").unwrap().values.get()[index]))
         .collect();
     assert_eq!(u3.len(), 4, "{u3:?}");
     for (value, factor) in u3.iter().zip([0.5, 1.0, 0.75, 0.5]) {
@@ -6973,7 +6993,7 @@ fn tip_deflection_per_step(frd: &FrdImport) -> Vec<f64> {
         let Some(u3) = increment.field("DISP").and_then(|f| f.component("U3")) else {
             continue;
         };
-        let value = f64::from(u3.values[index]);
+        let value = f64::from(u3.values.get()[index]);
         match out.last_mut() {
             Some((step, last)) if *step == increment.step => *last = value,
             _ => out.push((increment.step, value)),
@@ -7863,7 +7883,7 @@ fn solver_splits_the_bending_modes_of_the_rotating_cantilever() {
         assert!(pdisp.component(name).is_some(), "{name} missing");
     }
     let tip = frd.mesh.node_index(99).unwrap();
-    let magnitude = |k: &str| f64::from(pdisp.component(k).unwrap().values[tip]);
+    let magnitude = |k: &str| f64::from(pdisp.component(k).unwrap().values.get()[tip]);
     assert!(magnitude("MAG2").hypot(magnitude("MAG3")) > 0.0);
 }
 
@@ -8265,8 +8285,8 @@ fn solver_runs_the_element_types_chosen_for_a_part() {
         };
         let increment = frd.increments.last().unwrap();
         let values = &increment.field("DISP").unwrap().components[0].values;
-        assert!(values.iter().all(|v| v.is_finite()), "{type_name}");
-        assert!(values.iter().any(|v| *v != 0.0), "{type_name}");
+        assert!(values.get().iter().all(|v| v.is_finite()), "{type_name}");
+        assert!(values.get().iter().any(|v| *v != 0.0), "{type_name}");
     }
 }
 
@@ -8388,7 +8408,7 @@ fn solver_bends_the_cantilever_more_as_the_moving_load_drives_out() {
     let index = frd.mesh.node_index(99).unwrap();
     let tip: Vec<f64> = (frd.increments.iter())
         .filter_map(|i| i.field("DISP"))
-        .map(|f| f64::from(f.component("U3").unwrap().values[index]))
+        .map(|f| f64::from(f.component("U3").unwrap().values.get()[index]))
         .collect();
     assert_eq!(tip.len(), 5, "{tip:?}");
     assert!(tip.windows(2).all(|w| w[1] < w[0] && w[1] < 0.0), "{tip:?}");
@@ -8467,7 +8487,7 @@ fn solver_computes_the_sensitivities_of_mass_and_strain_energy() {
     };
     let index = frd.mesh.node_index(99).unwrap();
     let disp = frd.increments[0].field("DISP").unwrap();
-    let tip = -f64::from(disp.component("U3").unwrap().values[index]);
+    let tip = -f64::from(disp.component("U3").unwrap().values.get()[index]);
     let set = dat.sets.iter().find(|s| s.name == "STEP_2").unwrap();
     let response = |name: &str| {
         let field = set.field("DESIGN_RESPONSE").unwrap();
@@ -8496,7 +8516,7 @@ fn solver_computes_the_sensitivities_of_mass_and_strain_energy() {
         .unwrap()
         .component("DFDN")
         .unwrap();
-    assert!(sen.values.iter().any(|v| *v != 0.0));
+    assert!(sen.values.get().iter().any(|v| *v != 0.0));
 }
 
 /// With a linear filter, CalculiX smooths the sensitivities (DFDNFIL) and keeps the raw
@@ -8520,7 +8540,7 @@ fn solver_filters_the_sensitivities() {
         .unwrap();
     let field = sensitivity.field("SENENER").unwrap();
     let filtered = &field.component("DFDNFIL").unwrap().values;
-    let length: f32 = filtered.iter().map(|v| v * v).sum::<f32>().sqrt();
+    let length: f32 = filtered.get().iter().map(|v| v * v).sum::<f32>().sqrt();
     assert!((length - 1.0).abs() < 1e-3, "{length}");
 }
 
@@ -8665,9 +8685,16 @@ fn solver_creeps_the_bar_by_nortons_law() {
             .unwrap()
             .component("S11")
             .unwrap()
-            .values[index(node)];
+            .values
+            .get()[index(node)];
         assert!((f64::from(s) - stress).abs() < 0.01 * stress, "{s}");
-        let peeq = last.field("PE").unwrap().component("PE").unwrap().values[index(node)];
+        let peeq = last
+            .field("PE")
+            .unwrap()
+            .component("PE")
+            .unwrap()
+            .values
+            .get()[index(node)];
         let peeq = f64::from(peeq);
         assert!(
             (peeq - expected).abs() < 0.02 * expected,
@@ -8678,7 +8705,8 @@ fn solver_creeps_the_bar_by_nortons_law() {
             .unwrap()
             .component("E11")
             .unwrap()
-            .values[index(node)];
+            .values
+            .get()[index(node)];
         let strain = f64::from(strain);
         assert!(
             (strain - elastic - expected).abs() < 0.02 * expected,
@@ -8687,7 +8715,13 @@ fn solver_creeps_the_bar_by_nortons_law() {
     }
     // The static step does not creep.
     let first = frd.increments.iter().find(|i| i.step == 1).unwrap();
-    let peeq = first.field("PE").unwrap().component("PE").unwrap().values[index(1)];
+    let peeq = first
+        .field("PE")
+        .unwrap()
+        .component("PE")
+        .unwrap()
+        .values
+        .get()[index(1)];
     assert!(f64::from(peeq).abs() < 1e-3 * expected, "{peeq}");
 }
 
@@ -9298,7 +9332,7 @@ fn solver_bends_a_box_of_a_mesh_block_held_and_loaded_on_its_sides() {
     };
     let increment = frd.increments.last().unwrap();
     let u3 = increment.field("DISP").unwrap().component("U3").unwrap();
-    let tip = f64::from(u3.values.iter().copied().fold(f32::MAX, f32::min));
+    let tip = f64::from(u3.values.get().iter().copied().fold(f32::MAX, f32::min));
     let inertia = 10.0 * 10.0_f64.powi(3) / 12.0;
     let expected = -10.0 * 100.0_f64.powi(4) / (8.0 * 210_000.0 * inertia);
     assert!(
@@ -11721,7 +11755,7 @@ fn step_node_value(frd: &FrdImport, step: u32, component: &str, node: NodeId) ->
         .find(|i| i.step == step)
         .unwrap();
     let field = increment.field("DISP").unwrap();
-    f64::from(field.component(component).unwrap().values[index])
+    f64::from(field.component(component).unwrap().values.get()[index])
 }
 
 /// A face clamped node by node in Step-1 and turned by a rigid point in Step-2, both
@@ -12150,7 +12184,7 @@ fn tip_motion(frd: &FrdImport) -> Vec<(f64, f64, f64)> {
     (frd.increments.iter())
         .filter_map(|i| Some((i.value, i.field("DISP")?)))
         .map(|(t, f)| {
-            let u = |c: &str| f64::from(f.component(c).unwrap().values[index]);
+            let u = |c: &str| f64::from(f.component(c).unwrap().values.get()[index]);
             (t, u("U2"), u("U3"))
         })
         .collect()
@@ -13008,7 +13042,7 @@ fn solver_writes_imaginary_parts_that_damping_fills() {
         let field = sweep.first()?.field("DISPI")?;
         Some(
             (field.components.iter())
-                .flat_map(|c| c.values.iter())
+                .flat_map(|c| c.values.to_vec())
                 .filter(|v| v.is_finite())
                 .fold(0.0_f32, |m, v| m.max(v.abs())),
         )
@@ -13483,7 +13517,7 @@ fn solver_swings_and_weighs_a_cantilever_with_a_tip_mass() {
     let field = |name: &str, component: &str, node: NodeId| {
         let index = frd.mesh.node_index(node).unwrap();
         let values = &static_increment.field(name).unwrap();
-        f64::from(values.component(component).unwrap().values[index])
+        f64::from(values.component(component).unwrap().values.get()[index])
     };
     // The tip face moves with the point; its mean motion is the point's.
     let tip = mesh.node_sets["TIP"].clone();
@@ -13555,7 +13589,7 @@ fn solver_pulls_a_point_mass_alone_by_gravity_on_its_point() {
         .unwrap();
     let forces = increment.field("FORC").unwrap().component("F3").unwrap();
     let reaction: f64 = (fixed_nodes(&mesh).iter())
-        .map(|&n| f64::from(forces.values[frd.mesh.node_index(n).unwrap()]))
+        .map(|&n| f64::from(forces.values.get()[frd.mesh.node_index(n).unwrap()]))
         .sum();
     let expected = mass * 9810.0;
     assert!(
@@ -13584,7 +13618,7 @@ fn solver_twists_a_cantilever_with_a_rotary_inertia_at_its_tip() {
         let shape = |node: NodeId| {
             let index = frd.mesh.node_index(node).unwrap();
             let disp = frd.increments[n].field("DISP").unwrap();
-            ["U1", "U2", "U3"].map(|c| f64::from(disp.component(c).unwrap().values[index]))
+            ["U1", "U2", "U3"].map(|c| f64::from(disp.component(c).unwrap().values.get()[index]))
         };
         let length = |u: [f64; 3]| (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
         let largest = (mesh.node_ids().iter())

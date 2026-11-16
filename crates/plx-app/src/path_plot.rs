@@ -289,7 +289,7 @@ impl PathPlot {
             self.located = Some((path.clone(), points));
         }
         let points = self.located.as_ref()?.1.as_ref().ok()?;
-        let values = path::interpolate(points, &component.values);
+        let values = path::interpolate(points, &component.values.get());
         if !values.iter().any(|v| v.is_finite()) {
             return None;
         }

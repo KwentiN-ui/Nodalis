@@ -23,6 +23,23 @@ pub fn import(solved: &SolverResults) -> FrdImport {
     }
 }
 
+/// [`import`] of results whose fields are read from `source` when they are wanted, such as
+/// an opened `.ndlr` file ([`SolverResults::open`]); `solved` needs only its mesh.
+pub fn import_from(
+    solved: &SolverResults,
+    source: std::sync::Arc<dyn plx_results::solver::ArraySource>,
+) -> FrdImport {
+    let import = plx_results::solver::from_source(solved, source);
+    FrdImport {
+        mesh: import.mesh,
+        increments: import.increments,
+        materials: import.materials,
+        date: None,
+        time: None,
+        warnings: import.warnings,
+    }
+}
+
 /// The history output of the results, as [`crate::dat::read_dat`] reads it; names `input`
 /// shortened for CalculiX are given in full. `None` without history output.
 pub fn history(solved: &SolverResults, input: Option<&str>) -> Option<DatImport> {
@@ -250,7 +267,7 @@ mod tests {
                     // two opposite principal values of (nearly) equal size the rounding
                     // makes larger.
                     let signed = ca.name.starts_with("SGN_");
-                    for (&va, &vb) in ca.values.iter().zip(&cb.values) {
+                    for (&va, &vb) in ca.values.get().iter().zip(cb.values.get().iter()) {
                         let (va, vb) = if signed {
                             (va.abs(), vb.abs())
                         } else {

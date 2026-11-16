@@ -152,7 +152,7 @@ mod tests {
     fn field(name: &str, raw: usize) -> Field {
         let component = |k: usize| Component {
             name: format!("C{k}"),
-            values: vec![0.0],
+            values: vec![0.0].into(),
             derived: false,
             out_of_plane: false,
         };
