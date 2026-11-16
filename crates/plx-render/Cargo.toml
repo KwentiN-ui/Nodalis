@@ -11,6 +11,7 @@ bytemuck.workspace = true
 glam.workspace = true
 plx-mesh.workspace = true
 plx-model.workspace = true
+rayon.workspace = true
 wgpu = { version = "30", default-features = false, features = ["wgsl"] }
 
 [dev-dependencies]

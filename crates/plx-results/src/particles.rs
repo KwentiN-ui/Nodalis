@@ -13,8 +13,8 @@ use plxs_core::{Model, element::ElementType};
 /// The field of the quantities of the particles, beside `DISP` and `VELO`.
 pub const FIELD: &str = "PFLOW";
 
-/// The components of [`FIELD`], in the order of [`PARTICLE_FIELDS`] (without the body,
-/// which the parts show).
+/// The components of [`FIELD`], in the order of [`PARTICLE_FIELDS`] (without the
+/// temperature, a field of its own, and the body, which the parts show).
 pub const COMPONENTS: [&str; 5] = ["PRESS", "SHEAR", "PEEQ", "RATE", "J"];
 
 /// The name of the set the energies of the model are printed for.
@@ -31,6 +31,9 @@ const CORNERS: [[f64; 3]; 8] = [
     [1.0, 1.0, 1.0],
     [-1.0, 1.0, 1.0],
 ];
+
+/// The index of the temperature in [`ParticleFrame::fields`].
+const TEMPERATURE: usize = COMPONENTS.len();
 
 /// The index of the body field in [`ParticleFrame::fields`].
 fn body_field() -> usize {
@@ -137,6 +140,9 @@ pub struct FrameTrack {
     walls: Vec<u32>,
     wall_points: Vec<([f64; 3], usize)>,
     motions: Vec<plxs_core::particles::RigidMotion>,
+    /// The temperature of each wall, when the run computes the temperature (`None`: it
+    /// does not, and the results have no temperature).
+    temperatures: Option<Vec<Option<f64>>>,
 }
 
 impl FrameTrack {
@@ -156,6 +162,8 @@ impl FrameTrack {
                 .flat_map(|(w, wall)| wall.shape.points.iter().map(move |&p| (p, w)))
                 .collect(),
             motions: model.walls.iter().map(|w| w.motion.clone()).collect(),
+            temperatures: (model.heat.is_some())
+                .then(|| model.walls.iter().map(|w| w.temperature).collect()),
         }
     }
 
@@ -186,6 +194,7 @@ impl FrameTrack {
         let mut quantities: Vec<Vec<f64>> = (0..COMPONENTS.len())
             .map(|_| Vec::with_capacity(size))
             .collect();
+        let mut temperature = Vec::with_capacity(size);
         for (k, seen) in at.iter().enumerate() {
             let moved: [f64; 3] =
                 std::array::from_fn(|a| f64::from(self.last[k][a]) - f64::from(self.start[k][a]));
@@ -204,13 +213,15 @@ impl FrameTrack {
                     let value = seen.and_then(|j| frame.fields.get(c)?.get(j).copied());
                     values.push(value.map_or(f64::NAN, f64::from));
                 }
+                let value = seen.and_then(|j| frame.fields.get(TEMPERATURE)?.get(j).copied());
+                temperature.push(value.map_or(f64::NAN, f64::from));
             }
         }
         // The walls move rigidly and carry no values.
         let t = frame.time;
-        for (start, w) in &self.wall_points {
-            let motion = &self.motions[*w];
-            let at = motion.place(*start, t);
+        for &(start, index) in &self.wall_points {
+            let motion = &self.motions[index];
+            let at = motion.place(start, t);
             let center = motion.place(motion.center, t);
             let factor = motion.factor(t);
             let arm: [f64; 3] = std::array::from_fn(|a| at[a] - center[a]);
@@ -227,6 +238,8 @@ impl FrameTrack {
             for values in &mut quantities {
                 values.push(f64::NAN);
             }
+            let wall = self.temperatures.as_ref().and_then(|t| t[index]);
+            temperature.push(wall.unwrap_or(f64::NAN));
         }
         let field = |name: &str, components: &[&str], values| ResultField {
             name: name.into(),
@@ -241,11 +254,66 @@ impl FrameTrack {
             value: frame.time,
             total_time: frame.time,
             nodal_diameter: None,
-            fields: vec![
+            fields: [
                 field("DISP", &["D1", "D2", "D3"], disp),
                 field("VELO", &["V1", "V2", "V3"], velo),
                 field(FIELD, &COMPONENTS, quantities),
-            ],
+            ]
+            .into_iter()
+            .chain(
+                (self.temperatures.is_some()).then(|| field("NDTEMP", &["T"], vec![temperature])),
+            )
+            .collect(),
+        }
+    }
+}
+
+/// What the history outputs of a Particle Flow step ask for; nothing else is written.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HistoryRequest {
+    /// The energies of the whole model, by CalculiX's names: `ALLIE` (elastic), `ALLKE`,
+    /// `ALLWK` (the work of gravity and of the moving walls) and `ALLVD` (dissipated by
+    /// flow and at the walls).
+    pub energies: Vec<String>,
+    pub walls: Vec<WallRequest>,
+    pub temperatures: Vec<TemperatureRequest>,
+}
+
+/// The values of one wall, by its index in [`ParticleHistory::walls`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WallRequest {
+    pub wall: usize,
+    /// The force of the material on it, the moment about its reference point and the work
+    /// it did (`RF`).
+    pub force: bool,
+    /// The heat it gave the material (`RFL`).
+    pub heat: bool,
+}
+
+/// The mean and highest temperature of some bodies of material, written under `set`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TemperatureRequest {
+    pub set: String,
+    /// Indices into [`ParticleHistory::bodies`].
+    pub bodies: Vec<usize>,
+}
+
+impl HistoryRequest {
+    /// Everything the run records, for tests and tools that want it all.
+    pub fn all(history: &ParticleHistory) -> Self {
+        Self {
+            energies: ["ALLIE", "ALLKE", "ALLWK", "ALLVD"].map(String::from).to_vec(),
+            walls: (0..history.walls.len())
+                .map(|wall| WallRequest {
+                    wall,
+                    force: true,
+                    heat: true,
+                })
+                .collect(),
+            temperatures: vec![TemperatureRequest {
+                set: MODEL_SET.into(),
+                bodies: (0..history.bodies.len()).collect(),
+            }],
         }
     }
 }
@@ -255,12 +323,17 @@ pub fn set_name(wall: &str) -> String {
     wall.split_whitespace().collect::<Vec<_>>().join("_")
 }
 
-/// The history of a run as the history output of step `step`: the energies of the model
-/// (kinetic, elastic as internal, dissipated by flow and at the walls as damping
-/// dissipation, the work of gravity and of the moving walls as external work), and per wall
-/// the force of the material on it, the moment of that force about the wall's reference point
-/// (about the origin for the sides of the box) and the work the wall did on the material.
-pub fn history_blocks(history: &ParticleHistory, step: u32) -> Vec<HistoryBlock> {
+/// The history of a run as the history output of step `step`, as far as `request` asks for
+/// it: the energies of the model (kinetic, elastic as internal, dissipated by flow and at the
+/// walls as damping dissipation, the work of gravity and of the moving walls as external
+/// work); per wall the force of the material on it, the moment of that force about the
+/// wall's reference point (about the origin for the sides of the box), the work the wall did
+/// on the material and the heat it gave; the temperature of bodies of material.
+pub fn history_blocks(
+    history: &ParticleHistory,
+    request: &HistoryRequest,
+    step: u32,
+) -> Vec<HistoryBlock> {
     let mut blocks = Vec::new();
     let block =
         |increment: usize, quantity: &str, set: String, time: f64, values: Vec<f64>| HistoryBlock {
@@ -272,55 +345,88 @@ pub fn history_blocks(history: &ParticleHistory, step: u32) -> Vec<HistoryBlock>
             rows: vec![(0, values)],
         };
     let at = |v: &[f64], i: usize| v.get(i).copied().unwrap_or(0.0);
+    let asked = |name: &str| request.energies.iter().any(|e| e == name);
     for (i, &time) in history.time.iter().enumerate() {
         let energies = [
-            ("total model kinetic energy", at(&history.kinetic, i)),
-            ("total model internal energy", at(&history.elastic, i)),
+            ("ALLKE", "total model kinetic energy", at(&history.kinetic, i)),
+            ("ALLIE", "total model internal energy", at(&history.elastic, i)),
             (
+                "ALLVD",
                 "total model damping dissipation",
                 at(&history.dissipated, i) + at(&history.wall_loss, i),
             ),
             (
+                "ALLWK",
                 "total model external work",
                 at(&history.wall_work, i) - at(&history.potential, i),
             ),
         ];
-        for (quantity, value) in energies {
-            blocks.push(block(i, quantity, MODEL_SET.into(), time, vec![value]));
+        for (name, quantity, value) in energies {
+            if asked(name) {
+                blocks.push(block(i, quantity, MODEL_SET.into(), time, vec![value]));
+            }
         }
-        for (w, wall) in history.walls.iter().enumerate() {
+        for asked in &request.temperatures {
+            let bodies = || asked.bodies.iter().filter_map(|&b| history.bodies.get(b));
+            let mass: f64 = bodies().map(|b| at(&b.mass, i)).sum();
+            let heat: f64 = bodies()
+                .map(|b| at(&b.mass, i) * at(&b.temperature_mean, i))
+                .sum();
+            let hottest = bodies()
+                .filter_map(|b| b.temperature_max.get(i).copied())
+                .fold(f64::NEG_INFINITY, f64::max);
+            if hottest.is_finite() {
+                let mean = if mass > 0.0 { heat / mass } else { hottest };
+                blocks.push(block(
+                    i,
+                    "particle temperature",
+                    asked.set.clone(),
+                    time,
+                    vec![mean, hottest],
+                ));
+            }
+        }
+        for asked in &request.walls {
+            let w = asked.wall;
+            let Some(wall) = history.walls.get(w) else {
+                continue;
+            };
             let name = set_name(&wall.name);
-            if let Some(force) = wall.force.get(i) {
-                blocks.push(block(
-                    i,
-                    "total force (fx,fy,fz)",
-                    name.clone(),
-                    time,
-                    force.to_vec(),
-                ));
+            if asked.force {
+                if let Some(force) = wall.force.get(i) {
+                    blocks.push(block(
+                        i,
+                        "total force (fx,fy,fz)",
+                        name.clone(),
+                        time,
+                        force.to_vec(),
+                    ));
+                }
+                if let Some(&work) = wall.work.get(i) {
+                    blocks.push(block(
+                        i,
+                        "total model external work",
+                        name.clone(),
+                        time,
+                        vec![work],
+                    ));
+                }
+                if let Some(moment) = wall.moment.get(i) {
+                    // The moments as the rotation node of a reference point prints them.
+                    let set = format!("INTERNAL_ROTATION-{}_{name}", w + 1);
+                    blocks.push(block(
+                        i,
+                        "total force (fx,fy,fz)",
+                        set,
+                        time,
+                        moment.to_vec(),
+                    ));
+                }
             }
-            // Work only for walls that do some: a resting one does none.
-            if let Some(&work) = wall.work.get(i)
-                && wall.work.iter().any(|&w| w != 0.0)
+            if asked.heat
+                && let Some(&heat) = wall.heat.get(i)
             {
-                blocks.push(block(
-                    i,
-                    "total model external work",
-                    name.clone(),
-                    time,
-                    vec![work],
-                ));
-            }
-            if let Some(moment) = wall.moment.get(i) {
-                // The moments as the rotation node of a reference point prints them.
-                let set = format!("INTERNAL_ROTATION-{}_{name}", w + 1);
-                blocks.push(block(
-                    i,
-                    "total force (fx,fy,fz)",
-                    set,
-                    time,
-                    moment.to_vec(),
-                ));
+                blocks.push(block(i, "total wall heat", name.clone(), time, vec![heat]));
             }
         }
     }
@@ -330,6 +436,7 @@ pub fn history_blocks(history: &ParticleHistory, step: u32) -> Vec<HistoryBlock>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plxs_core::particles::BodyHistory;
 
     fn model() -> ParticleModel {
         let mut model = ParticleModel::default();
@@ -343,12 +450,16 @@ mod tests {
                     bulk: 1e6,
                     viscosity: 1.0,
                 },
+                thermal: None,
+                flow_factor: Vec::new(),
             });
         model.bodies.push(plxs_core::particles::MaterialBody {
             name: "Body".into(),
             material: 0,
             shape: Default::default(),
             velocity: [0.0; 3],
+            temperature: 0.0,
+            gravity: [0.0; 3],
         });
         model
     }
@@ -398,6 +509,7 @@ mod tests {
             },
             law: Default::default(),
             motion: Default::default(),
+            temperature: None,
         });
         let first = frame(0.0, vec![0, 1], vec![[0.0; 3], [1.0, 0.0, 0.0]]);
         let mesh = particle_mesh(&model, &first);
@@ -420,23 +532,57 @@ mod tests {
     }
 
     #[test]
-    fn the_history_names_walls_as_sets() {
+    fn the_history_writes_what_is_asked_and_names_walls_as_sets() {
+        let wall = |name: &str| plxs_core::particles::WallHistory {
+            name: name.into(),
+            force: vec![[1.0, 2.0, 3.0]],
+            moment: vec![[0.0, 0.0, 4.0]],
+            work: vec![5.0],
+            heat: vec![6.0],
+        };
+        let body = |name: &str, mass: f64, mean: f64, max: f64| BodyHistory {
+            name: name.into(),
+            mass: vec![mass],
+            temperature_mean: vec![mean],
+            temperature_max: vec![max],
+        };
         let history = ParticleHistory {
             time: vec![0.5],
             kinetic: vec![1.0],
-            walls: vec![plxs_core::particles::WallHistory {
-                name: "Box X min".into(),
-                force: vec![[1.0, 2.0, 3.0]],
-                moment: vec![[0.0, 0.0, 4.0]],
-                work: vec![5.0],
-            }],
+            walls: vec![wall("Blade"), wall("Box X min")],
+            bodies: vec![body("Paste", 1.0, 20.0, 30.0), body("Dough", 3.0, 40.0, 50.0)],
             ..Default::default()
         };
-        let blocks = history_blocks(&history, 1);
-        assert_eq!(blocks.len(), 7);
-        assert_eq!(blocks[4].set, "Box_X_min");
-        assert_eq!(blocks[5].set, "Box_X_min");
-        assert_eq!(blocks[5].rows[0].1, vec![5.0]);
-        assert_eq!(blocks[6].set, "INTERNAL_ROTATION-1_Box_X_min");
+        // Nothing asked: nothing written.
+        assert!(history_blocks(&history, &HistoryRequest::default(), 1).is_empty());
+        let request = HistoryRequest {
+            energies: vec!["ALLKE".into()],
+            walls: vec![WallRequest {
+                wall: 1,
+                force: true,
+                heat: false,
+            }],
+            temperatures: vec![TemperatureRequest {
+                set: "Mix".into(),
+                bodies: vec![0, 1],
+            }],
+        };
+        let blocks = history_blocks(&history, &request, 1);
+        let quantities: Vec<(&str, &str)> = (blocks.iter())
+            .map(|b| (b.quantity.as_str(), b.set.as_str()))
+            .collect();
+        assert_eq!(
+            quantities,
+            [
+                ("total model kinetic energy", MODEL_SET),
+                ("particle temperature", "Mix"),
+                ("total force (fx,fy,fz)", "Box_X_min"),
+                ("total model external work", "Box_X_min"),
+                ("total force (fx,fy,fz)", "INTERNAL_ROTATION-2_Box_X_min"),
+            ]
+        );
+        // The mean by mass over both bodies, the highest of both.
+        assert_eq!(blocks[1].rows[0].1, vec![35.0, 50.0]);
+        assert_eq!(blocks[3].rows[0].1, vec![5.0]);
     }
 }

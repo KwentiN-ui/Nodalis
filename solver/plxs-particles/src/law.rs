@@ -141,8 +141,9 @@ impl Law {
 
     /// One step: the state at the start, the increment `f` of the deformation gradient, the
     /// volume ratio the stress takes (`det F` at the end, or with F-bar the average over the
-    /// neighbourhood), the velocity gradient and the time step. The state is advanced; its
-    /// own volume ratio follows `f`.
+    /// neighbourhood), the velocity gradient and the time step. `factor` scales the yield
+    /// stress, the consistency and the viscosity (their change with the temperature). The
+    /// state is advanced; its own volume ratio follows `f`.
     pub fn update(
         &self,
         state: &mut PointState,
@@ -150,6 +151,7 @@ impl Law {
         j: f64,
         gradient: &Mat3,
         dt: f64,
+        factor: f64,
     ) -> PointUpdate {
         let own = state.j * crate::math::det(f);
         let d = sym(gradient);
@@ -157,6 +159,7 @@ impl Law {
         let shear_rate = (2.0 * contract(&dd, &dd)).sqrt();
         match self.kind {
             Kind::Fluid { viscosity } => {
+                let viscosity = viscosity * factor;
                 // No tension: the volume never grows past its initial one.
                 let j = j.min(1.0);
                 state.j = own.min(1.0);
@@ -202,6 +205,7 @@ impl Law {
                     exponent,
                 } = self.kind
                 {
+                    let (yield_stress, consistency) = (yield_stress * factor, consistency * factor);
                     let trial = std::f64::consts::SQRT_2 * g * dev_norm;
                     if trial > yield_stress && g > 0.0 {
                         let dgamma =
@@ -307,7 +311,7 @@ mod tests {
         let mut state = PointState::default();
         let mut out = PointUpdate::default();
         for _ in 0..20000 {
-            out = law.update(&mut state, &f, 1.0, &l, dt);
+            out = law.update(&mut state, &f, 1.0, &l, dt, 1.0);
         }
         let expected = 200.0 + 10.0 * rate;
         assert!(

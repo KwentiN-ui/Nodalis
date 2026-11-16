@@ -136,6 +136,17 @@ impl Default for ParticleFlowStep {
 }
 
 impl ParticleFlowStep {
+    /// The box the background grid covers: the fixed one, or `parts` (the bounds of the
+    /// parts that take part) enlarged by the margin.
+    pub fn grid_box(&self, parts: Option<([f64; 3], [f64; 3])>) -> Option<([f64; 3], [f64; 3])> {
+        match self.domain {
+            ParticleBox::Fixed { min, max } => Some((min, max)),
+            ParticleBox::Around { margin } => {
+                parts.map(|(lo, hi)| (lo.map(|v| v - margin), hi.map(|v| v + margin)))
+            }
+        }
+    }
+
     /// What keeps the settings from being computed, in words.
     pub fn problem(&self) -> Option<String> {
         let positive = |v: f64| v.is_finite() && v > 0.0;

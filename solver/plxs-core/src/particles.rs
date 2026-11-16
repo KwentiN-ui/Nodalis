@@ -22,6 +22,49 @@ pub struct ParticleModel {
     pub domain: Domain,
     pub gravity: [f64; 3],
     pub control: ParticleControl,
+    /// Whether and how the temperature is computed; `None` keeps every particle at the
+    /// temperature of its body.
+    #[serde(default)]
+    pub heat: Option<Heat>,
+}
+
+/// How heat moves in a particle analysis: it is made by the flow and at the walls,
+/// conducted through the material and exchanged with walls that have a temperature.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Heat {
+    /// The heat transfer coefficient between the material and a wall with a temperature
+    /// (W/(m² K)).
+    pub wall_transfer: f64,
+}
+
+/// The thermal properties of a material.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ParticleThermal {
+    /// W/(m K).
+    pub conductivity: f64,
+    /// J/(kg K).
+    pub specific_heat: f64,
+}
+
+/// The value of a table of (x, value) points at `x`: linear in between, held beyond the
+/// ends; 1 for an empty table.
+pub fn table_value(points: &[[f64; 2]], x: f64) -> f64 {
+    let (Some(first), Some(last)) = (points.first(), points.last()) else {
+        return 1.0;
+    };
+    if x <= first[0] {
+        return first[1];
+    }
+    if x >= last[0] {
+        return last[1];
+    }
+    let k = points.partition_point(|p| p[0] <= x).max(1);
+    let ([x0, y0], [x1, y1]) = (points[k - 1], points[k]);
+    if x1 > x0 {
+        y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    } else {
+        y1
+    }
 }
 
 /// A material of a particle analysis.
@@ -30,6 +73,13 @@ pub struct ParticleMaterial {
     pub name: String,
     pub density: f64,
     pub law: ParticleLaw,
+    /// For the temperature: without, the material keeps its temperature.
+    #[serde(default)]
+    pub thermal: Option<ParticleThermal>,
+    /// The factor on the yield stress, the consistency and the viscosity over the
+    /// temperature, as (temperature, factor) points ([`table_value`]); empty is 1.
+    #[serde(default)]
+    pub flow_factor: Vec<[f64; 2]>,
 }
 
 /// How a material responds.
@@ -187,6 +237,13 @@ pub struct MaterialBody {
     pub material: usize,
     pub shape: TriangleSurface,
     pub velocity: [f64; 3],
+    /// The temperature at the start.
+    #[serde(default)]
+    pub temperature: f64,
+    /// The acceleration of gravity on this body, on top of [`ParticleModel::gravity`]: the
+    /// gravity loads that select it.
+    #[serde(default)]
+    pub gravity: [f64; 3],
 }
 
 /// How material slides along a rigid surface.
@@ -294,6 +351,10 @@ pub struct RigidWall {
     pub shape: TriangleSurface,
     pub law: WallLaw,
     pub motion: RigidMotion,
+    /// The temperature of the wall, which it exchanges heat with the material at
+    /// ([`Heat::wall_transfer`]); `None` exchanges none.
+    #[serde(default)]
+    pub temperature: Option<f64>,
 }
 
 /// What happens at a side of the box the material moves in.
@@ -376,12 +437,13 @@ pub struct ParticleResults {
 }
 
 /// The names of the fields of a frame, in the order of [`ParticleFrame::fields`].
-pub const PARTICLE_FIELDS: [&str; 6] = [
+pub const PARTICLE_FIELDS: [&str; 7] = [
     "Pressure",
     "Shear stress",
     "Plastic strain",
     "Shear rate",
     "Volume ratio",
+    "Temperature",
     "Body",
 ];
 
@@ -425,16 +487,35 @@ pub struct ParticleHistory {
     pub outflow: Vec<f64>,
     /// The largest particle speed over the wave speed.
     pub mach: Vec<f64>,
+    /// Per body of material, in the order of [`ParticleModel::bodies`]: its mass in the
+    /// model and its temperature.
+    #[serde(default)]
+    pub bodies: Vec<BodyHistory>,
     /// Per wall (the walls of the model, then the six sides of the box): the force the
     /// material exerts on it and the moment of that force about the wall's center of
     /// motion where it is (about the origin for the sides).
     pub walls: Vec<WallHistory>,
 }
 
+/// One body of material over the time.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BodyHistory {
+    pub name: String,
+    /// The mass of its particles still in the model.
+    pub mass: Vec<f64>,
+    /// The mean (by mass) and the highest temperature of its particles.
+    pub temperature_mean: Vec<f64>,
+    pub temperature_max: Vec<f64>,
+}
+
 /// The load of one rigid surface over the time.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WallHistory {
     pub name: String,
+    /// The heat the wall gave the material, by transfer and by friction, summed from the
+    /// start.
+    #[serde(default)]
+    pub heat: Vec<f64>,
     pub force: Vec<[f64; 3]>,
     pub moment: Vec<[f64; 3]>,
     /// The work the wall did on the material, summed from the start.

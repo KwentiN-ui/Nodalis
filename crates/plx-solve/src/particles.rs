@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use plx_results::SolverResults;
-use plx_results::particles::{FrameTrack, history_blocks, particle_mesh};
+use plx_results::particles::{FrameTrack, HistoryRequest, history_blocks, particle_mesh};
 use plxs_core::particles::ParticleModel;
 use plxs_core::{CancelToken, Diagnostic, ProgressEvent};
 
@@ -24,6 +24,8 @@ pub struct PreparedParticles {
     pub warnings: Vec<String>,
     /// The step of the FE model the run computes, kept with the results.
     pub steps: Vec<plx_results::steps::StepRecord>,
+    /// The history the step's outputs ask for.
+    pub history: HistoryRequest,
 }
 
 /// The particle model in words: what the solver gets, without the triangles.
@@ -177,6 +179,7 @@ impl Run {
                     model,
                     warnings,
                     steps: records,
+                    history: request,
                     ..
                 } = prepared;
                 let mut track = Convergence::default();
@@ -204,7 +207,18 @@ impl Run {
                 let mut spool_error = None;
                 let mut last_time = 0.0;
                 let mut last_note = std::time::Instant::now();
-                let frame_dt = model.control.end_time / model.control.frames.max(1) as f64;
+                let end_time = model.control.end_time;
+                let frame_dt = end_time / model.control.frames.max(1) as f64;
+                // Each frame is an increment (the first, at time zero, is the start): the
+                // monitor shows which one runs and up to which time.
+                let start = |increment: u32, from: f64| ProgressEvent::Increment {
+                    step: 1,
+                    increment,
+                    attempt: 1,
+                    size: frame_dt,
+                    step_time: (from + frame_dt).min(end_time),
+                    total_time: (from + frame_dt).min(end_time),
+                };
                 let solved_run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     token.scope(|| {
                         pool.install(|| {
@@ -247,6 +261,9 @@ impl Run {
                                         step_time: frame.time,
                                         size: if increment == 1 { frame_dt } else { size },
                                     });
+                                    if frame.time < end_time - 1e-9 * end_time {
+                                        progress(start(increment + 1, frame.time));
+                                    }
                                 },
                             )
                         })
@@ -300,7 +317,7 @@ impl Run {
                     return fail("the particle solver wrote no frame".into());
                 };
                 let solved = plxs_core::Results {
-                    history: history_blocks(&results.history, 1),
+                    history: history_blocks(&results.history, &request, 1),
                     ..Default::default()
                 };
                 let mut out = SolverResults::new(&mesh, solved, VERSION);
@@ -359,12 +376,16 @@ mod tests {
                     bulk: 2e5,
                     viscosity: 1.0,
                 },
+                thermal: None,
+                flow_factor: Vec::new(),
             }],
             bodies: vec![MaterialBody {
                 name: "Drop".into(),
                 material: 0,
                 shape: TriangleSurface::cuboid([0.2, 0.2, 0.2], [0.4, 0.4, 0.4]),
                 velocity: [0.0; 3],
+                temperature: 0.0,
+                gravity: [0.0; 3],
             }],
             domain: Domain {
                 min: [0.0; 3],
@@ -385,6 +406,10 @@ mod tests {
             model,
             warnings: Vec::new(),
             steps: Vec::new(),
+            history: HistoryRequest {
+                energies: vec!["ALLKE".into()],
+                ..Default::default()
+            },
         };
         let mut run = Run::start_particles(1, &dir, "drop", prepared).unwrap();
         assert_eq!(run.wait(), JobStatus::Completed, "{:?}", run.new_output());

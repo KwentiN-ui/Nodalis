@@ -167,6 +167,15 @@ const KINDS: &[Kind] = &[
         &["ALLVD"],
         Ids::None,
     ),
+    // The material of a Particle Flow step: its mean and highest temperature, and the heat
+    // a wall gave it.
+    kind(
+        "particle temperature",
+        "PARTICLE_TEMPERATURE",
+        &["TMEAN", "TMAX"],
+        Ids::None,
+    ),
+    kind("total wall heat", "WALL_HEAT", &["HEAT"], Ids::None),
     kind("volume", "VOLUME", &["EVOL"], Ids::Id),
     kind("total volume", "TOTAL_VOLUME", &["VOL"], Ids::None),
     kind("heat flux", "HEAT_FLUX", &["Q1", "Q2", "Q3"], Ids::IdPoint),

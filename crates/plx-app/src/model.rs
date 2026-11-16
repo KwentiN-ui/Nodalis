@@ -27,6 +27,13 @@ const FEATURE_ANGLE_DEG: f64 = 30.0;
 /// Within a surface patch, coarse meshes of curved surfaces can fold more than the feature
 /// angle between neighbouring faces; shading still blends across such folds.
 const SMOOTH_ANGLE_DEG: f64 = 60.0;
+/// The faces of a cube of a part of loose cubes share their corners' normals: the cube is
+/// drawn round, with a third of the vertices.
+const LOOSE_SMOOTH_ANGLE_DEG: f64 = 100.0;
+/// From this many loose cubes a part is drawn as particles, see [`PartInfo::loose`].
+const LOOSE_CUBES: usize = 1000;
+/// The edges of the box of a Particle Flow step's background grid.
+const PARTICLE_BOX_COLOR: [f32; 3] = [0.95, 0.55, 0.1];
 
 /// Extension of nodalis project files.
 pub const PROJECT_EXTENSION: &str = "ndl";
@@ -68,6 +75,9 @@ pub struct PartInfo {
     /// A part of the geometry this analysis meshes itself although a link brings its mesh
     /// ([`plx_model::Geometry::own_meshes`]).
     pub own_mesh: bool,
+    /// A part of loose cubes that share no node, the particles of a Particle Flow step:
+    /// drawn without edges and with rounded shading, which keeps its many faces cheap.
+    pub loose: bool,
 }
 
 /// A loaded input file with everything the GUI shows about it.
@@ -827,7 +837,7 @@ impl Model {
         Self::with_skins(path, mesh, skins)
     }
 
-    fn with_skins(path: &Path, mesh: FeMesh, skins: Vec<PartSkin>) -> Self {
+    fn with_skins(path: &Path, mesh: FeMesh, mut skins: Vec<PartSkin>) -> Self {
         let origin = mesh.bounds().map_or(DVec3::ZERO, |(min, max)| {
             (DVec3::from(min) + DVec3::from(max)) * 0.5
         });
@@ -835,9 +845,20 @@ impl Model {
         for (index, part) in mesh.parts.iter().enumerate() {
             let mut types: BTreeMap<&str, usize> = BTreeMap::new();
             let mut nodes = std::collections::HashSet::new();
+            let mut cubes = true;
             for element in part.elements.iter().filter_map(|&id| mesh.element(id)) {
                 *types.entry(&element.type_name).or_default() += 1;
                 nodes.extend(element.nodes.iter().copied());
+                cubes &= element.shape == ElementShape::Hex8;
+            }
+            let loose = cubes
+                && part.elements.len() >= LOOSE_CUBES
+                && nodes.len() == 8 * part.elements.len();
+            if loose && let Some(skin) = skins.get_mut(index) {
+                // Every edge of every cube would be a feature edge, and every face a
+                // surface of its own.
+                skin.edges.clear();
+                skin.faces.iter_mut().for_each(|f| f.region = 0);
             }
             parts.push(PartInfo {
                 name: part.name.clone(),
@@ -852,6 +873,7 @@ impl Model {
                 dimension: None,
                 imported: false,
                 own_mesh: false,
+                loose,
             });
         }
         let origins = plx_model::PartOrigins::imported(&mesh);
@@ -1859,7 +1881,40 @@ impl Model {
         let mut meshes = self.render_meshes();
         meshes.extend(self.global_wireframe());
         meshes.extend(self.cyclic_wireframe());
+        meshes.extend(self.particle_box());
         meshes
+    }
+
+    /// The box the background grid of the active Particle Flow step covers, as its twelve
+    /// edges in the FE model view: where the particles can go.
+    fn particle_box(&self) -> Option<RenderMesh> {
+        if self.results.is_some() || self.is_geometry {
+            return None;
+        }
+        let settings = (self.fe.steps.iter().filter(|s| s.active)).find_map(|s| match &s.kind {
+            plx_model::StepKind::ParticleFlow(settings) => Some(settings),
+            _ => None,
+        })?;
+        let (lo, hi) = settings.grid_box(self.mesh.bounds())?;
+        let corner = |k: usize| {
+            let at = [0, 1, 2].map(|a| if k >> a & 1 == 1 { hi[a] } else { lo[a] });
+            Vertex {
+                position: (DVec3::from(at) - self.origin).as_vec3().to_array(),
+                normal: [0.0; 3],
+                color: PARTICLE_BOX_COLOR,
+                scalar: 0.9,
+            }
+        };
+        let mut mesh = RenderMesh::default();
+        // The corners differ in one bit along an edge.
+        for k in 0..8usize {
+            for a in 0..3 {
+                if k >> a & 1 == 0 {
+                    mesh.wireframe_edges.extend([corner(k), corner(k | 1 << a)]);
+                }
+            }
+        }
+        Some(mesh)
     }
 
     /// The other sectors of a cyclic symmetry preview: the outline of all parts rotated
@@ -1944,13 +1999,18 @@ impl Model {
         solids: &SolidElements,
     ) -> RenderMesh {
         let (info, skin) = (&self.parts[index], &self.skins[index]);
+        let smooth = if info.loose {
+            LOOSE_SMOOTH_ANGLE_DEG
+        } else {
+            SMOOTH_ANGLE_DEG
+        };
         let mut mesh = part_render_mesh(
             coords,
             skin,
             self.origin,
             info.color,
             self.face_highlight(index, skin),
-            SMOOTH_ANGLE_DEG,
+            smooth,
             scalars,
         );
         self.highlight_outline(index, skin, &mut mesh);
@@ -4379,5 +4439,59 @@ S
         model.parts[0].visible = true;
         model.update_plain_nodes();
         assert!(model.results.as_ref().unwrap().plain_nodes.is_empty());
+    }
+
+    /// Loose hex cubes, the particles of a Particle Flow step, `n` of them in a row.
+    fn loose_cubes(n: u32) -> FeMesh {
+        let mut mesh = FeMesh::default();
+        for c in 0..n {
+            let first = 8 * c + 1;
+            for k in 0..8u32 {
+                let at = [k & 1, k >> 1 & 1, k >> 2 & 1].map(f64::from);
+                mesh.set_node(first + k, [at[0] + 2.0 * f64::from(c), at[1], at[2]]);
+            }
+            let corners = [0, 1, 3, 2, 4, 5, 7, 6].map(|k| first + k);
+            mesh.add_element(plx_mesh::Element {
+                id: c + 1,
+                type_name: "C3D8".into(),
+                shape: ElementShape::Hex8,
+                nodes: corners.to_vec(),
+            })
+            .unwrap();
+        }
+        mesh.parts.push(plx_mesh::Part {
+            bodies: Vec::new(),
+            name: "Paste".into(),
+            elements: (1..=n).collect(),
+        });
+        mesh
+    }
+
+    #[test]
+    fn particles_are_drawn_round_without_edges_and_the_step_shows_its_box() {
+        let mut model = Model::new(Path::new("mixer.inp"), loose_cubes(LOOSE_CUBES as u32));
+        assert!(model.parts[0].loose);
+        let meshes = model.scene_meshes();
+        // A vertex per corner: the three faces at a corner share it.
+        assert_eq!(meshes[0].vertices.len(), 8 * LOOSE_CUBES);
+        assert!(meshes[0].feature_edges.is_empty() && meshes[0].mesh_edges.is_empty());
+        // A few cubes are an ordinary mesh.
+        assert!(!Model::new(Path::new("few.inp"), loose_cubes(2)).parts[0].loose);
+
+        let mut step = plx_model::Step::new_static("Flow");
+        step.kind = plx_model::StepKind::ParticleFlow(plx_model::particle_flow::ParticleFlowStep {
+            domain: plx_model::particle_flow::ParticleBox::Around { margin: 0.5 },
+            ..Default::default()
+        });
+        model.fe.steps.push(step);
+        let meshes = model.scene_meshes();
+        let edges = &meshes.last().unwrap().wireframe_edges;
+        assert_eq!(edges.len(), 24);
+        let x: Vec<f32> = edges.iter().map(|v| v.position[0] + model.origin.x as f32).collect();
+        let lowest = x.iter().copied().fold(f32::INFINITY, f32::min);
+        let highest = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!((lowest + 0.5).abs() < 1e-4, "{lowest}");
+        let right = 2.0 * (LOOSE_CUBES as f32 - 1.0) + 1.5;
+        assert!((highest - right).abs() < 1e-2, "{highest}");
     }
 }

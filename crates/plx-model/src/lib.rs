@@ -1063,14 +1063,16 @@ impl StepKind {
     }
 
     /// Whether a history output of this kind prints anything in the step: only the time
-    /// integration of a Dynamic step computes the energies.
+    /// integration of a Dynamic step and the particle flow compute the energies; the particle
+    /// flow writes no element or contact values.
     pub fn supports_history_output(&self, kind: &crate::HistoryKind) -> bool {
-        if !self.prints_history() {
-            false
-        } else if *kind == crate::HistoryKind::Energies {
-            matches!(self, StepKind::Dynamic(_))
-        } else {
-            true
+        match (self, kind) {
+            _ if !self.prints_history() => false,
+            (StepKind::ParticleFlow(_), crate::HistoryKind::Node { .. }) => true,
+            (StepKind::ParticleFlow(_), crate::HistoryKind::Energies) => true,
+            (StepKind::ParticleFlow(_), _) => false,
+            (_, crate::HistoryKind::Energies) => matches!(self, StepKind::Dynamic(_)),
+            _ => true,
         }
     }
 

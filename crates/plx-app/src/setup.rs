@@ -5397,8 +5397,8 @@ fn history_output_form(
             ui.label("");
             ui.weak(
                 "Sums over the whole model at every time\n\
-                 step of a Dynamic step; other steps do\n\
-                 not print them. Internal + kinetic energy\n\
+                 step of a Dynamic or Particle Flow step;\n\
+                 other steps do not print them. Internal + kinetic energy\n\
                  + dissipation = external work + energy at\n\
                  the start, up to the numerical damping.",
             );
@@ -6692,10 +6692,13 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
         .collect();
 }
 
-/// A new Dynamic step prints the energies of the model: the output of the model that
-/// prints them, or a new one.
+/// A new Dynamic or Particle Flow step prints the energies of the model: the output of the
+/// model that prints them, or a new one. The user can delete it before the solve.
 fn print_energies(fe: &mut FeModel, s: usize) {
-    if !matches!(fe.steps[s].kind, StepKind::Dynamic(_))
+    if !matches!(
+        fe.steps[s].kind,
+        StepKind::Dynamic(_) | StepKind::ParticleFlow(_)
+    )
         || (fe.step_history_outputs(s).iter()).any(|o| o.kind == HistoryKind::Energies)
     {
         return;

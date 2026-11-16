@@ -2019,8 +2019,9 @@ fn field_measure(field: &str, component: &str) -> Option<Measure> {
         | "MODEL_DAMPING_DISSIPATION"
         | "CONTACT_PRINT_ENERGY"
         | "CONTACT_SPRING_ENERGY"
-        | "TOTAL_CONTACT_SPRING_ENERGY" => Some(Of(Energy)),
-        "NDTEMP" | "TEMPERATURES" => Some(Of(Temperature)),
+        | "TOTAL_CONTACT_SPRING_ENERGY"
+        | "WALL_HEAT" => Some(Of(Energy)),
+        "NDTEMP" | "TEMPERATURES" | "PARTICLE_TEMPERATURE" => Some(Of(Temperature)),
         "FLUX" | "HEAT_FLUX" => Some(Per(Power, Area)),
         "RFL"
         | "HEAT_GENERATION"

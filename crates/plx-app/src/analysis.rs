@@ -534,6 +534,7 @@ impl Analysis {
             text,
             warnings: lowered.warnings,
             steps: vec![record],
+            history: lowered.history,
         };
         let job = if check_model {
             output.push(format!(

@@ -6,8 +6,9 @@
 //! field is then constant along z, which is the plane strain state.
 
 use plxs_core::particles::{
-    Domain, MaterialBody, ParticleControl, ParticleFrame, ParticleLaw, ParticleMaterial,
-    ParticleModel, ParticleResults, RigidMotion, RigidWall, Side, TriangleSurface, WallLaw,
+    Domain, Heat, MaterialBody, ParticleControl, ParticleFrame, ParticleLaw, ParticleMaterial,
+    ParticleModel, ParticleResults, ParticleThermal, RigidMotion, RigidWall, Side, TriangleSurface,
+    WallLaw,
 };
 
 const G: f64 = 9.81;
@@ -52,6 +53,8 @@ fn plane(
                 material: 0,
                 shape: TriangleSurface::cuboid([lo[0], lo[1], -cell], [hi[0], hi[1], depth + cell]),
                 velocity: [0.0; 3],
+                temperature: 0.0,
+                gravity: [0.0; 3],
             })
             .collect(),
         walls: Vec::new(),
@@ -64,6 +67,7 @@ fn plane(
         },
         gravity: [0.0, -G, 0.0],
         control: ParticleControl::default(),
+        heat: None,
     }
 }
 
@@ -75,6 +79,8 @@ fn water(viscosity: f64) -> ParticleMaterial {
             bulk: 2.2e9,
             viscosity,
         },
+        thermal: None,
+        flow_factor: Vec::new(),
     }
 }
 
@@ -91,6 +97,8 @@ fn bingham(yield_stress: f64, viscosity: f64) -> ParticleMaterial {
             consistency: viscosity,
             exponent: 1.0,
         },
+        thermal: None,
+        flow_factor: Vec::new(),
     }
 }
 
@@ -222,6 +230,7 @@ fn dam_break() {
 /// A rigid block of a plane model, reaching past the box in z.
 fn plane_wall(name: &str, lo: [f64; 2], hi: [f64; 2], depth: f64, law: WallLaw) -> RigidWall {
     RigidWall {
+        temperature: None,
         name: name.into(),
         shape: TriangleSurface::cuboid([lo[0], lo[1], -depth], [hi[0], hi[1], 2.0 * depth]),
         law,
@@ -248,6 +257,8 @@ fn slump(per_height: f64) {
             material: 0,
             shape: TriangleSurface::cylinder([0.0; 3], [0.0, height, 0.0], radius, 96),
             velocity: [0.0; 3],
+            temperature: 0.0,
+            gravity: [0.0; 3],
         }],
         walls: Vec::new(),
         domain: Domain {
@@ -265,6 +276,7 @@ fn slump(per_height: f64) {
             periodic: [false; 3],
         },
         gravity: [0.0, -G, 0.0],
+        heat: None,
         control: ParticleControl {
             end_time: 1.2,
             frames: 6,
@@ -409,12 +421,15 @@ fn pipe(per_radius: f64) {
                 256,
             ),
             velocity: [0.0; 3],
+            temperature: 0.0,
+            gravity: [0.0; 3],
         }],
         walls: vec![RigidWall {
             name: "Pipe".into(),
             shape: tube,
             law: WallLaw::Stick,
             motion: RigidMotion::default(),
+            temperature: None,
         }],
         domain: Domain {
             min: [-reach + cell, -reach + cell, 0.0],
@@ -424,6 +439,7 @@ fn pipe(per_radius: f64) {
             periodic: [false, false, true],
         },
         gravity: [0.0, 0.0, g],
+        heat: None,
         control: ParticleControl {
             end_time: 1.5,
             frames: 15,
@@ -503,6 +519,8 @@ fn die(per_gap: f64) {
             consistency: viscosity,
             exponent: 1.0,
         },
+        thermal: None,
+        flow_factor: Vec::new(),
     };
     let half = 0.5 * gap;
     let mut model = plane(
@@ -572,7 +590,7 @@ fn die_extrusion_fine() {
 
 /// Circular Couette flow (stage 3): a cylinder turns in a Newtonian fluid inside a resting
 /// tube. The torque on it per length is `4 π μ Ω R₁² R₂² / (R₂² − R₁²)`; its work is what
-/// the fluid dissipates.
+/// the fluid dissipates, and (stage 3b) what heats it: the walls take no heat.
 fn couette(per_gap: f64) {
     let (inner, outer) = (0.02, 0.04);
     let (viscosity, omega) = (20.0, 2.0);
@@ -598,7 +616,7 @@ fn couette(per_gap: f64) {
     tube.points.extend(hole.points);
     tube.triangles
         .extend(hole.triangles.into_iter().map(|t| t.map(|i| i + offset)));
-    let model = ParticleModel {
+    let mut model = ParticleModel {
         heading: "Couette flow".into(),
         materials: vec![water(viscosity)],
         bodies: vec![MaterialBody {
@@ -606,9 +624,12 @@ fn couette(per_gap: f64) {
             material: 0,
             shape: annulus(inner, outer),
             velocity: [0.0; 3],
+            temperature: 0.0,
+            gravity: [0.0; 3],
         }],
         walls: vec![
             RigidWall {
+                temperature: None,
                 name: "Rotor".into(),
                 shape: TriangleSurface::cylinder(
                     [0.0, 0.0, -1.0],
@@ -629,6 +650,7 @@ fn couette(per_gap: f64) {
                 shape: tube,
                 law: WallLaw::Stick,
                 motion: RigidMotion::default(),
+                temperature: None,
             },
         ],
         domain: Domain {
@@ -639,6 +661,7 @@ fn couette(per_gap: f64) {
             periodic: [false, false, true],
         },
         gravity: [0.0; 3],
+        heat: None,
         control: ParticleControl {
             end_time: 0.3,
             frames: 6,
@@ -646,6 +669,13 @@ fn couette(per_gap: f64) {
             ..Default::default()
         },
     };
+    let (specific_heat, start) = (4.0, 20.0);
+    model.materials[0].thermal = Some(ParticleThermal {
+        conductivity: 0.6,
+        specific_heat,
+    });
+    model.bodies[0].temperature = start;
+    model.heat = Some(Heat { wall_transfer: 0.0 });
     let results = solve(&model);
     let expected = 4.0 * std::f64::consts::PI * viscosity * omega * (inner * outer).powi(2)
         / (outer * outer - inner * inner);
@@ -671,6 +701,28 @@ fn couette(per_gap: f64) {
         "power {rate} vs {power}"
     );
     assert!(max_balance_error(&results) < 0.1);
+    // The heat in the fluid at the end: what the flow and the walls dissipated, and about
+    // the rotor's work (less the kinetic energy).
+    let frame = last(&results);
+    let particle_mass = 1000.0 * (0.5 * cell).powi(3);
+    let heat: f64 = (frame.fields[5].iter())
+        .map(|&t| particle_mass * specific_heat * (f64::from(t) - start))
+        .sum();
+    let h = &results.history;
+    let dissipated = h.dissipated[n - 1] + h.wall_loss[n - 1];
+    eprintln!(
+        "heat {heat:.5}, dissipated {dissipated:.5}, rotor work {:.5}",
+        work[n - 1]
+    );
+    assert!(
+        (heat - dissipated).abs() < 0.05 * dissipated,
+        "heat {heat} vs dissipated {dissipated}"
+    );
+    assert!(
+        (heat - work[n - 1]).abs() < 0.15 * work[n - 1],
+        "heat {heat} vs work {}",
+        work[n - 1]
+    );
 }
 
 #[test]
@@ -682,4 +734,78 @@ fn couette_flow() {
 #[ignore]
 fn couette_flow_fine() {
     couette(16.0);
+}
+
+/// Conduction (stage 3b): two resting blocks at 0 and 100 °C side by side. The temperature
+/// across the contact follows `50 + 50 erf((x − x₀) / (2 √(α t)))` while the far ends do not
+/// feel it yet.
+#[test]
+fn conduction_between_blocks() {
+    let (length, cell) = (0.1, 0.005);
+    let (conductivity, density, specific_heat) = (1.0, 1000.0, 1.0);
+    let alpha = conductivity / (density * specific_heat);
+    let side = 3.0 * cell;
+    let block = |name: &str, lo: f64, hi: f64, temperature: f64| MaterialBody {
+        name: name.into(),
+        material: 0,
+        shape: TriangleSurface::cuboid([lo, -cell, -cell], [hi, side + cell, side + cell]),
+        velocity: [0.0; 3],
+        temperature,
+        gravity: [0.0; 3],
+    };
+    let mut material = water(1.0);
+    material.thermal = Some(ParticleThermal {
+        conductivity,
+        specific_heat,
+    });
+    let end_time = 0.25;
+    let model = ParticleModel {
+        heading: "Conduction".into(),
+        materials: vec![material],
+        bodies: vec![
+            block("Cold", 0.0, 0.5 * length, 0.0),
+            block("Warm", 0.5 * length, length, 100.0),
+        ],
+        walls: Vec::new(),
+        domain: Domain {
+            min: [0.0; 3],
+            max: [length, side, side],
+            cell,
+            sides: [Side::Wall(WallLaw::Slip); 6],
+            periodic: [false, true, true],
+        },
+        gravity: [0.0; 3],
+        heat: Some(Heat { wall_transfer: 0.0 }),
+        control: ParticleControl {
+            end_time,
+            frames: 1,
+            sound_speed: Some(5.0),
+            ..Default::default()
+        },
+    };
+    let results = solve(&model);
+    let frame = last(&results);
+    let spread = 2.0 * (alpha * end_time).sqrt();
+    let mut worst: f64 = 0.0;
+    let mut total = 0.0;
+    for (p, &t) in frame.positions.iter().zip(&frame.fields[5]) {
+        let x = f64::from(p[0]);
+        let expected = 50.0 + 50.0 * erf((x - 0.5 * length) / spread);
+        worst = worst.max((f64::from(t) - expected).abs());
+        total += f64::from(t);
+    }
+    let mean = total / frame.positions.len() as f64;
+    // The heat stays: the mean temperature is the start's.
+    assert!((mean - 50.0).abs() < 0.01, "mean {mean}");
+    assert!(worst < 2.5, "temperature off by {worst} K");
+}
+
+/// The error function (Abramowitz and Stegun 7.1.26, error below 1.5e-7).
+fn erf(x: f64) -> f64 {
+    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
+    let poly = t
+        * (0.254829592
+            + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    let y = 1.0 - poly * (-x * x).exp();
+    if x < 0.0 { -y } else { y }
 }

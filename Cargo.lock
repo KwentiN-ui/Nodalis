@@ -3633,6 +3633,7 @@ dependencies = [
  "plx-model",
  "plxs-session",
  "pollster 1.0.1",
+ "rayon",
  "wgpu",
 ]
 

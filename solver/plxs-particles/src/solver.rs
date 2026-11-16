@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use plxs_core::particles::{
     Domain, PARTICLE_FIELDS, ParticleFrame, ParticleHistory, ParticleModel, ParticleReport,
-    ParticleResults, RigidMotion, Side, WallHistory, WallLaw,
+    ParticleResults, RigidMotion, Side, BodyHistory, WallHistory, WallLaw, table_value,
 };
 use rayon::prelude::*;
 
@@ -46,6 +46,8 @@ const WALL_BAND: f64 = 3.0;
 /// would put the wall half a cell behind its surface).
 const WALL_REACH: f64 = 0.2;
 /// The share of the way a particle's volume ratio moves towards the averaged one per step.
+/// How fast a particle's temperature follows the grid's, in units of α / h².
+const SUBCELL_CONDUCTION: f64 = 0.3;
 const VOLUME_RELAX: f64 = 0.05;
 
 /// How a run is going, for a progress display.
@@ -72,6 +74,12 @@ struct Particle {
     material: u16,
     body: u16,
     shear_rate: f32,
+    temperature: f64,
+    /// The acceleration of gravity on the particle's body.
+    gravity: Vec3,
+    /// Mass times specific heat (zero: the temperature stays).
+    heat_capacity: f64,
+    conductivity: f64,
     /// Left the box through an open side.
     gone: bool,
 }
@@ -158,6 +166,8 @@ struct Load {
     force: Vec3,
     moment: Vec3,
     work: f64,
+    /// Heat the wall gave the material by transfer.
+    heat: f64,
 }
 
 impl Load {
@@ -165,6 +175,7 @@ impl Load {
         self.force = add(self.force, other.force);
         self.moment = add(self.moment, other.moment);
         self.work += other.work;
+        self.heat += other.heat;
     }
 }
 
@@ -265,8 +276,16 @@ struct NodeSum {
     /// The force of the stresses on the node (in the momentum already), for the energy
     /// the walls take.
     force: Vec3,
+    /// The weight of the particles, mass times the gravity of their bodies.
+    weight: Vec3,
     /// Mass times volume ratio, for F-bar.
     volume: f64,
+    /// Heat capacity, heat (capacity times temperature), mass times conductivity and the
+    /// volume of the particles: for the temperature.
+    heat_capacity: f64,
+    heat: f64,
+    conduction: f64,
+    space: f64,
 }
 
 /// The sums of a step over the particles.
@@ -365,11 +384,27 @@ pub fn solve_streaming(
         .iter()
         .map(Law::wave_speed)
         .fold(f64::INFINITY, f64::min);
-    let viscosity_limit = (laws.iter())
-        .filter(|l| l.explicit_viscosity() > 0.0)
-        .map(|l| l.density * grid.h * grid.h / (8.0 * l.explicit_viscosity()))
+    // The factors of the flow over the temperature, per material.
+    let factors: Vec<&[[f64; 2]]> = (model.materials.iter())
+        .map(|m| m.flow_factor.as_slice())
+        .collect();
+    let highest = |m: usize| (factors[m].iter().map(|p| p[1])).fold(1.0f64, f64::max);
+    let viscosity_limit = (laws.iter().enumerate())
+        .filter(|(_, l)| l.explicit_viscosity() > 0.0)
+        .map(|(m, l)| l.density * grid.h * grid.h / (8.0 * l.explicit_viscosity() * highest(m)))
         .fold(f64::INFINITY, f64::min);
-    let gravity = model.gravity;
+    // Explicit conduction over the grid is stable below h² / (6 α).
+    let heat_limit = match model.heat {
+        None => f64::INFINITY,
+        Some(_) => (model.materials.iter())
+            .filter_map(|m| {
+                let t = m.thermal?;
+                let alpha = t.conductivity / (m.density * t.specific_heat);
+                (alpha > 0.0).then(|| grid.h * grid.h / (7.5 * alpha))
+            })
+            .fold(f64::INFINITY, f64::min),
+    };
+    let wall_temperature: Vec<Option<f64>> = model.walls.iter().map(|w| w.temperature).collect();
     let control = &model.control;
     let end = control.end_time;
     let frames = control.frames.max(1);
@@ -389,9 +424,15 @@ pub fn solve_streaming(
                 ..Default::default()
             })
             .collect(),
+        bodies: (model.bodies.iter())
+            .map(|b| BodyHistory {
+                name: b.name.clone(),
+                ..Default::default()
+            })
+            .collect(),
         ..Default::default()
     };
-    let initial = particle_sums(&particles, gravity);
+    let initial = particle_sums(&particles);
     let potential0 = initial.potential;
     let energy0 = initial.kinetic + initial.stored;
     let mut scale_energy = energy0.abs();
@@ -418,6 +459,9 @@ pub fn solve_streaming(
     let mut nodes = vec![NodeSum::default(); grid.count()];
     // Per node: the velocity at the end of the step and the averaged volume ratio.
     let mut values = vec![[0.0; 4]; grid.count()];
+    // Per node: the heat the walls gave in the step, and the change of the temperature.
+    let mut node_heat = vec![0.0; grid.count()];
+    let mut node_dt = vec![0.0; grid.count()];
 
     while t < end * (1.0 - 1e-12) {
         if plxs_core::CancelToken::current_cancelled() {
@@ -426,7 +470,7 @@ pub fn solve_streaming(
         }
         let target = next_frame as f64 * frame_dt;
         let mut dt = control.courant * grid.h / (wave + max_speed);
-        dt = dt.min(viscosity_limit);
+        dt = dt.min(viscosity_limit).min(heat_limit);
         if t + dt > target {
             dt = target - t;
         } else if t + 2.0 * dt > target {
@@ -447,11 +491,14 @@ pub fn solve_streaming(
             .map(|(w, p)| w.world_box(p))
             .collect();
         let side_index = walls.len();
+        let heat = model.heat;
         let (loss, forces) = (values.par_iter_mut().zip(nodes.par_iter()))
+            .zip(node_heat.par_iter_mut())
             .enumerate()
             .fold(
                 || (0.0, vec![Load::default(); side_index + 6]),
-                |(mut loss, mut forces), (at, (value, node))| {
+                |(mut loss, mut forces), (at, ((value, node), q))| {
+                    *q = 0.0;
                     if node.mass <= 0.0 {
                         *value = [0.0; 4];
                         return (loss, forces);
@@ -461,7 +508,7 @@ pub fn solve_streaming(
                         (at / grid.n[0]) % grid.n[1],
                         at / (grid.n[0] * grid.n[1]),
                     ];
-                    let before = add(scale(node.momentum, 1.0 / node.mass), scale(gravity, dt));
+                    let before = scale(add(node.momentum, scale(node.weight, dt)), 1.0 / node.mass);
                     let mut after = before;
                     let x = grid.position(i);
                     // The wall the node is deepest in.
@@ -483,6 +530,17 @@ pub fn solve_streaming(
                     if let Some((w, law, n, vw)) = owner {
                         after = wall_velocity(law, after, vw, n);
                         record(&mut forces[w], node.mass, before, after, dt, x, vw);
+                        // Heat transfer with a wall that has a temperature, never past it.
+                        if let (Some(heat), Some(tw)) = (heat, wall_temperature[w])
+                            && node.heat_capacity > 0.0
+                        {
+                            let gap = tw - node.heat / node.heat_capacity;
+                            let flow = heat.wall_transfer * grid.h * grid.h * gap * dt;
+                            let most = 0.5 * node.heat_capacity * gap.abs();
+                            let flow = flow.clamp(-most, most);
+                            *q += flow;
+                            forces[w].heat += flow;
+                        }
                     }
                     for a in 0..3 {
                         if grid.periodic[a] {
@@ -516,10 +574,15 @@ pub fn solve_streaming(
                     // removed, which the material never did: the stored and potential
                     // energies follow the particles.
                     if after != before {
-                        let pull = add(node.force, scale(gravity, node.mass));
+                        let pull = add(node.force, node.weight);
                         let own = sub(before, scale(pull, dt / node.mass));
-                        loss += 0.5 * node.mass * (dot(own, own) - dot(after, after))
+                        let taken = 0.5 * node.mass * (dot(own, own) - dot(after, after))
                             + dt * dot(pull, after);
+                        loss += taken;
+                        // What the walls take by friction heats the material there.
+                        if heat.is_some() {
+                            *q += taken.max(0.0);
+                        }
                     }
                     *value = [after[0], after[1], after[2], node.volume / node.mass];
                     (loss, forces)
@@ -546,6 +609,13 @@ pub fn solve_streaming(
         }
         wall_samples += 1;
 
+        // (2b) The heat: conduction between neighbouring nodes, and what the walls gave.
+        if heat.is_some() {
+            conduct(&grid, &nodes, &node_heat, dt, &mut node_dt);
+        }
+        let node_dt = &node_dt;
+        let node_sums = &nodes;
+
         // (3) Grid to particles.
         let smooth = control.smooth_volume;
         let pose_end = &pose;
@@ -560,6 +630,9 @@ pub fn solve_streaming(
                 let mut v = [0.0; 3];
                 let mut b = [[0.0; 3]; 3];
                 let mut jbar = 0.0;
+                let mut warmer = 0.0;
+                // The new temperature of the nodes around, weighted over the filled ones.
+                let mut around = [0.0; 2];
                 for sk in 0..3 {
                     for sj in 0..3 {
                         let wjk = w[1][sj] * w[2][sk];
@@ -576,6 +649,15 @@ pub fn solve_streaming(
                                 b[r][2] += wv * dn[2];
                             }
                             jbar += weight * node[3];
+                            if heat.is_some() {
+                                let at = offsets[0][si] + row;
+                                warmer += weight * node_dt[at];
+                                let n = &node_sums[at];
+                                if n.heat_capacity > 0.0 {
+                                    around[0] += weight * (n.heat / n.heat_capacity + node_dt[at]);
+                                    around[1] += weight;
+                                }
+                            }
                         }
                     }
                 }
@@ -592,7 +674,22 @@ pub fn solve_streaming(
                 };
                 let j_new = source * det(&f);
                 let law = &laws[p.material as usize];
-                let update = law.update(&mut p.state, &f, j_new, &c, dt);
+                let factor = table_value(factors[p.material as usize], p.temperature);
+                let update = law.update(&mut p.state, &f, j_new, &c, dt, factor);
+                // The temperature: what the grid conducted and the walls gave, and the
+                // heat of the particle's own flow.
+                if p.heat_capacity > 0.0 {
+                    p.temperature += warmer;
+                    // The grid only sees the average of the particles in a cell: what a
+                    // particle differs from it is conducted away within the cell, at the
+                    // rate α / h² of the particle's own diffusivity.
+                    if around[1] > 0.0 {
+                        let alpha = p.conductivity * p.volume / p.heat_capacity;
+                        let pull = (SUBCELL_CONDUCTION * alpha * dt / (grid.h * grid.h)).min(1.0);
+                        p.temperature += pull * (around[0] / around[1] - p.temperature);
+                    }
+                    p.temperature += update.dissipated * p.volume / p.heat_capacity;
+                }
                 if smooth && jbar > 0.0 {
                     // The particle's own volume ratio drifts where neighbouring particles
                     // part and close (the average does not see it): it is pulled a little
@@ -629,7 +726,7 @@ pub fn solve_streaming(
                     }
                 }
                 let speed = norm(p.v);
-                let energy = 0.5 * p.mass * speed * speed - p.mass * dot(gravity, p.x)
+                let energy = 0.5 * p.mass * speed * speed - p.mass * dot(p.gravity, p.x)
                     + update.stored * p.volume;
                 let mut sums = Sums {
                     dissipated: update.dissipated * p.volume,
@@ -640,7 +737,7 @@ pub fn solve_streaming(
                     sums.out_energy = energy;
                 } else {
                     sums.kinetic = 0.5 * p.mass * speed * speed;
-                    sums.potential = -p.mass * dot(gravity, p.x);
+                    sums.potential = -p.mass * dot(p.gravity, p.x);
                     sums.stored = update.stored * p.volume;
                     sums.max_speed = speed;
                 }
@@ -681,12 +778,45 @@ pub fn solve_streaming(
             history.mass.push(particles.iter().map(|p| p.mass).sum());
             history.outflow.push(outflow_mass);
             history.mach.push(max_speed / slowest);
+            // Per body: mass, mass times temperature, highest temperature.
+            let count = history.bodies.len();
+            let per_body = (particles.par_iter())
+                .fold(
+                    || vec![(0.0, 0.0, f64::NEG_INFINITY); count],
+                    |mut sums, p| {
+                        let s = &mut sums[p.body as usize];
+                        *s = (s.0 + p.mass, s.1 + p.mass * p.temperature, s.2.max(p.temperature));
+                        sums
+                    },
+                )
+                .reduce(
+                    || vec![(0.0, 0.0, f64::NEG_INFINITY); count],
+                    |a, b| {
+                        (a.iter().zip(&b))
+                            .map(|(a, b)| (a.0 + b.0, a.1 + b.1, a.2.max(b.2)))
+                            .collect()
+                    },
+                );
+            for (h, (mass, heat, hottest)) in history.bodies.iter_mut().zip(per_body) {
+                h.mass.push(mass);
+                let mean = h.temperature_mean.last().copied().unwrap_or(0.0);
+                // A body that left the model keeps its last temperature.
+                let (mean, hottest) = if mass > 0.0 {
+                    (heat / mass, hottest)
+                } else {
+                    (mean, h.temperature_max.last().copied().unwrap_or(mean))
+                };
+                h.temperature_mean.push(mean);
+                h.temperature_max.push(hottest);
+            }
             let n = wall_samples.max(1) as f64;
             for (h, f) in history.walls.iter_mut().zip(&mut wall_force) {
                 h.force.push(scale(f.force, 1.0 / n));
                 h.moment.push(scale(f.moment, 1.0 / n));
                 let done = h.work.last().copied().unwrap_or(0.0) + f.work;
                 h.work.push(done);
+                let given = h.heat.last().copied().unwrap_or(0.0) + f.heat;
+                h.heat.push(given);
                 *f = Load::default();
             }
             wall_samples = 0;
@@ -745,6 +875,49 @@ pub fn solve_streaming(
     Ok(results)
 }
 
+/// The change of the temperature of every node in a step: the heat `given` there, plus
+/// what flows in from the six neighbours by conduction. Between two nodes the conductance is
+/// `k h` times the smaller filling of the two, so that a node near a free surface, with little
+/// capacity, conducts as little and the explicit step stays stable.
+fn conduct(grid: &Grid, nodes: &[NodeSum], given: &[f64], dt: f64, change: &mut [f64]) {
+    let cell = grid.h * grid.h * grid.h;
+    // The temperature and the conductivity times the filling of a node.
+    let state = |n: &NodeSum| {
+        if n.heat_capacity <= 0.0 || n.mass <= 0.0 {
+            return None;
+        }
+        let filling = (n.space / cell).min(1.0);
+        Some((n.heat / n.heat_capacity, n.conduction / n.mass * filling))
+    };
+    change.par_iter_mut().enumerate().for_each(|(at, out)| {
+        let node = &nodes[at];
+        let Some((t, k)) = state(node) else {
+            *out = 0.0;
+            return;
+        };
+        let i = [
+            at % grid.n[0],
+            (at / grid.n[0]) % grid.n[1],
+            at / (grid.n[0] * grid.n[1]),
+        ];
+        let mut flow = 0.0;
+        for a in 0..3 {
+            for step in [-1isize, 1] {
+                let next = i[a] as isize + step;
+                if !grid.periodic[a] && (next < 0 || next >= grid.n[a] as isize) {
+                    continue;
+                }
+                let mut j = i;
+                j[a] = grid.wrap(a, next);
+                if let Some((tj, kj)) = state(&nodes[grid.index(j)]) {
+                    flow += k.min(kj) * grid.h * (tj - t);
+                }
+            }
+        }
+        *out = (flow * dt + given[at]) / node.heat_capacity;
+    });
+}
+
 /// Adds the force a node exerts on a wall, `m (v_before − v_after) / Δt`, its moment
 /// about the origin and the work the wall, at velocity `wall`, does on it in the step.
 fn record(sum: &mut Load, mass: f64, before: Vec3, after: Vec3, dt: f64, x: Vec3, wall: Vec3) {
@@ -754,7 +927,7 @@ fn record(sum: &mut Load, mass: f64, before: Vec3, after: Vec3, dt: f64, x: Vec3
     sum.work -= dot(force, wall) * dt;
 }
 
-fn particle_sums(particles: &[Particle], gravity: Vec3) -> Sums {
+fn particle_sums(particles: &[Particle]) -> Sums {
     // The stored energy is summed from the stress and the volume ratio: τ:ε/2 per unit
     // initial volume for the Hencky law equals the strain energy.
     particles
@@ -764,7 +937,7 @@ fn particle_sums(particles: &[Particle], gravity: Vec3) -> Sums {
             let stored = stored_from_stress(p);
             Sums {
                 kinetic: 0.5 * p.mass * speed * speed,
-                potential: -p.mass * dot(gravity, p.x),
+                potential: -p.mass * dot(p.gravity, p.x),
                 stored: stored * p.volume,
                 max_speed: speed,
                 ..Sums::default()
@@ -871,7 +1044,14 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
                                 (rel[0] + si) + PATCH * ((rel[1] + sj) + PATCH * (rel[2] + sk));
                             let node = &mut patch[at];
                             node.mass += weight * p.mass;
+                            for r in 0..3 {
+                                node.weight[r] += weight * p.mass * p.gravity[r];
+                            }
                             node.volume += weight * mj;
+                            node.heat_capacity += weight * p.heat_capacity;
+                            node.heat += weight * p.heat_capacity * p.temperature;
+                            node.conduction += weight * p.mass * p.conductivity;
+                            node.space += weight * p.volume * p.state.j;
                             for r in 0..3 {
                                 node.momentum[r] += weight * (mv[r] + qd[r]);
                                 node.force[r] += weight * fd[r];
@@ -917,6 +1097,11 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
                     dst.volume += src.volume;
                     dst.momentum = add(dst.momentum, src.momentum);
                     dst.force = add(dst.force, src.force);
+                    dst.weight = add(dst.weight, src.weight);
+                    dst.heat_capacity += src.heat_capacity;
+                    dst.heat += src.heat;
+                    dst.conduction += src.conduction;
+                    dst.space += src.space;
                 }
             }
         }
@@ -996,6 +1181,8 @@ fn fill(
         let Some(law) = laws.get(body.material) else {
             return Err(format!("body {} has no material", body.name));
         };
+        // Without heat the temperature stays: no capacity.
+        let thermal = model.heat.and(model.materials[body.material].thermal);
         let Some((lo, hi)) = body.shape.bounds() else {
             continue;
         };
@@ -1043,6 +1230,11 @@ fn fill(
                         material: body.material as u16,
                         body: b as u16,
                         shear_rate: 0.0,
+                        temperature: body.temperature,
+                        gravity: add(model.gravity, body.gravity),
+                        heat_capacity: thermal
+                            .map_or(0.0, |t| t.specific_heat * law.density * volume),
+                        conductivity: thermal.map_or(0.0, |t| t.conductivity),
                         gone: false,
                     });
                 }
@@ -1066,6 +1258,7 @@ fn frame(time: f64, particles: &[Particle]) -> ParticleFrame {
             p.state.plastic,
             f64::from(p.shear_rate),
             j,
+            p.temperature,
             f64::from(p.body),
         ];
         for (f, v) in fields.iter_mut().zip(values) {

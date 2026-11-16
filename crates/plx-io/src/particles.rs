@@ -10,8 +10,9 @@
 use std::collections::{BTreeSet, HashMap};
 
 use plx_mesh::{ElementFamily, FeMesh};
-use plx_model::particle_flow::{BoxSide, Flow, ParticleBox, ParticleFlowStep};
-use plx_model::{Constraint, ContactBehavior, FeModel, Material, ModelItem, StepKind};
+use plx_model::particle_flow::{BoxSide, Flow, ParticleFlowStep};
+use plx_model::{Constraint, HistoryKind, ContactBehavior, FeModel, Material, ModelItem, StepKind};
+use plx_results::particles::{HistoryRequest, TemperatureRequest, WallRequest, set_name};
 use plxs_core::particles::{
     self as ir, MaterialBody, ParticleControl, ParticleMaterial, ParticleModel, RigidWall, Side,
     TriangleSurface, WallLaw,
@@ -48,6 +49,8 @@ pub struct LoweredParticles {
     /// The name of the FE part each body is filled from, in the order of
     /// [`ParticleModel::bodies`].
     pub bodies: Vec<String>,
+    /// What the history outputs of the step ask for.
+    pub history: HistoryRequest,
     /// What the lowering noticed but did not stop for.
     pub warnings: Vec<String>,
 }
@@ -175,6 +178,8 @@ pub fn lower(
             material: solver_material,
             shape: part_surface(mesh, &[p]),
             velocity: [0.0; 3],
+            temperature: 0.0,
+            gravity: [0.0; 3],
         });
         bodies.push(part.name.clone());
         body_part.push(p);
@@ -209,21 +214,34 @@ pub fn lower(
             shape: part_surface(mesh, &parts),
             law,
             motion,
+            temperature: None,
         });
     }
 
-    // The loads of the step: gravity, and nothing else yet.
-    let mut gravity = [0.0; 3];
+    // The loads of the step: gravity on the bodies it selects, and nothing else yet.
     for load in step.loads.iter().filter(|l| l.active) {
-        match load.kind.gravity_vector() {
-            Some(g) => (0..3).for_each(|a| gravity[a] += g[a]),
-            None => warnings.push(format!(
+        let Some(g) = load.kind.gravity_vector() else {
+            warnings.push(format!(
                 "{}: a Particle Flow step takes gravity loads only; the load is left out.",
                 load.name
-            )),
+            ));
+            continue;
+        };
+        let parts = parts_of(&load.region, mesh);
+        let mut selected = false;
+        for (body, part) in model.bodies.iter_mut().zip(&body_part) {
+            if parts.contains(part) {
+                (0..3).for_each(|a| body.gravity[a] += g[a]);
+                selected = true;
+            }
+        }
+        if !selected {
+            warnings.push(format!(
+                "{}: the gravity load selects no part filled with material and acts on none.",
+                load.name
+            ));
         }
     }
-    model.gravity = gravity;
     // Boundary conditions move the rigid bodies at their reference points, and nothing else.
     let drivers: BTreeSet<plx_model::Id> = (walls.iter())
         .filter_map(|(_, _, c)| match &fe.constraints[*c] {
@@ -251,12 +269,118 @@ pub fn lower(
         smooth_volume: settings.smooth_volume,
         ..ParticleControl::default()
     };
+    let history = history_request(fe, mesh, index, &walls, &body_part, &model, &mut warnings);
     Ok(LoweredParticles {
         model,
         step: index,
         bodies,
+        history,
         warnings,
     })
+}
+
+/// What the history outputs of step `step` ask for: the energies, and of a node output
+/// the force, moment and work (`RF`) and the heat (`RFL`) of the walls of the rigid bodies
+/// whose reference point or parts it names, and the temperature (`NT`) of the bodies of
+/// material in its parts. The rest is left out with a warning.
+fn history_request(
+    fe: &FeModel,
+    mesh: &FeMesh,
+    step: usize,
+    walls: &[(String, BTreeSet<usize>, usize)],
+    body_part: &[usize],
+    model: &ParticleModel,
+    warnings: &mut Vec<String>,
+) -> HistoryRequest {
+    let mut request = HistoryRequest::default();
+    for output in fe.step_history_outputs(step).into_iter().filter(|o| o.active) {
+        let name = &output.name;
+        let region = match &output.kind {
+            HistoryKind::Energies => {
+                for variable in &output.variables {
+                    if !request.energies.contains(variable) {
+                        request.energies.push(variable.clone());
+                    }
+                }
+                continue;
+            }
+            HistoryKind::Node { region } => region,
+            HistoryKind::Element { .. } | HistoryKind::Contact { .. } => {
+                warnings.push(format!(
+                    "{name}: a Particle Flow step writes node outputs and energies only; the \
+                     output is left out."
+                ));
+                continue;
+            }
+        };
+        let parts = parts_of(region, mesh);
+        let hit: Vec<usize> = (walls.iter().enumerate())
+            .filter(|(_, (_, wall_parts, c))| {
+                let at_point = matches!(
+                    (&fe.constraints[*c], region),
+                    (Constraint::RigidBody(body), plx_model::Region::ReferencePoint(id))
+                        if body.reference_point == *id
+                );
+                at_point || !wall_parts.is_disjoint(&parts)
+            })
+            .map(|(w, _)| w)
+            .collect();
+        let bodies: Vec<usize> = (body_part.iter().enumerate())
+            .filter(|(_, p)| parts.contains(p))
+            .map(|(b, _)| b)
+            .collect();
+        let asks = |v: &str| output.variables.iter().any(|x| x == v);
+        let (force, heat) = (asks("RF"), asks("RFL"));
+        if (force || heat) && hit.is_empty() {
+            warnings.push(format!(
+                "{name}: RF and RFL are written for rigid bodies, by their reference point or \
+                 their parts; the output names none."
+            ));
+        }
+        if heat && model.heat.is_none() {
+            warnings.push(format!(
+                "{name}: RFL needs the heat of the step; it is left out."
+            ));
+        }
+        for &wall in &hit {
+            match request.walls.iter_mut().find(|r| r.wall == wall) {
+                Some(r) => {
+                    r.force |= force;
+                    r.heat |= heat;
+                }
+                None => request.walls.push(WallRequest { wall, force, heat }),
+            }
+        }
+        if asks("NT") {
+            if model.heat.is_none() {
+                warnings.push(format!(
+                    "{name}: NT needs the heat of the step; it is left out."
+                ));
+            } else if bodies.is_empty() {
+                warnings.push(format!(
+                    "{name}: NT is written for parts filled with material; the output names \
+                     none."
+                ));
+            } else {
+                request.temperatures.push(TemperatureRequest {
+                    set: set_name(name),
+                    bodies,
+                });
+            }
+        }
+        let other: Vec<&str> = (output.variables.iter())
+            .map(String::as_str)
+            .filter(|v| !["RF", "RFL", "NT"].contains(v))
+            .collect();
+        if !other.is_empty() {
+            warnings.push(format!(
+                "{name}: a Particle Flow step writes RF, RFL and NT; {} is left out.",
+                other.join(", ")
+            ));
+        }
+    }
+    request.walls.retain(|r| r.force || r.heat);
+    request
 }
 
 /// The motion of the rigid body `constraint` in step `step`: the displacement boundary
@@ -402,6 +526,8 @@ pub fn particle_material(material: &Material) -> Result<ParticleMaterial, String
         name: material.name.clone(),
         density,
         law,
+        thermal: None,
+        flow_factor: Vec::new(),
     })
 }
 
@@ -450,21 +576,18 @@ pub fn law_of(behavior: ContactBehavior) -> WallLaw {
 
 /// The box of the step: around all bodies and walls with the margin, or its own.
 fn domain(settings: &ParticleFlowStep, model: &ParticleModel) -> Result<ir::Domain, ParticleError> {
-    let (min, max) = match settings.domain {
-        ParticleBox::Fixed { min, max } => (min, max),
-        ParticleBox::Around { margin } => {
-            let shapes =
-                (model.bodies.iter().map(|b| &b.shape)).chain(model.walls.iter().map(|w| &w.shape));
-            let mut bounds = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
-            for (lo, hi) in shapes.filter_map(TriangleSurface::bounds) {
-                for a in 0..3 {
-                    bounds.0[a] = bounds.0[a].min(lo[a]);
-                    bounds.1[a] = bounds.1[a].max(hi[a]);
-                }
-            }
-            (bounds.0.map(|v| v - margin), bounds.1.map(|v| v + margin))
+    let shapes =
+        (model.bodies.iter().map(|b| &b.shape)).chain(model.walls.iter().map(|w| &w.shape));
+    let mut bounds = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    for (lo, hi) in shapes.filter_map(TriangleSurface::bounds) {
+        for a in 0..3 {
+            bounds.0[a] = bounds.0[a].min(lo[a]);
+            bounds.1[a] = bounds.1[a].max(hi[a]);
         }
-    };
+    }
+    let (min, max) = settings
+        .grid_box(Some(bounds))
+        .expect("a box around given bounds");
     let side = |side: BoxSide| match side {
         BoxSide::Frictionless => Side::Wall(WallLaw::Slip),
         BoxSide::Rough => Side::Wall(WallLaw::Stick),
@@ -671,5 +794,51 @@ mod tests {
         // Without a boundary condition the tool rests.
         let resting = lower(&mesh, &model(None), "Test").expect("lowers");
         assert!(resting.model.walls[0].motion.is_resting());
+    }
+
+    #[test]
+    fn the_step_writes_the_history_it_asks_for_and_gravity_acts_on_what_it_selects() {
+        let mesh = mesh();
+        let mut fe = model(Some(6.0));
+        let point = fe.reference_points[0].id;
+        let mut torque = plx_model::HistoryOutput::node("Torque", Region::ReferencePoint(point));
+        torque.variables = vec!["RF".into(), "U".into()];
+        fe.put_history_output(0, torque);
+        let mut energies = plx_model::HistoryOutput::energies("Energies");
+        energies.variables = vec!["ALLKE".into()];
+        fe.put_history_output(0, energies);
+        fe.steps[0].loads.push(plx_model::Load::new(
+            "Gravity",
+            Region::Parts(vec!["Paste".into()]),
+            plx_model::LoadKind::Gravity([0.0, 0.0, -9.81]),
+        ));
+        fe.steps[0].loads.push(plx_model::Load::new(
+            "Nowhere",
+            Region::Parts(Vec::new()),
+            plx_model::LoadKind::Gravity([1.0, 0.0, 0.0]),
+        ));
+        let lowered = lower(&mesh, &fe, "Test").expect("lowers");
+        let history = &lowered.history;
+        assert_eq!(history.energies, vec!["ALLKE".to_string()]);
+        assert_eq!(
+            history.walls,
+            vec![WallRequest {
+                wall: 0,
+                force: true,
+                heat: false,
+            }]
+        );
+        assert!(history.temperatures.is_empty());
+        // Only the selected paste falls; the load without parts is reported.
+        assert_eq!(lowered.model.gravity, [0.0; 3]);
+        assert_eq!(lowered.model.bodies[0].gravity, [0.0, 0.0, -9.81]);
+        let warned = |text: &str| lowered.warnings.iter().any(|w| w.contains(text));
+        assert!(warned("Nowhere: the gravity load selects no part"));
+        assert!(warned("Torque: a Particle Flow step writes RF, RFL and NT; U is left out"));
+        assert_eq!(lowered.warnings.len(), 2, "{:?}", lowered.warnings);
+
+        // Without outputs nothing is asked for.
+        let bare = lower(&mesh, &model(None), "Test").expect("lowers");
+        assert_eq!(bare.history, HistoryRequest::default());
     }
 }
