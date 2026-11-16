@@ -158,6 +158,104 @@ fn full_row(block: &HistoryBlock) -> Option<usize> {
     trailing_out_of_plane(block).map(|_| point + values)
 }
 
+/// Which out-of-plane components of the fields of a 2D model are zero in every increment,
+/// gathered a field at a time ([`OutOfPlane::add`]) for results that are not all in memory
+/// at once, and left out of each field ([`OutOfPlane::drop`]) once all are seen.
+#[derive(Clone, Debug, Default)]
+pub struct OutOfPlane {
+    /// By field name: the largest finite value of any component, and of the out-of-plane
+    /// components every field of the name has, the largest magnitude (infinite where one
+    /// is not finite).
+    fields: Vec<(String, f64, Vec<Magnitude>)>,
+}
+
+/// A component and its largest magnitude.
+type Magnitude = (String, f64);
+
+impl OutOfPlane {
+    /// Takes the values of `field` into account.
+    pub fn add(&mut self, field: &ResultField) {
+        let scale = field.values.iter().map(|v| largest(v)).fold(0.0, f64::max);
+        let magnitudes = (field.components.iter().zip(&field.values))
+            .filter(|(c, _)| out_of_plane(c))
+            .map(|(c, v)| (c.clone(), magnitude(v)));
+        match self.fields.iter_mut().find(|(n, _, _)| *n == field.name) {
+            Some((_, s, kept)) => {
+                *s = s.max(scale);
+                let magnitudes: Vec<(String, f64)> = magnitudes.collect();
+                kept.retain_mut(|(c, m)| match magnitudes.iter().find(|(n, _)| n == c) {
+                    Some((_, v)) => {
+                        *m = m.max(*v);
+                        true
+                    }
+                    None => false,
+                });
+            }
+            None => self
+                .fields
+                .push((field.name.clone(), scale, magnitudes.collect())),
+        }
+    }
+
+    /// The components of fields named `name` that are zero in every one seen.
+    fn zeros(&self, name: &str) -> Vec<String> {
+        let Some((_, scale, kept)) = self.fields.iter().find(|(n, _, _)| n == name) else {
+            return Vec::new();
+        };
+        let tiny = 1e-12 * scale;
+        (kept.iter())
+            .filter(|(_, m)| *m <= tiny)
+            .map(|(c, _)| c.clone())
+            .collect()
+    }
+
+    /// The components `field` keeps: without those zero in every field of its name, where
+    /// a reader can put them back ([`full_components`]); `None` if it keeps all.
+    pub fn kept(&self, field: &ResultField) -> Option<Vec<bool>> {
+        let zeros = self.zeros(&field.name);
+        if zeros.is_empty() {
+            return None;
+        }
+        let keep: Vec<bool> = field
+            .components
+            .iter()
+            .map(|c| !zeros.contains(c))
+            .collect();
+        let kept: Vec<String> = (field.components.iter().zip(&keep))
+            .filter(|(_, k)| **k)
+            .map(|(c, _)| c.clone())
+            .collect();
+        // Only what a reader can put back in full is left out; a field of another layout
+        // keeps its zeros.
+        (keep.contains(&false) && full_components(&kept).is_some()).then_some(keep)
+    }
+
+    /// Leaves out of `field` the components [`OutOfPlane::kept`] does not keep.
+    pub fn drop(&self, field: &mut ResultField) {
+        let Some(keep) = self.kept(field) else {
+            return;
+        };
+        let mut keep_iter = keep.iter();
+        field
+            .components
+            .retain(|_| *keep_iter.next().unwrap_or(&true));
+        let mut keep_iter = keep.iter();
+        field.values.retain(|_| *keep_iter.next().unwrap_or(&true));
+    }
+}
+
+/// The largest magnitude of `values`, infinite where one is not finite: zero only where
+/// all values are.
+fn magnitude(values: &[f64]) -> f64 {
+    values.iter().fold(0.0, |m, v| {
+        if v.is_nan() {
+            f64::INFINITY
+        } else {
+            m.max(v.abs())
+        }
+    })
+}
+
 impl Results {
     /// Leaves out the out-of-plane components of the results of a 2D model: of the fields
     /// those zero in every increment (see the module), of the history output the trailing
@@ -169,51 +267,12 @@ impl Results {
             return;
         }
         // Fields by name: the components zero in every increment.
-        let mut zero_components: Vec<(String, Vec<String>)> = Vec::new();
-        let mut scales: Vec<(String, f64)> = Vec::new();
+        let mut zeros = OutOfPlane::default();
         for field in self.increments.iter().flat_map(|i| &i.fields) {
-            let scale = field.values.iter().map(|v| largest(v)).fold(0.0, f64::max);
-            match scales.iter_mut().find(|(n, _)| *n == field.name) {
-                Some((_, s)) => *s = s.max(scale),
-                None => scales.push((field.name.clone(), scale)),
-            }
-        }
-        for field in self.increments.iter().flat_map(|i| &i.fields) {
-            let scale = scales
-                .iter()
-                .find(|(n, _)| *n == field.name)
-                .map_or(0.0, |s| s.1);
-            let zeros: Vec<String> = (field.components.iter().zip(&field.values))
-                .filter(|(c, v)| out_of_plane(c) && zero(v, scale))
-                .map(|(c, _)| c.clone())
-                .collect();
-            match zero_components.iter_mut().find(|(n, _)| *n == field.name) {
-                Some((_, kept)) => kept.retain(|c| zeros.contains(c)),
-                None => zero_components.push((field.name.clone(), zeros)),
-            }
+            zeros.add(field);
         }
         for field in self.increments.iter_mut().flat_map(|i| &mut i.fields) {
-            let Some((_, zeros)) = zero_components.iter().find(|(n, _)| *n == field.name) else {
-                continue;
-            };
-            if zeros.is_empty() {
-                continue;
-            }
-            let kept: Vec<String> = (field.components.iter())
-                .filter(|c| !zeros.contains(c))
-                .cloned()
-                .collect();
-            // Only what a reader can put back in full is left out; a field of another
-            // layout keeps its zeros.
-            if full_components(&kept).is_none() {
-                continue;
-            }
-            let values = std::mem::take(&mut field.values);
-            field.values = (field.components.iter().zip(values))
-                .filter(|(c, _)| !zeros.contains(c))
-                .map(|(_, v)| v)
-                .collect();
-            field.components = kept;
+            zeros.drop(field);
         }
 
         // History: per quantity and set, how many trailing values are zero everywhere.

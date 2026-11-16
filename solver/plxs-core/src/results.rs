@@ -7,6 +7,13 @@ use crate::mesh::NodeId;
 
 pub mod plane;
 
+/// Takes the increments of a run that are done, so that the results of a long run need not
+/// fit into memory: a procedure hands every increment but the one it wrote last over to it
+/// once it writes the next.
+pub trait Spill: Send + Sync {
+    fn spill(&mut self, increment: ResultsIncrement);
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Results {
     /// One entry per written increment (or mode).

@@ -29,7 +29,7 @@ pub const EXTENSION: &str = "ndlr";
 
 /// The first bytes of a `.ndlr` file; the last two count the format, which is not converted:
 /// results of another format are solved again.
-const MAGIC: &[u8; 8] = b"PLXRES\x00\x06";
+const MAGIC: &[u8; 8] = b"PLXRES\x00\x07";
 
 /// What a run of the built-in solver computed, as Nodalis keeps it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -106,6 +106,82 @@ impl SolverResults {
         packed::pack_to(MAGIC, self, &mut out)?;
         out.flush()?;
         out.into_inner()?.sync_all()
+    }
+
+    /// [`SolverResults::write`] of results whose increments are in `spool` (and none in
+    /// [`SolverResults::results`]): the `.ndlr` file is written beside `path` as
+    /// `<path>.tmp`, with the spooled arrays copied as they are stored, and renamed to `path`
+    /// once it is complete. The increments of the steps `skip` are left out; the out-of-plane
+    /// components of a 2D model are left out as [`SolverResults::new`] does, by all spooled
+    /// increments.
+    pub fn write_spooled(
+        &mut self,
+        spool: plxs_output::spool::Spool,
+        skip: &[u32],
+        path: &Path,
+    ) -> std::io::Result<()> {
+        // What a 2D model leaves out: decided by the values of every increment.
+        let mut plane = None;
+        if plxs_core::results::plane::is_plane(&self.model) {
+            let mut zeros = plxs_core::results::plane::OutOfPlane::default();
+            for index in 0..spool.len() {
+                for field in &spool.read(index)?.fields {
+                    zeros.add(field);
+                }
+            }
+            plane = Some(zeros);
+        }
+        let partial = path.with_extension(format!("{EXTENSION}.tmp"));
+        let file = std::fs::File::create(&partial)?;
+        let mut out = packed::Streaming::new(MAGIC, std::io::BufWriter::new(file))?;
+        // Node ids and coordinates are written from memory.
+        let mut written = vec![None, None];
+        let mut increments = Vec::new();
+        for spooled in spool.increments() {
+            if skip.contains(&spooled.skeleton.step) {
+                continue;
+            }
+            let mut increment = spooled.skeleton.clone();
+            let mut arrays = spooled.arrays.iter();
+            for field in &mut increment.fields {
+                let keep = plane.as_ref().and_then(|p| p.kept(field));
+                let nodes = arrays.next().copied();
+                written.push(
+                    nodes
+                        .map(|a| spool.raw(a).and_then(|r| out.raw(&r)))
+                        .transpose()?,
+                );
+                let columns: Vec<usize> =
+                    arrays.by_ref().take(field.values.len()).copied().collect();
+                for (k, column) in columns.into_iter().enumerate() {
+                    if keep.as_ref().is_none_or(|keep| keep[k]) {
+                        written.push(Some(out.raw(&spool.raw(column)?)?));
+                    }
+                }
+                if let Some(keep) = &keep {
+                    let mut kept = keep.iter();
+                    field.components.retain(|_| *kept.next().unwrap_or(&true));
+                    let mut kept = keep.iter();
+                    field.values.retain(|_| *kept.next().unwrap_or(&true));
+                }
+            }
+            increments.push(increment);
+        }
+        drop(spool);
+        // Increments in memory come after the spooled ones and are written from there.
+        let spooled = increments.len();
+        let in_memory = std::mem::replace(&mut self.results.increments, increments);
+        self.results.increments.extend(in_memory);
+        let mut count = 0;
+        self.arrays(&mut |_| count += 1);
+        written.resize(count, None);
+        let finished = out.finish(self, &written);
+        // The spooled increments stay out of memory: what is kept is their file.
+        self.results.increments.drain(..spooled);
+        let mut out = finished?;
+        out.flush()?;
+        out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+        std::fs::rename(&partial, path)
     }
 
     pub fn read(path: &Path) -> Result<Self, ReadError> {

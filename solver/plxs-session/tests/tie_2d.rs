@@ -195,7 +195,7 @@ fn solve(input: &str) -> HashMap<u32, [f64; 2]> {
     let mut kept = None;
     run_job_keeping(input, None, &options, &mut NoProgress, &mut kept)
         .unwrap_or_else(|e| panic!("{e}\n{input}"));
-    let (_, results) = kept.expect("results");
+    let results = kept.expect("results").results;
     let field = (results.increments.last().unwrap().fields.iter())
         .find(|f| f.name == "DISP")
         .unwrap();

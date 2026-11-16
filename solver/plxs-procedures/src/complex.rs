@@ -624,7 +624,7 @@ impl Procedure for ComplexFrequencyProcedure {
             if fields.is_empty() {
                 continue;
             }
-            ctx.results.increments.push(ResultsIncrement {
+            ctx.push_increment(ResultsIncrement {
                 step: ctx.step_number,
                 increment: number,
                 kind: IncrementKind::ComplexFrequency,

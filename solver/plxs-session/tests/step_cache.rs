@@ -65,8 +65,9 @@ fn fresh(test: &str) -> PathBuf {
     dir
 }
 
-/// Runs `steps` on the cube in `dir`, with the step cache `dir/job.steps` or without; the
-/// results and the info lines of the run.
+/// Runs `steps` on the cube in `dir`, with the step cache `dir/job.steps` and the
+/// increments spooled to disk as Nodalis runs it, or with neither; the results and the info
+/// lines of the run.
 fn run(dir: &Path, steps: &[&str], cached: bool) -> (Results, Vec<String>) {
     let input = cube(3) + &steps.concat();
     let options = JobOptions {
@@ -76,6 +77,7 @@ fn run(dir: &Path, steps: &[&str], cached: bool) -> (Results, Vec<String>) {
             dir: dir.join("job.steps"),
             salt: 1,
         }),
+        spool: cached.then(|| dir.join("job.spool")),
         ..JobOptions::new(dir, "job")
     };
     let mut info = Vec::new();
@@ -92,7 +94,14 @@ fn run(dir: &Path, steps: &[&str], cached: bool) -> (Results, Vec<String>) {
         &mut kept,
     )
     .unwrap();
-    (kept.unwrap().1, info)
+    let kept = kept.unwrap();
+    let mut results = kept.results;
+    if let Some(spool) = &kept.spool {
+        assert!(results.increments.is_empty());
+        results.increments = (0..spool.len()).map(|i| spool.read(i).unwrap()).collect();
+    }
+    assert_eq!(kept.spool.is_some(), cached);
+    (results, info)
 }
 
 fn taken_over(info: &[String]) -> Option<&String> {

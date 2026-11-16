@@ -9,6 +9,10 @@ use plxs_core::{Analysis, CancelToken, Error, Model, Progress, ProgressEvent, Re
 
 use plxs_core::state::Snapshot;
 
+use std::sync::{Arc, Mutex};
+
+use plxs_output::spool::Spool;
+
 use crate::cache::StepCache;
 use crate::restart::{self, RestartFile};
 use crate::{Session, SessionOptions, StepOutcome};
@@ -43,6 +47,11 @@ pub struct JobOptions {
     /// Keeps the state and results after each step, and takes over the steps a run before
     /// computed already ([`crate::cache`]); `None`: every step is computed.
     pub step_cache: Option<StepCache>,
+    /// Keeps the increments that are done in this file instead of memory while the run goes
+    /// on ([`KeptResults::spool`]), so that the results of a long run need not fit into
+    /// memory; only without [`JobOptions::write_files`]. The file is deleted with the
+    /// results.
+    pub spool: Option<PathBuf>,
 }
 
 impl JobOptions {
@@ -61,6 +70,7 @@ impl JobOptions {
             cancel: CancelToken::new(),
             linear_watch: None,
             step_cache: None,
+            spool: None,
         }
     }
 
@@ -137,7 +147,40 @@ pub fn run_input_file(dir: &Path, name: &str) -> std::result::Result<Vec<String>
 
 /// The output model and results of a job: the model with shells and beams expanded as the
 /// `.frd` file shows them, and the results on it.
-pub type KeptResults = (Model, Results);
+#[derive(Debug)]
+pub struct KeptResults {
+    pub model: Model,
+    /// The results; without their increments where these are in [`KeptResults::spool`].
+    pub results: Results,
+    /// The increments as written, kept on disk ([`JobOptions::spool`]); they come before
+    /// those in [`KeptResults::results`], which has none then.
+    pub spool: Option<Spool>,
+}
+
+/// A spool shared by the job and its session, which hands increments over to it.
+#[derive(Clone)]
+struct SharedSpool(Arc<Mutex<Option<Spool>>>);
+
+impl SharedSpool {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Spool>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl plxs_core::Spill for SharedSpool {
+    fn spill(&mut self, increment: plxs_core::ResultsIncrement) {
+        if let Some(spool) = self.lock().as_mut() {
+            plxs_core::Spill::spill(spool, increment);
+        }
+    }
+}
+
+fn spool_error(path: &Path, message: impl std::fmt::Display) -> Error {
+    Error::Io {
+        path: path.display().to_string(),
+        message: message.to_string(),
+    }
+}
 
 /// [`run_job`], keeping the results in `kept` whenever they would be written: at the end,
 /// and after a step that did not converge or was cancelled.
@@ -249,10 +292,19 @@ fn run_continuing(
     // the same keys. A `*RESTART, READ` run continues from its own state.
     let cache = options.step_cache.as_ref().filter(|_| snapshot.is_none());
     let keys = cache.map(|c| c.keys(&analysis, &options.work_dir));
+    // Increments that are done go to a file; the command line writes its `.frd` from
+    // memory.
+    let spool = match (&options.spool, options.write_files) {
+        (Some(path), false) => Some(SharedSpool(Arc::new(Mutex::new(Some(
+            Spool::create(path).map_err(|e| spool_error(path, e))?,
+        ))))),
+        _ => None,
+    };
     let mut cached = None;
     if let (Some(cache), Some(keys)) = (cache, &keys) {
         cache.keep_only(keys);
-        cached = cache.take(keys);
+        let mut spooled = spool.as_ref().map(SharedSpool::lock);
+        cached = cache.take(keys, spooled.as_mut().and_then(|s| s.as_mut()));
     }
     // Shells, membranes and beams are computed as the solids CalculiX expands them to.
     let expansion = plxs_elements::expand::expand(analysis)?;
@@ -291,13 +343,40 @@ fn run_continuing(
         }
         (None, _) => (Session::new(analysis.model, session_options)?, 0),
     };
+    if let Some(spool) = &spool {
+        session.set_spill(Box::new(spool.clone()));
+    }
     // Only when the expansion kept the steps as they were (it always does).
     let keys = keys.filter(|k| k.len() == steps);
     let mut keeping = cache.is_some();
     let output = |ext: &str| options.output(ext);
-    let mut write = |session: &Session| -> Result<()> {
+    let mut write = |session: &mut Session| -> Result<()> {
         let writing = std::time::Instant::now();
+        session.spill_increments();
+        let mut spooled = spool.as_ref().and_then(|s| s.lock().take());
+        if let Some(error) = spooled.as_ref().and_then(Spool::error) {
+            return Err(Error::Io {
+                path: String::new(),
+                message: format!("results not kept: {error}"),
+            });
+        }
         let (model, results) = output_map.apply(session.model(), session.results());
+        // The spooled increments as written: mapped one at a time where the written fields
+        // differ from the solver's.
+        if let (Some(raw), Some(path)) = (spooled.as_ref(), &options.spool) {
+            let written = output_map.written(session.model());
+            if !output_map.keeps_fields(&written) {
+                let path = path.with_extension("mapped");
+                let failed = |e: std::io::Error| spool_error(&path, e);
+                let mut mapped = Spool::create(&path).map_err(failed)?;
+                for index in 0..raw.len() {
+                    let mut increment = raw.read(index).map_err(failed)?;
+                    output_map.map_increment(&written, &mut increment);
+                    mapped.push(increment).map_err(failed)?;
+                }
+                spooled = Some(mapped);
+            }
+        }
         plxs_output::write_sta(&output("sta"), session.sta_rows())?;
         plxs_output::write_cvg(&output("cvg"), session.cvg_rows())?;
         if options.write_files {
@@ -325,7 +404,11 @@ fn run_continuing(
             let bytes = postcard::to_stdvec(modes).map_err(|e| io(e.to_string()))?;
             std::fs::write(&path, bytes).map_err(|e| io(e.to_string()))?;
         }
-        *kept = Some((model, results));
+        *kept = Some(KeptResults {
+            model,
+            results,
+            spool: spooled,
+        });
         if let Some(sink) = &options.profile_sink {
             let model = session.model();
             *sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(JobProfile {
@@ -347,17 +430,23 @@ fn run_continuing(
             )));
         }
         if options.cancel.is_cancelled() {
-            write(&session)?;
+            write(&mut session)?;
             return Ok(JobOutcome::Cancelled);
         }
-        match session.run_step(step, progress)? {
+        let outcome = session.run_step(step, progress)?;
+        // A step done, its increments go to the spool: the next step does not change them.
+        session.spill_increments();
+        match outcome {
             StepOutcome::Converged => {
                 if let (true, Some(cache), Some(keys)) = (keeping, cache, &keys) {
+                    let snapshot = session.snapshot();
+                    let spooled = spool.as_ref().map(SharedSpool::lock);
                     cache.keep(
                         keys[index],
                         session.state().steps_done,
-                        &session.snapshot(),
+                        &snapshot,
                         session.results_mut(),
+                        spooled.as_ref().and_then(|s| s.as_ref()),
                     );
                 }
             }
@@ -369,7 +458,7 @@ fn run_continuing(
                 failure,
                 message,
             } => {
-                write(&session)?;
+                write(&mut session)?;
                 // The step that did not converge is the one after those done.
                 return Err(Error::Numerical {
                     step: session.state().steps_done + 1,
@@ -384,7 +473,7 @@ fn run_continuing(
                 });
             }
             StepOutcome::Cancelled => {
-                write(&session)?;
+                write(&mut session)?;
                 return Ok(JobOutcome::Cancelled);
             }
         }
@@ -403,7 +492,7 @@ fn run_continuing(
         }
     }
     let writing = std::time::Instant::now();
-    write(&session)?;
+    write(&mut session)?;
     if options.profile {
         for line in session.profile().report(started.elapsed()) {
             progress.event(ProgressEvent::Info(line));

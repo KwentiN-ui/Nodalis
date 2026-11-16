@@ -99,6 +99,22 @@ pub struct ProcedureContext<'a> {
     /// A part of a dynamic step that switches between implicit and explicit integration
     /// (`INTEGRATION=AUTOMATIC`); `None` computes the whole step.
     pub segment: Option<Segment>,
+    /// Takes the increments written before the last one ([`ProcedureContext::push_increment`]);
+    /// `None` keeps all in [`ProcedureContext::results`].
+    pub spill: Option<&'a mut (dyn plxs_core::Spill + 'static)>,
+}
+
+impl ProcedureContext<'_> {
+    /// Writes an increment of results. The ones written before go to the spill, if there
+    /// is one: only the last one stays in memory, which a procedure may still add fields to.
+    pub fn push_increment(&mut self, increment: plxs_core::ResultsIncrement) {
+        if let Some(spill) = self.spill.as_deref_mut() {
+            for earlier in self.results.increments.drain(..) {
+                spill.spill(earlier);
+            }
+        }
+        self.results.increments.push(increment);
+    }
 }
 
 /// A part of a dynamic step, computed by one of its integrators on the state the part

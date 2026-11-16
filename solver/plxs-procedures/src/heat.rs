@@ -410,7 +410,7 @@ impl<'h> HeatRun<'h> {
                 )?;
             } else if write {
                 let fields = Vec::new();
-                ctx.results.increments.push(ResultsIncrement {
+                ctx.push_increment(ResultsIncrement {
                     step: ctx.step_number,
                     increment,
                     kind: IncrementKind::Time,
