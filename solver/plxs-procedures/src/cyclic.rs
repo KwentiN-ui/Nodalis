@@ -259,7 +259,7 @@ pub(crate) fn cyclic_frequency(
                 ));
             }
             if let (Some(imaginary), Some(real)) = (parts.pop(), parts.pop()) {
-                ctx.results.increments.push(ResultsIncrement {
+                ctx.push_increment(ResultsIncrement {
                     step: ctx.step_number,
                     increment: global_mode,
                     kind: IncrementKind::Frequency,

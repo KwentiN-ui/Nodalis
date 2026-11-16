@@ -568,7 +568,7 @@ impl Procedure for FrequencyProcedure {
                 let fields = build_fields(
                     ctx.table, ctx.model, step, &phi, &forces, &stresses, &strains,
                 );
-                ctx.results.increments.push(ResultsIncrement {
+                ctx.push_increment(ResultsIncrement {
                     step: ctx.step_number,
                     increment: mode_number,
                     kind: IncrementKind::Frequency,
@@ -723,7 +723,7 @@ impl Procedure for BuckleProcedure {
         // The reference solution, where the step asks for fields.
         if writes_fields(step) {
             let fields = build_fields(ctx.table, ctx.model, step, &u, &forces, &stresses, &strains);
-            ctx.results.increments.push(ResultsIncrement {
+            ctx.push_increment(ResultsIncrement {
                 step: ctx.step_number,
                 increment: 0,
                 kind: IncrementKind::Buckling,
@@ -835,7 +835,7 @@ impl Procedure for BuckleProcedure {
             let fields = build_fields(
                 ctx.table, ctx.model, step, &phi, &forces, &stresses, &strains,
             );
-            ctx.results.increments.push(ResultsIncrement {
+            ctx.push_increment(ResultsIncrement {
                 step: ctx.step_number,
                 increment: mode,
                 kind: IncrementKind::Buckling,

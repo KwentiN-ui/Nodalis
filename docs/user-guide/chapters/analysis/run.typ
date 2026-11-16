@@ -216,9 +216,9 @@ output pane shows how much they add to the project file; they are stored compres
 the results takes a moment and runs in the background. A new run replaces the results the
 analysis keeps.
 
-The solver hands its results to Nodalis in memory. They are kept as one binary results file
-(`.ndlr`, written next to the input file in the work directory) that holds the mesh the results
-are on and every field and history output of the run. Opening them reads the numbers directly,
+The solver keeps its results as one binary results file (`.ndlr`, written next to the input
+file in the work directory) that holds the mesh the results are on and every field and history
+output of the run. Opening them reads the numbers directly,
 without a text file to parse, and with their full precision. No `.frd` or `.dat` file is
 written.
 
@@ -249,6 +249,16 @@ increment animation first reads the displacements of all its frames, for the sca
 deformation. Results of a dynamic step with 400 frames and 44,000 nodes (a 2.8 GB results file)
 open in a tenth of a second with less than 30 MB of memory, where reading them as a whole took
 12 seconds and 6.8 GB.
+
+Results need not fit into memory while the analysis runs either. Each increment the solver
+finishes is written to a temporary file next to the results file (`.ndlr.spool`) and leaves
+memory; only the increment it works on stays there. When the run has ended, the results file
+is put together from the temporary file, without decompressing the increments again, and the
+temporary file is removed. The increments of a step that did not converge are kept as well;
+those of a stopped run are discarded with the temporary file. The beam with 44,000 nodes
+solved for 400 frames needs 1.6 GB of memory from the first increment to the last, where the
+memory grew with every increment before (3.3 GB for only 100 frames), and the run is faster
+(125 instead of 160 seconds).
 
 #figure(
   image("../../images/results-reading.png", width: 70%),

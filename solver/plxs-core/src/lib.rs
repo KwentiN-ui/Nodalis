@@ -50,7 +50,7 @@ pub use material::Material;
 pub use mesh::{ElementId, NodeId, Nodes, Sets, Surface, SurfaceFace};
 pub use model::{Analysis, InitialConditions, Model, PhysicalConstants, PointMass};
 pub use progress::{CancelToken, LinearIteration, LinearWatch, Progress, ProgressEvent};
-pub use results::{Results, ResultsIncrement};
+pub use results::{Results, ResultsIncrement, Spill};
 pub use section::Section;
 pub use state::State;
 pub use step::{Boundary, Loads, Outputs, Procedure, Step};

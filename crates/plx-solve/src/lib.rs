@@ -467,6 +467,9 @@ impl Run {
                 dir: work_dir.join(format!("{name}.steps")),
                 salt: solver_build(),
             }),
+            // The increments that are done wait on disk for the results file, so that a
+            // long run is not limited by the memory.
+            spool: Some(work_dir.join(format!("{name}.{}.spool", plx_results::solver::EXTENSION))),
             ..plxs_session::JobOptions::new(work_dir, name)
         };
         let lines = Arc::clone(&output);
@@ -536,19 +539,30 @@ impl Run {
                 // The results so far, also of a step that did not converge; a stopped run's are
                 // discarded (nobody waits for them, and a new run of the same name may
                 // already be writing its own file).
-                if let Some((model, results)) = kept.filter(|_| !options.cancel.is_cancelled()) {
-                    let mut results = SolverResults::new(&model, results, VERSION);
+                if let Some(kept) = kept.filter(|_| !options.cancel.is_cancelled()) {
+                    let mut results = SolverResults::new(&kept.model, kept.results, VERSION);
                     results.steps = records;
                     let failed = !matches!(run, Ok(Ok(plxs_session::JobOutcome::Finished)));
                     results.unconverged_step = track.step.filter(|_| failed).or(track.unconverged);
                     results.convergence = track.increments;
                     drop_preparation_steps(&mut results, &preparation);
-                    match results.write(&results_file) {
+                    // Written beside the results of the run before and renamed over them
+                    // once complete.
+                    let written = match kept.spool {
+                        Some(spool) => results.write_spooled(spool, &preparation, &results_file),
+                        None => results.write(&results_file),
+                    };
+                    match written {
                         Ok(()) => {
                             writing.store(true, std::sync::atomic::Ordering::Release);
                             if keeping.load(std::sync::atomic::Ordering::Acquire) {
+                                // Spooled increments are read back for who asked for them.
+                                let kept = match results.results.increments.is_empty() {
+                                    true => SolverResults::read(&results_file).ok(),
+                                    false => Some(results),
+                                };
                                 *keep_results.lock().unwrap_or_else(|e| e.into_inner()) =
-                                    Some(Arc::new(results));
+                                    kept.map(Arc::new);
                             }
                         }
                         Err(error) => say(format!(
@@ -944,6 +958,16 @@ S
         assert_eq!(run.wait(), JobStatus::Completed);
         assert!(run.solver_results().is_none());
         assert_eq!(run.results(), Some(run.file("ndlr")));
+        // The increments waited in a file of their own, which is gone with the run.
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        assert!(
+            !left.iter().any(|p| p.to_string_lossy().contains("spool")),
+            "{left:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

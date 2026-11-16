@@ -25,9 +25,12 @@ use plxs_core::step::DefinedFieldKind;
 use plxs_core::{Analysis, Results};
 use serde::Serialize;
 
+use plxs_output::packed::{Archive, Packable, Streaming};
+use plxs_output::spool::Spool;
+
 use crate::restart::{self, Fnv};
 
-const RESULTS_MAGIC: &[u8; 8] = b"PLXSSTP3";
+const RESULTS_MAGIC: &[u8; 8] = b"PLXSSTP4";
 
 /// Where the cache of a job is and which solver build it belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,8 +119,9 @@ impl StepCache {
 
     /// The longest start of the step chain `keys` that is kept, with the state after its
     /// last step and the results of its steps; `None` when not even the first step is
-    /// kept or a file cannot be read.
-    pub(crate) fn take(&self, keys: &[u64]) -> Option<Cached> {
+    /// kept or a file cannot be read. With a `spool`, the increments of these steps go
+    /// there, copied as they are stored, and not into [`Cached::results`].
+    pub(crate) fn take(&self, keys: &[u64], mut spool: Option<&mut Spool>) -> Option<Cached> {
         let steps = keys
             .iter()
             .take_while(|&&k| self.path(k, "state").is_file() && self.path(k, "results").is_file())
@@ -127,8 +131,29 @@ impl StepCache {
         }
         let mut results = Results::default();
         for &key in &keys[..steps] {
-            let bytes = std::fs::read(self.path(key, "results")).ok()?;
-            let step: Results = plxs_output::packed::unpack(RESULTS_MAGIC, &bytes).ok()?;
+            let file = std::fs::File::open(self.path(key, "results")).ok()?;
+            let archive = Archive::open(RESULTS_MAGIC, Box::new(file)).ok()?;
+            let mut step: Results = archive.skeleton().ok()?;
+            let mut index = 0;
+            if let Some(spool) = spool.as_deref_mut() {
+                for increment in std::mem::take(&mut step.increments) {
+                    let count: usize = (increment.fields.iter()).map(|f| 1 + f.values.len()).sum();
+                    let raw = (index..index + count)
+                        .map(|i| archive.raw(i).ok())
+                        .collect::<Option<Vec<_>>>()?;
+                    index += count;
+                    spool.push_raw(increment, &raw).ok()?;
+                }
+            }
+            // The rest of the arrays: the increments' where they are not spooled, the modes'.
+            let mut failed = false;
+            step.arrays(&mut |array| {
+                failed |= archive.read(index, array).is_err();
+                index += 1;
+            });
+            if failed {
+                return None;
+            }
             results.increments.extend(step.increments);
             results.history.extend(step.history);
             results.modes.extend(step.modes);
@@ -143,9 +168,16 @@ impl StepCache {
     }
 
     /// Keeps the state after step `step` (counted from 1) under `key`, with the results of
-    /// that step out of `results`. A file that cannot be written is left out: the cache only
-    /// saves time.
-    pub(crate) fn keep(&self, key: u64, step: u32, snapshot: &Snapshot, results: &mut Results) {
+    /// that step out of `results` and, if the increments are spooled, out of `spool`. A file
+    /// that cannot be written is left out: the cache only saves time.
+    pub(crate) fn keep(
+        &self,
+        key: u64,
+        step: u32,
+        snapshot: &Snapshot,
+        results: &mut Results,
+        spool: Option<&Spool>,
+    ) {
         // The step's results are the latest ones: taken out for packing (no copy of a
         // dynamic step's frames) and appended again afterwards.
         fn split<T>(items: &mut Vec<T>, mine: impl Fn(&T) -> bool) -> Vec<T> {
@@ -154,26 +186,58 @@ impl StepCache {
             taken
         }
         let mut of_step = Results {
-            increments: split(&mut results.increments, |i| i.step == step),
+            increments: Vec::new(),
             history: split(&mut results.history, |h| h.step == step),
             modes: split(&mut results.modes, |m| m.step == step),
         };
-        let bytes = plxs_output::packed::pack_in_place(RESULTS_MAGIC, &mut of_step);
-        results.increments.append(&mut of_step.increments);
+        // Spooled increments are copied as they are stored, those in memory packed.
+        let spooled: Vec<&plxs_output::spool::Spooled> = (spool.iter())
+            .flat_map(|s| s.increments())
+            .filter(|i| i.skeleton.step == step)
+            .collect();
+        of_step
+            .increments
+            .extend(spooled.iter().map(|i| i.skeleton.clone()));
+        of_step
+            .increments
+            .extend(split(&mut results.increments, |i| i.step == step));
+        let _ = std::fs::create_dir_all(&self.dir);
+        // Written beside and renamed, so that a stopped run leaves no half file.
+        let path = self.path(key, "results");
+        let partial = self.path(key, "results.tmp");
+        let packed = (|| -> std::io::Result<()> {
+            let file = std::fs::File::create(&partial)?;
+            let mut out = Streaming::new(RESULTS_MAGIC, std::io::BufWriter::new(file))?;
+            let mut written = Vec::new();
+            if let Some(spool) = spool {
+                for array in spooled.iter().flat_map(|i| &i.arrays) {
+                    written.push(Some(out.raw(&spool.raw(*array)?)?));
+                }
+            }
+            let mut count = 0;
+            of_step.arrays(&mut |_| count += 1);
+            written.resize(count, None);
+            let mut out = out.finish(&mut of_step, &written)?;
+            std::io::Write::flush(&mut out)?;
+            drop(out);
+            std::fs::rename(&partial, &path)
+        })();
+        // Only the increments that were in memory go back.
+        results
+            .increments
+            .extend(of_step.increments.drain(spooled.len()..));
         results.history.append(&mut of_step.history);
         results.modes.append(&mut of_step.modes);
-        let write = |extension: &str, bytes: Vec<u8>| -> std::io::Result<()> {
-            // Written beside and renamed, so that a stopped run leaves no half file.
-            let path = self.path(key, extension);
-            let partial = self.path(key, &format!("{extension}.tmp"));
-            std::fs::write(&partial, bytes)?;
-            std::fs::rename(&partial, &path)
-        };
-        let _ = std::fs::create_dir_all(&self.dir);
-        let written = write("results", bytes)
+        let written = packed
             .ok()
             .and_then(|()| restart::encode_snapshot(snapshot).ok())
-            .and_then(|bytes| write("state", bytes).ok());
+            .and_then(|bytes| {
+                let path = self.path(key, "state");
+                let partial = self.path(key, "state.tmp");
+                std::fs::write(&partial, bytes)
+                    .and_then(|()| std::fs::rename(&partial, &path))
+                    .ok()
+            });
         if written.is_none() {
             let _ = std::fs::remove_file(self.path(key, "results"));
             let _ = std::fs::remove_file(self.path(key, "state"));

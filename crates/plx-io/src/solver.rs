@@ -132,8 +132,8 @@ mod tests {
         let mut kept = None;
         let outcome =
             plxs_session::run_job_keeping(&text, Some(input), &options, &mut |_| {}, &mut kept);
-        let (model, results) = kept.filter(|_| outcome.is_ok())?;
-        let solved = SolverResults::new(&model, results, "test");
+        let kept = kept.filter(|_| outcome.is_ok())?;
+        let solved = SolverResults::new(&kept.model, kept.results, "test");
         Some((solved, dir.join(format!("{name}.frd"))))
     }
 

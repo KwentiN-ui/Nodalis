@@ -1046,7 +1046,7 @@ pub(crate) fn write_increment(
             .unwrap_or(fields.len());
         fields.splice(at..at, contact);
     }
-    ctx.results.increments.push(ResultsIncrement {
+    ctx.push_increment(ResultsIncrement {
         step: ctx.step_number,
         increment,
         kind: IncrementKind::Dynamic,

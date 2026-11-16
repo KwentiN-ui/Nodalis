@@ -16,9 +16,12 @@
 //! exactly: the container is lossless.
 //!
 //! Layout: the caller's magic (8 bytes), the offset of the table from the start (u64,
-//! little endian), the compressed chunks back to back in the order of the table, then the
-//! table ([`Table`], postcard) at the end, so that a writer streams the chunks out as it
-//! compresses them and writes the table last. All numbers are little endian.
+//! little endian), the compressed chunks of every dataset back to back, then the table
+//! ([`Table`], postcard) at the end, which says where each dataset is. A writer streams the
+//! chunks out as it compresses them and writes the table last; the datasets need not be in
+//! the order of the table ([`Streaming`] writes the arrays of a run as they come and the
+//! skeleton last), and bytes no dataset of the table names are not read. All numbers are
+//! little endian.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -91,13 +94,29 @@ impl Encoding {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Dataset {
     encoding: Encoding,
     /// Size of the dataset in bytes before compression.
     size: u64,
+    /// Where its first chunk is, from the start of the container; the chunks follow back
+    /// to back.
+    at: u64,
     /// Sizes of its chunks after compression.
     chunks: Vec<u32>,
+}
+
+impl Dataset {
+    /// Its size in the container.
+    fn stored(&self) -> u64 {
+        self.chunks.iter().map(|&c| u64::from(c)).sum()
+    }
+
+    /// Whether its chunks fit its size.
+    fn consistent(&self) -> bool {
+        let chunk = self.encoding.chunk() as u64;
+        self.chunks.len() as u64 == self.size.div_ceil(chunk)
+    }
 }
 
 /// The table of the datasets at the start of the container.
@@ -142,7 +161,7 @@ pub fn pack_to<T: Packable>(
             taken.put_back(array);
         }
     });
-    let mut datasets = vec![write_dataset(out, Encoding::Bytes, &skeleton)?];
+    let mut datasets = vec![write_dataset(out, start, Encoding::Bytes, &skeleton)?];
     drop(skeleton);
     let mut failed = None;
     value.arrays(&mut |array| {
@@ -150,7 +169,7 @@ pub fn pack_to<T: Packable>(
             return;
         }
         let (encoding, bytes) = encode_bytes(&array);
-        match write_dataset(out, encoding, &bytes) {
+        match write_dataset(out, start, encoding, &bytes) {
             Ok(dataset) => datasets.push(dataset),
             Err(e) => failed = Some(e),
         }
@@ -167,15 +186,18 @@ pub fn pack_to<T: Packable>(
     Ok(())
 }
 
-/// Writes the chunks of a dataset's bytes and returns its table entry.
+/// Writes the chunks of a dataset's bytes and returns its table entry; the container
+/// starts at `start` in `out`.
 fn write_dataset(
-    out: &mut impl Write,
+    out: &mut (impl Write + Seek),
+    start: u64,
     encoding: Encoding,
     bytes: &[u8],
 ) -> std::io::Result<Dataset> {
     let mut dataset = Dataset {
         encoding,
         size: bytes.len() as u64,
+        at: out.stream_position()? - start,
         chunks: Vec::new(),
     };
     // Batches of chunks, compressed in parallel, so that a large array is not held twice.
@@ -221,6 +243,23 @@ impl Taken {
         }
     }
 
+    /// The bytes of its dataset.
+    fn encode(&self) -> (Encoding, Vec<u8>) {
+        match self {
+            Taken::Ids(v) => (Encoding::Ids, id_bytes(v)),
+            Taken::F64(v) => (Encoding::F64, number_bytes(v)),
+            Taken::F64x3(v) => (Encoding::F64x3, number_bytes(v.as_flattened())),
+            Taken::F32x3(v) => (
+                Encoding::F32x3,
+                v.iter()
+                    .flatten()
+                    .copied()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+            ),
+        }
+    }
+
     fn put_back(self, array: Array<'_>) {
         match (self, array) {
             (Taken::Ids(v), Array::Ids(ids)) => *ids = v,
@@ -239,15 +278,14 @@ pub fn unpack<T: Packable>(magic: &[u8; 8], bytes: &[u8]) -> Result<T, PackError
     let rest = bytes
         .strip_prefix(magic.as_slice())
         .ok_or_else(|| error("not results of this Nodalis version: solve again"))?;
-    let (table_at, rest) = rest
+    let (table_at, _) = rest
         .split_first_chunk::<8>()
         .ok_or_else(|| error("results cut short"))?;
     let table_at = usize::try_from(u64::from_le_bytes(*table_at))
         .ok()
-        .and_then(|at| at.checked_sub(16))
-        .filter(|at| *at <= rest.len())
+        .filter(|at| (16..=bytes.len()).contains(at))
         .ok_or_else(|| error("results cut short"))?;
-    let (mut data, table) = rest.split_at(table_at);
+    let (data, table) = bytes.split_at(table_at);
     let table: Table =
         postcard::from_bytes(table).map_err(|e| PackError(format!("results not readable: {e}")))?;
 
@@ -256,21 +294,25 @@ pub fn unpack<T: Packable>(magic: &[u8; 8], bytes: &[u8]) -> Result<T, PackError
     let mut jobs: Vec<(&[u8], &mut [u8], Encoding)> = Vec::new();
     for dataset in &table.datasets {
         let size = usize::try_from(dataset.size).map_err(|_| error("results too large"))?;
-        let chunk = dataset.encoding.chunk();
-        if dataset.chunks.len() != size.div_ceil(chunk) || size > CHUNK * dataset.chunks.len() {
+        if !dataset.consistent() {
             return Err(error("results not readable: chunks do not match"));
         }
         datasets.push(vec![0; size]);
     }
     for (dataset, buffer) in table.datasets.iter().zip(&mut datasets) {
         let chunk = dataset.encoding.chunk();
+        let mut rest = usize::try_from(dataset.at)
+            .ok()
+            .filter(|at| (16..=data.len()).contains(at))
+            .map(|at| &data[at..])
+            .ok_or_else(|| error("results cut short"))?;
         for (target, &length) in buffer.chunks_mut(chunk).zip(&dataset.chunks) {
             let length = length as usize;
-            if data.len() < length {
+            if rest.len() < length {
                 return Err(error("results cut short"));
             }
-            let (compressed, rest) = data.split_at(length);
-            data = rest;
+            let (compressed, after) = rest.split_at(length);
+            rest = after;
             jobs.push((compressed, target, dataset.encoding));
         }
     }
@@ -369,25 +411,23 @@ impl Archive {
         source.read_to_end(&mut table).map_err(io)?;
         let table: Table = postcard::from_bytes(&table)
             .map_err(|e| PackError(format!("results not readable: {e}")))?;
-        let mut at = start + 16;
         let mut located = Vec::with_capacity(table.datasets.len());
         for dataset in table.datasets {
             let size = usize::try_from(dataset.size).map_err(|_| error("results too large"))?;
-            let chunk = dataset.encoding.chunk();
-            if dataset.chunks.len() != size.div_ceil(chunk) || size > CHUNK * dataset.chunks.len() {
+            if !dataset.consistent() {
                 return Err(error("results not readable: chunks do not match"));
             }
-            let length: u64 = dataset.chunks.iter().map(|&c| u64::from(c)).sum();
+            let end = (dataset.at.checked_add(dataset.stored()))
+                .filter(|&end| dataset.at >= 16 && end <= table_at);
+            if end.is_none() {
+                return Err(error("results cut short"));
+            }
             located.push(Located {
                 encoding: dataset.encoding,
                 size,
-                at,
+                at: start + dataset.at,
                 chunks: dataset.chunks,
             });
-            at += length;
-        }
-        if at > start + table_at {
-            return Err(error("results cut short"));
         }
         let mut datasets = located.into_iter();
         let skeleton = datasets.next().ok_or_else(|| error("results are empty"))?;
@@ -460,38 +500,217 @@ impl Archive {
         put_bytes(array, located.encoding, &bytes)
     }
 
-    /// The bytes of a dataset: its chunks read in one go, decompressed in parallel.
-    fn bytes(&self, located: &Located) -> Result<Vec<u8>, PackError> {
+    /// Array `index` as it is stored, compressed, to copy it into another container
+    /// without decoding it ([`Streaming::raw`]).
+    pub fn raw(&self, index: usize) -> Result<RawDataset, PackError> {
+        let located = (self.arrays.get(index))
+            .ok_or_else(|| PackError("results not readable: an array is missing".into()))?;
+        Ok(RawDataset {
+            encoding: located.encoding,
+            size: located.size as u64,
+            chunks: located.chunks.clone(),
+            bytes: self.compressed(located)?,
+        })
+    }
+
+    fn compressed(&self, located: &Located) -> Result<Vec<u8>, PackError> {
         let length: usize = located.chunks.iter().map(|&c| c as usize).sum();
         let mut compressed = vec![0; length];
-        {
-            let mut source = self.source.lock().unwrap_or_else(|e| e.into_inner());
-            (source.seek(SeekFrom::Start(located.at)))
-                .and_then(|_| source.read_exact(&mut compressed))
-                .map_err(|e| PackError(format!("results not readable: {e}")))?;
-        }
-        let mut out = vec![0; located.size];
-        let mut jobs: Vec<(&[u8], &mut [u8])> = Vec::with_capacity(located.chunks.len());
-        let mut rest = compressed.as_slice();
-        for (target, &length) in (out.chunks_mut(located.encoding.chunk())).zip(&located.chunks) {
-            let (chunk, after) = rest.split_at(length as usize);
-            rest = after;
-            jobs.push((chunk, target));
-        }
-        let encoding = located.encoding;
-        jobs.into_par_iter().try_for_each(|(compressed, target)| {
-            let shuffled = zstd::bulk::decompress(compressed, target.len())
-                .map_err(|e| PackError(format!("results not readable: {e}")))?;
-            if shuffled.len() != target.len() {
-                return Err(PackError(
-                    "results not readable: a chunk is cut short".into(),
-                ));
-            }
-            unshuffle(&shuffled, encoding.width(), target);
-            Ok(())
-        })?;
-        Ok(out)
+        let mut source = self.source.lock().unwrap_or_else(|e| e.into_inner());
+        (source.seek(SeekFrom::Start(located.at)))
+            .and_then(|_| source.read_exact(&mut compressed))
+            .map_err(|e| PackError(format!("results not readable: {e}")))?;
+        Ok(compressed)
     }
+
+    /// The bytes of a dataset: its chunks read in one go, decompressed in parallel.
+    fn bytes(&self, located: &Located) -> Result<Vec<u8>, PackError> {
+        decompress(located, &self.compressed(located)?)
+    }
+}
+
+/// A dataset as it is stored in a container, compressed: copied between containers without
+/// being decoded.
+#[derive(Debug)]
+pub struct RawDataset {
+    encoding: Encoding,
+    size: u64,
+    chunks: Vec<u32>,
+    bytes: Vec<u8>,
+}
+
+impl RawDataset {
+    /// Decodes it into `array`, which must be of its type.
+    pub fn decode(&self, array: Array<'_>) -> Result<(), PackError> {
+        let located = Located {
+            encoding: self.encoding,
+            size: self.size as usize,
+            at: 0,
+            chunks: self.chunks.clone(),
+        };
+        let bytes = decompress(&located, &self.bytes)?;
+        put_bytes(array, self.encoding, &bytes)
+    }
+}
+
+/// A container written a dataset at a time, in any order: the arrays of a value as they
+/// come, such as the increments of a run while it computes the next ones, and the skeleton
+/// and table last ([`Streaming::finish`]). The memory it takes is the table, and of an array
+/// written, its bytes while they are compressed.
+pub struct Streaming<W: Write + Seek> {
+    out: W,
+    /// Where the container starts in `out`.
+    start: u64,
+    datasets: Vec<Dataset>,
+}
+
+impl<W: Write + Seek> Streaming<W> {
+    /// Starts a container behind `magic` at the current position of `out`.
+    pub fn new(magic: &[u8; 8], mut out: W) -> std::io::Result<Self> {
+        let start = out.stream_position()?;
+        out.write_all(magic)?;
+        out.write_all(&[0; 8])?;
+        Ok(Self {
+            out,
+            start,
+            datasets: Vec::new(),
+        })
+    }
+
+    /// Writes `array` and returns its number, by which [`Streaming::finish`] puts it into
+    /// the table.
+    pub fn array(&mut self, array: Array<'_>) -> std::io::Result<usize> {
+        let (encoding, bytes) = encode_bytes(&array);
+        let dataset = write_dataset(&mut self.out, self.start, encoding, &bytes)?;
+        self.datasets.push(dataset);
+        Ok(self.datasets.len() - 1)
+    }
+
+    /// Writes a dataset of another container as it is stored.
+    pub fn raw(&mut self, raw: &RawDataset) -> std::io::Result<usize> {
+        let at = self.out.stream_position()? - self.start;
+        self.out.write_all(&raw.bytes)?;
+        self.datasets.push(Dataset {
+            encoding: raw.encoding,
+            size: raw.size,
+            at,
+            chunks: raw.chunks.clone(),
+        });
+        Ok(self.datasets.len() - 1)
+    }
+
+    /// Dataset `index` as it is stored, read back through `read_at` (the bytes of the
+    /// container from its start), which sees what was written.
+    pub fn stored(
+        &self,
+        index: usize,
+        read_at: impl FnOnce(u64, &mut [u8]) -> std::io::Result<()>,
+    ) -> std::io::Result<RawDataset> {
+        let dataset = (self.datasets.get(index))
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such dataset"))?;
+        let mut bytes = vec![0; dataset.stored() as usize];
+        read_at(self.start + dataset.at, &mut bytes)?;
+        Ok(RawDataset {
+            encoding: dataset.encoding,
+            size: dataset.size,
+            chunks: dataset.chunks.clone(),
+            bytes,
+        })
+    }
+
+    /// The writer, to read back what is written; write nothing to it.
+    pub fn get_ref(&self) -> &W {
+        &self.out
+    }
+
+    /// The writer, to move its position back to where the container is written to after
+    /// reading; write nothing to it.
+    pub fn get_mut(&mut self) -> &mut W {
+        &mut self.out
+    }
+
+    /// Ends the container with `value`: its skeleton and, in the order of
+    /// [`Packable::arrays`], its arrays. `written[k]` is the number of the dataset already
+    /// written for the `k`-th array (whose array in `value` is then left as it is), `None`
+    /// writes the array of `value` now. Returns the writer, positioned after the container.
+    pub fn finish<T: Packable>(
+        mut self,
+        value: &mut T,
+        written: &[Option<usize>],
+    ) -> std::io::Result<W> {
+        let mut taken: Vec<Taken> = Vec::new();
+        value.arrays(&mut |array| taken.push(Taken::take(array)));
+        if taken.len() != written.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the arrays of the value do not match the written ones",
+            ));
+        }
+        let skeleton = postcard::to_stdvec(&*value).unwrap_or_default();
+        let mut order = vec![write_dataset(
+            &mut self.out,
+            self.start,
+            Encoding::Bytes,
+            &skeleton,
+        )?];
+        drop(skeleton);
+        let mut back = Vec::with_capacity(taken.len());
+        for (taken, written) in taken.into_iter().zip(written) {
+            let dataset = match written {
+                Some(index) => self.datasets.get(*index).cloned().ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "no such dataset")
+                })?,
+                None => {
+                    let (encoding, bytes) = taken.encode();
+                    write_dataset(&mut self.out, self.start, encoding, &bytes)?
+                }
+            };
+            order.push(dataset);
+            back.push(taken);
+        }
+        let mut back = back.into_iter();
+        value.arrays(&mut |array| {
+            if let Some(taken) = back.next() {
+                taken.put_back(array);
+            }
+        });
+        let table_at = self.out.stream_position()? - self.start;
+        let table = postcard::to_stdvec(&Table { datasets: order }).unwrap_or_default();
+        self.out.write_all(&table)?;
+        self.out.seek(SeekFrom::Start(self.start + 8))?;
+        self.out.write_all(&table_at.to_le_bytes())?;
+        self.out
+            .seek(SeekFrom::Start(self.start + table_at + table.len() as u64))?;
+        Ok(self.out)
+    }
+}
+
+/// The decoded bytes of a dataset from its compressed chunks, decompressed in parallel.
+fn decompress(located: &Located, compressed: &[u8]) -> Result<Vec<u8>, PackError> {
+    let mut out = vec![0; located.size];
+    let mut jobs: Vec<(&[u8], &mut [u8])> = Vec::with_capacity(located.chunks.len());
+    let mut rest = compressed;
+    for (target, &length) in (out.chunks_mut(located.encoding.chunk())).zip(&located.chunks) {
+        if rest.len() < length as usize {
+            return Err(PackError("results cut short".into()));
+        }
+        let (chunk, after) = rest.split_at(length as usize);
+        rest = after;
+        jobs.push((chunk, target));
+    }
+    let encoding = located.encoding;
+    jobs.into_par_iter().try_for_each(|(compressed, target)| {
+        let shuffled = zstd::bulk::decompress(compressed, target.len())
+            .map_err(|e| PackError(format!("results not readable: {e}")))?;
+        if shuffled.len() != target.len() {
+            return Err(PackError(
+                "results not readable: a chunk is cut short".into(),
+            ));
+        }
+        unshuffle(&shuffled, encoding.width(), target);
+        Ok(())
+    })?;
+    Ok(out)
 }
 
 /// A Zstandard compressor at [`LEVEL`] whose frames carry a checksum, so that a damaged
@@ -505,27 +724,9 @@ fn compressor() -> Option<zstd::bulk::Compressor<'static>> {
 /// The bytes of a dataset of the array.
 fn encode_bytes(array: &Array<'_>) -> (Encoding, Vec<u8>) {
     match array {
-        Array::Ids(ids) => {
-            let mut previous = 0u32;
-            let bytes = (ids.iter())
-                .flat_map(|&id| {
-                    let delta = id.wrapping_sub(previous);
-                    previous = id;
-                    delta.to_le_bytes()
-                })
-                .collect();
-            (Encoding::Ids, bytes)
-        }
-        Array::F64(values) => (
-            Encoding::F64,
-            values.iter().copied().flat_map(f64::to_le_bytes).collect(),
-        ),
-        Array::F64x3(rows) => (
-            Encoding::F64x3,
-            (rows.iter().flatten().copied())
-                .flat_map(f64::to_le_bytes)
-                .collect(),
-        ),
+        Array::Ids(ids) => (Encoding::Ids, id_bytes(ids)),
+        Array::F64(values) => (Encoding::F64, number_bytes(values)),
+        Array::F64x3(rows) => (Encoding::F64x3, number_bytes(rows.as_flattened())),
         Array::F32x3(rows) => (
             Encoding::F32x3,
             (rows.iter().flatten().copied())
@@ -533,6 +734,22 @@ fn encode_bytes(array: &Array<'_>) -> (Encoding, Vec<u8>) {
                 .collect(),
         ),
     }
+}
+
+/// Ids as the differences to the id before.
+fn id_bytes(ids: &[u32]) -> Vec<u8> {
+    let mut previous = 0u32;
+    (ids.iter())
+        .flat_map(|&id| {
+            let delta = id.wrapping_sub(previous);
+            previous = id;
+            delta.to_le_bytes()
+        })
+        .collect()
+}
+
+fn number_bytes(values: &[f64]) -> Vec<u8> {
+    values.iter().copied().flat_map(f64::to_le_bytes).collect()
 }
 
 /// Puts a dataset's bytes back into its array.
@@ -789,6 +1006,57 @@ mod tests {
         assert!(same_bits(&all, &original));
         assert!(Archive::from_bytes(b"OTHERMAG", bytes.clone()).is_err());
         assert!(Archive::from_bytes(MAGIC, bytes[..bytes.len() / 2].to_vec()).is_err());
+    }
+
+    #[test]
+    fn a_streamed_container_takes_its_arrays_in_any_order() {
+        let original = results(300_001);
+        // The columns of the field first, in reverse, its nodes and a column nobody keeps
+        // after them; the rest of the arrays (EMPTY, the modes) from the value at the end.
+        let field = &original.increments[0].fields[0];
+        let mut out = Streaming::new(MAGIC, std::io::Cursor::new(Vec::new())).unwrap();
+        let columns: Vec<usize> = (0..3)
+            .rev()
+            .map(|k| out.array(Array::F64(&mut field.values[k].clone())).unwrap())
+            .collect();
+        let nodes = out.array(Array::Ids(&mut field.nodes.clone())).unwrap();
+        out.array(Array::F64(&mut vec![1.0; 10])).unwrap();
+        // A dataset copied from another container as it is stored.
+        let other = pack(MAGIC, original.clone());
+        let other = Archive::from_bytes(MAGIC, other).unwrap();
+        let copied = out.raw(&other.raw(1).unwrap()).unwrap();
+        let mut value = original.clone();
+        value.increments[0].fields[0].nodes.clear();
+        value.increments[0].fields[0]
+            .values
+            .iter_mut()
+            .for_each(Vec::clear);
+        let mut written = vec![
+            Some(nodes),
+            Some(copied),
+            Some(columns[1]),
+            Some(columns[0]),
+        ];
+        written.resize(4 + 2 + 3, None);
+        let bytes = out.finish(&mut value, &written).unwrap().into_inner();
+        let read: Results = unpack(MAGIC, &bytes).unwrap();
+        assert!(same_bits(&read, &original));
+        let archive = Archive::from_bytes(MAGIC, bytes).unwrap();
+        assert!(same_bits(
+            &archive.read_all::<Results>().unwrap(),
+            &original
+        ));
+        // A raw dataset decodes as the array.
+        let mut column = Vec::new();
+        archive
+            .raw(3)
+            .unwrap()
+            .decode(Array::F64(&mut column))
+            .unwrap();
+        assert_eq!(column, field.values[2]);
+        // The written arrays must match those of the value.
+        let out = Streaming::new(MAGIC, std::io::Cursor::new(Vec::new())).unwrap();
+        assert!(out.finish(&mut original.clone(), &[None]).is_err());
     }
 
     #[test]

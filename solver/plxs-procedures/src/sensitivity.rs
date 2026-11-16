@@ -1114,7 +1114,7 @@ impl Procedure for SensitivityProcedure {
                 &["NORMX", "NORMY", "NORMZ"],
                 &[&normals[0], &normals[1], &normals[2]],
             );
-            ctx.results.increments.push(ResultsIncrement {
+            ctx.push_increment(ResultsIncrement {
                 step: ctx.step_number,
                 increment: 1,
                 kind: IncrementKind::Sensitivity,
@@ -1159,7 +1159,7 @@ impl Procedure for SensitivityProcedure {
                     }
                     _ => 0.0,
                 };
-                ctx.results.increments.push(ResultsIncrement {
+                ctx.push_increment(ResultsIncrement {
                     step: ctx.step_number,
                     increment: 1,
                     kind: IncrementKind::Sensitivity,

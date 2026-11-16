@@ -83,85 +83,34 @@ impl OutputMap {
     /// The model and results as written: native elements back on their original nodes,
     /// and nodes that belong to no written element left out of the mesh and every field.
     pub fn apply(&self, model: &Model, results: &Results) -> (Model, Results) {
-        let mut out = model.clone();
+        let written = self.written(model);
         let mut results = results.clone();
         // The mode shapes change with the displacements of the increments.
         let mut mode_fields = results.mode_fields();
-        if !self.native.is_empty() {
-            let mut native_nodes: Vec<NodeId> = Vec::new();
-            for (index, element) in &self.native {
-                out.elements[*index] = element.clone();
-                native_nodes.extend(element.nodes.iter().copied());
-            }
-            native_nodes.sort_unstable();
-            native_nodes.dedup();
-            for field in all_fields(&mut results.increments, &mut mode_fields) {
-                let position: HashMap<NodeId, usize> = field
-                    .nodes
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &n)| (n, i))
-                    .collect();
-                let sum = field.name == "FORC";
-                let disp = field.name == "DISP";
-                for &node in &native_nodes {
-                    let Some(groups) = self.groups.get(&node) else {
-                        continue;
-                    };
-                    // Displacements of a knot are the node's own.
-                    if disp && groups.len() > 1 {
-                        continue;
-                    }
-                    // Per value: (field index, weight).
-                    let sources: Vec<(usize, f64)> = if sum {
-                        groups
-                            .iter()
-                            .flatten()
-                            .filter_map(|n| position.get(n).map(|&p| (p, 1.0)))
-                            .collect()
-                    } else {
-                        let Some(means) = self.means.get(&node) else {
-                            continue;
-                        };
-                        let complete: Vec<&Vec<(NodeId, f64)>> = means
-                            .iter()
-                            .filter(|m| m.iter().all(|(n, _)| position.contains_key(n)))
-                            .collect();
-                        let share = 1.0 / complete.len().max(1) as f64;
-                        complete
-                            .into_iter()
-                            .flatten()
-                            .map(|(n, w)| (position[n], w * share))
-                            .collect()
-                    };
-                    if sources.is_empty() {
-                        continue;
-                    }
-                    let target = match position.get(&node) {
-                        Some(&t) => t,
-                        None => {
-                            field.nodes.push(node);
-                            for component in &mut field.values {
-                                component.push(0.0);
-                            }
-                            field.nodes.len() - 1
-                        }
-                    };
-                    for component in &mut field.values {
-                        component[target] = sources.iter().map(|&(s, w)| w * component[s]).sum();
-                    }
-                }
-                // Nodes in ascending order, as written.
-                if field.nodes.windows(2).any(|w| w[0] > w[1]) {
-                    let mut order: Vec<usize> = (0..field.nodes.len()).collect();
-                    order.sort_by_key(|&i| field.nodes[i]);
-                    field.nodes = order.iter().map(|&i| field.nodes[i]).collect();
-                    for component in &mut field.values {
-                        *component = order.iter().map(|&i| component[i]).collect();
-                    }
-                }
+        self.map_fields(
+            &written,
+            all_fields(&mut results.increments, &mut mode_fields),
+        );
+        if written.trimmed {
+            for increment in &mut results.increments {
+                increment.fields.retain(|f| !f.nodes.is_empty());
             }
         }
+        results.set_mode_fields(mode_fields);
+        (written.model, results)
+    }
+
+    /// The written model of the solver's `model`, with what [`OutputMap::map_increment`]
+    /// needs to map the fields of an increment onto it.
+    pub fn written(&self, model: &Model) -> Written {
+        let mut out = model.clone();
+        let mut native_nodes: Vec<NodeId> = Vec::new();
+        for (index, element) in &self.native {
+            out.elements[*index] = element.clone();
+            native_nodes.extend(element.nodes.iter().copied());
+        }
+        native_nodes.sort_unstable();
+        native_nodes.dedup();
         if !self.rotations.is_empty() {
             // U1 elements stay on their two nodes only (the frd writer skips the type but
             // writes the nodes of every element).
@@ -173,33 +122,6 @@ impl OutputMap {
                 if e.nodes.len() == 4 {
                     e.nodes = vec![e.nodes[0], e.nodes[2]];
                 }
-            }
-            for field in all_fields(&mut results.increments, &mut mode_fields) {
-                let names: [&str; 3] = match field.name.as_str() {
-                    "DISP" => ["D4", "D5", "D6"],
-                    "FORC" => ["F4", "F5", "F6"],
-                    _ => continue,
-                };
-                let position: HashMap<NodeId, usize> = field
-                    .nodes
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &n)| (n, i))
-                    .collect();
-                let first = field.values.len().min(3);
-                let mut extra = vec![vec![0.0; field.nodes.len()]; 3];
-                for (i, node) in field.nodes.iter().enumerate() {
-                    let Some(p) = self.rotations.get(node).and_then(|h| position.get(h)) else {
-                        continue;
-                    };
-                    for (k, column) in extra.iter_mut().enumerate() {
-                        column[i] = field.values.get(k).map_or(0.0, |c| c[*p]);
-                    }
-                }
-                field.values.truncate(first);
-                field.values.extend(extra);
-                field.components.truncate(first);
-                field.components.extend(names.iter().map(|n| n.to_string()));
             }
         }
         let in_elements: HashSet<NodeId> = out
@@ -218,52 +140,190 @@ impl OutputMap {
                 .filter(|e| e.kind == ElementType::U1)
                 .flat_map(|e| e.nodes.iter().copied()),
         );
-        if used.len() == out.nodes.len() {
-            results.set_mode_fields(mode_fields);
-            return (out, results);
-        }
-        let mut nodes = plxs_core::mesh::Nodes::default();
-        for (id, x) in out.nodes.iter() {
-            if used.contains(&id) {
-                nodes.insert(id, x);
+        let trimmed = used.len() != out.nodes.len();
+        if trimmed {
+            let mut nodes = plxs_core::mesh::Nodes::default();
+            for (id, x) in out.nodes.iter() {
+                if used.contains(&id) {
+                    nodes.insert(id, x);
+                }
             }
+            out.nodes = nodes;
         }
-        out.nodes = nodes;
-        for field in all_fields(&mut results.increments, &mut mode_fields) {
-            // Element fields only where elements are.
-            let nodal = matches!(field.name.as_str(), "DISP" | "DISPI" | "FORC");
-            let keep: Vec<bool> = field
-                .nodes
-                .iter()
-                .map(|n| {
-                    if nodal {
-                        used.contains(n)
-                    } else {
-                        in_elements.contains(n)
-                    }
-                })
-                .collect();
-            field.nodes = field
-                .nodes
-                .iter()
-                .zip(&keep)
-                .filter(|(_, k)| **k)
-                .map(|(n, _)| *n)
-                .collect();
-            for component in &mut field.values {
-                *component = component
-                    .iter()
-                    .zip(&keep)
-                    .filter(|(_, k)| **k)
-                    .map(|(v, _)| *v)
-                    .collect();
-            }
+        Written {
+            model: out,
+            native_nodes,
+            used,
+            in_elements,
+            trimmed,
         }
-        for increment in &mut results.increments {
+    }
+
+    /// Whether the fields are written as the solver computed them.
+    pub fn keeps_fields(&self, written: &Written) -> bool {
+        self.native.is_empty() && self.rotations.is_empty() && !written.trimmed
+    }
+
+    /// The fields of `increment` as written: [`OutputMap::apply`] of one increment.
+    pub fn map_increment(&self, written: &Written, increment: &mut ResultsIncrement) {
+        self.map_fields(written, increment.fields.iter_mut());
+        if written.trimmed {
             increment.fields.retain(|f| !f.nodes.is_empty());
         }
-        results.set_mode_fields(mode_fields);
-        (out, results)
+    }
+
+    fn map_fields<'a>(&self, written: &Written, fields: impl Iterator<Item = &'a mut ResultField>) {
+        for field in fields {
+            if !self.native.is_empty() {
+                self.native_field(written, field);
+            }
+            if !self.rotations.is_empty() {
+                self.rotation_field(field);
+            }
+            if written.trimmed {
+                trim_field(written, field);
+            }
+        }
+    }
+
+    /// Values of native elements on their original nodes.
+    fn native_field(&self, written: &Written, field: &mut ResultField) {
+        let position: HashMap<NodeId, usize> = field
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| (n, i))
+            .collect();
+        let sum = field.name == "FORC";
+        let disp = field.name == "DISP";
+        for &node in &written.native_nodes {
+            let Some(groups) = self.groups.get(&node) else {
+                continue;
+            };
+            // Displacements of a knot are the node's own.
+            if disp && groups.len() > 1 {
+                continue;
+            }
+            // Per value: (field index, weight).
+            let sources: Vec<(usize, f64)> = if sum {
+                groups
+                    .iter()
+                    .flatten()
+                    .filter_map(|n| position.get(n).map(|&p| (p, 1.0)))
+                    .collect()
+            } else {
+                let Some(means) = self.means.get(&node) else {
+                    continue;
+                };
+                let complete: Vec<&Vec<(NodeId, f64)>> = means
+                    .iter()
+                    .filter(|m| m.iter().all(|(n, _)| position.contains_key(n)))
+                    .collect();
+                let share = 1.0 / complete.len().max(1) as f64;
+                complete
+                    .into_iter()
+                    .flatten()
+                    .map(|(n, w)| (position[n], w * share))
+                    .collect()
+            };
+            if sources.is_empty() {
+                continue;
+            }
+            let target = match position.get(&node) {
+                Some(&t) => t,
+                None => {
+                    field.nodes.push(node);
+                    for component in &mut field.values {
+                        component.push(0.0);
+                    }
+                    field.nodes.len() - 1
+                }
+            };
+            for component in &mut field.values {
+                component[target] = sources.iter().map(|&(s, w)| w * component[s]).sum();
+            }
+        }
+        // Nodes in ascending order, as written.
+        if field.nodes.windows(2).any(|w| w[0] > w[1]) {
+            let mut order: Vec<usize> = (0..field.nodes.len()).collect();
+            order.sort_by_key(|&i| field.nodes[i]);
+            field.nodes = order.iter().map(|&i| field.nodes[i]).collect();
+            for component in &mut field.values {
+                *component = order.iter().map(|&i| component[i]).collect();
+            }
+        }
+    }
+
+    /// The rotations and moments of U1 nodes from their helper nodes.
+    fn rotation_field(&self, field: &mut ResultField) {
+        let names: [&str; 3] = match field.name.as_str() {
+            "DISP" => ["D4", "D5", "D6"],
+            "FORC" => ["F4", "F5", "F6"],
+            _ => return,
+        };
+        let position: HashMap<NodeId, usize> = field
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| (n, i))
+            .collect();
+        let first = field.values.len().min(3);
+        let mut extra = vec![vec![0.0; field.nodes.len()]; 3];
+        for (i, node) in field.nodes.iter().enumerate() {
+            let Some(p) = self.rotations.get(node).and_then(|h| position.get(h)) else {
+                continue;
+            };
+            for (k, column) in extra.iter_mut().enumerate() {
+                column[i] = field.values.get(k).map_or(0.0, |c| c[*p]);
+            }
+        }
+        field.values.truncate(first);
+        field.values.extend(extra);
+        field.components.truncate(first);
+        field.components.extend(names.iter().map(|n| n.to_string()));
+    }
+}
+
+/// The written model of an [`OutputMap`] and what mapping fields onto it needs.
+#[derive(Clone, Debug)]
+pub struct Written {
+    pub model: Model,
+    native_nodes: Vec<NodeId>,
+    used: HashSet<NodeId>,
+    in_elements: HashSet<NodeId>,
+    /// Whether nodes are left out of the mesh, and so of the fields.
+    trimmed: bool,
+}
+
+/// `field` without the nodes left out of the written mesh.
+fn trim_field(written: &Written, field: &mut ResultField) {
+    // Element fields only where elements are.
+    let nodal = matches!(field.name.as_str(), "DISP" | "DISPI" | "FORC");
+    let keep: Vec<bool> = field
+        .nodes
+        .iter()
+        .map(|n| {
+            if nodal {
+                written.used.contains(n)
+            } else {
+                written.in_elements.contains(n)
+            }
+        })
+        .collect();
+    field.nodes = field
+        .nodes
+        .iter()
+        .zip(&keep)
+        .filter(|(_, k)| **k)
+        .map(|(n, _)| *n)
+        .collect();
+    for component in &mut field.values {
+        *component = component
+            .iter()
+            .zip(&keep)
+            .filter(|(_, k)| **k)
+            .map(|(v, _)| *v)
+            .collect();
     }
 }
 

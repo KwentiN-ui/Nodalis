@@ -89,6 +89,9 @@ pub struct Session {
     /// The state before an isolated group of steps ([`plxs_core::step::Isolation`]), which
     /// returns after its last step.
     kept: Option<(State, Option<f64>)>,
+    /// Takes the increments that are done instead of [`Session::results`]
+    /// ([`Session::set_spill`]).
+    spill: Option<Box<dyn plxs_core::Spill>>,
 }
 
 /// A pool of `threads` threads (0: all cores).
@@ -170,6 +173,7 @@ impl Session {
             options,
             fingerprint,
             kept: None,
+            spill: None,
         })
     }
 
@@ -242,6 +246,7 @@ impl Session {
             contact_pattern: self.contact_pattern.take(),
             profile: std::mem::take(&mut self.profile),
             segment: None,
+            spill: self.spill.as_deref_mut(),
         };
         // The procedure runs on the session's pool in a thread of its own; events come
         // through a channel so that the caller's (not necessarily `Send`) progress sink
@@ -327,6 +332,22 @@ impl Session {
 
     pub fn results_mut(&mut self) -> &mut Results {
         &mut self.results
+    }
+
+    /// From now on the increments of the results go to `spill` once the next one is
+    /// written, and all at the end of a step ([`Session::spill_increments`]): only the last
+    /// one stays in memory while a step runs.
+    pub fn set_spill(&mut self, spill: Box<dyn plxs_core::Spill>) {
+        self.spill = Some(spill);
+    }
+
+    /// Hands all increments of [`Session::results`] over to the spill, if there is one.
+    pub fn spill_increments(&mut self) {
+        if let Some(spill) = &mut self.spill {
+            for increment in self.results.increments.drain(..) {
+                spill.spill(increment);
+            }
+        }
     }
 
     /// Time per phase of the steps so far, with the symbolic analyses the direct solver
