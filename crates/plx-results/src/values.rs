@@ -351,6 +351,11 @@ pub fn set_budget(bytes: usize) {
     cache.trim(0);
 }
 
+/// How many bytes of read fields the cache keeps at most ([`set_budget`]).
+pub fn budget() -> usize {
+    cache().budget
+}
+
 /// The bytes of read fields the cache holds.
 pub fn cached_bytes() -> usize {
     cache().used
