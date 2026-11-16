@@ -24,12 +24,14 @@ FE Model and Results workspaces:
     rad) turn it about the reference point, which moves along. Without an amplitude the
     motion runs over the step at constant speed, so 50 rad over a step of 5 s turn a screw
     at 10 rad/s; an amplitude shapes it over time, e.g. a short start and then a constant
-    speed. Other boundary conditions are left out.],
+    speed. A temperature boundary condition on the same reference point gives the wall its
+    temperature, see @particle-flow-heat. Other boundary conditions are left out.],
   [Wall friction], [A contact region (@contacts) between a wall and a filled part gives
     the wall its law: #ui("Bonded") and #ui("Rough") let the material stick,
     #ui("No Separation") and #ui("Frictionless") let it slide freely, #ui("Frictional")
     with Coulomb friction of its coefficient. Without a contact region the material sticks.],
-  [Gravity], [The gravity loads of the step. Other loads are left out.],
+  [Gravity], [The gravity loads of the step, each on the filled parts it selects; a load
+    that selects none is reported. Other loads are left out.],
 )
 
 A Particle Flow step is computed alone: the other steps of its analysis must be
@@ -41,7 +43,8 @@ is drawn as a small cube.])
 
 #screenshot("particle-flow-tool.png", [A blade turns in a paste, seen from above: a rotation
 UR3 of one turn on the reference point of the rigid body, with an amplitude that starts it
-slowly. The history of the set BLADE holds the torque RMZ and the work the blade put in.])
+slowly. A node output RF on its reference point gives the torque RMZ and the work the blade
+put in.])
 
 === Flow of a material
 
@@ -59,6 +62,10 @@ large strains.
   [Newtonian], [A fluid with a #ui("Viscosity"): the bulk modulus of the elastic constants
     gives its pressure; it has no shear stiffness and takes no tension, so a free surface
     opens instead.],
+  [Temperature table], [Rows of temperature and a factor on the yield stress and the
+    consistency (or the viscosity), interpolated between the rows and held beyond them: a
+    paste that turns soft as it warms has factors below 1 at higher temperatures. It acts in
+    steps that follow the temperature; empty, the flow is the same at every temperature.],
 )
 
 === Settings of the step
@@ -75,20 +82,52 @@ large strains.
     nothing but the time to solve, as mass scaling does in an explicit dynamic step. The
     output names the largest ratio of the speed of the material to that of its waves: it
     should stay below about 0.1.],
-  [Box], [The space the material moves in: around all parts with a #ui("Margin"), or
-    #ui("Fixed") by its corners. Material that leaves the box is gone.],
+  [Box], [The space the background grid covers and the material moves in: around all
+    parts with a #ui("Margin"), or #ui("Fixed") by its corners. Material that leaves the box
+    is gone. The FE Model view draws the box as orange edges. In a closed vessel the box
+    around the parts is right; where the material can leave the walls, such as a heap that
+    spreads or a jet out of a die, the box must leave it room.],
   [Sides], [Each of the six sides of the box is a resting wall (#ui("Frictionless"),
     #ui("Rough") or #ui("Frictional")) or #ui("Open"): material that passes an open side
     leaves the model, e.g. at the end of a die, and is counted as outflow.],
   [Smooth the volume change], [Averages the volume change over the cells (F-bar), against
     locking of nearly incompressible material and noise of the pressure. Keep it on.],
+  [Temperature], [Follows the temperature of the material, see @particle-flow-heat.],
+  [Wall heat transfer], [The heat transfer coefficient between the material and the walls
+    with a temperature.],
 )
+
+=== Temperature <particle-flow-heat>
+
+With #ui("Temperature") on, every particle carries a temperature. The flow heats the
+material by what it dissipates, friction at the walls heats it where it slides, the heat is
+conducted through the material over the grid, and walls with a temperature heat or cool it
+with the #ui("Wall heat transfer") coefficient. The temperature table of a material's flow
+makes it softer or stiffer as it warms.
+
+#fields(
+  [Materials], [Each filled material needs its #ui("Conductivity") and
+    #ui("Specific heat").],
+  [Start], [A temperature initial condition (@initial-conditions) on each filled part gives
+    its temperature at the start.],
+  [Walls], [A temperature boundary condition on the reference point of a rigid body holds
+    its walls at that temperature. Walls without one take no heat but what friction makes.],
+)
+
+#screenshot("particle-flow-heat.png", [The mixer seen from above after one turn: the paste
+starts at 4 °C, the blade is held at 40 °C. The warmed paste lies in a thin layer along the
+blade and in its wake; a node output NT on the paste gives its mean and highest temperature
+over the time, RFL on the reference point the heat the blade gave.])
+
+The time step stays below the time heat needs to cross a cell; with food pastes, which
+conduct little, that is far longer than the time step of the flow and costs nothing.
 
 === Results
 
 The run writes results like any other analysis, shown in the Results workspace with the
 legend, the increment bar and the animation. Each particle is a small cube of the particle
-spacing; a frame moves the cubes to where the particles are (true scale). A particle that
+spacing, drawn rounded and without edges; a frame moves the cubes to where the particles are
+(true scale). A particle that
 left the model through an open side is no longer drawn. Each wall is a part of its own,
 drawn as its surface where it is. The fields are:
 
@@ -97,17 +136,33 @@ drawn as its surface where it is. The fields are:
   [PFLOW], [#ui("PRESS") the pressure, #ui("SHEAR") the equivalent shear stress
     ($sqrt(J_2)$), #ui("PEEQ") the accumulated plastic shear, #ui("RATE") the shear rate
     in 1/s, #ui("J") the volume ratio.],
+  [NT], [The temperature, in steps that follow it.],
 )
 
-The history output holds the energies of the model (kinetic as ALLKE, elastic as ALLIE,
-dissipated by flow and at the walls as ALLVD, the work of gravity and of the moving walls as
-ALLWK) under the set PARTICLES. Per wall it holds the force of the material on it, the
-moment of that force about the reference point of the wall, which is the torque a drive
-must give a turning tool, and the work the wall did on the material as ALLWK, the energy
-the drive puts in. The sides of the box have their force and moment about the origin. The output of the run names the number of particles and cells, the
-time steps and the error of the energy balance.
+The history output holds what the history outputs of the step (@history-output-step) ask for,
+nothing else. A new Particle Flow step gets an #ui("Energies") output, which can be deleted
+like any other:
+
+#fields(
+  [Energies], [The energies of the model under the set PARTICLES: kinetic as ALLKE, elastic
+    as ALLIE, dissipated by flow and at the walls as ALLVD, the work of gravity and of the
+    moving walls as ALLWK.],
+  [Node output on a rigid body], [On the reference point of a rigid body or on its parts:
+    #ui("RF") gives the force of the material on its walls, the moment of that force about
+    the reference point (RM), which is the torque a drive must give a turning tool, and
+    the work the wall did on the material as ALLWK, the energy the drive puts in.
+    #ui("RFL") gives the heat the wall gave the material.],
+  [Node output on filled parts], [#ui("NT") gives the mean and the highest temperature of
+    their material (TMEAN, TMAX).],
+)
+
+Element and contact outputs and other variables are left out with a warning. The output of
+the run names the number of particles and cells, the time steps and the error of the energy
+balance.
 
 The method is validated against a resting basin (hydrostatic pressure), the dam break of
 Martin and Moyce, the slump test of Pashias, the collapse of a Bingham column, the
-Buckingham-Reiner flow of a Bingham paste through a pipe, the flow out of a slot and the
-torque on a cylinder turning in a viscous fluid (Couette flow).
+Buckingham-Reiner flow of a Bingham paste through a pipe, the flow out of a slot, the
+torque on a cylinder turning in a viscous fluid (Couette flow) and the heat it dissipates
+there, and the conduction between a warm and a cold block (the error function of the
+analytic solution).

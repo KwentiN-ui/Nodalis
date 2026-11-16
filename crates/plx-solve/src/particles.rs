@@ -211,13 +211,17 @@ impl Run {
                 let frame_dt = end_time / model.control.frames.max(1) as f64;
                 // Each frame is an increment (the first, at time zero, is the start): the
                 // monitor shows which one runs and up to which time.
-                let start = |increment: u32, from: f64| ProgressEvent::Increment {
-                    step: 1,
-                    increment,
-                    attempt: 1,
-                    size: frame_dt,
-                    step_time: (from + frame_dt).min(end_time),
-                    total_time: (from + frame_dt).min(end_time),
+                let start = |increment: u32| {
+                    // Increment 1 is the start, at time zero.
+                    let time = (f64::from(increment - 1) * frame_dt).min(end_time);
+                    ProgressEvent::Increment {
+                        step: 1,
+                        increment,
+                        attempt: 1,
+                        size: frame_dt,
+                        step_time: time,
+                        total_time: time,
+                    }
                 };
                 let solved_run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     token.scope(|| {
@@ -262,7 +266,7 @@ impl Run {
                                         size: if increment == 1 { frame_dt } else { size },
                                     });
                                     if frame.time < end_time - 1e-9 * end_time {
-                                        progress(start(increment + 1, frame.time));
+                                        progress(start(increment + 1));
                                     }
                                 },
                             )

@@ -1910,7 +1910,7 @@ impl Model {
         for k in 0..8usize {
             for a in 0..3 {
                 if k >> a & 1 == 0 {
-                    mesh.wireframe_edges.extend([corner(k), corner(k | 1 << a)]);
+                    mesh.feature_edges.extend([corner(k), corner(k | 1 << a)]);
                 }
             }
         }
@@ -4485,7 +4485,7 @@ S
         });
         model.fe.steps.push(step);
         let meshes = model.scene_meshes();
-        let edges = &meshes.last().unwrap().wireframe_edges;
+        let edges = &meshes.last().unwrap().feature_edges;
         assert_eq!(edges.len(), 24);
         let x: Vec<f32> = edges
             .iter()
