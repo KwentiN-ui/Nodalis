@@ -142,6 +142,32 @@ impl Grid {
     }
 }
 
+/// Where a wall is at a time and how fast it moves.
+struct Pose {
+    rotation: Mat3,
+    /// The factor of the amplitude on the velocities.
+    factor: f64,
+    /// The center of the motion where it is.
+    center: Vec3,
+}
+
+/// What the material does to a wall over a time step: force, moment about the origin and
+/// the work the wall does on the material.
+#[derive(Clone, Copy, Default)]
+struct Load {
+    force: Vec3,
+    moment: Vec3,
+    work: f64,
+}
+
+impl Load {
+    fn add(&mut self, other: &Load) {
+        self.force = add(self.force, other.force);
+        self.moment = add(self.moment, other.moment);
+        self.work += other.work;
+    }
+}
+
 /// A rigid wall as the solver uses it.
 struct Wall {
     field: DistanceField,
@@ -150,20 +176,25 @@ struct Wall {
 }
 
 impl Wall {
-    /// The rotation and the translation of the body at time `t`.
-    fn pose(&self, t: f64) -> (Mat3, Vec3) {
-        (
-            rotation(scale(self.motion.angular, t)),
-            scale(self.motion.velocity, t),
-        )
+    /// The pose of the body at time `t`.
+    fn pose(&self, t: f64) -> Pose {
+        let moved = self.motion.moved_time(t);
+        let shift = scale(self.motion.velocity, moved);
+        Pose {
+            rotation: rotation(scale(self.motion.angular, moved)),
+            factor: self.motion.factor(t),
+            center: add(self.motion.center, shift),
+        }
     }
 
-    /// The distance, the outward unit normal and the wall's velocity at `x` and time `t`;
+    /// The distance, the outward unit normal and the wall's velocity at `x` at the pose;
     /// `None` far outside.
-    fn probe(&self, x: Vec3, pose: &(Mat3, Vec3)) -> Option<(f64, Vec3, Vec3)> {
-        let (r, shift) = pose;
-        let center = add(self.motion.center, *shift);
-        let body = add(mat_vec(&transpose(r), sub(x, center)), self.motion.center);
+    fn probe(&self, x: Vec3, pose: &Pose) -> Option<(f64, Vec3, Vec3)> {
+        let r = &pose.rotation;
+        let body = add(
+            mat_vec(&transpose(r), sub(x, pose.center)),
+            self.motion.center,
+        );
         let (phi, gradient) = self.field.sample(body)?;
         let g = norm(gradient);
         let normal = if g > 1e-12 {
@@ -171,19 +202,21 @@ impl Wall {
         } else {
             [0.0; 3]
         };
-        let velocity = add(
-            self.motion.velocity,
-            cross(self.motion.angular, sub(x, center)),
+        let velocity = scale(
+            add(
+                self.motion.velocity,
+                cross(self.motion.angular, sub(x, pose.center)),
+            ),
+            pose.factor,
         );
         Some((phi, normal, velocity))
     }
 
     /// The box in world coordinates that holds the body at the pose (its lattice box,
     /// turned).
-    fn world_box(&self, pose: &(Mat3, Vec3)) -> (Vec3, Vec3) {
+    fn world_box(&self, pose: &Pose) -> (Vec3, Vec3) {
         let (lo, hi) = self.field.bounds();
-        let (r, shift) = pose;
-        let center = add(self.motion.center, *shift);
+        let (r, center) = (&pose.rotation, pose.center);
         let mut out = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
         for corner in 0..8 {
             let p = [
@@ -229,6 +262,9 @@ fn wall_velocity(law: WallLaw, v: Vec3, wall: Vec3, n: Vec3) -> Vec3 {
 struct NodeSum {
     mass: f64,
     momentum: Vec3,
+    /// The force of the stresses on the node (in the momentum already), for the energy
+    /// the walls take.
+    force: Vec3,
     /// Mass times volume ratio, for F-bar.
     volume: f64,
 }
@@ -317,7 +353,7 @@ pub fn solve_streaming(
                 WALL_BAND * grid.h,
             ),
             law: w.law,
-            motion: w.motion,
+            motion: w.motion.clone(),
         })
         .collect();
     let mut particles = fill(model, &grid, &laws, &walls)?;
@@ -361,9 +397,11 @@ pub fn solve_streaming(
     let mut scale_energy = energy0.abs();
     let mut dissipated = 0.0;
     let mut wall_loss = 0.0;
+    // The work of the moving walls on the material.
+    let mut wall_work = 0.0;
     let mut outflow_energy = 0.0;
     let mut outflow_mass = 0.0;
-    let mut wall_force = vec![([0.0; 3], [0.0; 3]); names.len()];
+    let mut wall_force = vec![Load::default(); names.len()];
     let mut wall_samples = 0usize;
 
     let initial_count = particles.len();
@@ -412,7 +450,7 @@ pub fn solve_streaming(
         let (loss, forces) = (values.par_iter_mut().zip(nodes.par_iter()))
             .enumerate()
             .fold(
-                || (0.0, vec![([0.0; 3], [0.0; 3]); side_index + 6]),
+                || (0.0, vec![Load::default(); side_index + 6]),
                 |(mut loss, mut forces), (at, (value, node))| {
                     if node.mass <= 0.0 {
                         *value = [0.0; 4];
@@ -444,7 +482,7 @@ pub fn solve_streaming(
                     }
                     if let Some((w, law, n, vw)) = owner {
                         after = wall_velocity(law, after, vw, n);
-                        record(&mut forces[w], node.mass, before, after, dt, x);
+                        record(&mut forces[w], node.mass, before, after, dt, x, vw);
                     }
                     for a in 0..3 {
                         if grid.periodic[a] {
@@ -468,29 +506,43 @@ pub fn solve_streaming(
                                     after,
                                     dt,
                                     x,
+                                    [0.0; 3],
                                 );
                             }
                         }
                     }
-                    loss += 0.5 * node.mass * (dot(before, before) - dot(after, after));
+                    // What the walls took: the kinetic energy they removed, less the work the
+                    // forces on the node (stresses, gravity) would have done with the velocity
+                    // removed, which the material never did: the stored and potential
+                    // energies follow the particles.
+                    if after != before {
+                        let pull = add(node.force, scale(gravity, node.mass));
+                        let own = sub(before, scale(pull, dt / node.mass));
+                        loss += 0.5 * node.mass * (dot(own, own) - dot(after, after))
+                            + dt * dot(pull, after);
+                    }
                     *value = [after[0], after[1], after[2], node.volume / node.mass];
                     (loss, forces)
                 },
             )
             .reduce(
-                || (0.0, vec![([0.0; 3], [0.0; 3]); side_index + 6]),
+                || (0.0, vec![Load::default(); side_index + 6]),
                 |(l1, mut f1), (l2, f2)| {
                     for (a, b) in f1.iter_mut().zip(&f2) {
-                        a.0 = add(a.0, b.0);
-                        a.1 = add(a.1, b.1);
+                        a.add(b);
                     }
                     (l1 + l2, f1)
                 },
             );
         wall_loss += loss;
-        for (sum, f) in wall_force.iter_mut().zip(&forces) {
-            sum.0 = add(sum.0, f.0);
-            sum.1 = add(sum.1, f.1);
+        for (w, (sum, f)) in wall_force.iter_mut().zip(&forces).enumerate() {
+            let mut f = *f;
+            // A wall's moment about its center of motion, where it is.
+            if let Some(p) = pose.get(w) {
+                f.moment = sub(f.moment, cross(p.center, f.force));
+            }
+            wall_work += f.work;
+            sum.add(&f);
         }
         wall_samples += 1;
 
@@ -610,7 +662,8 @@ pub fn solve_streaming(
         let potential = now.potential - potential0;
         let total = now.kinetic + potential + now.stored + dissipated + wall_loss + outflow_energy;
         scale_energy = scale_energy
-            .max(now.kinetic + potential.abs() + now.stored + dissipated + wall_loss.abs());
+            .max(now.kinetic + potential.abs() + now.stored + dissipated + wall_loss.abs())
+            .max(wall_work.abs());
 
         if t >= next_history as f64 * history_dt * (1.0 - 1e-12) || t >= end * (1.0 - 1e-12) {
             next_history = (t / history_dt).floor() as usize + 1;
@@ -620,20 +673,22 @@ pub fn solve_streaming(
             history.potential.push(potential);
             history.elastic.push(now.stored);
             history.dissipated.push(dissipated);
-            history.wall_loss.push(wall_loss);
+            // What the walls took out is what they dissipated less what they put in.
+            history.wall_loss.push(wall_loss + wall_work);
+            history.wall_work.push(wall_work);
             history.outflow_energy.push(outflow_energy);
             history.balance_error.push(energy0 - total);
             history.mass.push(particles.iter().map(|p| p.mass).sum());
             history.outflow.push(outflow_mass);
             history.mach.push(max_speed / slowest);
             let n = wall_samples.max(1) as f64;
-            for (h, f) in history.walls.iter_mut().zip(&wall_force) {
-                h.force.push(scale(f.0, 1.0 / n));
-                h.moment.push(scale(f.1, 1.0 / n));
+            for (h, f) in history.walls.iter_mut().zip(&mut wall_force) {
+                h.force.push(scale(f.force, 1.0 / n));
+                h.moment.push(scale(f.moment, 1.0 / n));
+                let done = h.work.last().copied().unwrap_or(0.0) + f.work;
+                h.work.push(done);
+                *f = Load::default();
             }
-            wall_force
-                .iter_mut()
-                .for_each(|f| *f = ([0.0; 3], [0.0; 3]));
             wall_samples = 0;
         }
         if t >= target * (1.0 - 1e-12) {
@@ -690,12 +745,13 @@ pub fn solve_streaming(
     Ok(results)
 }
 
-/// Adds the force a node exerts on a wall, `m (v_before − v_after) / Δt`, and its moment
-/// about the origin.
-fn record(sum: &mut (Vec3, Vec3), mass: f64, before: Vec3, after: Vec3, dt: f64, x: Vec3) {
+/// Adds the force a node exerts on a wall, `m (v_before − v_after) / Δt`, its moment
+/// about the origin and the work the wall, at velocity `wall`, does on it in the step.
+fn record(sum: &mut Load, mass: f64, before: Vec3, after: Vec3, dt: f64, x: Vec3, wall: Vec3) {
     let force = scale(sub(before, after), mass / dt);
-    sum.0 = add(sum.0, force);
-    sum.1 = add(sum.1, cross(x, force));
+    sum.force = add(sum.force, force);
+    sum.moment = add(sum.moment, cross(x, force));
+    sum.work -= dot(force, wall) * dt;
 }
 
 fn particle_sums(particles: &[Particle], gravity: Vec3) -> Sums {
@@ -799,6 +855,7 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
                 }
                 let mv = scale(p.v, p.mass);
                 let mj = p.mass * p.state.j;
+                let stress = p.tau.map(|row| row.map(|t| -p.volume * inv * t));
                 for (sk, wk) in w[2].iter().enumerate() {
                     for (sj, wj) in w[1].iter().enumerate() {
                         for (si, wi) in w[0].iter().enumerate() {
@@ -809,6 +866,7 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
                                 (sk as f64 - frac[2]) * grid.h,
                             ];
                             let qd = mat_vec(&q, d);
+                            let fd = mat_vec(&stress, d);
                             let at =
                                 (rel[0] + si) + PATCH * ((rel[1] + sj) + PATCH * (rel[2] + sk));
                             let node = &mut patch[at];
@@ -816,6 +874,7 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
                             node.volume += weight * mj;
                             for r in 0..3 {
                                 node.momentum[r] += weight * (mv[r] + qd[r]);
+                                node.force[r] += weight * fd[r];
                             }
                         }
                     }
@@ -857,6 +916,7 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
                     dst.mass += src.mass;
                     dst.volume += src.volume;
                     dst.momentum = add(dst.momentum, src.momentum);
+                    dst.force = add(dst.force, src.force);
                 }
             }
         }

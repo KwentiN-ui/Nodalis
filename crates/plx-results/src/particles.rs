@@ -3,8 +3,8 @@
 //! the particle spacing at its start (an eight-node hexahedron), the frames are increments
 //! whose displacements move the cubes to the particles, and the fields of the particles
 //! are nodal fields of their cubes. A particle that left the model shrinks to a point where
-//! it left, without values. The walls are resting triangles after the particles, a part
-//! each, without values. The energies and the loads of the walls are history output.
+//! it left, without values. The walls are triangles after the particles, a part each, that
+//! move as the walls do, without values. The energies and the loads of the walls are history output.
 
 use plxs_core::particles::{PARTICLE_FIELDS, ParticleFrame, ParticleHistory, ParticleModel};
 use plxs_core::results::{HistoryBlock, IncrementKind, ResultField, ResultsIncrement};
@@ -133,8 +133,10 @@ pub struct FrameTrack {
     last: Vec<[f32; 3]>,
     /// The index of each particle id in `start`.
     index: std::collections::HashMap<u32, usize>,
-    /// The nodes of the resting walls.
+    /// The nodes of the walls, each with where it starts and the motion of its wall.
     walls: Vec<u32>,
+    wall_points: Vec<([f64; 3], usize)>,
+    motions: Vec<plxs_core::particles::RigidMotion>,
 }
 
 impl FrameTrack {
@@ -150,6 +152,10 @@ impl FrameTrack {
             start: first.positions.clone(),
             last: first.positions.clone(),
             walls: wall_nodes(model, first),
+            wall_points: (model.walls.iter().enumerate())
+                .flat_map(|(w, wall)| wall.shape.points.iter().map(move |&p| (p, w)))
+                .collect(),
+            motions: model.walls.iter().map(|w| w.motion.clone()).collect(),
         }
     }
 
@@ -200,11 +206,23 @@ impl FrameTrack {
                 }
             }
         }
-        // The walls rest and carry no values.
-        for _ in &self.walls {
+        // The walls move rigidly and carry no values.
+        let t = frame.time;
+        for (start, w) in &self.wall_points {
+            let motion = &self.motions[*w];
+            let at = motion.place(*start, t);
+            let center = motion.place(motion.center, t);
+            let factor = motion.factor(t);
+            let arm: [f64; 3] = std::array::from_fn(|a| at[a] - center[a]);
+            let (v, w) = (motion.velocity, motion.angular);
+            let turn = [
+                w[1] * arm[2] - w[2] * arm[1],
+                w[2] * arm[0] - w[0] * arm[2],
+                w[0] * arm[1] - w[1] * arm[0],
+            ];
             for a in 0..3 {
-                disp[a].push(0.0);
-                velo[a].push(0.0);
+                disp[a].push(at[a] - start[a]);
+                velo[a].push(factor * (v[a] + turn[a]));
             }
             for values in &mut quantities {
                 values.push(f64::NAN);
@@ -239,8 +257,9 @@ pub fn set_name(wall: &str) -> String {
 
 /// The history of a run as the history output of step `step`: the energies of the model
 /// (kinetic, elastic as internal, dissipated by flow and at the walls as damping
-/// dissipation, the work of gravity as external work), and per wall the force of the
-/// material on it and the moment of that force about the origin.
+/// dissipation, the work of gravity and of the moving walls as external work), and per wall
+/// the force of the material on it, the moment of that force about the wall's reference point
+/// (about the origin for the sides of the box) and the work the wall did on the material.
 pub fn history_blocks(history: &ParticleHistory, step: u32) -> Vec<HistoryBlock> {
     let mut blocks = Vec::new();
     let block =
@@ -261,7 +280,10 @@ pub fn history_blocks(history: &ParticleHistory, step: u32) -> Vec<HistoryBlock>
                 "total model damping dissipation",
                 at(&history.dissipated, i) + at(&history.wall_loss, i),
             ),
-            ("total model external work", -at(&history.potential, i)),
+            (
+                "total model external work",
+                at(&history.wall_work, i) - at(&history.potential, i),
+            ),
         ];
         for (quantity, value) in energies {
             blocks.push(block(i, quantity, MODEL_SET.into(), time, vec![value]));
@@ -275,6 +297,18 @@ pub fn history_blocks(history: &ParticleHistory, step: u32) -> Vec<HistoryBlock>
                     name.clone(),
                     time,
                     force.to_vec(),
+                ));
+            }
+            // Work only for walls that do some: a resting one does none.
+            if let Some(&work) = wall.work.get(i)
+                && wall.work.iter().any(|&w| w != 0.0)
+            {
+                blocks.push(block(
+                    i,
+                    "total model external work",
+                    name.clone(),
+                    time,
+                    vec![work],
                 ));
             }
             if let Some(moment) = wall.moment.get(i) {
@@ -375,6 +409,14 @@ mod tests {
         assert_eq!(increment.fields[0].nodes.len(), 19);
         assert_eq!(increment.fields[0].values[0].len(), 19);
         assert!(increment.fields[2].values[0][18].is_nan());
+        // Turned by a quarter about the z axis through the first point, over a second.
+        model.walls[0].motion.angular = [0.0, 0.0, std::f64::consts::FRAC_PI_2];
+        let mut track = FrameTrack::new(&model, &first);
+        let increment = track.increment(&frame(1.0, vec![0, 1], first.positions.clone()), 1, 2);
+        let (disp, velo) = (&increment.fields[0].values, &increment.fields[1].values);
+        // Node 18 starts at (1, 0, 0) and ends at (0, 1, 0), moving at pi/2 in -x.
+        assert!((disp[0][17] + 1.0).abs() < 1e-9 && (disp[1][17] - 1.0).abs() < 1e-9);
+        assert!((velo[0][17] + std::f64::consts::FRAC_PI_2).abs() < 1e-9);
     }
 
     #[test]
@@ -386,12 +428,15 @@ mod tests {
                 name: "Box X min".into(),
                 force: vec![[1.0, 2.0, 3.0]],
                 moment: vec![[0.0, 0.0, 4.0]],
+                work: vec![5.0],
             }],
             ..Default::default()
         };
         let blocks = history_blocks(&history, 1);
-        assert_eq!(blocks.len(), 6);
+        assert_eq!(blocks.len(), 7);
         assert_eq!(blocks[4].set, "Box_X_min");
-        assert_eq!(blocks[5].set, "INTERNAL_ROTATION-1_Box_X_min");
+        assert_eq!(blocks[5].set, "Box_X_min");
+        assert_eq!(blocks[5].rows[0].1, vec![5.0]);
+        assert_eq!(blocks[6].set, "INTERNAL_ROTATION-1_Box_X_min");
     }
 }

@@ -60,6 +60,13 @@ pub fn describe(model: &ParticleModel) -> String {
             w.law,
             w.shape.triangles.len()
         ));
+        if !w.motion.is_resting() {
+            let m = &w.motion;
+            line(format!(
+                "  moves about {:?}: translation {:?}, rotation {:?} over {:?}",
+                m.center, m.velocity, m.angular, m.amplitude
+            ));
+        }
     }
     let d = &model.domain;
     line(format!(

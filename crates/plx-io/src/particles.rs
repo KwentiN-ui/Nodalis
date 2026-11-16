@@ -203,11 +203,12 @@ pub fn lower(
             ));
         }
         let law = wall_law(fe, mesh, &parts, &body_part, name, &mut warnings);
+        let motion = wall_motion(fe, index, *c)?;
         model.walls.push(RigidWall {
             name: name.clone(),
             shape: part_surface(mesh, &parts),
             law,
-            motion: ir::RigidMotion::default(),
+            motion,
         });
     }
 
@@ -223,12 +224,23 @@ pub fn lower(
         }
     }
     model.gravity = gravity;
-    if step.boundary_conditions.iter().any(|bc| bc.active) {
-        warnings.push(format!(
-            "{}: a Particle Flow step does not move the rigid bodies by boundary conditions \
-             yet; they rest.",
-            step.name
-        ));
+    // Boundary conditions move the rigid bodies at their reference points, and nothing else.
+    let drivers: BTreeSet<plx_model::Id> = (walls.iter())
+        .filter_map(|(_, _, c)| match &fe.constraints[*c] {
+            Constraint::RigidBody(body) => Some(body.reference_point),
+            _ => None,
+        })
+        .collect();
+    for bc in step.boundary_conditions.iter().filter(|bc| bc.active) {
+        let drives =
+            matches!(bc.region, plx_model::Region::ReferencePoint(id) if drivers.contains(&id));
+        if !drives {
+            warnings.push(format!(
+                "{}: in a Particle Flow step boundary conditions move the reference points of \
+                 rigid bodies only; it is left out.",
+                bc.name
+            ));
+        }
     }
 
     model.domain = domain(settings, &model)?;
@@ -245,6 +257,110 @@ pub fn lower(
         bodies,
         warnings,
     })
+}
+
+/// The motion of the rigid body `constraint` in step `step`: the displacement boundary
+/// condition on its reference point, if any, as a translation and a rotation about that
+/// point that follow the amplitude (a ramp over the step without one).
+fn wall_motion(
+    fe: &FeModel,
+    step: usize,
+    constraint: usize,
+) -> Result<ir::RigidMotion, ParticleError> {
+    let Constraint::RigidBody(body) = &fe.constraints[constraint] else {
+        return Ok(ir::RigidMotion::default());
+    };
+    let Some(point) = (fe.reference_points.iter()).find(|p| p.id == body.reference_point) else {
+        return Err(error(
+            format!("{}: the reference point does not exist.", body.name),
+            Some(ModelItem::Constraint(constraint)),
+        ));
+    };
+    let mut motion = ir::RigidMotion {
+        center: point.position,
+        ..Default::default()
+    };
+    let the_step = &fe.steps[step];
+    let mut found = None;
+    for (b, bc) in the_step.boundary_conditions.iter().enumerate() {
+        if !bc.active || bc.region != plx_model::Region::ReferencePoint(body.reference_point) {
+            continue;
+        }
+        let item = Some(ModelItem::BoundaryCondition(step, b));
+        if found.is_some() {
+            return Err(error(
+                format!(
+                    "{}: the reference point of {} has a boundary condition already; give it \
+                     one.",
+                    bc.name, body.name
+                ),
+                item,
+            ));
+        }
+        found = Some(b);
+        let plx_model::BoundaryKind::Displacement(displacement) = &bc.kind else {
+            return Err(error(
+                format!(
+                    "{}: a rigid body of a Particle Flow step moves by a displacement and \
+                     rotation of its reference point.",
+                    bc.name
+                ),
+                item,
+            ));
+        };
+        if displacement.tables.iter().any(Option::is_some) {
+            return Err(error(
+                format!(
+                    "{}: a Particle Flow step takes no time tables; give the motion an \
+                     amplitude instead.",
+                    bc.name
+                ),
+                item,
+            ));
+        }
+        // The directions of its coordinate system, in global coordinates.
+        let axes = match displacement.system {
+            None => [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            Some(id) => {
+                let system = (fe.coordinate_systems.iter())
+                    .find(|s| s.id == id)
+                    .ok_or_else(|| {
+                        error(
+                            format!("{}: the coordinate system does not exist.", bc.name),
+                            item,
+                        )
+                    })?;
+                let frame = system.frame(&fe.coordinate_systems);
+                frame
+                    .directions_at(point.position)
+                    .map_err(|e| error(format!("{}: {e}", bc.name), item))?
+            }
+        };
+        let value = |i: usize| displacement.values[i].unwrap_or(0.0);
+        for (a, axis) in axes.iter().enumerate() {
+            for (g, &d) in axis.iter().enumerate() {
+                motion.velocity[g] += value(a) * d;
+                motion.angular[g] += value(3 + a) * d;
+            }
+        }
+        let duration = the_step.kind.period();
+        motion.amplitude = match bc.amplitude {
+            None => vec![[0.0, 0.0], [duration, 1.0]],
+            Some(id) => {
+                let amplitude = (fe.amplitudes.iter()).find(|a| a.id == id).ok_or_else(|| {
+                    error(format!("{}: the amplitude does not exist.", bc.name), item)
+                })?;
+                if let Some(problem) = amplitude.points_problem() {
+                    return Err(error(format!("{}: {problem}.", amplitude.name), item));
+                }
+                (amplitude.points.iter())
+                    .map(|p| p[0] + amplitude.shift_time)
+                    .map(|t| [t, amplitude.value_at(t)])
+                    .collect()
+            }
+        };
+    }
+    Ok(motion)
 }
 
 /// The solver's material of a material of the model: its density and elastic constants,
@@ -434,4 +550,126 @@ fn signed_volume(points: &[[f64; 3]], triangles: &[[u32; 3]]) -> f64 {
             + a[2] * (b[0] * c[1] - b[1] * c[0]);
     }
     volume / 6.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plx_mesh::{Element, ElementShape, Part};
+    use plx_model::{
+        BoundaryCondition, BoundaryKind, Elastic, Id, ReferencePoint, Region, RigidBody, Section,
+        Step,
+    };
+
+    /// Two unit cubes side by side: a paste and a tool.
+    fn mesh() -> FeMesh {
+        let mut mesh = FeMesh::default();
+        for (c, name) in ["Paste", "Tool"].into_iter().enumerate() {
+            let x0 = 1.5 * c as f64;
+            let first = 8 * c as u32 + 1;
+            for (k, [x, y, z]) in [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                mesh.set_node(first + k as u32, [x0 + x, y, z]);
+            }
+            mesh.add_element(Element {
+                id: c as u32 + 1,
+                type_name: "C3D8".into(),
+                shape: ElementShape::Hex8,
+                nodes: (first..first + 8).collect(),
+            })
+            .unwrap();
+            mesh.parts.push(Part {
+                bodies: Vec::new(),
+                name: name.into(),
+                elements: vec![c as u32 + 1],
+            });
+        }
+        mesh
+    }
+
+    /// A Particle Flow step that turns the tool by `turn` about z at its reference point.
+    fn model(turn: Option<f64>) -> FeModel {
+        let material = Material {
+            name: "Paste".into(),
+            density: Some(1000.0),
+            elastic: Some(Elastic {
+                young: 1e5,
+                poisson: 0.3,
+            }),
+            flow: Some(Flow::KINDS[0]),
+            ..Material::default()
+        };
+        let point = ReferencePoint {
+            id: Id::new(),
+            name: "RP".into(),
+            position: [2.0, 0.5, 0.5],
+            definition: Default::default(),
+        };
+        let mut body = RigidBody::new("Tool", point.id);
+        body.region = Region::Parts(vec!["Tool".into()]);
+        let mut step = Step::new_static("Flow");
+        step.kind = StepKind::ParticleFlow(ParticleFlowStep {
+            duration: 2.0,
+            cell_size: 0.25,
+            ..Default::default()
+        });
+        if let Some(turn) = turn {
+            step.boundary_conditions.push(BoundaryCondition::new(
+                "Turn",
+                Region::ReferencePoint(point.id),
+                BoundaryKind::displacement([
+                    Some(0.0),
+                    Some(0.0),
+                    Some(0.0),
+                    Some(0.0),
+                    Some(0.0),
+                    Some(turn),
+                ]),
+            ));
+        }
+        FeModel {
+            sections: vec![Section {
+                orientation: None,
+                name: "Paste".into(),
+                material: Some(material.id),
+                region: Region::Parts(vec!["Paste".into()]),
+                thickness: 1.0,
+                kind: Default::default(),
+            }],
+            materials: vec![material],
+            reference_points: vec![point],
+            constraints: vec![Constraint::RigidBody(body)],
+            steps: vec![step],
+            ..FeModel::default()
+        }
+    }
+
+    #[test]
+    fn a_rigid_body_turns_by_its_reference_point_over_the_step() {
+        let mesh = mesh();
+        let lowered = lower(&mesh, &model(Some(6.0)), "Test").expect("lowers");
+        assert_eq!(lowered.bodies, vec!["Paste".to_string()]);
+        assert_eq!(lowered.model.walls.len(), 1);
+        let motion = &lowered.model.walls[0].motion;
+        assert_eq!(motion.angular, [0.0, 0.0, 6.0]);
+        assert_eq!(motion.center, [2.0, 0.5, 0.5]);
+        // The default ramp: the whole turn over the duration, at 3 rad/s.
+        assert_eq!(motion.amplitude, vec![[0.0, 0.0], [2.0, 1.0]]);
+        assert_eq!(motion.factor(1.0) * motion.angular[2], 3.0);
+        assert!(lowered.warnings.is_empty(), "{:?}", lowered.warnings);
+        // Without a boundary condition the tool rests.
+        let resting = lower(&mesh, &model(None), "Test").expect("lowers");
+        assert!(resting.model.walls[0].motion.is_resting());
+    }
 }

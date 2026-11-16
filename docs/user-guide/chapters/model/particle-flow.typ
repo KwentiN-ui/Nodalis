@@ -17,8 +17,14 @@ FE Model and Results workspaces:
   [Material], [Every meshed solid part with a section that is not part of a rigid body is
     filled with particles at the start, two to a cell in each direction, with the material
     of its section. The mesh only describes the shape: its elements are not computed.],
-  [Walls], [The parts of a rigid body (@rigid-body) are walls. They are solid parts; the
-    material cannot enter them. In this version they rest.],
+  [Walls], [The parts of a rigid body (@rigid-body) are walls: tools, dies, vessels. They
+    are solid parts; the material cannot enter them.],
+  [Motion of a wall], [A displacement boundary condition on the reference point of a rigid
+    body moves the wall: the displacements U1 to U3 shift it, the rotations UR1 to UR3 (in
+    rad) turn it about the reference point, which moves along. Without an amplitude the
+    motion runs over the step at constant speed, so 50 rad over a step of 5 s turn a screw
+    at 10 rad/s; an amplitude shapes it over time, e.g. a short start and then a constant
+    speed. Other boundary conditions are left out.],
   [Wall friction], [A contact region (@contacts) between a wall and a filled part gives
     the wall its law: #ui("Bonded") and #ui("Rough") let the material stick,
     #ui("No Separation") and #ui("Frictionless") let it slide freely, #ui("Frictional")
@@ -32,6 +38,10 @@ deactivated. Create it with #ui("Steps") > #ui("Step"), type #ui("Particle Flow"
 #screenshot("particle-flow-step.png", [A paste flows out of a tube through the holes of a die
 plate under gravity, coloured by its speed and cut in half by a section view. Each particle
 is drawn as a small cube.])
+
+#screenshot("particle-flow-tool.png", [A blade turns in a paste, seen from above: a rotation
+UR3 of one turn on the reference point of the rigid body, with an amplitude that starts it
+slowly. The history of the set BLADE holds the torque RMZ and the work the blade put in.])
 
 === Flow of a material
 
@@ -80,7 +90,7 @@ The run writes results like any other analysis, shown in the Results workspace w
 legend, the increment bar and the animation. Each particle is a small cube of the particle
 spacing; a frame moves the cubes to where the particles are (true scale). A particle that
 left the model through an open side is no longer drawn. Each wall is a part of its own,
-drawn as its surface at rest. The fields are:
+drawn as its surface where it is. The fields are:
 
 #fields(
   [U, V], [Displacement from the start and velocity of the particles.],
@@ -90,11 +100,14 @@ drawn as its surface at rest. The fields are:
 )
 
 The history output holds the energies of the model (kinetic as ALLKE, elastic as ALLIE,
-dissipated by flow and at the walls as ALLVD, the work of gravity as ALLWK) under the set
-PARTICLES, and per wall and per side of the box the force of the material on it with its
-moment about the origin. The output of the run names the number of particles and cells, the
+dissipated by flow and at the walls as ALLVD, the work of gravity and of the moving walls as
+ALLWK) under the set PARTICLES. Per wall it holds the force of the material on it, the
+moment of that force about the reference point of the wall, which is the torque a drive
+must give a turning tool, and the work the wall did on the material as ALLWK, the energy
+the drive puts in. The sides of the box have their force and moment about the origin. The output of the run names the number of particles and cells, the
 time steps and the error of the energy balance.
 
 The method is validated against a resting basin (hydrostatic pressure), the dam break of
 Martin and Moyce, the slump test of Pashias, the collapse of a Bingham column, the
-Buckingham-Reiner flow of a Bingham paste through a pipe and the flow out of a slot.
+Buckingham-Reiner flow of a Bingham paste through a pipe, the flow out of a slot and the
+torque on a cylinder turning in a viscous fluid (Couette flow).

@@ -201,22 +201,89 @@ pub enum WallLaw {
     Coulomb { friction: f64 },
 }
 
-/// The motion of a rigid body: a constant rotation about an axis plus a constant
-/// translation. Stage 2 of the concept computes resting walls only (the default); the
-/// field is in the data so that moving tools (stage 3) add nothing new to the format.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// The motion of a rigid body: a rotation about an axis through `center` plus a
+/// translation, `angular s(t)` and `velocity s(t)` at time `t`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RigidMotion {
+    /// The translation per unit of `s`.
     pub velocity: [f64; 3],
-    /// A point on the axis of rotation.
+    /// A point on the axis of rotation at the start; it moves with the translation.
     pub center: [f64; 3],
-    /// The angular velocity vector (rad/s): direction is the axis.
+    /// The rotation vector per unit of `s` (rad): its direction is the axis.
     pub angular: [f64; 3],
+    /// `s` over time as (time, s) points, linear in between and held beyond the ends,
+    /// like the amplitude of a displacement; empty is `s = t`, a constant velocity.
+    #[serde(default)]
+    pub amplitude: Vec<[f64; 2]>,
 }
 
 impl RigidMotion {
     pub fn is_resting(&self) -> bool {
-        self.velocity == [0.0; 3] && self.angular == [0.0; 3]
+        (self.velocity == [0.0; 3] && self.angular == [0.0; 3])
+            || (!self.amplitude.is_empty() && self.amplitude.iter().all(|p| p[1] == 0.0))
     }
+
+    /// `ds/dt` at time `t`: the factor on `velocity` and `angular` that gives the
+    /// velocities (of the segment that starts at `t` at a kink).
+    pub fn factor(&self, t: f64) -> f64 {
+        let points = &self.amplitude;
+        if points.is_empty() {
+            return 1.0;
+        }
+        let k = points.partition_point(|p| p[0] <= t);
+        if k == 0 || k == points.len() {
+            return 0.0;
+        }
+        let ([t0, s0], [t1, s1]) = (points[k - 1], points[k]);
+        if t1 > t0 { (s1 - s0) / (t1 - t0) } else { 0.0 }
+    }
+
+    /// `s` at time `t`.
+    pub fn moved_time(&self, t: f64) -> f64 {
+        let points = &self.amplitude;
+        let (Some(first), Some(last)) = (points.first(), points.last()) else {
+            return t;
+        };
+        if t <= first[0] {
+            return first[1];
+        }
+        if t >= last[0] {
+            return last[1];
+        }
+        let k = points.partition_point(|p| p[0] <= t).max(1);
+        let ([t0, s0], [t1, s1]) = (points[k - 1], points[k]);
+        if t1 > t0 {
+            s0 + (s1 - s0) * (t - t0) / (t1 - t0)
+        } else {
+            s1
+        }
+    }
+
+    /// Where the point `p` of the body (where it is at the start) is at time `t`.
+    pub fn place(&self, p: [f64; 3], t: f64) -> [f64; 3] {
+        let s = self.moved_time(t);
+        let turn: [f64; 3] = std::array::from_fn(|a| self.angular[a] * s);
+        let arm: [f64; 3] = std::array::from_fn(|a| p[a] - self.center[a]);
+        let turned = rotate(turn, arm);
+        std::array::from_fn(|a| self.center[a] + self.velocity[a] * s + turned[a])
+    }
+}
+
+/// `v` turned by the rotation vector `turn` (Rodrigues).
+fn rotate(turn: [f64; 3], v: [f64; 3]) -> [f64; 3] {
+    let angle = (turn[0] * turn[0] + turn[1] * turn[1] + turn[2] * turn[2]).sqrt();
+    if angle < 1e-300 {
+        return v;
+    }
+    let k = turn.map(|c| c / angle);
+    let (sin, cos) = angle.sin_cos();
+    let kv = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+    let cross = [
+        k[1] * v[2] - k[2] * v[1],
+        k[2] * v[0] - k[0] * v[2],
+        k[0] * v[1] - k[1] * v[0],
+    ];
+    std::array::from_fn(|a| v[a] * cos + cross[a] * sin + k[a] * kv * (1.0 - cos))
 }
 
 /// A rigid body: its closed surface (the solid is inside), how material slides on it, and
@@ -343,8 +410,11 @@ pub struct ParticleHistory {
     pub elastic: Vec<f64>,
     /// Energy dissipated by plastic flow and viscosity, summed from the start.
     pub dissipated: Vec<f64>,
-    /// Energy taken out where walls stop the material, summed from the start.
+    /// Energy dissipated where walls stop or rub the material, summed from the start.
     pub wall_loss: Vec<f64>,
+    /// Work the moving walls did on the material, summed from the start.
+    #[serde(default)]
+    pub wall_work: Vec<f64>,
     /// Energy that left with material through open sides, summed from the start.
     pub outflow_energy: Vec<f64>,
     /// What the balance misses, relative to the largest energy so far: the numerical
@@ -356,7 +426,8 @@ pub struct ParticleHistory {
     /// The largest particle speed over the wave speed.
     pub mach: Vec<f64>,
     /// Per wall (the walls of the model, then the six sides of the box): the force the
-    /// material exerts on it and the moment of that force about the origin.
+    /// material exerts on it and the moment of that force about the wall's center of
+    /// motion where it is (about the origin for the sides).
     pub walls: Vec<WallHistory>,
 }
 
@@ -366,6 +437,9 @@ pub struct WallHistory {
     pub name: String,
     pub force: Vec<[f64; 3]>,
     pub moment: Vec<[f64; 3]>,
+    /// The work the wall did on the material, summed from the start.
+    #[serde(default)]
+    pub work: Vec<f64>,
 }
 
 /// What the solver tells about the run.
@@ -384,4 +458,33 @@ pub struct ParticleReport {
     pub stopped: bool,
     /// Remarks for the user, such as the slowed wave speed.
     pub notes: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_motion_follows_its_amplitude() {
+        let motion = RigidMotion {
+            velocity: [1.0, 0.0, 0.0],
+            center: [0.0; 3],
+            angular: [0.0, 0.0, std::f64::consts::PI],
+            amplitude: vec![[0.0, 0.0], [1.0, 0.5], [2.0, 1.5]],
+        };
+        // Half speed for a second, then full speed, then held.
+        assert_eq!(motion.factor(0.5), 0.5);
+        assert_eq!(motion.factor(1.5), 1.0);
+        assert_eq!(motion.factor(3.0), 0.0);
+        assert!((motion.moved_time(1.5) - 1.0).abs() < 1e-12);
+        assert_eq!(motion.moved_time(3.0), 1.5);
+        // At t = 2 the body turned by 1.5 pi and moved by 1.5.
+        let p = motion.place([1.0, 0.0, 0.0], 2.0);
+        assert!(
+            (p[0] - 1.5).abs() < 1e-12 && (p[1] + 1.0).abs() < 1e-12,
+            "{p:?}"
+        );
+        assert!(!motion.is_resting());
+        assert!(RigidMotion::default().is_resting());
+    }
 }

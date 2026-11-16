@@ -569,3 +569,117 @@ fn die_extrusion() {
 fn die_extrusion_fine() {
     die(12.0);
 }
+
+/// Circular Couette flow (stage 3): a cylinder turns in a Newtonian fluid inside a resting
+/// tube. The torque on it per length is `4 π μ Ω R₁² R₂² / (R₂² − R₁²)`; its work is what
+/// the fluid dissipates.
+fn couette(per_gap: f64) {
+    let (inner, outer) = (0.02, 0.04);
+    let (viscosity, omega) = (20.0, 2.0);
+    let cell = (outer - inner) / per_gap;
+    let length = 3.0 * cell;
+    let reach = outer + 3.0 * cell;
+    let annulus = |r1: f64, r2: f64| {
+        let mut shape =
+            TriangleSurface::cylinder([0.0, 0.0, -1.0], [0.0, 0.0, 2.0 + length], r2, 256);
+        let hole = TriangleSurface::cylinder([0.0, 0.0, -1.0], [0.0, 0.0, 2.0 + length], r1, 256)
+            .flipped();
+        let offset = shape.points.len() as u32;
+        shape.points.extend(hole.points);
+        shape
+            .triangles
+            .extend(hole.triangles.into_iter().map(|t| t.map(|i| i + offset)));
+        shape
+    };
+    let mut tube = TriangleSurface::cuboid([-reach, -reach, -1.0], [reach, reach, 1.0 + length]);
+    let hole =
+        TriangleSurface::cylinder([0.0, 0.0, -1.0], [0.0, 0.0, 2.0 + length], outer, 256).flipped();
+    let offset = tube.points.len() as u32;
+    tube.points.extend(hole.points);
+    tube.triangles
+        .extend(hole.triangles.into_iter().map(|t| t.map(|i| i + offset)));
+    let model = ParticleModel {
+        heading: "Couette flow".into(),
+        materials: vec![water(viscosity)],
+        bodies: vec![MaterialBody {
+            name: "Fluid".into(),
+            material: 0,
+            shape: annulus(inner, outer),
+            velocity: [0.0; 3],
+        }],
+        walls: vec![
+            RigidWall {
+                name: "Rotor".into(),
+                shape: TriangleSurface::cylinder(
+                    [0.0, 0.0, -1.0],
+                    [0.0, 0.0, 2.0 + length],
+                    inner,
+                    256,
+                ),
+                law: WallLaw::Stick,
+                motion: RigidMotion {
+                    angular: [0.0, 0.0, omega],
+                    // Half speed at first, against a jolt.
+                    amplitude: vec![[0.0, 0.0], [0.02, 0.01], [1.0, 0.99]],
+                    ..Default::default()
+                },
+            },
+            RigidWall {
+                name: "Tube".into(),
+                shape: tube,
+                law: WallLaw::Stick,
+                motion: RigidMotion::default(),
+            },
+        ],
+        domain: Domain {
+            min: [-reach + cell, -reach + cell, 0.0],
+            max: [reach - cell, reach - cell, length],
+            cell,
+            sides: [Side::Wall(WallLaw::Stick); 6],
+            periodic: [false, false, true],
+        },
+        gravity: [0.0; 3],
+        control: ParticleControl {
+            end_time: 0.3,
+            frames: 6,
+            sound_speed: Some(2.0),
+            ..Default::default()
+        },
+    };
+    let results = solve(&model);
+    let expected = 4.0 * std::f64::consts::PI * viscosity * omega * (inner * outer).powi(2)
+        / (outer * outer - inner * inner);
+    let rotor = &results.history.walls[0];
+    let torque: Vec<f64> = rotor.moment.iter().map(|m| -m[2] / length).collect();
+    let n = torque.len();
+    // The mean over the last fifth: the samples of the wall load are noisy.
+    let tail = &torque[n - n / 5..];
+    let mean = tail.iter().sum::<f64>() / tail.len() as f64;
+    eprintln!("torque per length {mean:.4} expected {expected:.4}");
+    assert!(
+        (mean - expected).abs() < 0.15 * expected,
+        "torque {mean} instead of {expected}"
+    );
+    // Steady: the rotor's power goes into the fluid's dissipation.
+    let power = mean * length * omega;
+    let work = &rotor.work;
+    let times = &results.history.time;
+    let rate = (work[n - 1] - work[n - n / 5]) / (times[n - 1] - times[n - n / 5]);
+    eprintln!("rotor power {rate:.5} from torque {power:.5}");
+    assert!(
+        (rate - power).abs() < 0.1 * power,
+        "power {rate} vs {power}"
+    );
+    assert!(max_balance_error(&results) < 0.1);
+}
+
+#[test]
+fn couette_flow() {
+    couette(8.0);
+}
+
+#[test]
+#[ignore]
+fn couette_flow_fine() {
+    couette(16.0);
+}
