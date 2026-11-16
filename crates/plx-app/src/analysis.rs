@@ -465,6 +465,8 @@ impl Analysis {
             Run::start_analysis_reusing(solver.threads, work_dir, &job_name, prepared)
         }
         .map_err(|e| format!("Solver not started: {e}"))?;
+        // The results are shown from their file, read field by field as they are wanted.
+        job.keep_results_in_memory(false);
         let mut output = vec![format!(
             "{name} {} in {}",
             if check_model {

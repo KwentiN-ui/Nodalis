@@ -179,8 +179,11 @@ pub struct ResultsFile {
     fields: Vec<Vec<usize>>,
     /// Of every mode set, the array of its nodes, and of every mode those of its shape and
     /// imaginary part.
-    modes: Vec<(usize, Vec<(usize, Option<usize>)>)>,
+    modes: Vec<(usize, Vec<ModeArrays>)>,
 }
+
+/// The arrays of a mode: its shape and, if it has one, its imaginary part.
+type ModeArrays = (usize, Option<usize>);
 
 impl std::fmt::Debug for ResultsFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

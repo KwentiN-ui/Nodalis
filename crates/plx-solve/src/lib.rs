@@ -122,8 +122,13 @@ pub struct Run {
     name: String,
     work_dir: PathBuf,
     output: Arc<Mutex<Vec<String>>>,
-    /// The results, once the solver has finished with some.
+    /// The results, once the solver has finished with some, unless they are not kept in
+    /// memory ([`Run::keep_results_in_memory`]).
     solved: Arc<Mutex<Option<Arc<SolverResults>>>>,
+    /// Whether the results are kept in memory besides their file.
+    keep: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether results were written to the results file.
+    written: Arc<std::sync::atomic::AtomicBool>,
     live: LiveProgress,
     cancel: CancelToken,
     handle: Option<JoinHandle<Finished>>,
@@ -472,6 +477,9 @@ impl Run {
         };
         let solved = Arc::new(Mutex::new(None));
         let keep_results = Arc::clone(&solved);
+        let keep = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let written = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (keeping, writing) = (Arc::clone(&keep), Arc::clone(&written));
         let results_file = work_dir.join(format!("{name}.{}", plx_results::solver::EXTENSION));
         let diagnostics = Arc::new(Mutex::new(None));
         let found = Arc::clone(&diagnostics);
@@ -537,8 +545,11 @@ impl Run {
                     drop_preparation_steps(&mut results, &preparation);
                     match results.write(&results_file) {
                         Ok(()) => {
-                            *keep_results.lock().unwrap_or_else(|e| e.into_inner()) =
-                                Some(Arc::new(results));
+                            writing.store(true, std::sync::atomic::Ordering::Release);
+                            if keeping.load(std::sync::atomic::Ordering::Acquire) {
+                                *keep_results.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(Arc::new(results));
+                            }
                         }
                         Err(error) => say(format!(
                             "*ERROR: results not written to {}: {error}",
@@ -609,6 +620,8 @@ impl Run {
             work_dir: work_dir.to_owned(),
             output,
             solved,
+            keep,
+            written,
             live: LiveProgress::default(),
             cancel,
             handle: Some(handle),
@@ -707,6 +720,16 @@ impl Run {
         self.file(plx_results::solver::EXTENSION)
     }
 
+    /// Whether the results stay in memory besides their file, for [`Run::solver_results`]:
+    /// by default they do. Results that are shown are read from their file, field by field
+    /// as they are wanted, and need not be kept.
+    pub fn keep_results_in_memory(&self, keep: bool) {
+        self.keep.store(keep, std::sync::atomic::Ordering::Release);
+        if !keep {
+            *self.solved.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+
     /// The results in memory, once the solver has finished with some.
     pub fn solver_results(&self) -> Option<Arc<SolverResults>> {
         if self.status == JobStatus::Running {
@@ -731,11 +754,7 @@ impl Run {
 
     fn results_written(&self) -> bool {
         self.status != JobStatus::Running
-            && self
-                .solved
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_some()
+            && self.written.load(std::sync::atomic::Ordering::Acquire)
             && self.results_file().is_file()
     }
 
@@ -746,12 +765,7 @@ impl Run {
         let finished = handle.join().unwrap_or(Finished::Error);
         self.awake = None;
         // A model check computes no results.
-        let results = !self.check
-            && self
-                .solved
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_some();
+        let results = !self.check && self.written.load(std::sync::atomic::Ordering::Acquire);
         if self.check && finished == Finished::Done {
             self.status = JobStatus::Completed;
             return;
@@ -918,6 +932,18 @@ S
         assert_eq!(profile.degrees_of_freedom, 24);
         assert!(profile.phases.count(Phase::Assembly) > 0);
         assert!(profile.total >= profile.writing);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn results_need_not_stay_in_memory() {
+        let dir = std::env::temp_dir().join(format!("plx-solve-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut run = Run::start(1, &dir, "Cube", CUBE).unwrap();
+        run.keep_results_in_memory(false);
+        assert_eq!(run.wait(), JobStatus::Completed);
+        assert!(run.solver_results().is_none());
+        assert_eq!(run.results(), Some(run.file("ndlr")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
