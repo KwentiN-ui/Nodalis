@@ -7577,7 +7577,12 @@ impl Workbench {
             return;
         };
         if animation.playing {
-            let dt = ctx.input(|i| i.stable_dt).min(0.1);
+            // While the shown frame waits for its values, the playback waits with it: every
+            // frame is shown, the playback slows down where the reading cannot keep up.
+            let dt = match self.results_reading {
+                true => 0.0,
+                false => ctx.input(|i| i.stable_dt).min(0.1),
+            };
             if animation.tick(dt) {
                 view.show_animation_frame();
                 self.frame_changed = true;
