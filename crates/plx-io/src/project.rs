@@ -4,8 +4,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
+use crate::blob::Blob;
 use flate2::Compression;
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
@@ -416,7 +415,7 @@ impl EmbeddedFile {
         let file = BoundFile {
             name: name.to_owned(),
             size: content.len() as u64,
-            data: BASE64.encode(encoder.finish()?).into(),
+            data: Blob::from_bytes(encoder.finish()?),
         };
         Ok(Self {
             print: print.finish(),
@@ -447,12 +446,7 @@ impl EmbeddedFile {
     /// The content of the file.
     pub fn content(&self) -> Result<Vec<u8>, ProjectError> {
         let mut content = Vec::with_capacity(self.file.size as usize);
-        let data = self.file.data.as_bytes();
-        let compressed = BASE64.decode(data).map_err(|e| ProjectError::Format {
-            path: PathBuf::from(&self.file.name),
-            message: format!("embedded file: {e}"),
-        })?;
-        DeflateDecoder::new(compressed.as_slice())
+        DeflateDecoder::new(self.file.data.reader())
             .read_to_end(&mut content)
             .map_err(|e| ProjectError::Format {
                 path: PathBuf::from(&self.file.name),
@@ -793,17 +787,17 @@ pub struct BoundResults {
     pub settings: Option<ResultsSettings>,
 }
 
-/// A file of [`BoundResults`]: its name and its content, base64 encoded so that it is a
-/// string in the project's RON. The results of the built-in solver (`.ndlr`) are compressed
-/// already and stored as they are, the other files deflated. The content is shared: results
-/// of a dynamic analysis take gigabytes, and the project copies its analyses to save or solve
-/// them without the window waiting for a copy of the content.
+/// A file of [`BoundResults`]: its name and its content, kept in the binary part of the
+/// project file and read from there when it is wanted ([`Blob`]). The results of the built-in
+/// solver (`.ndlr`) are compressed already and stored as they are, the other files deflated.
+/// The content is shared: results of a dynamic analysis take gigabytes, and the project
+/// copies its analyses to save or solve them without copying the content.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundFile {
     pub name: String,
     /// Size of the file itself.
     pub size: u64,
-    pub data: std::sync::Arc<str>,
+    pub data: Blob,
 }
 
 impl BoundResults {
@@ -813,7 +807,7 @@ impl BoundResults {
 
     /// Size of the files as stored in the project.
     pub fn stored_size(&self) -> u64 {
-        self.all_files().map(|f| f.data.len() as u64).sum()
+        self.all_files().map(|f| f.data.len()).sum()
     }
 
     /// Size of the files themselves.
@@ -835,8 +829,9 @@ impl BoundResults {
             })
     }
 
-    /// The results of the built-in solver opened in memory, to read their fields when they
-    /// are wanted ([`plx_results::SolverResults::open`]); `None` for results of CalculiX.
+    /// The results of the built-in solver opened to read their fields from the project file
+    /// when they are wanted ([`plx_results::SolverResults::open`]); `None` for results of
+    /// CalculiX.
     #[allow(clippy::type_complexity)]
     pub fn open_solver_results(
         &self,
@@ -850,8 +845,7 @@ impl BoundResults {
         let Some(file) = &self.solver else {
             return Ok(None);
         };
-        let bytes = unpack(file, Path::new(&file.name))?;
-        plx_results::SolverResults::open_bytes(bytes)
+        plx_results::SolverResults::open_source(Box::new(file.data.reader()))
             .map(Some)
             .map_err(|e| ProjectError::Format {
                 path: PathBuf::from(&file.name),
@@ -893,7 +887,7 @@ impl BoundResults {
             let input = self.text("inp");
             let history = crate::solver::history(&solved, input.as_deref());
             return Ok(ReadResults {
-                // The fields are read from the file in memory when they are wanted.
+                // The fields are read from the project file when they are wanted.
                 results: crate::solver::import_from(&solved, file),
                 history,
                 input,
@@ -925,14 +919,11 @@ fn unpack(file: &BoundFile, path: &Path) -> Result<Vec<u8>, ProjectError> {
         path: path.to_owned(),
         message,
     };
-    let compressed = BASE64
-        .decode(file.data.as_bytes())
-        .map_err(|e| format(format!("bound file {}: {e}", file.name)))?;
     if !deflated(Path::new(&file.name)) {
-        return Ok(compressed);
+        return (file.data.bytes()).map_err(|e| format(format!("bound file {}: {e}", file.name)));
     }
     let mut content = Vec::with_capacity(file.size as usize);
-    DeflateDecoder::new(compressed.as_slice())
+    DeflateDecoder::new(file.data.reader())
         .read_to_end(&mut content)
         .map_err(|e| format(format!("bound file {}: {e}", file.name)))?;
     Ok(content)
@@ -957,24 +948,38 @@ pub enum ProjectError {
     Older { path: PathBuf, format: u32 },
 }
 
-/// Writes the project; a crash while saving leaves an existing file intact.
+/// Writes the project: its RON text, then the content of its files ([`crate::blob`]); a
+/// crash while saving leaves an existing file intact. The content of the files is read from
+/// the written file from then on, and what was held in memory is let go.
 pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> {
-    let text = ron::to_string(project).map_err(|e| ProjectError::Format {
-        path: path.to_owned(),
-        message: e.to_string(),
-    })?;
     let io = |source| ProjectError::Io {
         path: path.to_owned(),
         source,
     };
     let temporary = path.with_extension("plx.tmp");
-    std::fs::write(&temporary, text).map_err(io)?;
-    std::fs::rename(&temporary, path).map_err(io)
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temporary)
+        .map_err(io)?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, &file);
+    let blobs =
+        crate::blob::write_file(project, &mut out).map_err(|message| ProjectError::Format {
+            path: path.to_owned(),
+            message,
+        })?;
+    out.flush().map_err(io)?;
+    drop(out);
+    std::fs::rename(&temporary, path).map_err(io)?;
+    crate::blob::moved_into(std::sync::Arc::new(file), blobs);
+    Ok(())
 }
 
 /// The oldest format that can still be opened. While Nodalis is being designed, a new
 /// format is not converted: older projects are refused.
-pub const FIRST_PROJECT_FORMAT: u32 = 44;
+pub const FIRST_PROJECT_FORMAT: u32 = 45;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
@@ -1000,18 +1005,38 @@ fn leading_format(text: &str) -> Option<u32> {
     rest[..end].parse().ok()
 }
 
+/// Reads a project; the content of its files stays in the file until it is wanted.
 pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
-    let text = std::fs::read_to_string(path).map_err(|source| ProjectError::Io {
+    let file = std::fs::File::open(path).map_err(|source| ProjectError::Io {
         path: path.to_owned(),
         source,
     })?;
+    let mut failed = None;
+    let read = crate::blob::read_file(file, |text| {
+        parse_project(path, text).map_err(|e| {
+            let message = e.to_string();
+            failed = Some(e);
+            message
+        })
+    });
+    match (read, failed) {
+        (Ok(project), _) => Ok(project),
+        (Err(_), Some(error)) => Err(error),
+        (Err(message), None) => Err(ProjectError::Format {
+            path: path.to_owned(),
+            message,
+        }),
+    }
+}
+
+fn parse_project(path: &Path, text: &str) -> Result<Project, ProjectError> {
     let format_error = |e: ron::error::SpannedError| ProjectError::Format {
         path: path.to_owned(),
         message: e.to_string(),
     };
-    let format = match leading_format(&text) {
+    let format = match leading_format(text) {
         Some(format) => format,
-        None => ron::from_str::<Header>(&text).map_err(format_error)?.format,
+        None => ron::from_str::<Header>(text).map_err(format_error)?.format,
     };
     if format > PROJECT_FORMAT {
         return Err(ProjectError::Newer {
@@ -1025,7 +1050,7 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
             format,
         });
     }
-    let mut project: Project = ron::from_str(&text).map_err(format_error)?;
+    let mut project: Project = ron::from_str(text).map_err(format_error)?;
     for analysis in project.analyses_mut() {
         analysis.model.migrate();
         // Every part of the mesh belongs to a geometry object.
@@ -1056,26 +1081,32 @@ pub fn bind_results(
             path: path.to_owned(),
             source,
         };
-        let content = match std::fs::read(path) {
-            Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !is_results_file(path) => {
-                continue;
-            }
-            Err(e) => return Err(io(e)),
-        };
-        let size = content.len() as u64;
-        let compressed = if deflated(path) {
+        let missing =
+            |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound && !is_results_file(path);
+        let (size, data) = if deflated(path) {
+            let content = match std::fs::read(path) {
+                Ok(content) => content,
+                Err(e) if missing(&e) => continue,
+                Err(e) => return Err(io(e)),
+            };
             // Level 3: a third of the time of the default level for a few percent more.
             let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(3));
             encoder.write_all(&content).map_err(io)?;
-            encoder.finish().map_err(io)?
+            let compressed = encoder.finish().map_err(io)?;
+            (content.len() as u64, Blob::from_bytes(compressed))
         } else {
-            content
+            // Copied aside instead of read into memory: the results of a dynamic analysis
+            // take gigabytes, and the next run may write the file anew.
+            match Blob::copy_of_file(path) {
+                Ok(blob) => (blob.len(), blob),
+                Err(e) if missing(&e) => continue,
+                Err(e) => return Err(io(e)),
+            }
         };
         let file = BoundFile {
             name: file_name(path).unwrap_or_default(),
             size,
-            data: BASE64.encode(compressed).into(),
+            data,
         };
         if plx_results::solver::is_solver_results(path) {
             bound.solver = Some(file);
@@ -1123,8 +1154,18 @@ pub fn restore_results(bound: &BoundResults, dir: &Path) -> Result<PathBuf, Proj
             )));
         }
         let path = dir.join(name);
-        let content = unpack(file, &path)?;
-        std::fs::write(&path, content).map_err(|e| io(&path, e))?;
+        if deflated(name) {
+            let content = unpack(file, &path)?;
+            std::fs::write(&path, content).map_err(|e| io(&path, e))?;
+        } else {
+            // Copied a part at a time: results files take gigabytes.
+            let written = std::fs::File::create(&path).and_then(|f| {
+                let mut out = std::io::BufWriter::new(f);
+                file.data.write_to(&mut out)?;
+                out.flush()
+            });
+            written.map_err(|e| io(&path, e))?;
+        }
         if is_results_file(&path) {
             results = Some(path);
         }
@@ -2128,13 +2169,21 @@ mod tests {
         }
     }
 
+    /// The RON text of a project file, without the binary part behind it.
+    fn project_text(path: &Path) -> String {
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(&bytes[..8], crate::blob::MAGIC);
+        let len = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
+        String::from_utf8(bytes[16..16 + len].to_vec()).unwrap()
+    }
+
     #[test]
     fn the_format_is_read_from_the_start_of_the_file() {
         // Reading it as a Header instead took minutes for a project with a large mesh.
         let project = single(None, &FeMesh::default(), &FeModel::default(), None);
         let path = std::env::temp_dir().join(format!("plx-format-{}.ndl", std::process::id()));
         save_project(&path, &project).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
+        let text = project_text(&path);
         let _ = std::fs::remove_file(&path);
         assert_eq!(leading_format(&text), Some(PROJECT_FORMAT));
         assert_eq!(leading_format("Project( format : 3, nodes: [])"), Some(3));
@@ -2636,7 +2685,7 @@ mod tests {
             excluded: Vec::new(),
         });
         save_project(&path, &saved).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
+        let text = project_text(&path);
         assert!(text.contains(&format!("format:{PROJECT_FORMAT}")));
         assert!(!text.contains("analyses:"), "{text}");
         let project = read_project(&path).unwrap();
@@ -2861,7 +2910,7 @@ mod tests {
 
         // Without bound results the project file has no trace of them.
         save_project(&path, &single(None, &mesh, &model, None)).unwrap();
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("files:"));
+        assert!(!project_text(&path).contains("files:"));
         let project = read_project(&path).unwrap();
         assert_eq!(project.analyses().next().unwrap().results, None);
 
@@ -2886,10 +2935,31 @@ mod tests {
         let file = bound.solver.as_ref().unwrap();
         // Compressed by its own format already: stored as it is, not deflated again.
         let written = std::fs::read(&path).unwrap();
-        assert_eq!(BASE64.decode(file.data.as_bytes()).unwrap(), written);
+        assert_eq!(file.data.bytes().unwrap(), written);
         assert_eq!(bound.solver_results().unwrap().unwrap(), solved);
         let restored = restore_results(&bound, &dir.join("restored")).unwrap();
         assert_eq!(std::fs::read(restored).unwrap(), written);
+
+        // Not held in memory: copied aside when bound, read from the project file once saved,
+        // also while the project is saved over the file it reads them from.
+        assert!(!file.data.in_memory());
+        std::fs::remove_file(&path).unwrap();
+        let project_path = dir.join("Analysis.ndl");
+        let mesh = FeMesh::default();
+        let model = FeModel::default();
+        save_project(&project_path, &single(None, &mesh, &model, Some(&bound))).unwrap();
+        for _ in 0..2 {
+            let project = read_project(&project_path).unwrap();
+            let analysis = project.analyses().next().unwrap();
+            let results = analysis.results.as_ref().unwrap();
+            let kept = &results.solver.as_ref().unwrap().data;
+            assert!(!kept.in_memory());
+            assert_eq!(kept.bytes().unwrap(), written);
+            let (opened, _) = results.open_solver_results().unwrap().unwrap();
+            assert_eq!(opened.model.nodes.ids, solved.model.nodes.ids);
+            save_project(&project_path, &project).unwrap();
+            assert_eq!(kept.bytes().unwrap(), written);
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

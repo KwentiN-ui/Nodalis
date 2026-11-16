@@ -277,6 +277,14 @@ impl SolverResults {
         Self::from_archive(archive).map_err(|e| failed(e.0))
     }
 
+    /// [`SolverResults::open`] of a `.ndlr` file read from `source`, such as a project file.
+    pub fn open_source(
+        source: Box<dyn packed::Source>,
+    ) -> Result<(Self, Arc<ResultsFile>), ReadError> {
+        let archive = packed::Archive::open(MAGIC, source).map_err(|e| ReadError(e.0))?;
+        Self::from_archive(archive)
+    }
+
     /// [`SolverResults::open`] of the bytes of a `.ndlr` file in memory.
     pub fn open_bytes(bytes: Vec<u8>) -> Result<(Self, Arc<ResultsFile>), ReadError> {
         let archive = packed::Archive::from_bytes(MAGIC, bytes).map_err(|e| ReadError(e.0))?;

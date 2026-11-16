@@ -1,5 +1,6 @@
 //! Dateiformate: CalculiX .inp/.frd/.dat und weitere Netzformate.
 
+pub mod blob;
 pub mod dat;
 pub mod fingerprint;
 pub mod frd;

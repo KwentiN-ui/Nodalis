@@ -233,8 +233,10 @@ use serde::{Deserialize, Serialize};
 /// geometry objects with the meshes they have, and an analysis can mesh a part itself
 /// ([`Geometry::own_meshes`]); older projects are refused. Format 44 gives the parts of the
 /// geometry ids ([`Geometry::ids`]), so that an analysis follows a part renamed where its
-/// link comes from, and marks linked shapes and sets; older projects are refused.
-pub const PROJECT_FORMAT: u32 = 44;
+/// link comes from, and marks linked shapes and sets; older projects are refused. Format 45
+/// keeps the content of files, such as results, in a binary part behind the text of the
+/// project file instead of base64 in the text; older projects are refused.
+pub const PROJECT_FORMAT: u32 = 45;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
