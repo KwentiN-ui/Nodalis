@@ -3658,6 +3658,8 @@ dependencies = [
  "plx-results",
  "plxs-core",
  "plxs-input",
+ "plxs-output",
+ "plxs-particles",
  "plxs-procedures",
  "plxs-session",
  "rayon",

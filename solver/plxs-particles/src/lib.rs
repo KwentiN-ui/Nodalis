@@ -16,4 +16,4 @@ pub mod law;
 pub mod math;
 mod solver;
 
-pub use solver::{Status, solve};
+pub use solver::{Status, solve, solve_streaming};

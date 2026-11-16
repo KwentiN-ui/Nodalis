@@ -49,6 +49,7 @@ mod origin;
 pub mod overview;
 mod parameter;
 mod part_filter;
+pub mod particle_flow;
 mod plot;
 mod primitive;
 mod properties;
@@ -235,8 +236,10 @@ use serde::{Deserialize, Serialize};
 /// geometry ids ([`Geometry::ids`]), so that an analysis follows a part renamed where its
 /// link comes from, and marks linked shapes and sets; older projects are refused. Format 45
 /// keeps the content of files, such as results, in a binary part behind the text of the
-/// project file instead of base64 in the text; older projects are refused.
-pub const PROJECT_FORMAT: u32 = 45;
+/// project file instead of base64 in the text; older projects are refused. Format 46 adds
+/// the Particle Flow step and the flow of materials ([`particle_flow`]); format 45 reads as
+/// it is.
+pub const PROJECT_FORMAT: u32 = 46;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -689,6 +692,9 @@ pub struct Material {
     /// Creep by Norton's law (`*CREEP`), which acts in Visco steps.
     #[serde(default)]
     pub creep: Option<Creep>,
+    /// How the material flows in a Particle Flow step; without, it is elastic there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<particle_flow::Flow>,
 }
 
 impl Material {
@@ -910,6 +916,9 @@ pub enum StepKind {
     /// How strongly mass, stiffness or an eigenfrequency react to moving the surface nodes
     /// of a design region (`*SENSITIVITY`), from the state of the step before it.
     Sensitivity(SensitivityStep),
+    /// The material flows as particles through a background grid (material point method),
+    /// with rigid bodies as the walls it meets.
+    ParticleFlow(particle_flow::ParticleFlowStep),
 }
 
 impl StepKind {
@@ -923,6 +932,7 @@ impl StepKind {
             | StepKind::UncoupledTempDisp(settings) => settings.increments.period(),
             StepKind::Visco(settings) => settings.increments.period(),
             StepKind::Dynamic(settings) => settings.duration,
+            StepKind::ParticleFlow(settings) => settings.duration,
             _ => 1.0,
         }
     }
@@ -934,6 +944,7 @@ impl StepKind {
             StepKind::CoupledTempDisp(settings) => settings.increments.nlgeom,
             StepKind::Visco(settings) => settings.increments.nlgeom,
             StepKind::Dynamic(settings) => settings.large_deformations,
+            StepKind::ParticleFlow(_) => true,
             _ => false,
         }
     }

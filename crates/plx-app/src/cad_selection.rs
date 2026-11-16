@@ -705,6 +705,7 @@ mod tests {
                 expansion: None,
                 plastic: None,
                 creep: None,
+                flow: None,
                 hyperelastic: None,
             }],
             sections: vec![Section {
@@ -879,6 +880,7 @@ mod tests {
                 expansion: None,
                 plastic: None,
                 creep: None,
+                flow: None,
                 hyperelastic: None,
             }],
             sections: vec![Section {

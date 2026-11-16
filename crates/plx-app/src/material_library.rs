@@ -731,6 +731,32 @@ fn material_models(
             ],
         ));
     }
+    if let Some(flow) = material.flow {
+        let stress = units.unit(Quantity::Pressure);
+        let rows = match flow {
+            plx_model::particle_flow::Flow::HerschelBulkley {
+                yield_stress,
+                consistency,
+                exponent,
+            } => vec![
+                ("Law", "Herschel-Bulkley".to_string()),
+                ("Yield stress", with_unit(yield_stress, Quantity::Pressure)),
+                (
+                    "Consistency K",
+                    format!("{} {stress} s^n", format_value(consistency)),
+                ),
+                ("Flow index n", format_value(exponent)),
+            ],
+            plx_model::particle_flow::Flow::Newtonian { viscosity } => vec![
+                ("Law", "Newtonian".to_string()),
+                (
+                    "Viscosity",
+                    format!("{} {stress} s", format_value(viscosity)),
+                ),
+            ],
+        };
+        models.push(("Flow", rows));
+    }
     if let Some(expansion) = material.expansion {
         models.push((
             "Thermal Expansion",

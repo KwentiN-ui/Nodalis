@@ -60,6 +60,8 @@ pub struct Status {
 
 #[derive(Clone, Copy, Debug)]
 struct Particle {
+    /// The number of the particle, counted from 0 in the order they were made.
+    id: u32,
     x: Vec3,
     v: Vec3,
     c: Mat3,
@@ -264,6 +266,20 @@ pub fn solve(
     model: &ParticleModel,
     progress: &mut dyn FnMut(Status),
 ) -> Result<ParticleResults, String> {
+    let mut frames = Vec::new();
+    let mut results = solve_streaming(model, progress, &mut |frame| frames.push(frame))?;
+    results.frames = frames;
+    Ok(results)
+}
+
+/// [`solve`] that hands every frame to `on_frame` as soon as it is computed instead of
+/// keeping it: the results it returns have no frames. A run of many particles and frames
+/// then needs the memory of one frame only.
+pub fn solve_streaming(
+    model: &ParticleModel,
+    progress: &mut dyn FnMut(Status),
+    on_frame: &mut dyn FnMut(ParticleFrame),
+) -> Result<ParticleResults, String> {
     let started = Instant::now();
     let grid = grid_of(&model.domain)?;
     if model.materials.is_empty() {
@@ -350,7 +366,8 @@ pub fn solve(
     let mut wall_force = vec![([0.0; 3], [0.0; 3]); names.len()];
     let mut wall_samples = 0usize;
 
-    results.frames.push(frame(0.0, &particles));
+    let initial_count = particles.len();
+    on_frame(frame(0.0, &particles));
     let mut t = 0.0;
     let mut steps = 0usize;
     let mut next_frame = 1usize;
@@ -620,7 +637,7 @@ pub fn solve(
             wall_samples = 0;
         }
         if t >= target * (1.0 - 1e-12) {
-            results.frames.push(frame(t, &particles));
+            on_frame(frame(t, &particles));
             next_frame += 1;
         }
         if last_report.elapsed().as_secs_f64() > 0.2 {
@@ -660,7 +677,7 @@ pub fn solve(
     }
     results.history = history;
     results.report = ParticleReport {
-        particles: results.frames.first().map_or(0, |f| f.positions.len()),
+        particles: initial_count,
         cells,
         steps,
         time_step: (dt_range.0, if steps > 0 { dt_range.1 } else { 0.0 }),
@@ -955,6 +972,7 @@ fn fill(
                     }
                     taken[slot] = true;
                     particles.push(Particle {
+                        id: particles.len() as u32,
                         x,
                         v: body.velocity,
                         c: [[0.0; 3]; 3],
@@ -996,6 +1014,7 @@ fn frame(time: f64, particles: &[Particle]) -> ParticleFrame {
     }
     ParticleFrame {
         time,
+        ids: particles.iter().map(|p| p.id).collect(),
         positions: particles.iter().map(|p| p.x.map(|x| x as f32)).collect(),
         velocities: particles.iter().map(|p| p.v.map(|x| x as f32)).collect(),
         fields,

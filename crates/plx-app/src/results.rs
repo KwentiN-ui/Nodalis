@@ -2003,6 +2003,9 @@ fn field_measure(field: &str, component: &str) -> Option<Measure> {
         "MOMENTS" | "MOMENT" | "TOTAL_MOMENT" => Some(Of(Moment)),
         "ANGULAR_VELOCITIES" => Some(Of(RotationalSpeed)),
         "VELO" | "VELOCITIES" => Some(Of(Velocity)),
+        // The particles of a Particle Flow step: stresses; plastic shear and volume ratio
+        // have no unit, the shear rate is per second.
+        "PFLOW" => matches!(component.as_str(), "PRESS" | "SHEAR").then_some(Of(Pressure)),
         "ACCE" => Some(Of(Acceleration)),
         "ENER" | "INTERNAL_ENERGY_DENSITY" => Some(Per(Energy, Volume)),
         "CELS"

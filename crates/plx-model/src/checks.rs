@@ -149,6 +149,11 @@ pub enum Problem {
     /// A sensitivity step without the static or frequency step before it whose solution
     /// its design responses need.
     NoSensitivityBase,
+    /// A Particle Flow step with other active steps: it is computed alone.
+    ParticleFlowNotAlone,
+    /// A part a Particle Flow step fills, or the material it is filled with, lacks what the
+    /// particles need: a section, a density, elastic constants.
+    ParticleBodyIncomplete,
     /// A later sensitivity step with another design region: the solver reads one, the first.
     DesignRegionIgnored,
     /// A Visco step in a model whose materials have no creep law: it is a static step.
@@ -349,6 +354,8 @@ impl Problem {
             Problem::CoarseInfillWalls => "Mesh coarser than the infill walls",
             Problem::NoExpansion => "Temperature without thermal expansion",
             Problem::NoSensitivityBase => "No step for the sensitivities",
+            Problem::ParticleFlowNotAlone => "Particle Flow step not alone",
+            Problem::ParticleBodyIncomplete => "Part cannot be filled with particles",
             Problem::DesignRegionIgnored => "Design region ignored",
             Problem::NoCreep => "Visco step without creep",
             Problem::GeneralBeamStep => "Step not possible with general beam profiles",
@@ -669,6 +676,15 @@ impl Problem {
                 "A defined temperature (Defined Field) deforms the model only through the \
                  thermal expansion of the materials. Without an expansion coefficient \
                  the analysis runs, but the temperature has no effect."
+            }
+            Problem::ParticleFlowNotAlone => {
+                "A Particle Flow step is computed by the particle solver, alone: it does not \
+                 continue from the state of another step, and no step continues from it."
+            }
+            Problem::ParticleBodyIncomplete => {
+                "A Particle Flow step fills every solid part that is not a rigid body with \
+                 particles of the material of its section: the particles need its density \
+                 and elastic constants, and a flow law to flow."
             }
             Problem::NoSensitivityBase => {
                 "A Sensitivity step differentiates the solution of the step right before it: \
@@ -1139,6 +1155,14 @@ impl Problem {
                 "Edit the material and enter a thermal expansion coefficient \
                  (steel: 1.2e-5 1/K)."
             }
+            Problem::ParticleFlowNotAlone => {
+                "Deactivate the other steps, or put the Particle Flow step into an analysis of \
+                 its own."
+            }
+            Problem::ParticleBodyIncomplete => {
+                "Give the part a section whose material has a density and elastic constants, \
+                 or make it a rigid body (a wall)."
+            }
             Problem::NoSensitivityBase => {
                 "Put a Static step (strain energy, mass) or a Frequency step with \"Store \
                  eigenmodes (Storage)\" (eigenfrequencies, mass) directly before the \
@@ -1505,6 +1529,10 @@ impl FeModel {
 
     /// All problems of the model, invalid references included, errors first.
     pub fn check(&self, mesh: &FeMesh, mesh_check: &MeshCheck) -> Vec<Finding> {
+        // The particle solver takes the model in a way of its own.
+        if self.particle_flow_step().is_some() {
+            return self.check_particle_flow(mesh);
+        }
         if self.bolts.is_empty() {
             return self.check_connections(mesh, mesh_check);
         }
@@ -1519,6 +1547,86 @@ impl FeModel {
         }
         self.check_bolts(mesh, &mut findings);
         findings.sort_by_key(|f| f.severity());
+        findings
+    }
+
+    /// The active Particle Flow step, by index.
+    pub fn particle_flow_step(&self) -> Option<usize> {
+        (self.steps.iter()).position(|s| s.active && matches!(s.kind, StepKind::ParticleFlow(_)))
+    }
+
+    /// [`FeModel::check`] of a model with a Particle Flow step: alone among the active steps,
+    /// and every part it fills has a section with a material the particles can take.
+    fn check_particle_flow(&self, mesh: &FeMesh) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        let Some(index) = self.particle_flow_step() else {
+            return findings;
+        };
+        for (s, step) in self.steps.iter().enumerate() {
+            if s != index && step.active {
+                findings.push(Finding::new(
+                    ModelItem::Step(index),
+                    Problem::ParticleFlowNotAlone,
+                    format!(
+                        "{} is computed alone, but step {} is active too.",
+                        self.steps[index].name, step.name
+                    ),
+                ));
+                break;
+            }
+        }
+        let rigid: std::collections::BTreeSet<ElementId> = (self.constraints.iter())
+            .filter_map(|c| match c {
+                Constraint::RigidBody(body) if body.active => Some(&body.region),
+                _ => None,
+            })
+            .flat_map(|region| {
+                (region.elements(mesh).into_iter())
+                    .chain(region.faces(mesh).into_iter().map(|(e, _)| e))
+            })
+            .collect();
+        let mut sections: HashMap<ElementId, usize> = HashMap::new();
+        for (s, section) in self.sections.iter().enumerate() {
+            for element in section.region.elements(mesh) {
+                sections.entry(element).or_insert(s);
+            }
+        }
+        for (p, part) in mesh.parts.iter().enumerate() {
+            let solid = part.elements.iter().all(|&e| {
+                mesh.element(e)
+                    .is_some_and(|e| e.shape.family() == plx_mesh::ElementFamily::Solid)
+            });
+            if !solid || part.elements.iter().any(|e| rigid.contains(e)) {
+                continue;
+            }
+            let problem = match part.elements.iter().find_map(|e| sections.get(e)) {
+                None => Some(format!("Part {} has no section.", part.name)),
+                Some(&s) => {
+                    let material = (self.sections[s].material)
+                        .and_then(|id| self.materials.iter().find(|m| m.id == id));
+                    match material {
+                        None => Some(format!(
+                            "Section {} has no material.",
+                            self.sections[s].name
+                        )),
+                        Some(m) if m.density.is_none_or(|d| d <= 0.0) => {
+                            Some(format!("Material {} has no density.", m.name))
+                        }
+                        Some(m) if m.small_strain_elastic().is_none() => {
+                            Some(format!("Material {} has no elastic constants.", m.name))
+                        }
+                        _ => None,
+                    }
+                }
+            };
+            if let Some(detail) = problem {
+                findings.push(Finding::new(
+                    ModelItem::Part(p),
+                    Problem::ParticleBodyIncomplete,
+                    detail,
+                ));
+            }
+        }
         findings
     }
 
@@ -4547,6 +4655,27 @@ mod tests {
 
     fn problems(findings: &[Finding]) -> Vec<(ModelItem, Problem)> {
         findings.iter().map(|f| (f.item, f.problem)).collect()
+    }
+
+    /// A Particle Flow step is computed alone, and every part it fills needs a density.
+    #[test]
+    fn a_particle_flow_step_is_alone_and_fills_complete_parts() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        let mut flow = Step::new_static("Flow");
+        flow.kind = StepKind::ParticleFlow(Default::default());
+        model.steps.push(flow);
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            vec![(ModelItem::Step(1), Problem::ParticleFlowNotAlone)]
+        );
+        model.steps[0].active = false;
+        assert!(check(&model, &mesh).is_empty());
+        model.materials[0].density = None;
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            vec![(ModelItem::Part(0), Problem::ParticleBodyIncomplete)]
+        );
     }
 
     /// A section that does not fit its elements is its own problem, not a missing reference.

@@ -322,6 +322,9 @@ pub const PARTICLE_FIELDS: [&str; 6] = [
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ParticleFrame {
     pub time: f64,
+    /// The number of each particle, counted from 0 in the order of the first frame:
+    /// particles that leave the model are missing from the frames after.
+    pub ids: Vec<u32>,
     pub positions: Vec<[f32; 3]>,
     pub velocities: Vec<[f32; 3]>,
     /// One value per particle for each of [`PARTICLE_FIELDS`].

@@ -1789,6 +1789,7 @@ mod tests {
             expansion: None,
             plastic: None,
             creep: None,
+            flow: None,
             hyperelastic: None,
         });
         model.fe.sections.push(Section {
@@ -1950,6 +1951,7 @@ mod tests {
             expansion: None,
             plastic: None,
             creep: None,
+            flow: None,
             hyperelastic: None,
         });
         model.fe.sections.push(Section {

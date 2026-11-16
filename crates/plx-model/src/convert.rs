@@ -185,6 +185,20 @@ impl FeModel {
                 // Buckling factors and the accuracy have no unit.
                 StepKind::Buckle(_) => {}
                 StepKind::Sensitivity(s) => c.option(&mut s.filter_radius, Quantity::Length),
+                StepKind::ParticleFlow(p) => {
+                    c.value(&mut p.duration, Quantity::Time);
+                    c.value(&mut p.cell_size, Quantity::Length);
+                    c.option(&mut p.wave_speed, Quantity::Velocity);
+                    match &mut p.domain {
+                        crate::particle_flow::ParticleBox::Around { margin } => {
+                            c.value(margin, Quantity::Length)
+                        }
+                        crate::particle_flow::ParticleBox::Fixed { min, max } => {
+                            c.all(min, Quantity::Length);
+                            c.all(max, Quantity::Length);
+                        }
+                    }
+                }
             }
             for field in &mut step.defined_fields {
                 if let crate::DefinedFieldKind::Temperature(t) = &mut field.kind {
@@ -461,6 +475,23 @@ impl Material {
                 c.value(&mut point.stress, Quantity::Pressure);
                 c.value(&mut point.temperature, Quantity::Temperature);
             }
+        }
+        // A consistency is a stress times a time to the power of the exponent.
+        let stress = c.from.factor_to(Quantity::Pressure, c.to);
+        let time = c.from.factor_to(Quantity::Time, c.to);
+        match &mut self.flow {
+            Some(crate::particle_flow::Flow::HerschelBulkley {
+                yield_stress,
+                consistency,
+                exponent,
+            }) => {
+                c.value(yield_stress, Quantity::Pressure);
+                *consistency *= stress * time.powf(*exponent);
+            }
+            Some(crate::particle_flow::Flow::Newtonian { viscosity }) => {
+                *viscosity *= stress * time;
+            }
+            None => {}
         }
         // The strain rate a * stress^n * time^m is per time: a scales with the stress to
         // the power -n and the time to the power -(m + 1).
