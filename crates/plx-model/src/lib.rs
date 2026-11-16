@@ -238,8 +238,9 @@ use serde::{Deserialize, Serialize};
 /// keeps the content of files, such as results, in a binary part behind the text of the
 /// project file instead of base64 in the text; older projects are refused. Format 46 adds
 /// the Particle Flow step and the flow of materials ([`particle_flow`]); format 45 reads as
-/// it is.
-pub const PROJECT_FORMAT: u32 = 46;
+/// it is. Format 47 adds the heat of the Particle Flow step and the temperature table of the
+/// flow of materials; older formats read as they are.
+pub const PROJECT_FORMAT: u32 = 47;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -695,6 +696,12 @@ pub struct Material {
     /// How the material flows in a Particle Flow step; without, it is elastic there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow: Option<particle_flow::Flow>,
+    /// How the flow depends on the temperature in a Particle Flow step with heat: pairs of
+    /// temperature and the factor on the yield stress and the consistency (or viscosity),
+    /// interpolated linearly and held beyond the ends. Empty: the same at every
+    /// temperature.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flow_temperature: Vec<[f64; 2]>,
 }
 
 impl Material {
@@ -1049,6 +1056,12 @@ impl StepKind {
             false
         } else if let BoundaryKind::Submodel { .. } = kind {
             matches!(self, StepKind::Static(_))
+        } else if let StepKind::ParticleFlow(_) = self {
+            // The reference points of rigid bodies: moved, and the walls' temperature.
+            matches!(
+                kind,
+                BoundaryKind::Displacement(_) | BoundaryKind::Temperature(_)
+            )
         } else if kind.is_thermal() {
             self.is_thermal()
         } else {

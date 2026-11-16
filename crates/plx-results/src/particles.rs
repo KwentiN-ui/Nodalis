@@ -302,7 +302,9 @@ impl HistoryRequest {
     /// Everything the run records, for tests and tools that want it all.
     pub fn all(history: &ParticleHistory) -> Self {
         Self {
-            energies: ["ALLIE", "ALLKE", "ALLWK", "ALLVD"].map(String::from).to_vec(),
+            energies: ["ALLIE", "ALLKE", "ALLWK", "ALLVD"]
+                .map(String::from)
+                .to_vec(),
             walls: (0..history.walls.len())
                 .map(|wall| WallRequest {
                     wall,
@@ -348,8 +350,16 @@ pub fn history_blocks(
     let asked = |name: &str| request.energies.iter().any(|e| e == name);
     for (i, &time) in history.time.iter().enumerate() {
         let energies = [
-            ("ALLKE", "total model kinetic energy", at(&history.kinetic, i)),
-            ("ALLIE", "total model internal energy", at(&history.elastic, i)),
+            (
+                "ALLKE",
+                "total model kinetic energy",
+                at(&history.kinetic, i),
+            ),
+            (
+                "ALLIE",
+                "total model internal energy",
+                at(&history.elastic, i),
+            ),
             (
                 "ALLVD",
                 "total model damping dissipation",
@@ -550,7 +560,10 @@ mod tests {
             time: vec![0.5],
             kinetic: vec![1.0],
             walls: vec![wall("Blade"), wall("Box X min")],
-            bodies: vec![body("Paste", 1.0, 20.0, 30.0), body("Dough", 3.0, 40.0, 50.0)],
+            bodies: vec![
+                body("Paste", 1.0, 20.0, 30.0),
+                body("Dough", 3.0, 40.0, 50.0),
+            ],
             ..Default::default()
         };
         // Nothing asked: nothing written.

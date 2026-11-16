@@ -4487,7 +4487,10 @@ S
         let meshes = model.scene_meshes();
         let edges = &meshes.last().unwrap().wireframe_edges;
         assert_eq!(edges.len(), 24);
-        let x: Vec<f32> = edges.iter().map(|v| v.position[0] + model.origin.x as f32).collect();
+        let x: Vec<f32> = edges
+            .iter()
+            .map(|v| v.position[0] + model.origin.x as f32)
+            .collect();
         let lowest = x.iter().copied().fold(f32::INFINITY, f32::min);
         let highest = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         assert!((lowest + 0.5).abs() < 1e-4, "{lowest}");

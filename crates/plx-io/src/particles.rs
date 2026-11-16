@@ -11,7 +11,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use plx_mesh::{ElementFamily, FeMesh};
 use plx_model::particle_flow::{BoxSide, Flow, ParticleFlowStep};
-use plx_model::{Constraint, HistoryKind, ContactBehavior, FeModel, Material, ModelItem, StepKind};
+use plx_model::{Constraint, ContactBehavior, FeModel, HistoryKind, Material, ModelItem, StepKind};
 use plx_results::particles::{HistoryRequest, TemperatureRequest, WallRequest, set_name};
 use plxs_core::particles::{
     self as ir, MaterialBody, ParticleControl, ParticleMaterial, ParticleModel, RigidWall, Side,
@@ -184,6 +184,37 @@ pub fn lower(
         bodies.push(part.name.clone());
         body_part.push(p);
     }
+    if settings.heat {
+        model.heat = Some(ir::Heat {
+            wall_transfer: settings.wall_transfer,
+        });
+        for (body, &part) in model.bodies.iter_mut().zip(&body_part) {
+            let material = &model.materials[body.material];
+            if material.thermal.is_none() {
+                return Err(error(
+                    format!(
+                        "Material {}: a Particle Flow step that follows the temperature needs \
+                         its conductivity and specific heat.",
+                        material.name
+                    ),
+                    fe.materials
+                        .iter()
+                        .position(|m| m.name == material.name)
+                        .map(ModelItem::Material),
+                ));
+            }
+            body.temperature = start_temperature(fe, mesh, part).ok_or_else(|| {
+                error(
+                    format!(
+                        "Part {}: a Particle Flow step that follows the temperature needs its \
+                         temperature at the start, a temperature initial condition.",
+                        body.name
+                    ),
+                    Some(ModelItem::Part(part)),
+                )
+            })?;
+        }
+    }
     if model.bodies.is_empty() {
         return Err(error(
             format!(
@@ -209,12 +240,19 @@ pub fn lower(
         }
         let law = wall_law(fe, mesh, &parts, &body_part, name, &mut warnings);
         let motion = wall_motion(fe, index, *c)?;
+        let temperature = wall_temperature(step, &fe.constraints[*c]);
+        if temperature.is_some() && !settings.heat {
+            warnings.push(format!(
+                "{name}: the temperature of the wall acts only when the step follows the \
+                 temperature."
+            ));
+        }
         model.walls.push(RigidWall {
             name: name.clone(),
             shape: part_surface(mesh, &parts),
             law,
             motion,
-            temperature: None,
+            temperature: temperature.filter(|_| settings.heat),
         });
     }
 
@@ -293,7 +331,11 @@ fn history_request(
     warnings: &mut Vec<String>,
 ) -> HistoryRequest {
     let mut request = HistoryRequest::default();
-    for output in fe.step_history_outputs(step).into_iter().filter(|o| o.active) {
+    for output in fe
+        .step_history_outputs(step)
+        .into_iter()
+        .filter(|o| o.active)
+    {
         let name = &output.name;
         let region = match &output.kind {
             HistoryKind::Energies => {
@@ -383,6 +425,39 @@ fn history_request(
     request
 }
 
+/// The temperature a temperature boundary condition of the step gives the reference point
+/// of a rigid body: the temperature of its walls.
+fn wall_temperature(step: &plx_model::Step, constraint: &Constraint) -> Option<f64> {
+    let Constraint::RigidBody(body) = constraint else {
+        return None;
+    };
+    (step.boundary_conditions.iter())
+        .filter(|bc| {
+            bc.active && bc.region == plx_model::Region::ReferencePoint(body.reference_point)
+        })
+        .find_map(|bc| match bc.kind {
+            plx_model::BoundaryKind::Temperature(t) => Some(t),
+            _ => None,
+        })
+}
+
+/// The temperature at the start of the part with index `part`: that of the first active
+/// temperature initial condition whose region holds elements or nodes of it.
+fn start_temperature(fe: &FeModel, mesh: &FeMesh, part: usize) -> Option<f64> {
+    (fe.initial_conditions.iter().filter(|c| c.active)).find_map(|condition| {
+        let plx_model::InitialConditionKind::Temperature(t) = condition.kind else {
+            return None;
+        };
+        let holds = parts_of(&condition.region, mesh).contains(&part) || {
+            let nodes: BTreeSet<_> = condition.region.nodes(mesh).into_iter().collect();
+            (mesh.parts[part].elements.iter())
+                .filter_map(|&e| mesh.element(e))
+                .any(|e| e.nodes.iter().any(|n| nodes.contains(n)))
+        };
+        holds.then_some(t)
+    })
+}
+
 /// The motion of the rigid body `constraint` in step `step`: the displacement boundary
 /// condition on its reference point, if any, as a translation and a rotation about that
 /// point that follow the amplitude (a ramp over the step without one).
@@ -407,7 +482,10 @@ fn wall_motion(
     let the_step = &fe.steps[step];
     let mut found = None;
     for (b, bc) in the_step.boundary_conditions.iter().enumerate() {
-        if !bc.active || bc.region != plx_model::Region::ReferencePoint(body.reference_point) {
+        if !bc.active
+            || bc.region != plx_model::Region::ReferencePoint(body.reference_point)
+            || matches!(bc.kind, plx_model::BoundaryKind::Temperature(_))
+        {
             continue;
         }
         let item = Some(ModelItem::BoundaryCondition(step, b));
@@ -522,12 +600,29 @@ pub fn particle_material(material: &Material) -> Result<ParticleMaterial, String
         },
         Some(Flow::Newtonian { viscosity }) => ir::ParticleLaw::Fluid { bulk, viscosity },
     };
+    let thermal = match (material.conductivity, material.specific_heat) {
+        (Some(conductivity), Some(specific_heat)) => Some(ir::ParticleThermal {
+            conductivity,
+            specific_heat,
+        }),
+        _ => None,
+    };
+    if let Some(&[_, factor]) = (material.flow_temperature.iter())
+        .find(|[t, f]| !t.is_finite() || !(f.is_finite() && *f >= 0.0))
+    {
+        return Err(format!(
+            "Material {}: the factors of the temperature table must not be negative ({factor}).",
+            material.name
+        ));
+    }
+    let mut flow_factor = material.flow_temperature.clone();
+    flow_factor.sort_by(|a, b| a[0].total_cmp(&b[0]));
     Ok(ParticleMaterial {
         name: material.name.clone(),
         density,
         law,
-        thermal: None,
-        flow_factor: Vec::new(),
+        thermal,
+        flow_factor,
     })
 }
 
@@ -834,11 +929,69 @@ mod tests {
         assert_eq!(lowered.model.bodies[0].gravity, [0.0, 0.0, -9.81]);
         let warned = |text: &str| lowered.warnings.iter().any(|w| w.contains(text));
         assert!(warned("Nowhere: the gravity load selects no part"));
-        assert!(warned("Torque: a Particle Flow step writes RF, RFL and NT; U is left out"));
+        assert!(warned(
+            "Torque: a Particle Flow step writes RF, RFL and NT; U is left out"
+        ));
         assert_eq!(lowered.warnings.len(), 2, "{:?}", lowered.warnings);
 
         // Without outputs nothing is asked for.
         let bare = lower(&mesh, &model(None), "Test").expect("lowers");
         assert_eq!(bare.history, HistoryRequest::default());
+    }
+
+    #[test]
+    fn a_step_with_heat_takes_the_temperatures_of_the_model() {
+        let mesh = mesh();
+        let mut fe = model(None);
+        let StepKind::ParticleFlow(settings) = &mut fe.steps[0].kind else {
+            unreachable!()
+        };
+        settings.heat = true;
+        settings.wall_transfer = 500.0;
+        fe.materials[0].conductivity = Some(0.5);
+        fe.materials[0].specific_heat = Some(3500.0);
+        fe.materials[0].flow_temperature = vec![[60.0, 0.5], [20.0, 1.0]];
+        // Without a temperature at the start the part cannot be filled.
+        let missing = lower(&mesh, &fe, "Test").unwrap_err();
+        assert!(
+            missing.message.contains("Part Paste"),
+            "{}",
+            missing.message
+        );
+        fe.initial_conditions.push(plx_model::InitialCondition {
+            name: "Cold".into(),
+            active: true,
+            region: Region::Parts(vec!["Paste".into()]),
+            kind: plx_model::InitialConditionKind::Temperature(4.0),
+            distribution: None,
+        });
+        let point = fe.reference_points[0].id;
+        fe.steps[0].boundary_conditions.push(BoundaryCondition::new(
+            "Warm tool",
+            Region::ReferencePoint(point),
+            BoundaryKind::Temperature(40.0),
+        ));
+        let lowered = lower(&mesh, &fe, "Test").expect("lowers");
+        let model = &lowered.model;
+        assert_eq!(
+            model.heat,
+            Some(ir::Heat {
+                wall_transfer: 500.0
+            })
+        );
+        assert_eq!(model.bodies[0].temperature, 4.0);
+        assert_eq!(model.walls[0].temperature, Some(40.0));
+        // The temperature does not move the tool.
+        assert!(model.walls[0].motion.is_resting());
+        let material = &model.materials[0];
+        assert_eq!(
+            material.thermal,
+            Some(ir::ParticleThermal {
+                conductivity: 0.5,
+                specific_heat: 3500.0
+            })
+        );
+        assert_eq!(material.flow_factor, vec![[20.0, 1.0], [60.0, 0.5]]);
+        assert!(lowered.warnings.is_empty(), "{:?}", lowered.warnings);
     }
 }

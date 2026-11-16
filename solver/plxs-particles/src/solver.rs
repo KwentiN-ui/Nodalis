@@ -20,8 +20,8 @@
 use std::time::Instant;
 
 use plxs_core::particles::{
-    Domain, PARTICLE_FIELDS, ParticleFrame, ParticleHistory, ParticleModel, ParticleReport,
-    ParticleResults, RigidMotion, Side, BodyHistory, WallHistory, WallLaw, table_value,
+    BodyHistory, Domain, PARTICLE_FIELDS, ParticleFrame, ParticleHistory, ParticleModel,
+    ParticleReport, ParticleResults, RigidMotion, Side, WallHistory, WallLaw, table_value,
 };
 use rayon::prelude::*;
 
@@ -785,7 +785,11 @@ pub fn solve_streaming(
                     || vec![(0.0, 0.0, f64::NEG_INFINITY); count],
                     |mut sums, p| {
                         let s = &mut sums[p.body as usize];
-                        *s = (s.0 + p.mass, s.1 + p.mass * p.temperature, s.2.max(p.temperature));
+                        *s = (
+                            s.0 + p.mass,
+                            s.1 + p.mass * p.temperature,
+                            s.2.max(p.temperature),
+                        );
                         sums
                     },
                 )

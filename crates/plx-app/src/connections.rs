@@ -1790,6 +1790,7 @@ mod tests {
             plastic: None,
             creep: None,
             flow: None,
+            flow_temperature: Vec::new(),
             hyperelastic: None,
         });
         model.fe.sections.push(Section {
@@ -1952,6 +1953,7 @@ mod tests {
             plastic: None,
             creep: None,
             flow: None,
+            flow_temperature: Vec::new(),
             hyperelastic: None,
         });
         model.fe.sections.push(Section {

@@ -6610,6 +6610,65 @@ fn flow_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
         }
     }
     material.flow = flows.then_some(flow);
+    if flows {
+        flow_temperature_rows(ui, material, units);
+    }
+}
+
+/// The table of the flow over the temperature: rows of temperature and the factor on the
+/// yield stress and the consistency or viscosity, for Particle Flow steps with heat.
+fn flow_temperature_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
+    ui.label("    Temperature table").on_hover_text(
+        "Scales the yield stress and the consistency (or viscosity) by the factor at the \
+         temperature of the material, interpolated between the rows and held beyond them. It \
+         acts in Particle Flow steps that follow the temperature; empty, the flow is the same \
+         at every temperature.",
+    );
+    ui.vertical(|ui| {
+        let unit = units.unit(Quantity::Temperature);
+        let table = &mut material.flow_temperature;
+        let mut remove = None;
+        if !table.is_empty() {
+            egui::Grid::new("flow temperature points")
+                .num_columns(3)
+                .striped(true)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.strong(format!("Temperature [{unit}]"));
+                    ui.strong("Factor");
+                    ui.label("");
+                    ui.end_row();
+                    for (i, [temperature, factor]) in table.iter_mut().enumerate() {
+                        ui.add(numeric::without_unit(
+                            temperature,
+                            units,
+                            Quantity::Temperature,
+                        ));
+                        ui.add(
+                            numeric::drag_value(factor)
+                                .speed(0.01)
+                                .range(0.0..=f64::MAX),
+                        );
+                        if ui.button("Remove").clicked() {
+                            remove = Some(i);
+                        }
+                        ui.end_row();
+                    }
+                });
+        }
+        if let Some(i) = remove {
+            table.remove(i);
+        }
+        if ui.button("Add row").clicked() {
+            // Ten degrees warmer than the last row, as soft.
+            let next = match table.last() {
+                Some(&[temperature, factor]) => [temperature + 10.0, factor],
+                None => [20.0, 1.0],
+            };
+            table.push(next);
+        }
+    });
+    ui.end_row();
 }
 
 /// The field of a stored value in Pa s (to a power), shown in the stress unit of `unit`
@@ -6698,8 +6757,7 @@ fn print_energies(fe: &mut FeModel, s: usize) {
     if !matches!(
         fe.steps[s].kind,
         StepKind::Dynamic(_) | StepKind::ParticleFlow(_)
-    )
-        || (fe.step_history_outputs(s).iter()).any(|o| o.kind == HistoryKind::Energies)
+    ) || (fe.step_history_outputs(s).iter()).any(|o| o.kind == HistoryKind::Energies)
     {
         return;
     }
@@ -8122,10 +8180,32 @@ fn particle_flow_form(
         );
     ui.end_row();
     ui.label("");
+    ui.checkbox(&mut settings.heat, "Temperature")
+        .on_hover_text(
+            "Follows the temperature of the material: its own flow and friction at the walls heat \
+         it, it conducts the heat, and it exchanges heat with walls of a given temperature. \
+         The materials need conductivity and specific heat, the filled parts a temperature \
+         initial condition; a temperature table of the flow makes the material softer or \
+         stiffer.",
+        );
+    ui.end_row();
+    if settings.heat {
+        ui.label("Wall heat transfer").on_hover_text(
+            "The heat transfer coefficient between the material and the walls whose rigid body \
+             has a temperature boundary condition at its reference point.",
+        );
+        ui.add(numeric::physical(
+            &mut settings.wall_transfer,
+            units,
+            Quantity::HeatTransferCoefficient,
+        ));
+        ui.end_row();
+    }
+    ui.label("");
     ui.weak(
         "Solid parts with a section are filled with particles of their material, rigid \
          bodies are walls, contact regions between them give the wall friction (none: the \
-         material sticks), a gravity load the gravity.",
+         material sticks), gravity loads the gravity of the parts they select.",
     );
     ui.end_row();
 }

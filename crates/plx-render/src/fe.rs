@@ -284,18 +284,17 @@ pub(crate) fn smooth_vertex_normals(
     (skin.faces.par_iter().zip(face_normals))
         .with_min_len(1024)
         .flat_map_iter(|(face, &own)| {
-            (nodes(face).map(move |n| n - offset))
-                .map(move |node| {
-                    let sum: DVec3 = faces_at_node[start[node]..start[node + 1]]
-                        .iter()
-                        .filter(|&&other| {
-                            skin.faces[other].region == face.region
-                                && own.dot(face_normals[other]) >= cos_limit
-                        })
-                        .map(|&other| face_normals[other] * weights[other])
-                        .sum();
-                    sum.try_normalize().unwrap_or(own).as_vec3().to_array()
-                })
+            (nodes(face).map(move |n| n - offset)).map(move |node| {
+                let sum: DVec3 = faces_at_node[start[node]..start[node + 1]]
+                    .iter()
+                    .filter(|&&other| {
+                        skin.faces[other].region == face.region
+                            && own.dot(face_normals[other]) >= cos_limit
+                    })
+                    .map(|&other| face_normals[other] * weights[other])
+                    .sum();
+                sum.try_normalize().unwrap_or(own).as_vec3().to_array()
+            })
         })
         .collect()
 }

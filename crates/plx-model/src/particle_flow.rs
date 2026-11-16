@@ -119,6 +119,14 @@ pub struct ParticleFlowStep {
     /// The volume change is averaged over the cells (F-bar), against volumetric locking
     /// and noise of the pressure.
     pub smooth_volume: bool,
+    /// The temperature of the material: heated by its own flow and by friction at the
+    /// walls, conducted through it, exchanged with walls of a given temperature. It needs
+    /// the conductivity and specific heat of the materials and their temperature at the
+    /// start; a temperature table of the flow makes the material softer or stiffer.
+    pub heat: bool,
+    /// The heat transfer coefficient between the material and the walls of a given
+    /// temperature, in W/(m² K).
+    pub wall_transfer: f64,
 }
 
 impl Default for ParticleFlowStep {
@@ -131,6 +139,8 @@ impl Default for ParticleFlowStep {
             domain: ParticleBox::default(),
             sides: [BoxSide::default(); 6],
             smooth_volume: true,
+            heat: false,
+            wall_transfer: 1000.0,
         }
     }
 }
@@ -170,6 +180,9 @@ impl ParticleFlowStep {
                 return Some("The box must be larger than its smallest corner.".into());
             }
             _ => {}
+        }
+        if self.heat && !(self.wall_transfer.is_finite() && self.wall_transfer >= 0.0) {
+            return Some("The heat transfer coefficient must not be negative.".into());
         }
         for (side, name) in self.sides.iter().zip(SIDE_NAMES) {
             if let BoxSide::Frictional { mu } = side
