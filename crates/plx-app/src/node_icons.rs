@@ -58,6 +58,8 @@ pub enum NodeIcon {
     Formula,
     /// A Switch block: two inputs and a lever to one of them.
     Switch,
+    /// A Particle Analysis block: a heap of particles.
+    Particles,
     /// A Plot block: two axes with a curve.
     Plot,
     /// A Preview block: a framed picture of a triangle mesh.
@@ -131,6 +133,18 @@ pub fn paint_scaled(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32
             line(&[p(2.5, 5.5), p(7.0, 5.5)]);
             line(&[p(8.5, 7.0), p(12.5, 12.5)]);
             line(&[p(12.5, 7.0), p(8.5, 12.5)]);
+        }
+        NodeIcon::Particles => {
+            for (x, y) in [
+                (7.0, 3.0),
+                (4.5, 6.5),
+                (9.5, 6.5),
+                (2.5, 10.5),
+                (7.0, 10.5),
+                (11.5, 10.5),
+            ] {
+                dot(p(x, y), 1.7);
+            }
         }
         NodeIcon::Plot => {
             line(&[p(1.5, 1.5), p(1.5, 12.5), p(12.5, 12.5)]);

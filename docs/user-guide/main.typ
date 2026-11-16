@@ -60,6 +60,7 @@
 #include "chapters/model/defined-fields.typ"
 
 #include "chapters/analysis/run.typ"
+#include "chapters/analysis/particles.typ"
 
 #include "chapters/results/viewing.typ"
 #include "chapters/results/animation.typ"

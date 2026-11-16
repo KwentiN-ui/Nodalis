@@ -29,6 +29,7 @@ use crate::model::PROJECT_EXTENSION;
 use crate::model_properties::{DialogResult, ModelPropertiesDialog};
 use crate::node_icons::{self, NodeIcon};
 use crate::parameter_set::{ParameterSetEditor, ParameterSetResult};
+use crate::particles::ParticleWindow;
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::solution_monitor::{BackgroundSolve, Outcome};
 use crate::status::{self, AnalysisStatus, CellState};
@@ -81,6 +82,7 @@ enum Kind {
     Study,
     MeshExport,
     Campbell,
+    Particles,
     File,
     Note,
     Math,
@@ -115,6 +117,7 @@ impl Kind {
             Self::Study => "parameter study",
             Self::MeshExport => "mesh export block",
             Self::Campbell => "Campbell block",
+            Self::Particles => "particle analysis",
             Self::File => "file block",
             Self::Note => "note",
             Self::Math => "math block",
@@ -176,6 +179,9 @@ enum Block {
     /// A sweep of the analysis linked to it over the rotational speed, with its Campbell
     /// diagram.
     Campbell(CampbellBlock),
+    /// A particle analysis (material point method) of the geometry and materials linked to
+    /// it, with its results.
+    Particles(ParticleBlock),
     /// A file outside the project read as a source: geometry, a mesh or results.
     File(Box<FileBlock>),
     /// A text for the reader, which gives and takes nothing.
@@ -745,6 +751,15 @@ struct CampbellBlock {
     input: Option<u64>,
 }
 
+/// A Particle Analysis block: its setup and results in its window, and the fingerprint of the
+/// geometry and materials linked to it as last found by [`ProjectApp::sync_links`], see
+/// [`crate::particles::input_key`].
+struct ParticleBlock {
+    /// Taken out while the project window shows it.
+    window: Option<Box<ParticleWindow>>,
+    input: Option<u64>,
+}
+
 impl Node {
     fn new(id: u64, name: String, block: Block) -> Self {
         // A materials block shows its materials at first.
@@ -870,6 +885,15 @@ impl Node {
         Self::new(id, name, Block::Campbell(block))
     }
 
+    /// A Particle Analysis block with its setup and results.
+    fn particle_block(id: u64, name: String, window: ParticleWindow) -> Self {
+        let block = ParticleBlock {
+            window: Some(Box::new(window)),
+            input: None,
+        };
+        Self::new(id, name, Block::Particles(block))
+    }
+
     fn kind(&self) -> Kind {
         match &self.block {
             Block::Analysis(_) => Kind::Analysis,
@@ -885,6 +909,7 @@ impl Node {
             Block::Study(_) => Kind::Study,
             Block::MeshExport(_) => Kind::MeshExport,
             Block::Campbell(_) => Kind::Campbell,
+            Block::Particles(_) => Kind::Particles,
             Block::File(_) => Kind::File,
             Block::Note(_) => Kind::Note,
             Block::Math(_) => Kind::Math,
@@ -1085,6 +1110,20 @@ impl Node {
     fn as_campbell_mut(&mut self) -> Option<&mut CampbellBlock> {
         match &mut self.block {
             Block::Campbell(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    fn as_particles(&self) -> Option<&ParticleBlock> {
+        match &self.block {
+            Block::Particles(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    fn as_particles_mut(&mut self) -> Option<&mut ParticleBlock> {
+        match &mut self.block {
+            Block::Particles(p) => Some(p),
             _ => None,
         }
     }
@@ -1397,6 +1436,11 @@ impl Node {
                 );
                 Self::campbell_block(block.id, block.name, window)
             }
+            ProjectNode::Particles(block) => {
+                let block = *block;
+                let window = ParticleWindow::saved(block.setup, block.results, block.fingerprint);
+                Self::particle_block(block.id, block.name, window)
+            }
             ProjectNode::Note(note) => Self::new(note.id, note.name, Block::Note(note.text)),
             ProjectNode::Math(math) => {
                 let block = NumberBlock {
@@ -1565,6 +1609,18 @@ impl Node {
                     fingerprint: window.fingerprint(),
                 }))
             }
+            // The geometry and materials come again by the links; the results stay.
+            Block::Particles(p) => {
+                let window = p.window.as_ref()?;
+                ProjectNode::Particles(Box::new(file::ParticleBlock {
+                    id,
+                    name,
+                    position,
+                    setup: window.setup.clone(),
+                    results: window.results().cloned(),
+                    fingerprint: window.fingerprint(),
+                }))
+            }
             Block::Note(text) => ProjectNode::Note(file::Note {
                 id,
                 name,
@@ -1702,6 +1758,11 @@ impl Node {
                 let window = CampbellWindow::saved(setup, Vec::new(), None, None);
                 return Some(Self::campbell_block(id, name, window));
             }
+            Block::Particles(p) => {
+                let setup = p.window.as_ref()?.setup.clone();
+                let window = ParticleWindow::saved(setup, None, None);
+                return Some(Self::particle_block(id, name, window));
+            }
             Block::Note(text) => Block::Note(text.clone()),
             Block::Math(math) => Block::Math(math.clone()),
             Block::Switch(switch) => Block::Switch(switch.clone()),
@@ -1775,6 +1836,7 @@ impl Node {
             | Block::Measure(_)
             | Block::Study(_)
             | Block::Campbell(_)
+            | Block::Particles(_)
             | Block::Note(_)
             | Block::Math(_)
             | Block::Switch(_)
@@ -2015,6 +2077,8 @@ enum Action {
     AddMeshExport(egui::Pos2),
     /// A new Campbell block at the position.
     AddCampbell(egui::Pos2),
+    /// A new Particle Analysis block at the position.
+    AddParticles(egui::Pos2),
     /// A new file block at the position.
     AddFile(egui::Pos2),
     /// Read the file of a file block again.
@@ -4477,6 +4541,177 @@ impl ProjectApp {
         started
     }
 
+    /// Adds a Particle Analysis block; returns its id.
+    fn add_particles(&mut self, position: egui::Pos2) -> u64 {
+        let id = self.next_id();
+        let name = block_name("Particle Analysis");
+        self.nodes
+            .push(Node::particle_block(id, name, ParticleWindow::new()));
+        self.graph.insert_node(position, id);
+        let name = self.name_of(id);
+        self.output.push(format!(
+            "{name} created: link a geometry to its Geometry row and materials to its \
+             Materials row, then open it to fill parts with material."
+        ));
+        id
+    }
+
+    /// What the links of a Particle Analysis block bring: the geometry, and the materials in
+    /// the order of their links.
+    fn particle_inputs(&self, id: u64) -> (Option<&plx_model::Geometry>, Vec<plx_model::Material>) {
+        let source = |l: &Link| self.nodes.iter().find(|n| n.id == l.source);
+        let geometry = (self.links.iter())
+            .find(|l| l.target == id && links::slot(l) == [links::GEOMETRY])
+            .and_then(source)
+            .and_then(Node::link_data)
+            .and_then(|d| d.geometry);
+        let mut materials: Vec<plx_model::Material> = Vec::new();
+        for link in
+            (self.links.iter()).filter(|l| l.target == id && particle_materials_row(links::slot(l)))
+        {
+            let Some(data) = source(link).and_then(Node::link_data) else {
+                continue;
+            };
+            for m in &data.fe.materials {
+                let wanted = link.item.get(2).is_none_or(|name| *name == m.name);
+                if wanted && !materials.iter().any(|known| known.name == m.name) {
+                    materials.push(m.clone());
+                }
+            }
+        }
+        (geometry, materials)
+    }
+
+    /// The state of the results of a Particle Analysis block: up to date while its setup and
+    /// inputs are as they were solved.
+    fn particle_state(&self, id: u64) -> CellState {
+        let Some(ParticleBlock {
+            window: Some(window),
+            input,
+        }) = self
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .and_then(Node::as_particles)
+        else {
+            return CellState::Missing;
+        };
+        if window.is_running() {
+            CellState::Running
+        } else if !window.has_results() {
+            CellState::Missing
+        } else if (input.zip(window.fingerprint()))
+            .is_some_and(|(key, f)| f == crate::particles::fingerprint(&window.setup, key))
+        {
+            CellState::UpToDate
+        } else {
+            CellState::OutOfDate
+        }
+    }
+
+    /// Takes the finished runs of the Particle Analysis blocks and shows their open windows.
+    fn particle_windows(&mut self, ctx: &egui::Context) {
+        let ids: Vec<u64> = (self.nodes.iter())
+            .filter(|n| n.kind() == Kind::Particles)
+            .map(|n| n.id)
+            .collect();
+        for id in ids {
+            let Some(mut window) =
+                (self.node(id).and_then(Node::as_particles_mut)).and_then(|p| p.window.take())
+            else {
+                continue;
+            };
+            let was_running = window.is_running();
+            let before = (
+                window.setup.clone(),
+                window.fingerprint(),
+                window.has_results(),
+            );
+            window.poll();
+            if was_running && !window.is_running() {
+                let name = self.name_of(id);
+                self.output.push(match window.has_results() {
+                    true => format!("{name}: particle analysis finished"),
+                    false => format!("{name}: particle analysis failed, see its window"),
+                });
+            }
+            if window.visible {
+                let (geometry, materials) = self.particle_inputs(id);
+                let key = crate::particles::input_key(geometry, &materials);
+                let inputs = crate::particles::Inputs {
+                    geometry,
+                    materials: &materials,
+                    units: self.units,
+                    key,
+                };
+                let name = self.name_of(id);
+                window.visible = window.show(ctx, (&name, id), &inputs);
+            }
+            // Its setup and results are saved with the project.
+            if before
+                != (
+                    window.setup.clone(),
+                    window.fingerprint(),
+                    window.has_results(),
+                )
+            {
+                self.saver.window_edits += 1;
+            }
+            if window.is_busy() {
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+            if let Some(block) = self.node(id).and_then(Node::as_particles_mut) {
+                block.window = Some(window);
+            }
+        }
+    }
+
+    /// Starts the Particle Analysis blocks whose results are not up to date; returns whether
+    /// any started.
+    fn update_particles(&mut self) -> bool {
+        let due: Vec<u64> = (self.nodes.iter())
+            .filter(|n| n.kind() == Kind::Particles)
+            .map(|n| n.id)
+            .filter(|&id| {
+                self.in_scope(id)
+                    && matches!(
+                        self.particle_state(id),
+                        CellState::Missing | CellState::OutOfDate
+                    )
+            })
+            .collect();
+        let mut started = false;
+        for id in due {
+            let name = self.name_of(id);
+            let Some(mut window) =
+                (self.node(id).and_then(Node::as_particles_mut)).and_then(|p| p.window.take())
+            else {
+                continue;
+            };
+            let (geometry, materials) = self.particle_inputs(id);
+            let key = crate::particles::input_key(geometry, &materials);
+            let inputs = crate::particles::Inputs {
+                geometry,
+                materials: &materials,
+                units: self.units,
+                key,
+            };
+            let geometry_missing = geometry.is_none();
+            let note = if geometry_missing || window.setup.bodies.is_empty() {
+                format!("{name} skipped: it has no geometry or no part filled with material.")
+            } else {
+                window.start(&inputs, false);
+                started = true;
+                format!("{name}: particle analysis started")
+            };
+            self.output.push(note);
+            if let Some(block) = self.node(id).and_then(Node::as_particles_mut) {
+                block.window = Some(window);
+            }
+        }
+        started
+    }
+
     /// The folder relative export paths are taken from: that of the project file.
     fn export_base(&self) -> Option<PathBuf> {
         self.path.as_deref()?.parent().map(Path::to_path_buf)
@@ -4843,6 +5078,15 @@ impl ProjectApp {
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 if let Some(window) =
                     (self.node(id).and_then(Node::as_campbell_mut)).and_then(|c| c.window.as_mut())
+                {
+                    window.visible = true;
+                }
+                return;
+            }
+            Some(Kind::Particles) => {
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+                if let Some(window) =
+                    (self.node(id).and_then(Node::as_particles_mut)).and_then(|p| p.window.as_mut())
                 {
                     window.visible = true;
                 }
@@ -5351,6 +5595,7 @@ impl ProjectApp {
             self.queue_exports(self.update_queue.is_empty());
             // A sweep runs the model of its analysis by itself, beside the solves.
             swept = self.update_campbells();
+            swept |= self.update_particles();
         }
         if self.update_queue.is_empty() && self.export_queue.is_empty() && !swept {
             self.output.push("Nothing to update.".into());
@@ -6070,6 +6315,11 @@ impl ProjectApp {
                         n,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
                         self.campbell_state(n.id),
+                    ),
+                    (Kind::Particles, _) => particle_rows(
+                        n,
+                        incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
+                        self.particle_state(n.id),
                     ),
                     (Kind::Measure, _) => measure_rows(
                         n,
@@ -7200,6 +7450,14 @@ impl ProjectApp {
                 }
                 continue;
             }
+            if (self.nodes.iter()).any(|n| n.id == target && n.kind() == Kind::Particles) {
+                let (geometry, materials) = self.particle_inputs(target);
+                let input = crate::particles::input_key(geometry, &materials);
+                if let Some(block) = self.node(target).and_then(Node::as_particles_mut) {
+                    block.input = Some(input);
+                }
+                continue;
+            }
             let incoming = self.incoming(target);
             upstream.stale_meshes = self.stale_meshes(target);
             if let Some(node) = self.node(target) {
@@ -7320,8 +7578,9 @@ impl ProjectApp {
     fn payload(&mut self, link: &Link, upstream: &mut crate::status::Upstream) -> Option<Payload> {
         let source = self.nodes.iter().find(|n| n.id == link.source)?;
         let target = self.nodes.iter().find(|n| n.id == link.target)?;
-        // A Campbell block reads the analysis when its sweep starts.
-        if target.kind() == Kind::Campbell {
+        // A Campbell block reads the analysis when its sweep starts, a particle analysis its
+        // inputs when it starts.
+        if matches!(target.kind(), Kind::Campbell | Kind::Particles) {
             return None;
         }
         if let Some(window) = target.window()
@@ -7828,6 +8087,7 @@ impl ProjectApp {
 
             | Action::AddMeshExport(_)
             | Action::AddCampbell(_)
+            | Action::AddParticles(_)
             | Action::AddFile(_)
             | Action::AddParameters(_)
             | Action::AddMeasure(_)
@@ -7973,6 +8233,9 @@ impl ProjectApp {
             }
             Action::AddCampbell(pos) => {
                 self.add_campbell(pos);
+            }
+            Action::AddParticles(pos) => {
+                self.add_particles(pos);
             }
             Action::AddFile(pos) => {
                 self.add_file(pos);
@@ -8620,6 +8883,7 @@ impl eframe::App for ProjectApp {
         self.measure_window(&ctx);
         self.study_window(&ctx);
         self.campbell_windows(&ctx);
+        self.particle_windows(&ctx);
         self.new_analysis_window(&ctx);
         self.settings_window(&ctx);
         self.unsaved_window(&ctx);
@@ -9927,6 +10191,21 @@ fn refusal(
         return (source_node.kind() != Kind::Analysis || target_node.kind() != Kind::Campbell)
             .then(|| format!("{to} sweeps an analysis, and {from} is none."));
     }
+    // A particle analysis takes the whole geometry and materials, nothing else.
+    if target_node.kind() == Kind::Particles {
+        let materials = |path: &[String]| {
+            path.first().is_some_and(|c| c == links::SETUP)
+                && path.get(1).is_some_and(|c| c == "Materials")
+        };
+        return match first {
+            Some(links::GEOMETRY) if item.len() == 1 => None,
+            Some(links::SETUP) if materials(slot) && materials(item) => None,
+            _ => Some(format!(
+                "{to} takes a geometry and materials, and {} of {from} is neither.",
+                links::label(item)
+            )),
+        };
+    }
     if first != Some(links::STATE)
         && let Some(chain) = existing
             .iter()
@@ -10872,6 +11151,74 @@ fn campbell_rows(node: &Node, incoming: &[(Vec<String>, String)], state: CellSta
     rows
 }
 
+/// Whether `path` is the Materials row of a particle analysis.
+fn particle_materials_row(path: &[String]) -> bool {
+    matches!(path, [a, b] if a == links::SETUP && b == "Materials")
+}
+
+/// The rows of a Particle Analysis block: the geometry and materials it takes, and the state
+/// of its results.
+fn particle_rows(node: &Node, incoming: &[(Vec<String>, String)], state: CellState) -> Vec<Row> {
+    let Some(window) = node.as_particles().and_then(|p| p.window.as_deref()) else {
+        return Vec::new();
+    };
+    let row = |path: Vec<String>, text: &str, icon, tip: String| Row {
+        linked_from: (incoming.iter())
+            .find(|(slot, _)| *slot == path)
+            .map(|(_, source)| source.clone()),
+        path,
+        text: text.into(),
+        depth: 0,
+        icon,
+        state: None,
+        expander: None,
+        input: true,
+        output: false,
+        collection: false,
+        partial: false,
+        widget: None,
+        tip,
+    };
+    let geometry = row(
+        vec![links::GEOMETRY.to_owned()],
+        "Geometry",
+        NodeIcon::Geometry,
+        "The geometry whose solid parts are filled with material or are walls: drag the \
+         Geometry of a block here."
+            .into(),
+    );
+    let materials = row(
+        vec![links::SETUP.to_owned(), "Materials".to_owned()],
+        "Materials",
+        NodeIcon::Materials,
+        "The materials the parts are filled with: drag materials of a materials block here.".into(),
+    );
+    let tip = match state {
+        CellState::Missing => "Not solved yet: Update Project or Solve in its window.",
+        CellState::UpToDate => "The results are up to date with the setup and its inputs.",
+        CellState::Running => "The particle analysis is running.",
+        _ => "The setup or its inputs changed since the run: Update Project solves it again.",
+    };
+    let bodies = window.setup.bodies.len();
+    let walls = window.setup.walls.len();
+    let results = Row {
+        input: false,
+        state: Some(state),
+        linked_from: None,
+        ..row(
+            vec!["Particles".to_owned(), "Results".to_owned()],
+            &format!(
+                "{bodies} {}, {walls} {}",
+                if bodies == 1 { "body" } else { "bodies" },
+                if walls == 1 { "wall" } else { "walls" }
+            ),
+            NodeIcon::Results,
+            tip.into(),
+        )
+    };
+    vec![geometry, materials, results]
+}
+
 /// Tooltip of an Add Mesh entry.
 /// A kind of block the schematic adds: the menus and the picker list these, in this order.
 enum BlockKind {
@@ -10890,6 +11237,7 @@ enum BlockKind {
     Measure,
     Study,
     Campbell,
+    Particles,
     MeshExport,
     File,
     Note,
@@ -10915,6 +11263,7 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::Measure,
         BlockKind::Study,
         BlockKind::Campbell,
+        BlockKind::Particles,
         BlockKind::MeshExport,
         BlockKind::File,
         BlockKind::Note,
@@ -11045,6 +11394,13 @@ impl BlockKind {
                  Link the Setup of an analysis with a Complex Frequency step to its Analysis \
                  row.",
             ),
+            Self::Particles => (
+                "Analysis",
+                "Particle Analysis",
+                "mpm material point method particles flow paste fluid dough meat grinder \
+                 extrusion viscoplastic herschel bulkley bingham",
+                PARTICLES_TIP,
+            ),
             Self::MeshExport => (
                 "Export",
                 "Mesh Export",
@@ -11115,6 +11471,7 @@ impl BlockKind {
             Self::Study => Action::AddStudy(pos),
             Self::MeshExport => Action::AddMeshExport(pos),
             Self::Campbell => Action::AddCampbell(pos),
+            Self::Particles => Action::AddParticles(pos),
             Self::File => Action::AddFile(pos),
             Self::Note => Action::AddNote(pos),
             Self::Plot => Action::AddPlot(pos),
@@ -11941,6 +12298,11 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Results, ink);
                 icon.on_hover_text("Sweeps an analysis over the rotational speed");
             }
+            Kind::Particles => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Particles, ink);
+                icon.on_hover_text("Material flowing as particles (material point method)");
+            }
             Kind::File => {
                 let ink = ui.visuals().text_color();
                 let glyph = match FileKind::of(&block.export_path) {
@@ -12068,6 +12430,7 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Measure => "Double-click chooses what it measures.",
             Kind::Study => "Double-click opens its table of design points.",
             Kind::Campbell => "Double-click opens its Campbell diagram and the sweep.",
+            Kind::Particles => "Double-click opens its setup and the particles of its results.",
             Kind::File => "Double-click chooses the file to read.",
             Kind::Note => "Double-click edits its text.",
             Kind::Math => "Its operation and numbers are edited in the block.",
@@ -13097,6 +13460,8 @@ fn node_menu(
             entry(ui, "Read Again", "", Action::ReadFile(id));
         } else if kind == Kind::Campbell {
             entry(ui, "Open Diagram …", "", Action::Open(id, None));
+        } else if kind == Kind::Particles {
+            entry(ui, "Open …", "", Action::Open(id, None));
         } else if !matches!(
             kind,
             Kind::RefineMesh | Kind::DeformedMesh | Kind::Plot | Kind::Preview
@@ -13302,6 +13667,10 @@ const PARAMETERS_TIP: &str = "Adds a block of named numbers: drag the pin of one
 const MEASURE_TIP: &str = "Adds a block that reads from the results of a step linked to it: \
                            the values of a field over a region, the displacement of a node, \
                            a history output or an eigenfrequency.";
+const PARTICLES_TIP: &str = "Adds a particle analysis (material point method): the solid parts \
+     of the geometry linked to it are filled with material, such as a paste or a fluid, or are \
+     rigid walls, and the material flows over the time under gravity. Link a geometry and \
+     materials, then open it to give the parts their roles.";
 const STUDY_TIP: &str = "Adds a parameter study: a table of design points, each a set of \
                          values it gives to exposed parameters of analyses or numbers of \
                          other blocks, solved in turn, with the values of Measure blocks it \

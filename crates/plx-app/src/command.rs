@@ -107,6 +107,7 @@ pub enum BlockTile {
     Measure,
     Study,
     Campbell,
+    Particles,
     MeshExport,
     Note,
     Plot,
@@ -805,6 +806,14 @@ fn build() -> Vec<Command> {
         "Rotor",
         Node(NodeIcon::Solution),
         "Places a block that sweeps a rotor over its speed for the Campbell diagram.",
+    ));
+    add(place(
+        BlockTile::Particles,
+        "Particle\nAnalysis",
+        "Evaluate",
+        "Particles",
+        Node(NodeIcon::Particles),
+        "Places a particle analysis: parts of a geometry filled with a paste or fluid that flows between rigid walls.",
     ));
     add(place(
         BlockTile::MeshExport,
@@ -2491,6 +2500,7 @@ mod tests {
             BlockTile::Measure,
             BlockTile::Study,
             BlockTile::Campbell,
+            BlockTile::Particles,
             BlockTile::MeshExport,
             BlockTile::Note,
             BlockTile::Plot,

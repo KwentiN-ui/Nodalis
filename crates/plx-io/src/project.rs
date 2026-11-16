@@ -98,6 +98,9 @@ pub enum ProjectNode {
     MeshExport(MeshExport),
     /// A sweep of an analysis over the rotational speed, with its Campbell diagram.
     Campbell(Box<CampbellBlock>),
+    /// A particle analysis (material point method) of the geometry and materials linked
+    /// to it, with its results.
+    Particles(Box<ParticleBlock>),
     /// A file outside the project read as a source: geometry, a mesh or results.
     File(FileSource),
     /// A text in the schematic, without pins.
@@ -138,6 +141,7 @@ impl ProjectNode {
             Self::Study(o) => o.id,
             Self::MeshExport(e) => e.id,
             Self::Campbell(c) => c.id,
+            Self::Particles(p) => p.id,
             Self::File(f) => f.id,
             Self::Note(n) => n.id,
             Self::Math(m) => m.id,
@@ -165,6 +169,7 @@ impl ProjectNode {
             Self::Study(o) => &o.name,
             Self::MeshExport(e) => &e.name,
             Self::Campbell(c) => &c.name,
+            Self::Particles(p) => &p.name,
             Self::File(f) => &f.name,
             Self::Note(n) => &n.name,
             Self::Math(m) => &m.name,
@@ -193,6 +198,7 @@ impl ProjectNode {
             Self::Study(o) => o.position,
             Self::MeshExport(e) => e.position,
             Self::Campbell(c) => c.position,
+            Self::Particles(p) => p.position,
             Self::File(f) => f.position,
             Self::Note(n) => n.position,
             Self::Math(m) => m.position,
@@ -675,6 +681,26 @@ pub struct CampbellBlock {
     pub focus: Option<[f64; 2]>,
     /// Fingerprint of the analysis the speeds were computed with, its speed left out: the
     /// diagram is out of date once that differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<u64>,
+}
+
+/// A particle analysis: its setup and the results of its last run, which stay in the
+/// project until the setup or what is linked to it changes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ParticleBlock {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    #[serde(default)]
+    pub setup: plx_model::particle::ParticleSetup,
+    /// The results of the last run ([`plx_results::particles::ParticleRun`]), kept in the
+    /// binary part of the project file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<BoundFile>,
+    /// Fingerprint of what the results were computed from: the setup, the geometry and the
+    /// materials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<u64>,
 }
