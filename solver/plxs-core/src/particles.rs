@@ -1,0 +1,384 @@
+//! The input and the results of a particle analysis (material point method), beside the FE
+//! [`crate::Model`]: what is filled with material, the rigid bodies it meets, the box it moves
+//! in, and what the solver writes back. Concept: `STUFENKONZEPT_1_2_PARTIKEL_MPM.md`.
+//!
+//! Like the FE model this holds data only. Cells, shape functions and the time step are the
+//! solver's (`plxs-particles`); the model gives the cell size as the resolution, the way a
+//! mesh gives its element size.
+//!
+//! Units: consistent, like the FE model (Nodalis hands in SI).
+
+use serde::{Deserialize, Serialize};
+
+/// A particle analysis: everything the solver needs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ParticleModel {
+    pub heading: String,
+    pub materials: Vec<ParticleMaterial>,
+    /// What is filled with material at the start.
+    pub bodies: Vec<MaterialBody>,
+    /// Rigid bodies the material meets.
+    pub walls: Vec<RigidWall>,
+    pub domain: Domain,
+    pub gravity: [f64; 3],
+    pub control: ParticleControl,
+}
+
+/// A material of a particle analysis.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ParticleMaterial {
+    pub name: String,
+    pub density: f64,
+    pub law: ParticleLaw,
+}
+
+/// How a material responds.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ParticleLaw {
+    /// Hyperelastic at large strains (Hencky: linear in the logarithmic strain).
+    Elastic { young: f64, poisson: f64 },
+    /// Elastic below a yield stress, flowing above it after Herschel-Bulkley: the shear
+    /// stress in flow is `yield + consistency * rate^exponent` (Bingham for `exponent = 1`).
+    /// `yield` is the yield stress in shear; `consistency` has the unit `Pa s^exponent`.
+    ViscoPlastic {
+        shear: f64,
+        bulk: f64,
+        yield_stress: f64,
+        consistency: f64,
+        exponent: f64,
+    },
+    /// A weakly compressible Newtonian fluid that carries no tension.
+    Fluid { bulk: f64, viscosity: f64 },
+}
+
+impl ParticleLaw {
+    /// The bulk and the shear modulus of its elastic part (zero shear for a fluid).
+    pub fn moduli(&self) -> (f64, f64) {
+        match *self {
+            Self::Elastic { young, poisson } => (
+                young / (3.0 * (1.0 - 2.0 * poisson)),
+                young / (2.0 * (1.0 + poisson)),
+            ),
+            Self::ViscoPlastic { shear, bulk, .. } => (bulk, shear),
+            Self::Fluid { bulk, .. } => (bulk, 0.0),
+        }
+    }
+}
+
+/// A closed surface of triangles: corner positions and the corners of each triangle,
+/// counterclockwise seen from outside.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TriangleSurface {
+    pub points: Vec<[f64; 3]>,
+    pub triangles: Vec<[u32; 3]>,
+}
+
+impl TriangleSurface {
+    /// The surface of an axis-parallel box.
+    pub fn cuboid(min: [f64; 3], max: [f64; 3]) -> Self {
+        let p = |i: usize| {
+            [
+                if i & 1 == 0 { min[0] } else { max[0] },
+                if i & 2 == 0 { min[1] } else { max[1] },
+                if i & 4 == 0 { min[2] } else { max[2] },
+            ]
+        };
+        let points = (0..8).map(p).collect();
+        // Faces as quads of corner numbers (bit 0: x, bit 1: y, bit 2: z), outward.
+        let quads = [
+            [0, 2, 3, 1], // z min
+            [4, 5, 7, 6], // z max
+            [0, 1, 5, 4], // y min
+            [2, 6, 7, 3], // y max
+            [0, 4, 6, 2], // x min
+            [1, 3, 7, 5], // x max
+        ];
+        let triangles = quads
+            .iter()
+            .flat_map(|q| [[q[0], q[1], q[2]], [q[0], q[2], q[3]]])
+            .collect();
+        Self { points, triangles }
+    }
+
+    /// The surface of a cylinder about the axis through `base` along `axis` (its length the
+    /// cylinder's height), with `segments` facets around.
+    pub fn cylinder(base: [f64; 3], axis: [f64; 3], radius: f64, segments: usize) -> Self {
+        let length = norm(axis);
+        let a = scale(axis, 1.0 / length);
+        let helper = if a[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let u = normalize(cross(a, helper));
+        let v = cross(a, u);
+        let n = segments.max(3);
+        let mut points = Vec::with_capacity(2 * n + 2);
+        for end in [0.0, length] {
+            for k in 0..n {
+                let phi = std::f64::consts::TAU * k as f64 / n as f64;
+                let (s, c) = phi.sin_cos();
+                points.push(std::array::from_fn(|i| {
+                    base[i] + end * a[i] + radius * (c * u[i] + s * v[i])
+                }));
+            }
+        }
+        let bottom = points.len() as u32;
+        points.push(base);
+        points.push(std::array::from_fn(|i| base[i] + axis[i]));
+        let top = bottom + 1;
+        let n = n as u32;
+        let mut triangles = Vec::new();
+        for k in 0..n {
+            let k1 = (k + 1) % n;
+            triangles.push([k, k1, n + k1]);
+            triangles.push([k, n + k1, n + k]);
+            triangles.push([bottom, k1, k]);
+            triangles.push([top, n + k, n + k1]);
+        }
+        Self { points, triangles }
+    }
+
+    /// The smallest and largest coordinates of its points.
+    pub fn bounds(&self) -> Option<([f64; 3], [f64; 3])> {
+        let first = *self.points.first()?;
+        Some(self.points.iter().fold((first, first), |(lo, hi), p| {
+            (
+                std::array::from_fn(|i| lo[i].min(p[i])),
+                std::array::from_fn(|i| hi[i].max(p[i])),
+            )
+        }))
+    }
+
+    /// The surface with its orientation turned around (normals inward).
+    pub fn flipped(mut self) -> Self {
+        for t in &mut self.triangles {
+            t.swap(1, 2);
+        }
+        self
+    }
+}
+
+fn norm(a: [f64; 3]) -> f64 {
+    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+}
+
+fn scale(a: [f64; 3], s: f64) -> [f64; 3] {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+
+fn normalize(a: [f64; 3]) -> [f64; 3] {
+    scale(a, 1.0 / norm(a))
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// A region filled with material at the start.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MaterialBody {
+    pub name: String,
+    /// Index into [`ParticleModel::materials`].
+    pub material: usize,
+    pub shape: TriangleSurface,
+    pub velocity: [f64; 3],
+}
+
+/// How material slides along a rigid surface.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum WallLaw {
+    /// No slip: the material moves with the wall.
+    #[default]
+    Stick,
+    /// Free slip: only the motion into the wall is stopped.
+    Slip,
+    /// Coulomb friction with this coefficient.
+    Coulomb { friction: f64 },
+}
+
+/// The motion of a rigid body: a constant rotation about an axis plus a constant
+/// translation. Stage 2 of the concept computes resting walls only (the default); the
+/// field is in the data so that moving tools (stage 3) add nothing new to the format.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RigidMotion {
+    pub velocity: [f64; 3],
+    /// A point on the axis of rotation.
+    pub center: [f64; 3],
+    /// The angular velocity vector (rad/s): direction is the axis.
+    pub angular: [f64; 3],
+}
+
+impl RigidMotion {
+    pub fn is_resting(&self) -> bool {
+        self.velocity == [0.0; 3] && self.angular == [0.0; 3]
+    }
+}
+
+/// A rigid body: its closed surface (the solid is inside), how material slides on it, and
+/// how it moves.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RigidWall {
+    pub name: String,
+    pub shape: TriangleSurface,
+    pub law: WallLaw,
+    pub motion: RigidMotion,
+}
+
+/// What happens at a side of the box the material moves in.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Side {
+    /// A resting wall with this law.
+    Wall(WallLaw),
+    /// Material leaves the model through it and counts as outflow.
+    Open,
+}
+
+impl Default for Side {
+    fn default() -> Self {
+        Self::Wall(WallLaw::Slip)
+    }
+}
+
+/// The box the material moves in, and the resolution.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Domain {
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+    /// The size of a cell of the background grid; particles start two to a cell in each
+    /// direction.
+    pub cell: f64,
+    /// The sides: `[x min, x max, y min, y max, z min, z max]`.
+    pub sides: [Side; 6],
+    /// Axes along which the box repeats (the sides of those axes are ignored). Along a
+    /// periodic axis the box must span a whole number of cells, at least three.
+    pub periodic: [bool; 3],
+}
+
+impl Default for Domain {
+    fn default() -> Self {
+        Self {
+            min: [0.0; 3],
+            max: [1.0; 3],
+            cell: 0.1,
+            sides: [Side::default(); 6],
+            periodic: [false; 3],
+        }
+    }
+}
+
+/// How long and how the solver runs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ParticleControl {
+    pub end_time: f64,
+    /// How many frames are written, evenly over the time, besides the start.
+    pub frames: usize,
+    /// The speed the elastic waves are slowed to (by a smaller bulk modulus), or `None` for
+    /// the material's own. Allowed while the material moves much slower than it (the
+    /// report gives the largest Mach number); like mass scaling in an explicit step.
+    pub sound_speed: Option<f64>,
+    /// Whether the volume ratio is averaged over the cells (F-bar), against volumetric
+    /// locking and pressure noise.
+    pub smooth_volume: bool,
+    /// The Courant number of the time step.
+    pub courant: f64,
+}
+
+impl Default for ParticleControl {
+    fn default() -> Self {
+        Self {
+            end_time: 1.0,
+            frames: 50,
+            sound_speed: None,
+            smooth_volume: true,
+            courant: 0.3,
+        }
+    }
+}
+
+/// The results of a particle analysis.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ParticleResults {
+    pub frames: Vec<ParticleFrame>,
+    pub history: ParticleHistory,
+    pub report: ParticleReport,
+}
+
+/// The names of the fields of a frame, in the order of [`ParticleFrame::fields`].
+pub const PARTICLE_FIELDS: [&str; 6] = [
+    "Pressure",
+    "Shear stress",
+    "Plastic strain",
+    "Shear rate",
+    "Volume ratio",
+    "Body",
+];
+
+/// The particles at one time.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ParticleFrame {
+    pub time: f64,
+    pub positions: Vec<[f32; 3]>,
+    pub velocities: Vec<[f32; 3]>,
+    /// One value per particle for each of [`PARTICLE_FIELDS`].
+    pub fields: Vec<Vec<f32>>,
+}
+
+/// Quantities of the whole model over the time.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ParticleHistory {
+    pub time: Vec<f64>,
+    pub time_step: Vec<f64>,
+    pub kinetic: Vec<f64>,
+    /// Potential energy of gravity, relative to the start.
+    pub potential: Vec<f64>,
+    /// Elastic energy stored in the material.
+    pub elastic: Vec<f64>,
+    /// Energy dissipated by plastic flow and viscosity, summed from the start.
+    pub dissipated: Vec<f64>,
+    /// Energy taken out where walls stop the material, summed from the start.
+    pub wall_loss: Vec<f64>,
+    /// Energy that left with material through open sides, summed from the start.
+    pub outflow_energy: Vec<f64>,
+    /// What the balance misses, relative to the largest energy so far: the numerical
+    /// dissipation of the transfers.
+    pub balance_error: Vec<f64>,
+    /// Mass in the model and mass that left it.
+    pub mass: Vec<f64>,
+    pub outflow: Vec<f64>,
+    /// The largest particle speed over the wave speed.
+    pub mach: Vec<f64>,
+    /// Per wall (the walls of the model, then the six sides of the box): the force the
+    /// material exerts on it and the moment of that force about the origin.
+    pub walls: Vec<WallHistory>,
+}
+
+/// The load of one rigid surface over the time.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WallHistory {
+    pub name: String,
+    pub force: Vec<[f64; 3]>,
+    pub moment: Vec<[f64; 3]>,
+}
+
+/// What the solver tells about the run.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ParticleReport {
+    pub particles: usize,
+    pub cells: [usize; 3],
+    pub steps: usize,
+    /// The largest and smallest time step.
+    pub time_step: (f64, f64),
+    /// The factor the wave speed was slowed by (1 for none).
+    pub sound_speed_factor: f64,
+    pub max_mach: f64,
+    pub seconds: f64,
+    /// Whether the run was stopped before its end time.
+    pub stopped: bool,
+    /// Remarks for the user, such as the slowed wave speed.
+    pub notes: Vec<String>,
+}

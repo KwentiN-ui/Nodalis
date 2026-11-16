@@ -3789,6 +3789,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "plxs-particles"
+version = "0.5.1"
+dependencies = [
+ "plxs-core",
+ "plxs-materials",
+ "rayon",
+]
+
+[[package]]
 name = "plxs-procedures"
 version = "0.5.1"
 dependencies = [

@@ -34,6 +34,7 @@ plxs-assembly = { path = "solver/plxs-assembly" }
 plxs-procedures = { path = "solver/plxs-procedures" }
 plxs-explicit = { path = "solver/plxs-explicit" }
 plxs-gpu = { path = "solver/plxs-gpu" }
+plxs-particles = { path = "solver/plxs-particles" }
 plxs-output = { path = "solver/plxs-output" }
 plxs-session = { path = "solver/plxs-session" }
 faer = "0.24"
@@ -110,6 +111,8 @@ opt-level = 2
 [profile.dev.package.plxs-explicit]
 opt-level = 2
 [profile.dev.package.plxs-gpu]
+opt-level = 2
+[profile.dev.package.plxs-particles]
 opt-level = 2
 
 # Profil für die CI: wie dev (Abhängigkeiten und Solver-Numerik optimiert, im Cache), ohne
