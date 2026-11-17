@@ -833,6 +833,7 @@ mod tests {
             name: "RP".into(),
             position: [2.0, 0.5, 0.5],
             definition: Default::default(),
+            visible: true,
         };
         let mut body = RigidBody::new("Tool", point.id);
         body.region = Region::Parts(vec!["Tool".into()]);
