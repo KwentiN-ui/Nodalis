@@ -139,11 +139,17 @@ pub enum Quantity {
     PowerPerVolume,
     /// Radiated power per area and fourth power of the absolute temperature.
     StefanBoltzmann,
+    /// Dynamic viscosity, a stress times a time.
+    Viscosity,
+    /// The consistency of a Herschel-Bulkley flow, a stress times a time to the power of the
+    /// flow index. All unit systems measure time in seconds, so it converts like a
+    /// viscosity, whose dimension it is given.
+    Consistency,
 }
 
 impl Quantity {
     /// Every quantity, in the order a list offers them.
-    pub const ALL: [Quantity; 29] = [
+    pub const ALL: [Quantity; 31] = [
         Quantity::Length,
         Quantity::Angle,
         Quantity::Mass,
@@ -173,6 +179,8 @@ impl Quantity {
         Quantity::HeatFlux,
         Quantity::PowerPerVolume,
         Quantity::StefanBoltzmann,
+        Quantity::Viscosity,
+        Quantity::Consistency,
     ];
 
     /// Name in the GUI.
@@ -207,6 +215,8 @@ impl Quantity {
             Quantity::HeatFlux => "Heat flux",
             Quantity::PowerPerVolume => "Power per volume",
             Quantity::StefanBoltzmann => "Stefan-Boltzmann constant",
+            Quantity::Viscosity => "Viscosity",
+            Quantity::Consistency => "Consistency",
         }
     }
 
@@ -241,6 +251,7 @@ impl Quantity {
             Quantity::HeatFlux => d(0, 1, -3, 0, 0),
             Quantity::PowerPerVolume => d(-1, 1, -3, 0, 0),
             Quantity::StefanBoltzmann => d(0, 1, -3, -4, 0),
+            Quantity::Viscosity | Quantity::Consistency => d(-1, 1, -1, 0, 0),
         }
     }
 }
@@ -451,6 +462,8 @@ impl UnitSystem {
                 "lbf/(in·s·°F^4)",
                 "µW/(mm²·K^4)",
             ],
+            Viscosity => ["Pa·s", "MPa·s", "kPa·s", "psi·s", "kPa·s"],
+            Consistency => ["Pa·s^n", "MPa·s^n", "kPa·s^n", "psi·s^n", "kPa·s^n"],
         };
         match self {
             UnitSystem::Unitless => "",
@@ -1035,7 +1048,8 @@ mod tests {
     #[test]
     fn every_unit_shown_reads_back_as_one_unit_of_its_system() {
         for units in UnitSystem::ALL.into_iter().filter(|u| u.has_units()) {
-            for quantity in Quantity::ALL {
+            // The power n of a consistency's unit is the flow index, not a number to read.
+            for quantity in Quantity::ALL.into_iter().filter(|q| *q != Consistency) {
                 let unit = units.unit(quantity);
                 let parsed = parse_unit(unit).unwrap_or_else(|e| panic!("{unit}: {e}"));
                 assert_eq!(parsed.dimension, quantity.dimension(), "{unit}");

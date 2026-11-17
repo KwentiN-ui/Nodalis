@@ -26,7 +26,7 @@
 //! Newtonian viscous stress of the strain rate. It carries no tension (a free surface
 //! opens instead).
 
-use plxs_core::particles::ParticleLaw;
+use plxs_core::particles::{FlowTables, ParticleLaw, table_value};
 use plxs_materials::finite::eigen_symmetric;
 
 use crate::math::{IDENTITY, Mat3, contract, deviator, mat_mul, sym, transpose};
@@ -135,6 +135,30 @@ impl Law {
         }
     }
 
+    /// The law with the values of its flow at the temperature `t`: those that `tables`
+    /// give over the temperature, the others as they are.
+    pub fn at_temperature(&self, tables: &FlowTables, t: f64) -> Self {
+        let mut law = *self;
+        let at = |value: &mut f64, table: &[[f64; 2]]| {
+            if !table.is_empty() {
+                *value = table_value(table, t);
+            }
+        };
+        match &mut law.kind {
+            Kind::ViscoPlastic {
+                yield_stress,
+                consistency,
+                ..
+            } => {
+                at(yield_stress, &tables.yield_stress);
+                at(consistency, &tables.consistency);
+            }
+            Kind::Fluid { viscosity } => at(viscosity, &tables.viscosity),
+            Kind::Elastic | Kind::Granular { .. } => {}
+        }
+        law
+    }
+
     /// The law of a mixture of two grain sizes with the volume fraction `fine` of the fine
     /// ones: its grain diameter is the mean of the two. Other laws stay as they are.
     pub fn mixed(&self, fine: f64) -> Self {
@@ -185,10 +209,8 @@ impl Law {
 
     /// One step: the state at the start, the increment `f` of the deformation gradient, the
     /// volume ratio the stress takes (`det F` at the end, or with F-bar the average over the
-    /// neighbourhood), the velocity gradient and the time step. `factor` scales the yield
-    /// stress, the consistency and the viscosity (their change with the temperature; the
-    /// friction of a granular material does not change). The state is advanced; its own
-    /// volume ratio follows `f`.
+    /// neighbourhood), the velocity gradient and the time step. The state is advanced; its
+    /// own volume ratio follows `f`.
     pub fn update(
         &self,
         state: &mut PointState,
@@ -196,7 +218,6 @@ impl Law {
         j: f64,
         gradient: &Mat3,
         dt: f64,
-        factor: f64,
     ) -> PointUpdate {
         let own = state.j * crate::math::det(f);
         let d = sym(gradient);
@@ -204,7 +225,6 @@ impl Law {
         let shear_rate = (2.0 * contract(&dd, &dd)).sqrt();
         match self.kind {
             Kind::Fluid { viscosity } => {
-                let viscosity = viscosity * factor;
                 // No tension: the volume never grows past its initial one.
                 let j = j.min(1.0);
                 state.j = own.min(1.0);
@@ -258,7 +278,6 @@ impl Law {
                     exponent,
                 } = self.kind
                 {
-                    let (yield_stress, consistency) = (yield_stress * factor, consistency * factor);
                     let trial = std::f64::consts::SQRT_2 * g * dev_norm;
                     if trial > yield_stress && g > 0.0 {
                         let dgamma =
@@ -428,6 +447,53 @@ mod tests {
         assert!(r.abs() < 1e-8, "{r}");
     }
 
+    /// Each value of the flow follows its own table over the temperature; a value without
+    /// one keeps the law's.
+    #[test]
+    fn values_over_temperature() {
+        let paste = Law::new(
+            1000.0,
+            &ParticleLaw::ViscoPlastic {
+                shear: 1e4,
+                bulk: 1e5,
+                yield_stress: 200.0,
+                consistency: 10.0,
+                exponent: 0.5,
+            },
+        );
+        let tables = FlowTables {
+            yield_stress: vec![[0.0, 300.0], [40.0, 100.0]],
+            consistency: Vec::new(),
+            viscosity: vec![[0.0, 99.0]],
+        };
+        let at = |t| match paste.at_temperature(&tables, t).kind {
+            Kind::ViscoPlastic {
+                yield_stress,
+                consistency,
+                ..
+            } => (yield_stress, consistency),
+            _ => unreachable!(),
+        };
+        assert_eq!(at(10.0), (250.0, 10.0));
+        assert_eq!(at(-5.0), (300.0, 10.0));
+        assert_eq!(at(60.0), (100.0, 10.0));
+        let fluid = Law::new(
+            1000.0,
+            &ParticleLaw::Fluid {
+                bulk: 1e5,
+                viscosity: 1.0,
+            },
+        );
+        let tables = FlowTables {
+            viscosity: vec![[20.0, 1.0], [40.0, 0.5]],
+            ..Default::default()
+        };
+        assert_eq!(
+            fluid.at_temperature(&tables, 30.0).explicit_viscosity(),
+            0.75
+        );
+    }
+
     /// Steady simple shear at the rate γ̇ ends at the Bingham stress `τ_y + η γ̇`.
     #[test]
     fn bingham_simple_shear() {
@@ -448,7 +514,7 @@ mod tests {
         let mut state = PointState::default();
         let mut out = PointUpdate::default();
         for _ in 0..20000 {
-            out = law.update(&mut state, &f, 1.0, &l, dt, 1.0);
+            out = law.update(&mut state, &f, 1.0, &l, dt);
         }
         let expected = 200.0 + 10.0 * rate;
         assert!(
@@ -487,7 +553,7 @@ mod tests {
         };
         let mut out = PointUpdate::default();
         for _ in 0..20000 {
-            out = law.update(&mut state, &f, j, &l, dt, 1.0);
+            out = law.update(&mut state, &f, j, &l, dt);
         }
         let pressure = -(out.tau[0][0] + out.tau[1][1] + out.tau[2][2]) / 3.0;
         assert!((pressure - 2e6 * -j.ln()).abs() < 1e-6 * pressure);
@@ -518,7 +584,7 @@ mod tests {
         );
         let f = [[1.01, 0.002, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         let mut state = PointState::default();
-        let out = law.update(&mut state, &f, 1.01, &[[0.0; 3]; 3], 1e-4, 1.0);
+        let out = law.update(&mut state, &f, 1.01, &[[0.0; 3]; 3], 1e-4);
         let norm = contract(&out.tau, &out.tau).sqrt();
         assert!(norm < 1e-6, "{:?}", out.tau);
         assert!(state.j <= 1.0);

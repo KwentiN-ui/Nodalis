@@ -154,7 +154,8 @@ struct Law {
     b: vec4f,
     // Conductivity, mass of a particle, grain diameter.
     c: vec4f,
-    // Start and length of the flow factor table in `tables`.
+    // Start and length in `tables` of the tables over the temperature of the yield stress
+    // (or viscosity) and of the consistency; length 0 keeps the value of `b`.
     d: vec4u,
 }
 
@@ -1239,7 +1240,7 @@ fn granular_increment(law: Law, trial: f32, pressure: f32, g: f32, dt: f32) -> f
 }
 
 fn law_update(law: Law, b_in: mat3x3f, j_state: f32, plastic_in: f32, f: mat3x3f, j: f32,
-              gradient: mat3x3f, dt: f32, factor: f32) -> Update {
+              gradient: mat3x3f, dt: f32, flow: vec2f) -> Update {
     var out: Update;
     let own = j_state * determinant(f);
     let d = 0.5 * (gradient + transpose(gradient));
@@ -1250,7 +1251,7 @@ fn law_update(law: Law, b_in: mat3x3f, j_state: f32, plastic_in: f32, f: mat3x3f
     let g = law.a.z;
     let kind = u32(law.a.w);
     if kind == 2u {
-        let viscosity = law.b.x * factor;
+        let viscosity = flow.x;
         let jt = min(j, 1.0);
         out.j = min(own, 1.0);
         let pressure_tau = bulk * log(jt);
@@ -1280,8 +1281,8 @@ fn law_update(law: Law, b_in: mat3x3f, j_state: f32, plastic_in: f32, f: mat3x3f
     let dev_norm = length(dev);
     out.dissipated = 0.0;
     if kind == 1u {
-        let yield_stress = law.b.x * factor;
-        let consistency = law.b.y * factor;
+        let yield_stress = flow.x;
+        let consistency = flow.y;
         let trial = sqrt(2.0) * g * dev_norm;
         if trial > yield_stress && g > 0.0 {
             let dgamma = plastic_increment(trial, yield_stress, g, consistency, law.b.z, dt);
@@ -1385,8 +1386,14 @@ fn g2p(@builtin(workgroup_id) wid: vec3u, @builtin(num_workgroups) groups: vec3u
         }
         let j_new = source * determinant(f);
         var temperature = vec2f(p.x.w, p.v.w);
-        let factor = table(law.d.x, law.d.y, temperature.x + temperature.y);
-        let up = law_update(law, particle_b(p), p.c0.w, p.c1.w, f, j_new, c, dt, factor);
+        var flow = law.b.xy;
+        if law.d.y > 0u {
+            flow.x = table(law.d.x, law.d.y, temperature.x + temperature.y);
+        }
+        if law.d.w > 0u {
+            flow.y = table(law.d.z, law.d.w, temperature.x + temperature.y);
+        }
+        let up = law_update(law, particle_b(p), p.c0.w, p.c1.w, f, j_new, c, dt, flow);
         let hc = law.b.w * volume;
         if heat_on && hc > 0.0 {
             temperature = add2(temperature, warmer);
