@@ -406,8 +406,26 @@ pub struct Domain {
     /// The sides: `[x min, x max, y min, y max, z min, z max]`.
     pub sides: [Side; 6],
     /// Axes along which the box repeats (the sides of those axes are ignored). Along a
-    /// periodic axis the box must span a whole number of cells, at least three.
+    /// periodic axis the box must span a whole number of cells, at least three (one along
+    /// z in a 2D space).
     pub periodic: [bool; 3],
+    /// A 3D box, or the slab of a 2D model: one cell thick along z, periodic there.
+    #[serde(default)]
+    pub space: Space,
+}
+
+/// What the box stands for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Space {
+    #[default]
+    Solid,
+    /// A long body across which the material flows in the x-y plane: the slab one cell
+    /// thick along z repeats. Forces on walls are per unit length along z.
+    PlaneStrain,
+    /// A body of revolution about the y axis, x the radius: the slab stands for the whole
+    /// ring at its radius. The box starts at the axis, x = 0. Forces on walls are of the
+    /// whole ring, along the axis only.
+    Axisymmetric,
 }
 
 impl Default for Domain {
@@ -418,6 +436,7 @@ impl Default for Domain {
             cell: 0.1,
             sides: [Side::default(); 6],
             periodic: [false; 3],
+            space: Space::Solid,
         }
     }
 }

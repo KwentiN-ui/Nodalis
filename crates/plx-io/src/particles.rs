@@ -5,13 +5,17 @@
 //! `STUFENKONZEPT_PARTICLE_FLOW_STEP.md`).
 //!
 //! The solver fills a body with particles inside its closed surface, which is the skin of
-//! the part's mesh; a wall is the skin of the parts of its rigid body.
+//! the part's mesh; a wall is the skin of the parts of its rigid body. A 2D model (plane
+//! strain or axisymmetric) is a slab one cell thick along z: its parts are extruded along z
+//! well beyond it, so that the slab cuts them in their middle.
 
 use std::collections::{BTreeSet, HashMap};
 
 use plx_mesh::{ElementFamily, FeMesh};
 use plx_model::particle_flow::{BoxSide, Flow, ParticleFlowStep};
-use plx_model::{Constraint, ContactBehavior, FeModel, HistoryKind, Material, ModelItem, StepKind};
+use plx_model::{
+    Constraint, ContactBehavior, FeModel, HistoryKind, Material, ModelItem, ModelSpace, StepKind,
+};
 use plx_results::particles::{HistoryRequest, TemperatureRequest, WallRequest, set_name};
 use plxs_core::particles::{
     self as ir, MaterialBody, ParticleControl, ParticleMaterial, ParticleModel, RigidWall, Side,
@@ -86,12 +90,25 @@ pub fn lower(
     if let Some(problem) = settings.problem() {
         return Err(error(format!("{}: {problem}", step.name), item));
     }
-    if fe.properties.space.is_2d() {
-        return Err(error(
-            format!("{}: a Particle Flow step needs a 3D model.", step.name),
-            item,
-        ));
-    }
+    let space = match fe.properties.space {
+        ModelSpace::ThreeD => ir::Space::Solid,
+        ModelSpace::PlaneStrain => ir::Space::PlaneStrain,
+        ModelSpace::Axisymmetric => ir::Space::Axisymmetric,
+        ModelSpace::PlaneStress => {
+            return Err(error(
+                format!(
+                    "{}: a Particle Flow step takes a 3D, plane strain or axisymmetric model; \
+                     a thin plate in plane stress has no flow of its own.",
+                    step.name
+                ),
+                item,
+            ));
+        }
+    };
+    let shapes = Shapes {
+        space,
+        cell: settings.cell_size,
+    };
     let mut warnings = Vec::new();
 
     // The parts of the rigid bodies are the walls.
@@ -137,10 +154,11 @@ pub fn lower(
         if wall_part.contains(&p) {
             continue;
         }
-        if !is_solid(mesh, p) {
+        if !shapes.is_solid(mesh, p) {
             warnings.push(format!(
-                "Part {} is no solid and takes no part in the particle flow.",
-                part.name
+                "Part {} is no {} and takes no part in the particle flow.",
+                part.name,
+                shapes.solid_name()
             ));
             continue;
         }
@@ -176,7 +194,7 @@ pub fn lower(
         model.bodies.push(MaterialBody {
             name: part.name.clone(),
             material: solver_material,
-            shape: part_surface(mesh, &[p]),
+            shape: shapes.surface(mesh, &[p]),
             velocity: [0.0; 3],
             temperature: 0.0,
             gravity: [0.0; 3],
@@ -229,11 +247,17 @@ pub fn lower(
     // The walls with the laws of the contact regions between them and the bodies.
     for (name, parts, c) in &walls {
         let parts: Vec<usize> = parts.iter().copied().collect();
-        if parts.iter().any(|&p| !is_solid(mesh, p)) {
+        if parts.iter().any(|&p| !shapes.is_solid(mesh, p)) {
             return Err(error(
                 format!(
-                    "{name}: the walls of a Particle Flow step are solid parts; a rigid body of \
-                     shells or beams has no inside."
+                    "{name}: the walls of a Particle Flow step are {} parts; a rigid body of \
+                     {} has no inside.",
+                    shapes.solid_name(),
+                    if space == ir::Space::Solid {
+                        "shells or beams"
+                    } else {
+                        "beams"
+                    }
                 ),
                 Some(ModelItem::Constraint(*c)),
             ));
@@ -249,7 +273,7 @@ pub fn lower(
         }
         model.walls.push(RigidWall {
             name: name.clone(),
-            shape: part_surface(mesh, &parts),
+            shape: shapes.surface(mesh, &parts),
             law,
             motion,
             temperature: temperature.filter(|_| settings.heat),
@@ -265,6 +289,26 @@ pub fn lower(
             ));
             continue;
         };
+        // In 2D the gravity acts in the plane, in a body of revolution along its axis.
+        let mut g = g;
+        let across: &[usize] = match space {
+            ir::Space::Solid => &[],
+            ir::Space::PlaneStrain => &[2],
+            ir::Space::Axisymmetric => &[0, 2],
+        };
+        if across.iter().any(|&a| g[a] != 0.0) {
+            warnings.push(format!(
+                "{}: in a {} model gravity acts {}; the rest of it is left out.",
+                load.name,
+                shapes.space_name(),
+                if space == ir::Space::Axisymmetric {
+                    "along the axis (y) only"
+                } else {
+                    "in the plane"
+                }
+            ));
+        }
+        across.iter().for_each(|&a| g[a] = 0.0);
         let parts = parts_of(&load.region, mesh);
         let mut selected = false;
         for (body, part) in model.bodies.iter_mut().zip(&body_part) {
@@ -299,7 +343,7 @@ pub fn lower(
         }
     }
 
-    model.domain = domain(settings, &model)?;
+    model.domain = domain(settings, &model, space, &mut warnings)?;
     model.control = ParticleControl {
         end_time: settings.duration,
         frames: settings.frames as usize,
@@ -693,8 +737,15 @@ pub fn law_of(behavior: ContactBehavior) -> WallLaw {
     }
 }
 
-/// The box of the step: around all bodies and walls with the margin, or its own.
-fn domain(settings: &ParticleFlowStep, model: &ParticleModel) -> Result<ir::Domain, ParticleError> {
+/// The box of the step: around all bodies and walls with the margin, or its own. The box of
+/// a 2D model is the slab one cell thick along z; that of a body of revolution starts at its
+/// axis, where its side is a frictionless wall.
+fn domain(
+    settings: &ParticleFlowStep,
+    model: &ParticleModel,
+    space: ir::Space,
+    warnings: &mut Vec<String>,
+) -> Result<ir::Domain, ParticleError> {
     let shapes =
         (model.bodies.iter().map(|b| &b.shape)).chain(model.walls.iter().map(|w| &w.shape));
     let mut bounds = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
@@ -704,9 +755,38 @@ fn domain(settings: &ParticleFlowStep, model: &ParticleModel) -> Result<ir::Doma
             bounds.1[a] = bounds.1[a].max(hi[a]);
         }
     }
-    let (min, max) = settings
+    let (mut min, mut max) = settings
         .grid_box(Some(bounds))
         .expect("a box around given bounds");
+    let mut sides = settings.sides;
+    let mut periodic = [false; 3];
+    if space != ir::Space::Solid {
+        (min[2], max[2]) = (0.0, settings.cell_size);
+        periodic[2] = true;
+    }
+    if space == ir::Space::Axisymmetric {
+        if bounds.0[0] < -1e-9 * settings.cell_size {
+            return Err(error(
+                "In an axisymmetric model the x coordinate is the radius: the parts of a \
+                 Particle Flow step lie at x of zero or above.",
+                None,
+            ));
+        }
+        min[0] = min[0].max(0.0);
+        if min[0] == 0.0 {
+            if sides[0] != BoxSide::Frictionless {
+                warnings.push(
+                    "The side X min of the box lies on the axis of revolution and is \
+                     frictionless there."
+                        .into(),
+                );
+            }
+            sides[0] = BoxSide::Frictionless;
+        }
+    }
+    if max[0] <= min[0] {
+        return Err(error("The box of the Particle Flow step is empty.", None));
+    }
     let side = |side: BoxSide| match side {
         BoxSide::Frictionless => Side::Wall(WallLaw::Slip),
         BoxSide::Rough => Side::Wall(WallLaw::Stick),
@@ -717,8 +797,9 @@ fn domain(settings: &ParticleFlowStep, model: &ParticleModel) -> Result<ir::Doma
         min,
         max,
         cell: settings.cell_size,
-        sides: settings.sides.map(side),
-        periodic: [false; 3],
+        sides: sides.map(side),
+        periodic,
+        space,
     })
 }
 
@@ -743,14 +824,120 @@ fn element_parts(mesh: &FeMesh) -> HashMap<plx_mesh::ElementId, usize> {
         .collect()
 }
 
-/// Whether a part is meshed with solid elements.
-fn is_solid(mesh: &FeMesh, part: usize) -> bool {
-    let elements = &mesh.parts[part].elements;
-    !elements.is_empty()
-        && elements.iter().all(|&e| {
-            mesh.element(e)
-                .is_some_and(|e| e.shape.family() == ElementFamily::Solid)
-        })
+/// How the parts of a model become closed surfaces: their skins in 3D, extruded along z
+/// in 2D.
+struct Shapes {
+    space: ir::Space,
+    cell: f64,
+}
+
+impl Shapes {
+    /// Whether a part is meshed with solid elements, or in 2D with plane elements.
+    fn is_solid(&self, mesh: &FeMesh, part: usize) -> bool {
+        let family = if self.space == ir::Space::Solid {
+            ElementFamily::Solid
+        } else {
+            ElementFamily::Surface
+        };
+        let elements = &mesh.parts[part].elements;
+        !elements.is_empty()
+            && elements
+                .iter()
+                .all(|&e| mesh.element(e).is_some_and(|e| e.shape.family() == family))
+    }
+
+    fn solid_name(&self) -> &'static str {
+        if self.space == ir::Space::Solid {
+            "solid"
+        } else {
+            "plane face"
+        }
+    }
+
+    fn space_name(&self) -> &'static str {
+        match self.space {
+            ir::Space::Solid => "3D",
+            ir::Space::PlaneStrain => "plane strain",
+            ir::Space::Axisymmetric => "axisymmetric",
+        }
+    }
+
+    fn surface(&self, mesh: &FeMesh, parts: &[usize]) -> TriangleSurface {
+        if self.space == ir::Space::Solid {
+            part_surface(mesh, parts)
+        } else {
+            // Far enough beyond the slab that the ends do not turn the distance near it.
+            let reach = 8.0 * self.cell;
+            plane_surface(mesh, parts, -reach, self.cell + reach)
+        }
+    }
+}
+
+/// The closed surface of plane parts extruded along z from `z0` to `z1`: the elements as
+/// the two ends, the edges on the outline of each part as its sides, facing out.
+pub fn plane_surface(mesh: &FeMesh, parts: &[usize], z0: f64, z1: f64) -> TriangleSurface {
+    let coords = mesh.coords();
+    let mut surface = TriangleSurface::default();
+    for &p in parts {
+        let mut index: HashMap<usize, u32> = HashMap::new();
+        let mut point = |surface: &mut TriangleSurface, node: usize| {
+            *index.entry(node).or_insert_with(|| {
+                let [x, y, _] = coords[node];
+                surface.points.push([x, y, z0]);
+                surface.points.push([x, y, z1]);
+                surface.points.len() as u32 - 2
+            })
+        };
+        // The corners of each element, turned counterclockwise about z.
+        let mut polygons = Vec::new();
+        for &e in &mesh.parts[p].elements {
+            let Some(element) = mesh.element(e) else {
+                continue;
+            };
+            let Some(face) = element.shape.faces().first() else {
+                continue;
+            };
+            let mut corners: Vec<usize> = (face.corners.iter())
+                .filter_map(|&c| mesh.node_index(element.nodes[c]))
+                .collect();
+            let area: f64 = (0..corners.len())
+                .map(|i| {
+                    let (a, b) = (coords[corners[i]], coords[corners[(i + 1) % corners.len()]]);
+                    a[0] * b[1] - a[1] * b[0]
+                })
+                .sum();
+            if area < 0.0 {
+                corners.reverse();
+            }
+            polygons.push(corners);
+        }
+        // An edge on the outline belongs to one element only.
+        let mut edges: HashMap<(usize, usize), (usize, usize, usize)> = HashMap::new();
+        for corners in &polygons {
+            for i in 0..corners.len() {
+                let (a, b) = (corners[i], corners[(i + 1) % corners.len()]);
+                edges.entry((a.min(b), a.max(b))).or_insert((a, b, 0)).2 += 1;
+            }
+        }
+        for corners in &polygons {
+            let ids: Vec<u32> = corners.iter().map(|&n| point(&mut surface, n)).collect();
+            for k in 1..ids.len().saturating_sub(1) {
+                // The bottom end faces down, the top end up.
+                surface.triangles.push([ids[0], ids[k + 1], ids[k]]);
+                surface
+                    .triangles
+                    .push([ids[0] + 1, ids[k] + 1, ids[k + 1] + 1]);
+            }
+        }
+        let mut outline: Vec<_> = edges.into_values().filter(|e| e.2 == 1).collect();
+        outline.sort_unstable();
+        for (a, b, _) in outline {
+            let (a, b) = (point(&mut surface, a), point(&mut surface, b));
+            surface.triangles.push([a, b, b + 1]);
+            surface.triangles.push([a, b + 1, a + 1]);
+        }
+    }
+    surface
 }
 
 /// The closed surface of solid parts: the corner triangles of their skins, facing out.
@@ -896,6 +1083,78 @@ mod tests {
             steps: vec![step],
             ..FeModel::default()
         }
+    }
+
+    /// The two parts of [`mesh`] in the plane: the paste of two squares, the tool of one.
+    fn plane_mesh() -> FeMesh {
+        let mut mesh = FeMesh::default();
+        let mut node = 0u32;
+        let mut element = 0u32;
+        for (name, x0, squares) in [("Paste", 0.0, 2), ("Tool", 1.5, 1)] {
+            let w = 1.0 / squares as f64;
+            // Two rows of nodes, the squares between them share their edges.
+            let first = node + 1;
+            for row in [0.0, 1.0] {
+                for c in 0..=squares {
+                    node += 1;
+                    mesh.set_node(node, [x0 + w * c as f64, row, 0.0]);
+                }
+            }
+            let up = squares as u32 + 1;
+            let mut elements = Vec::new();
+            for s in 0..squares as u32 {
+                let a = first + s;
+                element += 1;
+                // Clockwise, which the extrusion turns.
+                mesh.add_element(Element {
+                    id: element,
+                    type_name: "CAX4".into(),
+                    shape: ElementShape::Quad4,
+                    nodes: vec![a, a + up, a + up + 1, a + 1],
+                })
+                .unwrap();
+                elements.push(element);
+            }
+            mesh.parts.push(Part {
+                bodies: Vec::new(),
+                name: name.into(),
+                elements,
+            });
+        }
+        mesh
+    }
+
+    #[test]
+    fn a_plane_model_is_a_slab_of_its_parts_extruded() {
+        let mesh = plane_mesh();
+        let mut fe = model(None);
+        fe.properties.space = ModelSpace::Axisymmetric;
+        let lowered = lower(&mesh, &fe, "Test").expect("lowers");
+        let domain = &lowered.model.domain;
+        assert_eq!(domain.space, ir::Space::Axisymmetric);
+        assert_eq!(domain.periodic, [false, false, true]);
+        assert_eq!(
+            (domain.min[0], domain.min[2], domain.max[2]),
+            (0.0, 0.0, 0.25)
+        );
+        assert_eq!(domain.sides[0], Side::Wall(WallLaw::Slip));
+        // The paste, two squares that share an edge, encloses its area times the length.
+        let body = &lowered.model.bodies[0].shape;
+        let (lo, hi) = body.bounds().expect("points");
+        let volume = signed_volume(&body.points, &body.triangles);
+        assert!((volume - (hi[2] - lo[2])).abs() < 1e-9, "{volume}");
+        assert!(lo[2] < -1.0 && hi[2] > 1.25);
+        assert_eq!(body.triangles.len(), 2 * 2 * 2 + 6 * 2);
+        let wall = &lowered.model.walls[0].shape;
+        assert!(signed_volume(&wall.points, &wall.triangles) > 0.0);
+
+        fe.properties.space = ModelSpace::PlaneStress;
+        let refused = lower(&mesh, &fe, "Test").expect_err("plane stress is refused");
+        assert!(
+            refused.message.contains("plane strain"),
+            "{}",
+            refused.message
+        );
     }
 
     #[test]

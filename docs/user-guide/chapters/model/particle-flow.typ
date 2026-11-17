@@ -14,9 +14,9 @@ The step is a step of a normal analysis and takes the model as it is, with the G
 FE Model and Results workspaces:
 
 #fields(
-  [Material], [Every meshed solid part with a section that is not part of a rigid body is
-    filled with particles at the start, two to a cell in each direction, with the material
-    of its section. The mesh only describes the shape: its elements are not computed.],
+  [Material], [Every meshed solid part (in 2D every plane part, see @particle-flow-2d) with
+    a section that is not part of a rigid body is filled with particles at the start, two
+    to a cell in each direction, with the material of its section. The mesh only describes the shape: its elements are not computed.],
   [Walls], [The parts of a rigid body (@rigid-body) are walls: tools, dies, vessels. They
     are solid parts; the material cannot enter them. A wall that the box cuts, such as a
     drum in a thin slice, should reach a few cells beyond the box: otherwise its end faces
@@ -173,6 +173,43 @@ flowing heap, the coarse ones (blue) at its rim, as in experiments with rotating
     with a temperature.],
 )
 
+=== 2D models <particle-flow-2d>
+
+A model in plane strain or an axisymmetric model (@model-properties) flows in the plane:
+the filled parts and the walls are plane parts, meshed with plane elements, and the
+particles move in x and y only. The step computes a slab one cell thick along z that
+repeats, with one layer of particles; it costs a fraction of the same flow in 3D.
+
+#fields(
+  [Plane strain], [A long body across which the material flows, such as a dam, a slot
+    die or a heap along a wall. The masses, the loads of the walls and the energies are per
+    unit length along z.],
+  [Axisymmetric], [A body of revolution about the y axis, x the radius, such as a nozzle,
+    a cup or a pile: every particle stands for the ring it lies on, so the hoop stress
+    holds the material together around the axis and a flow towards the axis narrows as it
+    should. The box starts at the axis, where its side #ui("X min") is the axis itself,
+    frictionless. The masses, the energies and the force of a wall are of the whole ring;
+    of a wall's force only the part along the axis remains, the rest cancels around the
+    ring. Gravity acts along the axis.],
+)
+
+The 2D models are computed on the processor. Against the flow in 3D they agree closely: a
+viscous fluid flows down a pipe as Poiseuille's parabola within 3 %, a cylinder of sand
+collapses to the same heap as a quarter of it computed in 3D (height within 8 %, runout
+within a cell) and a cylinder of water spreads as fast; plane strain is the same as a 3D
+slab periodic in z. A plane stress model takes no Particle Flow step.
+
+As material of a body of revolution flows towards the axis its rings shrink, and since a
+particle keeps the mass of its ring, the particles move apart in the plane: material that
+narrows to a third of its radius covers nine times its area with the same particles. Keep
+a narrowing such as a nozzle within about 1:3 in radius, or the cell small enough that the
+particles of the narrow part stay less than a cell apart; beyond that the material tears
+into separate particles.
+
+#screenshot("particle-flow-2d.png", [An axisymmetric nozzle of a paste printer: a piston
+pushes toothpaste through a cone and an orifice of 3 mm onto a rough plate, coloured by its
+speed. The plane model shows half of the section; the axis is its left edge.])
+
 === Temperature <particle-flow-heat>
 
 With #ui("Temperature") on, every particle carries a temperature. The flow heats the
@@ -224,7 +261,7 @@ the report with the particles, cells and time steps, and the card.])
 
 The run writes results like any other analysis, shown in the Results workspace with the
 legend, the increment bar and the animation. Each particle is a small cube of the particle
-spacing, drawn rounded and without edges; a frame moves the cubes to where the particles are
+spacing (in 2D a square), drawn rounded and without edges; a frame moves the cubes to where the particles are
 (true scale). A particle that
 left the model through an open side is no longer drawn. Each wall is a part of its own,
 drawn as its surface where it is. The fields are:

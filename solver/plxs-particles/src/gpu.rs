@@ -196,6 +196,16 @@ impl Card {
         notes: &mut Vec<String>,
     ) -> Option<Self> {
         let worth = particles.len() >= GPU_FROM;
+        if setup.model.domain.space != plxs_core::particles::Space::Solid {
+            if worth {
+                notes.push(
+                    "Particles computed on the processor: the card does not compute 2D models \
+                     yet"
+                    .into(),
+                );
+            }
+            return None;
+        }
         if particles.iter().any(|p| p.grains[0] > 0.0) {
             if worth {
                 notes.push(

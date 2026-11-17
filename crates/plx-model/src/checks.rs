@@ -1592,10 +1592,14 @@ impl FeModel {
             }
         }
         for (p, part) in mesh.parts.iter().enumerate() {
-            let solid = part.elements.iter().all(|&e| {
-                mesh.element(e)
-                    .is_some_and(|e| e.shape.family() == plx_mesh::ElementFamily::Solid)
-            });
+            // In 2D the plane parts are filled.
+            let family = if self.properties.space.is_2d() {
+                plx_mesh::ElementFamily::Surface
+            } else {
+                plx_mesh::ElementFamily::Solid
+            };
+            let solid = (part.elements.iter())
+                .all(|&e| mesh.element(e).is_some_and(|e| e.shape.family() == family));
             if !solid || part.elements.iter().any(|e| rigid.contains(e)) {
                 continue;
             }

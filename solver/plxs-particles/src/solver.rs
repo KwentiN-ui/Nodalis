@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use plxs_core::particles::{
     BodyHistory, Domain, PARTICLE_FIELDS, ParticleFrame, ParticleHistory, ParticleLaw,
-    ParticleModel, ParticleReport, ParticleResults, RigidMotion, Side, WallHistory, WallLaw,
+    ParticleModel, ParticleReport, ParticleResults, RigidMotion, Side, Space, WallHistory, WallLaw,
     table_value,
 };
 use rayon::prelude::*;
@@ -58,6 +58,8 @@ const WALL_REACH: f64 = 0.2;
 /// How fast a particle's temperature follows the grid's, in units of α / h².
 const SUBCELL_CONDUCTION: f64 = 0.3;
 const VOLUME_RELAX: f64 = 0.05;
+/// The smallest radius, in cells, the ring terms of a body of revolution divide by.
+const RADIUS_FLOOR: f64 = 0.25;
 /// The speed at which fine grains sink through coarse ones, `C d_fine ln(d_coarse/d_fine)`
 /// times the shear rate (Schlick et al. 2015, J. Fluid Mech. 765, 632).
 const SEGREGATION: f64 = 0.26;
@@ -114,6 +116,7 @@ struct Grid {
     /// Nodes per axis.
     n: [usize; 3],
     periodic: [bool; 3],
+    space: Space,
     /// The index of the first and last node on or beyond the box, per axis (sides).
     lo: [usize; 3],
     hi: [usize; 3],
@@ -130,6 +133,29 @@ impl Grid {
 
     fn position(&self, i: [usize; 3]) -> Vec3 {
         std::array::from_fn(|a| self.origin[a] + i[a] as f64 * self.h)
+    }
+
+    /// The depth along z of what a cell at radius `r` (x) stands for: the cell in 3D, a
+    /// unit length in plane strain, the ring in a body of revolution.
+    fn depth(&self, r: f64) -> f64 {
+        match self.space {
+            Space::Solid => self.h,
+            Space::PlaneStrain => 1.0,
+            Space::Axisymmetric => std::f64::consts::TAU * self.radius(r),
+        }
+    }
+
+    /// Whether the grid reaches beyond the axis of a body of revolution.
+    fn mirrors_axis(&self) -> bool {
+        self.space == Space::Axisymmetric
+            && !self.periodic[0]
+            && self.origin[0].abs() > 0.0
+            && (self.origin[0] + self.lo[0] as f64 * self.h).abs() < 1e-9 * self.h
+    }
+
+    /// A radius kept off the axis, where the ring terms divide by it.
+    fn radius(&self, r: f64) -> f64 {
+        r.max(RADIUS_FLOOR * self.h)
     }
 
     /// The first node of the stencil of `x` (unwrapped) and the weights.
@@ -667,6 +693,10 @@ fn run_cpu(
 
         // (1) Particles to grid.
         spread(grid, &particles, dt, &mut nodes);
+        let mirrored = grid.mirrors_axis();
+        if mirrored {
+            fold_axis(grid, &mut nodes);
+        }
         // (2) The grid.
         let pose: Vec<_> = walls.iter().map(|w| w.pose(t + dt, dt)).collect();
         let boxes: Vec<_> = walls
@@ -719,7 +749,7 @@ fn run_cpu(
                             && node.heat_capacity > 0.0
                         {
                             let gap = tw - node.heat / node.heat_capacity;
-                            let flow = heat.wall_transfer * grid.h * grid.h * gap * dt;
+                            let flow = heat.wall_transfer * grid.h * grid.depth(x[0]) * gap * dt;
                             let most = 0.5 * node.heat_capacity * gap.abs();
                             let flow = flow.clamp(-most, most);
                             *q += flow;
@@ -752,6 +782,21 @@ fn run_cpu(
                                 );
                             }
                         }
+                    }
+                    // Nothing crosses the axis of a body of revolution, nor leaves it.
+                    if grid.space == Space::Axisymmetric && x[0] <= 1e-9 * grid.h && after[0] != 0.0
+                    {
+                        let was = after;
+                        after[0] = 0.0;
+                        record(
+                            &mut forces[side_index],
+                            node.mass,
+                            was,
+                            after,
+                            dt,
+                            x,
+                            [0.0; 3],
+                        );
                     }
                     // What the walls took: the kinetic energy they removed, less the work the
                     // forces on the node (stresses, gravity) would have done with the velocity
@@ -800,6 +845,9 @@ fn run_cpu(
         // (2c) The grains of mixtures: segregation and diffusion.
         if mixtures {
             segregate(grid, &nodes, dt, &mut node_fine);
+        }
+        if mirrored {
+            mirror_axis(grid, &mut values, &mut node_dt, &mut node_fine);
         }
         let node_dt = &node_dt;
         let node_fine = &node_fine;
@@ -855,7 +903,19 @@ fn run_cpu(
                     }
                 }
                 let inv = 4.0 / (grid.h * grid.h);
-                let c: Mat3 = b.map(|row| row.map(|x| x * inv));
+                let mut c: Mat3 = b.map(|row| row.map(|x| x * inv));
+                if grid.space != Space::Solid {
+                    // The plane flow: nothing moves or changes along z, but the ring of a
+                    // body of revolution stretches with its radius.
+                    v[2] = 0.0;
+                    for a in 0..3 {
+                        c[2][a] = 0.0;
+                        c[a][2] = 0.0;
+                    }
+                    if grid.space == Space::Axisymmetric {
+                        c[2][2] = v[0] / grid.radius(p.x[0]);
+                    }
+                }
                 let f: Mat3 =
                     std::array::from_fn(|r| std::array::from_fn(|s| IDENTITY[r][s] + dt * c[r][s]));
                 // F-bar: the stress takes the volume ratio averaged over the neighbourhood,
@@ -1012,8 +1072,9 @@ fn run_cpu(
             }
             let n = wall_samples.max(1) as f64;
             for (h, f) in history.walls.iter_mut().zip(&mut wall_force) {
-                h.force.push(scale(f.force, 1.0 / n));
-                h.moment.push(scale(f.moment, 1.0 / n));
+                let (force, moment) = in_plane(grid.space, f);
+                h.force.push(scale(force, 1.0 / n));
+                h.moment.push(scale(moment, 1.0 / n));
                 let done = h.work.last().copied().unwrap_or(0.0) + f.work;
                 h.work.push(done);
                 let given = h.heat.last().copied().unwrap_or(0.0) + f.heat;
@@ -1058,26 +1119,26 @@ fn run_cpu(
 /// `k h` times the smaller filling of the two, so that a node near a free surface, with little
 /// capacity, conducts as little and the explicit step stays stable.
 fn conduct(grid: &Grid, nodes: &[NodeSum], given: &[f64], dt: f64, change: &mut [f64]) {
-    let cell = grid.h * grid.h * grid.h;
     // The temperature and the conductivity times the filling of a node.
-    let state = |n: &NodeSum| {
+    let state = |n: &NodeSum, x: f64| {
         if n.heat_capacity <= 0.0 || n.mass <= 0.0 {
             return None;
         }
-        let filling = (n.space / cell).min(1.0);
+        let filling = (n.space / (grid.h * grid.h * grid.depth(x))).min(1.0);
         Some((n.heat / n.heat_capacity, n.conduction / n.mass * filling))
     };
     change.par_iter_mut().enumerate().for_each(|(at, out)| {
         let node = &nodes[at];
-        let Some((t, k)) = state(node) else {
-            *out = 0.0;
-            return;
-        };
         let i = [
             at % grid.n[0],
             (at / grid.n[0]) % grid.n[1],
             at / (grid.n[0] * grid.n[1]),
         ];
+        let x = grid.position(i)[0];
+        let Some((t, k)) = state(node, x) else {
+            *out = 0.0;
+            return;
+        };
         let mut flow = 0.0;
         for a in 0..3 {
             for step in [-1isize, 1] {
@@ -1087,8 +1148,12 @@ fn conduct(grid: &Grid, nodes: &[NodeSum], given: &[f64], dt: f64, change: &mut 
                 }
                 let mut j = i;
                 j[a] = grid.wrap(a, next);
-                if let Some((tj, kj)) = state(&nodes[grid.index(j)]) {
-                    flow += k.min(kj) * grid.h * (tj - t);
+                if j == i {
+                    continue;
+                }
+                let xj = grid.position(j)[0];
+                if let Some((tj, kj)) = state(&nodes[grid.index(j)], xj) {
+                    flow += k.min(kj) * grid.depth(0.5 * (x + xj)) * (tj - t);
                 }
             }
         }
@@ -1159,6 +1224,9 @@ fn segregate(grid: &Grid, nodes: &[NodeSum], dt: f64, change: &mut [f64]) {
                 }
                 let mut j = i;
                 j[a] = grid.wrap(a, next);
+                if j == i {
+                    continue;
+                }
                 let Some((phj, speed_j, diffusion_j, down_j, mass_j)) =
                     state(&nodes[grid.index(j)])
                 else {
@@ -1177,6 +1245,17 @@ fn segregate(grid: &Grid, nodes: &[NodeSum], dt: f64, change: &mut [f64]) {
         }
         *out = inflow * dt / mass;
     });
+}
+
+/// The force and the moment on a wall that a 2D model has: in the plane, and about z; of a
+/// body of revolution only the force along its axis, the rest cancels around the ring.
+fn in_plane(space: Space, load: &Load) -> (Vec3, Vec3) {
+    let [fx, fy, _] = load.force;
+    match space {
+        Space::Solid => (load.force, load.moment),
+        Space::PlaneStrain => ([fx, fy, 0.0], [0.0, 0.0, load.moment[2]]),
+        Space::Axisymmetric => ([0.0, fy, 0.0], [0.0; 3]),
+    }
 }
 
 /// Adds the force a node exerts on a wall, `m (v_before − v_after) / Δt`, its moment
@@ -1291,6 +1370,13 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
                 let mj = p.mass * p.state.j;
                 let (sinking, diffusion) = grain_motion(p);
                 let stress = p.tau.map(|row| row.map(|t| -p.volume * inv * t));
+                // The hoop stress of a ring pulls it towards the axis.
+                let hoop = if grid.space == Space::Axisymmetric {
+                    -p.volume * p.tau[2][2] / grid.radius(p.x[0])
+                } else {
+                    0.0
+                };
+
                 for (sk, wk) in w[2].iter().enumerate() {
                     for (sj, wj) in w[1].iter().enumerate() {
                         for (si, wi) in w[0].iter().enumerate() {
@@ -1325,6 +1411,8 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
                                 node.momentum[r] += weight * (mv[r] + qd[r]);
                                 node.force[r] += weight * fd[r];
                             }
+                            node.momentum[0] += weight * dt * hoop;
+                            node.force[0] += weight * hoop;
                         }
                     }
                 }
@@ -1381,6 +1469,52 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
     }
 }
 
+/// The nodes beyond the axis of a body of revolution stand for the nodes as far before it,
+/// the material being the same on both sides (the velocity along the radius turned): what
+/// the particles give them goes to those.
+fn fold_axis(grid: &Grid, nodes: &mut [NodeSum]) {
+    let axis = grid.lo[0];
+    for k in 0..grid.n[2] {
+        for j in 0..grid.n[1] {
+            for g in 1..=axis {
+                let ghost = grid.index([axis - g, j, k]);
+                let src = std::mem::take(&mut nodes[ghost]);
+                let dst = &mut nodes[grid.index([axis + g, j, k])];
+                let turn = |v: Vec3| [-v[0], v[1], v[2]];
+                dst.mass += src.mass;
+                dst.volume += src.volume;
+                dst.momentum = add(dst.momentum, turn(src.momentum));
+                dst.force = add(dst.force, turn(src.force));
+                dst.weight = add(dst.weight, turn(src.weight));
+                dst.heat_capacity += src.heat_capacity;
+                dst.heat += src.heat;
+                dst.conduction += src.conduction;
+                dst.space += src.space;
+                dst.mixture += src.mixture;
+                dst.fine += src.fine;
+                dst.sinking += src.sinking;
+                dst.diffusion += src.diffusion;
+            }
+        }
+    }
+}
+
+/// The nodes beyond the axis take the values of their mirror images back.
+fn mirror_axis(grid: &Grid, values: &mut [[f64; 4]], heat: &mut [f64], fine: &mut [f64]) {
+    let axis = grid.lo[0];
+    for k in 0..grid.n[2] {
+        for j in 0..grid.n[1] {
+            for g in 1..=axis {
+                let (ghost, image) = (grid.index([axis - g, j, k]), grid.index([axis + g, j, k]));
+                let v = values[image];
+                values[ghost] = [-v[0], v[1], v[2], v[3]];
+                heat[ghost] = heat[image];
+                fine[ghost] = fine[image];
+            }
+        }
+    }
+}
+
 /// The grid of a domain.
 fn grid_of(domain: &Domain) -> Result<Grid, String> {
     let h = domain.cell;
@@ -1397,7 +1531,14 @@ fn grid_of(domain: &Domain) -> Result<Grid, String> {
             return Err("the box of the particle analysis is empty".into());
         }
         let cells = span / h;
-        if domain.periodic[a] {
+        let slab = a == 2 && domain.space != Space::Solid;
+        if slab && (!domain.periodic[2] || (cells - 1.0).abs() > 1e-6) {
+            return Err(
+                "the box of a 2D particle analysis is one cell thick along z and periodic there"
+                    .into(),
+            );
+        }
+        if domain.periodic[a] && !slab {
             let whole = cells.round();
             if (cells - whole).abs() > 1e-6 * cells || whole < 3.0 {
                 return Err(format!(
@@ -1410,12 +1551,31 @@ fn grid_of(domain: &Domain) -> Result<Grid, String> {
             origin[a] = domain.min[a];
             lo[a] = 0;
             hi[a] = n[a];
+        } else if slab {
+            // One node: the three of every stencil fold onto it and the terms along z
+            // cancel, which leaves the plane flow.
+            n[a] = 1;
+            origin[a] = domain.min[a];
+            lo[a] = 0;
+            hi[a] = n[a];
         } else {
             let cells = cells.ceil() as usize;
             n[a] = cells + 5;
             origin[a] = domain.min[a] - 2.0 * h;
             lo[a] = 2;
             hi[a] = 2 + cells;
+        }
+    }
+    if domain.space == Space::Axisymmetric {
+        if domain.min[0] < -1e-9 * h {
+            return Err(
+                "the box of a body of revolution starts at the axis or beyond it: x, the \
+                 radius, is not below zero"
+                    .into(),
+            );
+        }
+        if domain.min[0] < 1e-9 * h && domain.sides[0] != Side::Wall(WallLaw::Slip) {
+            return Err("the side of the box on the axis of revolution is frictionless".into());
         }
     }
     let count = n[0] as f64 * n[1] as f64 * n[2] as f64;
@@ -1429,6 +1589,7 @@ fn grid_of(domain: &Domain) -> Result<Grid, String> {
         h,
         n,
         periodic: domain.periodic,
+        space: domain.space,
         lo,
         hi,
     })
@@ -1444,9 +1605,12 @@ fn fill(
 ) -> Result<Vec<Particle>, String> {
     let d = &model.domain;
     let s = 0.5 * grid.h;
+    // A 2D slab holds one layer of particles, in its middle.
+    let slab = grid.space != Space::Solid;
+    let step = |a: usize| if slab && a == 2 { grid.h } else { s };
     let counts: [usize; 3] =
-        std::array::from_fn(|a| ((d.max[a] - d.min[a]) / s - 1e-9).ceil().max(0.0) as usize);
-    let at = |a: usize, i: usize| d.min[a] + (i as f64 + 0.5) * s;
+        std::array::from_fn(|a| ((d.max[a] - d.min[a]) / step(a) - 1e-9).ceil().max(0.0) as usize);
+    let at = |a: usize, i: usize| d.min[a] + (i as f64 + 0.5) * step(a);
     let mut taken = vec![false; counts[0] * counts[1] * counts[2]];
     let mut particles = Vec::new();
     let pose: Vec<_> = walls.iter().map(|w| w.pose(0.0, 0.0)).collect();
@@ -1473,14 +1637,14 @@ fn fill(
             let last = (((hi[a] - d.min[a]) / s - 0.5).ceil().max(0.0) as usize + 1).min(counts[a]);
             first..last.max(first)
         };
-        let (rx, ry, rz) = (range(0), range(1), range(2));
+        let (rx, ry) = (range(0), range(1));
+        let rz = if slab { 0..1 } else { range(2) };
         let rows = ParityRows::new(
             &body.shape,
             [at(1, ry.start), at(2, rz.start)],
             s,
             [ry.len(), rz.len()],
         );
-        let volume = s * s * s;
         for k in rz.clone() {
             for j in ry.clone() {
                 for i in rx.clone() {
@@ -1500,6 +1664,7 @@ fn fill(
                         continue;
                     }
                     taken[slot] = true;
+                    let volume = s * s * step(2) * grid.depth(x[0]) / grid.h;
                     particles.push(Particle {
                         id: particles.len() as u32,
                         x,
@@ -1575,6 +1740,7 @@ mod tests {
             h,
             n: [1, 1, count],
             periodic: [true, true, false],
+            space: Space::Solid,
             lo: [0; 3],
             hi: [0, 0, count - 1],
         };

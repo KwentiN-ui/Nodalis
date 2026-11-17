@@ -5,8 +5,11 @@
 //! are nodal fields of their cubes. A particle that left the model shrinks to a point where
 //! it left, without values. The walls are triangles after the particles, a part each, that
 //! move as the walls do, without values. The energies and the loads of the walls are history output.
+//!
+//! In a 2D model (plane strain or axisymmetric) a particle is a square in the x-y plane (a
+//! four-node plane element) and a wall the triangles of its face in the plane.
 
-use plxs_core::particles::{PARTICLE_FIELDS, ParticleFrame, ParticleHistory, ParticleModel};
+use plxs_core::particles::{PARTICLE_FIELDS, ParticleFrame, ParticleHistory, ParticleModel, Space};
 use plxs_core::results::{HistoryBlock, IncrementKind, ResultField, ResultsIncrement};
 use plxs_core::{Model, element::ElementType};
 
@@ -32,6 +35,31 @@ const CORNERS: [[f64; 3]; 8] = [
     [-1.0, 1.0, 1.0],
 ];
 
+/// Corner offsets of a square in the x-y plane, in half edges.
+const SQUARE: [[f64; 3]; 4] = [
+    [-1.0, -1.0, 0.0],
+    [1.0, -1.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [-1.0, 1.0, 0.0],
+];
+
+/// The corners of the element of a particle and its type: a cube in 3D, a square in 2D.
+fn shape(model: &ParticleModel) -> (&'static [[f64; 3]], ElementType) {
+    match model.domain.space {
+        Space::Solid => (&CORNERS, ElementType::C3D8),
+        Space::PlaneStrain => (&SQUARE, ElementType::CPE4),
+        Space::Axisymmetric => (&SQUARE, ElementType::CAX4),
+    }
+}
+
+/// Where a point of the model is shown: in 2D in the plane z = 0.
+fn shown(model: &ParticleModel, p: [f64; 3]) -> [f64; 3] {
+    match model.domain.space {
+        Space::Solid => p,
+        _ => [p[0], p[1], 0.0],
+    }
+}
+
 /// The index of the temperature in [`ParticleFrame::fields`].
 const TEMPERATURE: usize = COMPONENTS.len();
 
@@ -48,10 +76,12 @@ fn body_field() -> usize {
 
 /// The mesh of the particles at the start (`first`, the frame at time 0): a cube per
 /// particle, its edge the particle spacing (half a cell), element `k + 1` with nodes
-/// `8 k + 1` to `8 k + 8`; one section per body, so that the results have a part per
-/// filled part of the model, named like it.
+/// `8 k + 1` to `8 k + 8` (in 2D a square, `4 k + 1` to `4 k + 4`); one section per body,
+/// so that the results have a part per filled part of the model, named like it.
 pub fn particle_mesh(model: &ParticleModel, first: &ParticleFrame) -> Model {
     let half = 0.25 * model.domain.cell;
+    let (corners, kind) = shape(model);
+    let per = corners.len() as u32;
     let mut mesh = Model::default();
     mesh.heading = model.heading.clone();
     // The results make a part of each material: here one named like each body.
@@ -72,20 +102,20 @@ pub fn particle_mesh(model: &ParticleModel, first: &ParticleFrame) -> Model {
     let bodies = first.fields.get(body_field());
     for (k, x) in first.positions.iter().enumerate() {
         let id = first.ids.get(k).copied().unwrap_or(k as u32);
-        let nodes: Vec<u32> = (0..8).map(|c| 8 * id + c + 1).collect();
+        let nodes: Vec<u32> = (0..per).map(|c| per * id + c + 1).collect();
         for (c, &node) in nodes.iter().enumerate() {
-            let p = std::array::from_fn(|a| f64::from(x[a]) + half * CORNERS[c][a]);
-            mesh.nodes.insert(node, p);
+            let p = std::array::from_fn(|a| f64::from(x[a]) + half * corners[c][a]);
+            mesh.nodes.insert(node, shown(model, p));
         }
         let body = bodies.and_then(|b| b.get(k)).map_or(0, |&b| b as usize);
         mesh.elements.push(plxs_core::element::Element {
             id: id + 1,
-            kind: ElementType::C3D8,
+            kind,
             nodes,
             section: Some(body as u32),
         });
     }
-    let mut node = wall_base(first);
+    let mut node = wall_base(model, first);
     let mut element = node;
     for (w, wall) in model.walls.iter().enumerate() {
         mesh.materials.push(plxs_core::material::Material {
@@ -103,9 +133,17 @@ pub fn particle_mesh(model: &ParticleModel, first: &ParticleFrame) -> Model {
         let first_node = node + 1;
         for p in &wall.shape.points {
             node += 1;
-            mesh.nodes.insert(node, *p);
+            mesh.nodes.insert(node, shown(model, *p));
         }
-        for t in &wall.shape.triangles {
+        // In 2D the wall is extruded along z: its face in the plane is the end at the
+        // lowest z.
+        let bottom = (wall.shape.points.iter()).fold(f64::INFINITY, |z, p| z.min(p[2]));
+        let in_plane = |t: &[u32; 3]| {
+            model.domain.space == Space::Solid
+                || t.iter()
+                    .all(|&i| wall.shape.points[i as usize][2] == bottom)
+        };
+        for t in wall.shape.triangles.iter().filter(|t| in_plane(t)) {
             element += 1;
             mesh.elements.push(plxs_core::element::Element {
                 id: element,
@@ -120,15 +158,16 @@ pub fn particle_mesh(model: &ParticleModel, first: &ParticleFrame) -> Model {
 }
 
 /// The first node and element number of the walls, less one: after every particle.
-fn wall_base(first: &ParticleFrame) -> u32 {
+fn wall_base(model: &ParticleModel, first: &ParticleFrame) -> u32 {
     let ids = (0..first.positions.len()).map(|k| first.ids.get(k).copied().unwrap_or(k as u32));
-    ids.max().map_or(0, |id| 8 * (id + 1))
+    let per = shape(model).0.len() as u32;
+    ids.max().map_or(0, |id| per * (id + 1))
 }
 
 /// The number of the nodes of the walls of [`particle_mesh`], in order.
 fn wall_nodes(model: &ParticleModel, first: &ParticleFrame) -> Vec<u32> {
     let count: usize = model.walls.iter().map(|w| w.shape.points.len()).sum();
-    let base = wall_base(first);
+    let base = wall_base(model, first);
     (1..=count as u32).map(|k| base + k).collect()
 }
 
@@ -137,6 +176,8 @@ fn wall_nodes(model: &ParticleModel, first: &ParticleFrame) -> Vec<u32> {
 #[derive(Clone, Debug)]
 pub struct FrameTrack {
     half: f64,
+    /// The corners of the element of a particle.
+    corners: &'static [[f64; 3]],
     ids: Vec<u32>,
     start: Vec<[f32; 3]>,
     last: Vec<[f32; 3]>,
@@ -162,6 +203,7 @@ impl FrameTrack {
             .collect();
         Self {
             half: 0.25 * model.domain.cell,
+            corners: shape(model).0,
             index: ids.iter().enumerate().map(|(k, &id)| (id, k)).collect(),
             ids,
             start: first.positions.clone(),
@@ -199,8 +241,9 @@ impl FrameTrack {
                 self.last[k] = *x;
             }
         }
+        let per = self.corners.len() as u32;
         let nodes: Vec<u32> = (self.ids.iter())
-            .flat_map(|&id| (0..8).map(move |c| 8 * id + c + 1))
+            .flat_map(|&id| (0..per).map(move |c| per * id + c + 1))
             .chain(self.walls.iter().copied())
             .collect();
         let size = nodes.len();
@@ -214,7 +257,7 @@ impl FrameTrack {
         for (k, seen) in at.iter().enumerate() {
             let moved: [f64; 3] =
                 std::array::from_fn(|a| f64::from(self.last[k][a]) - f64::from(self.start[k][a]));
-            for corner in CORNERS {
+            for corner in self.corners {
                 for a in 0..3 {
                     // A particle that left shrinks to the point it was last seen at.
                     let shrink = if seen.is_some() {
@@ -563,6 +606,46 @@ mod tests {
             .unwrap();
         assert_eq!(fine.components, vec!["FINE".to_string()]);
         assert!(fine.values[0][..8].iter().all(|&v| v == 0.75));
+    }
+
+    /// In 2D a particle is a square in the plane, a wall the end of its extrusion there.
+    #[test]
+    fn a_plane_model_has_squares_and_the_walls_in_the_plane() {
+        let mut model = model();
+        model.domain.space = Space::Axisymmetric;
+        model.walls.push(plxs_core::particles::RigidWall {
+            name: "Piston".into(),
+            shape: plxs_core::particles::TriangleSurface {
+                points: vec![
+                    [0.0, 1.0, -1.0],
+                    [1.0, 1.0, -1.0],
+                    [0.0, 2.0, -1.0],
+                    [0.0, 1.0, 2.0],
+                    [1.0, 1.0, 2.0],
+                    [0.0, 2.0, 2.0],
+                ],
+                triangles: vec![[0, 2, 1], [3, 4, 5]],
+            },
+            law: Default::default(),
+            motion: plxs_core::particles::RigidMotion {
+                velocity: [0.0, -0.5, 0.0],
+                ..Default::default()
+            },
+            temperature: None,
+        });
+        let first = frame(0.0, vec![0, 1], vec![[0.1, 0.1, 0.2], [0.3, 0.1, 0.2]]);
+        let mesh = particle_mesh(&model, &first);
+        assert_eq!(mesh.elements.len(), 3);
+        assert_eq!(mesh.elements[0].kind, ElementType::CAX4);
+        assert_eq!(mesh.elements[1].nodes, vec![5, 6, 7, 8]);
+        // The wall's triangle at its lowest z, its nodes after the squares' 8, in the plane.
+        assert_eq!(mesh.elements[2].nodes, vec![9, 11, 10]);
+        assert!(mesh.nodes.coordinates.iter().all(|c| c[2] == 0.0));
+        let mut track = FrameTrack::new(&model, &first);
+        let increment = track.increment(&frame(1.0, vec![0, 1], first.positions.clone()), 1, 2);
+        let disp = &increment.fields[0].values;
+        assert_eq!(disp[1].len(), 8 + 6);
+        assert!(disp[1][8..].iter().all(|d| (d + 0.5).abs() < 1e-9), "{disp:?}");
     }
 
     #[test]

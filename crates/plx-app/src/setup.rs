@@ -6930,8 +6930,12 @@ fn step_kinds(fe: &FeModel) -> Vec<(&'static str, StepKind, Vec<FieldOutput>)> {
         ),
     ];
     if fe.properties.space.is_2d() {
-        kinds.retain(|(_, kind, _)| {
-            !matches!(kind, StepKind::Sensitivity(_) | StepKind::ParticleFlow(_))
+        // Particles flow in plane strain and about an axis, not in a thin plate.
+        let plate = fe.properties.space == plx_model::ModelSpace::PlaneStress;
+        kinds.retain(|(_, kind, _)| match kind {
+            StepKind::Sensitivity(_) => false,
+            StepKind::ParticleFlow(_) => !plate,
+            _ => true,
         });
     }
     kinds
@@ -7032,7 +7036,9 @@ fn step_form(
         StepKind::UncoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::Sensitivity(settings) => sensitivity_form(ui, settings, units),
         StepKind::Visco(settings) => visco_form(ui, settings, units),
-        StepKind::ParticleFlow(settings) => particle_flow_form(ui, settings, units),
+        StepKind::ParticleFlow(settings) => {
+            particle_flow_form(ui, settings, units, fe.properties.space)
+        }
     }
     // Hyperelastic materials switch large deformations on in the steps that deform them.
     if !step.kind.nlgeom()
@@ -8156,7 +8162,9 @@ fn particle_flow_form(
     ui: &mut Ui,
     settings: &mut plx_model::particle_flow::ParticleFlowStep,
     units: UnitSystem,
+    space: plx_model::ModelSpace,
 ) {
+    use plx_model::ModelSpace;
     use plx_model::particle_flow::{BoxSide, ParticleBox, SIDE_NAMES};
     ui.label("Duration");
     ui.add(numeric::physical(
@@ -8237,7 +8245,21 @@ fn particle_flow_form(
             }
         }
     }
-    for (side, name) in settings.sides.iter_mut().zip(SIDE_NAMES) {
+    for (s, (side, name)) in settings.sides.iter_mut().zip(SIDE_NAMES).enumerate() {
+        // A 2D model is a slab along z that repeats; a body of revolution has its axis at
+        // X min.
+        if space.is_2d() && s >= 4 {
+            continue;
+        }
+        if space == ModelSpace::Axisymmetric && s == 0 {
+            ui.label(format!("Side {name}")).on_hover_text(
+                "Where the box reaches the axis of revolution (x = 0) the side is \
+                 frictionless, the axis itself.",
+            );
+            ui.weak("Axis where it reaches x = 0");
+            ui.end_row();
+            continue;
+        }
         ui.label(format!("Side {name}"));
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt(("particle box side", name))

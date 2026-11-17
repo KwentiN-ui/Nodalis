@@ -64,6 +64,7 @@ fn plane(
             cell,
             sides: [Side::Wall(WallLaw::Slip); 6],
             periodic: [false, false, true],
+            ..Default::default()
         },
         gravity: [0.0, -G, 0.0],
         control: ParticleControl::default(),
@@ -274,6 +275,7 @@ fn slump(per_height: f64) {
                 Side::Wall(WallLaw::Slip),
             ],
             periodic: [false; 3],
+            ..Default::default()
         },
         gravity: [0.0, -G, 0.0],
         heat: None,
@@ -437,6 +439,7 @@ fn pipe(per_radius: f64) {
             cell,
             sides: [Side::Wall(WallLaw::Stick); 6],
             periodic: [false, false, true],
+            ..Default::default()
         },
         gravity: [0.0, 0.0, g],
         heat: None,
@@ -659,6 +662,7 @@ fn couette(per_gap: f64) {
             cell,
             sides: [Side::Wall(WallLaw::Stick); 6],
             periodic: [false, false, true],
+            ..Default::default()
         },
         gravity: [0.0; 3],
         heat: None,
@@ -773,6 +777,7 @@ fn conduction_between_blocks() {
             cell,
             sides: [Side::Wall(WallLaw::Slip); 6],
             periodic: [false, true, true],
+            ..Default::default()
         },
         gravity: [0.0; 3],
         heat: Some(Heat { wall_transfer: 0.0 }),

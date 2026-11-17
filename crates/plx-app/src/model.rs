@@ -848,15 +848,23 @@ impl Model {
         for (index, part) in mesh.parts.iter().enumerate() {
             let mut types: BTreeMap<&str, usize> = BTreeMap::new();
             let mut nodes = std::collections::HashSet::new();
-            let mut cubes = true;
+            // Cubes, or in 2D squares, of the same shape.
+            let mut cubes = None;
             for element in part.elements.iter().filter_map(|&id| mesh.element(id)) {
                 *types.entry(&element.type_name).or_default() += 1;
                 nodes.extend(element.nodes.iter().copied());
-                cubes &= element.shape == ElementShape::Hex8;
+                let shape = matches!(element.shape, ElementShape::Hex8 | ElementShape::Quad4)
+                    .then_some(element.shape);
+                cubes = match cubes {
+                    None => Some(shape),
+                    Some(s) if s == shape => Some(s),
+                    Some(_) => Some(None),
+                };
             }
-            let loose = cubes
+            let corners = cubes.flatten().map_or(0, |s| s.node_count());
+            let loose = corners > 0
                 && part.elements.len() >= LOOSE_CUBES
-                && nodes.len() == 8 * part.elements.len();
+                && nodes.len() == corners * part.elements.len();
             if loose && let Some(skin) = skins.get_mut(index) {
                 // Every edge of every cube would be a feature edge, and every face a
                 // surface of its own.

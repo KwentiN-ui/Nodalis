@@ -65,6 +65,7 @@ fn mixer() -> ParticleModel {
                 Side::Open,
             ],
             periodic: [false; 3],
+            ..Default::default()
         },
         gravity: [0.0, 0.0, -9.81],
         control: ParticleControl {

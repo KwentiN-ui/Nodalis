@@ -92,6 +92,7 @@ fn plane(
             cell,
             sides: [Side::Wall(WallLaw::Slip); 6],
             periodic: [false, false, true],
+            ..Default::default()
         },
         gravity: [0.0, -G, 0.0],
         control: ParticleControl::default(),
