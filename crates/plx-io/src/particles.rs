@@ -577,6 +577,13 @@ pub fn particle_material(material: &Material) -> Result<ParticleMaterial, String
             material.name
         )
     })?;
+    if !(elastic.young > 0.0 && elastic.poisson > -1.0 && elastic.poisson < 0.5) {
+        return Err(format!(
+            "Material {}: Young's modulus must be above zero and Poisson's ratio below 0.5 \
+             (E = {}, nu = {}); take 0.49 for a nearly incompressible material.",
+            material.name, elastic.young, elastic.poisson
+        ));
+    }
     if let Some(problem) = material.flow.as_ref().and_then(Flow::problem) {
         return Err(format!("Material {}: {problem}", material.name));
     }
@@ -955,6 +962,15 @@ mod tests {
         // Without outputs nothing is asked for.
         let bare = lower(&mesh, &model(None), "Test").expect("lowers");
         assert_eq!(bare.history, HistoryRequest::default());
+    }
+
+    #[test]
+    fn an_incompressible_poisson_ratio_is_refused() {
+        let mesh = mesh();
+        let mut fe = model(None);
+        fe.materials[0].elastic.as_mut().unwrap().poisson = 0.5;
+        let error = lower(&mesh, &fe, "Test").expect_err("refused");
+        assert!(error.message.contains("below 0.5"), "{error}");
     }
 
     #[test]

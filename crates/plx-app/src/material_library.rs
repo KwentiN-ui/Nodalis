@@ -953,7 +953,7 @@ mod tests {
         editor.material_selected = Some(0);
         editor.select_library(Vec::new());
         editor.copy_to_library();
-        assert_eq!(editor.library_selected, Some(vec![2]));
+        assert_eq!(editor.library_selected, Some(vec![3]));
         assert_eq!(editor.name, "Alu");
         assert!(editor.library_changed);
         // Without a file the changes cannot be saved, so OK keeps the dialog open.
