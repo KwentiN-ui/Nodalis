@@ -259,6 +259,11 @@ comes holds the animation until it is, so that no frame is skipped for reading. 
 von Mises stresses through the 400 frames below, the view waited for the file 556 times in
 30 seconds before and once now, and shows about twice as many frames per second.
 
+Drawing an increment also happens in the background: the surfaces of the parts are built on
+another thread while the status bar shows #ui("Drawing results …"), and the window keeps
+answering meanwhile. For a mixer with 185,000 particles and 1.5 million nodes, changing the
+increment held the window for 360 ms before and for 125 ms now; the other 350 ms run beside it.
+
 Results of a dynamic step with 400 frames and 44,000 nodes (a 2.8 GB results file)
 open in a tenth of a second with less than 30 MB of memory, where reading them as a whole took
 12 seconds and 6.8 GB. Animating their 400 frames through six fields one after the other

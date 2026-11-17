@@ -49,6 +49,7 @@ mod origin;
 pub mod overview;
 mod parameter;
 mod part_filter;
+pub mod particle_flow;
 mod plot;
 mod primitive;
 mod properties;
@@ -235,8 +236,13 @@ use serde::{Deserialize, Serialize};
 /// geometry ids ([`Geometry::ids`]), so that an analysis follows a part renamed where its
 /// link comes from, and marks linked shapes and sets; older projects are refused. Format 45
 /// keeps the content of files, such as results, in a binary part behind the text of the
-/// project file instead of base64 in the text; older projects are refused.
-pub const PROJECT_FORMAT: u32 = 45;
+/// project file instead of base64 in the text; older projects are refused. Format 46 adds
+/// the Particle Flow step and the flow of materials ([`particle_flow`]); format 45 reads as
+/// it is. Format 47 adds the heat of the Particle Flow step and the temperature table of the
+/// flow of materials; older formats read as they are. Format 48 adds the granular flow;
+/// older formats read as they are. Format 49 adds grain mixtures of two sizes to the
+/// granular flow; older formats read as they are.
+pub const PROJECT_FORMAT: u32 = 49;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -689,6 +695,15 @@ pub struct Material {
     /// Creep by Norton's law (`*CREEP`), which acts in Visco steps.
     #[serde(default)]
     pub creep: Option<Creep>,
+    /// How the material flows in a Particle Flow step; without, it is elastic there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<particle_flow::Flow>,
+    /// How the flow depends on the temperature in a Particle Flow step with heat: pairs of
+    /// temperature and the factor on the yield stress and the consistency (or viscosity),
+    /// interpolated linearly and held beyond the ends. Empty: the same at every
+    /// temperature.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flow_temperature: Vec<[f64; 2]>,
 }
 
 impl Material {
@@ -910,6 +925,9 @@ pub enum StepKind {
     /// How strongly mass, stiffness or an eigenfrequency react to moving the surface nodes
     /// of a design region (`*SENSITIVITY`), from the state of the step before it.
     Sensitivity(SensitivityStep),
+    /// The material flows as particles through a background grid (material point method),
+    /// with rigid bodies as the walls it meets.
+    ParticleFlow(particle_flow::ParticleFlowStep),
 }
 
 impl StepKind {
@@ -923,6 +941,7 @@ impl StepKind {
             | StepKind::UncoupledTempDisp(settings) => settings.increments.period(),
             StepKind::Visco(settings) => settings.increments.period(),
             StepKind::Dynamic(settings) => settings.duration,
+            StepKind::ParticleFlow(settings) => settings.duration,
             _ => 1.0,
         }
     }
@@ -934,6 +953,7 @@ impl StepKind {
             StepKind::CoupledTempDisp(settings) => settings.increments.nlgeom,
             StepKind::Visco(settings) => settings.increments.nlgeom,
             StepKind::Dynamic(settings) => settings.large_deformations,
+            StepKind::ParticleFlow(_) => true,
             _ => false,
         }
     }
@@ -1038,6 +1058,12 @@ impl StepKind {
             false
         } else if let BoundaryKind::Submodel { .. } = kind {
             matches!(self, StepKind::Static(_))
+        } else if let StepKind::ParticleFlow(_) = self {
+            // The reference points of rigid bodies: moved, and the walls' temperature.
+            matches!(
+                kind,
+                BoundaryKind::Displacement(_) | BoundaryKind::Temperature(_)
+            )
         } else if kind.is_thermal() {
             self.is_thermal()
         } else {
@@ -1052,14 +1078,16 @@ impl StepKind {
     }
 
     /// Whether a history output of this kind prints anything in the step: only the time
-    /// integration of a Dynamic step computes the energies.
+    /// integration of a Dynamic step and the particle flow compute the energies; the particle
+    /// flow writes no element or contact values.
     pub fn supports_history_output(&self, kind: &crate::HistoryKind) -> bool {
-        if !self.prints_history() {
-            false
-        } else if *kind == crate::HistoryKind::Energies {
-            matches!(self, StepKind::Dynamic(_))
-        } else {
-            true
+        match (self, kind) {
+            _ if !self.prints_history() => false,
+            (StepKind::ParticleFlow(_), crate::HistoryKind::Node { .. }) => true,
+            (StepKind::ParticleFlow(_), crate::HistoryKind::Energies) => true,
+            (StepKind::ParticleFlow(_), _) => false,
+            (_, crate::HistoryKind::Energies) => matches!(self, StepKind::Dynamic(_)),
+            _ => true,
         }
     }
 

@@ -337,6 +337,7 @@ pub fn step_line(step: &plx_model::Step) -> String {
         K::Visco(_) => "visco".into(),
         K::SteadyStateDynamics(_) => "steady state dynamics".into(),
         K::Sensitivity(_) => "sensitivity".into(),
+        K::ParticleFlow(settings) => format!("particle flow, cell {:.3e}", settings.cell_size),
     };
     let nlgeom = if step.kind.nlgeom() { ", NLGEOM" } else { "" };
     format!("{} ({kind}{nlgeom})", step.name)

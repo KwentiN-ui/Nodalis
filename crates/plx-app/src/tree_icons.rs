@@ -177,6 +177,7 @@ pub enum StepGlyph {
     SteadyStateDynamics,
     Sensitivity,
     Visco,
+    ParticleFlow,
 }
 
 impl StepGlyph {
@@ -197,6 +198,7 @@ impl StepGlyph {
             StepGlyph::SteadyStateDynamics => "Steady State Dynamics",
             StepGlyph::Sensitivity => "Sensitivity",
             StepGlyph::Visco => "Visco",
+            StepGlyph::ParticleFlow => "Particle Flow",
         }
     }
 }
@@ -220,6 +222,7 @@ impl From<&StepKind> for StepGlyph {
             StepKind::SteadyStateDynamics(_) => StepGlyph::SteadyStateDynamics,
             StepKind::Sensitivity(_) => StepGlyph::Sensitivity,
             StepKind::Visco(_) => StepGlyph::Visco,
+            StepKind::ParticleFlow(_) => StepGlyph::ParticleFlow,
         }
     }
 }
@@ -410,6 +413,26 @@ fn paint_step_type(painter: &Painter, min: Pos2, glyph: StepGlyph) {
                 let t = (x - 2.0) / 13.0;
                 12.5 - 4.0 * (1.0 - (-8.0 * t).exp()) - 6.0 * t
             });
+        }
+        // Particles pouring out of a channel.
+        StepGlyph::ParticleFlow => {
+            line(&[(1.0, 3.0), (9.0, 3.0)], INK);
+            line(&[(1.0, 9.0), (9.0, 9.0)], INK);
+            let dots = [
+                (2.5, 5.0),
+                (5.0, 5.0),
+                (7.5, 5.0),
+                (2.5, 7.2),
+                (5.0, 7.2),
+                (7.5, 7.2),
+                (10.5, 6.8),
+                (12.5, 9.5),
+                (13.5, 12.8),
+                (11.0, 11.5),
+            ];
+            for (x, y) in dots {
+                painter.circle_filled(at(x, y), 1.1, crate::style::adapt(ORANGE));
+            }
         }
     }
 }

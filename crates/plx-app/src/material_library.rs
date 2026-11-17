@@ -731,6 +731,59 @@ fn material_models(
             ],
         ));
     }
+    if let Some(flow) = material.flow {
+        let stress = units.unit(Quantity::Pressure);
+        let rows = match flow {
+            plx_model::particle_flow::Flow::HerschelBulkley {
+                yield_stress,
+                consistency,
+                exponent,
+            } => vec![
+                ("Law", "Herschel-Bulkley".to_string()),
+                ("Yield stress", with_unit(yield_stress, Quantity::Pressure)),
+                (
+                    "Consistency K",
+                    format!("{} {stress} s^n", format_value(consistency)),
+                ),
+                ("Flow index n", format_value(exponent)),
+            ],
+            plx_model::particle_flow::Flow::Newtonian { viscosity } => vec![
+                ("Law", "Newtonian".to_string()),
+                (
+                    "Viscosity",
+                    format!("{} {stress} s", format_value(viscosity)),
+                ),
+            ],
+            plx_model::particle_flow::Flow::Granular {
+                friction_angle,
+                limit_angle,
+                grain,
+                inertial,
+                fine_grain,
+                fine_fraction,
+            } => {
+                let mut rows = vec![
+                    ("Law", "Granular (mu(I))".to_string()),
+                    (
+                        "Friction angle",
+                        format!("{} deg", format_value(friction_angle)),
+                    ),
+                    ("Limit angle", format!("{} deg", format_value(limit_angle))),
+                    ("Grain diameter", with_unit(grain, Quantity::Length)),
+                    ("I0", format_value(inertial)),
+                ];
+                if fine_grain > 0.0 {
+                    rows.push((
+                        "Fine grain diameter",
+                        with_unit(fine_grain, Quantity::Length),
+                    ));
+                    rows.push(("Fine fraction", format_value(fine_fraction)));
+                }
+                rows
+            }
+        };
+        models.push(("Flow", rows));
+    }
     if let Some(expansion) = material.expansion {
         models.push((
             "Thermal Expansion",
@@ -900,7 +953,7 @@ mod tests {
         editor.material_selected = Some(0);
         editor.select_library(Vec::new());
         editor.copy_to_library();
-        assert_eq!(editor.library_selected, Some(vec![2]));
+        assert_eq!(editor.library_selected, Some(vec![3]));
         assert_eq!(editor.name, "Alu");
         assert!(editor.library_changed);
         // Without a file the changes cannot be saved, so OK keeps the dialog open.

@@ -23,6 +23,7 @@ pub use plxs_session::JobProfile;
 pub mod awake;
 pub mod live;
 pub mod monitor;
+pub mod particles;
 pub mod process;
 
 /// The one thread pool every built-in run computes on, sized `threads` (0: all cores). Runs

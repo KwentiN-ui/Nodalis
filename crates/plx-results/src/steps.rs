@@ -26,6 +26,7 @@ pub enum StepCategory {
     ComplexFrequency,
     Buckle,
     Sensitivity,
+    ParticleFlow,
     /// Results that do not tell.
     Unknown,
 }
@@ -59,6 +60,7 @@ impl StepCategory {
             K::Visco(_) => Self::Visco,
             K::SteadyStateDynamics(_) => Self::SteadyStateDynamics,
             K::Sensitivity(_) => Self::Sensitivity,
+            K::ParticleFlow(_) => Self::ParticleFlow,
         }
     }
 
@@ -88,6 +90,7 @@ impl StepCategory {
             Self::ComplexFrequency => "Complex frequency",
             Self::Buckle => "Buckle",
             Self::Sensitivity => "Sensitivity",
+            Self::ParticleFlow => "Particle flow",
             Self::Unknown => "Step",
         }
     }
@@ -95,7 +98,7 @@ impl StepCategory {
     pub fn family(self) -> StepFamily {
         match self {
             Self::Static | Self::Visco => StepFamily::Mechanical,
-            Self::Dynamic | Self::SteadyStateDynamics => StepFamily::Dynamic,
+            Self::Dynamic | Self::SteadyStateDynamics | Self::ParticleFlow => StepFamily::Dynamic,
             Self::HeatTransfer | Self::CoupledTempDisp | Self::UncoupledTempDisp => {
                 StepFamily::Thermal
             }
@@ -114,6 +117,7 @@ impl StepCategory {
                 | Self::CoupledTempDisp
                 | Self::UncoupledTempDisp
                 | Self::Dynamic
+                | Self::ParticleFlow
                 | Self::Unknown
         )
     }
@@ -150,6 +154,7 @@ impl StepRecord {
                 Some(s.increments.duration)
             }
             K::Dynamic(s) => Some(s.duration),
+            K::ParticleFlow(s) => Some(s.duration),
             K::Visco(s) => Some(s.increments.duration),
             _ => None,
         };

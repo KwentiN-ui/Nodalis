@@ -3922,6 +3922,15 @@ fn step_block<'f>(
         StepKind::Visco(settings) => visco_step(settings, nlgeom),
         StepKind::SteadyStateDynamics(settings) => steady_state_dynamics_step(settings),
         StepKind::Sensitivity(settings) => sensitivity_step(sets, &step.name, settings)?,
+        // The particle solver takes the model as it is (`crate::particles`), not as input.
+        StepKind::ParticleFlow(_) => {
+            return Err(WriteError::Unsupported {
+                item: step.name.clone(),
+                reason: "a Particle Flow step is solved by the particle solver, not as an \
+                         input file"
+                    .into(),
+            });
+        }
     };
     // Hyperelastic materials deform with large strains: steps that deform them take NLGEOM.
     if model.step_nlgeom(&step.kind)

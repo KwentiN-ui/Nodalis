@@ -1,5 +1,6 @@
 use glam::DVec3;
 use plx_mesh::{PartSkin, SkinFace, face_normal};
+use rayon::prelude::*;
 
 use crate::contour::NO_VALUE;
 
@@ -252,14 +253,10 @@ pub(crate) fn smooth_vertex_normals(
     smooth_angle_deg: f64,
 ) -> Vec<[f32; 3]> {
     let cos_limit = smooth_angle_deg.to_radians().cos();
-    let face_normals: Vec<DVec3> = skin
-        .faces
-        .iter()
+    let face_normals: Vec<DVec3> = (skin.faces.par_iter())
         .map(|f| DVec3::from(face_normal(coords, &f.corners)))
         .collect();
-    let weights: Vec<f64> = skin
-        .faces
-        .iter()
+    let weights: Vec<f64> = (skin.faces.par_iter())
         .map(|f| polygon_area(coords, &f.corners))
         .collect();
     // The faces at each node, as one list in node order: those of node n start at
@@ -281,21 +278,25 @@ pub(crate) fn smooth_vertex_normals(
             filled[node - offset] += 1;
         }
     }
-    let mut normals = Vec::with_capacity(faces_at_node.len());
-    for (face, &own) in skin.faces.iter().zip(&face_normals) {
-        for node in nodes(face).map(|n| n - offset) {
-            let sum: DVec3 = faces_at_node[start[node]..start[node + 1]]
-                .iter()
-                .filter(|&&other| {
-                    skin.faces[other].region == face.region
-                        && own.dot(face_normals[other]) >= cos_limit
-                })
-                .map(|&other| face_normals[other] * weights[other])
-                .sum();
-            normals.push(sum.try_normalize().unwrap_or(own).as_vec3().to_array());
-        }
-    }
-    normals
+    // The faces on threads; the normals stay in face order.
+    let (start, faces_at_node, face_normals, weights) =
+        (&start, &faces_at_node, &face_normals, &weights);
+    (skin.faces.par_iter().zip(face_normals))
+        .with_min_len(1024)
+        .flat_map_iter(|(face, &own)| {
+            (nodes(face).map(move |n| n - offset)).map(move |node| {
+                let sum: DVec3 = faces_at_node[start[node]..start[node + 1]]
+                    .iter()
+                    .filter(|&&other| {
+                        skin.faces[other].region == face.region
+                            && own.dot(face_normals[other]) >= cos_limit
+                    })
+                    .map(|&other| face_normals[other] * weights[other])
+                    .sum();
+                sum.try_normalize().unwrap_or(own).as_vec3().to_array()
+            })
+        })
+        .collect()
 }
 
 fn nodes(face: &SkinFace) -> impl Iterator<Item = usize> + '_ {

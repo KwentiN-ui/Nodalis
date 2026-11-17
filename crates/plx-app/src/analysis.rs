@@ -435,6 +435,16 @@ impl Analysis {
         let heading = format!("Nodalis: {}", model.file_name());
         let mut fe = active.fe.clone().into_owned();
         let job_name = job_name(name);
+        // A Particle Flow step is computed by the particle solver, from the model as it is.
+        if plx_io::particles::particle_step(&fe).is_some() {
+            return Self::start_particles(
+                solver,
+                (&active.mesh, &fe),
+                (check_model, name, &job_name, &heading),
+                work_dir,
+                prints,
+            );
+        }
         stage_global_results(&mut fe, work_dir, &job_name)?;
         let initial = stage_linked_results(&fe, work_dir, &job_name)?;
         // The sets of the analyses that continue from its states go into the input file too.
@@ -498,6 +508,62 @@ impl Analysis {
             status: JobStatus::Running,
             origins,
             step_lines,
+        })
+    }
+
+    /// [`Analysis::start`] of a model with a Particle Flow step: the particle model is made
+    /// of it and solved by the particle solver; the model check only makes it.
+    fn start_particles(
+        solver: &Solver,
+        (mesh, fe): (&plx_mesh::FeMesh, &plx_model::FeModel),
+        (check_model, name, job_name, heading): (bool, &str, &str, &str),
+        work_dir: &std::path::Path,
+        prints: plx_io::fingerprint::Fingerprints,
+    ) -> Result<Self, StartError> {
+        let lowered = plx_io::particles::lower(mesh, fe, heading).map_err(|e| StartError {
+            message: format!("Analysis not set up: {e}"),
+            item: e.item,
+        })?;
+        let step = &fe.steps[lowered.step];
+        let mut record = plx_results::steps::StepRecord::new(&step.name, &step.kind, vec![1]);
+        record.nlgeom = true;
+        let mut output = Vec::new();
+        let text = plx_solve::particles::describe(&lowered.model);
+        let prepared = plx_solve::particles::PreparedParticles {
+            model: lowered.model,
+            text,
+            warnings: lowered.warnings,
+            steps: vec![record],
+            history: lowered.history,
+        };
+        let job = if check_model {
+            output.push(format!(
+                "{name} model check started in {}",
+                work_dir.display()
+            ));
+            plx_solve::Run::check_particles(work_dir, job_name, prepared)
+        } else {
+            output.push(format!("{name} started in {}", work_dir.display()));
+            plx_solve::Run::start_particles(solver.threads, work_dir, job_name, prepared)
+        }
+        .map_err(|e| format!("Solver not started: {e}"))?;
+        job.keep_results_in_memory(false);
+        Ok(Self {
+            output,
+            dropped: 0,
+            filter: String::new(),
+            job,
+            name: name.to_owned(),
+            input: prints.input,
+            steps: prints.steps,
+            started: Instant::now(),
+            finished: None,
+            status: JobStatus::Running,
+            origins: Default::default(),
+            step_lines: (fe.steps.iter())
+                .filter(|s| s.active)
+                .map(crate::solver_profile::step_line)
+                .collect(),
         })
     }
 

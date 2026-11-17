@@ -12,6 +12,7 @@ pub mod harmonic;
 pub mod history_output;
 pub mod hot_spot;
 pub mod names;
+pub mod particles;
 pub mod path;
 pub mod principal;
 pub mod saved_view;

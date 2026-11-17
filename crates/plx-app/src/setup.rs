@@ -4414,6 +4414,9 @@ impl Editor {
                 if let Some(problem) = material.creep.as_ref().and_then(|c| c.problem()) {
                     return Err(problem.into());
                 }
+                if let Some(problem) = material.flow.as_ref().and_then(|f| f.problem()) {
+                    return Err(problem);
+                }
                 if let Some(hyper) = &material.hyperelastic {
                     if let Some(problem) = hyper.problem() {
                         return Err(problem);
@@ -4513,6 +4516,11 @@ impl Editor {
                     }
                 }
                 StepKind::ComplexFrequency(settings) => {
+                    if let Some(problem) = settings.problem() {
+                        return Err(problem);
+                    }
+                }
+                StepKind::ParticleFlow(settings) => {
                     if let Some(problem) = settings.problem() {
                         return Err(problem);
                     }
@@ -5392,8 +5400,8 @@ fn history_output_form(
             ui.label("");
             ui.weak(
                 "Sums over the whole model at every time\n\
-                 step of a Dynamic step; other steps do\n\
-                 not print them. Internal + kinetic energy\n\
+                 step of a Dynamic or Particle Flow step;\n\
+                 other steps do not print them. Internal + kinetic energy\n\
                  + dissipation = external work + energy at\n\
                  the start, up to the numerical damping.",
             );
@@ -5723,6 +5731,7 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     elastic_rows(ui, material, units);
     plastic_rows(ui, material, units);
     creep_rows(ui, material, units);
+    flow_rows(ui, material, units);
     for (label, value, quantity, field) in [
         (
             "Thermal conductivity",
@@ -6532,6 +6541,235 @@ fn creep_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     material.creep = creeps.then_some(creep);
 }
 
+/// How the material flows in a Particle Flow step: Herschel-Bulkley, Newtonian or granular.
+fn flow_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
+    use plx_model::particle_flow::Flow;
+    let mut flows = material.flow.is_some();
+    ui.checkbox(&mut flows, "Flow (Particle Flow)")
+        .on_hover_text(
+            "How the material flows in a Particle Flow step, beyond its elastic constants; \
+         without, it stays elastic there. Other steps ignore it.",
+        );
+    ui.end_row();
+    let mut flow = material.flow.unwrap_or(Flow::KINDS[0]);
+    ui.label("    Law");
+    ui.add_enabled_ui(flows, |ui| {
+        egui::ComboBox::from_id_salt("material flow law")
+            .selected_text(flow.name())
+            .show_ui(ui, |ui| {
+                for kind in Flow::KINDS {
+                    let current = std::mem::discriminant(&flow) == std::mem::discriminant(&kind);
+                    if ui.selectable_label(current, kind.name()).clicked() && !current {
+                        flow = kind;
+                    }
+                }
+            });
+    });
+    ui.end_row();
+    // Consistency and viscosity are a stress times a time (to a power); all unit systems
+    // measure time in seconds, so only the stress is converted.
+    let pascal = units.si_factor(Quantity::Pressure).unwrap_or(1.0);
+    let stress = units.unit(Quantity::Pressure);
+    match &mut flow {
+        Flow::HerschelBulkley {
+            yield_stress,
+            consistency,
+            exponent,
+        } => {
+            ui.label("    Yield stress").on_hover_text(
+                "The shear stress below which the material does not flow (Bingham's yield \
+                 stress in shear).",
+            );
+            ui.add_enabled(
+                flows,
+                numeric::physical(yield_stress, units, Quantity::Pressure),
+            );
+            ui.end_row();
+            ui.label("    Consistency K");
+            ui.horizontal(|ui| {
+                ui.add_enabled(flows, stress_time(consistency, pascal));
+                ui.label(format!("{stress} s^n"));
+            });
+            ui.end_row();
+            ui.label("    Flow index n").on_hover_text(
+                "Below 1 the material thins with the shear rate, 1 is Bingham's material.",
+            );
+            ui.add_enabled(flows, numeric::drag_value(exponent).speed(0.01));
+            ui.end_row();
+            ui.label("");
+            ui.weak("Shear stress in flow = yield stress + K * shear rate^n.");
+            ui.end_row();
+        }
+        Flow::Newtonian { viscosity } => {
+            ui.label("    Viscosity");
+            ui.horizontal(|ui| {
+                ui.add_enabled(flows, stress_time(viscosity, pascal));
+                ui.label(format!("{stress} s"));
+            });
+            ui.end_row();
+            ui.label("");
+            ui.weak("Compressed by the bulk modulus of the elastic constants, no tension.");
+            ui.end_row();
+        }
+        Flow::Granular {
+            friction_angle,
+            limit_angle,
+            grain,
+            inertial,
+            fine_grain,
+            fine_fraction,
+        } => {
+            ui.label("    Friction angle").on_hover_text(
+                "The angle of internal friction at rest, about the angle of repose: the \
+                 material flows where the shear stress exceeds tan(angle) times the pressure.",
+            );
+            ui.horizontal(|ui| {
+                ui.add_enabled(flows, numeric::drag_value(friction_angle).speed(0.1));
+                ui.label("deg");
+            });
+            ui.end_row();
+            ui.label("    Limit angle").on_hover_text(
+                "The friction angle the material tends to in fast flow (large inertial \
+                 number I). Equal to the friction angle, the friction does not depend on the \
+                 speed (Drucker-Prager).",
+            );
+            ui.horizontal(|ui| {
+                ui.add_enabled(flows, numeric::drag_value(limit_angle).speed(0.1));
+                ui.label("deg");
+            });
+            ui.end_row();
+            ui.label("    Grain diameter").on_hover_text(
+                "The mean grain diameter, for the inertial number I; of a mixture the \
+                 diameter of the coarse grains.",
+            );
+            ui.add_enabled(flows, numeric::physical(grain, units, Quantity::Length));
+            ui.end_row();
+            let mut mixture = *fine_grain > 0.0;
+            ui.label("    Two grain sizes").on_hover_text(
+                "A mixture of coarse and fine grains: where it flows the fine grains sink \
+                 through the coarse ones and the coarse rise (segregation), and both mix by \
+                 diffusion. The results show the fine fraction (FINE).",
+            );
+            if ui
+                .add_enabled(flows, egui::Checkbox::without_text(&mut mixture))
+                .changed()
+            {
+                *fine_grain = if mixture { 0.5 * *grain } else { 0.0 };
+                if mixture && *fine_fraction == 0.0 {
+                    *fine_fraction = 0.5;
+                }
+            }
+            ui.end_row();
+            if mixture {
+                ui.label("        Fine grain diameter");
+                ui.add_enabled(
+                    flows,
+                    numeric::physical(fine_grain, units, Quantity::Length),
+                );
+                ui.end_row();
+                ui.label("        Fine fraction").on_hover_text(
+                    "The volume fraction of the fine grains at the start, 0 to 1. Parts of \
+                     different materials with the same grains but other fractions start \
+                     sorted.",
+                );
+                ui.add_enabled(
+                    flows,
+                    numeric::drag_value(fine_fraction)
+                        .speed(0.01)
+                        .range(0.0..=1.0),
+                );
+                ui.end_row();
+            }
+            ui.label("    I0").on_hover_text(
+                "The inertial number at which the friction is halfway between the two angles \
+                 (about 0.2 to 0.3 for sand and glass beads).",
+            );
+            ui.add_enabled(flows, numeric::drag_value(inertial).speed(0.01));
+            ui.end_row();
+            ui.label("");
+            ui.weak(
+                "Shear stress in flow = mu(I) * pressure, I = shear rate * grain diameter * \
+                 sqrt(density / pressure). No tension.",
+            );
+            ui.end_row();
+        }
+    }
+    material.flow = flows.then_some(flow);
+    if flows && !matches!(flow, Flow::Granular { .. }) {
+        flow_temperature_rows(ui, material, units);
+    }
+}
+
+/// The table of the flow over the temperature: rows of temperature and the factor on the
+/// yield stress and the consistency or viscosity, for Particle Flow steps with heat.
+fn flow_temperature_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
+    ui.label("    Temperature table").on_hover_text(
+        "Scales the yield stress and the consistency (or viscosity) by the factor at the \
+         temperature of the material, interpolated between the rows and held beyond them. It \
+         acts in Particle Flow steps that follow the temperature; empty, the flow is the same \
+         at every temperature.",
+    );
+    ui.vertical(|ui| {
+        let unit = units.unit(Quantity::Temperature);
+        let table = &mut material.flow_temperature;
+        let mut remove = None;
+        if !table.is_empty() {
+            egui::Grid::new("flow temperature points")
+                .num_columns(3)
+                .striped(true)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.strong(format!("Temperature [{unit}]"));
+                    ui.strong("Factor");
+                    ui.label("");
+                    ui.end_row();
+                    for (i, [temperature, factor]) in table.iter_mut().enumerate() {
+                        ui.add(numeric::without_unit(
+                            temperature,
+                            units,
+                            Quantity::Temperature,
+                        ));
+                        ui.add(
+                            numeric::drag_value(factor)
+                                .speed(0.01)
+                                .range(0.0..=f64::MAX),
+                        );
+                        if ui.button("Remove").clicked() {
+                            remove = Some(i);
+                        }
+                        ui.end_row();
+                    }
+                });
+        }
+        if let Some(i) = remove {
+            table.remove(i);
+        }
+        if ui.button("Add row").clicked() {
+            // Ten degrees warmer than the last row, as soft.
+            let next = match table.last() {
+                Some(&[temperature, factor]) => [temperature + 10.0, factor],
+                None => [20.0, 1.0],
+            };
+            table.push(next);
+        }
+    });
+    ui.end_row();
+}
+
+/// The field of a stored value in Pa s (to a power), shown in the stress unit of `unit`
+/// pascal.
+fn stress_time(value: &mut f64, unit: f64) -> egui::DragValue<'_> {
+    egui::DragValue::from_get_set(move |shown| {
+        if let Some(shown) = shown {
+            *value = shown * unit;
+        }
+        *value / unit
+    })
+    .custom_parser(numeric::evaluate)
+    .custom_formatter(|v, _| numeric::format_physical(v))
+    .speed(0.0)
+}
+
 /// The field of Norton's coefficient A, stored for stresses in Pa and shown for stresses
 /// in the units of `units`: the strain rate A * stress^n stays the same, so A scales with
 /// the n-th power of the unit of stress. All unit systems measure time in seconds.
@@ -6598,11 +6836,13 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
         .collect();
 }
 
-/// A new Dynamic step prints the energies of the model: the output of the model that
-/// prints them, or a new one.
+/// A new Dynamic or Particle Flow step prints the energies of the model: the output of the
+/// model that prints them, or a new one. The user can delete it before the solve.
 fn print_energies(fe: &mut FeModel, s: usize) {
-    if !matches!(fe.steps[s].kind, StepKind::Dynamic(_))
-        || (fe.step_history_outputs(s).iter()).any(|o| o.kind == HistoryKind::Energies)
+    if !matches!(
+        fe.steps[s].kind,
+        StepKind::Dynamic(_) | StepKind::ParticleFlow(_)
+    ) || (fe.step_history_outputs(s).iter()).any(|o| o.kind == HistoryKind::Energies)
     {
         return;
     }
@@ -6683,9 +6923,20 @@ fn step_kinds(fe: &FeModel) -> Vec<(&'static str, StepKind, Vec<FieldOutput>)> {
             StepKind::Sensitivity(SensitivityStep::default()),
             FieldOutput::sensitivity_defaults(),
         ),
+        (
+            PARTICLE_FLOW_LABEL,
+            StepKind::ParticleFlow(Default::default()),
+            Vec::new(),
+        ),
     ];
     if fe.properties.space.is_2d() {
-        kinds.retain(|(_, kind, _)| !matches!(kind, StepKind::Sensitivity(_)));
+        // Particles flow in plane strain and about an axis, not in a thin plate.
+        let plate = fe.properties.space == plx_model::ModelSpace::PlaneStress;
+        kinds.retain(|(_, kind, _)| match kind {
+            StepKind::Sensitivity(_) => false,
+            StepKind::ParticleFlow(_) => !plate,
+            _ => true,
+        });
     }
     kinds
 }
@@ -6701,6 +6952,7 @@ const COMPLEX_FREQUENCY_LABEL: &str = "Complex Frequency (rotating, Coriolis)";
 const BUCKLE_LABEL: &str = "Buckle";
 const SENSITIVITY_LABEL: &str = "Sensitivity (shape)";
 const VISCO_LABEL: &str = "Visco (creep)";
+const PARTICLE_FLOW_LABEL: &str = "Particle Flow (pastes, fluids)";
 
 fn step_kind_label(kind: &StepKind) -> &'static str {
     match kind {
@@ -6715,6 +6967,7 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
         StepKind::UncoupledTempDisp(_) => UNCOUPLED_LABEL,
         StepKind::Sensitivity(_) => SENSITIVITY_LABEL,
         StepKind::Visco(_) => VISCO_LABEL,
+        StepKind::ParticleFlow(_) => PARTICLE_FLOW_LABEL,
     }
 }
 
@@ -6783,6 +7036,9 @@ fn step_form(
         StepKind::UncoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::Sensitivity(settings) => sensitivity_form(ui, settings, units),
         StepKind::Visco(settings) => visco_form(ui, settings, units),
+        StepKind::ParticleFlow(settings) => {
+            particle_flow_form(ui, settings, units, fe.properties.space)
+        }
     }
     // Hyperelastic materials switch large deformations on in the steps that deform them.
     if !step.kind.nlgeom()
@@ -7900,6 +8156,167 @@ fn validate_frequency_step(settings: &FrequencyStep) -> Result<(), String> {
 
 /// The buckle step view: perturbation, solver, number of buckling factors and
 /// accuracy.
+/// The settings of a Particle Flow step: time and frames, the resolution, the slowed
+/// waves, and the box with its sides. What fills it and what it meets comes from the model.
+fn particle_flow_form(
+    ui: &mut Ui,
+    settings: &mut plx_model::particle_flow::ParticleFlowStep,
+    units: UnitSystem,
+    space: plx_model::ModelSpace,
+) {
+    use plx_model::ModelSpace;
+    use plx_model::particle_flow::{BoxSide, ParticleBox, SIDE_NAMES};
+    ui.label("Duration");
+    ui.add(numeric::physical(
+        &mut settings.duration,
+        units,
+        Quantity::Time,
+    ));
+    ui.end_row();
+    ui.label("Frames").on_hover_text(
+        "Result frames kept over the duration, evenly spaced; the last one at the end.",
+    );
+    ui.add(numeric::count(&mut settings.frames).range(1..=10_000));
+    ui.end_row();
+    ui.label("Cell size").on_hover_text(
+        "The size of a cell of the background grid. The particles start two to a cell in \
+         each direction. Like the element size of a mesh it decides accuracy and computing \
+         time: a gap needs eight cells or more across.",
+    );
+    ui.add(numeric::physical(
+        &mut settings.cell_size,
+        units,
+        Quantity::Length,
+    ));
+    ui.end_row();
+    ui.label("Wave speed").on_hover_text(
+        "Slows the elastic waves of the material to this speed by a smaller bulk modulus, so \
+         that the time step grows, like mass scaling. Keep it ten times the fastest speed of \
+         the material or more; the solver reports the ratio. Off: the material's own speed.",
+    );
+    let mut slowed = settings.wave_speed.is_some();
+    let mut speed = settings.wave_speed.unwrap_or(20.0);
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut slowed, "");
+        ui.add_enabled(
+            slowed,
+            numeric::physical(&mut speed, units, Quantity::Velocity),
+        );
+    });
+    ui.end_row();
+    settings.wave_speed = slowed.then_some(speed);
+    ui.label("Box").on_hover_text(
+        "The space the material moves in; material that leaves it is gone. Around the \
+         model: the bounding box of all parts, enlarged by the margin.",
+    );
+    let mut fixed = matches!(settings.domain, ParticleBox::Fixed { .. });
+    ui.horizontal(|ui| {
+        ui.radio_value(&mut fixed, false, "Around the model");
+        ui.radio_value(&mut fixed, true, "Fixed");
+    });
+    ui.end_row();
+    match (fixed, &mut settings.domain) {
+        (false, ParticleBox::Fixed { .. }) => {
+            settings.domain = ParticleBox::Around { margin: 0.01 };
+        }
+        (true, ParticleBox::Around { .. }) => {
+            settings.domain = ParticleBox::Fixed {
+                min: [-0.1; 3],
+                max: [0.1; 3],
+            };
+        }
+        _ => {}
+    }
+    match &mut settings.domain {
+        ParticleBox::Around { margin } => {
+            ui.label("Margin");
+            ui.add(numeric::physical(margin, units, Quantity::Length));
+            ui.end_row();
+        }
+        ParticleBox::Fixed { min, max } => {
+            for (label, corner) in [("Minimum", min), ("Maximum", max)] {
+                ui.label(label);
+                ui.horizontal(|ui| {
+                    for value in corner.iter_mut() {
+                        ui.add(numeric::physical(value, units, Quantity::Length));
+                    }
+                });
+                ui.end_row();
+            }
+        }
+    }
+    for (s, (side, name)) in settings.sides.iter_mut().zip(SIDE_NAMES).enumerate() {
+        // A 2D model is a slab along z that repeats; a body of revolution has its axis at
+        // X min.
+        if space.is_2d() && s >= 4 {
+            continue;
+        }
+        if space == ModelSpace::Axisymmetric && s == 0 {
+            ui.label(format!("Side {name}")).on_hover_text(
+                "Where the box reaches the axis of revolution (x = 0) the side is \
+                 frictionless, the axis itself.",
+            );
+            ui.weak("Axis where it reaches x = 0");
+            ui.end_row();
+            continue;
+        }
+        ui.label(format!("Side {name}"));
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt(("particle box side", name))
+                .selected_text(side.name())
+                .show_ui(ui, |ui| {
+                    for kind in BoxSide::KINDS {
+                        let current = std::mem::discriminant(side) == std::mem::discriminant(&kind);
+                        if ui.selectable_label(current, kind.name()).clicked() && !current {
+                            *side = kind;
+                        }
+                    }
+                });
+            if let BoxSide::Frictional { mu } = side {
+                ui.label("Friction");
+                ui.add(numeric::drag_value(mu).speed(0.01).range(0.0..=10.0));
+            }
+        });
+        ui.end_row();
+    }
+    ui.label("");
+    ui.checkbox(&mut settings.smooth_volume, "Smooth the volume change")
+        .on_hover_text(
+            "Averages the volume change over the cells (F-bar): against locking of nearly \
+             incompressible material and noise of the pressure.",
+        );
+    ui.end_row();
+    ui.label("");
+    ui.checkbox(&mut settings.heat, "Temperature")
+        .on_hover_text(
+            "Follows the temperature of the material: its own flow and friction at the walls heat \
+         it, it conducts the heat, and it exchanges heat with walls of a given temperature. \
+         The materials need conductivity and specific heat, the filled parts a temperature \
+         initial condition; a temperature table of the flow makes the material softer or \
+         stiffer.",
+        );
+    ui.end_row();
+    if settings.heat {
+        ui.label("Wall heat transfer").on_hover_text(
+            "The heat transfer coefficient between the material and the walls whose rigid body \
+             has a temperature boundary condition at its reference point.",
+        );
+        ui.add(numeric::physical(
+            &mut settings.wall_transfer,
+            units,
+            Quantity::HeatTransferCoefficient,
+        ));
+        ui.end_row();
+    }
+    ui.label("");
+    ui.weak(
+        "Solid parts with a section are filled with particles of their material, rigid \
+         bodies are walls, contact regions between them give the wall friction (none: the \
+         material sticks), gravity loads the gravity of the parts they select.",
+    );
+    ui.end_row();
+}
+
 fn buckle_form(ui: &mut Ui, settings: &mut BuckleStep) {
     ui.label("Number of buckling factors");
     ui.add(numeric::drag_value(&mut settings.num_factors).range(1..=10_000));

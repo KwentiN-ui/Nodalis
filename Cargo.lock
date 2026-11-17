@@ -3554,6 +3554,7 @@ dependencies = [
  "plxs-core",
  "plxs-explicit",
  "plxs-linalg",
+ "plxs-particles",
  "plxs-session",
  "png",
  "rfd",
@@ -3633,6 +3634,7 @@ dependencies = [
  "plx-model",
  "plxs-session",
  "pollster 1.0.1",
+ "rayon",
  "wgpu",
 ]
 
@@ -3658,6 +3660,8 @@ dependencies = [
  "plx-results",
  "plxs-core",
  "plxs-input",
+ "plxs-output",
+ "plxs-particles",
  "plxs-procedures",
  "plxs-session",
  "rayon",
@@ -3786,6 +3790,18 @@ dependencies = [
  "rayon",
  "serde",
  "zstd",
+]
+
+[[package]]
+name = "plxs-particles"
+version = "0.5.1"
+dependencies = [
+ "bytemuck",
+ "plxs-core",
+ "plxs-gpu",
+ "plxs-linalg",
+ "plxs-materials",
+ "rayon",
 ]
 
 [[package]]

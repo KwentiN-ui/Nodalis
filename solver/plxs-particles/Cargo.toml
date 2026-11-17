@@ -1,0 +1,27 @@
+[package]
+name = "plxs-particles"
+description = "Nodalis solver: particle analyses by the material point method (MLS-MPM) on the processor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+plxs-core.workspace = true
+plxs-materials.workspace = true
+rayon.workspace = true
+# The time steps on the graphics card (feature `gpu`); the mode of the card from the
+# multigrid's setting.
+plxs-gpu = { workspace = true, optional = true }
+plxs-linalg = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The mode of the card for the comparison with the processor.
+plxs-linalg.workspace = true
+
+[features]
+gpu = ["dep:plxs-gpu", "dep:plxs-linalg", "dep:bytemuck"]
+
+[lints]
+workspace = true

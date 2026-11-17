@@ -21,7 +21,9 @@ When results are opened, Nodalis shows the Results workspace with the last incre
   it. Components of vectors and tensors are named by their directions: `UX`, `UY`, `UZ` of
   `DISP`, `SXX` to `SXZ` of `STRESS`, `RFX` of reaction forces. Nodalis adds the displacement
   magnitude `ALL`, `MISES`, `TRESCA`, the principal stresses and the signed maximum absolute
-  principal stress (@component-names).
+  principal stress (@component-names). The field `PART` is added to every result: it colours
+  each part in its own colour and the legend names the parts, which tells apart for example the
+  water and the dam of a Particle Flow step (@results-part).
 / History Outputs: values from the `.dat` file and history outputs you create (@history-outputs).
 / Hot Spot Stresses, Paths, Plane Results: evaluations described in the following sections.
 
@@ -183,6 +185,15 @@ factor. Results of other programs, which do not know the steps of the FE model, 
 by number (`Step 1`). Labels mark the node with
 the maximum (and optionally the minimum) value. Legend, info block and labels can be dragged.
 Which of them appear is set under #menu("Edit", "Settings ...", "Post-processing").
+
+=== Parts <results-part>
+
+The field `PART` shows every part in its own strong colour, ten colours in turn, and the
+legend has a box with the name of each part instead of the colour bands. It has no minimum and
+maximum labels. The parts of a Particle Flow step are the filled parts of the model, named like
+them, and the walls of its rigid bodies.
+
+#screenshot("results-part.png", [Field `PART` of a dam of sand breached by the water behind it])
 
 == Arrows <arrows>
 

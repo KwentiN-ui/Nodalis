@@ -392,7 +392,7 @@ A deactivated field output is left out of the input file.
 #note[Field outputs of a step are what the solver computes. The field outputs on the #ui("Results")
 tab derive new fields from opened results instead (@derived-fields).]
 
-=== History outputs
+=== History outputs <history-output-step>
 
 History outputs write values of a region to the `.dat` file in every increment (`*NODE PRINT`,
 `*EL PRINT`, `*CONTACT PRINT`). Create them with #ui("History Output") on the #ui("Steps") tab, in the
@@ -401,7 +401,7 @@ active step. Hovering over a variable shows what it is.
 #fields(
   [Type], [#ui("Node Output") (region of nodes), #ui("Element Output") (parts, element set or
     selection), #ui("Contact Output") (a contact pair or a compression only support) or #ui("Energies") (the whole model,
-    Dynamic steps only, see @dynamic-step).],
+    Dynamic and Particle Flow steps only, see @dynamic-step and @particle-flow).],
   [Variables], [Node: `RF U V NT RFL`. Element: `S E ME PEEQ HFL ENER ELSE ELKE EVOL EBHE`.
     Contact: `CDIS CSTR CELS CNUM CF`. Energies: `ALLIE ALLKE ALLWK ALLVD`.],
   [Totals], [#ui("Yes") adds the sum over the region, #ui("Only") writes only the sum.],
