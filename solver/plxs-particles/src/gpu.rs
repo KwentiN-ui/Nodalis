@@ -1102,7 +1102,7 @@ impl Card {
                 wall_samples = 0;
             }
             if ctl.reason & FRAME != 0 {
-                on_frame(frame(t, &self.read_particles()?));
+                on_frame(frame(t, &self.read_particles()?, setup.grid));
                 next_frame += 1;
             }
             if ctl.reason & EMPTY != 0 {

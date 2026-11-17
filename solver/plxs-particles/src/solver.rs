@@ -509,7 +509,7 @@ pub fn solve_streaming(
     let initial_count = particles.len();
     #[cfg(feature = "gpu")]
     let card = gpu::Card::open_for(&setup, &particles, &mut notes);
-    on_frame(frame(0.0, &particles));
+    on_frame(frame(0.0, &particles, &grid));
     #[cfg(feature = "gpu")]
     let on_card = card.is_some();
     #[cfg(not(feature = "gpu"))]
@@ -1093,7 +1093,7 @@ fn run_cpu(
             wall_samples = 0;
         }
         if t >= target * (1.0 - 1e-12) {
-            on_frame(frame(t, &particles));
+            on_frame(frame(t, &particles, grid));
             next_frame += 1;
         }
         if last_report.elapsed().as_secs_f64() > 0.2 {
@@ -1781,7 +1781,7 @@ fn place(
 }
 
 /// A frame of the particles.
-fn frame(time: f64, particles: &[Particle]) -> ParticleFrame {
+fn frame(time: f64, particles: &[Particle], grid: &Grid) -> ParticleFrame {
     let mut fields = vec![Vec::with_capacity(particles.len()); PARTICLE_FIELDS.len()];
     for p in particles {
         let j = p.state.j.max(1e-300);
@@ -1808,7 +1808,14 @@ fn frame(time: f64, particles: &[Particle]) -> ParticleFrame {
         positions: particles.iter().map(|p| p.x.map(|x| x as f32)).collect(),
         velocities: particles.iter().map(|p| p.v.map(|x| x as f32)).collect(),
         fields,
-        shares: if particles.iter().any(|p| p.share < 1.0) {
+        shares: if grid.space != Space::Solid {
+            // In 2D the area in the plane: it grows where material of a body of revolution
+            // nears the axis, until the particle splits.
+            let s = 0.5 * grid.h;
+            (particles.iter())
+                .map(|p| (p.volume * p.state.j / (grid.depth(p.x[0]) * s * s)) as f32)
+                .collect()
+        } else if particles.iter().any(|p| p.share < 1.0) {
             particles.iter().map(|p| p.share).collect()
         } else {
             Vec::new()

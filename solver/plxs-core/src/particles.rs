@@ -502,9 +502,10 @@ pub struct ParticleFrame {
     pub velocities: Vec<[f32; 3]>,
     /// One value per particle for each of [`PARTICLE_FIELDS`].
     pub fields: Vec<Vec<f32>>,
-    /// The part of the particle it was made as that each particle still is, once a
-    /// particle split (a 2D model splits particles that spread in the plane, the halves
-    /// numbered after all before); empty while none did.
+    /// The size of each particle against the particle spacing: in a 2D model its area in
+    /// the plane over the spacing squared (it grows where material of a body of revolution
+    /// nears the axis, and a particle whose area doubled splits in two halves, numbered
+    /// after all before), in 3D the part of the particle it was made as; empty: all 1.
     #[serde(default)]
     pub shares: Vec<f32>,
 }

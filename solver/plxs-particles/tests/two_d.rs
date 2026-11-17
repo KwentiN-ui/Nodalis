@@ -337,3 +337,64 @@ fn water_in_a_cup_of_revolution_weighs_the_whole_cylinder() {
     eprintln!("floor {force:.3} N, weight {weight:.3} N");
     assert!((force / weight - 1.0).abs() < 0.02, "{force} {weight}");
 }
+
+/// A ring of fluid that flows to the axis of revolution: its particles spread in the plane
+/// (a ring nearer the axis has a larger section) and split, so that the material stays
+/// whole, every particle at most a cell from the next; the mass stays.
+#[test]
+fn a_ring_flowing_to_the_axis_splits_its_particles_and_stays_whole() {
+    let cell = 0.005;
+    let mut m = model(
+        Space::Axisymmetric,
+        [0.15, 0.04],
+        cell,
+        fluid(2.0, 2e5),
+        ([0.09, 0.0], [0.13, 0.03]),
+    );
+    m.gravity = [0.0; 3];
+    m.bodies[0].velocity = [-0.6, 0.0, 0.0];
+    m.control.end_time = 0.15;
+    m.control.frames = 3;
+    let results = solve(&m);
+    let first = &results.frames[0];
+    let last = results.frames.last().unwrap();
+    let mass = &results.history.mass;
+    eprintln!(
+        "{} particles at the start, {} at the end; mass {:.6e} to {:.6e}",
+        first.ids.len(),
+        last.ids.len(),
+        mass[0],
+        mass[mass.len() - 1]
+    );
+    assert!(last.ids.len() > first.ids.len() * 3 / 2, "no split");
+    assert!((mass[mass.len() - 1] / mass[0] - 1.0).abs() < 1e-9);
+    // Unique numbers, and the share of each particle.
+    let mut ids = last.ids.clone();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), last.ids.len());
+    assert_eq!(last.shares.len(), last.ids.len());
+    // The material reached the axis and holds together: near the axis, where it spread
+    // most, every cell holds a particle (without splitting every other column is empty).
+    let inner = last
+        .positions
+        .iter()
+        .map(|p| p[0])
+        .fold(f32::INFINITY, f32::min);
+    eprintln!("inner edge {inner}");
+    assert!(f64::from(inner) < 0.02, "inner edge {inner}");
+    let at = |p: &[f32; 3]| {
+        (
+            (f64::from(p[0]) / cell) as i64,
+            (f64::from(p[1]) / cell) as i64,
+        )
+    };
+    let taken: std::collections::HashSet<(i64, i64)> = last.positions.iter().map(at).collect();
+    let near: Vec<(i64, i64)> = (1..6).flat_map(|i| (0..6).map(move |j| (i, j))).collect();
+    let filled = near.iter().filter(|c| taken.contains(c)).count();
+    eprintln!(
+        "{filled} of {} cells near the axis hold particles",
+        near.len()
+    );
+    assert_eq!(filled, near.len());
+}

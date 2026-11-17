@@ -248,8 +248,9 @@ impl FrameTrack {
         }
     }
 
-    /// Half the edge of the element of particle `j` of `frame`: smaller for the halves of
-    /// split particles, by the area (in 2D) or volume they keep.
+    /// Half the edge of the element of particle `j` of `frame`, by its size: in 2D its area
+    /// in the plane (which grows near the axis of a body of revolution and halves when it
+    /// splits), in 3D the volume of the particle it was made as that it keeps.
     fn size(&self, frame: &ParticleFrame, j: usize) -> f64 {
         let share = frame.shares.get(j).map_or(1.0, |&s| f64::from(s));
         let root = if self.corners.len() == SQUARE.len() {
@@ -293,7 +294,6 @@ impl FrameTrack {
     /// Gives an increment written before particles were made the nodes of those: shrunk to
     /// a point where they were made, without values.
     pub fn complete(&self, increment: &mut ResultsIncrement) {
-        let per = self.corners.len() as u32;
         for field in &mut increment.fields {
             let known: std::collections::HashSet<u32> = (field.nodes.iter())
                 .copied()
@@ -316,7 +316,6 @@ impl FrameTrack {
                 }
             }
         }
-        let _ = per;
     }
 
     /// The increment of a frame, numbered `increment` in step `step`: the displacements,
@@ -354,6 +353,7 @@ impl FrameTrack {
                 self.last[k] = *x;
             }
         }
+        let per = self.corners.len() as u32;
         let nodes: Vec<u32> = (self.firsts.iter())
             .flat_map(|&first| (1..=per).map(move |c| first + c))
             .chain(self.walls.iter().copied())
@@ -689,6 +689,43 @@ mod tests {
 
     /// A grain mixture writes its fine fraction as a field of its own; other materials
     /// do not.
+    /// A particle that splits: the half that stays shrinks, the new half gets an element
+    /// after the walls, at its size where it was made, and the frames before it have it
+    /// shrunk to a point there, without values.
+    #[test]
+    fn the_halves_of_a_split_particle_are_smaller_cubes_from_their_split_on() {
+        let model = model();
+        let first = frame(0.0, vec![0], vec![[0.0; 3]]);
+        let mut mesh = particle_mesh(&model, &first);
+        let mut track = FrameTrack::new(&model, &first);
+        let mut before = track.increment(&first, 1, 1);
+        let mut split = frame(1.0, vec![0, 1], vec![[-0.1, 0.0, 0.0], [0.1, 0.0, 0.0]]);
+        split.shares = vec![0.5, 0.5];
+        let after = track.increment(&split, 1, 2);
+        assert!(track.has_born());
+        track.born_mesh(&model, &mut mesh);
+        assert_eq!(mesh.elements.len(), 2);
+        // The new element at its size: a cube of half the volume where it was made.
+        let half = 0.1 * 0.5f64.cbrt();
+        let born = &mesh.elements[1];
+        let corner = mesh.nodes.coordinates[mesh.nodes.index(born.nodes[0]).unwrap() as usize];
+        assert!((corner[0] - (0.1 - half)).abs() < 1e-6, "{corner:?}");
+        // The half that stayed shrinks in place of its cube's half edge 0.1.
+        let disp = &after.fields[0].values;
+        assert!(
+            (disp[0][0] - (-0.1 - (half - 0.1))).abs() < 1e-6,
+            "{}",
+            disp[0][0]
+        );
+        assert_eq!(after.fields[0].nodes.len(), 16);
+        // The frame before gets the new half's nodes: shrunk to a point, without values.
+        assert_eq!(before.fields[0].nodes.len(), 8);
+        track.complete(&mut before);
+        assert_eq!(before.fields[0].nodes, after.fields[0].nodes);
+        assert!((before.fields[0].values[0][8] - half).abs() < 1e-6);
+        assert!(before.fields[1].values[0][8].is_nan());
+    }
+
     #[test]
     fn a_grain_mixture_has_the_fine_fraction() {
         let mut model = model();

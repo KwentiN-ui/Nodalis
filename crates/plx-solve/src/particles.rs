@@ -326,9 +326,28 @@ impl Run {
                     step: 1,
                     converged: true,
                 });
-                let Some(mesh) = mesh else {
+                let Some(mut mesh) = mesh else {
                     return fail("the particle solver wrote no frame".into());
                 };
+                // Particles made during the run (halves of split ones) join the mesh, and the
+                // frames before them get them, shrunk to a point.
+                if let Some(track) = frames.as_ref().filter(|t| t.has_born()) {
+                    track.born_mesh(&model, &mut mesh);
+                    let completed = (|| -> std::io::Result<plxs_output::spool::Spool> {
+                        let path = spool_file.with_extension("spool2");
+                        let mut again = plxs_output::spool::Spool::create(&path)?;
+                        for i in 0..spool.len() {
+                            let mut increment = spool.read(i)?;
+                            track.complete(&mut increment);
+                            again.push(increment)?;
+                        }
+                        Ok(again)
+                    })();
+                    match completed {
+                        Ok(again) => spool = again,
+                        Err(e) => return fail(format!("results not spooled: {e}")),
+                    }
+                }
                 let solved = plxs_core::Results {
                     history: history_blocks(&results.history, &request, 1),
                     ..Default::default()
