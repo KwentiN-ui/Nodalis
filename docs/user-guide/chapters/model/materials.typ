@@ -63,6 +63,9 @@ A new library has three groups. #ui("Elastic_Models") holds materials with elast
   Pouliquen, _Nature_ 441, 2006), #ui("Glass Beads 3 + 1.5 mm") (a mixture that sorts when it
   flows), #ui("Wheat") and #ui("Gravel").
 
+#screenshot("material-library-flow.png", [Flow materials in the library, with the flow law of
+  Minced Meat])
+
 These are rough values to try the solver with. The yield stress and consistency of a real
 paste can differ by a factor of two or more with recipe, fat or water content and
 temperature; the friction of grains depends on their shape and moisture. The elastic
