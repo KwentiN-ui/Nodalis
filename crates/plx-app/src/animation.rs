@@ -84,6 +84,7 @@ pub const DEFAULT_FPS: f32 = 30.0;
 /// Seconds an animation by time plays in.
 pub const DEFAULT_DURATION: f32 = 4.0;
 
+#[derive(Clone)]
 pub struct Animation {
     pub kind: AnimationKind,
     /// Number of frames of a scale factor animation.
@@ -362,6 +363,33 @@ impl Animation {
         self.frame != before
     }
 
+    /// The increments the next frames of the playback show, after the shown one, in the
+    /// order they come and each once: at most `count`, fewer where a one-shot playback ends.
+    /// Those a playback by time blends towards count as well.
+    pub fn upcoming(&self, count: usize) -> Vec<usize> {
+        let mut ahead = self.clone();
+        ahead.playing = true;
+        let mut increments = Vec::new();
+        let add = |increment: Option<usize>, increments: &mut Vec<usize>| {
+            if let Some(increment) = increment
+                && Some(increment) != self.increment()
+                && !increments.contains(&increment)
+            {
+                increments.push(increment);
+            }
+        };
+        // Every frame is passed at most twice (forth and back) before the playback repeats.
+        for _ in 0..2 * self.frame_count() {
+            if increments.len() >= count || !ahead.advance() {
+                break;
+            }
+            add(ahead.increment(), &mut increments);
+            add(ahead.interpolation().map(|(next, _)| next), &mut increments);
+        }
+        increments.truncate(count);
+        increments
+    }
+
     /// Starts playing; a finished one-shot animation starts over.
     pub fn play(&mut self) {
         if self.playback == Playback::Once && self.frame + 1 >= self.frame_count() {
@@ -394,6 +422,27 @@ mod tests {
                 animation.frame
             })
             .collect()
+    }
+
+    #[test]
+    fn the_increments_ahead_follow_the_playback() {
+        let mut animation = Animation::new(
+            AnimationKind::Step,
+            vec![10, 11, 12, 13],
+            Vec::new(),
+            12,
+            false,
+        );
+        animation.playback = Playback::Swing;
+        assert_eq!(animation.frame, 2);
+        assert_eq!(animation.upcoming(2), [13, 11]);
+        assert_eq!(animation.upcoming(9), [13, 11, 10]);
+        animation.playback = Playback::Once;
+        assert_eq!(animation.upcoming(9), [13]);
+        animation.playback = Playback::Loop;
+        assert_eq!(animation.upcoming(2), [13, 10]);
+        // Nothing changes on the animation itself.
+        assert_eq!(animation.frame, 2);
     }
 
     #[test]

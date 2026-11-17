@@ -242,13 +242,27 @@ seventh of a second with 20 MB of memory and is saved again in less than 2 secon
 Results need not fit into memory. Opening them reads the mesh and the list of increments and
 fields only; the values of a field are read from the file when it is shown or used, a field
 at a time and with all its components. Fields read recently stay in memory for going back and
-forth between increments, up to 2 GB together; beyond that the ones used longest ago are dropped
-and read again when they are wanted. The values are read in the background: while they are, the
+forth between increments, up to the #ui("Memory for results read") of the settings (by
+default a quarter of the free memory, at most 2 GB); beyond that the ones used longest ago are
+dropped and read again when they are wanted, so that clicking through every field of every
+increment never holds more. The values are read in the background: while they are, the
 status bar shows #ui("Reading results …") and the view keeps showing what it showed before. An
 increment animation first reads the displacements of all its frames, for the scale of the
-deformation. Results of a dynamic step with 400 frames and 44,000 nodes (a 2.8 GB results file)
+deformation.
+
+While an increment is shown, the same field and the displacements of the increments shown next
+are read ahead in the background: during an animation the frames it plays next, in the
+direction it plays; otherwise the increments after the shown one and a few before it. They take
+at most a quarter of the memory for results, and no more than 64 increments. Stepping or
+scrolling through time thus finds them at hand. A frame that is not read yet when its turn
+comes holds the animation until it is, so that no frame is skipped for reading. Animating
+von Mises stresses through the 400 frames below, the view waited for the file 556 times in
+30 seconds before and once now, and shows about twice as many frames per second.
+
+Results of a dynamic step with 400 frames and 44,000 nodes (a 2.8 GB results file)
 open in a tenth of a second with less than 30 MB of memory, where reading them as a whole took
-12 seconds and 6.8 GB.
+12 seconds and 6.8 GB. Animating their 400 frames through six fields one after the other
+holds 2.7 GB with the default memory for results and 0.8 GB with 512 MB.
 
 Results need not fit into memory while the analysis runs either. Each increment the solver
 finishes is written to a temporary file next to the results file (`.ndlr.spool`) and leaves

@@ -913,6 +913,9 @@ fn shows_symbol_of(group: &TreeItem, item: &TreeItem) -> bool {
         (TreeItem::Group("Constraints"), TreeItem::Constraint(_)) => true,
         (TreeItem::StepGroup(s, "BCs"), TreeItem::BoundaryCondition(t, _))
         | (TreeItem::StepGroup(s, "Loads"), TreeItem::Load(t, _)) => s == t,
+        (TreeItem::Group(REFERENCE_POINTS), TreeItem::ReferencePoint(_))
+        | (TreeItem::Group(COORDINATE_SYSTEMS), TreeItem::CoordinateSystem(_))
+        | (TreeItem::Group(PLANES), TreeItem::Plane(_)) => true,
         _ => false,
     }
 }
@@ -1449,9 +1452,16 @@ impl Tree<'_> {
                     if let Some(&visible) = self.symbols.get(&item) {
                         let label = if visible { "Hide" } else { "Show" };
                         if ui.button(label).clicked() {
-                            self.response
-                                .symbol_visibility
-                                .push((item.clone(), !visible));
+                            // Several selected items all take the state the clicked one
+                            // changes to.
+                            let items = match several {
+                                true => (self.state.selected_items(self.view).into_iter())
+                                    .filter(|i| self.symbols.contains_key(i))
+                                    .collect(),
+                                false => vec![item.clone()],
+                            };
+                            (self.response.symbol_visibility)
+                                .extend(items.into_iter().map(|i| (i, !visible)));
                         }
                     }
                     if can_deactivate(&item) {
@@ -2170,6 +2180,18 @@ impl Tree<'_> {
             || !fe.planes.is_empty();
         if !open {
             return;
+        }
+        // Hidden features have no mark in the 3D view unless selected, like hidden symbols.
+        for (i, point) in fe.reference_points.iter().enumerate() {
+            self.symbols
+                .insert(TreeItem::ReferencePoint(i), point.visible);
+        }
+        for (i, system) in fe.coordinate_systems.iter().enumerate() {
+            self.symbols
+                .insert(TreeItem::CoordinateSystem(i), system.visible);
+        }
+        for (i, plane) in fe.planes.iter().enumerate() {
+            self.symbols.insert(TreeItem::Plane(i), plane.visible);
         }
         self.branch(
             ui,
