@@ -166,8 +166,11 @@ struct Workbench {
     highlight_changed: Option<BTreeSet<usize>>,
     /// Only the animation frame changed; frames already built are reused.
     frame_changed: bool,
-    /// Scene of each animation frame shown so far, cleared when anything else changes.
-    frame_cache: std::collections::HashMap<usize, Vec<RenderMesh>>,
+    /// Scene of the animation frames shown so far, cleared when anything else changes.
+    frame_cache: FrameCache,
+    /// The surfaces of the results scene being built on another thread; the scene shown
+    /// stays until they are ready.
+    scene_job: Option<SceneJob>,
     /// Open dialog creating or editing an item of the FE model.
     editor: Option<Editor>,
     /// The step new boundary conditions, loads, outputs and defined fields go into, by name;
@@ -353,6 +356,7 @@ impl AnalysisWindow {
                 highlight_changed: None,
                 frame_changed: false,
                 frame_cache: Default::default(),
+                scene_job: None,
                 editor: None,
                 active_step: None,
                 step_selection: None,
@@ -887,6 +891,16 @@ impl AnalysisWindow {
         if self.loading.is_some() {
             return;
         }
+        // A results file on the command line is not read as a mesh (a binary results file
+        // would be read whole to fail); like a dropped one, it is not opened on its own.
+        let (results, paths): (Vec<PathBuf>, Vec<PathBuf>) =
+            paths.into_iter().partition(|p| is_results_file(p));
+        if !results.is_empty() {
+            self.workbench.output.push(RESULTS_NOT_ALONE.into());
+        }
+        if paths.is_empty() {
+            return;
+        }
         let sender = self.load_events.0.clone();
         let ctx = ctx.clone();
         let units = self.workbench.import_units();
@@ -1054,7 +1068,10 @@ impl AnalysisWindow {
         }
         if self.workbench.results_reading {
             ui.spinner();
-            ui.label("Reading results …");
+            ui.label(match self.workbench.scene_job {
+                Some(_) => "Drawing results …",
+                None => "Reading results …",
+            });
             ui.separator();
         }
         ui.horizontal(|ui| match (&self.loading, self.workbench.shown()) {
@@ -1148,6 +1165,62 @@ pub fn export_calculix_results(
     }
     Ok(())
 }
+
+/// The surfaces of the parts of a results scene, built on another thread
+/// ([`crate::model::SceneBase`]).
+struct SceneJob {
+    meshes: std::sync::mpsc::Receiver<Vec<RenderMesh>>,
+    /// Only the animation frame changed: the scenes of the other frames stay.
+    frame_only: bool,
+}
+
+/// The scenes of the animation frames shown so far, so that a looping animation does not
+/// build them again: as many as fit into a quarter of the memory for result fields
+/// ([`plx_results::values::budget`]); the frames beyond are built each time they are shown.
+#[derive(Default)]
+struct FrameCache {
+    frames: std::collections::HashMap<usize, Vec<RenderMesh>>,
+    bytes: usize,
+    /// The scene of the last frame that did not fit.
+    uncached: Vec<RenderMesh>,
+}
+
+impl FrameCache {
+    fn contains(&self, frame: usize) -> bool {
+        self.frames.contains_key(&frame)
+    }
+
+    fn clear(&mut self) {
+        self.frames.clear();
+        self.bytes = 0;
+        self.uncached.clear();
+    }
+
+    /// The scene of `frame`, built by `build` unless it is kept; kept if the frames take no
+    /// more than `limit` bytes with it.
+    fn get(
+        &mut self,
+        frame: usize,
+        limit: usize,
+        build: impl FnOnce() -> Vec<RenderMesh>,
+    ) -> &Vec<RenderMesh> {
+        if self.frames.contains_key(&frame) {
+            return &self.frames[&frame];
+        }
+        let meshes = build();
+        let bytes: usize = meshes.iter().map(RenderMesh::bytes).sum();
+        if self.bytes + bytes <= limit {
+            self.bytes += bytes;
+            return self.frames.entry(frame).or_insert(meshes);
+        }
+        self.uncached = meshes;
+        &self.uncached
+    }
+}
+
+/// Why a results file given to an analysis is not opened.
+const RESULTS_NOT_ALONE: &str = "Results files are not opened on their own: the Results tab \
+     shows the results of the analysis (Solve).";
 
 /// Whether a file is a results file: CalculiX's (`.frd`) or the built-in solver's (`.ndlr`).
 pub fn is_results_file(path: &std::path::Path) -> bool {
@@ -1640,11 +1713,7 @@ impl AnalysisWindow {
         let (results, dropped): (Vec<PathBuf>, Vec<PathBuf>) =
             dropped.into_iter().partition(|p| is_results_file(p));
         if !results.is_empty() {
-            self.workbench.output.push(
-                "Results files are not opened on their own: the Results tab shows the \
-                 results of the analysis (Solve)."
-                    .into(),
-            );
+            self.workbench.output.push(RESULTS_NOT_ALONE.into());
         }
         if !dropped.is_empty() {
             self.import_paths(dropped, &ctx);
@@ -2764,9 +2833,18 @@ impl Workbench {
                 }
             }
         }
-        if let Some(model) = self.model.as_mut() {
+        // Features are hidden in the results too; the FE model shares them and follows.
+        let symbols_of = match view {
+            TreeView::Results => self.results.get_mut(self.current_result),
+            _ => self.model.as_mut(),
+        };
+        if let Some(model) = symbols_of.filter(|_| !response.symbol_visibility.is_empty()) {
+            let before = model.fe.shared_features();
             for (item, visible) in &response.symbol_visibility {
                 crate::setup::set_visible(&mut model.fe, item, *visible);
+            }
+            if view == TreeView::Results {
+                self.share_feature_edit(self.current_result, &before);
             }
         }
         if let (Some(item), Some(model)) = (response.swap_master_slave, self.model.as_mut()) {
@@ -7293,6 +7371,7 @@ impl Workbench {
         }
         new.solver.apply_gpu();
         crate::results::set_significant_digits(new.post.digits);
+        plx_results::values::set_budget(new.post.results_memory_bytes());
         if new.graphics.theme != self.settings.graphics.theme {
             crate::style::set_theme(ctx, new.graphics.theme);
         }
@@ -7526,7 +7605,12 @@ impl Workbench {
             return;
         };
         if animation.playing {
-            let dt = ctx.input(|i| i.stable_dt).min(0.1);
+            // While the shown frame waits for its values, the playback waits with it: every
+            // frame is shown, the playback slows down where the reading cannot keep up.
+            let dt = match self.results_reading {
+                true => 0.0,
+                false => ctx.input(|i| i.stable_dt).min(0.1),
+            };
             if animation.tick(dt) {
                 view.show_animation_frame();
                 self.frame_changed = true;
@@ -7754,8 +7838,30 @@ impl Workbench {
             self.rebuild_highlighted_parts(parts);
             return;
         }
-        let frame_only = !self.results_changed && self.frame_changed;
-        if !(std::mem::take(&mut self.results_changed) | std::mem::take(&mut self.frame_changed)) {
+        let mut frame_only = !self.results_changed && self.frame_changed;
+        let changed =
+            std::mem::take(&mut self.results_changed) | std::mem::take(&mut self.frame_changed);
+        // A change meanwhile makes the surfaces being built useless: they are built anew.
+        let mut base = None;
+        if changed {
+            self.scene_job = None;
+        } else if let Some(job) = &self.scene_job {
+            match job.meshes.try_recv() {
+                Ok(meshes) => {
+                    frame_only = job.frame_only;
+                    base = Some(meshes);
+                    self.scene_job = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.results_reading = true;
+                    return;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    frame_only = job.frame_only;
+                    self.scene_job = None;
+                }
+            }
+        } else {
             return;
         }
         let model = match self.tree_view {
@@ -7777,14 +7883,37 @@ impl Workbench {
         if !frame_only {
             self.frame_cache.clear();
         }
+        // The surfaces of the parts, which take long for a large model, are built on
+        // another thread the first time; the scene is made of them once they are ready.
+        let cached = frame.is_some_and(|frame| self.frame_cache.contains(frame));
+        if base.is_none()
+            && !cached
+            && self.tree_view == TreeView::Results
+            && let Some(scene) = model.scene_base()
+        {
+            let (sender, meshes) = std::sync::mpsc::channel();
+            let spawned = std::thread::Builder::new()
+                .name("results scene".into())
+                .spawn(move || {
+                    let _ = sender.send(scene.build());
+                    // Repaints, as when values were read.
+                    plx_results::values::loaded();
+                });
+            if spawned.is_ok() {
+                self.scene_job = Some(SceneJob { meshes, frame_only });
+                self.results_reading = true;
+                return;
+            }
+        }
         let fresh;
         let meshes: &Vec<RenderMesh> = match frame {
-            Some(frame) => self
-                .frame_cache
-                .entry(frame)
-                .or_insert_with(|| model.scene_meshes()),
+            Some(frame) => {
+                let limit = plx_results::values::budget() / 4;
+                self.frame_cache
+                    .get(frame, limit, || model.scene_meshes_on(base))
+            }
             None => {
-                fresh = model.scene_meshes();
+                fresh = model.scene_meshes_on(base);
                 &fresh
             }
         };
@@ -8409,6 +8538,29 @@ fn keep_up_to_date(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn animation_frames_are_kept_while_they_fit() {
+        let mesh = |n: usize| {
+            vec![RenderMesh {
+                triangles: Vec::with_capacity(n),
+                ..Default::default()
+            }]
+        };
+        let mut cache = FrameCache::default();
+        let mut builds = 0;
+        for frame in [0, 1, 2, 0, 1, 2] {
+            cache.get(frame, 2000, || {
+                builds += 1;
+                mesh(250)
+            });
+        }
+        // 1000 bytes a frame: two are kept, the third is built each time it is shown.
+        assert_eq!(builds, 4);
+        assert_eq!(cache.bytes, 2000);
+        cache.clear();
+        assert!(cache.frames.is_empty() && cache.bytes == 0);
+    }
 
     #[test]
     fn bound_results_keep_the_workspace_the_project_window_asked_for() {
