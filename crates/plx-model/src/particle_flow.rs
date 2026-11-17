@@ -26,23 +26,42 @@ pub enum Flow {
     /// A Newtonian fluid of this dynamic viscosity (Pa s), weakly compressible by the bulk
     /// modulus of the elastic constants, which carries no tension.
     Newtonian { viscosity: f64 },
+    /// A dry granular material after the μ(I) rheology: in flow the shear stress is
+    /// `μ(I) p`, the friction rising from `tan friction_angle` at rest to
+    /// `tan limit_angle` in fast flow, `μ = μs + (μ2 − μs) I/(I0 + I)`, with the inertial
+    /// number `I = rate · grain · √(density/p)`. It carries no tension. The angles are in
+    /// degrees, `grain` is the grain diameter.
+    Granular {
+        friction_angle: f64,
+        limit_angle: f64,
+        grain: f64,
+        inertial: f64,
+    },
 }
 
 impl Flow {
-    /// The kinds with typical values: a stiff paste (such as minced meat) and water.
-    pub const KINDS: [Flow; 2] = [
+    /// The kinds with typical values: a stiff paste (such as minced meat), water and dry
+    /// sand.
+    pub const KINDS: [Flow; 3] = [
         Flow::HerschelBulkley {
             yield_stress: 1000.0,
             consistency: 500.0,
             exponent: 0.5,
         },
         Flow::Newtonian { viscosity: 1e-3 },
+        Flow::Granular {
+            friction_angle: 31.0,
+            limit_angle: 42.0,
+            grain: 1e-3,
+            inertial: 0.22,
+        },
     ];
 
     pub fn name(&self) -> &'static str {
         match self {
             Flow::HerschelBulkley { .. } => "Herschel-Bulkley",
             Flow::Newtonian { .. } => "Newtonian",
+            Flow::Granular { .. } => "Granular",
         }
     }
 }
@@ -217,6 +236,25 @@ impl Flow {
             }
             Flow::Newtonian { viscosity } => (!(viscosity.is_finite() && viscosity > 0.0))
                 .then(|| "The viscosity must be positive.".into()),
+            Flow::Granular {
+                friction_angle,
+                limit_angle,
+                grain,
+                inertial,
+            } => {
+                let angle = |a: f64| a.is_finite() && a > 0.0 && a < 90.0;
+                if !angle(friction_angle) || !angle(limit_angle) {
+                    Some("The friction angles must lie between 0 and 90 degrees.".into())
+                } else if limit_angle < friction_angle {
+                    Some("The limit angle must not be below the friction angle.".into())
+                } else if !(grain.is_finite() && grain > 0.0)
+                    || !(inertial.is_finite() && inertial > 0.0)
+                {
+                    Some("Grain diameter and I0 must be positive.".into())
+                } else {
+                    None
+                }
+            }
         }
     }
 }

@@ -754,6 +754,21 @@ fn material_models(
                     format!("{} {stress} s", format_value(viscosity)),
                 ),
             ],
+            plx_model::particle_flow::Flow::Granular {
+                friction_angle,
+                limit_angle,
+                grain,
+                inertial,
+            } => vec![
+                ("Law", "Granular (mu(I))".to_string()),
+                (
+                    "Friction angle",
+                    format!("{} deg", format_value(friction_angle)),
+                ),
+                ("Limit angle", format!("{} deg", format_value(limit_angle))),
+                ("Grain diameter", with_unit(grain, Quantity::Length)),
+                ("I0", format_value(inertial)),
+            ],
         };
         models.push(("Flow", rows));
     }

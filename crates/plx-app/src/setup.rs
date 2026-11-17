@@ -6538,7 +6538,7 @@ fn creep_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     material.creep = creeps.then_some(creep);
 }
 
-/// How the material flows in a Particle Flow step: Herschel-Bulkley or Newtonian.
+/// How the material flows in a Particle Flow step: Herschel-Bulkley, Newtonian or granular.
 fn flow_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     use plx_model::particle_flow::Flow;
     let mut flows = material.flow.is_some();
@@ -6608,9 +6608,51 @@ fn flow_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
             ui.weak("Compressed by the bulk modulus of the elastic constants, no tension.");
             ui.end_row();
         }
+        Flow::Granular {
+            friction_angle,
+            limit_angle,
+            grain,
+            inertial,
+        } => {
+            ui.label("    Friction angle").on_hover_text(
+                "The angle of internal friction at rest, about the angle of repose: the \
+                 material flows where the shear stress exceeds tan(angle) times the pressure.",
+            );
+            ui.horizontal(|ui| {
+                ui.add_enabled(flows, numeric::drag_value(friction_angle).speed(0.1));
+                ui.label("deg");
+            });
+            ui.end_row();
+            ui.label("    Limit angle").on_hover_text(
+                "The friction angle the material tends to in fast flow (large inertial \
+                 number I). Equal to the friction angle, the friction does not depend on the \
+                 speed (Drucker-Prager).",
+            );
+            ui.horizontal(|ui| {
+                ui.add_enabled(flows, numeric::drag_value(limit_angle).speed(0.1));
+                ui.label("deg");
+            });
+            ui.end_row();
+            ui.label("    Grain diameter")
+                .on_hover_text("The mean grain diameter, for the inertial number I.");
+            ui.add_enabled(flows, numeric::physical(grain, units, Quantity::Length));
+            ui.end_row();
+            ui.label("    I0").on_hover_text(
+                "The inertial number at which the friction is halfway between the two angles \
+                 (about 0.2 to 0.3 for sand and glass beads).",
+            );
+            ui.add_enabled(flows, numeric::drag_value(inertial).speed(0.01));
+            ui.end_row();
+            ui.label("");
+            ui.weak(
+                "Shear stress in flow = mu(I) * pressure, I = shear rate * grain diameter * \
+                 sqrt(density / pressure). No tension.",
+            );
+            ui.end_row();
+        }
     }
     material.flow = flows.then_some(flow);
-    if flows {
+    if flows && !matches!(flow, Flow::Granular { .. }) {
         flow_temperature_rows(ui, material, units);
     }
 }

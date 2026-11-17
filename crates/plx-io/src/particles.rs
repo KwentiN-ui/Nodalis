@@ -599,6 +599,19 @@ pub fn particle_material(material: &Material) -> Result<ParticleMaterial, String
             exponent,
         },
         Some(Flow::Newtonian { viscosity }) => ir::ParticleLaw::Fluid { bulk, viscosity },
+        Some(Flow::Granular {
+            friction_angle,
+            limit_angle,
+            grain,
+            inertial,
+        }) => ir::ParticleLaw::Granular {
+            shear,
+            bulk,
+            friction: friction_angle.to_radians().tan(),
+            friction_limit: limit_angle.to_radians().tan(),
+            grain,
+            inertial,
+        },
     };
     let thermal = match (material.conductivity, material.specific_heat) {
         (Some(conductivity), Some(specific_heat)) => Some(ir::ParticleThermal {
@@ -937,6 +950,45 @@ mod tests {
         // Without outputs nothing is asked for.
         let bare = lower(&mesh, &model(None), "Test").expect("lowers");
         assert_eq!(bare.history, HistoryRequest::default());
+    }
+
+    #[test]
+    fn a_granular_flow_gives_its_friction_as_coefficients() {
+        let mesh = mesh();
+        let mut fe = model(None);
+        fe.materials[0].flow = Some(Flow::Granular {
+            friction_angle: 30.0,
+            limit_angle: 45.0,
+            grain: 2e-3,
+            inertial: 0.25,
+        });
+        let lowered = lower(&mesh, &fe, "Test").expect("lowers");
+        let ir::ParticleLaw::Granular {
+            friction,
+            friction_limit,
+            grain,
+            inertial,
+            ..
+        } = lowered.model.materials[0].law
+        else {
+            panic!("{:?}", lowered.model.materials[0].law)
+        };
+        assert!((friction - 30f64.to_radians().tan()).abs() < 1e-12);
+        assert!((friction_limit - 1.0).abs() < 1e-12);
+        assert_eq!((grain, inertial), (2e-3, 0.25));
+        // A limit below the friction at rest is refused.
+        fe.materials[0].flow = Some(Flow::Granular {
+            friction_angle: 30.0,
+            limit_angle: 20.0,
+            grain: 2e-3,
+            inertial: 0.25,
+        });
+        let refused = lower(&mesh, &fe, "Test").unwrap_err();
+        assert!(
+            refused.message.contains("limit angle"),
+            "{}",
+            refused.message
+        );
     }
 
     #[test]

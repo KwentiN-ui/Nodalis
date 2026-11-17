@@ -239,8 +239,9 @@ use serde::{Deserialize, Serialize};
 /// project file instead of base64 in the text; older projects are refused. Format 46 adds
 /// the Particle Flow step and the flow of materials ([`particle_flow`]); format 45 reads as
 /// it is. Format 47 adds the heat of the Particle Flow step and the temperature table of the
-/// flow of materials; older formats read as they are.
-pub const PROJECT_FORMAT: u32 = 47;
+/// flow of materials; older formats read as they are. Format 48 adds the granular flow;
+/// older formats read as they are.
+pub const PROJECT_FORMAT: u32 = 48;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

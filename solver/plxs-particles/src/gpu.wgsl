@@ -145,11 +145,12 @@ struct Node {
 }
 
 struct Law {
-    // Density, bulk, shear, kind (0 elastic, 1 Herschel-Bulkley, 2 fluid).
+    // Density, bulk, shear, kind (0 elastic, 1 Herschel-Bulkley, 2 fluid, 3 granular).
     a: vec4f,
-    // Yield stress or viscosity, consistency, exponent, heat capacity per volume.
+    // Yield stress or viscosity, consistency, exponent (granular: static and limit
+    // friction, inertial number I0), heat capacity per volume.
     b: vec4f,
-    // Conductivity, mass of a particle.
+    // Conductivity, mass of a particle, grain diameter.
     c: vec4f,
     // Start and length of the flow factor table in `tables`.
     d: vec4u,
@@ -1187,6 +1188,49 @@ fn plastic_increment(trial: f32, yield_stress: f32, g: f32, k: f32, n: f32, dt: 
     return x;
 }
 
+// The friction of the mu(I) rheology at the shear rate `rate` and its derivative;
+// `per_rate` is d sqrt(rho/p).
+fn inertial_friction(law: Law, per_rate: f32, rate: f32) -> vec2f {
+    let rise = law.b.y - law.b.x;
+    if rise <= 0.0 || law.b.z <= 0.0 {
+        return vec2f(law.b.x, 0.0);
+    }
+    let i = rate * per_rate;
+    let s = law.b.z + i;
+    return vec2f(law.b.x + rise * i / s, rise * law.b.z / (s * s) * per_rate);
+}
+
+// The plastic shear increment with trial - G x = p mu(I(x/dt)) (as in law.rs).
+fn granular_increment(law: Law, trial: f32, pressure: f32, g: f32, dt: f32) -> f32 {
+    if pressure <= 0.0 {
+        return trial / g;
+    }
+    let per_rate = law.c.z * sqrt(law.a.x / pressure);
+    let top = (trial - pressure * law.b.x) / g;
+    var lo = 0.0;
+    var hi = top;
+    var x = hi;
+    for (var i = 0; i < 60; i++) {
+        let mu = inertial_friction(law, per_rate, x / dt);
+        let r = trial - g * x - pressure * mu.x;
+        if r > 0.0 {
+            lo = x;
+        } else {
+            hi = x;
+        }
+        let slope = g + pressure * mu.y / dt;
+        var next = x + r / slope;
+        if !(next > lo && next < hi) {
+            next = 0.5 * (lo + hi);
+        }
+        if abs(next - x) <= 1e-7 * max(top, 1e-30) {
+            return next;
+        }
+        x = next;
+    }
+    return x;
+}
+
 fn law_update(law: Law, b_in: mat3x3f, j_state: f32, plastic_in: f32, f: mat3x3f, j: f32,
               gradient: mat3x3f, dt: f32, factor: f32) -> Update {
     var out: Update;
@@ -1210,10 +1254,17 @@ fn law_update(law: Law, b_in: mat3x3f, j_state: f32, plastic_in: f32, f: mat3x3f
         out.b = identity;
         return out;
     }
+    // Grains carry no tension: the volume of their stress stays at most the initial one.
+    var js = j;
+    var own_s = own;
+    if kind == 3u {
+        js = min(j, 1.0);
+        own_s = min(own, 1.0);
+    }
     var b = f * b_in * transpose(f);
     let det_b = determinant(b);
     if det_b > 0.0 {
-        b = b * pow(j * j / det_b, 1.0 / 3.0);
+        b = b * pow(js * js / det_b, 1.0 / 3.0);
     }
     let e = eigen_symmetric(b);
     let strain = 0.5 * log(max(e.values, vec3f(1e-30)));
@@ -1233,6 +1284,19 @@ fn law_update(law: Law, b_in: mat3x3f, j_state: f32, plastic_in: f32, f: mat3x3f
             out.dissipated = reduced * dgamma;
         }
     }
+    if kind == 3u {
+        let trial = sqrt(2.0) * g * dev_norm;
+        let pressure = -bulk * volumetric;
+        if g > 0.0 && trial > law.b.x * pressure {
+            let dgamma = granular_increment(law, trial, pressure, g, dt);
+            let reduced = trial - g * dgamma;
+            if trial > 0.0 {
+                dev = dev * (reduced / trial);
+            }
+            out.plastic += dgamma;
+            out.dissipated = reduced * dgamma;
+        }
+    }
     let total = dev + vec3f(volumetric / 3.0);
     let tau_principal = 2.0 * g * dev + vec3f(bulk * volumetric);
     let e2 = exp(2.0 * total);
@@ -1246,7 +1310,7 @@ fn law_update(law: Law, b_in: mat3x3f, j_state: f32, plastic_in: f32, f: mat3x3f
     }
     out.tau = tau;
     out.b = bn;
-    out.j = own;
+    out.j = own_s;
     out.stored = g * dot(dev, dev) + 0.5 * bulk * volumetric * volumetric;
     return out;
 }

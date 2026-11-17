@@ -14,6 +14,14 @@
 //! no time step limit of its own (the formulation of Yue et al. 2015 for shear-dependent
 //! foams, here derived on the Hencky strain). Plastic flow keeps the volume.
 //!
+//! The granular material flows after the μ(I) rheology of Jop, Forterre & Pouliquen (2006):
+//! a Drucker-Prager cone whose friction rises with the inertial number
+//! `I = γ̇ d √(ρ/p)` from its static value to a limit. The return mapping is the same scalar
+//! equation as for the paste, `τ_tr − G Δγ = p μ(I(Δγ/Δt))`, at the pressure of the trial
+//! state, as Dunatunga & Kamrin (2015) do it in their MPM; plastic flow keeps the volume. Like
+//! the fluid it carries no tension: grains that move apart are free of stress until they
+//! touch again.
+//!
 //! The fluid has no elastic shear: its stress is the pressure of the volume ratio plus the
 //! Newtonian viscous stress of the strain rate. It carries no tension (a free surface
 //! opens instead).
@@ -78,6 +86,12 @@ pub enum Kind {
     Fluid {
         viscosity: f64,
     },
+    Granular {
+        friction: f64,
+        friction_limit: f64,
+        grain: f64,
+        inertial: f64,
+    },
 }
 
 impl Law {
@@ -96,6 +110,18 @@ impl Law {
                 exponent,
             },
             ParticleLaw::Fluid { viscosity, .. } => Kind::Fluid { viscosity },
+            ParticleLaw::Granular {
+                friction,
+                friction_limit,
+                grain,
+                inertial,
+                ..
+            } => Kind::Granular {
+                friction,
+                friction_limit,
+                grain,
+                inertial,
+            },
         };
         Self {
             density,
@@ -142,8 +168,9 @@ impl Law {
     /// One step: the state at the start, the increment `f` of the deformation gradient, the
     /// volume ratio the stress takes (`det F` at the end, or with F-bar the average over the
     /// neighbourhood), the velocity gradient and the time step. `factor` scales the yield
-    /// stress, the consistency and the viscosity (their change with the temperature). The
-    /// state is advanced; its own volume ratio follows `f`.
+    /// stress, the consistency and the viscosity (their change with the temperature; the
+    /// friction of a granular material does not change). The state is advanced; its own
+    /// volume ratio follows `f`.
     pub fn update(
         &self,
         state: &mut PointState,
@@ -180,7 +207,15 @@ impl Law {
                     shear_rate,
                 }
             }
-            Kind::Elastic | Kind::ViscoPlastic { .. } => {
+            Kind::Elastic | Kind::ViscoPlastic { .. } | Kind::Granular { .. } => {
+                // Grains carry no tension: the volume of their stress never grows past the
+                // initial one.
+                let granular = matches!(self.kind, Kind::Granular { .. });
+                let (j, own) = if granular {
+                    (j.min(1.0), own.min(1.0))
+                } else {
+                    (j, own)
+                };
                 let mut b = mat_mul(&mat_mul(f, &state.b), &transpose(f));
                 // The volume of the elastic part is the total one (plastic flow keeps it).
                 let det_b = crate::math::det(&b);
@@ -212,6 +247,33 @@ impl Law {
                             plastic_increment(trial, yield_stress, g, consistency, exponent, dt);
                         let new = trial - g * dgamma;
                         dev = dev.map(|e| e * new / trial);
+                        state.plastic += dgamma;
+                        dissipated = new * dgamma;
+                    }
+                }
+                if let Kind::Granular {
+                    friction,
+                    friction_limit,
+                    grain,
+                    inertial,
+                } = self.kind
+                {
+                    let trial = std::f64::consts::SQRT_2 * g * dev_norm;
+                    let pressure = -self.bulk * volumetric;
+                    let rate = Inertial {
+                        friction,
+                        friction_limit,
+                        inertial,
+                        per_rate: grain * (self.density / pressure.max(1e-300)).sqrt(),
+                    };
+                    if g > 0.0 && trial > friction * pressure {
+                        let dgamma = granular_increment(trial, pressure, g, &rate, dt);
+                        let new = trial - g * dgamma;
+                        dev = if trial > 0.0 {
+                            dev.map(|e| e * new / trial)
+                        } else {
+                            dev
+                        };
                         state.plastic += dgamma;
                         dissipated = new * dgamma;
                     }
@@ -279,6 +341,62 @@ pub fn plastic_increment(trial: f64, yield_stress: f64, g: f64, k: f64, n: f64, 
     x
 }
 
+/// The friction of the μ(I) rheology over the shear rate at a pressure: `per_rate` is
+/// `d √(ρ/p)`, so that `I = γ̇ per_rate`.
+pub struct Inertial {
+    pub friction: f64,
+    pub friction_limit: f64,
+    pub inertial: f64,
+    pub per_rate: f64,
+}
+
+impl Inertial {
+    /// The friction coefficient and its derivative at the shear rate `rate`.
+    fn at(&self, rate: f64) -> (f64, f64) {
+        let rise = self.friction_limit - self.friction;
+        if rise <= 0.0 || self.inertial <= 0.0 {
+            return (self.friction, 0.0);
+        }
+        let i = rate * self.per_rate;
+        let s = self.inertial + i;
+        (
+            self.friction + rise * i / s,
+            rise * self.inertial / (s * s) * self.per_rate,
+        )
+    }
+}
+
+/// The plastic shear increment `Δγ ≥ 0` with `trial − G Δγ = p μ(I(Δγ/Δt))`; `trial` is
+/// above `p μ_s`. The left side falls and the right side rises with `Δγ`, so the root is
+/// unique and lies below `(trial − p μ_s)/G`. Without pressure the shear stress is gone.
+pub fn granular_increment(trial: f64, pressure: f64, g: f64, mu: &Inertial, dt: f64) -> f64 {
+    let hi_start = (trial - pressure.max(0.0) * mu.friction) / g;
+    if pressure <= 0.0 {
+        return trial / g;
+    }
+    let residual = |x: f64| trial - g * x - pressure * mu.at(x / dt).0;
+    let (mut lo, mut hi) = (0.0, hi_start);
+    let mut x = hi;
+    for _ in 0..100 {
+        let r = residual(x);
+        if r > 0.0 {
+            lo = x;
+        } else {
+            hi = x;
+        }
+        let slope = g + pressure * mu.at(x / dt).1 / dt;
+        let mut next = x + r / slope;
+        if !(next > lo && next < hi) {
+            next = 0.5 * (lo + hi);
+        }
+        if (next - x).abs() <= 1e-14 * hi_start.max(1e-300) {
+            return next;
+        }
+        x = next;
+    }
+    x
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,5 +438,66 @@ mod tests {
             out.tau
         );
         assert!((out.shear_rate - rate).abs() < 1e-9);
+    }
+
+    /// Steady simple shear under a pressure ends at the shear stress `μ(I) p` of the rate.
+    #[test]
+    fn granular_simple_shear() {
+        let (friction, friction_limit, grain, inertial) = (0.38, 0.64, 0.5e-3, 0.28);
+        let law = Law::new(
+            1500.0,
+            &ParticleLaw::Granular {
+                shear: 1e6,
+                bulk: 2e6,
+                friction,
+                friction_limit,
+                grain,
+                inertial,
+            },
+        );
+        // A compression of 1 % holds the pressure; the shear rate is so high that I
+        // matters.
+        let (rate, dt, j) = (50.0, 1e-6, 0.99f64);
+        let l = [[0.0, rate, 0.0], [0.0; 3], [0.0; 3]];
+        let f = [[1.0, rate * dt, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut state = PointState {
+            j,
+            ..Default::default()
+        };
+        let mut out = PointUpdate::default();
+        for _ in 0..20000 {
+            out = law.update(&mut state, &f, j, &l, dt, 1.0);
+        }
+        let pressure = -(out.tau[0][0] + out.tau[1][1] + out.tau[2][2]) / 3.0;
+        assert!((pressure - 2e6 * -j.ln()).abs() < 1e-6 * pressure);
+        let i = rate * grain * (1500.0 / pressure).sqrt();
+        let mu = friction + (friction_limit - friction) * i / (inertial + i);
+        let shear = out.tau[0][1];
+        assert!(
+            (shear - mu * pressure).abs() < 0.01 * mu * pressure,
+            "{shear} {mu} {pressure}"
+        );
+    }
+
+    /// Grains pulled apart carry no stress.
+    #[test]
+    fn granular_no_tension() {
+        let law = Law::new(
+            1500.0,
+            &ParticleLaw::Granular {
+                shear: 1e6,
+                bulk: 2e6,
+                friction: 0.5,
+                friction_limit: 0.5,
+                grain: 1e-3,
+                inertial: 0.3,
+            },
+        );
+        let f = [[1.01, 0.002, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut state = PointState::default();
+        let out = law.update(&mut state, &f, 1.01, &[[0.0; 3]; 3], 1e-4, 1.0);
+        let norm = contract(&out.tau, &out.tau).sqrt();
+        assert!(norm < 1e-6, "{:?}", out.tau);
+        assert!(state.j <= 1.0);
     }
 }

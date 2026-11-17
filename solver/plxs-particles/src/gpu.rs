@@ -270,14 +270,20 @@ impl Card {
             for p in setup.factors[m] {
                 tables.extend([(p[0] - t_ref) as f32, p[1] as f32]);
             }
-            let (kind, values) = match law.kind {
-                Kind::Elastic => (0.0, [0.0; 3]),
+            let (kind, values, grain) = match law.kind {
+                Kind::Elastic => (0.0, [0.0; 3], 0.0),
                 Kind::ViscoPlastic {
                     yield_stress,
                     consistency,
                     exponent,
-                } => (1.0, [yield_stress, consistency, exponent]),
-                Kind::Fluid { viscosity } => (2.0, [viscosity, 0.0, 0.0]),
+                } => (1.0, [yield_stress, consistency, exponent], 0.0),
+                Kind::Fluid { viscosity } => (2.0, [viscosity, 0.0, 0.0], 0.0),
+                Kind::Granular {
+                    friction,
+                    friction_limit,
+                    grain,
+                    inertial,
+                } => (3.0, [friction, friction_limit, inertial], grain),
             };
             laws.push(CardLaw {
                 a: [law.density as f32, law.bulk as f32, law.shear as f32, kind],
@@ -290,7 +296,7 @@ impl Card {
                 c: [
                     thermal.map_or(0.0, |t| t.conductivity) as f32,
                     (law.density * volume) as f32,
-                    0.0,
+                    grain as f32,
                     0.0,
                 ],
                 d: [start, setup.factors[m].len() as u32, 0, 0],

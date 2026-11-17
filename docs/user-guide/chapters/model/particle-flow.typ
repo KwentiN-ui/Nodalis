@@ -62,11 +62,48 @@ large strains.
   [Newtonian], [A fluid with a #ui("Viscosity"): the bulk modulus of the elastic constants
     gives its pressure; it has no shear stiffness and takes no tension, so a free surface
     opens instead.],
+  [Granular], [Dry sand, gravel, powder or grain, see @particle-flow-granular.],
   [Temperature table], [Rows of temperature and a factor on the yield stress and the
     consistency (or the viscosity), interpolated between the rows and held beyond them: a
     paste that turns soft as it warms has factors below 1 at higher temperatures. It acts in
     steps that follow the temperature; empty, the flow is the same at every temperature.],
 )
+
+=== Granular material <particle-flow-granular>
+
+The flow #ui("Granular") is a bulk solid of dry grains after the $mu(I)$ rheology (Jop,
+Forterre and Pouliquen 2006), the law most used for granular flows in a continuum. The
+grains carry no tension; under pressure they hold a shear stress up to the friction
+$mu p$, beyond it they flow. The friction rises with the inertial number
+$I = dot(gamma) d sqrt(rho slash p)$, the shear rate against the time a grain needs to fall
+into the gap under the pressure:
+
+$ mu(I) = mu_s + (mu_2 - mu_s) I / (I_0 + I) $
+
+#fields(
+  [Friction angle], [$mu_s = tan$ of it: the friction at rest, about the angle of repose
+    of the material (sand 30° to 35°, glass beads 21°).],
+  [Limit angle], [$mu_2 = tan$ of it: the friction in fast flow. Equal to the friction
+    angle, the friction is the same at every speed (Drucker-Prager).],
+  [Grain diameter], [The mean diameter $d$ of the grains.],
+  [I0], [The inertial number $I_0$ halfway between the two frictions, about 0.2 to 0.3;
+    $rho$ in $I$ is the density of the material, the bulk density of the heap.],
+)
+
+The particles are points of the computation, not grains: a cell holds many grains, and the
+grain diameter enters only through $I$. Young's modulus and Poisson's ratio give the
+stiffness of the heap under pressure; a soft value (some MPa) keeps the time step large and
+changes little. Two materials of different grains can be mixed by giving their parts
+different sections; they then move together and do not separate by size.
+
+The law is checked against measurements and the exact solution: a column of sand that
+collapses onto a rough floor runs out as far as Lube et al. (2005) measured within 5 %,
+a layer on an incline rests below its friction angle, and above it flows with the speed
+profile of Bagnold that the law gives.
+
+#screenshot("particle-flow-sand.png", [A column of sand, 50 mm across and 30 mm high, has
+collapsed on a floor with friction into a flat heap, coloured by the plastic shear the
+grains went through: most at the rim, which ran out furthest.])
 
 === Settings of the step
 

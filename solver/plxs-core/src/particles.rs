@@ -99,6 +99,20 @@ pub enum ParticleLaw {
     },
     /// A weakly compressible Newtonian fluid that carries no tension.
     Fluid { bulk: f64, viscosity: f64 },
+    /// A dry granular material after the μ(I) rheology (Jop, Forterre & Pouliquen 2006):
+    /// in flow the equivalent shear stress is `μ(I) p` with
+    /// `μ(I) = friction + (friction_limit − friction) I / (inertial + I)` and the inertial
+    /// number `I = γ̇ grain √(ρ/p)` (ρ the density of the material). It carries no tension.
+    /// `friction` and `friction_limit` are friction coefficients (tangents of the angles),
+    /// `grain` is the grain diameter.
+    Granular {
+        shear: f64,
+        bulk: f64,
+        friction: f64,
+        friction_limit: f64,
+        grain: f64,
+        inertial: f64,
+    },
 }
 
 impl ParticleLaw {
@@ -111,6 +125,7 @@ impl ParticleLaw {
             ),
             Self::ViscoPlastic { shear, bulk, .. } => (bulk, shear),
             Self::Fluid { bulk, .. } => (bulk, 0.0),
+            Self::Granular { shear, bulk, .. } => (bulk, shear),
         }
     }
 }

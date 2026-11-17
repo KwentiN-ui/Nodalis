@@ -491,6 +491,9 @@ impl Material {
             Some(crate::particle_flow::Flow::Newtonian { viscosity }) => {
                 *viscosity *= stress * time;
             }
+            Some(crate::particle_flow::Flow::Granular { grain, .. }) => {
+                c.value(grain, Quantity::Length);
+            }
             None => {}
         }
         // The strain rate a * stress^n * time^m is per time: a scales with the stress to
