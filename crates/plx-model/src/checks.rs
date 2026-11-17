@@ -154,6 +154,10 @@ pub enum Problem {
     /// A part a Particle Flow step fills, or the material it is filled with, lacks what the
     /// particles need: a section, a density, elastic constants.
     ParticleBodyIncomplete,
+    /// A load or boundary condition of a Particle Flow step that the particles do not take:
+    /// loads other than gravity, boundary conditions elsewhere than on the reference point
+    /// of a rigid body.
+    ParticleFlowIgnored,
     /// A later sensitivity step with another design region: the solver reads one, the first.
     DesignRegionIgnored,
     /// A Visco step in a model whose materials have no creep law: it is a static step.
@@ -300,7 +304,8 @@ impl Problem {
             | Problem::HyperelasticLinearized
             | Problem::ExplicitFullIntegration
             | Problem::SupportInMovingSystem
-            | Problem::CoarseInfillWalls => Severity::Warning,
+            | Problem::CoarseInfillWalls
+            | Problem::ParticleFlowIgnored => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -356,6 +361,7 @@ impl Problem {
             Problem::NoSensitivityBase => "No step for the sensitivities",
             Problem::ParticleFlowNotAlone => "Particle Flow step not alone",
             Problem::ParticleBodyIncomplete => "Part cannot be filled with particles",
+            Problem::ParticleFlowIgnored => "Ignored by the Particle Flow step",
             Problem::DesignRegionIgnored => "Design region ignored",
             Problem::NoCreep => "Visco step without creep",
             Problem::GeneralBeamStep => "Step not possible with general beam profiles",
@@ -680,6 +686,11 @@ impl Problem {
             Problem::ParticleFlowNotAlone => {
                 "A Particle Flow step is computed by the particle solver, alone: it does not \
                  continue from the state of another step, and no step continues from it."
+            }
+            Problem::ParticleFlowIgnored => {
+                "The particles take gravity as their only load, and boundary conditions move \
+                 the reference points of rigid bodies (the walls), or give them a \
+                 temperature. Other loads and boundary conditions of the step have no effect."
             }
             Problem::ParticleBodyIncomplete => {
                 "A Particle Flow step fills every solid part that is not a rigid body with \
@@ -1159,6 +1170,10 @@ impl Problem {
                 "Deactivate the other steps, or put the Particle Flow step into an analysis of \
                  its own."
             }
+            Problem::ParticleFlowIgnored => {
+                "Delete or deactivate it in this step. To push the material, move a rigid \
+                 body (a piston) with a displacement on its reference point."
+            }
             Problem::ParticleBodyIncomplete => {
                 "Give the part a section whose material has a density and elastic constants, \
                  or make it a rigid body (a wall)."
@@ -1575,11 +1590,16 @@ impl FeModel {
                 break;
             }
         }
+        // Walls: rigid bodies and what a displacement that keeps its shape holds.
+        let held = (self.steps[index].boundary_conditions.iter())
+            .filter(|bc| crate::holds_particle_wall(bc))
+            .map(|bc| &bc.region);
         let rigid: std::collections::BTreeSet<ElementId> = (self.constraints.iter())
             .filter_map(|c| match c {
                 Constraint::RigidBody(body) if body.active => Some(&body.region),
                 _ => None,
             })
+            .chain(held)
             .flat_map(|region| {
                 (region.elements(mesh).into_iter())
                     .chain(region.faces(mesh).into_iter().map(|(e, _)| e))
@@ -1628,6 +1648,40 @@ impl FeModel {
                     ModelItem::Part(p),
                     Problem::ParticleBodyIncomplete,
                     detail,
+                ));
+            }
+        }
+        let step = &self.steps[index];
+        for (i, load) in step.loads.iter().enumerate() {
+            if load.active && load.kind.gravity_vector().is_none() {
+                findings.push(Finding::new(
+                    ModelItem::Load(index, i),
+                    Problem::ParticleFlowIgnored,
+                    format!(
+                        "{}: a Particle Flow step takes gravity loads only.",
+                        load.name
+                    ),
+                ));
+            }
+        }
+        // Boundary conditions act on the reference points of rigid bodies.
+        let points: std::collections::BTreeSet<_> = (self.constraints.iter())
+            .filter_map(|c| match c {
+                Constraint::RigidBody(body) if body.active => Some(body.reference_point),
+                _ => None,
+            })
+            .collect();
+        for (i, bc) in step.boundary_conditions.iter().enumerate() {
+            let on_point = matches!(bc.region, Region::ReferencePoint(id) if points.contains(&id));
+            if bc.active && !on_point && !crate::holds_particle_wall(bc) {
+                findings.push(Finding::new(
+                    ModelItem::BoundaryCondition(index, i),
+                    Problem::ParticleFlowIgnored,
+                    format!(
+                        "{}: in a Particle Flow step boundary conditions act on the reference \
+                         points of rigid bodies only.",
+                        bc.name
+                    ),
                 ));
             }
         }
@@ -4680,6 +4734,53 @@ mod tests {
             problems(&check(&model, &mesh)),
             vec![(ModelItem::Part(0), Problem::ParticleBodyIncomplete)]
         );
+    }
+
+    /// A Particle Flow step offers gravity only, and warns of the loads and boundary
+    /// conditions it leaves out.
+    #[test]
+    fn a_particle_flow_step_warns_of_what_it_ignores() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        model.steps[0].active = false;
+        let mut flow = Step::new_static("Flow");
+        flow.kind = StepKind::ParticleFlow(Default::default());
+        assert!(!flow.kind.supports_load(&LoadKind::Pressure(1.0)));
+        assert!(
+            flow.kind
+                .supports_load(&LoadKind::Gravity([0.0, 0.0, -9.81]))
+        );
+        let region = Region::Parts(vec![mesh.parts[0].name.clone()]);
+        flow.loads.push(Load::new(
+            "Gravity",
+            region.clone(),
+            LoadKind::Gravity([0.0, 0.0, -9.81]),
+        ));
+        flow.loads
+            .push(Load::new("Pressure", region, LoadKind::Pressure(1.0)));
+        flow.boundary_conditions.push(BoundaryCondition::new(
+            "Hot",
+            Region::Nodes(vec![1]),
+            BoundaryKind::Temperature(20.0),
+        ));
+        // A displacement that keeps the shape of its selection makes it a wall.
+        flow.boundary_conditions.push(BoundaryCondition::new(
+            "Held",
+            Region::Nodes(vec![1]),
+            BoundaryKind::displacement([Some(0.0); 6]),
+        ));
+        model.steps.push(flow);
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            vec![
+                (ModelItem::Load(1, 1), Problem::ParticleFlowIgnored),
+                (
+                    ModelItem::BoundaryCondition(1, 0),
+                    Problem::ParticleFlowIgnored
+                ),
+            ]
+        );
+        assert_eq!(Problem::ParticleFlowIgnored.severity(), Severity::Warning);
     }
 
     /// A section that does not fit its elements is its own problem, not a missing reference.

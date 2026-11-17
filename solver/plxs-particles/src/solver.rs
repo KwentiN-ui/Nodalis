@@ -57,6 +57,11 @@ const WALL_REACH: f64 = 0.2;
 /// How fast a particle's temperature follows the grid's, in units of α / h².
 const SUBCELL_CONDUCTION: f64 = 0.3;
 const VOLUME_RELAX: f64 = 0.05;
+/// In a 2D model, a particle whose area in the plane grew to this many times the area of
+/// the particle spacing squared splits in two. Material that flows towards the axis of an
+/// axisymmetric model spreads its particles in the plane (a ring of the same volume nearer
+/// the axis is a larger section): without splitting they part and the material tears.
+const SPLIT_AREA: f64 = 2.0;
 /// The smallest radius, in cells, the ring terms of a body of revolution divide by.
 const RADIUS_FLOOR: f64 = 0.25;
 /// The speed at which fine grains sink through coarse ones, `C d_fine ln(d_coarse/d_fine)`
@@ -103,6 +108,8 @@ struct Particle {
     /// The fine and the coarse grain diameter of a mixture of two sizes (zero: the
     /// particle does not segregate).
     grains: [f64; 2],
+    /// The part of the particle it was made as that it still is: halved by every split.
+    share: f32,
     /// Left the box through an open side.
     gone: bool,
 }
@@ -502,7 +509,7 @@ pub fn solve_streaming(
     let initial_count = particles.len();
     #[cfg(feature = "gpu")]
     let card = gpu::Card::open_for(&setup, &particles, &mut notes);
-    on_frame(frame(0.0, &particles));
+    on_frame(frame(0.0, &particles, &grid));
     #[cfg(feature = "gpu")]
     let on_card = card.is_some();
     #[cfg(not(feature = "gpu"))]
@@ -660,6 +667,7 @@ fn run_cpu(
     let mut max_speed = particles.iter().map(|p| norm(p.v)).fold(0.0, f64::max);
     let mut last_report = Instant::now();
     let mut stopped = false;
+    let mut next_id = particles.iter().map(|p| p.id + 1).max().unwrap_or(0);
     let mut nodes = vec![NodeSum::default(); grid.count()];
     // Per node: the velocity at the end of the step and the averaged volume ratio.
     let mut values = vec![[0.0; 4]; grid.count()];
@@ -1010,6 +1018,7 @@ fn run_cpu(
             outflow_energy += sums.out_energy;
             particles.retain(|p| !p.gone);
         }
+        split(grid, domain, walls, pose_end, &mut particles, &mut next_id);
 
         t += dt;
         steps += 1;
@@ -1087,7 +1096,7 @@ fn run_cpu(
             wall_samples = 0;
         }
         if t >= target * (1.0 - 1e-12) {
-            on_frame(frame(t, &particles));
+            on_frame(frame(t, &particles, grid));
             next_frame += 1;
         }
         if last_report.elapsed().as_secs_f64() > 0.2 {
@@ -1687,6 +1696,7 @@ fn fill(
                         conductivity: thermal.map_or(0.0, |t| t.conductivity),
                         fine,
                         grains,
+                        share: 1.0,
                         gone: false,
                     });
                 }
@@ -1696,8 +1706,85 @@ fn fill(
     Ok(particles)
 }
 
+/// Splits the particles of a 2D model whose area in the plane grew beyond [`SPLIT_AREA`]
+/// times the spacing squared in two halves, side by side along the direction the
+/// material stretches fastest; the new halves are numbered from `next_id` on. Mass, volume,
+/// heat capacity and momentum are shared; stress, velocity and its gradient are taken over.
+fn split(
+    grid: &Grid,
+    domain: &plxs_core::particles::Domain,
+    walls: &[Wall],
+    pose: &[Pose],
+    particles: &mut Vec<Particle>,
+    next_id: &mut u32,
+) {
+    if grid.space == Space::Solid {
+        return;
+    }
+    let s = 0.5 * grid.h;
+    let area = |p: &Particle| p.volume * p.state.j / grid.depth(p.x[0]);
+    let limit = SPLIT_AREA * s * s;
+    if !particles.par_iter().any(|p| area(p) > limit) {
+        return;
+    }
+    let count = particles.len();
+    for k in 0..count {
+        let a = area(&particles[k]);
+        if a <= limit {
+            continue;
+        }
+        let p = &mut particles[k];
+        // The direction of the fastest stretch in the plane: the eigenvector of the
+        // largest eigenvalue of the symmetric velocity gradient.
+        let (xx, yy, xy) = (p.c[0][0], p.c[1][1], 0.5 * (p.c[0][1] + p.c[1][0]));
+        let angle = 0.5 * (2.0 * xy).atan2(xx - yy);
+        let along = [angle.cos(), angle.sin(), 0.0];
+        // The halves sit at the middles of the halves of the particle's square.
+        let offset = scale(along, 0.25 * a.sqrt());
+        p.mass *= 0.5;
+        p.volume *= 0.5;
+        p.heat_capacity *= 0.5;
+        p.share *= 0.5;
+        let mut half = *p;
+        half.id = *next_id;
+        *next_id += 1;
+        p.x = sub(p.x, offset);
+        half.x = add(half.x, offset);
+        for q in [&mut particles[k], &mut half] {
+            place(grid, domain, walls, pose, &mut q.x);
+        }
+        particles.push(half);
+    }
+}
+
+/// Moves a point of a split particle back into the material: out of the walls, across
+/// the axis of an axisymmetric model, into the box.
+fn place(
+    grid: &Grid,
+    domain: &plxs_core::particles::Domain,
+    walls: &[Wall],
+    pose: &[Pose],
+    x: &mut Vec3,
+) {
+    for (wall, pose) in walls.iter().zip(pose) {
+        if let Some((phi, n, _)) = wall.probe(*x, pose)
+            && phi < 0.0
+        {
+            *x = sub(*x, scale(n, phi));
+        }
+    }
+    if grid.space == Space::Axisymmetric {
+        x[0] = x[0].abs();
+    }
+    for a in 0..3 {
+        if !grid.periodic[a] {
+            x[a] = x[a].clamp(domain.min[a], domain.max[a]);
+        }
+    }
+}
+
 /// A frame of the particles.
-fn frame(time: f64, particles: &[Particle]) -> ParticleFrame {
+fn frame(time: f64, particles: &[Particle], grid: &Grid) -> ParticleFrame {
     let mut fields = vec![Vec::with_capacity(particles.len()); PARTICLE_FIELDS.len()];
     for p in particles {
         let j = p.state.j.max(1e-300);
@@ -1724,6 +1811,18 @@ fn frame(time: f64, particles: &[Particle]) -> ParticleFrame {
         positions: particles.iter().map(|p| p.x.map(|x| x as f32)).collect(),
         velocities: particles.iter().map(|p| p.v.map(|x| x as f32)).collect(),
         fields,
+        shares: if grid.space != Space::Solid {
+            // In 2D the area in the plane: it grows where material of a body of revolution
+            // nears the axis, until the particle splits.
+            let s = 0.5 * grid.h;
+            (particles.iter())
+                .map(|p| (p.volume * p.state.j / (grid.depth(p.x[0]) * s * s)) as f32)
+                .collect()
+        } else if particles.iter().any(|p| p.share < 1.0) {
+            particles.iter().map(|p| p.share).collect()
+        } else {
+            Vec::new()
+        },
     }
 }
 

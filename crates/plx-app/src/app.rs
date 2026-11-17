@@ -1066,7 +1066,9 @@ impl AnalysisWindow {
             ui.label(status);
             ui.separator();
         }
-        if self.workbench.results_reading {
+        // While recording its progress says it: a status coming and going before it moved its
+        // Stop button with every frame.
+        if self.workbench.results_reading && self.workbench.recording.is_none() {
             ui.spinner();
             ui.label(match self.workbench.scene_job {
                 Some(_) => "Drawing results …",

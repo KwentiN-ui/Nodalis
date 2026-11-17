@@ -27,13 +27,15 @@ FE Model and Results workspaces:
     motion runs over the step at constant speed, so 50 rad over a step of 5 s turn a screw
     at 10 rad/s; an amplitude shapes it over time, e.g. a short start and then a constant
     speed. A temperature boundary condition on the same reference point gives the wall its
-    temperature, see @particle-flow-heat. Other boundary conditions are left out.],
+    temperature, see @particle-flow-heat. Other boundary conditions are left out, and the
+    model check warns of them.],
   [Wall friction], [A contact region (@contacts) between a wall and a filled part gives
     the wall its law: #ui("Bonded") and #ui("Rough") let the material stick,
     #ui("No Separation") and #ui("Frictionless") let it slide freely, #ui("Frictional")
     with Coulomb friction of its coefficient. Without a contact region the material sticks.],
   [Gravity], [The gravity loads of the step, each on the filled parts it selects; a load
-    that selects none is reported. Other loads are left out.],
+    that selects none is reported. The step offers no other loads; one copied into it is
+    left out, and the model check warns of it.],
 )
 
 A Particle Flow step is computed alone: the other steps of its analysis must be
@@ -212,15 +214,22 @@ slab periodic in z. A plane stress model takes no Particle Flow step.
 
 As material of a body of revolution flows towards the axis its rings shrink, and since a
 particle keeps the mass of its ring, the particles move apart in the plane: material that
-narrows to a third of its radius covers nine times its area with the same particles. Keep
-a narrowing such as a nozzle within about 1:3 in radius, or the cell small enough that the
-particles of the narrow part stay less than a cell apart; beyond that the material tears
-into separate particles.
+narrows to a third of its radius covers nine times its area with the same particles. A
+particle whose area in the plane doubled therefore splits in two halves, side by side along
+the direction the material stretches; mass and momentum stay, and the material stays whole
+however narrow the nozzle. The results draw every particle as a square of its area in the
+plane; a half made during the run appears in the frames from its split on. Where the
+material stretches along the flow, as in a cone, the squares stand apart in stripes across
+it: the particles lie closer across the flow than along it, while the grid still holds the
+material together. Splitting adds particles, and with
+them time: a narrowing to a tenth of the radius makes about ten times as many particles of
+the material that passes it.
 
 #screenshot("particle-flow-2d.png", [An axisymmetric nozzle of a paste printer: a piston
-pushes toothpaste through a cone toward an orifice of 3 mm, coloured by its speed, which rises
-tenfold toward the orifice. The plane model shows half of the section; the axis is its left
-edge.])
+pushes toothpaste through a cone toward an orifice of 1.2 mm, less than a sixth of the bore of
+8 mm, coloured by its speed, which reaches 88 mm/s in the orifice. The plane model shows half of the
+section; the axis is its left edge. Toward the orifice the particles split, from 2233 to
+3405.])
 
 === Temperature <particle-flow-heat>
 
