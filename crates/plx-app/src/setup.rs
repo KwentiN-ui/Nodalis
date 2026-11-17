@@ -5039,6 +5039,9 @@ pub fn set_visible(fe: &mut FeModel, item: &TreeItem, visible: bool) -> bool {
             .and_then(|st| st.loads.get_mut(i))
             .map(|l| &mut l.visible),
         TreeItem::Constraint(i) => fe.constraints.get_mut(i).and_then(Constraint::visible_mut),
+        TreeItem::ReferencePoint(i) => fe.reference_points.get_mut(i).map(|p| &mut p.visible),
+        TreeItem::CoordinateSystem(i) => (fe.coordinate_systems.get_mut(i)).map(|c| &mut c.visible),
+        TreeItem::Plane(i) => fe.planes.get_mut(i).map(|p| &mut p.visible),
         _ => None,
     };
     shown.map(|v| *v = visible).is_some()

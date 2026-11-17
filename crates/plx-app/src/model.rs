@@ -136,7 +136,8 @@ pub struct Model {
     pub uncut: HashSet<usize>,
     /// Centre of the mesh; render positions are relative to it.
     origin: DVec3,
-    skins: Vec<PartSkin>,
+    /// Shared with the scene built in the background ([`SceneBase`]).
+    skins: std::sync::Arc<Vec<PartSkin>>,
     /// Elements of each part prepared for section cuts, built when first needed.
     section_cells: std::sync::OnceLock<Vec<SectionCells>>,
     /// The exploded view: parts drawn and picked moved apart.
@@ -904,7 +905,7 @@ impl Model {
             clip: None,
             uncut: HashSet::new(),
             origin,
-            skins,
+            skins: std::sync::Arc::new(skins),
             section_cells: Default::default(),
             explosion: Explosion::default(),
             query_annotations: Vec::new(),
@@ -1014,7 +1015,7 @@ impl Model {
         let kept: Vec<bool> = (self.parts.iter())
             .map(|p| !deleted.iter().any(|d| p.name.eq_ignore_ascii_case(d)))
             .collect();
-        let skins = std::mem::take(&mut self.skins);
+        let skins = std::sync::Arc::unwrap_or_clone(std::mem::take(&mut self.skins));
         let elements: Vec<ElementId> = self.mesh.elements().iter().map(|e| e.id).collect();
         let nodes = self.mesh.node_ids().to_vec();
         let display = (self.into_geometry_display()).without_parts(deleted, smaller, tags)?;
@@ -1145,7 +1146,7 @@ impl Model {
         let cad_parts = self.parts.len() - shown.len();
         let colors: Vec<_> = self.parts.iter().map(|p| (p.color, p.visible)).collect();
         let suppressed: Vec<bool> = self.parts.iter().map(|p| p.suppressed).collect();
-        let mut skins = std::mem::take(&mut self.skins);
+        let mut skins = std::sync::Arc::unwrap_or_clone(std::mem::take(&mut self.skins));
         skins.truncate(cad_parts);
         let mut display = self.into_geometry_display();
         if !shown.is_empty() {
@@ -1375,11 +1376,18 @@ impl Model {
                 ..Default::default()
             };
         }
-        self.skins = (self.mesh.parts.iter())
-            .map(|part| {
-                plx_mesh::extract_part_skin_welded(&self.mesh, part, FEATURE_ANGLE_DEG, Some(&weld))
-            })
-            .collect();
+        self.skins = std::sync::Arc::new(
+            (self.mesh.parts.iter())
+                .map(|part| {
+                    plx_mesh::extract_part_skin_welded(
+                        &self.mesh,
+                        part,
+                        FEATURE_ANGLE_DEG,
+                        Some(&weld),
+                    )
+                })
+                .collect(),
+        );
         self.skin_lookup = Default::default();
         self.seams = Default::default();
         self.part_nodes = Default::default();
@@ -1787,13 +1795,20 @@ impl Model {
     /// GPU-ready meshes of all parts, deformed and coloured by the selected result if any,
     /// with the transformed copies of the results.
     pub fn render_meshes(&self) -> Vec<RenderMesh> {
+        self.render_meshes_on(None)
+    }
+
+    /// [`Model::render_meshes`] on the surfaces of the parts built before, by
+    /// [`SceneBase::build`], if given.
+    fn render_meshes_on(&self, base: Option<Vec<RenderMesh>>) -> Vec<RenderMesh> {
         let (coords, scalars, deformed) = self.shown_state();
         let arrows = self.part_arrows();
         // Coloured arrows take the contour colours, the surfaces under them turn grey.
         let surface = |scalars: Option<Vec<f32>>| {
             scalars.filter(|_| !arrows.as_ref().is_some_and(|a| a.colored))
         };
-        let mut meshes = self.part_meshes(&coords, surface(scalars.clone()).as_deref(), deformed);
+        let surface_scalars = surface(scalars.clone());
+        let mut meshes = self.part_meshes(&coords, surface_scalars.as_deref(), deformed, base);
         let lic = self.lic_values();
         if let Some((values, _)) = &lic {
             for (index, mesh) in meshes.iter_mut().enumerate() {
@@ -1822,7 +1837,7 @@ impl Model {
         for (instance, scalars) in copies {
             let moved = transform_coords(&coords, &instance);
             let undeformed = deformed.then(|| transform_coords(&self.exploded_coords(), &instance));
-            let parts = meshes.iter_mut().zip(&self.parts).zip(&self.skins);
+            let parts = meshes.iter_mut().zip(&self.parts).zip(self.skins.iter());
             for (index, ((mesh, info), skin)) in parts.enumerate() {
                 let surface_scalars = surface(scalars.clone());
                 let mut copy = part_render_mesh(
@@ -1878,7 +1893,13 @@ impl Model {
 
     /// [`Model::render_meshes`] followed, for a submodel, by the wireframe of its global model.
     pub fn scene_meshes(&self) -> Vec<RenderMesh> {
-        let mut meshes = self.render_meshes();
+        self.scene_meshes_on(None)
+    }
+
+    /// [`Model::scene_meshes`] on the surfaces of the parts [`SceneBase::build`] built from
+    /// [`Model::scene_base`], if given: what is left takes a fraction of the time.
+    pub fn scene_meshes_on(&self, base: Option<Vec<RenderMesh>>) -> Vec<RenderMesh> {
+        let mut meshes = self.render_meshes_on(base);
         meshes.extend(self.global_wireframe());
         meshes.extend(self.cyclic_wireframe());
         meshes.extend(self.particle_box());
@@ -1934,7 +1955,7 @@ impl Model {
                 * DAffine3::from_axis_angle(axis, angle)
                 * DAffine3::from_translation(-point);
             let turned = transform_coords(&coords, &instance);
-            for skin in &self.skins {
+            for skin in self.skins.iter() {
                 mesh.wireframe_edges
                     .extend(wireframe_edges(&turned, skin, self.origin));
             }
@@ -1964,7 +1985,7 @@ impl Model {
         }
         // Render positions are relative to the submodel's origin.
         let mut mesh = RenderMesh::default();
-        for skin in &model.skins {
+        for skin in model.skins.iter() {
             mesh.wireframe_edges
                 .extend(mesh_wireframe(&coords, skin, self.origin));
         }
@@ -1976,19 +1997,67 @@ impl Model {
         coords: &[[f64; 3]],
         scalars: Option<&[f32]>,
         deformed: bool,
+        base: Option<Vec<RenderMesh>>,
     ) -> Vec<RenderMesh> {
-        let undeformed = if deformed {
+        let count = self.parts.len().min(self.skins.len());
+        // Built before for these parts, or not at all.
+        let mut base = base.filter(|b| b.len() == count).map(Vec::into_iter);
+        let undeformed = if deformed && base.is_none() {
             self.exploded_coords()
         } else {
             std::borrow::Cow::Borrowed(&[][..])
         };
         let solids = self.solid_elements();
-        (0..self.parts.len().min(self.skins.len()))
-            .map(|index| self.part_mesh(index, coords, scalars, &undeformed, deformed, &solids))
+        (0..count)
+            .map(|index| {
+                let surface = base.as_mut().and_then(Iterator::next);
+                self.part_mesh(
+                    index,
+                    coords,
+                    scalars,
+                    &undeformed,
+                    deformed,
+                    &solids,
+                    surface,
+                )
+            })
             .collect()
     }
 
+    /// What the surfaces of the parts of the shown results are built from, to build them
+    /// on another thread ([`SceneBase::build`]) while this one goes on; `None` where the
+    /// scene shows more than results, such as highlighted faces.
+    pub fn scene_base(&self) -> Option<SceneBase> {
+        let highlight = &self.highlight;
+        if self.results.is_none()
+            || self.is_geometry
+            || !highlight.parts.is_empty()
+            || !highlight.faces.is_empty()
+            || !highlight.secondary_faces.is_empty()
+        {
+            return None;
+        }
+        let (coords, scalars, deformed) = self.shown_state();
+        let colored_arrows = self.part_arrows().is_some_and(|a| a.colored);
+        let count = self.parts.len().min(self.skins.len());
+        Some(SceneBase {
+            coords: coords.into_owned(),
+            undeformed: if deformed {
+                self.exploded_coords().into_owned()
+            } else {
+                Vec::new()
+            },
+            scalars: scalars.filter(|_| !colored_arrows),
+            skins: std::sync::Arc::clone(&self.skins),
+            parts: (self.parts.iter().take(count))
+                .map(|info| (info.color, smooth_angle(info)))
+                .collect(),
+            origin: self.origin,
+        })
+    }
+
     /// The mesh of one part as [`Model::part_meshes`] builds it.
+    #[allow(clippy::too_many_arguments)]
     fn part_mesh(
         &self,
         index: usize,
@@ -1997,25 +2066,24 @@ impl Model {
         undeformed: &[[f64; 3]],
         deformed: bool,
         solids: &SolidElements,
+        surface: Option<RenderMesh>,
     ) -> RenderMesh {
         let (info, skin) = (&self.parts[index], &self.skins[index]);
-        let smooth = if info.loose {
-            LOOSE_SMOOTH_ANGLE_DEG
-        } else {
-            SMOOTH_ANGLE_DEG
-        };
-        let mut mesh = part_render_mesh(
-            coords,
-            skin,
-            self.origin,
-            info.color,
-            self.face_highlight(index, skin),
-            smooth,
-            scalars,
-        );
+        let built = surface.is_some();
+        let mut mesh = surface.unwrap_or_else(|| {
+            part_render_mesh(
+                coords,
+                skin,
+                self.origin,
+                info.color,
+                self.face_highlight(index, skin),
+                smooth_angle(info),
+                scalars,
+            )
+        });
         self.highlight_outline(index, skin, &mut mesh);
         self.append_solids(&mut mesh, index, coords, scalars, solids, true);
-        if deformed {
+        if deformed && !built {
             mesh.wireframe_edges = wireframe_edges(undeformed, skin, self.origin);
         }
         if self.is_geometry {
@@ -2037,7 +2105,7 @@ impl Model {
         }
         let coords = self.shown_coords();
         let solids = self.solid_elements();
-        Some(self.part_mesh(index, &coords, None, &[], false, &solids))
+        Some(self.part_mesh(index, &coords, None, &[], false, &solids, None))
     }
 
     /// The parts drawn differently with the highlight `new` than with `old`; `None` when
@@ -2740,7 +2808,7 @@ impl Model {
     /// segments.
     pub fn element_outline(&self, element: usize) -> Vec<[Vec3; 2]> {
         let mut edges = Vec::new();
-        for skin in &self.skins {
+        for skin in self.skins.iter() {
             for face in skin.faces.iter().filter(|f| f.element == element) {
                 edges.extend(self.face_outline(&face.corners));
             }
@@ -2910,6 +2978,54 @@ fn ray_triangle(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Opt
     let v = direction.dot(q) / det;
     let t = ac.dot(q) / det;
     (u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t >= 0.0).then_some(t)
+}
+
+/// The smooth angle of the surface of a part: wider for loose cubes such as particles.
+fn smooth_angle(info: &PartInfo) -> f64 {
+    if info.loose {
+        LOOSE_SMOOTH_ANGLE_DEG
+    } else {
+        SMOOTH_ANGLE_DEG
+    }
+}
+
+/// What the surfaces of the parts of a results scene are built from, taken from the model
+/// ([`Model::scene_base`]) so that they can be built on another thread: the part of
+/// building the scene that takes long for a large model.
+pub struct SceneBase {
+    coords: Vec<[f64; 3]>,
+    /// The undeformed coordinates for the outline behind deformed results; empty without.
+    undeformed: Vec<[f64; 3]>,
+    scalars: Option<Vec<f32>>,
+    skins: std::sync::Arc<Vec<PartSkin>>,
+    /// Colour and smooth angle of each part.
+    parts: Vec<([f32; 3], f64)>,
+    origin: DVec3,
+}
+
+impl SceneBase {
+    /// The surface of each part with its contour colours and the undeformed outline, as
+    /// [`Model::scene_meshes_on`] takes them.
+    pub fn build(self) -> Vec<RenderMesh> {
+        (self.parts.iter().zip(self.skins.iter()))
+            .map(|(&(color, smooth), skin)| {
+                let scalars = self.scalars.as_deref();
+                let mut mesh = part_render_mesh(
+                    &self.coords,
+                    skin,
+                    self.origin,
+                    color,
+                    |_| None,
+                    smooth,
+                    scalars,
+                );
+                if !self.undeformed.is_empty() {
+                    mesh.wireframe_edges = wireframe_edges(&self.undeformed, skin, self.origin);
+                }
+                mesh
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -3142,6 +3258,29 @@ mod tests {
                 .iter()
                 .all(|v| v.scalar >= 0.0)
         );
+    }
+
+    #[test]
+    fn results_scene_built_on_another_thread_matches_the_one_built_in_place() {
+        let loaded = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::Unitless).unwrap();
+        let model = &loaded.model;
+        let base = std::thread::spawn({
+            let scene = model.scene_base().expect("results without highlights");
+            move || scene.build()
+        })
+        .join()
+        .unwrap();
+        let in_place = model.scene_meshes();
+        let from_base = model.scene_meshes_on(Some(base));
+        assert_eq!(in_place.len(), from_base.len());
+        for (a, b) in in_place.iter().zip(&from_base) {
+            assert_eq!(a.vertices, b.vertices);
+            assert_eq!(a.triangles, b.triangles);
+            assert_eq!(a.feature_edges, b.feature_edges);
+            assert_eq!(a.mesh_edges, b.mesh_edges);
+            assert_eq!(a.wireframe_edges, b.wireframe_edges);
+            assert_eq!(a.wide_edges, b.wide_edges);
+        }
     }
 
     #[test]
