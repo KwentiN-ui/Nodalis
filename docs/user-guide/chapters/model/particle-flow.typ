@@ -122,6 +122,28 @@ over the time, RFL on the reference point the heat the blade gave.])
 The time step stays below the time heat needs to cross a cell; with food pastes, which
 conduct little, that is far longer than the time step of the flow and costs nothing.
 
+=== On the graphics card <particle-flow-gpu>
+
+From 20 000 particles the time steps run on a discrete graphics card, when the setting
+#ui("Graphics card") > #ui("Use for the solver") is on (@settings). The whole time step
+runs on the card, in single precision: the particles are sorted by the cell they are in,
+every node of the grid gathers what the particles around it give, the walls, the sides of
+the box and the temperature act there, and the particles take their motion and their
+stress back. The processor only writes the frames and the points of the history output.
+The sums do not depend on the order the card's threads run in, so a run on the same card
+gives the same results every time, and they agree with the processor's: a paste stirred by
+a warm blade with friction gives the torque, the work, the heat and the temperatures within
+0.01 % of the processor.
+
+The output says so as the run starts; its report at the end names the card
+(#ui("Particles computed on …")) or why the
+processor computes them: the card is switched off, there is no discrete card, or the model
+needs more of the card's memory than the solver may take (@settings).
+
+#screenshot("particle-flow-gpu.png", [The end of the output of a Particle Flow step computed
+on the graphics card (here a software renderer), filtered for "particles": the progress,
+the report with the particles, cells and time steps, and the card.])
+
 === Results
 
 The run writes results like any other analysis, shown in the Results workspace with the

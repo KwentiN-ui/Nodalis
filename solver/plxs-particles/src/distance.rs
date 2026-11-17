@@ -156,10 +156,23 @@ pub struct DistanceField {
 
 impl DistanceField {
     /// The field of `surface` on a lattice of `spacing` over its box widened by `margin`,
-    /// exact within `band` of the surface.
-    pub fn new(surface: &TriangleSurface, spacing: f64, margin: f64, band: f64) -> Self {
+    /// exact within `band` of the surface. The lattice points lie half a spacing off the
+    /// points `anchor + k spacing` (the nodes of a grid of that spacing): those then sit in
+    /// the middle of the lattice cells, not on their corners, where the gradient of the
+    /// interpolation jumps between the cells around and the normal at a node would hang on
+    /// the last bit of its position.
+    pub fn new(
+        surface: &TriangleSurface,
+        spacing: f64,
+        margin: f64,
+        band: f64,
+        anchor: Vec3,
+    ) -> Self {
         let (lo, hi) = surface.bounds().unwrap_or(([0.0; 3], [0.0; 3]));
-        let origin = std::array::from_fn(|a| lo[a] - margin);
+        let origin = std::array::from_fn(|a| {
+            let k = ((lo[a] - margin - anchor[a]) / spacing).floor();
+            anchor[a] + (k - 0.5) * spacing
+        });
         let dims: [usize; 3] =
             std::array::from_fn(|a| ((hi[a] + margin - origin[a]) / spacing).ceil() as usize + 1);
         let index = |i: usize, j: usize, k: usize| i + dims[0] * (j + dims[1] * k);
@@ -259,6 +272,11 @@ impl DistanceField {
         Some((value, gradient))
     }
 
+    /// The distances at the lattice points, `i + dims[0] (j + dims[1] k)`.
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
+
     /// The smallest and largest corner of the lattice.
     pub fn bounds(&self) -> (Vec3, Vec3) {
         let hi = std::array::from_fn(|a| self.origin[a] + (self.dims[a] - 1) as f64 * self.spacing);
@@ -285,7 +303,7 @@ mod tests {
     fn box_distance_and_sign() {
         let s = TriangleSurface::cuboid([0.0; 3], [1.0, 2.0, 3.0]);
         assert!((enclosed_volume(&s) - 6.0).abs() < 1e-12);
-        let field = DistanceField::new(&s, 0.1, 0.5, 0.4);
+        let field = DistanceField::new(&s, 0.1, 0.5, 0.4, [0.0; 3]);
         let (d, g) = field.sample([0.5, 1.0, 0.15]).unwrap();
         assert!((d + 0.15).abs() < 1e-6, "{d}");
         assert!((g[2] + 1.0).abs() < 1e-6, "{g:?}");

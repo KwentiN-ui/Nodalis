@@ -207,6 +207,7 @@ impl Run {
                 let mut spool_error = None;
                 let mut last_time = 0.0;
                 let mut last_note = std::time::Instant::now();
+                let mut told_card = false;
                 let end_time = model.control.end_time;
                 let frame_dt = end_time / model.control.frames.max(1) as f64;
                 // Each frame is an increment (the first, at time zero, is the start): the
@@ -229,6 +230,12 @@ impl Run {
                             plxs_particles::solve_streaming(
                                 &model,
                                 &mut |status| {
+                                    if status.on_card && !told_card {
+                                        told_card = true;
+                                        progress(ProgressEvent::Info(
+                                            "particles: time steps on the graphics card".into(),
+                                        ));
+                                    }
                                     if last_note.elapsed().as_secs_f64() > 5.0 {
                                         last_note = std::time::Instant::now();
                                         progress(ProgressEvent::Info(format!(

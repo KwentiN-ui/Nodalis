@@ -32,6 +32,10 @@ use crate::math::{
     transpose,
 };
 
+#[cfg(feature = "gpu")]
+#[path = "gpu.rs"]
+mod gpu;
+
 /// Cells per block and axis of the sorting.
 const BLOCK: usize = 4;
 /// Nodes per axis of the patch of a block: the block's cells and the reach of the stencil.
@@ -58,6 +62,8 @@ pub struct Status {
     pub steps: usize,
     pub particles: usize,
     pub time_step: f64,
+    /// Whether the time steps run on the graphics card.
+    pub on_card: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -187,13 +193,15 @@ struct Wall {
 }
 
 impl Wall {
-    /// The pose of the body at time `t`.
-    fn pose(&self, t: f64) -> Pose {
+    /// The pose of the body at the end `t` of a time step of `dt`, with the velocity of
+    /// the middle of the step: a step that ends on a kink of the amplitude moves with the
+    /// segment it lies in, not with the next one.
+    fn pose(&self, t: f64, dt: f64) -> Pose {
         let moved = self.motion.moved_time(t);
         let shift = scale(self.motion.velocity, moved);
         Pose {
             rotation: rotation(scale(self.motion.angular, moved)),
-            factor: self.motion.factor(t),
+            factor: self.motion.factor(t - 0.5 * dt),
             center: add(self.motion.center, shift),
         }
     }
@@ -370,12 +378,13 @@ pub fn solve_streaming(
                 grid.h,
                 (WALL_BAND + 2.0) * grid.h,
                 WALL_BAND * grid.h,
+                grid.origin,
             ),
             law: w.law,
             motion: w.motion.clone(),
         })
         .collect();
-    let mut particles = fill(model, &grid, &laws, &walls)?;
+    let particles = fill(model, &grid, &laws, &walls)?;
     if particles.is_empty() {
         return Err("no particles: the material bodies lie outside the box or inside walls".into());
     }
@@ -405,12 +414,6 @@ pub fn solve_streaming(
             .fold(f64::INFINITY, f64::min),
     };
     let wall_temperature: Vec<Option<f64>> = model.walls.iter().map(|w| w.temperature).collect();
-    let control = &model.control;
-    let end = control.end_time;
-    let frames = control.frames.max(1);
-    let frame_dt = end / frames as f64;
-    let history_dt = end / HISTORY_POINTS as f64;
-
     let mut names: Vec<String> = model.walls.iter().map(|w| w.name.clone()).collect();
     for side in ["X min", "X max", "Y min", "Y max", "Z min", "Z max"] {
         names.push(format!("Box {side}"));
@@ -433,8 +436,162 @@ pub fn solve_streaming(
         ..Default::default()
     };
     let initial = particle_sums(&particles);
-    let potential0 = initial.potential;
-    let energy0 = initial.kinetic + initial.stored;
+    let setup = Setup {
+        model,
+        grid: &grid,
+        laws: &laws,
+        walls: &walls,
+        factors: &factors,
+        wave,
+        slowest,
+        viscosity_limit,
+        heat_limit,
+        wall_temperature: &wall_temperature,
+        potential0: initial.potential,
+        energy0: initial.kinetic + initial.stored,
+    };
+    let initial_count = particles.len();
+    #[cfg(feature = "gpu")]
+    let card = gpu::Card::open_for(&setup, &particles, &mut notes);
+    on_frame(frame(0.0, &particles));
+    #[cfg(feature = "gpu")]
+    let on_card = card.is_some();
+    #[cfg(not(feature = "gpu"))]
+    let on_card = false;
+    #[cfg(feature = "gpu")]
+    let tally = match card {
+        Some(card) => card.run(
+            &setup,
+            &particles,
+            &mut history,
+            progress,
+            on_frame,
+            &mut notes,
+        )?,
+        None => run_cpu(
+            &setup,
+            particles,
+            &mut history,
+            progress,
+            on_frame,
+            &mut notes,
+        )?,
+    };
+    #[cfg(not(feature = "gpu"))]
+    let tally = run_cpu(
+        &setup,
+        particles,
+        &mut history,
+        progress,
+        on_frame,
+        &mut notes,
+    )?;
+    let Tally {
+        t,
+        steps,
+        dt_range,
+        max_mach,
+        stopped,
+        scale_energy,
+        particles: left,
+    } = tally;
+    progress(Status {
+        time: t,
+        end_time: model.control.end_time,
+        steps,
+        particles: left,
+        time_step: dt_range.1,
+        on_card,
+    });
+    if max_mach > 0.1 && factor > 1.0 {
+        notes.push(format!(
+            "The material moved at up to {max_mach:.2} times the slowed wave speed; a value \
+             above 0.1 makes the slowed waves change the result"
+        ));
+    }
+    let cells = std::array::from_fn(|a| {
+        ((model.domain.max[a] - model.domain.min[a]) / grid.h).round() as usize
+    });
+    // The balance error relative to the largest energy of the run.
+    for e in &mut history.balance_error {
+        *e /= scale_energy.max(1e-300);
+    }
+    results.history = history;
+    results.report = ParticleReport {
+        particles: initial_count,
+        cells,
+        steps,
+        time_step: (dt_range.0, if steps > 0 { dt_range.1 } else { 0.0 }),
+        sound_speed_factor: factor,
+        max_mach,
+        seconds: started.elapsed().as_secs_f64(),
+        stopped,
+        notes,
+    };
+    Ok(results)
+}
+
+/// What the solvers share before the time loop.
+struct Setup<'a> {
+    model: &'a ParticleModel,
+    grid: &'a Grid,
+    laws: &'a [Law],
+    walls: &'a [Wall],
+    /// The factors of the flow over the temperature, per material.
+    factors: &'a [&'a [[f64; 2]]],
+    /// The fastest and the slowest wave speed of the materials.
+    wave: f64,
+    slowest: f64,
+    viscosity_limit: f64,
+    heat_limit: f64,
+    wall_temperature: &'a [Option<f64>],
+    /// The potential energy and the kinetic plus stored energy at the start.
+    potential0: f64,
+    energy0: f64,
+}
+
+/// How the time loop ended.
+struct Tally {
+    t: f64,
+    steps: usize,
+    /// The largest and the smallest time step.
+    dt_range: (f64, f64),
+    max_mach: f64,
+    stopped: bool,
+    /// The largest energy of the run, the scale of the balance error.
+    scale_energy: f64,
+    /// The particles left in the model.
+    particles: usize,
+}
+
+/// The time loop on the processor.
+fn run_cpu(
+    setup: &Setup<'_>,
+    mut particles: Vec<Particle>,
+    history: &mut ParticleHistory,
+    progress: &mut dyn FnMut(Status),
+    on_frame: &mut dyn FnMut(ParticleFrame),
+    notes: &mut Vec<String>,
+) -> Result<Tally, String> {
+    let Setup {
+        model,
+        grid,
+        laws,
+        walls,
+        factors,
+        wave,
+        slowest,
+        viscosity_limit,
+        heat_limit,
+        wall_temperature,
+        potential0,
+        energy0,
+    } = *setup;
+    let control = &model.control;
+    let end = control.end_time;
+    let frames = control.frames.max(1);
+    let frame_dt = end / frames as f64;
+    let history_dt = end / HISTORY_POINTS as f64;
     let mut scale_energy = energy0.abs();
     let mut dissipated = 0.0;
     let mut wall_loss = 0.0;
@@ -442,11 +599,9 @@ pub fn solve_streaming(
     let mut wall_work = 0.0;
     let mut outflow_energy = 0.0;
     let mut outflow_mass = 0.0;
-    let mut wall_force = vec![Load::default(); names.len()];
+    let mut wall_force = vec![Load::default(); history.walls.len()];
     let mut wall_samples = 0usize;
 
-    let initial_count = particles.len();
-    on_frame(frame(0.0, &particles));
     let mut t = 0.0;
     let mut steps = 0usize;
     let mut next_frame = 1usize;
@@ -482,9 +637,9 @@ pub fn solve_streaming(
         dt_range = (dt_range.0.max(dt), dt_range.1.min(dt));
 
         // (1) Particles to grid.
-        spread(&grid, &particles, dt, &mut nodes);
+        spread(grid, &particles, dt, &mut nodes);
         // (2) The grid.
-        let pose: Vec<_> = walls.iter().map(|w| w.pose(t + dt)).collect();
+        let pose: Vec<_> = walls.iter().map(|w| w.pose(t + dt, dt)).collect();
         let boxes: Vec<_> = walls
             .iter()
             .zip(&pose)
@@ -611,7 +766,7 @@ pub fn solve_streaming(
 
         // (2b) The heat: conduction between neighbouring nodes, and what the walls gave.
         if heat.is_some() {
-            conduct(&grid, &nodes, &node_heat, dt, &mut node_dt);
+            conduct(grid, &nodes, &node_heat, dt, &mut node_dt);
         }
         let node_dt = &node_dt;
         let node_sums = &nodes;
@@ -837,6 +992,7 @@ pub fn solve_streaming(
                 steps,
                 particles: particles.len(),
                 time_step: dt,
+                on_card: false,
             });
         }
         if particles.is_empty() {
@@ -844,39 +1000,15 @@ pub fn solve_streaming(
             break;
         }
     }
-    progress(Status {
-        time: t,
-        end_time: end,
+    Ok(Tally {
+        t,
         steps,
-        particles: particles.len(),
-        time_step: dt_range.1,
-    });
-    if max_mach > 0.1 && factor > 1.0 {
-        notes.push(format!(
-            "The material moved at up to {max_mach:.2} times the slowed wave speed; a value \
-             above 0.1 makes the slowed waves change the result"
-        ));
-    }
-    let cells = std::array::from_fn(|a| {
-        ((model.domain.max[a] - model.domain.min[a]) / grid.h).round() as usize
-    });
-    // The balance error relative to the largest energy of the run.
-    for e in &mut history.balance_error {
-        *e /= scale_energy.max(1e-300);
-    }
-    results.history = history;
-    results.report = ParticleReport {
-        particles: initial_count,
-        cells,
-        steps,
-        time_step: (dt_range.0, if steps > 0 { dt_range.1 } else { 0.0 }),
-        sound_speed_factor: factor,
+        dt_range,
         max_mach,
-        seconds: started.elapsed().as_secs_f64(),
         stopped,
-        notes,
-    };
-    Ok(results)
+        scale_energy,
+        particles: particles.len(),
+    })
 }
 
 /// The change of the temperature of every node in a step: the heat `given` there, plus
@@ -1180,7 +1312,7 @@ fn fill(
     let at = |a: usize, i: usize| d.min[a] + (i as f64 + 0.5) * s;
     let mut taken = vec![false; counts[0] * counts[1] * counts[2]];
     let mut particles = Vec::new();
-    let pose: Vec<_> = walls.iter().map(|w| w.pose(0.0)).collect();
+    let pose: Vec<_> = walls.iter().map(|w| w.pose(0.0, 0.0)).collect();
     for (b, body) in model.bodies.iter().enumerate() {
         let Some(law) = laws.get(body.material) else {
             return Err(format!("body {} has no material", body.name));
