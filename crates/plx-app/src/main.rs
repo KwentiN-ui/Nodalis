@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod allocator;
 mod amplitude_dialog;
 #[cfg(test)]
 mod test_ids {
@@ -116,6 +117,7 @@ fn main() -> eframe::Result {
     if let Some(code) = meshing::worker_main() {
         std::process::exit(code);
     }
+    allocator::give_back_large_blocks();
     crash_log::install();
     if let Ok(program) = std::env::current_exe() {
         meshing::set_worker(program);

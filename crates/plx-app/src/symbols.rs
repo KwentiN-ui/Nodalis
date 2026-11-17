@@ -1169,6 +1169,7 @@ mod tests {
         let mesh = plx_io::inp::read_inp(&path).unwrap().mesh;
         let mut model = Model::new(&path, mesh);
         model.fe.reference_points.push(plx_model::ReferencePoint {
+            visible: true,
             id: crate::test_ids::named("RP-1"),
             name: "RP-1".into(),
             position: [130.0, 5.0, 5.0],
