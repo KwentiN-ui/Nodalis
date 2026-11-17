@@ -33,7 +33,7 @@ fn granular(name: &str, friction: f64, friction_limit: f64, grain: f64) -> Parti
             fine_fraction: 0.0,
         },
         thermal: None,
-        flow_factor: Vec::new(),
+        flow_tables: Default::default(),
     }
 }
 

@@ -12,7 +12,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use plx_mesh::{ElementFamily, FeMesh};
-use plx_model::particle_flow::{BoxSide, Flow, ParticleFlowStep};
+use plx_model::particle_flow::{BoxSide, Flow, FlowProperty, ParticleFlowStep};
 use plx_model::{
     Constraint, ContactBehavior, FeModel, HistoryKind, Material, ModelItem, ModelSpace, StepKind,
 };
@@ -675,22 +675,31 @@ pub fn particle_material(material: &Material) -> Result<ParticleMaterial, String
         }),
         _ => None,
     };
-    if let Some(&[_, factor]) = (material.flow_temperature.iter())
-        .find(|[t, f]| !t.is_finite() || !(f.is_finite() && *f >= 0.0))
+    if let Some(flow) = &material.flow
+        && let Some(problem) = material.flow_tables.problem(flow)
     {
-        return Err(format!(
-            "Material {}: the factors of the temperature table must not be negative ({factor}).",
-            material.name
-        ));
+        return Err(format!("Material {}: {problem}", material.name));
     }
-    let mut flow_factor = material.flow_temperature.clone();
-    flow_factor.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    // Only the tables of the material's law act; a fixed value has none.
+    let table = |property: FlowProperty| -> Vec<[f64; 2]> {
+        let acts =
+            (material.flow.as_ref()).is_some_and(|f| FlowProperty::of(f).contains(&property));
+        match material.flow_tables.get(property) {
+            Some(table) if acts => table.points.clone(),
+            _ => Vec::new(),
+        }
+    };
+    let flow_tables = ir::FlowTables {
+        yield_stress: table(FlowProperty::YieldStress),
+        consistency: table(FlowProperty::Consistency),
+        viscosity: table(FlowProperty::Viscosity),
+    };
     Ok(ParticleMaterial {
         name: material.name.clone(),
         density,
         law,
         thermal,
-        flow_factor,
+        flow_tables,
     })
 }
 
@@ -1310,7 +1319,13 @@ mod tests {
         settings.wall_transfer = 500.0;
         fe.materials[0].conductivity = Some(0.5);
         fe.materials[0].specific_heat = Some(3500.0);
-        fe.materials[0].flow_temperature = vec![[60.0, 0.5], [20.0, 1.0]];
+        // A table of the yield stress, one of the viscosity, which a paste does not have.
+        let table = |points: Vec<[f64; 2]>| Some(plx_model::ValueTable { points });
+        fe.materials[0].flow_tables = plx_model::particle_flow::FlowTables {
+            yield_stress: table(vec![[20.0, 1000.0], [60.0, 500.0]]),
+            consistency: None,
+            viscosity: table(vec![[20.0, 1.0]]),
+        };
         // Without a temperature at the start the part cannot be filled.
         let missing = lower(&mesh, &fe, "Test").unwrap_err();
         assert!(
@@ -1351,7 +1366,13 @@ mod tests {
                 specific_heat: 3500.0
             })
         );
-        assert_eq!(material.flow_factor, vec![[20.0, 1.0], [60.0, 0.5]]);
+        assert_eq!(
+            material.flow_tables,
+            ir::FlowTables {
+                yield_stress: vec![[20.0, 1000.0], [60.0, 500.0]],
+                ..Default::default()
+            }
+        );
         assert!(lowered.warnings.is_empty(), "{:?}", lowered.warnings);
     }
 }
