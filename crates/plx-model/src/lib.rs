@@ -241,8 +241,10 @@ use serde::{Deserialize, Serialize};
 /// it is. Format 47 adds the heat of the Particle Flow step and the temperature table of the
 /// flow of materials; older formats read as they are. Format 48 adds the granular flow;
 /// older formats read as they are. Format 49 adds grain mixtures of two sizes to the
-/// granular flow; older formats read as they are.
-pub const PROJECT_FORMAT: u32 = 50;
+/// granular flow; older formats read as they are. Format 51 adds the Flow boundary
+/// conditions and one default side of the Particle Flow step; older steps take the default
+/// side.
+pub const PROJECT_FORMAT: u32 = 51;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
