@@ -1101,6 +1101,10 @@ impl StepKind {
         if matches!(kind, LoadKind::Excitation(_)) {
             return matches!(self, StepKind::Dynamic(_));
         }
+        // The particles take gravity only.
+        if matches!(self, StepKind::ParticleFlow(_)) {
+            return kind.gravity_vector().is_some();
+        }
         self.supports_loads()
             && if kind.is_thermal() {
                 self.is_thermal()

@@ -27,13 +27,15 @@ FE Model and Results workspaces:
     motion runs over the step at constant speed, so 50 rad over a step of 5 s turn a screw
     at 10 rad/s; an amplitude shapes it over time, e.g. a short start and then a constant
     speed. A temperature boundary condition on the same reference point gives the wall its
-    temperature, see @particle-flow-heat. Other boundary conditions are left out.],
+    temperature, see @particle-flow-heat. Other boundary conditions are left out, and the
+    model check warns of them.],
   [Wall friction], [A contact region (@contacts) between a wall and a filled part gives
     the wall its law: #ui("Bonded") and #ui("Rough") let the material stick,
     #ui("No Separation") and #ui("Frictionless") let it slide freely, #ui("Frictional")
     with Coulomb friction of its coefficient. Without a contact region the material sticks.],
   [Gravity], [The gravity loads of the step, each on the filled parts it selects; a load
-    that selects none is reported. Other loads are left out.],
+    that selects none is reported. The step offers no other loads; one copied into it is
+    left out, and the model check warns of it.],
 )
 
 A Particle Flow step is computed alone: the other steps of its analysis must be
