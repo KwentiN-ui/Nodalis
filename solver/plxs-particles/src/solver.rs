@@ -190,7 +190,19 @@ impl Grid {
                 0.5 * (f - 0.5) * (f - 0.5),
             ];
         }
+        if self.space != Space::Solid {
+            // The slab of a 2D model has one node along z, onto which the three of the
+            // stencil fold: their weights add up to one and their offsets cancel.
+            base[2] = 0;
+            frac[2] = 0.0;
+            w[2] = [1.0, 0.0, 0.0];
+        }
         (base, w, frac)
+    }
+
+    /// The nodes of a stencil along z: three, or the one of a 2D slab.
+    fn reach_z(&self) -> usize {
+        if self.space == Space::Solid { 3 } else { 1 }
     }
 
     /// The offsets into the node arrays of the three nodes of a stencil along each axis.
@@ -732,7 +744,7 @@ fn run_cpu(
         // (1b) The pressure of the inlets on the nodes behind their layers.
         pushed.clear();
         for feed in feeds {
-            feed.push(grid, t, |at| nodes[at].mass, &mut pushed);
+            feed.push(t, |at| nodes[at].mass, &mut pushed);
         }
         for &(at, f) in &pushed {
             nodes[at].weight = add(nodes[at].weight, f);
@@ -935,7 +947,7 @@ fn run_cpu(
                 let mut finer = 0.0;
                 // The new temperature of the nodes around, weighted over the filled ones.
                 let mut around = [0.0; 2];
-                for sk in 0..3 {
+                for sk in 0..grid.reach_z() {
                     for sj in 0..3 {
                         let wjk = w[1][sj] * w[2][sk];
                         let row = offsets[1][sj] + offsets[2][sk];
@@ -1433,6 +1445,8 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
     }
     let busy: Vec<usize> = (0..count).filter(|&b| start[b + 1] > start[b]).collect();
     let inv = 4.0 / (grid.h * grid.h);
+    // The patch of a 2D slab is one node deep.
+    let deep = if grid.reach_z() == 1 { 1 } else { PATCH };
     let patches: Vec<(usize, Vec<NodeSum>)> = busy
         .par_iter()
         .map(|&b| {
@@ -1441,7 +1455,7 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
                 (((b / blocks[0]) % blocks[1]) * BLOCK) as isize,
                 ((b / (blocks[0] * blocks[1])) * BLOCK) as isize,
             ];
-            let mut patch = vec![NodeSum::default(); PATCH * PATCH * PATCH];
+            let mut patch = vec![NodeSum::default(); PATCH * PATCH * deep];
             for &p in &order[start[b]..start[b + 1]] {
                 let p = &particles[p];
                 let (base, w, frac) = grid.stencil(p.x);
@@ -1472,7 +1486,7 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
                     0.0
                 };
 
-                for (sk, wk) in w[2].iter().enumerate() {
+                for (sk, wk) in w[2].iter().enumerate().take(grid.reach_z()) {
                     for (sj, wj) in w[1].iter().enumerate() {
                         for (si, wi) in w[0].iter().enumerate() {
                             let weight = wi * wj * wk;
@@ -1522,7 +1536,7 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
             (((b / blocks[0]) % blocks[1]) * BLOCK) as isize,
             ((b / (blocks[0] * blocks[1])) * BLOCK) as isize,
         ];
-        for k in 0..PATCH {
+        for k in 0..deep {
             let gk = corner[2] + k as isize;
             if !grid.periodic[2] && gk >= grid.n[2] as isize {
                 continue;
