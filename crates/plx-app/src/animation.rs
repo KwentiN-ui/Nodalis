@@ -123,7 +123,7 @@ impl Animation {
             kind,
             frames: DEFAULT_FRAMES,
             fps: DEFAULT_FPS,
-            playback: Playback::Swing,
+            playback: Playback::Once,
             limits: ColorLimits::CurrentFrame,
             frame: DEFAULT_FRAMES as usize - 1,
             playing: false,

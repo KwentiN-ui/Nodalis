@@ -1114,6 +1114,15 @@ impl StepKind {
     }
 }
 
+/// Whether a boundary condition of a Particle Flow step makes the parts it selects a wall
+/// (a rigid body) that moves as it says: an active displacement on a selection of the mesh
+/// that keeps its shape (any behavior but deformable).
+pub fn holds_particle_wall(bc: &BoundaryCondition) -> bool {
+    bc.active
+        && bc.region.reference_point().is_none()
+        && matches!(&bc.kind, BoundaryKind::Displacement(d) if d.behavior != remote::Behavior::Deformable)
+}
+
 /// How a step solves its systems of equations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LinearSolverChoice {

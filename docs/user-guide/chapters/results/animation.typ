@@ -32,7 +32,7 @@ frequency step, #ui("Sound") appears right of #ui("Animate") (@sound).
     (default 4). The label below the player gives the time of the shown frame.],
   [Frames per second], [Playback speed (default 30); #ui("By time"), also the number of frames
     over the duration.],
-  [Playback], [#ui("Once"), #ui("Loop") or #ui("Swing") (forth and back, default).],
+  [Playback], [#ui("Once") (default), #ui("Loop") or #ui("Swing") (forth and back).],
   [Color scale], [#ui("Current frame") adapts the legend to every frame, #ui("All frames") keeps
     one range for the whole animation.],
 )

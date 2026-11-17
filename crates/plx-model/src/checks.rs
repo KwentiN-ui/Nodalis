@@ -1590,11 +1590,16 @@ impl FeModel {
                 break;
             }
         }
+        // Walls: rigid bodies and what a displacement that keeps its shape holds.
+        let held = (self.steps[index].boundary_conditions.iter())
+            .filter(|bc| crate::holds_particle_wall(bc))
+            .map(|bc| &bc.region);
         let rigid: std::collections::BTreeSet<ElementId> = (self.constraints.iter())
             .filter_map(|c| match c {
                 Constraint::RigidBody(body) if body.active => Some(&body.region),
                 _ => None,
             })
+            .chain(held)
             .flat_map(|region| {
                 (region.elements(mesh).into_iter())
                     .chain(region.faces(mesh).into_iter().map(|(e, _)| e))
@@ -1668,7 +1673,7 @@ impl FeModel {
             .collect();
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
             let on_point = matches!(bc.region, Region::ReferencePoint(id) if points.contains(&id));
-            if bc.active && !on_point {
+            if bc.active && !on_point && !crate::holds_particle_wall(bc) {
                 findings.push(Finding::new(
                     ModelItem::BoundaryCondition(index, i),
                     Problem::ParticleFlowIgnored,
@@ -4754,9 +4759,15 @@ mod tests {
         flow.loads
             .push(Load::new("Pressure", region, LoadKind::Pressure(1.0)));
         flow.boundary_conditions.push(BoundaryCondition::new(
-            "Fixed",
+            "Hot",
             Region::Nodes(vec![1]),
             BoundaryKind::Temperature(20.0),
+        ));
+        // A displacement that keeps the shape of its selection makes it a wall.
+        flow.boundary_conditions.push(BoundaryCondition::new(
+            "Held",
+            Region::Nodes(vec![1]),
+            BoundaryKind::displacement([Some(0.0); 6]),
         ));
         model.steps.push(flow);
         assert_eq!(
