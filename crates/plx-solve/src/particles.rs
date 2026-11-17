@@ -225,8 +225,10 @@ impl Run {
                     }
                 };
                 let solved_run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    token.scope(|| {
-                        pool.install(|| {
+                    // The solver asks the token of its own thread: the pool's, where
+                    // `install` runs it.
+                    pool.install(|| {
+                        token.scope(|| {
                             plxs_particles::solve_streaming(
                                 &model,
                                 &mut |status| {
@@ -436,6 +438,66 @@ mod tests {
         assert!((fall + 0.0123).abs() < 2e-3, "{fall}");
         assert!(last.field(plx_results::particles::FIELD).is_some());
         assert!(!results.results.history.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_stopped_particle_run_stops_computing() {
+        let dir = std::env::temp_dir().join(format!("plx-particles-stop-{}", std::process::id()));
+        let model = ParticleModel {
+            heading: "slosh".into(),
+            materials: vec![ParticleMaterial {
+                name: "Water".into(),
+                density: 1000.0,
+                law: ParticleLaw::Fluid {
+                    bulk: 2e5,
+                    viscosity: 1.0,
+                },
+                thermal: None,
+                flow_factor: Vec::new(),
+            }],
+            bodies: vec![MaterialBody {
+                name: "Block".into(),
+                material: 0,
+                shape: TriangleSurface::cuboid([0.0; 3], [0.3, 0.6, 0.6]),
+                velocity: [0.0; 3],
+                temperature: 0.0,
+                gravity: [0.0; 3],
+            }],
+            domain: Domain {
+                min: [0.0; 3],
+                max: [0.6; 3],
+                cell: 0.02,
+                ..Default::default()
+            },
+            gravity: [0.0, 0.0, -9.81],
+            control: ParticleControl {
+                // Minutes of computing.
+                end_time: 100.0,
+                frames: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let prepared = PreparedParticles {
+            text: describe(&model),
+            model,
+            warnings: Vec::new(),
+            steps: Vec::new(),
+            history: HistoryRequest::default(),
+        };
+        let mut run = Run::start_particles(1, &dir, "slosh", prepared).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let output = std::sync::Arc::clone(&run.output);
+        run.kill();
+        let stopped = std::time::Instant::now();
+        let said = || {
+            (output.lock().unwrap().iter()).any(|line| line.contains("the run was stopped"))
+        };
+        while !said() && stopped.elapsed().as_secs_f64() < 20.0 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(said(), "the solver went on after the stop");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

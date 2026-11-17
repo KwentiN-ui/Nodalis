@@ -83,8 +83,30 @@ impl Deformation {
 type HarmonicEntry = ((usize, usize, u32), std::sync::Arc<Field>);
 
 /// Selection and display settings for the results of one `.frd` file.
+/// A field nodalis adds to all results: the part of each node, shown in the colours of the
+/// parts with their names in the legend.
+pub const PART_FIELD: &str = "PART";
+
+/// The colours of the parts in [`PART_FIELD`]: strong and far apart, so that neighbouring
+/// parts stand out (the categorical palette of Tableau 10).
+pub const PART_COLORS: [[f32; 3]; 10] = [
+    [0.122, 0.467, 0.706],
+    [1.000, 0.498, 0.055],
+    [0.173, 0.627, 0.173],
+    [0.839, 0.153, 0.157],
+    [0.580, 0.404, 0.741],
+    [0.549, 0.337, 0.294],
+    [0.890, 0.467, 0.761],
+    [0.498, 0.498, 0.498],
+    [0.737, 0.741, 0.133],
+    [0.090, 0.745, 0.812],
+];
+
 pub struct ResultsView {
     pub increments: Vec<Increment>,
+    /// The names and colours of the parts of the model, which the field [`PART_FIELD`]
+    /// shows ([`ResultsView::add_part_field`]).
+    pub parts: Vec<(String, [f32; 3])>,
     /// The steps the increments belong to, see [`ResultsView::set_step_records`].
     pub steps: plx_results::steps::ResultSteps,
     pub increment: usize,
@@ -198,6 +220,9 @@ pub struct Legend {
     pub below: Option<OutOfRange>,
     /// Values above the maximum of a manual scale, if there are any.
     pub above: Option<OutOfRange>,
+    /// A name for each band, minimum first, in place of the band limits: the legend of a
+    /// field of categories such as [`PART_FIELD`].
+    pub names: Vec<String>,
 }
 
 /// Values beyond the limits of a manual colour scale, drawn in a colour of their own.
@@ -250,6 +275,7 @@ impl ResultsView {
             deformation: Deformation::Automatic(1.0),
             deformation_chosen: false,
             contact: false,
+            parts: Vec::new(),
             user_scale: 10.0,
             mode_deformation: Deformation::Automatic(1.0),
             mode_amplitude: 1.0,
@@ -1917,6 +1943,10 @@ impl ResultsView {
     }
 
     fn extreme(&self, better: impl Fn(f32, f32) -> bool) -> Option<(usize, f32, usize)> {
+        // The parts have no largest or smallest.
+        if self.current().is_some_and(|(f, _)| f.name == PART_FIELD) {
+            return None;
+        }
         let mut best: Option<(usize, f32, usize)> = None;
         for (item, instance) in self.instances().iter().enumerate() {
             let values = self.shown_values_on(instance)?;
@@ -1932,8 +1962,63 @@ impl ResultsView {
         best
     }
 
+    /// Adds the field [`PART_FIELD`] to every increment: at each node the number of its
+    /// part (the first, where parts share a node), each part in a colour of
+    /// [`PART_COLORS`].
+    pub fn add_part_field(&mut self, mesh: &FeMesh) {
+        if mesh.parts.is_empty() {
+            return;
+        }
+        let mut values = vec![f32::NAN; mesh.node_count()];
+        for (index, part) in mesh.parts.iter().enumerate() {
+            for element in part.elements.iter().filter_map(|&e| mesh.element(e)) {
+                for node in element.nodes.iter().filter_map(|&n| mesh.node_index(n)) {
+                    if values[node].is_nan() {
+                        values[node] = index as f32;
+                    }
+                }
+            }
+        }
+        let values: std::sync::Arc<[f32]> = values.into();
+        self.parts = (mesh.parts.iter().enumerate())
+            .map(|(i, p)| (p.name.clone(), PART_COLORS[i % PART_COLORS.len()]))
+            .collect();
+        for increment in &mut self.increments {
+            if increment.fields.iter().any(|f| f.name == PART_FIELD) {
+                continue;
+            }
+            let component = Component {
+                name: PART_FIELD.into(),
+                values: values.clone().into(),
+                derived: true,
+                out_of_plane: false,
+            };
+            let mut field = Field::new(PART_FIELD, vec![component]);
+            field.rank = plx_results::FieldRank::Scalar;
+            increment.fields.push(field);
+        }
+    }
+
+    /// The legend of [`PART_FIELD`]: a box in the colour of each part, with its name.
+    fn part_legend(&self) -> Legend {
+        Legend {
+            title: "Part".into(),
+            min: -0.5,
+            max: self.parts.len() as f32 - 0.5,
+            colors: self.parts.iter().map(|(_, c)| *c).collect(),
+            below: None,
+            above: None,
+            names: (self.parts.iter())
+                .map(|(n, _)| n.replace(['_', '-'], " "))
+                .collect(),
+        }
+    }
+
     pub fn legend(&self) -> Option<Legend> {
         let (field, component) = self.current()?;
+        if field.name == PART_FIELD {
+            return Some(self.part_legend());
+        }
         let (low, high) = match self.section_range {
             Some(range) => range,
             None => self.value_range()?,
@@ -2000,6 +2085,7 @@ impl ResultsView {
             colors: band_colors(scale),
             below,
             above,
+            names: Vec::new(),
         })
     }
 }
@@ -3071,5 +3157,39 @@ mod tests {
         assert_eq!(format_significant(123.456, 2), "1.2E2");
         assert_eq!(format_significant(123456.0, 6), "123456");
         assert_eq!(format_significant(1234567.0, 5), "1.2346E6");
+    }
+
+    #[test]
+    fn the_part_field_numbers_the_parts_and_names_them_in_the_legend() {
+        let mut mesh = FeMesh::default();
+        for (id, x) in [(1, 0.0), (2, 1.0), (3, 2.0), (4, 3.0)] {
+            mesh.set_node(id, [x, 0.0, 0.0]);
+        }
+        for (id, nodes) in [(1, vec![1, 2]), (2, vec![3, 4])] {
+            mesh.add_element(plx_mesh::Element {
+                id,
+                type_name: "T3D2".into(),
+                shape: plx_mesh::ElementShape::Line2,
+                nodes,
+            })
+            .unwrap();
+        }
+        mesh.parts = vec![
+            plx_mesh::Part::new("DAM", vec![1]),
+            plx_mesh::Part::new("WATER_BODY", vec![2]),
+        ];
+        let disp = [[0.0; 3]; 4];
+        let mut view = ResultsView::new(vec![increment(1, 1, AnalysisKind::Static, &disp)], None);
+        view.add_part_field(&mesh);
+        let field = (view.increments[0].fields.iter())
+            .position(|f| f.name == PART_FIELD)
+            .unwrap();
+        view.field = field;
+        view.component = 0;
+        assert_eq!(view.shown_values().unwrap().as_ref(), [0.0, 0.0, 1.0, 1.0]);
+        let legend = view.legend().unwrap();
+        assert_eq!(legend.names, ["DAM", "WATER BODY"]);
+        assert_eq!(legend.normalize(&[0.0, 1.0]), [0.25, 0.75]);
+        assert_eq!(view.maximum(), None);
     }
 }

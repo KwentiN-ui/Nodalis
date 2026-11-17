@@ -435,21 +435,23 @@ fn draw_legend(
     let mut boxes: Vec<[f32; 3]> = above.iter().map(|o| o.color).collect();
     boxes.extend(legend.colors.iter().rev());
     boxes.extend(below.iter().map(|o| o.color));
-    let mut labels: Vec<f32> = above.iter().map(|o| o.value).collect();
-    labels.extend((0..=levels).map(|i| {
-        let t = 1.0 - i as f32 / levels as f32;
-        legend.min + t * (legend.max - legend.min)
-    }));
-    labels.extend(below.iter().map(|o| o.value));
-    let values: Vec<_> = labels
+    // A legend of categories names each box at its middle, one of values gives the limits
+    // of the bands at their edges.
+    let named = !legend.names.is_empty();
+    let texts: Vec<String> = if named {
+        legend.names.iter().rev().cloned().collect()
+    } else {
+        let mut labels: Vec<f32> = above.iter().map(|o| o.value).collect();
+        labels.extend((0..=levels).map(|i| {
+            let t = 1.0 - i as f32 / levels as f32;
+            legend.min + t * (legend.max - legend.min)
+        }));
+        labels.extend(below.iter().map(|o| o.value));
+        labels.into_iter().map(format_legend_value).collect()
+    };
+    let values: Vec<_> = texts
         .into_iter()
-        .map(|value| {
-            painter.layout_no_wrap(
-                format_legend_value(value),
-                font(),
-                crate::style::viewport_text(),
-            )
-        })
+        .map(|text| painter.layout_no_wrap(text, font(), crate::style::viewport_text()))
         .collect();
     let band = vec2(BAND_HEIGHT / 0.75, BAND_HEIGHT);
     let label_height = values.first().map_or(0.0, |g| g.size().y);
@@ -489,8 +491,9 @@ fn draw_legend(
             StrokeKind::Middle,
         );
     }
+    let shift = if named { 0.5 * band.y } else { 0.0 };
     for (i, galley) in values.into_iter().enumerate() {
-        let y = top + i as f32 * band.y - galley.size().y * 0.5;
+        let y = top + i as f32 * band.y + shift - galley.size().y * 0.5;
         painter.galley(
             pos2(frame.left() + band.x + 8.0, y),
             galley,

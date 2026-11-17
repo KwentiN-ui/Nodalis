@@ -48,21 +48,22 @@ fn body_field() -> usize {
 
 /// The mesh of the particles at the start (`first`, the frame at time 0): a cube per
 /// particle, its edge the particle spacing (half a cell), element `k + 1` with nodes
-/// `8 k + 1` to `8 k + 8`; one section per material, so that the results have a part per
-/// material.
+/// `8 k + 1` to `8 k + 8`; one section per body, so that the results have a part per
+/// filled part of the model, named like it.
 pub fn particle_mesh(model: &ParticleModel, first: &ParticleFrame) -> Model {
     let half = 0.25 * model.domain.cell;
     let mut mesh = Model::default();
     mesh.heading = model.heading.clone();
-    for material in &model.materials {
+    // The results make a part of each material: here one named like each body.
+    for body in &model.bodies {
         mesh.materials.push(plxs_core::material::Material {
-            name: material.name.clone(),
+            name: body.name.clone(),
             ..Default::default()
         });
         mesh.sections.push(plxs_core::section::Section {
-            elset: material.name.clone(),
+            elset: body.name.clone(),
             kind: plxs_core::section::SectionKind::Solid {
-                material: material.name.clone(),
+                material: body.name.clone(),
                 thickness: None,
                 orientation: None,
             },
@@ -77,12 +78,11 @@ pub fn particle_mesh(model: &ParticleModel, first: &ParticleFrame) -> Model {
             mesh.nodes.insert(node, p);
         }
         let body = bodies.and_then(|b| b.get(k)).map_or(0, |&b| b as usize);
-        let material = (model.bodies.get(body)).map_or(0, |b| b.material);
         mesh.elements.push(plxs_core::element::Element {
             id: id + 1,
             kind: ElementType::C3D8,
             nodes,
-            section: Some(material as u32),
+            section: Some(body as u32),
         });
     }
     let mut node = wall_base(first);
@@ -111,7 +111,7 @@ pub fn particle_mesh(model: &ParticleModel, first: &ParticleFrame) -> Model {
                 id: element,
                 kind: ElementType::M3D3,
                 nodes: t.iter().map(|&i| first_node + i).collect(),
-                section: Some((model.materials.len() + w) as u32),
+                section: Some((model.bodies.len() + w) as u32),
             });
         }
     }

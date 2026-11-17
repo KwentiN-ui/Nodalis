@@ -404,6 +404,7 @@ impl DistributionPreview {
             colors: plx_render::contour::band_colors(&scale),
             below: None,
             above: None,
+            names: Vec::new(),
         }
     }
 }
@@ -642,6 +643,7 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     model.included_files = included_files;
     model.results = increments.map(|(increments, date, time)| {
         let mut view = ResultsView::new(increments, model.mesh.bounds());
+        view.add_part_field(&model.mesh);
         // The solver writes contact into the results only on request; the input it ran tells.
         if let Some(contact) = contact {
             view.contact |= contact;
