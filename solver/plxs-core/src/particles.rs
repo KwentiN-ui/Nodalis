@@ -495,12 +495,18 @@ pub const PARTICLE_FIELDS: [&str; 8] = [
 pub struct ParticleFrame {
     pub time: f64,
     /// The number of each particle, counted from 0 in the order of the first frame:
-    /// particles that leave the model are missing from the frames after.
+    /// particles that leave the model are missing from the frames after, and the halves of
+    /// split particles come with new numbers.
     pub ids: Vec<u32>,
     pub positions: Vec<[f32; 3]>,
     pub velocities: Vec<[f32; 3]>,
     /// One value per particle for each of [`PARTICLE_FIELDS`].
     pub fields: Vec<Vec<f32>>,
+    /// The part of the particle it was made as that each particle still is, once a
+    /// particle split (a 2D model splits particles that spread in the plane, the halves
+    /// numbered after all before); empty while none did.
+    #[serde(default)]
+    pub shares: Vec<f32>,
 }
 
 /// Quantities of the whole model over the time.

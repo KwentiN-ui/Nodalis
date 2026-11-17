@@ -3,7 +3,9 @@
 //! the particle spacing at its start (an eight-node hexahedron), the frames are increments
 //! whose displacements move the cubes to the particles, and the fields of the particles
 //! are nodal fields of their cubes. A particle that left the model shrinks to a point where
-//! it left, without values. The walls are triangles after the particles, a part each, that
+//! it left, without values. The halves of a split particle are smaller cubes; a half made
+//! during the run has its element after the walls, at its size where it was made, shrunk
+//! to a point there in the frames before. The walls are triangles after the particles, a part each, that
 //! move as the walls do, without values. The energies and the loads of the walls are history output.
 //!
 //! In a 2D model (plane strain or axisymmetric) a particle is a square in the x-y plane (a
@@ -171,6 +173,14 @@ fn wall_nodes(model: &ParticleModel, first: &ParticleFrame) -> Vec<u32> {
     (1..=count as u32).map(|k| base + k).collect()
 }
 
+/// The first node and element number of the particles made during the run, less one: after
+/// the walls.
+fn born_base(model: &ParticleModel, first: &ParticleFrame) -> u32 {
+    let points: usize = model.walls.iter().map(|w| w.shape.points.len()).sum();
+    let triangles: usize = model.walls.iter().map(|w| w.shape.triangles.len()).sum();
+    wall_base(model, first) + points.max(triangles) as u32
+}
+
 /// What the frames of a run need of the frames before them: the start of every particle
 /// and where it was last seen.
 #[derive(Clone, Debug)]
@@ -179,8 +189,17 @@ pub struct FrameTrack {
     /// The corners of the element of a particle.
     corners: &'static [[f64; 3]],
     ids: Vec<u32>,
+    /// The node before the first of each particle's element.
+    firsts: Vec<u32>,
+    /// Half the edge of each particle's element in the mesh.
+    halves: Vec<f64>,
     start: Vec<[f32; 3]>,
     last: Vec<[f32; 3]>,
+    /// The particles made during the run (halves of split ones): their index in `ids` and
+    /// their body.
+    born: Vec<(usize, u32)>,
+    /// The node before the first of the particles made during the run.
+    born_base: u32,
     /// The index of each particle id in `start`.
     index: std::collections::HashMap<u32, usize>,
     /// The nodes of the walls, each with where it starts and the motion of its wall.
@@ -201,10 +220,15 @@ impl FrameTrack {
         let ids: Vec<u32> = (0..first.positions.len())
             .map(|k| first.ids.get(k).copied().unwrap_or(k as u32))
             .collect();
+        let per = shape(model).0.len() as u32;
         Self {
             half: 0.25 * model.domain.cell,
             corners: shape(model).0,
             index: ids.iter().enumerate().map(|(k, &id)| (id, k)).collect(),
+            firsts: ids.iter().map(|&id| per * id).collect(),
+            halves: vec![0.25 * model.domain.cell; ids.len()],
+            born: Vec::new(),
+            born_base: born_base(model, first),
             ids,
             start: first.positions.clone(),
             last: first.positions.clone(),
@@ -224,6 +248,77 @@ impl FrameTrack {
         }
     }
 
+    /// Half the edge of the element of particle `j` of `frame`: smaller for the halves of
+    /// split particles, by the area (in 2D) or volume they keep.
+    fn size(&self, frame: &ParticleFrame, j: usize) -> f64 {
+        let share = frame.shares.get(j).map_or(1.0, |&s| f64::from(s));
+        let root = if self.corners.len() == SQUARE.len() {
+            share.sqrt()
+        } else {
+            share.cbrt()
+        };
+        self.half * root
+    }
+
+    /// Whether particles were made during the run, which then need [`FrameTrack::born_mesh`]
+    /// and [`FrameTrack::complete`].
+    pub fn has_born(&self) -> bool {
+        !self.born.is_empty()
+    }
+
+    /// Adds the elements of the particles made during the run to the mesh of
+    /// [`particle_mesh`]: at their size and place where they were made.
+    pub fn born_mesh(&self, model: &ParticleModel, mesh: &mut Model) {
+        let (corners, kind) = shape(model);
+        let per = corners.len() as u32;
+        for (b, &(k, body)) in self.born.iter().enumerate() {
+            let first = self.firsts[k];
+            let nodes: Vec<u32> = (1..=per).map(|c| first + c).collect();
+            for (c, &node) in nodes.iter().enumerate() {
+                let p = std::array::from_fn(|a| {
+                    f64::from(self.start[k][a]) + self.halves[k] * corners[c][a]
+                });
+                mesh.nodes.insert(node, shown(model, p));
+            }
+            mesh.elements.push(plxs_core::element::Element {
+                id: self.born_base + b as u32 + 1,
+                kind,
+                nodes,
+                section: Some(body),
+            });
+        }
+        mesh.rebuild_indices();
+    }
+
+    /// Gives an increment written before particles were made the nodes of those: shrunk to
+    /// a point where they were made, without values.
+    pub fn complete(&self, increment: &mut ResultsIncrement) {
+        let per = self.corners.len() as u32;
+        for field in &mut increment.fields {
+            let known: std::collections::HashSet<u32> = (field.nodes.iter())
+                .copied()
+                .filter(|&n| n > self.born_base)
+                .collect();
+            for &(k, _) in &self.born {
+                let first = self.firsts[k];
+                if known.contains(&(first + 1)) {
+                    continue;
+                }
+                for (c, corner) in self.corners.iter().enumerate() {
+                    field.nodes.push(first + c as u32 + 1);
+                    for (a, column) in field.values.iter_mut().enumerate() {
+                        column.push(if field.name == "DISP" {
+                            -self.halves[k] * corner[a]
+                        } else {
+                            f64::NAN
+                        });
+                    }
+                }
+            }
+        }
+        let _ = per;
+    }
+
     /// The increment of a frame, numbered `increment` in step `step`: the displacements,
     /// velocities and particle quantities of every node of the mesh of [`particle_mesh`].
     pub fn increment(
@@ -232,6 +327,24 @@ impl FrameTrack {
         step: u32,
         increment: u32,
     ) -> ResultsIncrement {
+        // Halves of split particles seen for the first time are new particles.
+        let body = frame.fields.get(body_field());
+        for (j, x) in frame.positions.iter().enumerate() {
+            let id = frame.ids.get(j).copied().unwrap_or(j as u32);
+            if !self.index.contains_key(&id) {
+                let per = self.corners.len() as u32;
+                let k = self.ids.len();
+                self.index.insert(id, k);
+                self.ids.push(id);
+                self.firsts
+                    .push(self.born_base + per * self.born.len() as u32);
+                self.halves.push(self.size(frame, j));
+                self.start.push(*x);
+                self.last.push(*x);
+                let body = body.and_then(|b| b.get(j)).map_or(0, |&b| b as u32);
+                self.born.push((k, body));
+            }
+        }
         let n = self.start.len();
         let mut at = vec![None; n];
         for (j, x) in frame.positions.iter().enumerate() {
@@ -241,9 +354,8 @@ impl FrameTrack {
                 self.last[k] = *x;
             }
         }
-        let per = self.corners.len() as u32;
-        let nodes: Vec<u32> = (self.ids.iter())
-            .flat_map(|&id| (0..per).map(move |c| per * id + c + 1))
+        let nodes: Vec<u32> = (self.firsts.iter())
+            .flat_map(|&first| (1..=per).map(move |c| first + c))
             .chain(self.walls.iter().copied())
             .collect();
         let size = nodes.len();
@@ -257,15 +369,11 @@ impl FrameTrack {
         for (k, seen) in at.iter().enumerate() {
             let moved: [f64; 3] =
                 std::array::from_fn(|a| f64::from(self.last[k][a]) - f64::from(self.start[k][a]));
+            // A particle that left shrinks to the point it was last seen at.
+            let half = seen.map_or(0.0, |j| self.size(frame, j));
             for corner in self.corners {
                 for a in 0..3 {
-                    // A particle that left shrinks to the point it was last seen at.
-                    let shrink = if seen.is_some() {
-                        0.0
-                    } else {
-                        self.half * corner[a]
-                    };
-                    disp[a].push(moved[a] - shrink);
+                    disp[a].push(moved[a] + (half - self.halves[k]) * corner[a]);
                     velo[a].push(seen.map_or(f64::NAN, |j| f64::from(frame.velocities[j][a])));
                 }
                 for (c, values) in quantities.iter_mut().enumerate() {
@@ -552,6 +660,7 @@ mod tests {
             velocities: vec![[1.0, 0.0, 0.0]; n],
             positions,
             fields: vec![vec![2.0; n]; PARTICLE_FIELDS.len()],
+            shares: Vec::new(),
         }
     }
 
