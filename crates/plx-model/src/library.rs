@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::particle_flow::Flow;
+use crate::particle_flow::{Flow, FlowTables};
 use crate::{Elastic, Expansion, Material, Plastic, PlasticPoint, UnitSystem};
 
 /// Version of the library file format written by this build.
@@ -86,7 +86,7 @@ impl Category {
 /// Version of the built-in materials. Raise it when `MaterialLibrary::default` gains or changes
 /// materials; libraries saved with an older version are updated by
 /// [`MaterialLibrary::update_defaults`].
-pub const DEFAULTS_VERSION: u32 = 4;
+pub const DEFAULTS_VERSION: u32 = 5;
 
 /// Generic material in the library's unit system (mm, t, s, degC) from datasheet values.
 struct Generic {
@@ -507,9 +507,23 @@ struct FlowMaterial {
     specific_heat: f64,
     /// The flow law in SI units: stresses in Pa, viscosities in Pa s, grains in m.
     flow: Flow,
-    /// The temperature table of the flow: (temperature in degC, factor).
-    temperature: &'static [[f64; 2]],
+    /// The tables of the flow over the temperature, in SI units.
+    tables: FlowTemperature,
 }
+
+/// The values of a [`FlowMaterial`]'s flow over the temperature: (temperature in degC,
+/// value in SI units) rows; empty for a value that does not change.
+struct FlowTemperature {
+    yield_stress: &'static [[f64; 2]],
+    consistency: &'static [[f64; 2]],
+    viscosity: &'static [[f64; 2]],
+}
+
+const CONSTANT: FlowTemperature = FlowTemperature {
+    yield_stress: &[],
+    consistency: &[],
+    viscosity: &[],
+};
 
 impl FlowMaterial {
     fn material(&self) -> Material {
@@ -553,7 +567,19 @@ impl FlowMaterial {
             conductivity: Some(self.conductivity),
             specific_heat: Some(self.specific_heat * 1e6),
             flow: Some(flow),
-            flow_temperature: self.temperature.to_vec(),
+            flow_tables: {
+                // Pa -> MPa.
+                let table = |rows: &[[f64; 2]]| {
+                    (!rows.is_empty()).then(|| crate::ValueTable {
+                        points: rows.iter().map(|&[t, v]| [t, v * 1e-6]).collect(),
+                    })
+                };
+                FlowTables {
+                    yield_stress: table(self.tables.yield_stress),
+                    consistency: table(self.tables.consistency),
+                    viscosity: table(self.tables.viscosity),
+                }
+            },
             ..Material::default()
         }
     }
@@ -568,7 +594,7 @@ const PASTE: FlowMaterial = FlowMaterial {
     conductivity: 0.5,
     specific_heat: 3000.0,
     flow: Flow::Newtonian { viscosity: 1.0 },
-    temperature: &[],
+    tables: CONSTANT,
 };
 
 /// Pastes after Herschel-Bulkley. Orders of magnitude from food and building rheology
@@ -587,13 +613,24 @@ const PASTES: [FlowMaterial; 4] = [
             consistency: 2000.0,
             exponent: 0.3,
         },
-        temperature: &[
-            [-2.0, 2.5],
-            [0.0, 1.6],
-            [5.0, 1.0],
-            [10.0, 0.7],
-            [20.0, 0.45],
-        ],
+        // Firmer as the fat sets below 5 degC, softer as it warms.
+        tables: FlowTemperature {
+            yield_stress: &[
+                [-2.0, 3750.0],
+                [0.0, 2400.0],
+                [5.0, 1500.0],
+                [10.0, 1050.0],
+                [20.0, 675.0],
+            ],
+            consistency: &[
+                [-2.0, 5000.0],
+                [0.0, 3200.0],
+                [5.0, 2000.0],
+                [10.0, 1400.0],
+                [20.0, 900.0],
+            ],
+            viscosity: &[],
+        },
         ..PASTE
     },
     FlowMaterial {
@@ -647,13 +684,16 @@ const FLUIDS: [FlowMaterial; 3] = [
         conductivity: 0.6,
         specific_heat: 4180.0,
         flow: Flow::Newtonian { viscosity: 1.0e-3 },
-        temperature: &[
-            [0.0, 1.79],
-            [10.0, 1.31],
-            [20.0, 1.0],
-            [40.0, 0.65],
-            [60.0, 0.47],
-        ],
+        tables: FlowTemperature {
+            viscosity: &[
+                [0.0, 1.79e-3],
+                [10.0, 1.31e-3],
+                [20.0, 1.0e-3],
+                [40.0, 0.653e-3],
+                [60.0, 0.467e-3],
+            ],
+            ..CONSTANT
+        },
     },
     // Glycerol: viscosity 3.9 / 1.41 / 0.61 / 0.28 Pa s at 10 / 20 / 30 / 40 degC.
     FlowMaterial {
@@ -664,7 +704,10 @@ const FLUIDS: [FlowMaterial; 3] = [
         conductivity: 0.29,
         specific_heat: 2430.0,
         flow: Flow::Newtonian { viscosity: 1.41 },
-        temperature: &[[10.0, 2.8], [20.0, 1.0], [30.0, 0.43], [40.0, 0.2]],
+        tables: FlowTemperature {
+            viscosity: &[[10.0, 3.9], [20.0, 1.41], [30.0, 0.61], [40.0, 0.28]],
+            ..CONSTANT
+        },
     },
     FlowMaterial {
         name: "Olive Oil",
@@ -674,7 +717,10 @@ const FLUIDS: [FlowMaterial; 3] = [
         conductivity: 0.17,
         specific_heat: 1970.0,
         flow: Flow::Newtonian { viscosity: 0.084 },
-        temperature: &[[10.0, 1.6], [20.0, 1.0], [40.0, 0.43]],
+        tables: FlowTemperature {
+            viscosity: &[[10.0, 0.134], [20.0, 0.084], [40.0, 0.036]],
+            ..CONSTANT
+        },
     },
 ];
 
@@ -689,7 +735,7 @@ const GRAIN: FlowMaterial = FlowMaterial {
     conductivity: 0.3,
     specific_heat: 800.0,
     flow: Flow::Newtonian { viscosity: 1.0 },
-    temperature: &[],
+    tables: CONSTANT,
 };
 
 const fn granular(friction_angle: f64, limit_angle: f64, grain: f64) -> Flow {
@@ -1062,6 +1108,24 @@ fn add_default(category: &mut Category, material: &Material, old: &Material) {
             .find(|n| matches!(n, LibraryNode::Material(m) if Material { id: old.id, ..m.clone() } == *old));
         if let Some(node) = unchanged {
             *node = LibraryNode::Material(material.clone());
+            return;
+        }
+    }
+    // A flow material saved before the tables per value of the flow (defaults version 5)
+    // lost its one table of factors: it gets the tables back if its flow is unchanged.
+    if !material.flow_tables.is_empty() {
+        let same = category.items.iter_mut().find_map(|n| match n {
+            LibraryNode::Material(m)
+                if m.name == material.name
+                    && m.flow == material.flow
+                    && m.flow_tables.is_empty() =>
+            {
+                Some(m)
+            }
+            _ => None,
+        });
+        if let Some(same) = same {
+            same.flow_tables = material.flow_tables.clone();
             return;
         }
     }

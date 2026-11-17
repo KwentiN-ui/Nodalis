@@ -36,7 +36,7 @@ fn sand() -> ParticleMaterial {
             fine_fraction: 0.0,
         },
         thermal: None,
-        flow_factor: Vec::new(),
+        flow_tables: Default::default(),
     }
 }
 
@@ -46,7 +46,7 @@ fn fluid(viscosity: f64, bulk: f64) -> ParticleMaterial {
         density: 1000.0,
         law: ParticleLaw::Fluid { bulk, viscosity },
         thermal: None,
-        flow_factor: Vec::new(),
+        flow_tables: Default::default(),
     }
 }
 

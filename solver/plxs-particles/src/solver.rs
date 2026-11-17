@@ -20,9 +20,8 @@
 use std::time::Instant;
 
 use plxs_core::particles::{
-    BodyHistory, Domain, PARTICLE_FIELDS, ParticleFrame, ParticleHistory, ParticleLaw,
+    BodyHistory, Domain, FlowTables, PARTICLE_FIELDS, ParticleFrame, ParticleHistory, ParticleLaw,
     ParticleModel, ParticleReport, ParticleResults, RigidMotion, Side, Space, WallHistory, WallLaw,
-    table_value,
 };
 use rayon::prelude::*;
 
@@ -466,14 +465,15 @@ pub fn solve_streaming(
         .iter()
         .map(Law::wave_speed)
         .fold(f64::INFINITY, f64::min);
-    // The factors of the flow over the temperature, per material.
-    let factors: Vec<&[[f64; 2]]> = (model.materials.iter())
-        .map(|m| m.flow_factor.as_slice())
-        .collect();
-    let highest = |m: usize| (factors[m].iter().map(|p| p[1])).fold(1.0f64, f64::max);
+    // The values of the flow over the temperature, per material.
+    let tables: Vec<&FlowTables> = model.materials.iter().map(|m| &m.flow_tables).collect();
+    // The highest viscosity of a fluid at any temperature limits the time step.
+    let highest = |m: usize, l: &Law| {
+        (tables[m].viscosity.iter().map(|p| p[1])).fold(l.explicit_viscosity(), f64::max)
+    };
     let viscosity_limit = (laws.iter().enumerate())
         .filter(|(_, l)| l.explicit_viscosity() > 0.0)
-        .map(|(m, l)| l.density * grid.h * grid.h / (8.0 * l.explicit_viscosity() * highest(m)))
+        .map(|(m, l)| l.density * grid.h * grid.h / (8.0 * highest(m, l)))
         .fold(f64::INFINITY, f64::min);
     // Explicit conduction over the grid is stable below h² / (6 α).
     let heat_limit = match model.heat {
@@ -514,7 +514,7 @@ pub fn solve_streaming(
         grid: &grid,
         laws: &laws,
         walls: &walls,
-        factors: &factors,
+        tables: &tables,
         wave,
         slowest,
         viscosity_limit,
@@ -611,8 +611,8 @@ struct Setup<'a> {
     grid: &'a Grid,
     laws: &'a [Law],
     walls: &'a [Wall],
-    /// The factors of the flow over the temperature, per material.
-    factors: &'a [&'a [[f64; 2]]],
+    /// The values of the flow over the temperature, per material.
+    tables: &'a [&'a FlowTables],
     /// The fastest and the slowest wave speed of the materials.
     wave: f64,
     slowest: f64,
@@ -653,7 +653,7 @@ fn run_cpu(
         grid,
         laws,
         walls,
-        factors,
+        tables,
         wave,
         slowest,
         viscosity_limit,
@@ -993,9 +993,12 @@ fn run_cpu(
                 if p.grains[0] > 0.0 {
                     p.fine = (p.fine + finer).clamp(0.0, 1.0);
                 }
-                let law = &laws[p.material as usize].mixed(p.fine);
-                let factor = table_value(factors[p.material as usize], p.temperature);
-                let update = law.update(&mut p.state, &f, j_new, &c, dt, factor);
+                let m = p.material as usize;
+                let mut law = laws[m].mixed(p.fine);
+                if !tables[m].is_empty() {
+                    law = law.at_temperature(tables[m], p.temperature);
+                }
+                let update = law.update(&mut p.state, &f, j_new, &c, dt);
                 // The temperature: what the grid conducted and the walls gave, and the
                 // heat of the particle's own flow.
                 if p.heat_capacity > 0.0 {

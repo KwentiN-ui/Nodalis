@@ -1,5 +1,5 @@
 //! The time steps on the graphics card against the processor's: a paste stirred by a warm
-//! paddle that turns with Coulomb friction, under gravity, with a flow factor over the
+//! paddle that turns with Coulomb friction, under gravity, with the flow over the
 //! temperature. The card computes in single precision and sums in another order, so the
 //! two runs part like two runs of a flow with slightly different starts: compared are the
 //! sums of the run, not single particles. Runs where a graphics card is found
@@ -8,8 +8,9 @@
 #![cfg(feature = "gpu")]
 
 use plxs_core::particles::{
-    Domain, Heat, MaterialBody, ParticleControl, ParticleLaw, ParticleMaterial, ParticleModel,
-    ParticleResults, ParticleThermal, RigidMotion, RigidWall, Side, TriangleSurface, WallLaw,
+    Domain, FlowTables, Heat, MaterialBody, ParticleControl, ParticleLaw, ParticleMaterial,
+    ParticleModel, ParticleResults, ParticleThermal, RigidMotion, RigidWall, Side, TriangleSurface,
+    WallLaw,
 };
 use plxs_linalg::amg::GpuMode;
 
@@ -31,7 +32,12 @@ fn mixer() -> ParticleModel {
                 conductivity: 0.5,
                 specific_heat: 3500.0,
             }),
-            flow_factor: vec![[0.0, 1.0], [40.0, 0.6]],
+            // Both values over the temperature, softening differently.
+            flow_tables: FlowTables {
+                yield_stress: vec![[0.0, 150.0], [40.0, 90.0]],
+                consistency: vec![[0.0, 20.0], [40.0, 8.0]],
+                viscosity: Vec::new(),
+            },
         }],
         bodies: vec![MaterialBody {
             name: "Paste".into(),

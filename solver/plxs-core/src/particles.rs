@@ -122,10 +122,28 @@ pub struct ParticleMaterial {
     /// For the temperature: without, the material keeps its temperature.
     #[serde(default)]
     pub thermal: Option<ParticleThermal>,
-    /// The factor on the yield stress, the consistency and the viscosity over the
-    /// temperature, as (temperature, factor) points ([`table_value`]); empty is 1.
+    /// The values of the flow over the temperature.
     #[serde(default)]
-    pub flow_factor: Vec<[f64; 2]>,
+    pub flow_tables: FlowTables,
+}
+
+/// The values of a flow law over the temperature, each as (temperature, value) points
+/// ([`table_value`]) in place of the law's own value; an empty table keeps the law's value.
+/// Only the tables of the material's law act.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FlowTables {
+    #[serde(default)]
+    pub yield_stress: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub consistency: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub viscosity: Vec<[f64; 2]>,
+}
+
+impl FlowTables {
+    pub fn is_empty(&self) -> bool {
+        self.yield_stress.is_empty() && self.consistency.is_empty() && self.viscosity.is_empty()
+    }
 }
 
 /// How a material responds.

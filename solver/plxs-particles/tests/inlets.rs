@@ -26,7 +26,7 @@ fn fluid(viscosity: f64) -> ParticleMaterial {
             viscosity,
         },
         thermal: None,
-        flow_factor: Vec::new(),
+        flow_tables: Default::default(),
     }
 }
 

@@ -202,6 +202,18 @@ pub enum Field {
     /// The top and bottom thickness of an infill section (its wall thickness is
     /// [`Field::Thickness`]).
     TopBottomThickness,
+    /// The values of the flow of a material in Particle Flow steps: Herschel-Bulkley,
+    /// Newtonian and granular. The angles are in degrees, numbers without quantity.
+    YieldStress,
+    Consistency,
+    FlowIndex,
+    Viscosity,
+    FrictionAngle,
+    LimitAngle,
+    Grain,
+    FineGrain,
+    FineFraction,
+    InertialNumber,
     /// A named variable of a distribution, by its key ([`crate::DistributionVariable::key`]).
     Variable(u32),
 }
@@ -267,6 +279,16 @@ impl Field {
             Self::ScaleZ => "Factor Z",
             Self::InfillDensity => "Infill density",
             Self::TopBottomThickness => "Top/bottom thickness",
+            Self::YieldStress => "Yield stress",
+            Self::Consistency => "Consistency",
+            Self::FlowIndex => "Flow index",
+            Self::Viscosity => "Viscosity",
+            Self::FrictionAngle => "Friction angle",
+            Self::LimitAngle => "Limit angle",
+            Self::Grain => "Grain diameter",
+            Self::FineGrain => "Fine grain diameter",
+            Self::FineFraction => "Fine fraction",
+            Self::InertialNumber => "I0",
             Self::Variable(_) => "Variable",
         }
     }
@@ -277,7 +299,7 @@ impl Field {
     pub const AXIS: [Self; 3] = [Self::AxisX, Self::AxisY, Self::AxisZ];
     pub const NORMAL: [Self; 3] = [Self::NormalX, Self::NormalY, Self::NormalZ];
     pub const SCALE: [Self; 3] = [Self::ScaleX, Self::ScaleY, Self::ScaleZ];
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 67] = [
         Self::Value,
         Self::X,
         Self::Y,
@@ -335,6 +357,16 @@ impl Field {
         Self::ScaleZ,
         Self::InfillDensity,
         Self::TopBottomThickness,
+        Self::YieldStress,
+        Self::Consistency,
+        Self::FlowIndex,
+        Self::Viscosity,
+        Self::FrictionAngle,
+        Self::LimitAngle,
+        Self::Grain,
+        Self::FineGrain,
+        Self::FineFraction,
+        Self::InertialNumber,
     ];
 
     /// The component of a vector it names.
@@ -449,7 +481,7 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                     &mut material.expansion.as_mut()?.coefficient,
                     Quantity::ThermalExpansion,
                 ),
-                _ => None,
+                field => flow_slot(material, field),
             }
         }
         ItemRef::Section(name) => {
@@ -563,6 +595,44 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
             let variable = distribution.variables.iter_mut().find(|v| v.key == key)?;
             Some((Slot::Real(&mut variable.value), ValueKind::Factor))
         }
+    }
+}
+
+/// The numbers of the flow of a material; a value that follows a temperature table has no
+/// number of its own.
+fn flow_slot(material: &mut crate::Material, field: Field) -> Option<(Slot<'_>, ValueKind)> {
+    use crate::particle_flow::Flow;
+    let real = |value, quantity| Some((Slot::Real(value), ValueKind::Quantity(quantity)));
+    let factor = |value| Some((Slot::Real(value), ValueKind::Factor));
+    let tables = &material.flow_tables;
+    let mixture =
+        matches!(material.flow, Some(Flow::Granular { fine_grain, .. }) if fine_grain > 0.0);
+    match (material.flow.as_mut()?, field) {
+        (Flow::HerschelBulkley { yield_stress, .. }, Field::YieldStress)
+            if tables.yield_stress.is_none() =>
+        {
+            real(yield_stress, Quantity::Pressure)
+        }
+        (Flow::HerschelBulkley { consistency, .. }, Field::Consistency)
+            if tables.consistency.is_none() =>
+        {
+            real(consistency, Quantity::Consistency)
+        }
+        (Flow::HerschelBulkley { exponent, .. }, Field::FlowIndex) => factor(exponent),
+        (Flow::Newtonian { viscosity }, Field::Viscosity) if tables.viscosity.is_none() => {
+            real(viscosity, Quantity::Viscosity)
+        }
+        (Flow::Granular { friction_angle, .. }, Field::FrictionAngle) => factor(friction_angle),
+        (Flow::Granular { limit_angle, .. }, Field::LimitAngle) => factor(limit_angle),
+        (Flow::Granular { grain, .. }, Field::Grain) => real(grain, Quantity::Length),
+        (Flow::Granular { fine_grain, .. }, Field::FineGrain) if mixture => {
+            real(fine_grain, Quantity::Length)
+        }
+        (Flow::Granular { fine_fraction, .. }, Field::FineFraction) if mixture => {
+            factor(fine_fraction)
+        }
+        (Flow::Granular { inertial, .. }, Field::InertialNumber) => factor(inertial),
+        _ => None,
     }
 }
 
@@ -850,6 +920,44 @@ impl FeModel {
 mod tests {
     use super::*;
     use crate::{Load, Material, Region, Step};
+
+    /// The values of a flow are numbers of the material, except one that follows a table
+    /// over the temperature.
+    #[test]
+    fn flow_values_are_exposed_unless_they_follow_a_table() {
+        use crate::particle_flow::Flow;
+        let mut fe = FeModel {
+            materials: vec![Material {
+                name: "Oil".into(),
+                flow: Some(Flow::Newtonian { viscosity: 0.08 }),
+                ..Material::default()
+            }],
+            ..FeModel::default()
+        };
+        let item = ItemRef::Material("Oil".into());
+        assert_eq!(fe.exposable(&item), vec![Field::Viscosity]);
+        let path = ValuePath::new(item.clone(), Field::Viscosity);
+        assert_eq!(
+            fe.value_kind(&path),
+            Some(ValueKind::Quantity(Quantity::Viscosity))
+        );
+        assert!(fe.set_value(&path, 0.1));
+        assert_eq!(fe.value_at(&path), Some(0.1));
+        fe.materials[0].flow_tables.viscosity = Some(crate::ValueTable {
+            points: vec![[20.0, 0.1]],
+        });
+        assert!(fe.exposable(&item).is_empty());
+        fe.materials[0].flow = Some(Flow::KINDS[2]);
+        assert_eq!(
+            fe.exposable(&item),
+            vec![
+                Field::FrictionAngle,
+                Field::LimitAngle,
+                Field::Grain,
+                Field::InertialNumber
+            ]
+        );
+    }
 
     fn model() -> FeModel {
         let mut step = Step::new_static("Step-1");

@@ -82,7 +82,7 @@ fn water(viscosity: f64) -> ParticleMaterial {
             viscosity,
         },
         thermal: None,
-        flow_factor: Vec::new(),
+        flow_tables: Default::default(),
     }
 }
 
@@ -100,7 +100,7 @@ fn bingham(yield_stress: f64, viscosity: f64) -> ParticleMaterial {
             exponent: 1.0,
         },
         thermal: None,
-        flow_factor: Vec::new(),
+        flow_tables: Default::default(),
     }
 }
 
@@ -526,7 +526,7 @@ fn die(per_gap: f64) {
             exponent: 1.0,
         },
         thermal: None,
-        flow_factor: Vec::new(),
+        flow_tables: Default::default(),
     };
     let half = 0.5 * gap;
     let mut model = plane(

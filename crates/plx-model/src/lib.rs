@@ -241,9 +241,11 @@ use serde::{Deserialize, Serialize};
 /// it is. Format 47 adds the heat of the Particle Flow step and the temperature table of the
 /// flow of materials; older formats read as they are. Format 48 adds the granular flow;
 /// older formats read as they are. Format 49 adds grain mixtures of two sizes to the
-/// granular flow; older formats read as they are. Format 51 adds the Flow boundary
-/// conditions and one default side of the Particle Flow step; older steps take the default
-/// side.
+/// granular flow; older formats read as they are. Format 50 replaces the one temperature
+/// table of factors of the flow with a table of values per value of the flow law
+/// ([`particle_flow::FlowTables`]); older formats read as they are, without their table.
+/// Format 51 adds the Flow boundary conditions and one default side of the Particle Flow
+/// step; older steps take the default side.
 pub const PROJECT_FORMAT: u32 = 51;
 
 /// Everything besides the mesh that makes up an analysis.
@@ -700,12 +702,10 @@ pub struct Material {
     /// How the material flows in a Particle Flow step; without, it is elastic there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow: Option<particle_flow::Flow>,
-    /// How the flow depends on the temperature in a Particle Flow step with heat: pairs of
-    /// temperature and the factor on the yield stress and the consistency (or viscosity),
-    /// interpolated linearly and held beyond the ends. Empty: the same at every
-    /// temperature.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub flow_temperature: Vec<[f64; 2]>,
+    /// The values of the flow over the temperature in a Particle Flow step with heat, a
+    /// table per value of the law; without, the flow is the same at every temperature.
+    #[serde(default, skip_serializing_if = "particle_flow::FlowTables::is_empty")]
+    pub flow_tables: particle_flow::FlowTables,
 }
 
 impl Material {

@@ -4535,7 +4535,9 @@ impl Editor {
                 if let Some(problem) = material.creep.as_ref().and_then(|c| c.problem()) {
                     return Err(problem.into());
                 }
-                if let Some(problem) = material.flow.as_ref().and_then(|f| f.problem()) {
+                if let Some(problem) = (material.flow.as_ref())
+                    .and_then(|f| f.problem().or_else(|| material.flow_tables.problem(f)))
+                {
                     return Err(problem);
                 }
                 if let Some(hyper) = &material.hyperelastic {
@@ -6664,7 +6666,7 @@ fn creep_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
 
 /// How the material flows in a Particle Flow step: Herschel-Bulkley, Newtonian or granular.
 fn flow_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
-    use plx_model::particle_flow::Flow;
+    use plx_model::particle_flow::{Flow, FlowProperty};
     let mut flows = material.flow.is_some();
     ui.checkbox(&mut flows, "Flow (Particle Flow)")
         .on_hover_text(
@@ -6687,10 +6689,30 @@ fn flow_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
             });
     });
     ui.end_row();
-    // Consistency and viscosity are a stress times a time (to a power); all unit systems
-    // measure time in seconds, so only the stress is converted.
-    let pascal = units.si_factor(Quantity::Pressure).unwrap_or(1.0);
-    let stress = units.unit(Quantity::Pressure);
+    // A value of the flow with its expose button and, for those that change with the
+    // temperature, its table button.
+    let name = material.name.clone();
+    let tables = &mut material.flow_tables;
+    let mut temperature_row =
+        |ui: &mut Ui, property: FlowProperty, field: Field, quantity: Quantity, value: &mut f64| {
+            let label = property.label();
+            let shown = *value;
+            crate::value_table::value_over_temperature(
+                ui,
+                egui::Id::new(("material flow table", label)),
+                tables.get_mut(property),
+                &format!("{label} of {name}"),
+                label,
+                quantity,
+                units,
+                shown,
+                |ui| {
+                    expose::field(ui, field, |ui| {
+                        ui.add_enabled(flows, numeric::physical(value, units, quantity))
+                    })
+                },
+            );
+        };
     match &mut flow {
         Flow::HerschelBulkley {
             yield_stress,
@@ -6699,34 +6721,50 @@ fn flow_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
         } => {
             ui.label("    Yield stress").on_hover_text(
                 "The shear stress below which the material does not flow (Bingham's yield \
-                 stress in shear).",
+                 stress in shear). T gives it as a table over the temperature.",
             );
-            ui.add_enabled(
-                flows,
-                numeric::physical(yield_stress, units, Quantity::Pressure),
+            temperature_row(
+                ui,
+                FlowProperty::YieldStress,
+                Field::YieldStress,
+                Quantity::Pressure,
+                yield_stress,
             );
             ui.end_row();
-            ui.label("    Consistency K");
-            ui.horizontal(|ui| {
-                ui.add_enabled(flows, stress_time(consistency, pascal));
-                ui.label(format!("{stress} s^n"));
-            });
+            ui.label("    Consistency K").on_hover_text(
+                "The factor of the shear rate to the power n in the flow stress, in the stress \
+                 unit times seconds to the power n. T gives it as a table over the temperature.",
+            );
+            temperature_row(
+                ui,
+                FlowProperty::Consistency,
+                Field::Consistency,
+                Quantity::Consistency,
+                consistency,
+            );
             ui.end_row();
             ui.label("    Flow index n").on_hover_text(
                 "Below 1 the material thins with the shear rate, 1 is Bingham's material.",
             );
-            ui.add_enabled(flows, numeric::drag_value(exponent).speed(0.01));
+            expose::field(ui, Field::FlowIndex, |ui| {
+                ui.add_enabled(flows, numeric::drag_value(exponent).speed(0.01))
+            });
             ui.end_row();
             ui.label("");
             ui.weak("Shear stress in flow = yield stress + K * shear rate^n.");
             ui.end_row();
         }
         Flow::Newtonian { viscosity } => {
-            ui.label("    Viscosity");
-            ui.horizontal(|ui| {
-                ui.add_enabled(flows, stress_time(viscosity, pascal));
-                ui.label(format!("{stress} s"));
-            });
+            ui.label("    Viscosity").on_hover_text(
+                "The dynamic viscosity. T gives it as a table over the temperature.",
+            );
+            temperature_row(
+                ui,
+                FlowProperty::Viscosity,
+                Field::Viscosity,
+                Quantity::Viscosity,
+                viscosity,
+            );
             ui.end_row();
             ui.label("");
             ui.weak("Compressed by the bulk modulus of the elastic constants, no tension.");
@@ -6740,13 +6778,13 @@ fn flow_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
             fine_grain,
             fine_fraction,
         } => {
+            let angle = |value| numeric::drag_value(value).speed(0.1).suffix(" °");
             ui.label("    Friction angle").on_hover_text(
                 "The angle of internal friction at rest, about the angle of repose: the \
                  material flows where the shear stress exceeds tan(angle) times the pressure.",
             );
-            ui.horizontal(|ui| {
-                ui.add_enabled(flows, numeric::drag_value(friction_angle).speed(0.1));
-                ui.label("deg");
+            expose::field(ui, Field::FrictionAngle, |ui| {
+                ui.add_enabled(flows, angle(friction_angle))
             });
             ui.end_row();
             ui.label("    Limit angle").on_hover_text(
@@ -6754,16 +6792,17 @@ fn flow_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
                  number I). Equal to the friction angle, the friction does not depend on the \
                  speed (Drucker-Prager).",
             );
-            ui.horizontal(|ui| {
-                ui.add_enabled(flows, numeric::drag_value(limit_angle).speed(0.1));
-                ui.label("deg");
+            expose::field(ui, Field::LimitAngle, |ui| {
+                ui.add_enabled(flows, angle(limit_angle))
             });
             ui.end_row();
             ui.label("    Grain diameter").on_hover_text(
                 "The mean grain diameter, for the inertial number I; of a mixture the \
                  diameter of the coarse grains.",
             );
-            ui.add_enabled(flows, numeric::physical(grain, units, Quantity::Length));
+            expose::field(ui, Field::Grain, |ui| {
+                ui.add_enabled(flows, numeric::physical(grain, units, Quantity::Length))
+            });
             ui.end_row();
             let mut mixture = *fine_grain > 0.0;
             ui.label("    Two grain sizes").on_hover_text(
@@ -6783,29 +6822,35 @@ fn flow_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
             ui.end_row();
             if mixture {
                 ui.label("        Fine grain diameter");
-                ui.add_enabled(
-                    flows,
-                    numeric::physical(fine_grain, units, Quantity::Length),
-                );
+                expose::field(ui, Field::FineGrain, |ui| {
+                    ui.add_enabled(
+                        flows,
+                        numeric::physical(fine_grain, units, Quantity::Length),
+                    )
+                });
                 ui.end_row();
                 ui.label("        Fine fraction").on_hover_text(
                     "The volume fraction of the fine grains at the start, 0 to 1. Parts of \
                      different materials with the same grains but other fractions start \
                      sorted.",
                 );
-                ui.add_enabled(
-                    flows,
-                    numeric::drag_value(fine_fraction)
-                        .speed(0.01)
-                        .range(0.0..=1.0),
-                );
+                expose::field(ui, Field::FineFraction, |ui| {
+                    ui.add_enabled(
+                        flows,
+                        numeric::drag_value(fine_fraction)
+                            .speed(0.01)
+                            .range(0.0..=1.0),
+                    )
+                });
                 ui.end_row();
             }
             ui.label("    I0").on_hover_text(
                 "The inertial number at which the friction is halfway between the two angles \
                  (about 0.2 to 0.3 for sand and glass beads).",
             );
-            ui.add_enabled(flows, numeric::drag_value(inertial).speed(0.01));
+            expose::field(ui, Field::InertialNumber, |ui| {
+                ui.add_enabled(flows, numeric::drag_value(inertial).speed(0.01))
+            });
             ui.end_row();
             ui.label("");
             ui.weak(
@@ -6816,79 +6861,6 @@ fn flow_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
         }
     }
     material.flow = flows.then_some(flow);
-    if flows && !matches!(flow, Flow::Granular { .. }) {
-        flow_temperature_rows(ui, material, units);
-    }
-}
-
-/// The table of the flow over the temperature: rows of temperature and the factor on the
-/// yield stress and the consistency or viscosity, for Particle Flow steps with heat.
-fn flow_temperature_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
-    ui.label("    Temperature table").on_hover_text(
-        "Scales the yield stress and the consistency (or viscosity) by the factor at the \
-         temperature of the material, interpolated between the rows and held beyond them. It \
-         acts in Particle Flow steps that follow the temperature; empty, the flow is the same \
-         at every temperature.",
-    );
-    ui.vertical(|ui| {
-        let unit = units.unit(Quantity::Temperature);
-        let table = &mut material.flow_temperature;
-        let mut remove = None;
-        if !table.is_empty() {
-            egui::Grid::new("flow temperature points")
-                .num_columns(3)
-                .striped(true)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.strong(format!("Temperature [{unit}]"));
-                    ui.strong("Factor");
-                    ui.label("");
-                    ui.end_row();
-                    for (i, [temperature, factor]) in table.iter_mut().enumerate() {
-                        ui.add(numeric::without_unit(
-                            temperature,
-                            units,
-                            Quantity::Temperature,
-                        ));
-                        ui.add(
-                            numeric::drag_value(factor)
-                                .speed(0.01)
-                                .range(0.0..=f64::MAX),
-                        );
-                        if ui.button("Remove").clicked() {
-                            remove = Some(i);
-                        }
-                        ui.end_row();
-                    }
-                });
-        }
-        if let Some(i) = remove {
-            table.remove(i);
-        }
-        if ui.button("Add row").clicked() {
-            // Ten degrees warmer than the last row, as soft.
-            let next = match table.last() {
-                Some(&[temperature, factor]) => [temperature + 10.0, factor],
-                None => [20.0, 1.0],
-            };
-            table.push(next);
-        }
-    });
-    ui.end_row();
-}
-
-/// The field of a stored value in Pa s (to a power), shown in the stress unit of `unit`
-/// pascal.
-fn stress_time(value: &mut f64, unit: f64) -> egui::DragValue<'_> {
-    egui::DragValue::from_get_set(move |shown| {
-        if let Some(shown) = shown {
-            *value = shown * unit;
-        }
-        *value / unit
-    })
-    .custom_parser(numeric::evaluate)
-    .custom_formatter(|v, _| numeric::format_physical(v))
-    .speed(0.0)
 }
 
 /// The field of Norton's coefficient A, stored for stresses in Pa and shown for stresses
@@ -8398,8 +8370,8 @@ fn particle_flow_form(
             "Follows the temperature of the material: its own flow and friction at the walls heat \
          it, it conducts the heat, and it exchanges heat with walls of a given temperature. \
          The materials need conductivity and specific heat, the filled parts a temperature \
-         initial condition; a temperature table of the flow makes the material softer or \
-         stiffer.",
+         initial condition; temperature tables of the flow values make the material softer \
+         or stiffer.",
         );
     ui.end_row();
     if settings.heat {
