@@ -210,6 +210,7 @@ impl NewPoint {
             Location::Coordinates => PointDefinition::Global,
         };
         ReferencePoint {
+            visible: true,
             id: self.id,
             name: self.name.trim().to_string(),
             position: self.coordinates,

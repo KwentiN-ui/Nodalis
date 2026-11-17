@@ -1048,17 +1048,21 @@ pub fn marks(
     replaced: Option<FeatureItem>,
 ) -> Vec<FeatureMark> {
     let is = |kind, index| Some(FeatureItem { kind, index });
+    // A hidden feature is still drawn while selected.
+    let shown = |kind, index, visible: bool| {
+        replaced != is(kind, index) && (visible || selected == is(kind, index))
+    };
     let points = (model.fe.reference_points.iter().enumerate())
-        .filter(|(i, _)| replaced != is(FeatureKind::ReferencePoint, *i))
+        .filter(|(i, r)| shown(FeatureKind::ReferencePoint, *i, r.visible))
         .map(|(i, r)| point_mark(model, r, selected == is(FeatureKind::ReferencePoint, i)));
     let systems = (model.fe.coordinate_systems.iter().enumerate())
-        .filter(|(i, _)| replaced != is(FeatureKind::CoordinateSystem, *i))
+        .filter(|(i, c)| shown(FeatureKind::CoordinateSystem, *i, c.visible))
         .filter_map(|(i, c)| {
             let selected = selected == is(FeatureKind::CoordinateSystem, i);
             system_mark(model, c, &model.fe.coordinate_systems, selected)
         });
     let planes = (model.fe.planes.iter().enumerate())
-        .filter(|(i, _)| replaced != is(FeatureKind::Plane, *i))
+        .filter(|(i, p)| shown(FeatureKind::Plane, *i, p.visible))
         .filter_map(|(i, p)| plane_mark(model, p, selected == is(FeatureKind::Plane, i)));
     points.chain(systems).chain(planes).collect()
 }
@@ -1994,6 +1998,25 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_hidden_point_has_no_mark_unless_selected() {
+        let mut model = Model::new(std::path::Path::new("test.inp"), FeMesh::default());
+        FeatureDialog::create(FeatureKind::ReferencePoint, None, &model)
+            .apply_draft_and_coupling(&mut model.fe);
+        assert!(model.fe.reference_points[0].visible);
+        assert_eq!(marks(&model, None, None).len(), 1);
+        let item = crate::tree::TreeItem::ReferencePoint(0);
+        assert!(crate::setup::set_visible(&mut model.fe, &item, false));
+        assert!(marks(&model, None, None).is_empty());
+        let point = FeatureItem {
+            kind: FeatureKind::ReferencePoint,
+            index: 0,
+        };
+        assert_eq!(marks(&model, Some(point), None).len(), 1);
+        crate::setup::set_visible(&mut model.fe, &item, true);
+        assert_eq!(marks(&model, None, None).len(), 1);
     }
 
     #[test]

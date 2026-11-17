@@ -2833,9 +2833,18 @@ impl Workbench {
                 }
             }
         }
-        if let Some(model) = self.model.as_mut() {
+        // Features are hidden in the results too; the FE model shares them and follows.
+        let symbols_of = match view {
+            TreeView::Results => self.results.get_mut(self.current_result),
+            _ => self.model.as_mut(),
+        };
+        if let Some(model) = symbols_of.filter(|_| !response.symbol_visibility.is_empty()) {
+            let before = model.fe.shared_features();
             for (item, visible) in &response.symbol_visibility {
                 crate::setup::set_visible(&mut model.fe, item, *visible);
+            }
+            if view == TreeView::Results {
+                self.share_feature_edit(self.current_result, &before);
             }
         }
         if let (Some(item), Some(model)) = (response.swap_master_slave, self.model.as_mut()) {
