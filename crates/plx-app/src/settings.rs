@@ -121,6 +121,29 @@ pub struct PostProcessing {
     pub digits: u32,
     /// FFmpeg for exporting animations as MP4 or MKV; empty for `ffmpeg` on the `PATH`.
     pub ffmpeg: String,
+    /// Megabytes of result fields read from the results files that stay in memory for going
+    /// back to them; `None` for [`PostProcessing::automatic_results_memory`].
+    pub results_memory: Option<u32>,
+}
+
+impl PostProcessing {
+    /// The memory for result fields chosen by itself: a quarter of what is free when
+    /// Nodalis starts, at least 256 MB and at most 2 GB.
+    pub fn automatic_results_memory() -> u32 {
+        static AUTOMATIC: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        *AUTOMATIC.get_or_init(|| {
+            let free = plxs_linalg::memory::available_memory().unwrap_or(8 << 30);
+            ((free / 4) >> 20).clamp(256, 2048) as u32
+        })
+    }
+
+    /// Bytes of result fields kept in memory.
+    pub fn results_memory_bytes(&self) -> usize {
+        let megabytes = self
+            .results_memory
+            .unwrap_or_else(Self::automatic_results_memory);
+        (megabytes as usize) << 20
+    }
 }
 
 impl Default for PostProcessing {
@@ -133,6 +156,7 @@ impl Default for PostProcessing {
             levels: plx_render::contour::DEFAULT_LEVELS,
             digits: 4,
             ffmpeg: String::new(),
+            results_memory: None,
         }
     }
 }
@@ -576,6 +600,38 @@ impl SettingsWindow {
                             "Digits shown in the legend, labels, Query, tables and plots. \
                          The stored values are not rounded.",
                         );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Memory for results read");
+                    let mut automatic = p.results_memory.is_none();
+                    let tip = "Result fields are read from the results file when they are \
+                         shown and stay in memory for going back to them, up to this much; \
+                         beyond it, those used longest ago are dropped and read again when \
+                         wanted. Automatic takes a quarter of the memory free when Nodalis \
+                         starts, at least 256 MB and at most 2 GB.";
+                    if ui
+                        .checkbox(&mut automatic, "Automatic")
+                        .on_hover_text(tip)
+                        .changed()
+                    {
+                        p.results_memory =
+                            (!automatic).then(PostProcessing::automatic_results_memory);
+                    }
+                    let mut megabytes = p
+                        .results_memory
+                        .unwrap_or_else(PostProcessing::automatic_results_memory);
+                    let edited = ui
+                        .add_enabled(
+                            !automatic,
+                            numeric::drag_value(&mut megabytes)
+                                .range(64..=65536)
+                                .suffix(" MB"),
+                        )
+                        .on_hover_text(tip)
+                        .changed();
+                    if edited {
+                        p.results_memory = Some(megabytes);
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("FFmpeg executable");
