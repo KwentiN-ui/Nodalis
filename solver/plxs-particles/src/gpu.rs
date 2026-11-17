@@ -39,6 +39,9 @@ const SUBMISSION: f64 = 0.25;
 /// The storage buffers of the largest kernel (`g2p`).
 const STORAGE_BUFFERS: u32 = 13;
 
+/// The speed the card reports for a particle whose motion is no number any more.
+const UNSTABLE: f32 = 1e38;
+
 const FRAME: u32 = 1;
 const HISTORY: u32 = 2;
 const BROKEN: u32 = 4;
@@ -996,7 +999,11 @@ impl Card {
                 }
             }
             if ctl.reason & BROKEN != 0 {
-                return Err("the time step became zero".into());
+                return Err(if ctl.max_speed >= UNSTABLE {
+                    super::UNSTABLE_MESSAGE.into()
+                } else {
+                    "the time step became zero".into()
+                });
             }
             steps += ctl.steps as usize;
             gone = ctl.gone;

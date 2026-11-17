@@ -79,9 +79,17 @@ fn mixer() -> ParticleModel {
     }
 }
 
-fn run(mode: GpuMode, model: &ParticleModel) -> ParticleResults {
+/// The choice of the card is global: one run at a time.
+static CHOICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn solve(mode: GpuMode, model: &ParticleModel) -> Result<ParticleResults, String> {
+    let _one = CHOICE.lock().unwrap_or_else(|e| e.into_inner());
     GpuMode::set_preferred(mode);
-    let results = plxs_particles::solve(model, &mut |_| {}).expect("solves");
+    plxs_particles::solve(model, &mut |_| {})
+}
+
+fn run(mode: GpuMode, model: &ParticleModel) -> ParticleResults {
+    let results = solve(mode, model).expect("solves");
     eprintln!(
         "{mode:?}: {} particles, {} steps, {:.1} s",
         results.report.particles, results.report.steps, results.report.seconds
@@ -227,4 +235,26 @@ fn the_card_computes_what_the_processor_computes() {
     );
     assert!((error(ha) - error(hb)).abs() < 0.005);
     assert_eq!(ha.time.len(), hb.time.len());
+}
+
+/// A run that blows up (time steps four times too long) stops with an error on both, and
+/// the card does not hang on particles whose position is no number.
+#[test]
+fn an_unstable_run_stops_on_the_card_as_on_the_processor() {
+    if std::env::var_os("PLXS_GPU").is_some() {
+        return;
+    }
+    let mut model = mixer();
+    model.heat = None;
+    model.control.courant = 4.0;
+    model.control.end_time = 0.1;
+    for mode in [GpuMode::Off, GpuMode::On] {
+        let started = std::time::Instant::now();
+        let error = solve(mode, &model).expect_err("blows up");
+        eprintln!(
+            "{mode:?}: {error} after {:.1} s",
+            started.elapsed().as_secs_f64()
+        );
+        assert!(error.contains("unstable"), "{mode:?}: {error}");
+    }
 }
