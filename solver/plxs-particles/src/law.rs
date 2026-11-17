@@ -356,27 +356,24 @@ pub fn plastic_increment(trial: f64, yield_stress: f64, g: f64, k: f64, n: f64, 
     if (n - 1.0).abs() < 1e-12 {
         return over / (g + k / dt);
     }
-    let residual = |x: f64| over - g * x - k * (x / dt).powf(n);
-    let (mut lo, mut hi) = (0.0, over / g);
-    let mut x = 0.5 * hi;
-    for _ in 0..100 {
-        let r = residual(x);
-        if r > 0.0 {
-            lo = x;
-        } else {
-            hi = x;
+    // In u = ln Δγ the condition reads ln(G e^u + c e^(n u)) = ln(trial − yield) with
+    // c = k / Δtⁿ: the left side is convex and rises with a slope between n and 1, so
+    // Newton's steps converge from any start, in a few, however the elastic and the
+    // viscous part share the stress.
+    let c = k * dt.powf(-n);
+    let target = over.ln();
+    let mut u = (over / g).min((over / c).powf(1.0 / n)).ln();
+    for _ in 0..50 {
+        let elastic = g * u.exp();
+        let viscous = c * (n * u).exp();
+        let sum = elastic + viscous;
+        let step = (sum.ln() - target) * sum / (elastic + n * viscous);
+        u -= step;
+        if step.abs() <= 1e-12 {
+            break;
         }
-        let slope = g + k * n / dt * (x / dt).max(1e-300).powf(n - 1.0);
-        let mut next = x + r / slope;
-        if !(next > lo && next < hi) {
-            next = 0.5 * (lo + hi);
-        }
-        if (next - x).abs() <= 1e-14 * hi.max(1e-300) {
-            return next;
-        }
-        x = next;
     }
-    x
+    u.exp()
 }
 
 /// The friction of the μ(I) rheology over the shear rate at a pressure: `per_rate` is

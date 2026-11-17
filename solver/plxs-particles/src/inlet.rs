@@ -35,9 +35,9 @@ pub(super) struct Feed {
     /// The bounds of the surface widened by the layer and a cell.
     lo: Vec3,
     hi: Vec3,
-    /// Of a pressure inlet: the points of the reservoir behind its surface and their
-    /// volume.
-    ghosts: Vec<(Vec3, f64)>,
+    /// Of a pressure inlet: the nodes that the points of the reservoir behind its surface
+    /// reach and the force they put on each per unit of pressure.
+    pressed: Vec<(usize, Vec3)>,
     /// Of a velocity inlet: the nodes of its layer and the normal there.
     nodes: Vec<(usize, Vec3)>,
     /// Of a pressure inlet: the nodes behind the surface that the layer reaches, and the
@@ -100,13 +100,13 @@ impl Feed {
             faces,
             lo,
             hi,
-            ghosts: Vec::new(),
+            pressed: Vec::new(),
             nodes: Vec::new(),
             behind: Vec::new(),
         };
         match inlet.kind {
             InletKind::Pressure(_) => {
-                feed.ghosts = feed.reservoir(grid, inlet);
+                feed.pressed = pressed(grid, &feed.reservoir(grid, inlet));
                 feed.behind = feed.behind_nodes(grid);
             }
             InletKind::Velocity(_) => feed.nodes = feed.layer_nodes(grid),
@@ -259,7 +259,6 @@ impl Feed {
     /// little mass, stay at rest under the two.
     pub(super) fn push(
         &self,
-        grid: &Grid,
         t: f64,
         mass: impl Fn(usize) -> f64,
         forces: &mut Vec<(usize, Vec3)>,
@@ -271,39 +270,9 @@ impl Feed {
         if p == 0.0 {
             return;
         }
-        let inv = 4.0 / (grid.h * grid.h);
-        let plane = grid.space != Space::Solid;
-        for &(x, volume) in &self.ghosts {
-            let (base, w, _) = grid.stencil(x);
-            let offsets = grid.offsets(base);
-            // The hoop stress of the ring of a body of revolution.
-            let hoop = if grid.space == Space::Axisymmetric {
-                volume * p / grid.radius(x[0])
-            } else {
-                0.0
-            };
-            for sk in 0..3 {
-                for sj in 0..3 {
-                    for si in 0..3 {
-                        let at = offsets[0][si] + offsets[1][sj] + offsets[2][sk];
-                        let s = [si, sj, sk];
-                        let node: Vec3 = std::array::from_fn(|a| {
-                            grid.origin[a] + (base[a] + s[a] as isize) as f64 * grid.h
-                        });
-                        // Nodes beyond the axis of a body of revolution only mirror others.
-                        let beyond = grid.space == Space::Axisymmetric && node[0] < -1e-9 * grid.h;
-                        if mass(at) <= 0.0 || beyond {
-                            continue;
-                        }
-                        let weight = w[0][si] * w[1][sj] * w[2][sk];
-                        let mut f = scale(sub(node, x), volume * inv * p * weight);
-                        f[0] += hoop * weight;
-                        if plane {
-                            f[2] = 0.0;
-                        }
-                        forces.push((at, f));
-                    }
-                }
+        for &(at, unit) in &self.pressed {
+            if mass(at) > 0.0 {
+                forces.push((at, scale(unit, p)));
             }
         }
     }
@@ -467,4 +436,46 @@ pub(super) fn spawn(
         particles.push(q);
     }
     (mass, brought)
+}
+
+/// The force per unit of pressure that the points of a reservoir, at their places and of
+/// their volumes, put on each node they reach.
+fn pressed(grid: &Grid, ghosts: &[(Vec3, f64)]) -> Vec<(usize, Vec3)> {
+    let inv = 4.0 / (grid.h * grid.h);
+    let plane = grid.space != Space::Solid;
+    let mut sums: std::collections::BTreeMap<usize, Vec3> = std::collections::BTreeMap::new();
+    for &(x, volume) in ghosts {
+        let (base, w, _) = grid.stencil(x);
+        let offsets = grid.offsets(base);
+        // The hoop stress of the ring of a body of revolution.
+        let hoop = if grid.space == Space::Axisymmetric {
+            volume / grid.radius(x[0])
+        } else {
+            0.0
+        };
+        for sk in 0..grid.reach_z() {
+            for sj in 0..3 {
+                for si in 0..3 {
+                    let at = offsets[0][si] + offsets[1][sj] + offsets[2][sk];
+                    let s = [si, sj, sk];
+                    let node: Vec3 = std::array::from_fn(|a| {
+                        grid.origin[a] + (base[a] + s[a] as isize) as f64 * grid.h
+                    });
+                    // Nodes beyond the axis of a body of revolution only mirror others.
+                    if grid.space == Space::Axisymmetric && node[0] < -1e-9 * grid.h {
+                        continue;
+                    }
+                    let weight = w[0][si] * w[1][sj] * w[2][sk];
+                    let mut f = scale(sub(node, x), volume * inv * weight);
+                    f[0] += hoop * weight;
+                    if plane {
+                        f[2] = 0.0;
+                    }
+                    let sum = sums.entry(at).or_insert([0.0; 3]);
+                    *sum = [sum[0] + f[0], sum[1] + f[1], sum[2] + f[2]];
+                }
+            }
+        }
+    }
+    sums.into_iter().collect()
 }
