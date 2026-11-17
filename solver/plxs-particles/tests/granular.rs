@@ -97,6 +97,7 @@ fn plane(
         gravity: [0.0, -G, 0.0],
         control: ParticleControl::default(),
         heat: None,
+        inlets: Vec::new(),
     }
 }
 

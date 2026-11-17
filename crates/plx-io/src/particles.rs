@@ -12,7 +12,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use plx_mesh::{ElementFamily, FeMesh};
-use plx_model::particle_flow::{BoxSide, Flow, ParticleFlowStep};
+use plx_model::particle_flow::{BoxSide, Flow, FlowBoundary, FlowKind, ParticleFlowStep};
 use plx_model::{
     Constraint, ContactBehavior, FeModel, HistoryKind, Material, ModelItem, ModelSpace, StepKind,
 };
@@ -368,7 +368,8 @@ pub fn lower(
         let drives =
             matches!(bc.region, plx_model::Region::ReferencePoint(id) if drivers.contains(&id));
         let holds = walls.iter().any(|w| w.held == Some(b));
-        if bc.active && !drives && !holds {
+        let flow = matches!(bc.kind, plx_model::BoundaryKind::Flow(_));
+        if bc.active && !drives && !holds && !flow {
             warnings.push(format!(
                 "{}: in a Particle Flow step boundary conditions move the reference points of \
                  rigid bodies only; it is left out.",
@@ -377,7 +378,95 @@ pub fn lower(
         }
     }
 
-    model.domain = domain(settings, &model, space, &mut warnings)?;
+    // The flow boundary conditions: sides of the box, and inlets and openings.
+    let flows: Vec<(usize, &plx_model::BoundaryCondition, &FlowBoundary)> =
+        (step.boundary_conditions.iter().enumerate())
+            .filter(|(_, bc)| bc.active)
+            .filter_map(|(b, bc)| match &bc.kind {
+                plx_model::BoundaryKind::Flow(flow) => Some((b, bc, flow)),
+                _ => None,
+            })
+            .collect();
+    let mut sides = [settings.side; 6];
+    for &(b, bc, flow) in &flows {
+        if let Some(problem) = flow.problem(!bc.region.is_empty()) {
+            return Err(error(
+                format!("{}: {problem}", bc.name),
+                Some(ModelItem::BoundaryCondition(index, b)),
+            ));
+        }
+        for (side, &on) in sides.iter_mut().zip(&flow.sides) {
+            if on {
+                *side = match flow.kind {
+                    FlowKind::Side(law) => law,
+                    // An inlet's material that goes back leaves the box.
+                    FlowKind::Pressure(_) | FlowKind::Velocity(_) => BoxSide::Open,
+                };
+            }
+        }
+    }
+    model.domain = domain(settings, sides, &model, space, &mut warnings)?;
+    for &(b, bc, flow) in &flows {
+        let item = Some(ModelItem::BoundaryCondition(index, b));
+        let kind = match flow.kind {
+            FlowKind::Pressure(p) => ir::InletKind::Pressure(p),
+            FlowKind::Velocity(v) => ir::InletKind::Velocity(v),
+            FlowKind::Side(BoxSide::Open) if !bc.region.is_empty() => ir::InletKind::Open,
+            // The sides of the box are set above.
+            FlowKind::Side(_) => continue,
+        };
+        let mut shapes_of: Vec<(TriangleSurface, Option<usize>)> = Vec::new();
+        if !bc.region.is_empty() {
+            let (shape, part) = inlet_faces(
+                mesh,
+                &bc.region,
+                &body_part,
+                &wall_part,
+                space,
+                settings.cell_size,
+            )
+            .map_err(|e| error(format!("{}: {e}", bc.name), item))?;
+            shapes_of.push((shape, Some(part)));
+        }
+        if kind != ir::InletKind::Open {
+            for side in (0..6).filter(|&s| flow.sides[s]) {
+                if space != ir::Space::Solid && side >= 4 {
+                    warnings.push(format!(
+                        "{}: a 2D model has no sides along z; {} is left out.",
+                        bc.name,
+                        plx_model::particle_flow::SIDE_NAMES[side]
+                    ));
+                    continue;
+                }
+                shapes_of.push((box_face(&model.domain, side), None));
+            }
+        }
+        let amplitude = flow_amplitude(fe, index, b)?;
+        for (shape, part) in shapes_of {
+            // The material fed: the part named, the part of the faces, or at a side of the
+            // box the filled part nearest to it.
+            let body = match (&flow.like, part) {
+                (Some(name), _) => bodies.iter().position(|n| n == name).ok_or_else(|| {
+                    error(
+                        format!("{}: part {name} is not filled with material.", bc.name),
+                        item,
+                    )
+                })?,
+                (None, Some(part)) => body_part.iter().position(|&p| p == part).unwrap_or(0),
+                (None, None) => nearest_body(&model, &shape),
+            };
+            model.inlets.push(ir::Inlet {
+                name: bc.name.clone(),
+                shape,
+                kind,
+                amplitude: amplitude.clone(),
+                body,
+            });
+        }
+        if let FlowKind::Pressure(p) = flow.kind {
+            pressure_note(&model, settings, p, &bc.name, &mut warnings);
+        }
+    }
     model.control = ParticleControl {
         end_time: settings.duration,
         frames: settings.frames as usize,
@@ -853,6 +942,7 @@ pub fn law_of(behavior: ContactBehavior) -> WallLaw {
 /// axis, where its side is a frictionless wall.
 fn domain(
     settings: &ParticleFlowStep,
+    mut sides: [BoxSide; 6],
     model: &ParticleModel,
     space: ir::Space,
     warnings: &mut Vec<String>,
@@ -869,7 +959,6 @@ fn domain(
     let (mut min, mut max) = settings
         .grid_box(Some(bounds))
         .expect("a box around given bounds");
-    let mut sides = settings.sides;
     let mut periodic = [false; 3];
     if space != ir::Space::Solid {
         (min[2], max[2]) = (0.0, settings.cell_size);
@@ -912,6 +1001,210 @@ fn domain(
         periodic,
         space,
     })
+}
+
+/// The surface of the faces (edges in 2D) of `region`, wound to face into the material, and
+/// the filled part they lie on. Faces of walls are left out.
+fn inlet_faces(
+    mesh: &FeMesh,
+    region: &plx_model::Region,
+    filled: &[usize],
+    walls: &BTreeSet<usize>,
+    space: ir::Space,
+    cell: f64,
+) -> Result<(TriangleSurface, usize), String> {
+    let element_part = element_parts(mesh);
+    let coords = mesh.coords();
+    let position = |id| mesh.node_index(id).map(|i| coords[i]);
+    let mut surface = TriangleSurface::default();
+    let mut part = None;
+    let mut on_wall = false;
+    for (e, number) in region.faces(mesh) {
+        let Some(&p) = element_part.get(&e) else {
+            continue;
+        };
+        if walls.contains(&p) || !filled.contains(&p) {
+            on_wall |= walls.contains(&p);
+            continue;
+        }
+        let Some(element) = mesh.element(e) else {
+            continue;
+        };
+        let Some(face) = element.faces().get(number as usize - 1) else {
+            continue;
+        };
+        let corners: Vec<[f64; 3]> = (face.corners.iter())
+            .filter_map(|&c| element.nodes.get(c).copied().and_then(position))
+            .collect();
+        let all: Vec<[f64; 3]> = element.nodes.iter().filter_map(|&n| position(n)).collect();
+        let centre = all.iter().fold([0.0; 3], |c, x| {
+            std::array::from_fn(|a| c[a] + x[a] / all.len() as f64)
+        });
+        let first = surface.points.len() as u32;
+        let mut triangles = Vec::new();
+        if space == ir::Space::Solid {
+            surface.points.extend(&corners);
+            for k in 1..corners.len().saturating_sub(1) {
+                triangles.push([first, first + k as u32, first + k as u32 + 1]);
+            }
+        } else {
+            // The edge across the slab, well beyond it.
+            let [a, b] = [corners[0], corners[corners.len() - 1]];
+            for (x, z) in [(a, -cell), (b, -cell), (b, 2.0 * cell), (a, 2.0 * cell)] {
+                surface.points.push([x[0], x[1], z]);
+            }
+            triangles.push([first, first + 1, first + 2]);
+            triangles.push([first, first + 2, first + 3]);
+        }
+        for t in &mut triangles {
+            let [a, b, c] = t.map(|i| surface.points[i as usize]);
+            let n = cross(sub(b, a), sub(c, a));
+            let mut into = sub(centre, a);
+            if space != ir::Space::Solid {
+                into[2] = 0.0;
+            }
+            if dot(n, into) < 0.0 {
+                t.swap(1, 2);
+            }
+        }
+        surface.triangles.extend(triangles);
+        part.get_or_insert(p);
+    }
+    match part {
+        Some(part) => Ok((surface, part)),
+        None if on_wall => Err(
+            "its faces lie on walls only; an inlet or opening lies on a              filled part."
+                .into(),
+        ),
+        None => Err(format!(
+            "it picks no {} of a filled part.",
+            if space == ir::Space::Solid {
+                "faces"
+            } else {
+                "edges"
+            }
+        )),
+    }
+}
+
+/// Side `side` of the box as a surface facing into it, a cell beyond its edges.
+fn box_face(domain: &ir::Domain, side: usize) -> TriangleSurface {
+    let a = side / 2;
+    let (u, v) = ((a + 1) % 3, (a + 2) % 3);
+    let h = domain.cell;
+    let at = if side.is_multiple_of(2) {
+        domain.min[a]
+    } else {
+        domain.max[a]
+    };
+    let corner = |su: f64, sv: f64| {
+        let mut x = [0.0; 3];
+        x[a] = at;
+        x[u] = su;
+        x[v] = sv;
+        x
+    };
+    let (u0, u1) = (domain.min[u] - h, domain.max[u] + h);
+    let (v0, v1) = (domain.min[v] - h, domain.max[v] + h);
+    let points = vec![
+        corner(u0, v0),
+        corner(u1, v0),
+        corner(u1, v1),
+        corner(u0, v1),
+    ];
+    // (u, v, a) is right-handed: counterclockwise in u, v faces along +a.
+    let triangles = if side.is_multiple_of(2) {
+        vec![[0, 1, 2], [0, 2, 3]]
+    } else {
+        vec![[0, 2, 1], [0, 3, 2]]
+    };
+    TriangleSurface { points, triangles }
+}
+
+/// The body whose shape lies nearest to `shape`, a side of the box.
+fn nearest_body(model: &ParticleModel, shape: &TriangleSurface) -> usize {
+    let Some((lo, hi)) = shape.bounds() else {
+        return 0;
+    };
+    let gap = |body: &MaterialBody| {
+        body.shape.bounds().map_or(f64::INFINITY, |(blo, bhi)| {
+            (0..3)
+                .map(|a| (blo[a] - hi[a]).max(lo[a] - bhi[a]).max(0.0).powi(2))
+                .sum::<f64>()
+        })
+    };
+    (0..model.bodies.len())
+        .min_by(|&i, &j| gap(&model.bodies[i]).total_cmp(&gap(&model.bodies[j])))
+        .unwrap_or(0)
+}
+
+/// The factor over time of flow boundary condition `index` of step `step`: its amplitude,
+/// or constant without one.
+fn flow_amplitude(fe: &FeModel, step: usize, index: usize) -> Result<Vec<[f64; 2]>, ParticleError> {
+    let bc = &fe.steps[step].boundary_conditions[index];
+    let item = Some(ModelItem::BoundaryCondition(step, index));
+    let Some(id) = bc.amplitude else {
+        return Ok(Vec::new());
+    };
+    let amplitude = (fe.amplitudes.iter())
+        .find(|a| a.id == id)
+        .ok_or_else(|| error(format!("{}: the amplitude does not exist.", bc.name), item))?;
+    if let Some(problem) = amplitude.points_problem() {
+        return Err(error(format!("{}: {problem}.", amplitude.name), item));
+    }
+    Ok((amplitude.points.iter())
+        .map(|p| p[0] + amplitude.shift_time)
+        .map(|t| [t, amplitude.value_at(t)])
+        .collect())
+}
+
+/// A note when the pressure of an inlet compresses the material it feeds by more than a
+/// few per cent: the wave speed (or the material's own bulk modulus) is too low for it.
+fn pressure_note(
+    model: &ParticleModel,
+    settings: &ParticleFlowStep,
+    pressure: f64,
+    name: &str,
+    warnings: &mut Vec<String>,
+) {
+    for m in &model.materials {
+        let own = match m.law {
+            ir::ParticleLaw::ViscoPlastic { bulk, .. }
+            | ir::ParticleLaw::Fluid { bulk, .. }
+            | ir::ParticleLaw::Granular { bulk, .. } => bulk,
+            _ => continue,
+        };
+        let bulk = match settings.wave_speed {
+            Some(c) => own.min(m.density * c * c),
+            None => own,
+        };
+        let squeeze = pressure.abs() / bulk;
+        if squeeze > 0.05 {
+            let needed = (20.0 * pressure.abs() / m.density).sqrt();
+            warnings.push(format!(
+                "{name}: the pressure compresses {} by about {:.0} %; a wave speed of {needed:.3e} \
+                 or more keeps it below 5 %.",
+                m.name,
+                100.0 * squeeze.min(1.0)
+            ));
+        }
+    }
+}
+
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|k| a[k] - b[k])
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 
 /// The parts the elements and faces of a region belong to.
@@ -1278,6 +1571,83 @@ mod tests {
             refused.message.contains("plane strain"),
             "{}",
             refused.message
+        );
+    }
+
+    /// Flow boundary conditions: an inlet on picked edges faces into the part they lie on,
+    /// an inlet at a side of the box opens it and faces into the box, a wall at a side
+    /// overrides the default of the step.
+    #[test]
+    fn flow_boundary_conditions_make_inlets_and_sides() {
+        use plx_model::particle_flow::{FlowBoundary, FlowKind};
+        let mesh = plane_mesh();
+        let mut fe = model(None);
+        fe.properties.space = ModelSpace::PlaneStrain;
+        if let StepKind::ParticleFlow(settings) = &mut fe.steps[0].kind {
+            settings.side = BoxSide::Open;
+        }
+        let flow = |kind, sides| {
+            BoundaryKind::Flow(FlowBoundary {
+                kind,
+                sides,
+                like: None,
+            })
+        };
+        let bcs = &mut fe.steps[0].boundary_conditions;
+        // The top edges of the two squares of the paste.
+        bcs.push(BoundaryCondition::new(
+            "Push",
+            Region::Faces(vec![(1, 2), (2, 2)]),
+            flow(FlowKind::Pressure(500.0), [false; 6]),
+        ));
+        bcs.push(BoundaryCondition::new(
+            "Feed",
+            Region::Nodes(Vec::new()),
+            flow(
+                FlowKind::Velocity(0.1),
+                [false, false, false, true, false, false],
+            ),
+        ));
+        bcs.push(BoundaryCondition::new(
+            "Rough",
+            Region::Nodes(Vec::new()),
+            flow(
+                FlowKind::Side(BoxSide::Rough),
+                [false, true, false, false, false, false],
+            ),
+        ));
+        let lowered = lower(&mesh, &fe, "Test").expect("lowers");
+        assert!(lowered.warnings.is_empty(), "{:?}", lowered.warnings);
+        let model = &lowered.model;
+        assert_eq!(model.domain.sides[0], Side::Open);
+        assert_eq!(model.domain.sides[1], Side::Wall(WallLaw::Stick));
+        assert_eq!(model.domain.sides[3], Side::Open);
+        assert_eq!(model.inlets.len(), 2);
+        let normal = |inlet: &ir::Inlet| {
+            let t = inlet.shape.triangles[0].map(|i| inlet.shape.points[i as usize]);
+            let n = cross(sub(t[1], t[0]), sub(t[2], t[0]));
+            let length = dot(n, n).sqrt();
+            n.map(|v| v / length)
+        };
+        let push = &model.inlets[0];
+        assert_eq!(push.kind, ir::InletKind::Pressure(500.0));
+        assert_eq!(push.body, 0);
+        assert_eq!(push.shape.triangles.len(), 4);
+        for t in &push.shape.triangles {
+            let [a, b, c] = t.map(|i| push.shape.points[i as usize]);
+            assert!(cross(sub(b, a), sub(c, a))[1] < 0.0, "faces into the paste");
+        }
+        assert!(push.shape.points.iter().all(|p| p[1] == 1.0));
+        let feed = &model.inlets[1];
+        assert_eq!(feed.kind, ir::InletKind::Velocity(0.1));
+        assert_eq!(feed.body, 0);
+        let n = normal(feed);
+        assert!((n[1] + 1.0).abs() < 1e-12, "{n:?}");
+        assert!(
+            feed.shape
+                .points
+                .iter()
+                .all(|p| p[1] == model.domain.max[1])
         );
     }
 

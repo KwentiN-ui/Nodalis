@@ -36,6 +36,8 @@ use crate::math::{
 #[cfg(feature = "gpu")]
 #[path = "gpu.rs"]
 mod gpu;
+#[path = "inlet.rs"]
+mod inlet;
 
 /// The error of a run whose motion is no number any more.
 const UNSTABLE_MESSAGE: &str = "the motion became unstable (speeds that are no number); a \
@@ -113,6 +115,11 @@ struct Particle {
     share: f32,
     /// Left the box through an open side.
     gone: bool,
+    /// The inlet whose layer the particle is in, counted from 1; 0 for none.
+    inlet: u16,
+    /// Where the successor of a particle that left the layer of an inlet is made, and the
+    /// inlet.
+    spawn: Option<(Vec3, u16)>,
 }
 
 /// The background grid.
@@ -440,7 +447,17 @@ pub fn solve_streaming(
             motion: w.motion.clone(),
         })
         .collect();
-    let particles = fill(model, &grid, &laws, &walls)?;
+    let feeds = (model.inlets.iter())
+        .map(|i| inlet::Feed::new(i, &grid))
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(i) = model.inlets.iter().find(|i| i.body >= model.bodies.len()) {
+        return Err(format!(
+            "inlet {} feeds a body the model does not have",
+            i.name
+        ));
+    }
+    let mut particles = fill(model, &grid, &laws, &walls)?;
+    inlet::prime(model, &grid, &laws, &feeds, &walls, &mut particles);
     if particles.is_empty() {
         return Err("no particles: the material bodies lie outside the box or inside walls".into());
     }
@@ -503,6 +520,7 @@ pub fn solve_streaming(
         viscosity_limit,
         heat_limit,
         wall_temperature: &wall_temperature,
+        feeds: &feeds,
         potential0: initial.potential,
         energy0: initial.kinetic + initial.stored,
     };
@@ -601,6 +619,7 @@ struct Setup<'a> {
     viscosity_limit: f64,
     heat_limit: f64,
     wall_temperature: &'a [Option<f64>],
+    feeds: &'a [inlet::Feed],
     /// The potential energy and the kinetic plus stored energy at the start.
     potential0: f64,
     energy0: f64,
@@ -640,6 +659,7 @@ fn run_cpu(
         viscosity_limit,
         heat_limit,
         wall_temperature,
+        feeds,
         potential0,
         energy0,
     } = *setup;
@@ -655,6 +675,10 @@ fn run_cpu(
     let mut wall_work = 0.0;
     let mut outflow_energy = 0.0;
     let mut outflow_mass = 0.0;
+    let mut inflow_energy = 0.0;
+    let mut inflow_mass = 0.0;
+    // The force of the pressure inlets on the nodes in a step.
+    let mut pushed: Vec<(usize, Vec3)> = Vec::new();
     let mut wall_force = vec![Load::default(); history.walls.len()];
     let mut wall_samples = 0usize;
 
@@ -704,6 +728,14 @@ fn run_cpu(
         let mirrored = grid.mirrors_axis();
         if mirrored {
             fold_axis(grid, &mut nodes);
+        }
+        // (1b) The pressure of the inlets on the nodes behind their layers.
+        pushed.clear();
+        for feed in feeds {
+            feed.push(grid, t, |at| nodes[at].mass, &mut pushed);
+        }
+        for &(at, f) in &pushed {
+            nodes[at].weight = add(nodes[at].weight, f);
         }
         // (2) The grid.
         let pose: Vec<_> = walls.iter().map(|w| w.pose(t + dt, dt)).collect();
@@ -845,6 +877,30 @@ fn run_cpu(
             sum.add(&f);
         }
         wall_samples += 1;
+        // (2a) The inlets: the work of the pressure, and the speed of the layers of the
+        // velocity inlets, with the energy it gives.
+        for &(at, f) in &pushed {
+            let v = &values[at];
+            inflow_energy += dt * (f[0] * v[0] + f[1] * v[1] + f[2] * v[2]);
+        }
+        for feed in feeds {
+            for &(at, from) in feed.behind() {
+                if nodes[at].mass > 0.0 {
+                    let v = values[from];
+                    values[at][..3].copy_from_slice(&v[..3]);
+                }
+            }
+            for (at, v) in feed.held(t + dt) {
+                let m = nodes[at].mass;
+                if m <= 0.0 {
+                    continue;
+                }
+                let value = &mut values[at];
+                let before = [value[0], value[1], value[2]];
+                inflow_energy += 0.5 * m * (dot(v, v) - dot(before, before));
+                value[..3].copy_from_slice(&v);
+            }
+        }
 
         // (2b) The heat: conduction between neighbouring nodes, and what the walls gave.
         if heat.is_some() {
@@ -989,6 +1045,9 @@ fn run_cpu(
                         }
                     }
                 }
+                if !feeds.is_empty() && !p.gone {
+                    inlet::pass(p, feeds, grid.h);
+                }
                 let speed = norm(p.v);
                 let energy = 0.5 * p.mass * speed * speed - p.mass * dot(p.gravity, p.x)
                     + update.stored * p.volume;
@@ -1015,6 +1074,19 @@ fn run_cpu(
             outflow_energy += sums.out_energy;
             particles.retain(|p| !p.gone);
         }
+        if !feeds.is_empty() {
+            let (mass, energy) = inlet::spawn(
+                model,
+                grid,
+                walls,
+                pose_end,
+                &mut particles,
+                &mut next_id,
+                particle_energy,
+            );
+            inflow_mass += mass;
+            inflow_energy += energy;
+        }
         split(grid, domain, walls, pose_end, &mut particles, &mut next_id);
 
         t += dt;
@@ -1023,10 +1095,13 @@ fn run_cpu(
         max_speed = now.max_speed;
         max_mach = max_mach.max(max_speed / slowest);
         let potential = now.potential - potential0;
-        let total = now.kinetic + potential + now.stored + dissipated + wall_loss + outflow_energy;
+        let total = now.kinetic + potential + now.stored + dissipated + wall_loss + outflow_energy
+            - inflow_energy;
         scale_energy = scale_energy
             .max(now.kinetic + potential.abs() + now.stored + dissipated + wall_loss.abs())
-            .max(wall_work.abs());
+            .max(wall_work.abs())
+            .max(inflow_energy.abs())
+            .max(outflow_energy.abs());
 
         if t >= next_history as f64 * history_dt * (1.0 - 1e-12) || t >= end * (1.0 - 1e-12) {
             next_history = (t / history_dt).floor() as usize + 1;
@@ -1043,6 +1118,8 @@ fn run_cpu(
             history.balance_error.push(energy0 - total);
             history.mass.push(particles.iter().map(|p| p.mass).sum());
             history.outflow.push(outflow_mass);
+            history.inflow.push(inflow_mass);
+            history.inflow_energy.push(inflow_energy);
             history.mach.push(max_speed / slowest);
             // Per body: mass, mass times temperature, highest temperature.
             let count = history.bodies.len();
@@ -1293,6 +1370,12 @@ fn particle_sums(particles: &[Particle]) -> Sums {
             }
         })
         .reduce(Sums::default, Sums::join)
+}
+
+/// The kinetic, potential and stored energy of a particle.
+fn particle_energy(p: &Particle) -> f64 {
+    let speed = norm(p.v);
+    0.5 * p.mass * speed * speed - p.mass * dot(p.gravity, p.x) + stored_from_stress(p) * p.volume
 }
 
 /// The strain energy per unit initial volume, `½ τ : ε` of the Hencky law, with the
@@ -1624,20 +1707,9 @@ fn fill(
     let mut particles = Vec::new();
     let pose: Vec<_> = walls.iter().map(|w| w.pose(0.0, 0.0)).collect();
     for (b, body) in model.bodies.iter().enumerate() {
-        let Some(law) = laws.get(body.material) else {
+        if laws.get(body.material).is_none() {
             return Err(format!("body {} has no material", body.name));
-        };
-        // Without heat the temperature stays: no capacity.
-        let thermal = model.heat.and(model.materials[body.material].thermal);
-        let (fine, grains) = match model.materials[body.material].law {
-            ParticleLaw::Granular {
-                grain,
-                fine_grain,
-                fine_fraction,
-                ..
-            } if fine_grain > 0.0 => (fine_fraction, [fine_grain, grain]),
-            _ => (0.0, [0.0; 2]),
-        };
+        }
         let Some((lo, hi)) = body.shape.bounds() else {
             continue;
         };
@@ -1673,34 +1745,67 @@ fn fill(
                         continue;
                     }
                     taken[slot] = true;
-                    let volume = s * s * step(2) * grid.depth(x[0]) / grid.h;
-                    particles.push(Particle {
-                        id: particles.len() as u32,
-                        x,
-                        v: body.velocity,
-                        c: [[0.0; 3]; 3],
-                        state: PointState::default(),
-                        tau: [[0.0; 3]; 3],
-                        mass: law.density * volume,
-                        volume,
-                        material: body.material as u16,
-                        body: b as u16,
-                        shear_rate: 0.0,
-                        temperature: body.temperature,
-                        gravity: add(model.gravity, body.gravity),
-                        heat_capacity: thermal
-                            .map_or(0.0, |t| t.specific_heat * law.density * volume),
-                        conductivity: thermal.map_or(0.0, |t| t.conductivity),
-                        fine,
-                        grains,
-                        share: 1.0,
-                        gone: false,
-                    });
+                    let id = particles.len() as u32;
+                    particles.push(new_particle(model, grid, laws, b, x, id));
                 }
             }
         }
     }
     Ok(particles)
+}
+
+/// A particle of body `b` at `x` that rests, as the bodies are filled.
+fn new_particle(
+    model: &ParticleModel,
+    grid: &Grid,
+    laws: &[Law],
+    b: usize,
+    x: Vec3,
+    id: u32,
+) -> Particle {
+    let body = &model.bodies[b];
+    let law = &laws[body.material];
+    let s = 0.5 * grid.h;
+    // Without heat the temperature stays: no capacity.
+    let thermal = model.heat.and(model.materials[body.material].thermal);
+    let (fine, grains) = match model.materials[body.material].law {
+        ParticleLaw::Granular {
+            grain,
+            fine_grain,
+            fine_fraction,
+            ..
+        } if fine_grain > 0.0 => (fine_fraction, [fine_grain, grain]),
+        _ => (0.0, [0.0; 2]),
+    };
+    // A 2D slab holds one layer, standing for the depth of its radius.
+    let volume = if grid.space == Space::Solid {
+        s * s * s
+    } else {
+        s * s * grid.depth(x[0])
+    };
+    Particle {
+        id,
+        x,
+        v: body.velocity,
+        c: [[0.0; 3]; 3],
+        state: PointState::default(),
+        tau: [[0.0; 3]; 3],
+        mass: law.density * volume,
+        volume,
+        material: body.material as u16,
+        body: b as u16,
+        shear_rate: 0.0,
+        temperature: body.temperature,
+        gravity: add(model.gravity, body.gravity),
+        heat_capacity: thermal.map_or(0.0, |t| t.specific_heat * law.density * volume),
+        conductivity: thermal.map_or(0.0, |t| t.conductivity),
+        fine,
+        grains,
+        share: 1.0,
+        gone: false,
+        inlet: 0,
+        spawn: None,
+    }
 }
 
 /// Splits the particles of a 2D model whose area in the plane grew beyond [`SPLIT_AREA`]
@@ -1721,13 +1826,15 @@ fn split(
     let s = 0.5 * grid.h;
     let area = |p: &Particle| p.volume * p.state.j / grid.depth(p.x[0]);
     let limit = SPLIT_AREA * s * s;
-    if !particles.par_iter().any(|p| area(p) > limit) {
+    // The layers of the inlets are made anew as the material moves on.
+    let splits = |p: &Particle| p.inlet == 0 && area(p) > limit;
+    if !particles.par_iter().any(splits) {
         return;
     }
     let count = particles.len();
     for k in 0..count {
         let a = area(&particles[k]);
-        if a <= limit {
+        if !splits(&particles[k]) {
             continue;
         }
         let p = &mut particles[k];

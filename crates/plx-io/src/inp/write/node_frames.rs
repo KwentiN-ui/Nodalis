@@ -153,7 +153,7 @@ pub(super) fn hold(
                 submodel: false,
             }
         }
-        BoundaryKind::Temperature(_) => return Ok(None),
+        BoundaryKind::Temperature(_) | BoundaryKind::Flow(_) => return Ok(None),
     };
     Ok((!hold.held.is_empty()).then_some(hold))
 }

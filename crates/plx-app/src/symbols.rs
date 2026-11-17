@@ -641,7 +641,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                         displacement.values.map(|v| v.is_some()),
                         displacement.system,
                     ),
-                    BoundaryKind::Temperature(_) => ([false; 6], None),
+                    BoundaryKind::Temperature(_) | BoundaryKind::Flow(_) => ([false; 6], None),
                     BoundaryKind::Submodel { dofs, .. } => (dofs, None),
                     BoundaryKind::Symmetry { .. } => unreachable!("drawn above"),
                 };

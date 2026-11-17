@@ -1541,6 +1541,7 @@ const GRAVITY: &str = "Gravity";
 const CENTRIFUGAL: &str = "Centrifugal_Load";
 const MOVING: &str = "Moving_Load";
 const EXCITATION: &str = "Excitation";
+const FLOW: &str = "Flow";
 
 /// Whether the boundary condition dialog offers a preview of the motion: a prescribed
 /// displacement that follows an amplitude of the model.
@@ -1559,7 +1560,7 @@ fn motion_of(bc: &BoundaryCondition, fe: &FeModel) -> Option<crate::motion_previ
 }
 
 /// The boundary condition kinds of the dialog: label, default name and the kind.
-fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 4] {
+fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 5] {
     [
         // All degrees of freedom held, the most common support.
         (
@@ -1584,6 +1585,12 @@ fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 4] {
                 halve_beams: true,
             },
         ),
+        // Of a Particle Flow step: sides of its box, openings and inlets.
+        (
+            "Particle Flow",
+            FLOW,
+            BoundaryKind::Flow(Default::default()),
+        ),
     ]
 }
 
@@ -1600,7 +1607,108 @@ fn boundary_kind_name(kind: &BoundaryKind) -> &'static str {
         BoundaryKind::Temperature(_) => TEMPERATURE,
         BoundaryKind::Submodel { .. } => SUBMODEL,
         BoundaryKind::Symmetry { .. } => SYMMETRY,
+        BoundaryKind::Flow(_) => FLOW,
     }
+}
+
+/// What a boundary condition picks its region with: a flow boundary condition faces
+/// (edges in 2D), the others nodes, picked as faces, edges or points of the geometry.
+fn boundary_picks(kind: &BoundaryKind, fe: &FeModel) -> (&'static [Source], Target) {
+    match kind {
+        BoundaryKind::Flow(_) => (FACE_SOURCES, face_target(fe)),
+        _ => (SUPPORT_SOURCES, Target::Nodes),
+    }
+}
+
+/// Rows of a flow boundary condition of a Particle Flow step: what it is, its value, the
+/// sides of the box it takes and the part whose material an inlet feeds.
+fn flow_boundary_rows(
+    ui: &mut Ui,
+    flow: &mut plx_model::particle_flow::FlowBoundary,
+    model: &Model,
+    units: UnitSystem,
+) {
+    use plx_model::particle_flow::{BoxSide, FlowKind, SIDE_NAMES};
+    let space = model.fe.properties.space;
+    ui.label("Flow");
+    egui::ComboBox::from_id_salt("flow kind")
+        .selected_text(flow.kind.name())
+        .width(crate::dock::fit_width(ui, 200.0))
+        .show_ui(ui, |ui| {
+            for kind in FlowKind::KINDS {
+                let current = flow.kind.name() == kind.name();
+                if ui.selectable_label(current, kind.name()).clicked() && !current {
+                    flow.kind = kind;
+                }
+            }
+        });
+    ui.end_row();
+    match &mut flow.kind {
+        FlowKind::Pressure(p) => {
+            ui.label("Pressure").on_hover_text(
+                "The pressure of the reservoir above the ambient one, which acts on every free \
+                 surface: it pushes the material in and feeds it.",
+            );
+            expose::field(ui, Field::Value, |ui| {
+                ui.add(numeric::quantity(p, units, Quantity::Pressure).speed(1.0))
+            });
+            ui.end_row();
+        }
+        FlowKind::Velocity(v) => {
+            ui.label("Speed")
+                .on_hover_text("The speed the material is fed at, normal to the faces.");
+            expose::field(ui, Field::Value, |ui| {
+                ui.add(numeric::quantity(v, units, Quantity::Velocity).speed(0.01))
+            });
+            ui.end_row();
+        }
+        FlowKind::Side(BoxSide::Frictional { mu }) => {
+            ui.label("Friction");
+            ui.add(numeric::drag_value(mu).speed(0.01).range(0.0..=10.0));
+            ui.end_row();
+        }
+        FlowKind::Side(_) => {}
+    }
+    ui.label("Box sides")
+        .on_hover_text("The sides of the box of the step it applies to, besides the picked faces.");
+    crate::layout::wrapped_row(ui, |ui| {
+        for (s, name) in SIDE_NAMES.iter().enumerate() {
+            // A 2D model repeats along z; an axisymmetric one has its axis at X min.
+            if (space.is_2d() && s >= 4) || (space == plx_model::ModelSpace::Axisymmetric && s == 0)
+            {
+                continue;
+            }
+            ui.checkbox(&mut flow.sides[s], *name);
+        }
+    });
+    ui.end_row();
+    if flow.kind.feeds() {
+        ui.label("Material of").on_hover_text(
+            "The filled part whose material, temperature and gravity the material fed has: \
+             by default the part the picked faces lie on, at a side of the box the part \
+             nearest to it.",
+        );
+        let automatic = "Part it touches";
+        egui::ComboBox::from_id_salt("flow like")
+            .selected_text(flow.like.as_deref().unwrap_or(automatic))
+            .width(crate::dock::fit_width(ui, 200.0))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut flow.like, None, automatic);
+                for part in &model.mesh().parts {
+                    let name = Some(part.name.clone());
+                    let label = part.name.clone();
+                    ui.selectable_value(&mut flow.like, name, label);
+                }
+            });
+        ui.end_row();
+    }
+    ui.label("");
+    ui.weak(if space.is_2d() {
+        "Pick edges of filled parts, or choose sides of the box. Walls are sides only."
+    } else {
+        "Pick faces of filled parts, or choose sides of the box. Walls are sides only."
+    });
+    ui.end_row();
 }
 
 /// Rows of a displacement below its values: how the selection follows them (Ansys'
@@ -2726,8 +2834,8 @@ impl Editor {
             }
             TreeItem::BoundaryCondition(s, i) => {
                 let bc = fe.steps.get(s)?.boundary_conditions.get(i)?.clone();
-                let region =
-                    RegionDraft::from_region(&bc.region, SUPPORT_SOURCES, Target::Nodes, mesh);
+                let (sources, target) = boundary_picks(&bc.kind, fe);
+                let region = RegionDraft::from_region(&bc.region, sources, target, mesh);
                 (Draft::BoundaryCondition(s, bc, region), i)
             }
             TreeItem::Load(s, i) => {
@@ -3428,12 +3536,22 @@ impl Editor {
                             if ui.selectable_label(current == name, label).clicked()
                                 && current != name
                             {
+                                let moved = boundary_picks(&kind, &model.fe)
+                                    != boundary_picks(&bc.kind, &model.fe);
                                 bc.kind = kind;
                                 rename_default(&mut bc.name, current, name, &taken);
+                                if moved {
+                                    let (sources, target) = boundary_picks(&bc.kind, &model.fe);
+                                    let (kept, dropped) =
+                                        region.converted(sources, target, model.mesh());
+                                    *region = kept;
+                                    dropped_note(ui, dropped);
+                                }
                             }
                         }
                     });
                 ui.end_row();
+                show_dropped_note(ui);
                 if let BoundaryKind::Temperature(t) = &mut bc.kind {
                     ui.label("Temperature");
                     expose::field(ui, Field::Value, |ui| {
@@ -3519,6 +3637,9 @@ impl Editor {
                 } = &mut bc.kind
                 {
                     symmetry_rows(ui, normal, halve_beams, &region.region(), model);
+                }
+                if let BoundaryKind::Flow(flow) = &mut bc.kind {
+                    flow_boundary_rows(ui, flow, model, units);
                 }
                 if bc.kind.takes_amplitude() {
                     let playing = self.motion.is_some();
@@ -7036,9 +7157,7 @@ fn step_form(
         StepKind::UncoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::Sensitivity(settings) => sensitivity_form(ui, settings, units),
         StepKind::Visco(settings) => visco_form(ui, settings, units),
-        StepKind::ParticleFlow(settings) => {
-            particle_flow_form(ui, settings, units, fe.properties.space)
-        }
+        StepKind::ParticleFlow(settings) => particle_flow_form(ui, settings, units),
     }
     // Hyperelastic materials switch large deformations on in the steps that deform them.
     if !step.kind.nlgeom()
@@ -8162,10 +8281,8 @@ fn particle_flow_form(
     ui: &mut Ui,
     settings: &mut plx_model::particle_flow::ParticleFlowStep,
     units: UnitSystem,
-    space: plx_model::ModelSpace,
 ) {
-    use plx_model::ModelSpace;
-    use plx_model::particle_flow::{BoxSide, ParticleBox, SIDE_NAMES};
+    use plx_model::particle_flow::{BoxSide, ParticleBox};
     ui.label("Duration");
     ui.add(numeric::physical(
         &mut settings.duration,
@@ -8245,40 +8362,29 @@ fn particle_flow_form(
             }
         }
     }
-    for (s, (side, name)) in settings.sides.iter_mut().zip(SIDE_NAMES).enumerate() {
-        // A 2D model is a slab along z that repeats; a body of revolution has its axis at
-        // X min.
-        if space.is_2d() && s >= 4 {
-            continue;
-        }
-        if space == ModelSpace::Axisymmetric && s == 0 {
-            ui.label(format!("Side {name}")).on_hover_text(
-                "Where the box reaches the axis of revolution (x = 0) the side is \
-                 frictionless, the axis itself.",
-            );
-            ui.weak("Axis where it reaches x = 0");
-            ui.end_row();
-            continue;
-        }
-        ui.label(format!("Side {name}"));
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt(("particle box side", name))
-                .selected_text(side.name())
-                .show_ui(ui, |ui| {
-                    for kind in BoxSide::KINDS {
-                        let current = std::mem::discriminant(side) == std::mem::discriminant(&kind);
-                        if ui.selectable_label(current, kind.name()).clicked() && !current {
-                            *side = kind;
-                        }
+    ui.label("Sides").on_hover_text(
+        "What the sides of the box are; a flow boundary condition of the step makes single \
+         sides something else. In a 2D model the box repeats along z; in an axisymmetric \
+         one the side X min, where it reaches the axis (x = 0), is the axis itself.",
+    );
+    ui.horizontal(|ui| {
+        let side = &mut settings.side;
+        egui::ComboBox::from_id_salt("particle box sides")
+            .selected_text(side.name())
+            .show_ui(ui, |ui| {
+                for kind in BoxSide::KINDS {
+                    let current = std::mem::discriminant(side) == std::mem::discriminant(&kind);
+                    if ui.selectable_label(current, kind.name()).clicked() && !current {
+                        *side = kind;
                     }
-                });
-            if let BoxSide::Frictional { mu } = side {
-                ui.label("Friction");
-                ui.add(numeric::drag_value(mu).speed(0.01).range(0.0..=10.0));
-            }
-        });
-        ui.end_row();
-    }
+                }
+            });
+        if let BoxSide::Frictional { mu } = side {
+            ui.label("Friction");
+            ui.add(numeric::drag_value(mu).speed(0.01).range(0.0..=10.0));
+        }
+    });
+    ui.end_row();
     ui.label("");
     ui.checkbox(&mut settings.smooth_volume, "Smooth the volume change")
         .on_hover_text(

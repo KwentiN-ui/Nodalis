@@ -230,6 +230,15 @@ impl FeModel {
                         }
                     }
                     BoundaryKind::Temperature(t) => c.value(t, Quantity::Temperature),
+                    BoundaryKind::Flow(flow) => match &mut flow.kind {
+                        crate::particle_flow::FlowKind::Pressure(p) => {
+                            c.value(p, Quantity::Pressure)
+                        }
+                        crate::particle_flow::FlowKind::Velocity(v) => {
+                            c.value(v, Quantity::Velocity)
+                        }
+                        crate::particle_flow::FlowKind::Side(_) => {}
+                    },
                 }
             }
             for load in &mut step.loads {

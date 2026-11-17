@@ -206,6 +206,15 @@ impl Card {
             }
             return None;
         }
+        if !setup.feeds.is_empty() {
+            if worth {
+                notes.push(
+                    "Particles computed on the processor: the card does not compute inlets yet"
+                        .into(),
+                );
+            }
+            return None;
+        }
         if particles.iter().any(|p| p.grains[0] > 0.0) {
             if worth {
                 notes.push(

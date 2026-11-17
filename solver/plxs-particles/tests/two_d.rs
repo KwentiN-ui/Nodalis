@@ -88,6 +88,7 @@ fn model(
         gravity: [0.0, -G, 0.0],
         control: ParticleControl::default(),
         heat: None,
+        inlets: Vec::new(),
     }
 }
 
@@ -122,6 +123,7 @@ fn quarter(
         gravity: [0.0, -G, 0.0],
         control: ParticleControl::default(),
         heat: None,
+        inlets: Vec::new(),
     }
 }
 

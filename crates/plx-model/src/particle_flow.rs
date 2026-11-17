@@ -109,8 +109,105 @@ impl BoxSide {
     }
 }
 
-/// The names of the sides of the box, in the order of [`ParticleFlowStep::sides`].
+/// The names of the sides of the box, in the order of [`FlowBoundary::sides`].
 pub const SIDE_NAMES: [&str; 6] = ["X min", "X max", "Y min", "Y max", "Z min", "Z max"];
+
+/// A boundary condition of a Particle Flow step at sides of its box or on faces of the
+/// model (edges in 2D): a wall, an opening, or an inlet that feeds material from a
+/// reservoir behind it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FlowBoundary {
+    pub kind: FlowKind,
+    /// The sides of the box it makes this, besides the faces of its region: x min, x max,
+    /// y min, y max, z min, z max.
+    #[serde(default)]
+    pub sides: [bool; 6],
+    /// Of an inlet: the filled part whose material, temperature and gravity the material
+    /// fed has; `None` takes the part its faces lie on, at a side of the box the filled
+    /// part nearest to it.
+    #[serde(default)]
+    pub like: Option<String>,
+}
+
+impl Default for FlowBoundary {
+    fn default() -> Self {
+        Self {
+            kind: FlowKind::Pressure(1000.0),
+            sides: [false; 6],
+            like: None,
+        }
+    }
+}
+
+/// What a [`FlowBoundary`] does.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum FlowKind {
+    /// A resting wall, or open (at sides of the box only for a wall).
+    Side(BoxSide),
+    /// A reservoir at this pressure above the ambient one: it pushes the material in,
+    /// feeds it where it moves away and takes back what the material pushes out.
+    Pressure(f64),
+    /// Feeds the material at this speed, normal to the faces.
+    Velocity(f64),
+}
+
+impl FlowKind {
+    pub const KINDS: [FlowKind; 6] = [
+        FlowKind::Pressure(1000.0),
+        FlowKind::Velocity(0.01),
+        FlowKind::Side(BoxSide::Open),
+        FlowKind::Side(BoxSide::Frictionless),
+        FlowKind::Side(BoxSide::Rough),
+        FlowKind::Side(BoxSide::Frictional { mu: 0.3 }),
+    ];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            FlowKind::Pressure(_) => "Pressure inlet",
+            FlowKind::Velocity(_) => "Velocity inlet",
+            FlowKind::Side(BoxSide::Open) => "Open",
+            FlowKind::Side(BoxSide::Frictionless) => "Frictionless wall",
+            FlowKind::Side(BoxSide::Rough) => "Rough wall",
+            FlowKind::Side(BoxSide::Frictional { .. }) => "Frictional wall",
+        }
+    }
+
+    /// Whether it feeds material.
+    pub fn feeds(&self) -> bool {
+        matches!(self, FlowKind::Pressure(_) | FlowKind::Velocity(_))
+    }
+
+    /// Whether it is a wall, which only sides of the box can be.
+    pub fn is_wall(&self) -> bool {
+        matches!(self, FlowKind::Side(s) if *s != BoxSide::Open)
+    }
+}
+
+impl FlowBoundary {
+    /// What keeps it from being computed, in words, besides its region.
+    pub fn problem(&self, has_region: bool) -> Option<String> {
+        if !has_region && !self.sides.contains(&true) {
+            return Some("Pick faces (edges in 2D) or choose sides of the box.".into());
+        }
+        if has_region && self.kind.is_wall() {
+            return Some(
+                "A wall on picked faces is a rigid body; a flow boundary condition makes \
+                 walls of sides of the box only."
+                    .into(),
+            );
+        }
+        match self.kind {
+            FlowKind::Pressure(p) if !p.is_finite() => {
+                Some("The pressure must be a number.".into())
+            }
+            FlowKind::Velocity(v) if !v.is_finite() => Some("The speed must be a number.".into()),
+            FlowKind::Side(BoxSide::Frictional { mu }) if !(mu.is_finite() && mu >= 0.0) => {
+                Some("The friction must not be negative.".into())
+            }
+            _ => None,
+        }
+    }
+}
 
 /// The box the material of a Particle Flow step moves in: material outside of it is gone.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -144,8 +241,9 @@ pub struct ParticleFlowStep {
     /// the material moves much slower than it.
     pub wave_speed: Option<f64>,
     pub domain: ParticleBox,
-    /// The sides of the box: x min, x max, y min, y max, z min, z max.
-    pub sides: [BoxSide; 6],
+    /// What the sides of the box are, unless a flow boundary condition of the step makes
+    /// one something else.
+    pub side: BoxSide,
     /// The volume change is averaged over the cells (F-bar), against volumetric locking
     /// and noise of the pressure.
     pub smooth_volume: bool,
@@ -167,7 +265,7 @@ impl Default for ParticleFlowStep {
             cell_size: 0.005,
             wave_speed: Some(20.0),
             domain: ParticleBox::default(),
-            sides: [BoxSide::default(); 6],
+            side: BoxSide::default(),
             smooth_volume: true,
             heat: false,
             wall_transfer: 1000.0,
@@ -214,12 +312,10 @@ impl ParticleFlowStep {
         if self.heat && !(self.wall_transfer.is_finite() && self.wall_transfer >= 0.0) {
             return Some("The heat transfer coefficient must not be negative.".into());
         }
-        for (side, name) in self.sides.iter().zip(SIDE_NAMES) {
-            if let BoxSide::Frictional { mu } = side
-                && !(mu.is_finite() && *mu >= 0.0)
-            {
-                return Some(format!("Side {name}: the friction must not be negative."));
-            }
+        if let BoxSide::Frictional { mu } = self.side
+            && !(mu.is_finite() && mu >= 0.0)
+        {
+            return Some("The friction of the sides must not be negative.".into());
         }
         None
     }

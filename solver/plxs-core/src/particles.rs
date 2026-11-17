@@ -26,6 +26,52 @@ pub struct ParticleModel {
     /// temperature of its body.
     #[serde(default)]
     pub heat: Option<Heat>,
+    /// Where material enters the model or leaves it, besides the open sides of the box.
+    #[serde(default)]
+    pub inlets: Vec<Inlet>,
+}
+
+/// A reservoir behind a surface that material enters the model from or leaves it into. The
+/// layer of [`Inlet::DEPTH`] cells in front of the surface is the reservoir's: it is kept
+/// full of the inlet's material, and material that passes it enters the model.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Inlet {
+    pub name: String,
+    /// The surface; in a 2D model its lines extruded across the slab. Every triangle is
+    /// wound so that its normal (right hand) points into the model.
+    pub shape: TriangleSurface,
+    pub kind: InletKind,
+    /// The factor on the pressure or speed over time as (time, factor) points, linear in
+    /// between and held beyond the ends; empty is 1.
+    #[serde(default)]
+    pub amplitude: Vec<[f64; 2]>,
+    /// The body whose material, temperature and gravity the entering material has.
+    pub body: usize,
+}
+
+impl Inlet {
+    /// The depth of the layer of the reservoir in front of the surface, in cells.
+    pub const DEPTH: f64 = 1.0;
+}
+
+/// What the reservoir of an [`Inlet`] does.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum InletKind {
+    /// Holds the material in front of it at this pressure (above the ambient one): it
+    /// pushes the material in and feeds it where it moves away, and takes back what the
+    /// material pushes out.
+    Pressure(f64),
+    /// Feeds the material at this speed along the normal.
+    Velocity(f64),
+    /// Takes what passes it out of the model at the ambient pressure, and feeds nothing.
+    Open,
+}
+
+impl InletKind {
+    /// Whether the reservoir feeds material.
+    pub fn feeds(&self) -> bool {
+        !matches!(self, InletKind::Open)
+    }
 }
 
 /// How heat moves in a particle analysis: it is made by the flow and at the walls,
@@ -535,6 +581,12 @@ pub struct ParticleHistory {
     /// Mass in the model and mass that left it.
     pub mass: Vec<f64>,
     pub outflow: Vec<f64>,
+    /// Mass that entered through the inlets, and the energy it brought (its own and the
+    /// work of the pressure), summed from the start.
+    #[serde(default)]
+    pub inflow: Vec<f64>,
+    #[serde(default)]
+    pub inflow_energy: Vec<f64>,
     /// The largest particle speed over the wave speed.
     pub mach: Vec<f64>,
     /// Per body of material, in the order of [`ParticleModel::bodies`]: its mass in the

@@ -242,7 +242,7 @@ use serde::{Deserialize, Serialize};
 /// flow of materials; older formats read as they are. Format 48 adds the granular flow;
 /// older formats read as they are. Format 49 adds grain mixtures of two sizes to the
 /// granular flow; older formats read as they are.
-pub const PROJECT_FORMAT: u32 = 49;
+pub const PROJECT_FORMAT: u32 = 50;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1059,11 +1059,16 @@ impl StepKind {
         } else if let BoundaryKind::Submodel { .. } = kind {
             matches!(self, StepKind::Static(_))
         } else if let StepKind::ParticleFlow(_) = self {
-            // The reference points of rigid bodies: moved, and the walls' temperature.
+            // The reference points of rigid bodies: moved, and the walls' temperature; the
+            // sides of the box and the inlets.
             matches!(
                 kind,
-                BoundaryKind::Displacement(_) | BoundaryKind::Temperature(_)
+                BoundaryKind::Displacement(_)
+                    | BoundaryKind::Temperature(_)
+                    | BoundaryKind::Flow(_)
             )
+        } else if matches!(kind, BoundaryKind::Flow(_)) {
+            false
         } else if kind.is_thermal() {
             self.is_thermal()
         } else {
@@ -2279,6 +2284,9 @@ pub enum BoundaryKind {
         #[serde(default = "crate::active")]
         halve_beams: bool,
     },
+    /// Of a Particle Flow step: what sides of its box or faces of the model (edges in 2D)
+    /// do to the flow, a wall, an opening or an inlet.
+    Flow(particle_flow::FlowBoundary),
 }
 
 impl BoundaryCondition {
@@ -2349,10 +2357,14 @@ impl Load {
 impl BoundaryKind {
     /// Whether an amplitude can scale the boundary condition; symmetry supports stay zero.
     pub fn takes_amplitude(&self) -> bool {
-        !matches!(
-            self,
-            BoundaryKind::Submodel { .. } | BoundaryKind::Symmetry { .. }
-        )
+        match self {
+            BoundaryKind::Submodel { .. } | BoundaryKind::Symmetry { .. } => false,
+            BoundaryKind::Flow(f) => matches!(
+                f.kind,
+                particle_flow::FlowKind::Pressure(_) | particle_flow::FlowKind::Velocity(_)
+            ),
+            _ => true,
+        }
     }
 
     pub fn is_thermal(&self) -> bool {

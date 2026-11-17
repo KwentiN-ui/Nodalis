@@ -4158,6 +4158,8 @@ fn step_block<'f>(
             BoundaryKind::Temperature(t) => {
                 items.push(boundary(target, 11, 11, Some(t), amplitude));
             }
+            // Only the particle solver knows the flow.
+            BoundaryKind::Flow(_) => {}
             // The global results hold displacements, no rotations.
             BoundaryKind::Submodel {
                 dofs: held, step, ..
