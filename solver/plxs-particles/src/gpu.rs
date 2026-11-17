@@ -282,17 +282,30 @@ impl Card {
         };
         let rel = |x: [f64; 3]| -> [f32; 3] { std::array::from_fn(|a| (x[a] - origin[a]) as f32) };
 
-        // The tables: flow factors, amplitudes, distance fields.
+        // The tables: flow over the temperature, amplitudes, distance fields.
         let mut tables: Vec<f32> = Vec::new();
         let mut laws = Vec::new();
         let volume = particles[0].volume;
         for (m, law) in setup.laws.iter().enumerate() {
             let material = &model.materials[m];
             let thermal = model.heat.and(material.thermal);
-            let start = tables.len() as u32;
-            for p in setup.factors[m] {
-                tables.extend([(p[0] - t_ref) as f32, p[1] as f32]);
-            }
+            // The tables of the two values of the flow law over the temperature: yield stress
+            // and consistency, or the viscosity.
+            let flow = setup.tables[m];
+            let (first, second): (&[[f64; 2]], &[[f64; 2]]) = match law.kind {
+                Kind::ViscoPlastic { .. } => (&flow.yield_stress, &flow.consistency),
+                Kind::Fluid { .. } => (&flow.viscosity, &[]),
+                Kind::Elastic | Kind::Granular { .. } => (&[], &[]),
+            };
+            let mut table = |points: &[[f64; 2]]| {
+                let start = tables.len() as u32;
+                for p in points {
+                    tables.extend([(p[0] - t_ref) as f32, p[1] as f32]);
+                }
+                [start, points.len() as u32]
+            };
+            let [start, len] = table(first);
+            let [start2, len2] = table(second);
             let (kind, values, grain) = match law.kind {
                 Kind::Elastic => (0.0, [0.0; 3], 0.0),
                 Kind::ViscoPlastic {
@@ -323,7 +336,7 @@ impl Card {
                     grain as f32,
                     0.0,
                 ],
-                d: [start, setup.factors[m].len() as u32, 0, 0],
+                d: [start, len, start2, len2],
             });
         }
         let mut card_walls = Vec::new();

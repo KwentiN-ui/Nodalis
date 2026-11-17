@@ -11,6 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ValueTable;
+
 /// How a material flows beyond its elasticity in a Particle Flow step. The elastic part
 /// comes from the material's elastic constants (Young's modulus and Poisson's ratio).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -74,6 +76,111 @@ impl Flow {
             Flow::Newtonian { .. } => "Newtonian",
             Flow::Granular { .. } => "Granular",
         }
+    }
+}
+
+/// A value of a flow law that can change with the temperature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlowProperty {
+    YieldStress,
+    Consistency,
+    Viscosity,
+}
+
+impl FlowProperty {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::YieldStress => "Yield stress",
+            Self::Consistency => "Consistency K",
+            Self::Viscosity => "Viscosity",
+        }
+    }
+
+    /// Its name within a sentence.
+    pub fn noun(self) -> &'static str {
+        match self {
+            Self::YieldStress => "the yield stress",
+            Self::Consistency => "the consistency",
+            Self::Viscosity => "the viscosity",
+        }
+    }
+
+    /// The values of `flow` that can have a table: those of its law.
+    pub fn of(flow: &Flow) -> &'static [FlowProperty] {
+        match flow {
+            Flow::HerschelBulkley { .. } => &[Self::YieldStress, Self::Consistency],
+            Flow::Newtonian { .. } => &[Self::Viscosity],
+            Flow::Granular { .. } => &[],
+        }
+    }
+}
+
+/// The values of the flow over the temperature, for Particle Flow steps that follow the
+/// temperature: each table holds pairs of temperature and the value itself (like the time
+/// table of a boundary condition), interpolated linearly and held beyond the first and last
+/// row, and takes the place of the fixed value of the law. A value without a table is the
+/// same at every temperature. Only the tables of the material's law act.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FlowTables {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yield_stress: Option<ValueTable>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consistency: Option<ValueTable>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub viscosity: Option<ValueTable>,
+}
+
+impl FlowTables {
+    pub fn is_empty(&self) -> bool {
+        self.yield_stress.is_none() && self.consistency.is_none() && self.viscosity.is_none()
+    }
+
+    pub fn get(&self, property: FlowProperty) -> Option<&ValueTable> {
+        match property {
+            FlowProperty::YieldStress => self.yield_stress.as_ref(),
+            FlowProperty::Consistency => self.consistency.as_ref(),
+            FlowProperty::Viscosity => self.viscosity.as_ref(),
+        }
+    }
+
+    pub fn get_mut(&mut self, property: FlowProperty) -> &mut Option<ValueTable> {
+        match property {
+            FlowProperty::YieldStress => &mut self.yield_stress,
+            FlowProperty::Consistency => &mut self.consistency,
+            FlowProperty::Viscosity => &mut self.viscosity,
+        }
+    }
+
+    /// What keeps the tables that act for `flow` from being computed, in words.
+    pub fn problem(&self, flow: &Flow) -> Option<String> {
+        for &property in FlowProperty::of(flow) {
+            let Some(table) = self.get(property) else {
+                continue;
+            };
+            let name = property.noun();
+            if table.points.is_empty() {
+                return Some(format!("The temperature table of {name} has no rows."));
+            }
+            if table.points.iter().flatten().any(|v| !v.is_finite()) {
+                return Some(format!(
+                    "The temperature table of {name} has invalid numbers."
+                ));
+            }
+            if table.points.iter().any(|p| p[1] < 0.0) {
+                return Some(format!(
+                    "The temperature table of {name} must not have negative values."
+                ));
+            }
+            if let Some(i) = (table.points.windows(2)).position(|w| w[1][0] < w[0][0]) {
+                return Some(format!(
+                    "The temperature table of {name}: the temperature in row {} is smaller \
+                     than before.",
+                    i + 2
+                ));
+            }
+        }
+        None
     }
 }
 
@@ -152,7 +259,7 @@ pub struct ParticleFlowStep {
     /// The temperature of the material: heated by its own flow and by friction at the
     /// walls, conducted through it, exchanged with walls of a given temperature. It needs
     /// the conductivity and specific heat of the materials and their temperature at the
-    /// start; a temperature table of the flow makes the material softer or stiffer.
+    /// start; temperature tables of the flow values make the material softer or stiffer.
     pub heat: bool,
     /// The heat transfer coefficient between the material and the walls of a given
     /// temperature, in W/(m² K).

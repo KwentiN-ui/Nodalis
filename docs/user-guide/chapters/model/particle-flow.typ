@@ -69,11 +69,22 @@ from.
     gives its pressure; it has no shear stiffness and takes no tension, so a free surface
     opens instead.],
   [Granular], [Dry sand, gravel, powder or grain, see @particle-flow-granular.],
-  [Temperature table], [Rows of temperature and a factor on the yield stress and the
-    consistency (or the viscosity), interpolated between the rows and held beyond them: a
-    paste that turns soft as it warms has factors below 1 at higher temperatures. It acts in
-    steps that follow the temperature; empty, the flow is the same at every temperature.],
 )
+
+The yield stress, the consistency and the viscosity can each change with the temperature:
+the #ui("T") button next to the value opens a table of temperature and value for it,
+interpolated linearly between the rows and held below the first and above the last row.
+The table takes the place of the fixed value, whose field becomes a button with the number
+of rows; #ui("Remove Table") brings the fixed value back. Each value has a table of its own,
+so a paste may soften in its yield stress faster than in its consistency. The tables act in
+steps that follow the temperature; elsewhere the material keeps the value at the
+temperature it starts with. Like the other numbers of a material, every fixed value of the
+flow has a #ui("P") button that exposes it as a parameter of the project (@exposed-parameters).
+
+#screenshot("particle-flow-temperature-table.png", [The flow of minced meat: the yield
+stress and the consistency each follow a table over the temperature (the buttons with the
+number of points open them); the window shows the yield stress, which falls as the fat
+softens.])
 
 === Granular material <particle-flow-granular>
 
@@ -225,8 +236,8 @@ section; the axis is its left edge. Toward the orifice the particles split, from
 With #ui("Temperature") on, every particle carries a temperature. The flow heats the
 material by what it dissipates, friction at the walls heats it where it slides, the heat is
 conducted through the material over the grid, and walls with a temperature heat or cool it
-with the #ui("Wall heat transfer") coefficient. The temperature table of a material's flow
-makes it softer or stiffer as it warms.
+with the #ui("Wall heat transfer") coefficient. The temperature tables of a material's flow
+values make it softer or stiffer as it warms.
 
 #fields(
   [Materials], [Each filled material needs its #ui("Conductivity") and

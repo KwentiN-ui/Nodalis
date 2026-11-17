@@ -409,7 +409,7 @@ mod tests {
                     viscosity: 1.0,
                 },
                 thermal: None,
-                flow_factor: Vec::new(),
+                flow_tables: Default::default(),
             }],
             bodies: vec![MaterialBody {
                 name: "Drop".into(),
@@ -473,7 +473,7 @@ mod tests {
                     viscosity: 1.0,
                 },
                 thermal: None,
-                flow_factor: Vec::new(),
+                flow_tables: Default::default(),
             }],
             bodies: vec![MaterialBody {
                 name: "Block".into(),

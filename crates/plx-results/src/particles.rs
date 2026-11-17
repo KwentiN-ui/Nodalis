@@ -639,7 +639,7 @@ mod tests {
                     viscosity: 1.0,
                 },
                 thermal: None,
-                flow_factor: Vec::new(),
+                flow_tables: Default::default(),
             });
         model.bodies.push(plxs_core::particles::MaterialBody {
             name: "Body".into(),
