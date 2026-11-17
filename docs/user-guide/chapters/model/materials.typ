@@ -41,7 +41,7 @@ On the left are the library materials in categories, on the right the materials 
   organise the library.
 - #ui("Preview Material Properties") shows the values of the selected material.
 
-A new library has two groups. #ui("Elastic_Models") holds materials with elastic data only:
+A new library has three groups. #ui("Elastic_Models") holds materials with elastic data only:
 
 - #ui("Steel"): #ui("Generic Steel").
 - #ui("Aluminium"): the wrought alloys (#ui("Wrought")) EN AW-1050A, 3003, 5083, 5754, 6061,
@@ -53,7 +53,23 @@ A new library has two groups. #ui("Elastic_Models") holds materials with elastic
 #ui("Plastic_Models") holds steels with a hardening curve for plastic analyses
 (#ui("Plastic") switched on, isotropic hardening): #ui("S235"), #ui("S355") and #ui("42CrMo4").
 
-All entries have density, Young's modulus, Poisson's ratio, thermal expansion, thermal
+#ui("Flow_Models") holds materials with a flow law (@particle-flow) for Particle Flow steps:
+
+- #ui("Pastes") (Herschel-Bulkley): #ui("Minced Meat") (at about 5 °C, with a temperature
+  table), #ui("Bread Dough"), #ui("Toothpaste") and #ui("Fresh Concrete") (Bingham).
+- #ui("Fluids") (Newtonian, at 20 °C, with temperature tables of the viscosity):
+  #ui("Water"), #ui("Glycerol") and #ui("Olive Oil").
+- #ui("Granular") ($mu(I)$): #ui("Dry Sand"), #ui("Glass Beads") (after Jop, Forterre and
+  Pouliquen, _Nature_ 441, 2006), #ui("Glass Beads 3 + 1.5 mm") (a mixture that sorts when it
+  flows), #ui("Wheat") and #ui("Gravel").
+
+These are rough values to try the solver with. The yield stress and consistency of a real
+paste can differ by a factor of two or more with recipe, fat or water content and
+temperature; the friction of grains depends on their shape and moisture. The elastic
+constants only keep the material together below its flow: pastes have Young's modulus
+200 kPa, grains 10 MPa, liquids their real bulk modulus.
+
+All other entries have density, Young's modulus, Poisson's ratio, thermal expansion, thermal
 conductivity and specific heat. The values are typical room-temperature means from datasheets.
 Plastics vary a lot with grade, moisture, temperature and, for 3D printing, with print
 orientation and infill; aluminium alloys vary with the temper and the casting process. Treat

@@ -53,7 +53,9 @@ put in.])
 The material dialog (@materials) gives a material its #ui("Flow (Particle Flow)"); other
 steps ignore it. The elastic part comes from its Young's modulus and Poisson's ratio, the
 mass from its density. Without a flow the material stays elastic, a hyperelastic solid at
-large strains.
+large strains. The group #ui("Flow_Models") of the material library
+(@material-library) has pastes, liquids and granular materials with rough values to start
+from.
 
 #fields(
   [Herschel-Bulkley], [A paste with a yield stress: below the #ui("Yield stress") it

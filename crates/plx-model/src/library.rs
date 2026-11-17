@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::particle_flow::Flow;
 use crate::{Elastic, Expansion, Material, Plastic, PlasticPoint, UnitSystem};
 
 /// Version of the library file format written by this build.
@@ -85,7 +86,7 @@ impl Category {
 /// Version of the built-in materials. Raise it when `MaterialLibrary::default` gains or changes
 /// materials; libraries saved with an older version are updated by
 /// [`MaterialLibrary::update_defaults`].
-pub const DEFAULTS_VERSION: u32 = 3;
+pub const DEFAULTS_VERSION: u32 = 4;
 
 /// Generic material in the library's unit system (mm, t, s, degC) from datasheet values.
 struct Generic {
@@ -489,6 +490,272 @@ const PLASTIC_STEELS: [PlasticSteel; 3] = [
     },
 ];
 
+/// A material for Particle Flow steps, in the library's unit system from SI values: rough
+/// typical values to try the solver with, to be replaced with measured ones. The elastic
+/// constants only keep the material together below its flow; the step slows its waves
+/// anyway.
+struct FlowMaterial {
+    name: &'static str,
+    /// Density in kg/m^3 (for granular material the bulk density of the heap).
+    density: f64,
+    /// Young's modulus in Pa.
+    young: f64,
+    poisson: f64,
+    /// Thermal conductivity in W/(m K).
+    conductivity: f64,
+    /// Specific heat in J/(kg K).
+    specific_heat: f64,
+    /// The flow law in SI units: stresses in Pa, viscosities in Pa s, grains in m.
+    flow: Flow,
+    /// The temperature table of the flow: (temperature in degC, factor).
+    temperature: &'static [[f64; 2]],
+}
+
+impl FlowMaterial {
+    fn material(&self) -> Material {
+        // Pa -> MPa, m -> mm.
+        let flow = match self.flow {
+            Flow::HerschelBulkley {
+                yield_stress,
+                consistency,
+                exponent,
+            } => Flow::HerschelBulkley {
+                yield_stress: yield_stress * 1e-6,
+                consistency: consistency * 1e-6,
+                exponent,
+            },
+            Flow::Newtonian { viscosity } => Flow::Newtonian {
+                viscosity: viscosity * 1e-6,
+            },
+            Flow::Granular {
+                friction_angle,
+                limit_angle,
+                grain,
+                inertial,
+                fine_grain,
+                fine_fraction,
+            } => Flow::Granular {
+                friction_angle,
+                limit_angle,
+                grain: grain * 1e3,
+                inertial,
+                fine_grain: fine_grain * 1e3,
+                fine_fraction,
+            },
+        };
+        Material {
+            name: self.name.into(),
+            density: Some(self.density / 1e12),
+            elastic: Some(Elastic {
+                young: self.young * 1e-6,
+                poisson: self.poisson,
+            }),
+            conductivity: Some(self.conductivity),
+            specific_heat: Some(self.specific_heat * 1e6),
+            flow: Some(flow),
+            flow_temperature: self.temperature.to_vec(),
+            ..Material::default()
+        }
+    }
+}
+
+/// A soft paste: Young's modulus 200 kPa, Poisson's ratio 0.45.
+const PASTE: FlowMaterial = FlowMaterial {
+    name: "",
+    density: 1000.0,
+    young: 2e5,
+    poisson: 0.45,
+    conductivity: 0.5,
+    specific_heat: 3000.0,
+    flow: Flow::Newtonian { viscosity: 1.0 },
+    temperature: &[],
+};
+
+/// Pastes after Herschel-Bulkley. Orders of magnitude from food and building rheology
+/// (Steffe, Rheological Methods in Food Process Engineering, 1996; Roussel, Understanding
+/// the Rheology of Concrete, 2012); real values vary with recipe, fat, water and temperature
+/// by a factor of two or more.
+const PASTES: [FlowMaterial; 4] = [
+    // Minced meat at about 5 degC, cooled; softer as the fat warms.
+    FlowMaterial {
+        name: "Minced Meat",
+        density: 1050.0,
+        conductivity: 0.45,
+        specific_heat: 3500.0,
+        flow: Flow::HerschelBulkley {
+            yield_stress: 1500.0,
+            consistency: 2000.0,
+            exponent: 0.3,
+        },
+        temperature: &[
+            [-2.0, 2.5],
+            [0.0, 1.6],
+            [5.0, 1.0],
+            [10.0, 0.7],
+            [20.0, 0.45],
+        ],
+        ..PASTE
+    },
+    FlowMaterial {
+        name: "Bread Dough",
+        density: 1200.0,
+        conductivity: 0.4,
+        specific_heat: 2800.0,
+        flow: Flow::HerschelBulkley {
+            yield_stress: 200.0,
+            consistency: 2000.0,
+            exponent: 0.35,
+        },
+        ..PASTE
+    },
+    FlowMaterial {
+        name: "Toothpaste",
+        density: 1300.0,
+        conductivity: 0.5,
+        specific_heat: 2500.0,
+        flow: Flow::HerschelBulkley {
+            yield_stress: 150.0,
+            consistency: 70.0,
+            exponent: 0.4,
+        },
+        ..PASTE
+    },
+    // Fresh concrete of normal consistency as a Bingham material (exponent 1).
+    FlowMaterial {
+        name: "Fresh Concrete",
+        density: 2400.0,
+        young: 1e6,
+        conductivity: 1.5,
+        specific_heat: 1000.0,
+        flow: Flow::HerschelBulkley {
+            yield_stress: 500.0,
+            consistency: 50.0,
+            exponent: 1.0,
+        },
+        ..PASTE
+    },
+];
+
+/// Newtonian liquids at 20 degC. The bulk modulus is the real one (Poisson's ratio 0.49,
+/// Young's modulus 0.06 times the bulk modulus); the step slows the waves.
+const FLUIDS: [FlowMaterial; 3] = [
+    FlowMaterial {
+        name: "Water",
+        density: 998.0,
+        young: 0.06 * 2.2e9,
+        poisson: 0.49,
+        conductivity: 0.6,
+        specific_heat: 4180.0,
+        flow: Flow::Newtonian { viscosity: 1.0e-3 },
+        temperature: &[
+            [0.0, 1.79],
+            [10.0, 1.31],
+            [20.0, 1.0],
+            [40.0, 0.65],
+            [60.0, 0.47],
+        ],
+    },
+    // Glycerol: viscosity 3.9 / 1.41 / 0.61 / 0.28 Pa s at 10 / 20 / 30 / 40 degC.
+    FlowMaterial {
+        name: "Glycerol",
+        density: 1260.0,
+        young: 0.06 * 4.35e9,
+        poisson: 0.49,
+        conductivity: 0.29,
+        specific_heat: 2430.0,
+        flow: Flow::Newtonian { viscosity: 1.41 },
+        temperature: &[[10.0, 2.8], [20.0, 1.0], [30.0, 0.43], [40.0, 0.2]],
+    },
+    FlowMaterial {
+        name: "Olive Oil",
+        density: 910.0,
+        young: 0.06 * 1.6e9,
+        poisson: 0.49,
+        conductivity: 0.17,
+        specific_heat: 1970.0,
+        flow: Flow::Newtonian { viscosity: 0.084 },
+        temperature: &[[10.0, 1.6], [20.0, 1.0], [40.0, 0.43]],
+    },
+];
+
+/// Dry granular material after the μ(I) rheology, with the bulk density of a loose heap and
+/// Young's modulus 10 MPa. The glass beads are those of Jop, Forterre and Pouliquen (Nature
+/// 441, 2006); the others are rough values from the angle of repose.
+const GRAIN: FlowMaterial = FlowMaterial {
+    name: "",
+    density: 1600.0,
+    young: 1e7,
+    poisson: 0.3,
+    conductivity: 0.3,
+    specific_heat: 800.0,
+    flow: Flow::Newtonian { viscosity: 1.0 },
+    temperature: &[],
+};
+
+const fn granular(friction_angle: f64, limit_angle: f64, grain: f64) -> Flow {
+    Flow::Granular {
+        friction_angle,
+        limit_angle,
+        grain,
+        inertial: 0.28,
+        fine_grain: 0.0,
+        fine_fraction: 0.0,
+    }
+}
+
+const GRANULAR: [FlowMaterial; 5] = [
+    FlowMaterial {
+        name: "Dry Sand",
+        flow: Flow::Granular {
+            friction_angle: 31.0,
+            limit_angle: 42.0,
+            grain: 1e-3,
+            inertial: 0.22,
+            fine_grain: 0.0,
+            fine_fraction: 0.0,
+        },
+        ..GRAIN
+    },
+    FlowMaterial {
+        name: "Glass Beads",
+        density: 1500.0,
+        conductivity: 0.2,
+        flow: granular(21.0, 33.0, 0.5e-3),
+        ..GRAIN
+    },
+    // Two sizes that sort when they flow, as in a rotating drum.
+    FlowMaterial {
+        name: "Glass Beads 3 + 1.5 mm",
+        density: 1500.0,
+        conductivity: 0.2,
+        flow: Flow::Granular {
+            friction_angle: 21.0,
+            limit_angle: 33.0,
+            grain: 3e-3,
+            inertial: 0.28,
+            fine_grain: 1.5e-3,
+            fine_fraction: 0.5,
+        },
+        ..GRAIN
+    },
+    FlowMaterial {
+        name: "Wheat",
+        density: 780.0,
+        conductivity: 0.15,
+        specific_heat: 1500.0,
+        flow: granular(27.0, 36.0, 4e-3),
+        ..GRAIN
+    },
+    FlowMaterial {
+        name: "Gravel",
+        density: 1700.0,
+        young: 5e7,
+        conductivity: 0.5,
+        flow: granular(38.0, 48.0, 10e-3),
+        ..GRAIN
+    },
+];
+
 /// The S235 of libraries created before the generic materials; renamed only while unchanged.
 fn old_steel() -> Material {
     Material {
@@ -513,6 +780,11 @@ impl Default for MaterialLibrary {
         let materials = |list: &[Generic]| {
             (list.iter())
                 .map(|g| LibraryNode::Material(g.material()))
+                .collect()
+        };
+        let flow_materials = |list: &[FlowMaterial]| {
+            (list.iter())
+                .map(|m| LibraryNode::Material(m.material()))
                 .collect()
         };
         Self {
@@ -550,6 +822,14 @@ impl Default for MaterialLibrary {
                                 .map(|s| LibraryNode::Material(s.material()))
                                 .collect(),
                         )],
+                    ),
+                    category_node(
+                        "Flow_Models",
+                        vec![
+                            category_node("Pastes", flow_materials(&PASTES)),
+                            category_node("Fluids", flow_materials(&FLUIDS)),
+                            category_node("Granular", flow_materials(&GRANULAR)),
+                        ],
                     ),
                 ],
             ),
@@ -838,9 +1118,9 @@ mod tests {
     #[test]
     fn categories_are_added_with_free_names() {
         let mut library = MaterialLibrary::default();
-        assert_eq!(library.add_category(&[]), Some(vec![2]));
         assert_eq!(library.add_category(&[]), Some(vec![3]));
-        assert_eq!(library.node(&[3]).unwrap().name(), "NewCategory-1");
+        assert_eq!(library.add_category(&[]), Some(vec![4]));
+        assert_eq!(library.node(&[4]).unwrap().name(), "NewCategory-1");
         // Not below a material.
         assert_eq!(library.add_category(&S235), None);
     }
@@ -856,7 +1136,7 @@ mod tests {
             "Generic Steel_Model-1"
         );
         let path = library.add_material(&[], &s235).unwrap();
-        assert_eq!(path, [2]);
+        assert_eq!(path, [3]);
         assert_eq!(library.material(&path).unwrap().name, "Generic Steel");
     }
 
@@ -981,5 +1261,40 @@ mod tests {
         };
         assert_eq!(s355.name, "S355");
         assert_eq!(s355.plastic.as_ref().unwrap().points[0].stress, 356.0);
+    }
+
+    #[test]
+    fn flow_materials_are_complete_and_in_library_units() {
+        let library = MaterialLibrary::default();
+        let flow = (library.root.items.iter())
+            .find(|n| n.name() == "Flow_Models")
+            .unwrap();
+        let LibraryNode::Category(flow) = flow else {
+            panic!("Flow_Models is a category")
+        };
+        let mut count = 0;
+        for node in &flow.items {
+            let LibraryNode::Category(kind) = node else {
+                panic!("sorted by kind")
+            };
+            for node in &kind.items {
+                let LibraryNode::Material(m) = node else {
+                    panic!("materials")
+                };
+                let law = m.flow.as_ref().unwrap();
+                assert_eq!(law.problem(), None, "{}", m.name);
+                assert!(m.density.unwrap() > 0.0 && m.elastic.is_some());
+                assert!(m.conductivity.is_some() && m.specific_heat.is_some());
+                count += 1;
+            }
+        }
+        assert_eq!(count, 12);
+        let meat = (library.material(&[2, 0, 0])).unwrap();
+        assert_eq!(meat.name, "Minced Meat");
+        assert_eq!(meat.density, Some(1.05e-9));
+        assert!(matches!(
+            meat.flow,
+            Some(Flow::HerschelBulkley { yield_stress, .. }) if (yield_stress - 1.5e-3).abs() < 1e-12
+        ));
     }
 }
