@@ -31,6 +31,8 @@ const SUMS: u32 = 8u;
 const FRAME: u32 = 1u;
 const HISTORY: u32 = 2u;
 const BROKEN: u32 = 4u;
+// The speed a particle reports when its motion is no number any more: it stops the run.
+const UNSTABLE: f32 = 1e38;
 const EMPTY: u32 = 8u;
 
 override LEVEL: u32 = 0u;
@@ -248,6 +250,11 @@ fn weights(f: f32) -> vec3f {
 fn cell_of(base: vec3f) -> u32 {
     let b = vec3i(base);
     return node_index(vec3u(wrap(0u, b.x), wrap(1u, b.y), wrap(2u, b.z)));
+}
+
+// Whether a value is a number and not infinite, by its bits (not optimised away).
+fn finite(x: f32) -> bool {
+    return (bitcast<u32>(x) & 0x7f800000u) != 0x7f800000u;
 }
 
 // a + x as a compensated pair.
@@ -489,7 +496,7 @@ fn control(@builtin(local_invocation_index) lid: u32) {
         dt = 0.5 * remaining;
     }
     // No thread writes what another reads.
-    if !(dt > 0.0) {
+    if !(dt > 0.0) || ctl.max_speed >= UNSTABLE {
         for (var i = lid; i < words; i += 64u) {
             args[i] = 0u;
         }
@@ -1362,6 +1369,15 @@ fn g2p(@builtin(workgroup_id) wid: vec3u, @builtin(num_workgroups) groups: vec3u
                 }
             }
         }
+        var speed = length(v);
+        // A motion that is no number any more stops the run before the next step; the
+        // particle stays where it was, so that sorting it by its cell stays cheap.
+        if !(finite(speed) && finite(x.x) && finite(x.y) && finite(x.z)) {
+            x = p.x.xyz;
+            v = vec3f(0.0);
+            speed = UNSTABLE;
+            gone = false;
+        }
         let cr = transpose(c);
         let t = up.tau;
         let bn = up.b;
@@ -1373,7 +1389,6 @@ fn g2p(@builtin(workgroup_id) wid: vec3u, @builtin(num_workgroups) groups: vec3u
         p.b = vec4f(bn[0][0], bn[1][1], bn[2][2], bn[1][0]);
         p.tau = vec4f(t[0][0], t[1][1], t[2][2], t[1][0]);
         p.bt = vec4f(bn[2][1], bn[2][0], t[2][1], t[2][0]);
-        let speed = length(v);
         let gravity = bodies[body(p)].xyz;
         let potential = -mass * dot(gravity, x + params.origin.xyz);
         let kinetic = 0.5 * mass * speed * speed;

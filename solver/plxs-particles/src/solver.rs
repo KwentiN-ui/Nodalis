@@ -36,6 +36,10 @@ use crate::math::{
 #[path = "gpu.rs"]
 mod gpu;
 
+/// The error of a run whose motion is no number any more.
+const UNSTABLE_MESSAGE: &str = "the motion became unstable (speeds that are no number); a \
+     smaller cell, a lower wave speed or a stiffer material may help";
+
 /// Cells per block and axis of the sorting.
 const BLOCK: usize = 4;
 /// Nodes per axis of the patch of a block: the block's cells and the reach of the stencil.
@@ -631,6 +635,9 @@ fn run_cpu(
         } else if t + 2.0 * dt > target {
             dt = 0.5 * (target - t);
         }
+        if !max_speed.is_finite() {
+            return Err(UNSTABLE_MESSAGE.into());
+        }
         if dt.is_nan() || dt <= 0.0 {
             return Err("the time step became zero".into());
         }
@@ -894,7 +901,8 @@ fn run_cpu(
                     sums.kinetic = 0.5 * p.mass * speed * speed;
                     sums.potential = -p.mass * dot(p.gravity, p.x);
                     sums.stored = update.stored * p.volume;
-                    sums.max_speed = speed;
+                    // A speed that is no number stops the run.
+                    sums.max_speed = if speed.is_nan() { f64::INFINITY } else { speed };
                 }
                 sums
             })
