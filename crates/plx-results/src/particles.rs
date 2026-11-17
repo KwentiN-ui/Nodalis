@@ -645,7 +645,10 @@ mod tests {
         let increment = track.increment(&frame(1.0, vec![0, 1], first.positions.clone()), 1, 2);
         let disp = &increment.fields[0].values;
         assert_eq!(disp[1].len(), 8 + 6);
-        assert!(disp[1][8..].iter().all(|d| (d + 0.5).abs() < 1e-9), "{disp:?}");
+        assert!(
+            disp[1][8..].iter().all(|d| (d + 0.5).abs() < 1e-9),
+            "{disp:?}"
+        );
     }
 
     #[test]

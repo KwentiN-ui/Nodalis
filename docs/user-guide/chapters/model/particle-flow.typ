@@ -207,8 +207,9 @@ particles of the narrow part stay less than a cell apart; beyond that the materi
 into separate particles.
 
 #screenshot("particle-flow-2d.png", [An axisymmetric nozzle of a paste printer: a piston
-pushes toothpaste through a cone and an orifice of 3 mm onto a rough plate, coloured by its
-speed. The plane model shows half of the section; the axis is its left edge.])
+pushes toothpaste through a cone toward an orifice of 3 mm, coloured by its speed, which rises
+tenfold toward the orifice. The plane model shows half of the section; the axis is its left
+edge.])
 
 === Temperature <particle-flow-heat>
 
