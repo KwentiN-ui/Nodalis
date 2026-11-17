@@ -111,8 +111,9 @@ pub fn lower(
     };
     let mut warnings = Vec::new();
 
-    // The parts of the rigid bodies are the walls.
-    let mut walls: Vec<(String, BTreeSet<usize>, usize)> = Vec::new();
+    // The parts of the rigid bodies are the walls, and the parts a displacement that keeps
+    // their shape holds.
+    let mut walls: Vec<WallSource> = Vec::new();
     for (c, constraint) in fe.constraints.iter().enumerate() {
         let Constraint::RigidBody(body) = constraint else {
             continue;
@@ -127,9 +128,33 @@ pub fn lower(
                 Some(ModelItem::Constraint(c)),
             ));
         }
-        walls.push((body.name.clone(), parts, c));
+        walls.push(WallSource {
+            name: body.name.clone(),
+            parts,
+            constraint: Some(c),
+            held: None,
+        });
     }
-    let wall_part: BTreeSet<usize> = walls.iter().flat_map(|w| w.1.iter().copied()).collect();
+    for (b, bc) in step.boundary_conditions.iter().enumerate() {
+        if !plx_model::holds_particle_wall(bc) {
+            continue;
+        }
+        let taken: BTreeSet<usize> = walls.iter().flat_map(|w| w.parts.iter().copied()).collect();
+        let parts: BTreeSet<usize> = parts_of(&bc.region, mesh)
+            .difference(&taken)
+            .copied()
+            .collect();
+        if parts.is_empty() {
+            continue;
+        }
+        walls.push(WallSource {
+            name: bc.name.clone(),
+            parts,
+            constraint: None,
+            held: Some(b),
+        });
+    }
+    let wall_part: BTreeSet<usize> = walls.iter().flat_map(|w| w.parts.iter().copied()).collect();
 
     // Every other solid part is filled with the material of its section.
     let element_part = element_parts(mesh);
@@ -245,8 +270,10 @@ pub fn lower(
     }
 
     // The walls with the laws of the contact regions between them and the bodies.
-    for (name, parts, c) in &walls {
-        let parts: Vec<usize> = parts.iter().copied().collect();
+    for wall in &walls {
+        let name = &wall.name;
+        let parts: Vec<usize> = wall.parts.iter().copied().collect();
+        let item = wall.item(index);
         if parts.iter().any(|&p| !shapes.is_solid(mesh, p)) {
             return Err(error(
                 format!(
@@ -259,12 +286,18 @@ pub fn lower(
                         "beams"
                     }
                 ),
-                Some(ModelItem::Constraint(*c)),
+                Some(item),
             ));
         }
         let law = wall_law(fe, mesh, &parts, &body_part, name, &mut warnings);
-        let motion = wall_motion(fe, index, *c)?;
-        let temperature = wall_temperature(step, &fe.constraints[*c]);
+        let (motion, temperature) = match (wall.constraint, wall.held) {
+            (Some(c), _) => (
+                wall_motion(fe, index, c)?,
+                wall_temperature(step, &fe.constraints[c]),
+            ),
+            (None, Some(b)) => (held_motion(fe, mesh, index, b)?, None),
+            (None, None) => (ir::RigidMotion::default(), None),
+        };
         if temperature.is_some() && !settings.heat {
             warnings.push(format!(
                 "{name}: the temperature of the wall acts only when the step follows the \
@@ -326,15 +359,16 @@ pub fn lower(
     }
     // Boundary conditions move the rigid bodies at their reference points, and nothing else.
     let drivers: BTreeSet<plx_model::Id> = (walls.iter())
-        .filter_map(|(_, _, c)| match &fe.constraints[*c] {
+        .filter_map(|w| match &fe.constraints[w.constraint?] {
             Constraint::RigidBody(body) => Some(body.reference_point),
             _ => None,
         })
         .collect();
-    for bc in step.boundary_conditions.iter().filter(|bc| bc.active) {
+    for (b, bc) in step.boundary_conditions.iter().enumerate() {
         let drives =
             matches!(bc.region, plx_model::Region::ReferencePoint(id) if drivers.contains(&id));
-        if !drives {
+        let holds = walls.iter().any(|w| w.held == Some(b));
+        if bc.active && !drives && !holds {
             warnings.push(format!(
                 "{}: in a Particle Flow step boundary conditions move the reference points of \
                  rigid bodies only; it is left out.",
@@ -369,7 +403,7 @@ fn history_request(
     fe: &FeModel,
     mesh: &FeMesh,
     step: usize,
-    walls: &[(String, BTreeSet<usize>, usize)],
+    walls: &[WallSource],
     body_part: &[usize],
     model: &ParticleModel,
     warnings: &mut Vec<String>,
@@ -401,13 +435,15 @@ fn history_request(
         };
         let parts = parts_of(region, mesh);
         let hit: Vec<usize> = (walls.iter().enumerate())
-            .filter(|(_, (_, wall_parts, c))| {
-                let at_point = matches!(
-                    (&fe.constraints[*c], region),
-                    (Constraint::RigidBody(body), plx_model::Region::ReferencePoint(id))
-                        if body.reference_point == *id
-                );
-                at_point || !wall_parts.is_disjoint(&parts)
+            .filter(|(_, wall)| {
+                let at_point = wall.constraint.is_some_and(|c| {
+                    matches!(
+                        (&fe.constraints[c], region),
+                        (Constraint::RigidBody(body), plx_model::Region::ReferencePoint(id))
+                            if body.reference_point == *id
+                    )
+                });
+                at_point || !wall.parts.is_disjoint(&parts)
             })
             .map(|(w, _)| w)
             .collect();
@@ -469,6 +505,59 @@ fn history_request(
     request
 }
 
+/// What makes parts a wall: a rigid body (`constraint`), or a displacement boundary
+/// condition of the step that keeps their shape (`held`, its index).
+struct WallSource {
+    name: String,
+    parts: BTreeSet<usize>,
+    constraint: Option<usize>,
+    held: Option<usize>,
+}
+
+impl WallSource {
+    /// The item problems with the wall are reported on.
+    fn item(&self, step: usize) -> ModelItem {
+        match (self.constraint, self.held) {
+            (Some(c), _) => ModelItem::Constraint(c),
+            (None, Some(b)) => ModelItem::BoundaryCondition(step, b),
+            (None, None) => ModelItem::Step(step),
+        }
+    }
+}
+
+/// The motion of the wall a displacement boundary condition `bc` of step `step` holds: about
+/// its point (where it says, or the centre of its selection).
+fn held_motion(
+    fe: &FeModel,
+    mesh: &FeMesh,
+    step: usize,
+    bc: usize,
+) -> Result<ir::RigidMotion, ParticleError> {
+    let condition = &fe.steps[step].boundary_conditions[bc];
+    let item = Some(ModelItem::BoundaryCondition(step, bc));
+    let plx_model::BoundaryKind::Displacement(displacement) = &condition.kind else {
+        return Ok(ir::RigidMotion::default());
+    };
+    let system = (fe.coordinate_system_or_global(displacement.system)).ok_or_else(|| {
+        error(
+            format!("{}: the coordinate system does not exist.", condition.name),
+            item,
+        )
+    })?;
+    let center = match displacement.location {
+        Some(local) => system
+            .global(local)
+            .map_err(|e| error(format!("{}: {e}", condition.name), item))?,
+        None => condition.region.centroid(mesh).ok_or_else(|| {
+            error(
+                format!("{}: the selection contains no nodes.", condition.name),
+                item,
+            )
+        })?,
+    };
+    motion_of(fe, step, bc, center)
+}
+
 /// The temperature a temperature boundary condition of the step gives the reference point
 /// of a rigid body: the temperature of its walls.
 fn wall_temperature(step: &plx_model::Step, constraint: &Constraint) -> Option<f64> {
@@ -523,9 +612,8 @@ fn wall_motion(
         center: point.position,
         ..Default::default()
     };
-    let the_step = &fe.steps[step];
     let mut found = None;
-    for (b, bc) in the_step.boundary_conditions.iter().enumerate() {
+    for (b, bc) in fe.steps[step].boundary_conditions.iter().enumerate() {
         if !bc.active
             || bc.region != plx_model::Region::ReferencePoint(body.reference_point)
             || matches!(bc.kind, plx_model::BoundaryKind::Temperature(_))
@@ -544,7 +632,7 @@ fn wall_motion(
             ));
         }
         found = Some(b);
-        let plx_model::BoundaryKind::Displacement(displacement) = &bc.kind else {
+        if !matches!(bc.kind, plx_model::BoundaryKind::Displacement(_)) {
             return Err(error(
                 format!(
                     "{}: a rigid body of a Particle Flow step moves by a displacement and \
@@ -553,59 +641,82 @@ fn wall_motion(
                 ),
                 item,
             ));
-        };
-        if displacement.tables.iter().any(Option::is_some) {
-            return Err(error(
-                format!(
-                    "{}: a Particle Flow step takes no time tables; give the motion an \
-                     amplitude instead.",
-                    bc.name
-                ),
-                item,
-            ));
         }
-        // The directions of its coordinate system, in global coordinates.
-        let axes = match displacement.system {
-            None => [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            Some(id) => {
-                let system = (fe.coordinate_systems.iter())
-                    .find(|s| s.id == id)
-                    .ok_or_else(|| {
-                        error(
-                            format!("{}: the coordinate system does not exist.", bc.name),
-                            item,
-                        )
-                    })?;
-                let frame = system.frame(&fe.coordinate_systems);
-                frame
-                    .directions_at(point.position)
-                    .map_err(|e| error(format!("{}: {e}", bc.name), item))?
-            }
-        };
-        let value = |i: usize| displacement.values[i].unwrap_or(0.0);
-        for (a, axis) in axes.iter().enumerate() {
-            for (g, &d) in axis.iter().enumerate() {
-                motion.velocity[g] += value(a) * d;
-                motion.angular[g] += value(3 + a) * d;
-            }
-        }
-        let duration = the_step.kind.period();
-        motion.amplitude = match bc.amplitude {
-            None => vec![[0.0, 0.0], [duration, 1.0]],
-            Some(id) => {
-                let amplitude = (fe.amplitudes.iter()).find(|a| a.id == id).ok_or_else(|| {
-                    error(format!("{}: the amplitude does not exist.", bc.name), item)
-                })?;
-                if let Some(problem) = amplitude.points_problem() {
-                    return Err(error(format!("{}: {problem}.", amplitude.name), item));
-                }
-                (amplitude.points.iter())
-                    .map(|p| p[0] + amplitude.shift_time)
-                    .map(|t| [t, amplitude.value_at(t)])
-                    .collect()
-            }
-        };
+        motion = motion_of(fe, step, b, point.position)?;
     }
+    Ok(motion)
+}
+
+/// The motion displacement boundary condition `bc` of step `step` gives a rigid wall about
+/// `center`: a translation and a rotation about that point that follow the amplitude (a ramp
+/// over the step without one).
+fn motion_of(
+    fe: &FeModel,
+    step: usize,
+    index: usize,
+    center: [f64; 3],
+) -> Result<ir::RigidMotion, ParticleError> {
+    let the_step = &fe.steps[step];
+    let bc = &the_step.boundary_conditions[index];
+    let item = Some(ModelItem::BoundaryCondition(step, index));
+    let mut motion = ir::RigidMotion {
+        center,
+        ..Default::default()
+    };
+    let plx_model::BoundaryKind::Displacement(displacement) = &bc.kind else {
+        return Ok(motion);
+    };
+    if displacement.tables.iter().any(Option::is_some) {
+        return Err(error(
+            format!(
+                "{}: a Particle Flow step takes no time tables; give the motion an \
+                 amplitude instead.",
+                bc.name
+            ),
+            item,
+        ));
+    }
+    // The directions of its coordinate system, in global coordinates.
+    let axes = match displacement.system {
+        None => [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        Some(id) => {
+            let system = (fe.coordinate_systems.iter())
+                .find(|s| s.id == id)
+                .ok_or_else(|| {
+                    error(
+                        format!("{}: the coordinate system does not exist.", bc.name),
+                        item,
+                    )
+                })?;
+            let frame = system.frame(&fe.coordinate_systems);
+            frame
+                .directions_at(center)
+                .map_err(|e| error(format!("{}: {e}", bc.name), item))?
+        }
+    };
+    let value = |i: usize| displacement.values[i].unwrap_or(0.0);
+    for (a, axis) in axes.iter().enumerate() {
+        for (g, &d) in axis.iter().enumerate() {
+            motion.velocity[g] += value(a) * d;
+            motion.angular[g] += value(3 + a) * d;
+        }
+    }
+    let duration = the_step.kind.period();
+    motion.amplitude = match bc.amplitude {
+        None => vec![[0.0, 0.0], [duration, 1.0]],
+        Some(id) => {
+            let amplitude = (fe.amplitudes.iter()).find(|a| a.id == id).ok_or_else(|| {
+                error(format!("{}: the amplitude does not exist.", bc.name), item)
+            })?;
+            if let Some(problem) = amplitude.points_problem() {
+                return Err(error(format!("{}: {problem}.", amplitude.name), item));
+            }
+            (amplitude.points.iter())
+                .map(|p| p[0] + amplitude.shift_time)
+                .map(|t| [t, amplitude.value_at(t)])
+                .collect()
+        }
+    };
     Ok(motion)
 }
 
@@ -812,8 +923,21 @@ fn parts_of(region: &plx_model::Region, mesh: &FeMesh) -> BTreeSet<usize> {
             .collect();
     }
     let element_part = element_parts(mesh);
+    // A face of the geometry of a 2D model is its plane elements.
+    let plane: Vec<plx_mesh::ElementId> = match region {
+        plx_model::Region::Geometry(entities) => (entities.iter())
+            .filter_map(|e| match e {
+                plx_mesh::CadEntity::Face(tag) => mesh.cad.faces.get(tag),
+                _ => None,
+            })
+            .flatten()
+            .map(|&(e, _)| e)
+            .collect(),
+        _ => Vec::new(),
+    };
     (region.elements(mesh).into_iter())
         .chain(region.faces(mesh).into_iter().map(|(e, _)| e))
+        .chain(plane)
         .filter_map(|e| element_part.get(&e).copied())
         .collect()
 }
@@ -1173,6 +1297,39 @@ mod tests {
         // Without a boundary condition the tool rests.
         let resting = lower(&mesh, &model(None), "Test").expect("lowers");
         assert!(resting.model.walls[0].motion.is_resting());
+    }
+
+    /// A displacement that keeps the shape of the part it selects makes the part a wall
+    /// without a rigid body, turning about the centre of the selection.
+    #[test]
+    fn a_part_held_by_a_rigid_displacement_is_a_wall() {
+        let mesh = mesh();
+        let mut fe = model(None);
+        fe.constraints.clear();
+        let mut held = plx_model::Displacement::new([
+            Some(0.0),
+            Some(0.0),
+            Some(0.0),
+            Some(0.0),
+            Some(0.0),
+            Some(6.0),
+        ]);
+        held.behavior = plx_model::Behavior::Rigid;
+        let region = Region::Parts(vec!["Tool".into()]);
+        let center = region.centroid(&mesh).unwrap();
+        fe.steps[0].boundary_conditions.push(BoundaryCondition::new(
+            "Held",
+            region,
+            BoundaryKind::Displacement(held),
+        ));
+        let lowered = lower(&mesh, &fe, "Test").expect("lowers");
+        assert_eq!(lowered.bodies, vec!["Paste".to_string()]);
+        assert_eq!(lowered.model.walls.len(), 1);
+        assert_eq!(lowered.model.walls[0].name, "Held");
+        let motion = &lowered.model.walls[0].motion;
+        assert_eq!(motion.angular, [0.0, 0.0, 6.0]);
+        assert_eq!(motion.center, center);
+        assert!(lowered.warnings.is_empty(), "{:?}", lowered.warnings);
     }
 
     #[test]
