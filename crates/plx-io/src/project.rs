@@ -2468,11 +2468,14 @@ mod tests {
             (project.mesh.parts.iter().any(|p| p.name == "SOLID-1")).then_some(42)
         );
 
-        let newer = std::fs::read_to_string(&path).unwrap().replacen(
-            &format!("format:{PROJECT_FORMAT}"),
-            "format:99",
-            1,
-        );
+        // The file starts with the length of its text in binary, which need not be UTF-8;
+        // the new format has as many digits, so the length stays.
+        let mut newer = std::fs::read(&path).unwrap();
+        let current = format!("format:{PROJECT_FORMAT}");
+        let at = (newer.windows(current.len()))
+            .position(|w| w == current.as_bytes())
+            .unwrap();
+        newer[at..at + current.len()].copy_from_slice(b"format:99");
         std::fs::write(&path, newer).unwrap();
         assert!(matches!(
             read_project(&path),

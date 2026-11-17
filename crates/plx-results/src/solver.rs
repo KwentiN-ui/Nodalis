@@ -132,56 +132,63 @@ impl SolverResults {
             plane = Some(zeros);
         }
         let partial = path.with_extension(format!("{EXTENSION}.tmp"));
-        let file = std::fs::File::create(&partial)?;
-        let mut out = packed::Streaming::new(MAGIC, std::io::BufWriter::new(file))?;
-        // Node ids and coordinates are written from memory.
-        let mut written = vec![None, None];
-        let mut increments = Vec::new();
-        for spooled in spool.increments() {
-            if skip.contains(&spooled.skeleton.step) {
-                continue;
-            }
-            let mut increment = spooled.skeleton.clone();
-            let mut arrays = spooled.arrays.iter();
-            for field in &mut increment.fields {
-                let keep = plane.as_ref().and_then(|p| p.kept(field));
-                let nodes = arrays.next().copied();
-                written.push(
-                    nodes
-                        .map(|a| spool.raw(a).and_then(|r| out.raw(&r)))
-                        .transpose()?,
-                );
-                let columns: Vec<usize> =
-                    arrays.by_ref().take(field.values.len()).copied().collect();
-                for (k, column) in columns.into_iter().enumerate() {
-                    if keep.as_ref().is_none_or(|keep| keep[k]) {
-                        written.push(Some(out.raw(&spool.raw(column)?)?));
+        // A file that cannot be written whole, e.g. on a full disk, leaves no part behind.
+        let written = (|| -> std::io::Result<()> {
+            let file = std::fs::File::create(&partial)?;
+            let mut out = packed::Streaming::new(MAGIC, std::io::BufWriter::new(file))?;
+            // Node ids and coordinates are written from memory.
+            let mut written = vec![None, None];
+            let mut increments = Vec::new();
+            for spooled in spool.increments() {
+                if skip.contains(&spooled.skeleton.step) {
+                    continue;
+                }
+                let mut increment = spooled.skeleton.clone();
+                let mut arrays = spooled.arrays.iter();
+                for field in &mut increment.fields {
+                    let keep = plane.as_ref().and_then(|p| p.kept(field));
+                    let nodes = arrays.next().copied();
+                    written.push(
+                        nodes
+                            .map(|a| spool.raw(a).and_then(|r| out.raw(&r)))
+                            .transpose()?,
+                    );
+                    let columns: Vec<usize> =
+                        arrays.by_ref().take(field.values.len()).copied().collect();
+                    for (k, column) in columns.into_iter().enumerate() {
+                        if keep.as_ref().is_none_or(|keep| keep[k]) {
+                            written.push(Some(out.raw(&spool.raw(column)?)?));
+                        }
+                    }
+                    if let Some(keep) = &keep {
+                        let mut kept = keep.iter();
+                        field.components.retain(|_| *kept.next().unwrap_or(&true));
+                        let mut kept = keep.iter();
+                        field.values.retain(|_| *kept.next().unwrap_or(&true));
                     }
                 }
-                if let Some(keep) = &keep {
-                    let mut kept = keep.iter();
-                    field.components.retain(|_| *kept.next().unwrap_or(&true));
-                    let mut kept = keep.iter();
-                    field.values.retain(|_| *kept.next().unwrap_or(&true));
-                }
+                increments.push(increment);
             }
-            increments.push(increment);
+            drop(spool);
+            // Increments in memory come after the spooled ones and are written from there.
+            let spooled = increments.len();
+            let in_memory = std::mem::replace(&mut self.results.increments, increments);
+            self.results.increments.extend(in_memory);
+            let mut count = 0;
+            self.arrays(&mut |_| count += 1);
+            written.resize(count, None);
+            let finished = out.finish(self, &written);
+            // The spooled increments stay out of memory: what is kept is their file.
+            self.results.increments.drain(..spooled);
+            let mut out = finished?;
+            out.flush()?;
+            out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+            std::fs::rename(&partial, path)
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(&partial);
         }
-        drop(spool);
-        // Increments in memory come after the spooled ones and are written from there.
-        let spooled = increments.len();
-        let in_memory = std::mem::replace(&mut self.results.increments, increments);
-        self.results.increments.extend(in_memory);
-        let mut count = 0;
-        self.arrays(&mut |_| count += 1);
-        written.resize(count, None);
-        let finished = out.finish(self, &written);
-        // The spooled increments stay out of memory: what is kept is their file.
-        self.results.increments.drain(..spooled);
-        let mut out = finished?;
-        out.flush()?;
-        out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-        std::fs::rename(&partial, path)
+        written
     }
 
     pub fn read(path: &Path) -> Result<Self, ReadError> {
