@@ -193,6 +193,16 @@ impl Card {
         notes: &mut Vec<String>,
     ) -> Option<Self> {
         let worth = particles.len() >= GPU_FROM;
+        if particles.iter().any(|p| p.grains[0] > 0.0) {
+            if worth {
+                notes.push(
+                    "Particles computed on the processor: the card does not compute the \
+                     segregation of grain mixtures yet"
+                        .into(),
+                );
+            }
+            return None;
+        }
         let any = match GpuMode::from_environment() {
             GpuMode::Off => {
                 if worth {
@@ -283,6 +293,7 @@ impl Card {
                     friction_limit,
                     grain,
                     inertial,
+                    ..
                 } => (3.0, [friction, friction_limit, inertial], grain),
             };
             laws.push(CardLaw {

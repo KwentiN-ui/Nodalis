@@ -20,8 +20,9 @@
 use std::time::Instant;
 
 use plxs_core::particles::{
-    BodyHistory, Domain, PARTICLE_FIELDS, ParticleFrame, ParticleHistory, ParticleModel,
-    ParticleReport, ParticleResults, RigidMotion, Side, WallHistory, WallLaw, table_value,
+    BodyHistory, Domain, PARTICLE_FIELDS, ParticleFrame, ParticleHistory, ParticleLaw,
+    ParticleModel, ParticleReport, ParticleResults, RigidMotion, Side, WallHistory, WallLaw,
+    table_value,
 };
 use rayon::prelude::*;
 
@@ -53,6 +54,12 @@ const WALL_REACH: f64 = 0.2;
 /// How fast a particle's temperature follows the grid's, in units of α / h².
 const SUBCELL_CONDUCTION: f64 = 0.3;
 const VOLUME_RELAX: f64 = 0.05;
+/// The speed at which fine grains sink through coarse ones, `C d_fine ln(d_coarse/d_fine)`
+/// times the shear rate (Schlick et al. 2015, J. Fluid Mech. 765, 632).
+const SEGREGATION: f64 = 0.26;
+/// The diffusion of grains in a shear flow, `C γ̇ d²` with the mean diameter (Utter &
+/// Behringer 2004, Phys. Rev. E 69, 031308).
+const GRAIN_DIFFUSION: f64 = 0.042;
 
 /// How a run is going, for a progress display.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -86,6 +93,11 @@ struct Particle {
     /// Mass times specific heat (zero: the temperature stays).
     heat_capacity: f64,
     conductivity: f64,
+    /// The volume fraction of fine grains of a mixture of two sizes.
+    fine: f64,
+    /// The fine and the coarse grain diameter of a mixture of two sizes (zero: the
+    /// particle does not segregate).
+    grains: [f64; 2],
     /// Left the box through an open side.
     gone: bool,
 }
@@ -294,6 +306,13 @@ struct NodeSum {
     heat: f64,
     conduction: f64,
     space: f64,
+    /// The mass of the particles of grain mixtures, its fine part, and mass times the
+    /// speed of segregation per unit of the gravity's direction and the grain diffusivity:
+    /// for the segregation.
+    mixture: f64,
+    fine: f64,
+    sinking: f64,
+    diffusion: f64,
 }
 
 /// The sums of a step over the particles.
@@ -617,6 +636,9 @@ fn run_cpu(
     // Per node: the heat the walls gave in the step, and the change of the temperature.
     let mut node_heat = vec![0.0; grid.count()];
     let mut node_dt = vec![0.0; grid.count()];
+    // Per node: the change of the fine fraction of grain mixtures.
+    let mut node_fine = vec![0.0; grid.count()];
+    let mixtures = particles.iter().any(|p| p.grains[0] > 0.0);
 
     while t < end * (1.0 - 1e-12) {
         if plxs_core::CancelToken::current_cancelled() {
@@ -768,7 +790,12 @@ fn run_cpu(
         if heat.is_some() {
             conduct(grid, &nodes, &node_heat, dt, &mut node_dt);
         }
+        // (2c) The grains of mixtures: segregation and diffusion.
+        if mixtures {
+            segregate(grid, &nodes, dt, &mut node_fine);
+        }
         let node_dt = &node_dt;
+        let node_fine = &node_fine;
         let node_sums = &nodes;
 
         // (3) Grid to particles.
@@ -786,6 +813,7 @@ fn run_cpu(
                 let mut b = [[0.0; 3]; 3];
                 let mut jbar = 0.0;
                 let mut warmer = 0.0;
+                let mut finer = 0.0;
                 // The new temperature of the nodes around, weighted over the filled ones.
                 let mut around = [0.0; 2];
                 for sk in 0..3 {
@@ -804,6 +832,9 @@ fn run_cpu(
                                 b[r][2] += wv * dn[2];
                             }
                             jbar += weight * node[3];
+                            if mixtures {
+                                finer += weight * node_fine[offsets[0][si] + row];
+                            }
                             if heat.is_some() {
                                 let at = offsets[0][si] + row;
                                 warmer += weight * node_dt[at];
@@ -828,7 +859,10 @@ fn run_cpu(
                     p.state.j
                 };
                 let j_new = source * det(&f);
-                let law = &laws[p.material as usize];
+                if p.grains[0] > 0.0 {
+                    p.fine = (p.fine + finer).clamp(0.0, 1.0);
+                }
+                let law = &laws[p.material as usize].mixed(p.fine);
                 let factor = table_value(factors[p.material as usize], p.temperature);
                 let update = law.update(&mut p.state, &f, j_new, &c, dt, factor);
                 // The temperature: what the grid conducted and the walls gave, and the
@@ -1054,6 +1088,89 @@ fn conduct(grid: &Grid, nodes: &[NodeSum], given: &[f64], dt: f64, change: &mut 
     });
 }
 
+/// The segregation coefficients of a particle: the speed at which its fine grains sink per
+/// unit of shear rate, times the shear rate, and the diffusivity of its grains (zero for
+/// particles of one grain size).
+fn grain_motion(p: &Particle) -> (f64, f64) {
+    let [fine, coarse] = p.grains;
+    if fine <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let rate = f64::from(p.shear_rate);
+    let mean = p.fine * fine + (1.0 - p.fine) * coarse;
+    (
+        SEGREGATION * fine * (coarse / fine).max(1.0).ln() * rate,
+        GRAIN_DIFFUSION * rate * mean * mean,
+    )
+}
+
+/// The change of the fine fraction of every node of grain mixtures in a step (Gray &
+/// Thornton 2005; Fan et al. 2014): the fine grains sink along the gravity at the speed
+/// `S γ̇ (1 − φ)` relative to the mixture, the coarse ones rise, and both diffuse at
+/// `D = C γ̇ d̄²`. Between two neighbouring nodes the fine grains of the upper one swap
+/// with the coarse ones of the lower one, at the rate `S γ̇ φ_upper (1 − φ_lower)`, which
+/// keeps the fraction between 0 and 1; the diffusion follows the difference. As for the
+/// conduction the exchange is weighted with the smaller mass of the two.
+fn segregate(grid: &Grid, nodes: &[NodeSum], dt: f64, change: &mut [f64]) {
+    // The fine fraction, the speed of segregation, the diffusivity and the direction of
+    // the gravity at a node.
+    let state = |n: &NodeSum| {
+        if n.mixture <= 0.0 {
+            return None;
+        }
+        let g = norm(n.weight);
+        let down = if g > 0.0 {
+            scale(n.weight, 1.0 / g)
+        } else {
+            [0.0; 3]
+        };
+        Some((
+            n.fine / n.mixture,
+            n.sinking / n.mixture,
+            n.diffusion / n.mixture,
+            down,
+            n.mixture,
+        ))
+    };
+    change.par_iter_mut().enumerate().for_each(|(at, out)| {
+        *out = 0.0;
+        let Some((phi, speed, diffusion, down, mass)) = state(&nodes[at]) else {
+            return;
+        };
+        let i = [
+            at % grid.n[0],
+            (at / grid.n[0]) % grid.n[1],
+            at / (grid.n[0] * grid.n[1]),
+        ];
+        let mut inflow = 0.0;
+        for a in 0..3 {
+            for step in [-1isize, 1] {
+                let next = i[a] as isize + step;
+                if !grid.periodic[a] && (next < 0 || next >= grid.n[a] as isize) {
+                    continue;
+                }
+                let mut j = i;
+                j[a] = grid.wrap(a, next);
+                let Some((phj, speed_j, diffusion_j, down_j, mass_j)) =
+                    state(&nodes[grid.index(j)])
+                else {
+                    continue;
+                };
+                // The speed of the fine grains from this node towards the neighbour.
+                let toward = 0.5 * (speed * down[a] + speed_j * down_j[a]) * step as f64;
+                let swap = if toward > 0.0 {
+                    toward * phi * (1.0 - phj)
+                } else {
+                    toward * phj * (1.0 - phi)
+                };
+                let spread = 0.5 * (diffusion + diffusion_j) * (phi - phj) / grid.h;
+                inflow -= mass.min(mass_j) / grid.h * (swap + spread);
+            }
+        }
+        *out = inflow * dt / mass;
+    });
+}
+
 /// Adds the force a node exerts on a wall, `m (v_before − v_after) / Δt`, its moment
 /// about the origin and the work the wall, at velocity `wall`, does on it in the step.
 fn record(sum: &mut Load, mass: f64, before: Vec3, after: Vec3, dt: f64, x: Vec3, wall: Vec3) {
@@ -1164,6 +1281,7 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
                 }
                 let mv = scale(p.v, p.mass);
                 let mj = p.mass * p.state.j;
+                let (sinking, diffusion) = grain_motion(p);
                 let stress = p.tau.map(|row| row.map(|t| -p.volume * inv * t));
                 for (sk, wk) in w[2].iter().enumerate() {
                     for (sj, wj) in w[1].iter().enumerate() {
@@ -1188,6 +1306,13 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
                             node.heat += weight * p.heat_capacity * p.temperature;
                             node.conduction += weight * p.mass * p.conductivity;
                             node.space += weight * p.volume * p.state.j;
+                            if p.grains[0] > 0.0 {
+                                let wm = weight * p.mass;
+                                node.mixture += wm;
+                                node.fine += wm * p.fine;
+                                node.sinking += wm * sinking;
+                                node.diffusion += wm * diffusion;
+                            }
                             for r in 0..3 {
                                 node.momentum[r] += weight * (mv[r] + qd[r]);
                                 node.force[r] += weight * fd[r];
@@ -1238,6 +1363,10 @@ fn spread(grid: &Grid, particles: &[Particle], dt: f64, nodes: &mut [NodeSum]) {
                     dst.heat += src.heat;
                     dst.conduction += src.conduction;
                     dst.space += src.space;
+                    dst.mixture += src.mixture;
+                    dst.fine += src.fine;
+                    dst.sinking += src.sinking;
+                    dst.diffusion += src.diffusion;
                 }
             }
         }
@@ -1319,6 +1448,15 @@ fn fill(
         };
         // Without heat the temperature stays: no capacity.
         let thermal = model.heat.and(model.materials[body.material].thermal);
+        let (fine, grains) = match model.materials[body.material].law {
+            ParticleLaw::Granular {
+                grain,
+                fine_grain,
+                fine_fraction,
+                ..
+            } if fine_grain > 0.0 => (fine_fraction, [fine_grain, grain]),
+            _ => (0.0, [0.0; 2]),
+        };
         let Some((lo, hi)) = body.shape.bounds() else {
             continue;
         };
@@ -1371,6 +1509,8 @@ fn fill(
                         heat_capacity: thermal
                             .map_or(0.0, |t| t.specific_heat * law.density * volume),
                         conductivity: thermal.map_or(0.0, |t| t.conductivity),
+                        fine,
+                        grains,
                         gone: false,
                     });
                 }
@@ -1395,6 +1535,7 @@ fn frame(time: f64, particles: &[Particle]) -> ParticleFrame {
             f64::from(p.shear_rate),
             j,
             p.temperature,
+            p.fine,
             f64::from(p.body),
         ];
         for (f, v) in fields.iter_mut().zip(values) {
@@ -1407,5 +1548,71 @@ fn frame(time: f64, particles: &[Particle]) -> ParticleFrame {
         positions: particles.iter().map(|p| p.x.map(|x| x as f32)).collect(),
         velocities: particles.iter().map(|p| p.v.map(|x| x as f32)).collect(),
         fields,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A column of a mixture at a uniform speed of segregation `q` and without diffusion
+    /// separates as Gray & Thornton (2005) solved it: from the top a layer of coarse grains
+    /// grows downwards at `q (1 − φ0)`, from the floor one of fine grains upwards at `q φ0`;
+    /// they meet after `H/q`, the fine layer then `φ0 H` thick. The fine grains are kept.
+    #[test]
+    fn a_column_of_a_mixture_separates_at_the_speed_of_segregation() {
+        let (count, h, q, phi0) = (60usize, 1e-3, 0.01, 0.3);
+        let grid = Grid {
+            origin: [0.0; 3],
+            h,
+            n: [1, 1, count],
+            periodic: [true, true, false],
+            lo: [0; 3],
+            hi: [0, 0, count - 1],
+        };
+        let mut phi = vec![phi0; count];
+        let height = count as f64 * h;
+        let dt = 0.2 * h / q;
+        let mut change = vec![0.0; count];
+        let mut t = 0.0;
+        let mut checked = false;
+        while t < 1.2 * height / q {
+            let nodes: Vec<NodeSum> = (phi.iter())
+                .map(|&f| NodeSum {
+                    mass: 1.0,
+                    weight: [0.0, 0.0, -1.0],
+                    mixture: 1.0,
+                    fine: f,
+                    sinking: q,
+                    ..Default::default()
+                })
+                .collect();
+            segregate(&grid, &nodes, dt, &mut change);
+            for (f, d) in phi.iter_mut().zip(&change) {
+                *f += d;
+                assert!((-1e-12..=1.0 + 1e-12).contains(f), "{f}");
+            }
+            t += dt;
+            let total: f64 = phi.iter().sum();
+            assert!(
+                (total - phi0 * count as f64).abs() < 1e-9,
+                "fine grains lost"
+            );
+            // Half way: the layers where the exact solution has them.
+            if !checked && t >= 0.5 * height / q {
+                checked = true;
+                let coarse = (phi.iter().rev()).take_while(|&&f| f < 0.05).count() as f64 * h;
+                let fine = phi.iter().take_while(|&&f| f > 0.95).count() as f64 * h;
+                let (coarse_exact, fine_exact) = (q * (1.0 - phi0) * t, q * phi0 * t);
+                eprintln!(
+                    "t {t:.3}: coarse {coarse:.4} ({coarse_exact:.4}) fine {fine:.4} ({fine_exact:.4})"
+                );
+                assert!((coarse - coarse_exact).abs() < 0.1 * coarse_exact + 3.0 * h);
+                assert!((fine - fine_exact).abs() < 0.1 * fine_exact + 3.0 * h);
+            }
+        }
+        let fine = phi.iter().filter(|&&f| f > 0.5).count();
+        eprintln!("fine layer {fine} of {count} nodes");
+        assert!((fine as f64 - phi0 * count as f64).abs() <= 1.0);
     }
 }

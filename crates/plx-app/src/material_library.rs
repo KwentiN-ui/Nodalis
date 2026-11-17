@@ -759,16 +759,28 @@ fn material_models(
                 limit_angle,
                 grain,
                 inertial,
-            } => vec![
-                ("Law", "Granular (mu(I))".to_string()),
-                (
-                    "Friction angle",
-                    format!("{} deg", format_value(friction_angle)),
-                ),
-                ("Limit angle", format!("{} deg", format_value(limit_angle))),
-                ("Grain diameter", with_unit(grain, Quantity::Length)),
-                ("I0", format_value(inertial)),
-            ],
+                fine_grain,
+                fine_fraction,
+            } => {
+                let mut rows = vec![
+                    ("Law", "Granular (mu(I))".to_string()),
+                    (
+                        "Friction angle",
+                        format!("{} deg", format_value(friction_angle)),
+                    ),
+                    ("Limit angle", format!("{} deg", format_value(limit_angle))),
+                    ("Grain diameter", with_unit(grain, Quantity::Length)),
+                    ("I0", format_value(inertial)),
+                ];
+                if fine_grain > 0.0 {
+                    rows.push((
+                        "Fine grain diameter",
+                        with_unit(fine_grain, Quantity::Length),
+                    ));
+                    rows.push(("Fine fraction", format_value(fine_fraction)));
+                }
+                rows
+            }
         };
         models.push(("Flow", rows));
     }

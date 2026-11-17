@@ -18,7 +18,9 @@ FE Model and Results workspaces:
     filled with particles at the start, two to a cell in each direction, with the material
     of its section. The mesh only describes the shape: its elements are not computed.],
   [Walls], [The parts of a rigid body (@rigid-body) are walls: tools, dies, vessels. They
-    are solid parts; the material cannot enter them.],
+    are solid parts; the material cannot enter them. A wall that the box cuts, such as a
+    drum in a thin slice, should reach a few cells beyond the box: otherwise its end faces
+    lie closer to the material than its inner face, and material slides into it.],
   [Motion of a wall], [A displacement boundary condition on the reference point of a rigid
     body moves the wall: the displacements U1 to U3 shift it, the rotations UR1 to UR3 (in
     rad) turn it about the reference point, which moves along. Without an amplitude the
@@ -104,6 +106,41 @@ profile of Bagnold that the law gives.
 #screenshot("particle-flow-sand.png", [A column of sand, 50 mm across and 30 mm high, has
 collapsed on a floor with friction into a flat heap, coloured by the plastic shear the
 grains went through: most at the rim, which ran out furthest.])
+
+==== Mixtures of two grain sizes <particle-flow-segregation>
+
+With #ui("Two grain sizes") the granular material is a mixture of coarse grains, the
+#ui("Grain diameter"), and fine ones, the #ui("Fine grain diameter"); the
+#ui("Fine fraction") is the volume fraction of the fine grains at the start. Where the
+mixture flows, the fine grains fall into the gaps between the coarse ones and sink, and the
+coarse ones rise: a heap, a chute or a drum sorts itself (segregation), while the shear
+mixes the grains again by diffusion. Each particle carries its fine fraction $phi$, which
+changes after the model of Gray and Thornton (2005) in the form of Fan et al. (2014):
+
+#fields(
+  [Segregation], [The fine grains move along the gravity, relative to the mixture, at
+    $w = S dot(gamma) (1 - phi)$ with $S = 0.26 thin d_f ln(d_c slash d_f)$ (Schlick et
+    al. 2015), $d_f$ and $d_c$ the fine and coarse diameter: the larger the difference
+    of the sizes and the faster the shear, the faster the mixture sorts.],
+  [Diffusion], [$D = 0.042 thin dot(gamma) thin overline(d)^2$ with the mean diameter
+    $overline(d) = phi d_f + (1 - phi) d_c$ (Utter and Behringer 2004).],
+  [Friction], [The inertial number $I$ takes the mean diameter, so a fine layer flows
+    a little more easily.],
+)
+
+The results show the fine fraction as the field #ui("FINE"). A mixture at rest does not
+sort; only the shear moves the grains past each other. Parts of different materials with
+the same grains but other fine fractions start sorted, for example a layer of fine grains
+under one of coarse ones. The transport is checked against the exact solution of Gray and
+Thornton for a column at uniform shear: the layers of fine and coarse grains grow at the
+speeds it gives, and the amount of fine grains is kept.
+
+A mixture is computed on the processor; the graphics card does not compute the
+segregation yet.
+
+#screenshot("particle-flow-segregation.png", [Glass beads of 3 mm and 1.5 mm, half and
+half, in a drum that turns four times in 4 s: the fine beads (red) gather in the core of the
+flowing heap, the coarse ones (blue) at its rim, as in experiments with rotating drums.])
 
 === Settings of the step
 
@@ -196,6 +233,8 @@ drawn as its surface where it is. The fields are:
     ($sqrt(J_2)$), #ui("PEEQ") the accumulated plastic shear, #ui("RATE") the shear rate
     in 1/s, #ui("J") the volume ratio.],
   [NT], [The temperature, in steps that follow it.],
+  [FINE], [The fine fraction of grain mixtures (@particle-flow-segregation), when a
+    material is one.],
 )
 
 The history output holds what the history outputs of the step (@history-output-step) ask for,

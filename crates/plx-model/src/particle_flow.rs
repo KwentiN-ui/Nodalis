@@ -31,11 +31,20 @@ pub enum Flow {
     /// `tan limit_angle` in fast flow, `μ = μs + (μ2 − μs) I/(I0 + I)`, with the inertial
     /// number `I = rate · grain · √(density/p)`. It carries no tension. The angles are in
     /// degrees, `grain` is the grain diameter.
+    ///
+    /// With `fine_grain` above zero the material is a mixture of two grain sizes: `grain` is
+    /// the coarse diameter, `fine_grain` the fine one and `fine_fraction` the volume fraction
+    /// of the fine grains at the start. Where it flows the fine grains sink through the
+    /// coarse ones (segregation).
     Granular {
         friction_angle: f64,
         limit_angle: f64,
         grain: f64,
         inertial: f64,
+        #[serde(default)]
+        fine_grain: f64,
+        #[serde(default)]
+        fine_fraction: f64,
     },
 }
 
@@ -54,6 +63,8 @@ impl Flow {
             limit_angle: 42.0,
             grain: 1e-3,
             inertial: 0.22,
+            fine_grain: 0.0,
+            fine_fraction: 0.0,
         },
     ];
 
@@ -241,6 +252,8 @@ impl Flow {
                 limit_angle,
                 grain,
                 inertial,
+                fine_grain,
+                fine_fraction,
             } => {
                 let angle = |a: f64| a.is_finite() && a > 0.0 && a < 90.0;
                 if !angle(friction_angle) || !angle(limit_angle) {
@@ -251,6 +264,10 @@ impl Flow {
                     || !(inertial.is_finite() && inertial > 0.0)
                 {
                     Some("Grain diameter and I0 must be positive.".into())
+                } else if fine_grain > 0.0 && (fine_grain >= grain || !fine_grain.is_finite()) {
+                    Some("The fine grains must be smaller than the coarse ones.".into())
+                } else if fine_grain > 0.0 && !(0.0..=1.0).contains(&fine_fraction) {
+                    Some("The fine fraction must lie between 0 and 1.".into())
                 } else {
                     None
                 }

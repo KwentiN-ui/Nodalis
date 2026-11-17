@@ -35,6 +35,12 @@ const CORNERS: [[f64; 3]; 8] = [
 /// The index of the temperature in [`ParticleFrame::fields`].
 const TEMPERATURE: usize = COMPONENTS.len();
 
+/// The index of the fine fraction of grain mixtures in [`ParticleFrame::fields`].
+const FINE: usize = TEMPERATURE + 1;
+
+/// The field of the fine fraction of grain mixtures, written when a material is one.
+pub const FINE_FIELD: &str = "FINE";
+
 /// The index of the body field in [`ParticleFrame::fields`].
 fn body_field() -> usize {
     PARTICLE_FIELDS.len() - 1
@@ -143,6 +149,9 @@ pub struct FrameTrack {
     /// The temperature of each wall, when the run computes the temperature (`None`: it
     /// does not, and the results have no temperature).
     temperatures: Option<Vec<Option<f64>>>,
+    /// Whether a material is a mixture of two grain sizes (the results then have the fine
+    /// fraction).
+    mixtures: bool,
 }
 
 impl FrameTrack {
@@ -164,6 +173,12 @@ impl FrameTrack {
             motions: model.walls.iter().map(|w| w.motion.clone()).collect(),
             temperatures: (model.heat.is_some())
                 .then(|| model.walls.iter().map(|w| w.temperature).collect()),
+            mixtures: model.materials.iter().any(|m| {
+                matches!(
+                    m.law,
+                    plxs_core::particles::ParticleLaw::Granular { fine_grain, .. } if fine_grain > 0.0
+                )
+            }),
         }
     }
 
@@ -195,6 +210,7 @@ impl FrameTrack {
             .map(|_| Vec::with_capacity(size))
             .collect();
         let mut temperature = Vec::with_capacity(size);
+        let mut fine = Vec::with_capacity(if self.mixtures { size } else { 0 });
         for (k, seen) in at.iter().enumerate() {
             let moved: [f64; 3] =
                 std::array::from_fn(|a| f64::from(self.last[k][a]) - f64::from(self.start[k][a]));
@@ -215,6 +231,10 @@ impl FrameTrack {
                 }
                 let value = seen.and_then(|j| frame.fields.get(TEMPERATURE)?.get(j).copied());
                 temperature.push(value.map_or(f64::NAN, f64::from));
+                if self.mixtures {
+                    let value = seen.and_then(|j| frame.fields.get(FINE)?.get(j).copied());
+                    fine.push(value.map_or(f64::NAN, f64::from));
+                }
             }
         }
         // The walls move rigidly and carry no values.
@@ -240,6 +260,9 @@ impl FrameTrack {
             }
             let wall = self.temperatures.as_ref().and_then(|t| t[index]);
             temperature.push(wall.unwrap_or(f64::NAN));
+            if self.mixtures {
+                fine.push(f64::NAN);
+            }
         }
         let field = |name: &str, components: &[&str], values| ResultField {
             name: name.into(),
@@ -262,6 +285,10 @@ impl FrameTrack {
             .into_iter()
             .chain(
                 (self.temperatures.is_some()).then(|| field("NDTEMP", &["T"], vec![temperature])),
+            )
+            .chain(
+                self.mixtures
+                    .then(|| field(FINE_FIELD, &["FINE"], vec![fine])),
             )
             .collect(),
         }
@@ -506,6 +533,36 @@ mod tests {
         let pflow = &increment.fields[2].values;
         assert_eq!(pflow[0][0], 2.0);
         assert!(pflow[0][8].is_nan());
+    }
+
+    /// A grain mixture writes its fine fraction as a field of its own; other materials
+    /// do not.
+    #[test]
+    fn a_grain_mixture_has_the_fine_fraction() {
+        let mut model = model();
+        let first = frame(0.0, vec![0], vec![[0.0; 3]]);
+        let plain = FrameTrack::new(&model, &first).increment(&first, 1, 1);
+        assert!(plain.fields.iter().all(|f| f.name != FINE_FIELD));
+        model.materials[0].law = plxs_core::particles::ParticleLaw::Granular {
+            shear: 1e5,
+            bulk: 1e6,
+            friction: 0.4,
+            friction_limit: 0.6,
+            grain: 2e-3,
+            inertial: 0.3,
+            fine_grain: 1e-3,
+            fine_fraction: 0.5,
+        };
+        let mut later = frame(1.0, vec![0], vec![[0.0; 3]]);
+        later.fields[FINE] = vec![0.75];
+        let increment = FrameTrack::new(&model, &first).increment(&later, 1, 2);
+        let fine = increment
+            .fields
+            .iter()
+            .find(|f| f.name == FINE_FIELD)
+            .unwrap();
+        assert_eq!(fine.components, vec!["FINE".to_string()]);
+        assert!(fine.values[0][..8].iter().all(|&v| v == 0.75));
     }
 
     #[test]

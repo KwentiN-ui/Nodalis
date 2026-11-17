@@ -29,6 +29,8 @@ fn granular(name: &str, friction: f64, friction_limit: f64, grain: f64) -> Parti
             friction_limit,
             grain,
             inertial: INERTIAL,
+            fine_grain: 0.0,
+            fine_fraction: 0.0,
         },
         thermal: None,
         flow_factor: Vec::new(),
@@ -100,14 +102,25 @@ fn plane(
 /// A layer `h` deep on a rough floor, periodic along the slope, the gravity tilted by the
 /// angle of the slope.
 fn incline(angle_deg: f64, per_depth: f64, end_time: f64) -> (ParticleResults, f64, f64) {
-    let (h, grain) = (0.01, 0.5e-3);
+    let grain = 0.5e-3;
+    let (results, h) = incline_of(beads(grain), angle_deg, per_depth, end_time);
+    (results, h, grain)
+}
+
+fn incline_of(
+    material: ParticleMaterial,
+    angle_deg: f64,
+    per_depth: f64,
+    end_time: f64,
+) -> (ParticleResults, f64) {
+    let h = 0.01;
     let cell = h / per_depth;
     let mut model = plane(
         "Incline",
         [0.0, 0.0],
         [4.0 * cell, 1.5 * h],
         cell,
-        beads(grain),
+        material,
         ([-cell, 0.0], [5.0 * cell, h]),
     );
     model.domain.periodic[0] = true;
@@ -118,7 +131,7 @@ fn incline(angle_deg: f64, per_depth: f64, end_time: f64) -> (ParticleResults, f
     model.control.end_time = end_time;
     model.control.frames = 20;
     model.control.sound_speed = Some(8.0);
-    (solve(&model), h, grain)
+    (solve(&model), h)
 }
 
 fn mean_velocity(frame: &ParticleFrame) -> f64 {
@@ -321,4 +334,60 @@ fn granular_tall_column_collapse() {
 #[test]
 fn granular_flat_column_collapse() {
     check(0.5, 16.0, 0.5);
+}
+
+/// The index of the fine fraction in the fields of a frame.
+const FINE: usize = 6;
+
+/// A mixture of fine and coarse glass beads, half and half, flows down the incline: the
+/// fine grains sink to the floor and the coarse rise (Savage & Lun 1988), until the layer
+/// is sorted with the fine half at the bottom. The amount of fine grains stays.
+fn segregation(end_time: f64) {
+    let mut beads = beads(1e-3);
+    if let ParticleLaw::Granular {
+        fine_grain,
+        fine_fraction,
+        ..
+    } = &mut beads.law
+    {
+        *fine_grain = 0.5e-3;
+        *fine_fraction = 0.5;
+    }
+    let (results, h) = incline_of(beads, 25.0, 12.0, end_time);
+    let fine_in = |frame: &ParticleFrame, lo: f64, hi: f64| {
+        let (sum, n) = (frame.positions.iter().zip(&frame.fields[FINE]))
+            .filter(|(x, _)| (lo..hi).contains(&f64::from(x[1])))
+            .fold((0.0, 0), |(s, n), (_, f)| (s + f64::from(*f), n + 1));
+        sum / f64::from(n.max(1))
+    };
+    let mut total = Vec::new();
+    for frame in &results.frames {
+        let mean: f64 = frame.fields[FINE]
+            .iter()
+            .map(|f| f64::from(*f))
+            .sum::<f64>()
+            / frame.fields[FINE].len() as f64;
+        eprintln!(
+            "t {:.2}: fine fraction bottom quarter {:.3}, top quarter {:.3}, mean {mean:.4}",
+            frame.time,
+            fine_in(frame, 0.0, 0.25 * h),
+            fine_in(frame, 0.75 * h, h + 0.01),
+        );
+        total.push(mean);
+    }
+    let last = results.frames.last().unwrap();
+    assert!(
+        (total.last().unwrap() - 0.5).abs() < 0.005,
+        "fine grains not kept"
+    );
+    assert!(fine_in(last, 0.0, 0.25 * h) > 0.9, "the floor is not fine");
+    assert!(
+        fine_in(last, 0.75 * h, h + 0.01) < 0.1,
+        "the top is not coarse"
+    );
+}
+
+#[test]
+fn segregation_on_an_incline() {
+    segregation(4.0);
 }

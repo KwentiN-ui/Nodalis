@@ -491,8 +491,11 @@ impl Material {
             Some(crate::particle_flow::Flow::Newtonian { viscosity }) => {
                 *viscosity *= stress * time;
             }
-            Some(crate::particle_flow::Flow::Granular { grain, .. }) => {
+            Some(crate::particle_flow::Flow::Granular {
+                grain, fine_grain, ..
+            }) => {
                 c.value(grain, Quantity::Length);
+                c.value(fine_grain, Quantity::Length);
             }
             None => {}
         }

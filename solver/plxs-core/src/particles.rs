@@ -105,6 +105,12 @@ pub enum ParticleLaw {
     /// number `I = γ̇ grain √(ρ/p)` (ρ the density of the material). It carries no tension.
     /// `friction` and `friction_limit` are friction coefficients (tangents of the angles),
     /// `grain` is the grain diameter.
+    ///
+    /// With `fine_grain` above zero the material is a mixture of two grain sizes, `grain`
+    /// the coarse and `fine_grain` the fine one, `fine_fraction` the volume fraction of the
+    /// fine grains at the start. Where it flows the fine grains sink through the coarse ones
+    /// and the coarse rise (segregation), and both mix by diffusion; the mean grain diameter
+    /// of the mixture enters `I`.
     Granular {
         shear: f64,
         bulk: f64,
@@ -112,6 +118,8 @@ pub enum ParticleLaw {
         friction_limit: f64,
         grain: f64,
         inertial: f64,
+        fine_grain: f64,
+        fine_fraction: f64,
     },
 }
 
@@ -452,13 +460,14 @@ pub struct ParticleResults {
 }
 
 /// The names of the fields of a frame, in the order of [`ParticleFrame::fields`].
-pub const PARTICLE_FIELDS: [&str; 7] = [
+pub const PARTICLE_FIELDS: [&str; 8] = [
     "Pressure",
     "Shear stress",
     "Plastic strain",
     "Shear rate",
     "Volume ratio",
     "Temperature",
+    "Fine fraction",
     "Body",
 ];
 

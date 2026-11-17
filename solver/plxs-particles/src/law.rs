@@ -91,6 +91,8 @@ pub enum Kind {
         friction_limit: f64,
         grain: f64,
         inertial: f64,
+        /// The fine grains of a mixture of two sizes (zero: one size).
+        fine_grain: f64,
     },
 }
 
@@ -115,12 +117,14 @@ impl Law {
                 friction_limit,
                 grain,
                 inertial,
+                fine_grain,
                 ..
             } => Kind::Granular {
                 friction,
                 friction_limit,
                 grain,
                 inertial,
+                fine_grain,
             },
         };
         Self {
@@ -129,6 +133,20 @@ impl Law {
             shear,
             kind,
         }
+    }
+
+    /// The law of a mixture of two grain sizes with the volume fraction `fine` of the fine
+    /// ones: its grain diameter is the mean of the two. Other laws stay as they are.
+    pub fn mixed(&self, fine: f64) -> Self {
+        let mut law = *self;
+        if let Kind::Granular {
+            grain, fine_grain, ..
+        } = &mut law.kind
+            && *fine_grain > 0.0
+        {
+            *grain = fine * *fine_grain + (1.0 - fine) * *grain;
+        }
+        law
     }
 
     /// The speed of the elastic (pressure) waves.
@@ -256,6 +274,7 @@ impl Law {
                     friction_limit,
                     grain,
                     inertial,
+                    ..
                 } = self.kind
                 {
                     let trial = std::f64::consts::SQRT_2 * g * dev_norm;
@@ -453,6 +472,8 @@ mod tests {
                 friction_limit,
                 grain,
                 inertial,
+                fine_grain: 0.0,
+                fine_fraction: 0.0,
             },
         );
         // A compression of 1 % holds the pressure; the shear rate is so high that I
@@ -491,6 +512,8 @@ mod tests {
                 friction_limit: 0.5,
                 grain: 1e-3,
                 inertial: 0.3,
+                fine_grain: 0.0,
+                fine_fraction: 0.0,
             },
         );
         let f = [[1.01, 0.002, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];

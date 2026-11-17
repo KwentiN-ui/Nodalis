@@ -604,6 +604,8 @@ pub fn particle_material(material: &Material) -> Result<ParticleMaterial, String
             limit_angle,
             grain,
             inertial,
+            fine_grain,
+            fine_fraction,
         }) => ir::ParticleLaw::Granular {
             shear,
             bulk,
@@ -611,6 +613,8 @@ pub fn particle_material(material: &Material) -> Result<ParticleMaterial, String
             friction_limit: limit_angle.to_radians().tan(),
             grain,
             inertial,
+            fine_grain,
+            fine_fraction,
         },
     };
     let thermal = match (material.conductivity, material.specific_heat) {
@@ -961,6 +965,8 @@ mod tests {
             limit_angle: 45.0,
             grain: 2e-3,
             inertial: 0.25,
+            fine_grain: 0.0,
+            fine_fraction: 0.0,
         });
         let lowered = lower(&mesh, &fe, "Test").expect("lowers");
         let ir::ParticleLaw::Granular {
@@ -982,6 +988,8 @@ mod tests {
             limit_angle: 20.0,
             grain: 2e-3,
             inertial: 0.25,
+            fine_grain: 0.0,
+            fine_fraction: 0.0,
         });
         let refused = lower(&mesh, &fe, "Test").unwrap_err();
         assert!(
@@ -989,6 +997,30 @@ mod tests {
             "{}",
             refused.message
         );
+        // A mixture of two grain sizes, the fine ones smaller.
+        fe.materials[0].flow = Some(Flow::Granular {
+            friction_angle: 30.0,
+            limit_angle: 45.0,
+            grain: 2e-3,
+            inertial: 0.25,
+            fine_grain: 1e-3,
+            fine_fraction: 0.3,
+        });
+        let lowered = lower(&mesh, &fe, "Test").expect("lowers");
+        let ir::ParticleLaw::Granular {
+            fine_grain,
+            fine_fraction,
+            ..
+        } = lowered.model.materials[0].law
+        else {
+            unreachable!()
+        };
+        assert_eq!((fine_grain, fine_fraction), (1e-3, 0.3));
+        if let Some(Flow::Granular { fine_grain, .. }) = &mut fe.materials[0].flow {
+            *fine_grain = 3e-3;
+        }
+        let refused = lower(&mesh, &fe, "Test").unwrap_err();
+        assert!(refused.message.contains("smaller"), "{}", refused.message);
     }
 
     #[test]

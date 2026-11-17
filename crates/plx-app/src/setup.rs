@@ -6613,6 +6613,8 @@ fn flow_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
             limit_angle,
             grain,
             inertial,
+            fine_grain,
+            fine_fraction,
         } => {
             ui.label("    Friction angle").on_hover_text(
                 "The angle of internal friction at rest, about the angle of repose: the \
@@ -6633,10 +6635,48 @@ fn flow_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
                 ui.label("deg");
             });
             ui.end_row();
-            ui.label("    Grain diameter")
-                .on_hover_text("The mean grain diameter, for the inertial number I.");
+            ui.label("    Grain diameter").on_hover_text(
+                "The mean grain diameter, for the inertial number I; of a mixture the \
+                 diameter of the coarse grains.",
+            );
             ui.add_enabled(flows, numeric::physical(grain, units, Quantity::Length));
             ui.end_row();
+            let mut mixture = *fine_grain > 0.0;
+            ui.label("    Two grain sizes").on_hover_text(
+                "A mixture of coarse and fine grains: where it flows the fine grains sink \
+                 through the coarse ones and the coarse rise (segregation), and both mix by \
+                 diffusion. The results show the fine fraction (FINE).",
+            );
+            if ui
+                .add_enabled(flows, egui::Checkbox::without_text(&mut mixture))
+                .changed()
+            {
+                *fine_grain = if mixture { 0.5 * *grain } else { 0.0 };
+                if mixture && *fine_fraction == 0.0 {
+                    *fine_fraction = 0.5;
+                }
+            }
+            ui.end_row();
+            if mixture {
+                ui.label("        Fine grain diameter");
+                ui.add_enabled(
+                    flows,
+                    numeric::physical(fine_grain, units, Quantity::Length),
+                );
+                ui.end_row();
+                ui.label("        Fine fraction").on_hover_text(
+                    "The volume fraction of the fine grains at the start, 0 to 1. Parts of \
+                     different materials with the same grains but other fractions start \
+                     sorted.",
+                );
+                ui.add_enabled(
+                    flows,
+                    numeric::drag_value(fine_fraction)
+                        .speed(0.01)
+                        .range(0.0..=1.0),
+                );
+                ui.end_row();
+            }
             ui.label("    I0").on_hover_text(
                 "The inertial number at which the friction is halfway between the two angles \
                  (about 0.2 to 0.3 for sand and glass beads).",
