@@ -491,9 +491,8 @@ mod tests {
         let output = std::sync::Arc::clone(&run.output);
         run.kill();
         let stopped = std::time::Instant::now();
-        let said = || {
-            (output.lock().unwrap().iter()).any(|line| line.contains("the run was stopped"))
-        };
+        let said =
+            || (output.lock().unwrap().iter()).any(|line| line.contains("the run was stopped"));
         while !said() && stopped.elapsed().as_secs_f64() < 20.0 {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
