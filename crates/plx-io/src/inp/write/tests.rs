@@ -5088,7 +5088,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
             plastic: None,
             creep: None,
             flow: None,
-            flow_temperature: Vec::new(),
+            flow_tables: Default::default(),
             hyperelastic: None,
         }],
         sections: vec![Section {

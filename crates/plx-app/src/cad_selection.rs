@@ -706,7 +706,7 @@ mod tests {
                 plastic: None,
                 creep: None,
                 flow: None,
-                flow_temperature: Vec::new(),
+                flow_tables: Default::default(),
                 hyperelastic: None,
             }],
             sections: vec![Section {
@@ -882,7 +882,7 @@ mod tests {
                 plastic: None,
                 creep: None,
                 flow: None,
-                flow_temperature: Vec::new(),
+                flow_tables: Default::default(),
                 hyperelastic: None,
             }],
             sections: vec![Section {

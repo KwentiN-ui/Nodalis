@@ -476,12 +476,24 @@ impl Material {
                 c.value(&mut point.temperature, Quantity::Temperature);
             }
         }
-        for row in &mut self.flow_temperature {
-            c.value(&mut row[0], Quantity::Temperature);
-        }
         // A consistency is a stress times a time to the power of the exponent.
         let stress = c.from.factor_to(Quantity::Pressure, c.to);
         let time = c.from.factor_to(Quantity::Time, c.to);
+        let exponent = match self.flow {
+            Some(crate::particle_flow::Flow::HerschelBulkley { exponent, .. }) => exponent,
+            _ => 1.0,
+        };
+        let tables = &mut self.flow_tables;
+        for (table, factor) in [
+            (&mut tables.yield_stress, stress),
+            (&mut tables.consistency, stress * time.powf(exponent)),
+            (&mut tables.viscosity, stress * time),
+        ] {
+            for row in table.iter_mut().flat_map(|t| t.points.iter_mut()) {
+                c.value(&mut row[0], Quantity::Temperature);
+                row[1] *= factor;
+            }
+        }
         match &mut self.flow {
             Some(crate::particle_flow::Flow::HerschelBulkley {
                 yield_stress,
