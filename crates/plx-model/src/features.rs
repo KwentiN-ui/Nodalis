@@ -19,6 +19,9 @@ pub struct ReferencePoint {
     pub position: [f64; 3],
     #[serde(default)]
     pub definition: PointDefinition,
+    /// A hidden point has no mark in the 3D view unless selected.
+    #[serde(default = "crate::active")]
+    pub visible: bool,
 }
 
 /// How a reference point is given.
@@ -54,6 +57,7 @@ impl PointDefinition {
 impl ReferencePoint {
     pub fn new(name: impl Into<String>, position: [f64; 3]) -> Self {
         Self {
+            visible: true,
             id: Id::new(),
             name: name.into(),
             position,
@@ -184,12 +188,16 @@ pub struct Plane {
     pub id: Id,
     pub name: String,
     pub source: PlaneSource,
+    /// A hidden plane has no mark in the 3D view unless selected.
+    #[serde(default = "crate::active")]
+    pub visible: bool,
 }
 
 impl Plane {
     /// The global XY plane.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            visible: true,
             id: Id::new(),
             name: name.into(),
             source: PlaneSource::CoordinateSystem {
@@ -671,6 +679,7 @@ mod tests {
     fn degenerate_planes_are_reported() {
         let model = FeModel::default();
         let plane = Plane {
+            visible: true,
             id: crate::Id::new(),
             name: "P".into(),
             source: PlaneSource::ThreePoints {
@@ -683,6 +692,7 @@ mod tests {
         };
         assert!(plane.resolve(&model).is_err());
         let missing = Plane {
+            visible: true,
             id: crate::Id::new(),
             name: "P".into(),
             source: PlaneSource::CoordinateSystem {

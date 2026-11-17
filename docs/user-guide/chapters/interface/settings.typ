@@ -63,6 +63,11 @@ Autosave writes the open project's own file, the same as #key("Ctrl+S"), in the 
     default 9).],
   [Significant digits of result values], [Digits shown for result values in the legend,
     labels, Query, tables and plots (2 to 7, default 4). Stored values are never rounded.],
+  [Memory for results read], [How much of the result fields read from the results file
+    stays in memory for going back to them (@bind-result). Beyond it, the fields used longest ago are
+    dropped and read again when they are wanted. #ui("Automatic") takes a quarter of the memory
+    free when Nodalis starts, at least 256 MB and at most 2 GB. The scenes of animation frames
+    already shown are kept besides, up to a quarter of this.],
   [FFmpeg executable], [FFmpeg for exporting animations as MP4 or MKV (@animation-export);
     empty for `ffmpeg` on the `PATH`.],
 )
