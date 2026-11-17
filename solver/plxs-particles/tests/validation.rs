@@ -69,6 +69,7 @@ fn plane(
         gravity: [0.0, -G, 0.0],
         control: ParticleControl::default(),
         heat: None,
+        inlets: Vec::new(),
     }
 }
 
@@ -279,6 +280,7 @@ fn slump(per_height: f64) {
         },
         gravity: [0.0, -G, 0.0],
         heat: None,
+        inlets: Vec::new(),
         control: ParticleControl {
             end_time: 1.2,
             frames: 6,
@@ -443,6 +445,7 @@ fn pipe(per_radius: f64) {
         },
         gravity: [0.0, 0.0, g],
         heat: None,
+        inlets: Vec::new(),
         control: ParticleControl {
             end_time: 1.5,
             frames: 15,
@@ -666,6 +669,7 @@ fn couette(per_gap: f64) {
         },
         gravity: [0.0; 3],
         heat: None,
+        inlets: Vec::new(),
         control: ParticleControl {
             end_time: 0.3,
             frames: 6,
@@ -781,6 +785,7 @@ fn conduction_between_blocks() {
         },
         gravity: [0.0; 3],
         heat: Some(Heat { wall_transfer: 0.0 }),
+        inlets: Vec::new(),
         control: ParticleControl {
             end_time,
             frames: 1,

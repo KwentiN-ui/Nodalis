@@ -434,6 +434,11 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 (step_named(fe, step)?.boundary_conditions.iter_mut()).find(|b| &b.name == name)?;
             match (&mut bc.kind, field) {
                 (BoundaryKind::Temperature(t), Field::Value) => real(t, Quantity::Temperature),
+                (BoundaryKind::Flow(flow), Field::Value) => match &mut flow.kind {
+                    crate::particle_flow::FlowKind::Pressure(p) => real(p, Quantity::Pressure),
+                    crate::particle_flow::FlowKind::Velocity(v) => real(v, Quantity::Velocity),
+                    crate::particle_flow::FlowKind::Side(_) => None,
+                },
                 (BoundaryKind::Displacement(remote), field) => match field {
                     Field::Pinball => real(remote.pinball.as_mut()?, Quantity::Length),
                     Field::LocationX | Field::LocationY | Field::LocationZ => {

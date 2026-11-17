@@ -154,6 +154,8 @@ pub enum Problem {
     /// A part a Particle Flow step fills, or the material it is filled with, lacks what the
     /// particles need: a section, a density, elastic constants.
     ParticleBodyIncomplete,
+    /// A flow boundary condition of a Particle Flow step that cannot act.
+    FlowBoundaryIncomplete,
     /// A load or boundary condition of a Particle Flow step that the particles do not take:
     /// loads other than gravity, boundary conditions elsewhere than on the reference point
     /// of a rigid body.
@@ -361,6 +363,7 @@ impl Problem {
             Problem::NoSensitivityBase => "No step for the sensitivities",
             Problem::ParticleFlowNotAlone => "Particle Flow step not alone",
             Problem::ParticleBodyIncomplete => "Part cannot be filled with particles",
+            Problem::FlowBoundaryIncomplete => "Flow boundary condition cannot act",
             Problem::ParticleFlowIgnored => "Ignored by the Particle Flow step",
             Problem::DesignRegionIgnored => "Design region ignored",
             Problem::NoCreep => "Visco step without creep",
@@ -691,6 +694,11 @@ impl Problem {
                 "The particles take gravity as their only load, and boundary conditions move \
                  the reference points of rigid bodies (the walls), or give them a \
                  temperature. Other loads and boundary conditions of the step have no effect."
+            }
+            Problem::FlowBoundaryIncomplete => {
+                "A flow boundary condition makes sides of the box of a Particle Flow step walls, \
+                 openings or inlets, and picked faces (edges in 2D) openings or inlets; an \
+                 inlet feeds the material of a filled part."
             }
             Problem::ParticleBodyIncomplete => {
                 "A Particle Flow step fills every solid part that is not a rigid body with \
@@ -1173,6 +1181,10 @@ impl Problem {
             Problem::ParticleFlowIgnored => {
                 "Delete or deactivate it in this step. To push the material, move a rigid \
                  body (a piston) with a displacement on its reference point."
+            }
+            Problem::FlowBoundaryIncomplete => {
+                "Pick faces of the model (edges in 2D) or choose sides of the box, and for an \
+                 inlet a filled part whose material it feeds."
             }
             Problem::ParticleBodyIncomplete => {
                 "Give the part a section whose material has a density and elastic constants, \
@@ -1672,6 +1684,23 @@ impl FeModel {
             })
             .collect();
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
+            if let BoundaryKind::Flow(flow) = &bc.kind {
+                let problem = flow.problem(!bc.region.is_empty()).or_else(|| {
+                    let like = flow.like.as_ref()?;
+                    (!mesh.parts.iter().any(|p| &p.name == like))
+                        .then(|| format!("The model has no part {like}."))
+                });
+                if bc.active
+                    && let Some(problem) = problem
+                {
+                    findings.push(Finding::new(
+                        ModelItem::BoundaryCondition(index, i),
+                        Problem::FlowBoundaryIncomplete,
+                        format!("{}: {problem}", bc.name),
+                    ));
+                }
+                continue;
+            }
             let on_point = matches!(bc.region, Region::ReferencePoint(id) if points.contains(&id));
             if bc.active && !on_point && !crate::holds_particle_wall(bc) {
                 findings.push(Finding::new(
@@ -3071,6 +3100,8 @@ impl FeModel {
                     .collect(),
                 // Degree of freedom 11.
                 BoundaryKind::Temperature(t) => vec![(10, *t)],
+                // The flow of a Particle Flow step holds no node.
+                BoundaryKind::Flow(_) => Vec::new(),
                 // The values come from the global model; NaN stands for them.
                 BoundaryKind::Submodel { dofs: held, .. } => (0..dofs.min(3))
                     .filter(|&d| held[d])
@@ -3445,7 +3476,9 @@ impl FeModel {
                     out.extend((0..dofs.min(3)).filter(|&d| driven[d]));
                 }
                 // A reference point fixes no plane.
-                BoundaryKind::Temperature(_) | BoundaryKind::Symmetry { .. } => {}
+                BoundaryKind::Temperature(_)
+                | BoundaryKind::Symmetry { .. }
+                | BoundaryKind::Flow(_) => {}
             }
         }
         out.sort_unstable();

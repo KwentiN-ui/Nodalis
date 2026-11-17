@@ -83,6 +83,7 @@ fn mixer() -> ParticleModel {
         heat: Some(Heat {
             wall_transfer: 2000.0,
         }),
+        inlets: Vec::new(),
     }
 }
 

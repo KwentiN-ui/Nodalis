@@ -237,7 +237,7 @@ impl FeModel {
                     }
                     BoundaryKind::Submodel { dofs, .. } => dofs[..3].iter().any(|&d| d),
                     BoundaryKind::Symmetry { .. } => true,
-                    BoundaryKind::Temperature(_) => false,
+                    BoundaryKind::Temperature(_) | BoundaryKind::Flow(_) => false,
                 };
                 if direct {
                     held.extend(bc.region.nodes(mesh));
@@ -296,7 +296,7 @@ impl FeModel {
                             None => [true; 3],
                         }
                     }
-                    BoundaryKind::Temperature(_) => continue,
+                    BoundaryKind::Temperature(_) | BoundaryKind::Flow(_) => continue,
                 };
                 if !directions.iter().any(|&d| d) {
                     continue;

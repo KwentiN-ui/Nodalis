@@ -27,7 +27,9 @@ FE Model and Results workspaces:
     motion runs over the step at constant speed, so 50 rad over a step of 5 s turn a screw
     at 10 rad/s; an amplitude shapes it over time, e.g. a short start and then a constant
     speed. A temperature boundary condition on the same reference point gives the wall its
-    temperature, see @particle-flow-heat. Other boundary conditions are left out, and the
+    temperature, see @particle-flow-heat. A displacement that keeps the shape of the parts
+    it selects (behavior #ui("Rigid")) makes them a wall too, without a rigid body. Other
+    boundary conditions but those of the flow (@particle-flow-boundary) are left out, and the
     model check warns of them.],
   [Wall friction], [A contact region (@contacts) between a wall and a filled part gives
     the wall its law: #ui("Bonded") and #ui("Rough") let the material stick,
@@ -176,15 +178,56 @@ flowing heap, the coarse ones (blue) at its rim, as in experiments with rotating
     is gone. The FE Model view draws the box as orange edges. In a closed vessel the box
     around the parts is right; where the material can leave the walls, such as a heap that
     spreads or a jet out of a die, the box must leave it room.],
-  [Sides], [Each of the six sides of the box is a resting wall (#ui("Frictionless"),
+  [Sides], [What the sides of the box are: a resting wall (#ui("Frictionless"),
     #ui("Rough") or #ui("Frictional")) or #ui("Open"): material that passes an open side
-    leaves the model, e.g. at the end of a die, and is counted as outflow.],
+    leaves the model, e.g. at the end of a die, and is counted as outflow. A flow boundary
+    condition (@particle-flow-boundary) makes single sides something else.],
   [Smooth the volume change], [Averages the volume change over the cells (F-bar), against
     locking of nearly incompressible material and noise of the pressure. Keep it on.],
   [Temperature], [Follows the temperature of the material, see @particle-flow-heat.],
   [Wall heat transfer], [The heat transfer coefficient between the material and the walls
     with a temperature.],
 )
+
+=== Inlets, openings and sides <particle-flow-boundary>
+
+A boundary condition of type #ui("Particle Flow") in the step tells what happens where the
+material meets the outside: on the sides of the box it chooses, and on the faces (in 2D the
+edges) of filled parts it picks.
+
+#fields(
+  [Pressure inlet], [A reservoir at its #ui("Pressure") above the ambient one: it pushes
+    the material in and feeds new material where the material moves away, and takes back
+    what the material pushes out against it, such as the barrel of a nozzle under
+    pressure instead of a piston. The ambient pressure acts on every free surface; the
+    model has no gas, so a gap in the material holds no pressure.],
+  [Velocity inlet], [Feeds the material at its #ui("Speed"), normal to the faces.],
+  [Open], [Material that passes the faces leaves the model, at the ambient pressure.],
+  [Walls], [#ui("Frictionless"), #ui("Rough") or #ui("Frictional"): a side of the box as a
+    resting wall, different from the other sides. Walls on picked faces are rigid bodies
+    instead.],
+  [Box sides], [The sides of the box it acts on, besides the picked faces.],
+  [Material of], [Of an inlet: the filled part whose material, temperature and gravity the
+    material fed has. By default the part the picked faces lie on, at a side of the box the
+    filled part nearest to it.],
+  [Amplitude], [The pressure or speed of an inlet follows it over time; without one it is
+    constant.],
+)
+
+An inlet keeps the layer one cell deep in front of its faces full: what moves on from it
+into the model is followed by new material, and the material there is the inlet's own
+from the start. The pressure compresses the material as its bulk modulus allows, so with
+a slowed wave speed it should stay well below the bulk modulus the solver reports; the
+step warns where it compresses the material by more than 5 % and names the wave speed
+that keeps it below. Material fed as a plug, which the walls then slow at the sides,
+crowds its particles a little there: a channel takes up a few per cent more mass than its
+volume holds. Against Poiseuille's flow through a plane channel twelve cells wide the
+material flows 9 % faster, through a pipe of revolution 4 %. A model with inlets or
+openings on faces is computed on the processor.
+
+#screenshot("particle-flow-inlet.png", [The nozzle of the paste printer without its piston:
+a pressure inlet on the top edge of the paste feeds it at 5 kPa above the ambient
+pressure. After 0.5 s the strand leaves the orifice at about 11 mm/s.])
 
 === 2D models <particle-flow-2d>
 
