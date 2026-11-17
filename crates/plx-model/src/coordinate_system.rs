@@ -112,6 +112,9 @@ pub struct CoordinateSystem {
     /// The selection the system moves with; `None` keeps it fixed in space, unless its base
     /// moves.
     pub attached: Option<Region>,
+    /// A hidden system has no mark in the 3D view unless selected.
+    #[serde(default = "crate::active")]
+    pub visible: bool,
 }
 
 /// The three planes of a coordinate system.
@@ -150,6 +153,7 @@ impl CoordinateSystem {
     /// The default: the global system, fixed in space.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            visible: true,
             id: Id::new(),
             name: name.into(),
             kind: CoordinateSystemKind::Rectangular,

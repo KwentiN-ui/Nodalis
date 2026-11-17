@@ -1047,6 +1047,7 @@ impl ResultsView {
         for values in &pending {
             values.prefetch();
         }
+        self.read_ahead();
         let peaks = match &self.animation {
             Some(animation)
                 if animation.kind.plays_increments()
@@ -1058,6 +1059,40 @@ impl ResultsView {
             _ => false,
         };
         !pending.is_empty() || peaks
+    }
+
+    /// Has the shown field and the deformation of the increments shown next read in the
+    /// background ([`plx_results::values::read_ahead`]), so that stepping or playing through
+    /// the increments finds them at hand: those the animation plays next, or else the
+    /// increments after the shown one and a few before it. As many as take a quarter of the
+    /// memory for results read, at most [`READ_AHEAD`].
+    fn read_ahead(&self) {
+        let Some(shown) = self.current().map(|(field, _)| field.name.clone()) else {
+            return;
+        };
+        let Some(current) = self.current_increment() else {
+            return;
+        };
+        let per_increment = field_bytes(current, &shown).max(1);
+        let count = (plx_results::values::budget() / 4 / per_increment).min(READ_AHEAD);
+        let order: Vec<usize> = match &self.animation {
+            Some(animation) if animation.kind.plays_increments() => animation.upcoming(count),
+            _ => {
+                let back = count / 4;
+                let after = (self.increment + 1..self.increments.len()).take(count - back);
+                let before = (0..self.increment).rev().take(back);
+                after.chain(before).collect()
+            }
+        };
+        let values: Vec<plx_results::Values> = (order.iter())
+            .filter_map(|&i| self.increments.get(i))
+            .flat_map(|increment| {
+                (increment.field(&shown).into_iter())
+                    .chain(increment.deformation_field())
+                    .filter_map(|field| Some(field.components.first()?.values.clone()))
+            })
+            .collect();
+        plx_results::values::read_ahead(&values);
     }
 
     fn peaks_missing(&self, increments: &[usize]) -> bool {
@@ -2135,6 +2170,18 @@ pub fn convert_history(sets: &mut [HistorySet], units: UnitSystem) {
 
 /// The measure of the largest displacement: the root of the summed squares of the
 /// largest absolute value of every `DISP` component, including `ALL`.
+/// Most increments [`ResultsView::read_ahead`] reads ahead.
+const READ_AHEAD: usize = 64;
+
+/// Bytes of the field `shown` and the deformation of an increment, all their components.
+fn field_bytes(increment: &Increment, shown: &str) -> usize {
+    (increment.field(shown).into_iter())
+        .chain(increment.deformation_field())
+        .flat_map(|field| &field.components)
+        .map(|component| component.values.len() * 4)
+        .sum()
+}
+
 fn max_deformation(increment: &Increment) -> Option<f32> {
     // A mode of the built-in solver is normalized to a largest displacement of 1 (over a
     // turn, for a complex mode).

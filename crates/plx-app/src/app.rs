@@ -166,8 +166,8 @@ struct Workbench {
     highlight_changed: Option<BTreeSet<usize>>,
     /// Only the animation frame changed; frames already built are reused.
     frame_changed: bool,
-    /// Scene of each animation frame shown so far, cleared when anything else changes.
-    frame_cache: std::collections::HashMap<usize, Vec<RenderMesh>>,
+    /// Scene of the animation frames shown so far, cleared when anything else changes.
+    frame_cache: FrameCache,
     /// Open dialog creating or editing an item of the FE model.
     editor: Option<Editor>,
     /// The step new boundary conditions, loads, outputs and defined fields go into, by name;
@@ -887,6 +887,16 @@ impl AnalysisWindow {
         if self.loading.is_some() {
             return;
         }
+        // A results file on the command line is not read as a mesh (a binary results file
+        // would be read whole to fail); like a dropped one, it is not opened on its own.
+        let (results, paths): (Vec<PathBuf>, Vec<PathBuf>) =
+            paths.into_iter().partition(|p| is_results_file(p));
+        if !results.is_empty() {
+            self.workbench.output.push(RESULTS_NOT_ALONE.into());
+        }
+        if paths.is_empty() {
+            return;
+        }
         let sender = self.load_events.0.clone();
         let ctx = ctx.clone();
         let units = self.workbench.import_units();
@@ -1148,6 +1158,50 @@ pub fn export_calculix_results(
     }
     Ok(())
 }
+
+/// The scenes of the animation frames shown so far, so that a looping animation does not
+/// build them again: as many as fit into a quarter of the memory for result fields
+/// ([`plx_results::values::budget`]); the frames beyond are built each time they are shown.
+#[derive(Default)]
+struct FrameCache {
+    frames: std::collections::HashMap<usize, Vec<RenderMesh>>,
+    bytes: usize,
+    /// The scene of the last frame that did not fit.
+    uncached: Vec<RenderMesh>,
+}
+
+impl FrameCache {
+    fn clear(&mut self) {
+        self.frames.clear();
+        self.bytes = 0;
+        self.uncached.clear();
+    }
+
+    /// The scene of `frame`, built by `build` unless it is kept; kept if the frames take no
+    /// more than `limit` bytes with it.
+    fn get(
+        &mut self,
+        frame: usize,
+        limit: usize,
+        build: impl FnOnce() -> Vec<RenderMesh>,
+    ) -> &Vec<RenderMesh> {
+        if self.frames.contains_key(&frame) {
+            return &self.frames[&frame];
+        }
+        let meshes = build();
+        let bytes: usize = meshes.iter().map(RenderMesh::bytes).sum();
+        if self.bytes + bytes <= limit {
+            self.bytes += bytes;
+            return self.frames.entry(frame).or_insert(meshes);
+        }
+        self.uncached = meshes;
+        &self.uncached
+    }
+}
+
+/// Why a results file given to an analysis is not opened.
+const RESULTS_NOT_ALONE: &str = "Results files are not opened on their own: the Results tab \
+     shows the results of the analysis (Solve).";
 
 /// Whether a file is a results file: CalculiX's (`.frd`) or the built-in solver's (`.ndlr`).
 pub fn is_results_file(path: &std::path::Path) -> bool {
@@ -1640,11 +1694,7 @@ impl AnalysisWindow {
         let (results, dropped): (Vec<PathBuf>, Vec<PathBuf>) =
             dropped.into_iter().partition(|p| is_results_file(p));
         if !results.is_empty() {
-            self.workbench.output.push(
-                "Results files are not opened on their own: the Results tab shows the \
-                 results of the analysis (Solve)."
-                    .into(),
-            );
+            self.workbench.output.push(RESULTS_NOT_ALONE.into());
         }
         if !dropped.is_empty() {
             self.import_paths(dropped, &ctx);
@@ -2764,9 +2814,18 @@ impl Workbench {
                 }
             }
         }
-        if let Some(model) = self.model.as_mut() {
+        // Features are hidden in the results too; the FE model shares them and follows.
+        let symbols_of = match view {
+            TreeView::Results => self.results.get_mut(self.current_result),
+            _ => self.model.as_mut(),
+        };
+        if let Some(model) = symbols_of.filter(|_| !response.symbol_visibility.is_empty()) {
+            let before = model.fe.shared_features();
             for (item, visible) in &response.symbol_visibility {
                 crate::setup::set_visible(&mut model.fe, item, *visible);
+            }
+            if view == TreeView::Results {
+                self.share_feature_edit(self.current_result, &before);
             }
         }
         if let (Some(item), Some(model)) = (response.swap_master_slave, self.model.as_mut()) {
@@ -7293,6 +7352,7 @@ impl Workbench {
         }
         new.solver.apply_gpu();
         crate::results::set_significant_digits(new.post.digits);
+        plx_results::values::set_budget(new.post.results_memory_bytes());
         if new.graphics.theme != self.settings.graphics.theme {
             crate::style::set_theme(ctx, new.graphics.theme);
         }
@@ -7526,7 +7586,12 @@ impl Workbench {
             return;
         };
         if animation.playing {
-            let dt = ctx.input(|i| i.stable_dt).min(0.1);
+            // While the shown frame waits for its values, the playback waits with it: every
+            // frame is shown, the playback slows down where the reading cannot keep up.
+            let dt = match self.results_reading {
+                true => 0.0,
+                false => ctx.input(|i| i.stable_dt).min(0.1),
+            };
             if animation.tick(dt) {
                 view.show_animation_frame();
                 self.frame_changed = true;
@@ -7779,10 +7844,10 @@ impl Workbench {
         }
         let fresh;
         let meshes: &Vec<RenderMesh> = match frame {
-            Some(frame) => self
-                .frame_cache
-                .entry(frame)
-                .or_insert_with(|| model.scene_meshes()),
+            Some(frame) => {
+                let limit = plx_results::values::budget() / 4;
+                self.frame_cache.get(frame, limit, || model.scene_meshes())
+            }
             None => {
                 fresh = model.scene_meshes();
                 &fresh
@@ -8409,6 +8474,29 @@ fn keep_up_to_date(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn animation_frames_are_kept_while_they_fit() {
+        let mesh = |n: usize| {
+            vec![RenderMesh {
+                triangles: Vec::with_capacity(n),
+                ..Default::default()
+            }]
+        };
+        let mut cache = FrameCache::default();
+        let mut builds = 0;
+        for frame in [0, 1, 2, 0, 1, 2] {
+            cache.get(frame, 2000, || {
+                builds += 1;
+                mesh(250)
+            });
+        }
+        // 1000 bytes a frame: two are kept, the third is built each time it is shown.
+        assert_eq!(builds, 4);
+        assert_eq!(cache.bytes, 2000);
+        cache.clear();
+        assert!(cache.frames.is_empty() && cache.bytes == 0);
+    }
 
     #[test]
     fn bound_results_keep_the_workspace_the_project_window_asked_for() {
