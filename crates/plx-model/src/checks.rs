@@ -1733,7 +1733,7 @@ impl FeModel {
             // Contact regions are checked as the ties and contact pairs they become; what is
             // found on those belongs to the region, or to the compound part whose bodies a
             // tie ties.
-            let (lowered, origin) = self.lower_contacts(mesh);
+            let (lowered, origin, resolved) = self.lower_contacts_resolved(mesh);
             let mut findings = lowered.check_explicit(mesh, mesh_check);
             for finding in &mut findings {
                 if let Some(region) = origin.region_of(finding.item) {
@@ -1742,7 +1742,7 @@ impl FeModel {
                     finding.item = ModelItem::Part(part);
                 }
             }
-            self.check_contact_regions(mesh, &lowered, &mut findings);
+            self.check_contact_regions(mesh, &lowered, &resolved, &mut findings);
             findings
         };
         // The input file holds these parts with weak springs.
@@ -1828,8 +1828,14 @@ impl FeModel {
 
     /// Contact regions whose sides do not touch, contact pairs whose formulation differs
     /// from that of the others, and the mortar formulation where the solver does not take it.
-    fn check_contact_regions(&self, mesh: &FeMesh, lowered: &FeModel, findings: &mut Vec<Finding>) {
-        for (i, check) in self.check_contacts(mesh).into_iter().enumerate() {
+    fn check_contact_regions(
+        &self,
+        mesh: &FeMesh,
+        lowered: &FeModel,
+        resolved: &crate::ResolvedContacts,
+        findings: &mut Vec<Finding>,
+    ) {
+        for (i, check) in self.checks_of(mesh, resolved).into_iter().enumerate() {
             let region = &self.contact_regions[i];
             let Some(check) = check.filter(|_| region.active) else {
                 continue;
@@ -1862,7 +1868,6 @@ impl FeModel {
                 ));
             }
         }
-        let resolved = self.resolve_contacts(mesh);
         for (i, (region, item)) in self.contact_regions.iter().zip(&resolved.items).enumerate() {
             if !region.switched(&self.steps) {
                 continue;
