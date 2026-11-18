@@ -781,11 +781,16 @@ and the field in the dialog is read-only while the link is there. Renaming the i
 parameter. The numbers that can be exposed are those of loads, boundary conditions, defined
 fields and initial conditions, of materials and sections, the duration and the number of frames
 of static, heat transfer, visco and Dynamic steps, the number of modes of a frequency step and
-the numbers of the transforms under #ui("Mesh Operations") (@mesh-tools). A Materials block (@materials-block)
+the numbers of the transforms under #ui("Mesh Operations") (@mesh-tools) and those of the mesh
+setup (@mesh-setup): the sizes, the elements per curvature radius and the options of the default
+meshing parameters and of Meshing Parameters items, the size and depth of Local Mesh Size items.
+An option is a number too, 1 for on and 0 for off. A Materials block (@materials-block)
 exposes the numbers of its own materials in the same way, a Cross-Sections block
 (@cross-sections-block) the dimensions of its cross-sections.
 
-Exposing a number does not change the analysis: only a new value makes it out of date.
+Exposing a number does not change the analysis: only a new value makes it out of date. A new
+number of the mesh setup makes the parts it meshes out of date: #ui("Update Project") meshes
+them anew before it solves.
 
 === Measure <measure-block>
 

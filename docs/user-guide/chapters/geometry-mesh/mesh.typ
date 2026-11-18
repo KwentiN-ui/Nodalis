@@ -109,7 +109,8 @@ values and meshes at once.
   [Min. element size], [Smallest element edge length.],
   [Elements per curvature radius], [Refines the mesh on curved faces: about this many elements
     per radius (default 2). 0 switches curvature refinement off.],
-  [Second order], [Quadratic elements with midside nodes (default on).],
+  [Second order], [Quadratic elements with midside nodes, such as C3D10, S6/S8 and CPS6/CPS8
+    (default on).],
   [Midside nodes on geometry], [Places midside nodes on the curved geometry instead of on the
     straight edge between the corner nodes (only with second order).],
   [Optimize mesh (Netgen)], [Improves the element quality after meshing (default on).],
@@ -193,6 +194,13 @@ triangles are then joined to quadrilaterals, which is faster and less regular.
 
 #screenshot("local-mesh-size-surface-angle.png", [A Local Mesh Size on the three faces of a
   split cylinder, picked with one click in the #ui("Surface angle") mode])
+
+Each number of the default parameters, of a Meshing Parameters item and of a Local Mesh Size
+has a #ui("P") button: it exposes the number to the project window, where a parameter study
+can vary it for a mesh study (@exposed-parameters).
+
+#screenshot("mesh-parameters-expose.png", [The #ui("P") buttons of a Meshing Parameters item:
+  the max. element size is exposed and given by a parameter study])
 
 #ui("OK") stores the item. #ui("OK & Remesh") stores it and meshes again the parts it names.
 A Local Mesh Size item is picked on faces and edges: #ui("OK & Remesh") meshes again only the parts that hold them,

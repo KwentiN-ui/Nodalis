@@ -137,3 +137,12 @@ over #ui("Elements") is the convergence curve. When the output hardly
 changes from one point to the next, the mesh is fine enough. When it grows with every
 refinement, it is a singularity: a stress at a sharp corner or under a point load grows without
 end as the mesh gets finer. Measure a displacement there, or a region away from it.
+
+An analysis that meshes its own geometry can vary its mesh setup directly: expose the
+#ui("Max. element size") of the default meshing parameters or of a Meshing Parameters item, or
+the size of a Local Mesh Size (@exposed-parameters), and link it to the Inputs. Each point
+meshes the parts anew with its size before it solves; an option such as #ui("Second order")
+compares linear and quadratic elements with the points 0 and 1.
+
+#screenshot("mesh-study.png", [A mesh study over the exposed max. element size of a Meshing
+  Parameters item: the Elements column grows as the size shrinks])

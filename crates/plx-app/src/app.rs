@@ -770,8 +770,8 @@ impl AnalysisWindow {
     }
 
     /// Sets the number at `path` of the FE model, for the project window to set an exposed
-    /// parameter; a number of a mesh operation moves the mesh along. Returns whether it
-    /// changed.
+    /// parameter; a number of a mesh operation moves the mesh along, one of the mesh setup
+    /// is of the geometry. Returns whether it changed.
     pub fn set_value(&mut self, path: &plx_model::ValuePath, value: f64) -> bool {
         let workbench = &mut self.workbench;
         let Some(model) = workbench.model.as_mut() else {
@@ -785,6 +785,10 @@ impl AnalysisWindow {
                 let mut changed = false;
                 model.edit_mesh(|mesh, fe| changed = fe.set_value_meshed(mesh, path, value));
                 changed
+            }
+            // A number of the mesh setup: the parts it meshes are out of date.
+            plx_model::ItemRef::MeshSetup(_) | plx_model::ItemRef::DefaultMeshing => {
+                (model.geometry.as_mut()).is_some_and(|g| g.set_value(path, value))
             }
             _ => model.fe.set_value(path, value),
         };
@@ -3746,20 +3750,25 @@ impl Workbench {
     }
 
     fn mesh_setup_window(&mut self, ctx: &egui::Context) {
-        let Some(window) = &mut self.mesh_setup else {
+        let (Some(window), Some(model)) = (&mut self.mesh_setup, &mut self.model) else {
             return;
         };
-        let (setup, mesh) = match window.show(ctx) {
+        window.set_linked(crate::links::linked_parameters(&self.incoming.paths));
+        let (setup, mesh) = match window.show(ctx, &model.fe) {
             MeshSetupResult::Open => return,
             MeshSetupResult::Cancel => (None, false),
             MeshSetupResult::Ok(setup) => (Some(setup), false),
             MeshSetupResult::Mesh(setup) => (Some(setup), true),
         };
+        let expose = window.take_expose();
         self.mesh_setup = None;
-        if let (Some(setup), Some(geometry)) =
-            (setup, self.model.as_mut().and_then(|m| m.geometry.as_mut()))
-        {
+        if let (Some(setup), Some(geometry)) = (setup, model.geometry.as_mut()) {
             geometry.meshing = setup;
+            // The numbers clicked to be exposed become parameters of the analysis.
+            if let Some(scope) = expose {
+                let item = plx_model::ItemRef::DefaultMeshing;
+                scope.apply(&mut model.fe, model.geometry.as_ref(), &item);
+            }
         }
         if mesh {
             self.generate_mesh(ctx, None);
@@ -3768,15 +3777,17 @@ impl Workbench {
 
     /// The dialog of a mesh setup item; OK stores the item in the geometry.
     fn mesh_item_window(&mut self, ctx: &egui::Context) {
-        let (Some(editor), Some(geometry)) = (
-            &mut self.mesh_item_editor,
-            self.model.as_mut().and_then(|m| m.geometry.as_mut()),
-        ) else {
+        let (Some(editor), Some(model)) = (&mut self.mesh_item_editor, self.model.as_mut()) else {
             self.mesh_item_editor = None;
             return;
         };
+        let (fe, Some(geometry)) = (&mut model.fe, model.geometry.as_mut()) else {
+            self.mesh_item_editor = None;
+            return;
+        };
+        editor.set_linked(crate::links::linked_parameters(&self.incoming.paths));
         let mut remesh = None;
-        match editor.show(ctx, geometry, self.geometry.as_ref()) {
+        match editor.show(ctx, fe, geometry, self.geometry.as_ref()) {
             MeshItemResult::Open => return,
             MeshItemResult::Cancel => {}
             result @ (MeshItemResult::Ok(..) | MeshItemResult::OkRemesh(..)) => {
@@ -3805,6 +3816,7 @@ impl Workbench {
                         _ => item.kind.parts().map(<[String]>::to_vec),
                     });
                 }
+                let exposed = (editor.take_expose()).map(|s| (s, item.name.clone()));
                 let index = match index.filter(|&i| i < geometry.mesh_items.len()) {
                     Some(index) => {
                         geometry.mesh_items[index] = item;
@@ -3815,6 +3827,11 @@ impl Workbench {
                         geometry.mesh_items.len() - 1
                     }
                 };
+                // The numbers clicked to be exposed become parameters of the analysis, and
+                // those exposed follow the item under its new name.
+                if let Some((scope, name)) = exposed {
+                    scope.apply(fe, Some(geometry), &plx_model::ItemRef::MeshSetup(name));
+                }
                 self.tree.selected = Some((TreeView::Geometry, TreeItem::MeshItem(index)));
                 // The parts a local mesh size does not touch stay up to date.
                 if let (Some(before), Some(affected), Some(model)) =

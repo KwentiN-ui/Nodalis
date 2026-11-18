@@ -98,8 +98,13 @@ pub const MESH_OPERATIONS: &str = "Mesh Operations";
 /// The group of the exposed parameters in the FE Model tree.
 pub const EXPOSED: &str = "Exposed Parameters";
 
-/// The tree item of an item of the model a value path names.
-pub fn item_of(fe: &FeModel, item: &plx_model::ItemRef) -> Option<TreeItem> {
+/// The tree item of an item of the model a value path names; an item of the mesh setup is
+/// one of `geometry`. The default meshing parameters have none.
+pub fn item_of(
+    fe: &FeModel,
+    geometry: Option<&plx_model::Geometry>,
+    item: &plx_model::ItemRef,
+) -> Option<TreeItem> {
     use plx_model::ItemRef;
     let step = |name: &str| fe.steps.iter().position(|s| s.name == name);
     Some(match item {
@@ -136,6 +141,10 @@ pub fn item_of(fe: &FeModel, item: &plx_model::ItemRef) -> Option<TreeItem> {
         ItemRef::Distribution(name) => {
             TreeItem::Distribution((fe.distributions.iter()).position(|d| &d.name == name)?)
         }
+        ItemRef::MeshSetup(name) => {
+            TreeItem::MeshItem((geometry?.mesh_items.iter()).position(|i| &i.name == name)?)
+        }
+        ItemRef::DefaultMeshing => return None,
     })
 }
 
@@ -2348,6 +2357,10 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
         }
     }
     let fe = model.as_ref().map(|m| m.fe.clone()).unwrap_or_default();
+    // The mesh setup, for its exposed parameters.
+    let meshing = (model.as_ref())
+        .filter(|_| fe.exposed.iter().any(|e| e.path.item.is_meshing()))
+        .and_then(|m| m.geometry.as_ref().map(plx_model::Geometry::setup_only));
     tree.branch(ui, TreeItem::Model, "Model", true, |tree, ui| {
         tree.mesh(ui, model);
         tree.features(ui, &fe);
@@ -2476,7 +2489,12 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
         // The numbers exposed as parameters, each under the item it belongs to, which a
         // double-click opens.
         let exposed: Vec<(TreeItem, &str)> = (fe.exposed.iter())
-            .filter_map(|e| Some((item_of(&fe, &e.path.item)?, e.name.as_str())))
+            .filter_map(|e| {
+                Some((
+                    item_of(&fe, meshing.as_ref(), &e.path.item)?,
+                    e.name.as_str(),
+                ))
+            })
             .collect();
         if !exposed.is_empty() {
             tree.container(ui, EXPOSED, exposed);

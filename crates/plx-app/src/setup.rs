@@ -4766,7 +4766,7 @@ impl Editor {
         let exposed = (self.expose.take()).zip(self.draft_item(fe).map(|(item, _)| item));
         self.apply_draft(fe);
         if let Some((scope, item)) = exposed {
-            scope.apply(fe, &item);
+            scope.apply(fe, None, &item);
         }
     }
 
