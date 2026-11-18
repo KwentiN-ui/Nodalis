@@ -244,7 +244,8 @@ gmsh_api! {
     mesh_get_element_qualities = "gmshModelMeshGetElementQualities": fn(
         *const usize, usize,
         *mut *mut c_double, *mut usize,
-        *const c_char, c_int, c_int,
+        // task and numTasks are size_t: as int, Windows passes them with garbage upper halves.
+        *const c_char, usize, usize,
         Ierr,
     );
     mesh_import_stl = "gmshModelMeshImportStl": fn(Ierr);
