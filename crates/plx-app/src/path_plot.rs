@@ -85,7 +85,7 @@ pub struct PathPlot {
     pub kind: PlotKind,
     pub placement: Placement,
     /// Read-out points of the path as last located.
-    located: Option<(ResultPath, Result<Vec<PathPoint>, String>)>,
+    located: Option<LocatedPath>,
     /// Paths of the hot spot as last located.
     hot_spot: crate::hot_spots::Located,
     /// The curves of a table's plot.
@@ -282,24 +282,26 @@ impl PathPlot {
     pub fn plot_box(&mut self, index: usize, model: &Model, path: &ResultPath) -> Option<PlotBox> {
         let view = model.results.as_ref()?;
         let (field, component) = view.current()?;
-        if self.located.as_ref().is_none_or(|(p, _)| p != path) {
-            let points = path
-                .samples(&model.fe)
-                .map(|samples| path::path_points(model.mesh(), &samples));
-            self.located = Some((path.clone(), points));
+        let moving = particle_increment(model);
+        if (self.located.as_ref()).is_none_or(|(p, at, _)| p != path || *at != moving) {
+            self.located = Some((path.clone(), moving, locate_path(model, path)));
         }
-        let points = self.located.as_ref()?.1.as_ref().ok()?;
+        let points = self.located.as_ref()?.2.as_ref().ok()?;
         let values = path::interpolate(points, &component.values.get());
         if !values.iter().any(|v| v.is_finite()) {
             return None;
         }
         let (mut ends, _) = crate::features::path_line(model, path)?;
         // Where the shown mesh is deformed the path is drawn on it, as the 3D view draws it.
+        // Particles are read where they are: the path is drawn straight through them.
         let track = track(
             model,
-            points
-                .iter()
-                .map(|p| (p.weights.as_deref(), Some(p.position))),
+            (points.iter()).map(|p| {
+                (
+                    p.weights.as_deref().filter(|_| moving.is_none()),
+                    Some(p.position),
+                )
+            }),
         );
         if let [first, .., last] = track[..] {
             ends = [first, last];
@@ -323,6 +325,36 @@ impl PathPlot {
         })
     }
 }
+
+/// The shown increment, by step and number, when the results are those of particles,
+/// whose path is located anew in every increment: the particles move through space and the
+/// path reads the material that is on it at the time.
+pub fn particle_increment(model: &Model) -> Option<(u32, u32)> {
+    let increment = model.results.as_ref()?.current_increment()?;
+    (increment.field(plx_results::particles::FIELD).is_some())
+        .then_some((increment.step, increment.increment))
+}
+
+/// The read-out points of `path` in the shown results: in the undeformed mesh, or in the
+/// particles where they are in the shown increment.
+pub fn locate_path(model: &Model, path: &ResultPath) -> Result<Vec<PathPoint>, String> {
+    let samples = path.samples(&model.fe)?;
+    let moved = (model.results.as_ref())
+        .and_then(|view| view.current_increment())
+        .and_then(|increment| path::particle_positions(model.mesh(), increment));
+    Ok(match moved {
+        Some(positions) => path::particle_path_points(model.mesh(), &positions, &samples),
+        None => path::path_points(model.mesh(), &samples),
+    })
+}
+
+/// A path as last located: its definition, the increment of particle results it was
+/// located in ([`particle_increment`]) and its read-out points or why there are none.
+type LocatedPath = (
+    ResultPath,
+    Option<(u32, u32)>,
+    Result<Vec<PathPoint>, String>,
+);
 
 /// Points of a path in render coordinates, where the shown mesh has them: interpolated
 /// between the drawn, deformed nodes, or at their position where they lie outside the mesh.

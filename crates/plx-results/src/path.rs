@@ -28,7 +28,74 @@ const OFF_PLANE: f64 = 1e-3;
 
 /// Locates the read-out points `(distance, position)` in the elements of the mesh.
 pub fn path_points(mesh: &FeMesh, samples: &[(f64, [f64; 3])]) -> Vec<PathPoint> {
-    let coords = mesh.coords();
+    locate(mesh, mesh.coords(), samples)
+}
+
+/// The nodes of particle results where `increment` has them: the particles of a Particle
+/// Flow step move through space, and the path reads the material that is on it at the
+/// time, not the one that started there. `None` for results of a mesh, whose path reads
+/// the undeformed mesh. Nodes of particles not there at the time are NaN.
+pub fn particle_positions(mesh: &FeMesh, increment: &crate::Increment) -> Option<Vec<[f64; 3]>> {
+    increment.field(crate::particles::FIELD)?;
+    let disp = increment.field("DISP")?;
+    let axes = ["U1", "U2", "U3"].map(|name| disp.component(name).map(|c| c.values.get()));
+    Some(
+        (mesh.coords().iter().enumerate())
+            .map(|(n, p)| {
+                std::array::from_fn(|a| {
+                    let d = axes[a]
+                        .as_ref()
+                        .map_or(0.0, |v| v.get(n).map_or(f32::NAN, |&d| d));
+                    p[a] + f64::from(d)
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Locates the read-out points in the particles of particle results, at the nodes'
+/// `positions` ([`particle_positions`]). A point between particles, which part as the
+/// material flows, reads the nearest particle within the size of a particle.
+pub fn particle_path_points(
+    mesh: &FeMesh,
+    positions: &[[f64; 3]],
+    samples: &[(f64, [f64; 3])],
+) -> Vec<PathPoint> {
+    let mut points = locate(mesh, positions, samples);
+    // The particles: their nodes, centre and size.
+    let particles: Vec<(Vec<usize>, [f64; 3], f64)> = (mesh.elements().iter())
+        .filter(|e| matches!(e.shape, ElementShape::Quad4 | ElementShape::Hex8))
+        .filter_map(|e| {
+            let nodes: Vec<usize> = (e.nodes.iter())
+                .map(|&id| mesh.node_index(id))
+                .collect::<Option<_>>()?;
+            // A particle not there at the time has no place.
+            if !(nodes.iter()).all(|&n| positions[n].iter().all(|x| x.is_finite())) {
+                return None;
+            }
+            let (low, high) = bounds(positions, &nodes);
+            let centre = std::array::from_fn(|k| 0.5 * (low[k] + high[k]));
+            let size = (0..3).map(|k| high[k] - low[k]).fold(0.0, f64::max);
+            Some((nodes, centre, size))
+        })
+        .collect();
+    for point in points.iter_mut().filter(|p| p.weights.is_none()) {
+        let nearest = (particles.iter())
+            .map(|(nodes, centre, size)| {
+                let d = sub(point.position, *centre);
+                (dot(d, d).sqrt(), size, nodes)
+            })
+            .filter(|(distance, size, _)| distance <= *size)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, _, nodes)) = nearest {
+            let w = 1.0 / nodes.len() as f64;
+            point.weights = Some(nodes.iter().map(|&n| (n, w)).collect());
+        }
+    }
+    points
+}
+
+fn locate(mesh: &FeMesh, coords: &[[f64; 3]], samples: &[(f64, [f64; 3])]) -> Vec<PathPoint> {
     let mut points: Vec<PathPoint> = samples
         .iter()
         .map(|&(distance, position)| PathPoint {
@@ -63,6 +130,10 @@ pub fn path_points(mesh: &FeMesh, samples: &[(f64, [f64; 3])]) -> Vec<PathPoint>
         let Some(nodes) = nodes.iter().copied().collect::<Option<Vec<usize>>>() else {
             continue;
         };
+        // Particles not there at the time have no place.
+        if !(nodes.iter()).all(|&n| coords[n].iter().all(|x| x.is_finite())) {
+            continue;
+        }
         let (low, high) = bounds(coords, &nodes);
         let size = (0..3).map(|k| high[k] - low[k]).fold(0.0, f64::max);
         let margin = size * OFF_PLANE;
@@ -337,6 +408,63 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// `n` unit cubes along x with nodes of their own, as particles are written.
+    fn loose(n: u32) -> FeMesh {
+        let mut mesh = FeMesh::default();
+        for i in 0..n {
+            let first = i * 8 + 1;
+            for (k, [x, y, z]) in [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                mesh.set_node(first + k as u32, [i as f64 + x, y, z]);
+            }
+            mesh.add_element(Element {
+                id: i + 1,
+                type_name: "C3D8".into(),
+                shape: ElementShape::Hex8,
+                nodes: (first..first + 8).collect(),
+            })
+            .unwrap();
+        }
+        mesh
+    }
+
+    /// Particles are read where they are: the path through where the first of three has
+    /// gone reads it there, a point near the second but outside it reads it, and where the
+    /// third was before it left nothing is read.
+    #[test]
+    fn particles_are_read_where_they_are() {
+        let mesh = loose(3);
+        let mut positions = mesh.coords().to_vec();
+        for (n, p) in positions.iter_mut().enumerate() {
+            match n / 8 {
+                0 => p[1] += 2.0,
+                2 => *p = [f64::NAN; 3],
+                _ => {}
+            }
+        }
+        let read = |from, to| particle_path_points(&mesh, &positions, &line(from, to, 2));
+        let up = read([0.5, 2.5, 0.5], [0.6, 2.5, 0.5]);
+        assert!(up.iter().all(|p| p.weights.as_ref().unwrap()[0].0 < 8));
+        let near = read([1.5, 1.3, 0.5], [1.5, 1.4, 0.5]);
+        assert!(
+            near.iter()
+                .all(|p| p.weights.as_ref().unwrap()[0].0 / 8 == 1)
+        );
+        let gone = read([2.6, 0.5, 0.5], [2.9, 0.5, 0.5]);
+        assert!(gone.iter().all(|p| p.weights.is_none()));
     }
 
     #[test]
