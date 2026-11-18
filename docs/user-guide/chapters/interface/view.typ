@@ -19,7 +19,9 @@
   [Left click on a part], [Select the part in the tree; #key("Ctrl") toggles, #key("Shift")
     adds. In the FE Model workspace the tree marks what acts on the part (@acting).
     A click into empty space clears the selection.],
-  [Left drag], [Box selection, only while a dialog is picking (@selection)],
+  [Left drag], [Box selection: while a dialog is picking, of its region (@selection), else of
+    the visible parts inside the box in the tree, dragged to the left also those it crosses;
+    #key("Shift") adds them, #key("Ctrl") removes them],
   [Right click], [Context menu: the menu of the part under the cursor followed by the view
     commands],
 )

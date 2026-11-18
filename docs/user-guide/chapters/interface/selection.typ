@@ -105,6 +105,17 @@ again.
   clears the selection.
 - Dragging with the left button draws a box. Dragged from left to right (blue) it takes what lies
   completely inside; dragged from right to left (green) it also takes what crosses the box.
+  In the geometry based modes the box takes whole entities, as a click would: CAD faces,
+  edges and corner points, or on a mesh without geometry the smooth patches and the edges of
+  the outline from corner to corner. For a region of nodes it names the faces inside, then
+  the edges that bound none of them, then the corners on none of those. #ui("Part") takes the
+  parts inside the box. The mesh based modes take the element faces or nodes inside it.
+  On the Geometry tab a box works in the same way for mesh setup items and in the editor of a
+  CAD Operation block (@cad-operation-block); with no dialog open it selects the parts inside
+  it in the tree.
+
+#screenshot("box-select-geometry.png", [A box dragged from right to left over the end of a
+  plate on the Geometry tab, for a Local Mesh Size: it takes the faces it crosses as a whole])
 - When the mouse rests for a moment, what a click would select is previewed in orange.
 
 Selected regions are drawn red. Line parts such as beams, trusses and CAD edges have no faces

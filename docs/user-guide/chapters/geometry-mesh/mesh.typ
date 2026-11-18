@@ -159,7 +159,8 @@ triangles are then joined to quadrilaterals, which is faster and less regular.
   the clicked edge and the edges that continue it, also in touching parts, #ui("Surface angle")
   the clicked face and the neighbouring faces that meet it at less than the angle, such as the
   pieces of a split cylinder, on into the visible parts that touch it along an edge. A box
-  takes the faces inside it. The default size is a quarter of the maximum element size. #ui("Depth") keeps
+  takes the whole faces inside it, with the edges inside it that bound none of them; in
+  #ui("Edge angle") only edges, in #ui("Part") the parts inside it. The default size is a quarter of the maximum element size. #ui("Depth") keeps
   the size inside the solid up to that distance below the selected faces (and around the
   selected edges), so that a layer of that thickness gets elements of the size, such as the
   walls of an infill section (@infill-section); beyond it the elements grow to the size of the

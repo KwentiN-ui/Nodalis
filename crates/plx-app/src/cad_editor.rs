@@ -625,6 +625,17 @@ impl CadOperationEditor {
                         kind.label().to_lowercase()
                     ),
                 };
+                let boxes = self.picking()
+                    && self.kind != CadOperationKind::SplitPlane
+                    && !(self.kind == CadOperationKind::Defeature && self.finding());
+                let hint = if boxes {
+                    format!(
+                        "{hint} A box adds all inside it (dragged to the left also those it \
+                         crosses), with Ctrl it removes them."
+                    )
+                } else {
+                    hint
+                };
                 if self.input.suppressed.is_empty() {
                     ui.weak(hint);
                 } else {
