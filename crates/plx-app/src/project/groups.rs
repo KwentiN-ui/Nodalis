@@ -224,6 +224,11 @@ trait Tree {
     /// fits; that of the pin a socket was made from for a pin of a socket.
     fn pin_kind(&self, pin: &GroupPin) -> Vec<String>;
 
+    /// The row of a Preview block a wire from `from` ends at: the one for what comes
+    /// through the wire, as for a wire between two blocks, see [`visualize::preview_slot`].
+    /// Any other pin stays as it is.
+    fn preview_pin(&self, from: &GroupPin, to: GroupPin) -> GroupPin;
+
     /// The wires shown with the group `level` open, or outside all groups, with how each
     /// is kept.
     fn level_wires(&self, links: &[Link], level: Option<u64>) -> Vec<Wire>;
@@ -508,6 +513,20 @@ impl Tree for Vec<Node> {
                 .find(|n| n.id == pin.node)
                 .map_or_else(|| last.clone(), |n| n.name.clone()),
             [.., last] => last.clone(),
+        }
+    }
+
+    fn preview_pin(&self, from: &GroupPin, to: GroupPin) -> GroupPin {
+        if !self.is_real(&to) {
+            return to;
+        }
+        let given = (self.resolve_source(from, 0)).map_or_else(|| self.pin_kind(from), |s| s.path);
+        match visualize::preview_slot(self, to.node, &given) {
+            Some(path) => GroupPin {
+                node: to.node,
+                path,
+            },
+            None => to,
         }
     }
 
@@ -1011,6 +1030,7 @@ impl ProjectApp {
             // A new socket takes the type of the other end.
             return None;
         }
+        let to = self.nodes.preview_pin(&from, to);
         let source = self.nodes.resolve_source(&from, 0);
         let targets = self.nodes.resolve_targets(&to, 0);
         if let Some(source) = &source
@@ -1069,10 +1089,17 @@ impl ProjectApp {
             };
             to = socket_pin(to.node, socket);
         }
+        let to = self.nodes.preview_pin(&from, to);
         if let Some(why) = self.group_refusal((from.node, &from.path), (to.node, &to.path)) {
             self.output.push(format!("Not linked: {why}"));
             self.nodes.tidy_sockets();
             return;
+        }
+        // A Preview block shows one thing: what it showed goes, whichever row it went to.
+        if self.nodes.kind_of(to.node) == Some(Kind::Preview) {
+            let preview = to.node;
+            self.nodes.forget_pins(|p| p.node == preview);
+            self.unlink(|l| l.target == preview);
         }
         // A pin of a single value takes one wire, the new one.
         let assembly =
@@ -1931,6 +1958,35 @@ mod tests {
         nodes.tidy_sockets();
         assert!(nodes.group(10).unwrap().inputs.is_empty());
         assert_eq!(nodes.group(10).unwrap().outputs.len(), 1);
+    }
+
+    #[test]
+    fn a_group_output_goes_to_the_value_row_of_a_preview() {
+        let (mut nodes, links) = chain();
+        make_group(&mut nodes, &links, None, &[2], 10);
+        let preview = Node::new(4, "Preview".into(), Block::Preview(Box::default()));
+        nodes.push(preview);
+        let o = nodes.group(10).unwrap().outputs[0].id;
+        // Outside the group, and inside from the block the socket takes from.
+        let input = pin(4, &[visualize::PREVIEW_INPUT]);
+        let value = pin(4, &["Parameters", visualize::PREVIEW_VALUE]);
+        assert_eq!(nodes.preview_pin(&socket_pin(10, o), input.clone()), value);
+        assert_eq!(
+            nodes.preview_pin(&pin(2, &["Value", "Result"]), input.clone()),
+            value
+        );
+        // The way to the block is complete, and the link may be made.
+        nodes.store_wire(&socket_pin(10, o), &value);
+        assert!(
+            nodes
+                .routed()
+                .contains(&(pin(2, &["Value", "Result"]), value.clone()))
+        );
+        let item = path(&["Value", "Result"]);
+        assert!(refusal(&nodes, &links, 2, &item, 4, &value.path).is_none());
+        // A pin of another block stays as it is.
+        let math = pin(3, &["Parameters", "a"]);
+        assert_eq!(nodes.preview_pin(&socket_pin(10, o), math.clone()), math);
     }
 
     #[test]

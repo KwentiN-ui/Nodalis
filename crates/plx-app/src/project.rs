@@ -9943,14 +9943,24 @@ fn refusal(
         && item.first().is_some_and(|c| transform::takes(c))
         && item.len() <= 2;
     if !transformed && !links::compatible(item, slot) {
-        let kind = |path: &[String]| links::DataType::of(path).map_or("nothing", |t| t.label());
-        return Some(format!(
-            "{} of {from} is {} and {} of {to} takes {}.",
-            links::label(item),
-            with_article(kind(item)),
-            links::label(slot),
-            with_article(kind(slot)),
-        ));
+        let kind = |path: &[String]| links::DataType::of(path).map(|t| with_article(t.label()));
+        return Some(match (kind(item), kind(slot)) {
+            (Some(given), Some(taken)) => format!(
+                "{} of {from} is {given} and {} of {to} takes {taken}.",
+                links::label(item),
+                links::label(slot),
+            ),
+            (Some(given), None) => format!(
+                "{} of {from} is {given}, which {} of {to} does not take.",
+                links::label(item),
+                links::label(slot),
+            ),
+            (None, _) => format!(
+                "{} of {from} gives nothing {} of {to} takes.",
+                links::label(item),
+                links::label(slot),
+            ),
+        });
     }
     // A refine mesh block takes the model space of the mesh it refines.
     let target_space = match target_node.kind() {

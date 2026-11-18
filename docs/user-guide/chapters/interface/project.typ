@@ -285,6 +285,12 @@ A wire dropped on it adds one more.
 Groups only arrange the schematic. A link through a group is the link between the blocks at
 its ends, which Update Project follows as before; it is made once the wires reach from one
 block to the other through the pins of the groups, and removed once one of them goes.
+So a pin of a group takes and gives what the block at the other end of its wires does: a
+number a Formula block inside gives out goes to a Preview block outside, which shows it.
+
+#screenshot("group-preview.png", [The output #ui("Formula") of a group linked to a Preview
+  block, which shows the number of the Formula block inside.])
+
 #key("Ctrl+Alt+G") or #ui("Ungroup") puts the blocks of a group back where the group is,
 with the wires between them as before. #key("Shift+D") duplicates a group with the blocks
 inside, the links between them and its inputs (@duplicate-inputs); #key("X") deletes it with all its blocks, and undo
