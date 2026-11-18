@@ -159,7 +159,7 @@ impl DetectionScope {
         filter: &plx_model::PartFilter,
         previous: Option<&DetectionScope>,
     ) -> Self {
-        let context = crate::part_filter_ui::cached_context(ctx, &model.fe, geometry.mesh());
+        let context = crate::part_filter_ui::cached_context(ctx, model, geometry.mesh());
         let visible = detection_visibility(model, geometry);
         let searched = filter.searched(&context, &visible);
         let tolerance = match previous {
@@ -207,22 +207,59 @@ pub fn detect(
                 part_dimensions: &dimensions,
                 compounds: &compounds,
             };
-            let mut report = (model.fe).detect_contacts_on_geometry(index, &geometry, &visible)?;
-            // Line ends are tied by their nodes, which only the mesh has.
-            let visible: Vec<bool> = model.parts.iter().map(|p| p.visible).collect();
+            // A suppressed part takes part in nothing: no detection searches it.
+            let left_out = model.left_out_of(display.mesh());
+            let mut report =
+                (model.fe).detect_contacts_on_geometry(index, &geometry, &visible, &left_out)?;
+            // Line ends are tied by their nodes, which only the mesh has: the mesh solved,
+            // without the suppressed objects.
+            // The FE model is taken out while the mesh solved borrows the model; making that
+            // mesh needs nothing of it.
             let mut fe = std::mem::take(&mut model.fe);
-            fe.detect_line_ends(index, model.mesh(), &visible, &mut report);
+            let active = model.active();
+            let visible = visible_by_name(model, active.mesh());
+            let nothing = plx_model::LeftOut::nothing();
+            fe.detect_line_ends(index, active.mesh(), &visible, &nothing, &mut report);
+            drop(active);
             model.fe = fe;
             Some(report)
         }
         None => {
-            let visible: Vec<bool> = model.parts.iter().map(|p| p.visible).collect();
+            // The detection searches the mesh solved: without the suppressed objects, also
+            // the suppressed bodies of a compound part. Its elements keep their numbers, so
+            // the regions found are those of the whole mesh too.
             let mut fe = std::mem::take(&mut model.fe);
-            let report = fe.detect_contacts(index, model.mesh(), model.skins(), &visible);
+            let active = model.active();
+            let mesh = active.mesh();
+            let skins: Vec<plx_mesh::PartSkin>;
+            let skins = if mesh.element_count() == model.mesh().element_count() {
+                model.skins()
+            } else {
+                let angle = crate::model::FEATURE_ANGLE_DEG;
+                skins = (mesh.parts.iter())
+                    .map(|part| plx_mesh::extract_part_skin(mesh, part, angle))
+                    .collect();
+                &skins
+            };
+            let visible = visible_by_name(model, mesh);
+            let nothing = plx_model::LeftOut::nothing();
+            let report = fe.detect_contacts(index, mesh, skins, &visible, &nothing);
+            drop(active);
             model.fe = fe;
             report
         }
     }
+}
+
+/// Whether each part of `mesh`, the solved part of the model's mesh, is shown in the model.
+fn visible_by_name(model: &Model, mesh: &plx_mesh::FeMesh) -> Vec<bool> {
+    (mesh.parts.iter())
+        .map(|part| {
+            (model.mesh().parts.iter().zip(&model.parts))
+                .find(|(p, _)| p.name == part.name)
+                .is_none_or(|(_, info)| info.visible)
+        })
+        .collect()
 }
 
 /// Whether each part of the geometry display is shown: as in the FE model once it is
@@ -249,7 +286,7 @@ pub fn detection_form(
     let units = model.fe.properties.units;
     let context = match scope {
         Some(scope) => scope.context.clone(),
-        None => crate::part_filter_ui::cached_context(ui.ctx(), &model.fe, model.mesh()),
+        None => crate::part_filter_ui::cached_context(ui.ctx(), model, model.mesh()),
     };
     ui.label("Search in").on_hover_text(
         "The parts searched. Without parts to include, all visible parts are searched, less \
@@ -1731,7 +1768,7 @@ mod tests {
 
     /// The largest displacement against `component` CalculiX computes, if ccx is installed.
     fn settlement(model: &Model, component: &str) -> Option<f32> {
-        let inp = plx_io::inp::write_inp(model.mesh(), &model.fe, "Block").unwrap();
+        let inp = plx_io::inp::write_inp(&model.active(), "Block").unwrap();
         let dir = std::env::temp_dir().join(format!(
             "nodalis-geometry-detection-{}-{}",
             std::process::id(),
@@ -1882,6 +1919,25 @@ mod tests {
                 assert!(value > block && value < 3.0 * block, "{value} vs. {block}");
             }
             assert!((fine - coarse).abs() < 0.05 * fine, "{coarse} -> {fine}");
+        }
+
+        // Suppressed once meshed, the block keeps its mesh for when it is unsuppressed, but
+        // it takes part in nothing: the solver gets neither the region found with it, which
+        // would have nothing on one side, nor the pressure on it alone.
+        let block = names[1].clone();
+        (model.geometry.as_mut().unwrap()).set_suppressed(std::slice::from_ref(&block), true);
+        let active = model.active();
+        assert_eq!(active.left_out(), std::slice::from_ref(&block));
+        assert!(active.fe().contact_regions.is_empty());
+        assert!(active.fe().steps[0].loads.is_empty());
+        assert_eq!(active.fe().steps[0].boundary_conditions.len(), 1);
+        plx_io::inp::write_inp(&active, "Plate").unwrap();
+        drop(active);
+        // Nor does a detection find the block, on the geometry or on the mesh.
+        for display in [Some(&view), None] {
+            let report = detect(&mut model, display, 0).unwrap();
+            assert_eq!(report.added, 0, "{report:?}");
+            assert!(model.fe.contact_regions.is_empty());
         }
     }
 

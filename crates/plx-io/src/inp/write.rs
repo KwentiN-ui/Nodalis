@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
-    Amplitude, AmplitudeTime, BeamProfile, BeamSection, BoundaryKind, BuckleStep,
+    Active, Amplitude, AmplitudeTime, BeamProfile, BeamSection, BoundaryKind, BuckleStep,
     ComplexFrequencyStep, Constraint, ContactMethod, ContactPair, ContactScale, Damping,
     DefinedFieldKind, DynamicMethod, DynamicStep, FeModel, FieldOutput, Formulation, FrequencyStep,
     GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Id, IncrementPlan,
@@ -237,19 +237,19 @@ impl Lowered {
     }
 }
 
-/// Lowers the mesh and the analysis of `model` into the solver's input, validated.
-pub fn lower(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Lowered, LowerError> {
-    validated(lower_unvalidated(mesh, model, heading)?)
+/// Lowers the mesh and the analysis of `model` into the solver's input, validated. The
+/// model is an [`Active`] one: what the analysis solves, without its suppressed objects.
+pub fn lower(model: &Active, heading: &str) -> Result<Lowered, LowerError> {
+    validated(lower_unvalidated(model, heading)?)
 }
 
 /// [`lower`] with the sets of `extra` steps too, see [`write_inp_with_sets_of`].
 pub fn lower_with_sets_of(
-    mesh: &FeMesh,
-    model: &FeModel,
+    model: &Active,
     heading: &str,
     extra: &[(usize, Vec<Step>)],
 ) -> Result<Lowered, LowerError> {
-    validated(lower_with_sets_unvalidated(mesh, model, heading, extra)?)
+    validated(lower_with_sets_unvalidated(model, heading, extra)?)
 }
 
 fn validated(mut lowered: Lowered) -> Result<Lowered, LowerError> {
@@ -260,7 +260,44 @@ fn validated(mut lowered: Lowered) -> Result<Lowered, LowerError> {
 
 /// The analysis before the solver's validation, for a run that validates it itself and
 /// reports what it finds as its diagnostics.
-pub fn lower_unvalidated(
+pub fn lower_unvalidated(model: &Active, heading: &str) -> Result<Lowered, ModelError> {
+    lower_whole(model.mesh(), model.fe(), heading)
+}
+
+/// [`lower_with_sets_of`] before the solver's validation, see [`lower_unvalidated`].
+pub fn lower_with_sets_unvalidated(
+    model: &Active,
+    heading: &str,
+    extra: &[(usize, Vec<Step>)],
+) -> Result<Lowered, ModelError> {
+    lower_with_sets_whole(model.mesh(), model.fe(), heading, extra)
+}
+
+/// Writes the mesh and the analysis as the text of an input file.
+pub fn write_inp(model: &Active, heading: &str) -> Result<String, WriteError> {
+    write_inp_whole(model.mesh(), model.fe(), heading)
+}
+
+/// Writes the input file of `model` with the sets of `extra` steps too, which are not
+/// written themselves: the steps of analyses that continue from the state after a step of
+/// this one. The solver takes no new sets after reading a state, so the run that writes it has
+/// to define them. Each entry holds the index of the step of `model` the steps follow; they
+/// take the place in the order of the sets they have in the input file of the analysis that
+/// continues, so that the sets are named as there. When the extra steps cannot be written,
+/// the file is written without their sets.
+pub fn write_inp_with_sets_of(
+    model: &Active,
+    heading: &str,
+    extra: &[(usize, Vec<Step>)],
+) -> Result<String, WriteError> {
+    Ok(lower_with_sets_unvalidated(model, heading, extra)
+        .map_err(|e| e.error)?
+        .text())
+}
+
+/// [`lower_unvalidated`] of all of `mesh` and `model`, for the tests and the mesh export,
+/// which have nothing suppressed.
+pub(crate) fn lower_whole(
     mesh: &FeMesh,
     model: &FeModel,
     heading: &str,
@@ -268,15 +305,15 @@ pub fn lower_unvalidated(
     Ok(lower_model(mesh, model, heading)?.assemble(|_| true))
 }
 
-/// [`lower_with_sets_of`] before the solver's validation, see [`lower_unvalidated`].
-pub fn lower_with_sets_unvalidated(
+/// [`lower_with_sets_unvalidated`] of all of `mesh` and `model`.
+pub(crate) fn lower_with_sets_whole(
     mesh: &FeMesh,
     model: &FeModel,
     heading: &str,
     extra: &[(usize, Vec<Step>)],
 ) -> Result<Lowered, ModelError> {
     if extra.iter().all(|(_, steps)| steps.is_empty()) {
-        return lower_unvalidated(mesh, model, heading);
+        return lower_whole(mesh, model, heading);
     }
     let mut combined = model.clone();
     combined.steps.clear();
@@ -290,32 +327,18 @@ pub fn lower_with_sets_unvalidated(
         }
     }
     let Ok(built) = lower_model(mesh, &combined, heading) else {
-        return lower_unvalidated(mesh, model, heading);
+        return lower_whole(mesh, model, heading);
     };
     Ok(built.assemble(|s| written.get(s).copied().unwrap_or(true)))
 }
 
-/// Writes the mesh and the analysis as the text of an input file.
-pub fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String, WriteError> {
-    Ok(lower_unvalidated(mesh, model, heading)
-        .map_err(|e| e.error)?
-        .text())
-}
-
-/// Writes the input file of `model` with the sets of `extra` steps too, which are not
-/// written themselves: the steps of analyses that continue from the state after a step of
-/// this one. The solver takes no new sets after reading a state, so the run that writes it has
-/// to define them. Each entry holds the index of the step of `model` the steps follow; they
-/// take the place in the order of the sets they have in the input file of the analysis that
-/// continues, so that the sets are named as there. When the extra steps cannot be written,
-/// the file is written without their sets.
-pub fn write_inp_with_sets_of(
+/// [`write_inp`] of all of `mesh` and `model`.
+pub(crate) fn write_inp_whole(
     mesh: &FeMesh,
     model: &FeModel,
     heading: &str,
-    extra: &[(usize, Vec<Step>)],
 ) -> Result<String, WriteError> {
-    Ok(lower_with_sets_unvalidated(mesh, model, heading, extra)
+    Ok(lower_whole(mesh, model, heading)
         .map_err(|e| e.error)?
         .text())
 }
@@ -334,7 +357,7 @@ pub fn write_deformed_mesh_inp(
         let moved = std::array::from_fn(|k| coords[k] + scale * f64::from(u[k]));
         deformed.set_node(id, moved);
     }
-    write_inp(&deformed, &FeModel::default(), heading)
+    write_inp_whole(&deformed, &FeModel::default(), heading)
 }
 
 /// One `*STEP` of the analysis before the carry-over between the steps: its settings and

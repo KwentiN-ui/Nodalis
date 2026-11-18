@@ -10,18 +10,17 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use plx_io::fingerprint::Fingerprints;
-use plx_mesh::FeMesh;
-use plx_model::FeModel;
+use plx_model::Active;
 
 /// Fingerprints of the last models asked for, by their quick fingerprint.
 static KEPT: Mutex<Vec<(u64, Fingerprints)>> = Mutex::new(Vec::new());
 const KEPT_MODELS: usize = 16;
 
-/// The fingerprints of the solution of `fe` on `mesh`. A model that cannot be lowered (its
-/// analysis cannot be set up) counts by its quick fingerprints.
-pub fn fingerprints(mesh: &FeMesh, fe: &FeModel) -> Fingerprints {
-    let key = plx_model::fingerprint::solve_input(mesh, fe);
-    kept(key).unwrap_or_else(|| made(key, mesh, fe))
+/// The fingerprints of the solution of `model`, what is solved of it. A model that cannot
+/// be lowered (its analysis cannot be set up) counts by its quick fingerprints.
+pub fn fingerprints(model: &Active) -> Fingerprints {
+    let key = plx_model::fingerprint::solve_input(model.mesh(), model.fe());
+    kept(key).unwrap_or_else(|| made(key, model))
 }
 
 /// The fingerprints kept for the model with the quick fingerprint `key`.
@@ -30,12 +29,12 @@ fn kept(key: u64) -> Option<Fingerprints> {
 }
 
 /// Lowers the model for its fingerprints and keeps them.
-fn made(key: u64, mesh: &FeMesh, fe: &FeModel) -> Fingerprints {
-    let prints = match plx_io::inp::lower_unvalidated(mesh, fe, "") {
-        Ok(lowered) => plx_io::fingerprint::fingerprints(&lowered, fe),
+fn made(key: u64, model: &Active) -> Fingerprints {
+    let prints = match plx_io::inp::lower_unvalidated(model, "") {
+        Ok(lowered) => plx_io::fingerprint::fingerprints(&lowered, model.fe()),
         Err(_) => Fingerprints {
             input: key,
-            steps: plx_model::fingerprint::step_inputs(mesh, fe),
+            steps: plx_model::fingerprint::step_inputs(model.mesh(), model.fe()),
         },
     };
     if let Ok(mut kept) = KEPT.lock() {
@@ -50,8 +49,7 @@ fn made(key: u64, mesh: &FeMesh, fe: &FeModel) -> Fingerprints {
 /// A model waiting to be lowered in the background, by its quick fingerprint.
 struct Job {
     key: u64,
-    mesh: FeMesh,
-    fe: FeModel,
+    model: Active<'static>,
 }
 
 /// The background lowering: the model it lowers now and the one it lowers next. Only the
@@ -92,13 +90,13 @@ pub fn generation() -> u64 {
 
 /// [`fingerprints`] if they are at hand; otherwise `None`, and the model is lowered in the
 /// background: lowering a large model takes seconds, too long for a frame.
-pub fn fingerprints_soon(mesh: &FeMesh, fe: &FeModel) -> Option<Fingerprints> {
-    let key = plx_model::fingerprint::solve_input(mesh, fe);
+pub fn fingerprints_soon(model: &Active) -> Option<Fingerprints> {
+    let key = plx_model::fingerprint::solve_input(model.mesh(), model.fe());
     if let Some(prints) = kept(key) {
         return Some(prints);
     }
     let Ok(mut background) = BACKGROUND.lock() else {
-        return Some(made(key, mesh, fe));
+        return Some(made(key, model));
     };
     let waiting = background.running == Some(key)
         || background.next.as_ref().is_some_and(|job| job.key == key);
@@ -107,8 +105,7 @@ pub fn fingerprints_soon(mesh: &FeMesh, fe: &FeModel) -> Option<Fingerprints> {
     }
     background.next = Some(Job {
         key,
-        mesh: mesh.clone(),
-        fe: fe.clone(),
+        model: model.clone().into_owned(),
     });
     if background.running.is_none() {
         background.running = Some(key);
@@ -119,7 +116,7 @@ pub fn fingerprints_soon(mesh: &FeMesh, fe: &FeModel) -> Option<Fingerprints> {
             background.running = None;
             background.next = None;
             drop(background);
-            return Some(made(key, mesh, fe));
+            return Some(made(key, model));
         }
     }
     None
@@ -144,7 +141,7 @@ fn lower_in_background() {
             }
         };
         if kept(job.key).is_none() {
-            made(job.key, &job.mesh, &job.fe);
+            made(job.key, &job.model);
         }
         drop(job);
         GENERATION.fetch_add(1, Ordering::AcqRel);
@@ -156,12 +153,18 @@ fn lower_in_background() {
 
 /// What the whole solution is computed from.
 #[cfg(test)]
-pub fn solve_input(mesh: &FeMesh, fe: &FeModel) -> u64 {
-    fingerprints(mesh, fe).input
+pub fn solve_input(mesh: &plx_mesh::FeMesh, fe: &plx_model::FeModel) -> u64 {
+    fingerprints(&whole(mesh, fe)).input
 }
 
 /// What the results of each step are computed from: the model and the steps up to it.
 #[cfg(test)]
-pub fn step_inputs(mesh: &FeMesh, fe: &FeModel) -> Vec<u64> {
-    fingerprints(mesh, fe).steps
+pub fn step_inputs(mesh: &plx_mesh::FeMesh, fe: &plx_model::FeModel) -> Vec<u64> {
+    fingerprints(&whole(mesh, fe)).steps
+}
+
+/// All of `mesh` and `fe`, for tests: without a geometry nothing is suppressed.
+#[cfg(test)]
+pub fn whole<'a>(mesh: &'a plx_mesh::FeMesh, fe: &'a plx_model::FeModel) -> Active<'a> {
+    plx_model::active_model(mesh, fe, None, &plx_model::PartOrigins::default())
 }

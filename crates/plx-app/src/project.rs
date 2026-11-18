@@ -473,7 +473,7 @@ impl ModelMut<'_> {
         if !nodes.is_empty() || !elements.is_empty() {
             self.fe.renumber(&nodes, &elements);
         }
-        *self.geometry = geometry;
+        *self.geometry = geometry.map(plx_model::Geometry::without_operations);
         *self.mesh = mesh;
         *self.origins = origins.linked(self.origins);
         self.fe.mesh_sets = mesh_sets;
@@ -1240,8 +1240,7 @@ impl Node {
             model.geometry.as_ref(),
             &model.origins,
         );
-        let text =
-            plx_io::inp::write_inp(&active.mesh, &active.fe, &name).map_err(|e| e.to_string())?;
+        let text = plx_io::inp::write_inp(&active, &name).map_err(|e| e.to_string())?;
         std::fs::write(&file, text).map_err(|e| format!("{} not written: {e}", file.display()))?;
         export.written = Some(print);
         Ok(file)
@@ -4534,7 +4533,7 @@ impl ProjectApp {
         let solver = &self.settings.solver;
         // Suppressed geometry objects are not swept.
         let active = data.active();
-        window.start(solver, (&active.mesh, &active.fe), dir, keep)
+        window.start(solver, &active, dir, keep)
     }
 
     /// Takes the finished speeds of the Campbell blocks and shows their open diagrams.
@@ -7419,7 +7418,7 @@ impl ProjectApp {
                     .and_then(Node::link_data)
                     .map(|d| {
                         let active = d.active();
-                        crate::campbell::sweep_fingerprint(&active.mesh, &active.fe)
+                        crate::campbell::sweep_fingerprint(active.mesh(), active.fe())
                     });
                 if let Some(campbell) = self.node(target).and_then(Node::as_campbell_mut) {
                     campbell.input = input;
@@ -14347,6 +14346,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let mesh = MeshPrimitive::default_box().generate(ModelSpace::ThreeD, "Solid-1");
         let space = ModelSpace::ThreeD;
@@ -15562,6 +15563,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let fe = plx_model::FeModel::default();
         let inputs = plx_model::PartOrigins::default();
@@ -15658,6 +15661,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let path = plx_model::ValuePath::new(
             plx_model::ItemRef::MeshSetup("Meshing_Parameters-1".into()),

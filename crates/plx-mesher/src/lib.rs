@@ -265,6 +265,8 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     };
     geometry.ensure_ids();
     let display = tessellate(&geometry)?;

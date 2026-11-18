@@ -72,9 +72,10 @@ CAD file where it has names, otherwise they are `SOLID-1`, `SHELL-1`, `LINE-1` a
 
 The context menu of a geometry part has #ui("Create Mesh"), #ui("Clear Mesh"), #ui("Suppress") (@suppressed-parts),
 the entries of the compound parts (@compound-parts), #ui("Properties ..."),
-#ui("Hide")/#ui("Show") and #ui("Delete").
+#ui("Hide")/#ui("Show"), #ui("Isolate") and #ui("Delete").
 A mesh always belongs to its geometry part: deleting the part, in the Geometry or in the FE
-Model workspace, deletes its mesh too, and renaming it renames the mesh. #ui("Clear Mesh") deletes
+Model workspace, deletes its mesh too, and renaming it renames the mesh. The items on the deleted
+part alone, such as a contact found with it or a load on it, are deleted with it. #ui("Clear Mesh") deletes
 only the mesh and keeps the part. A part without a mesh makes the mesh out of date, unless it is
 suppressed. #ui("Edit") > #ui("Undo") brings a deleted part back with its mesh.
 
@@ -96,31 +97,46 @@ needed between them, and each face can still be picked on its own.
 
 === Modifying the geometry <geometry-modify>
 
-The #ui("Modify") group of the #ui("Geometry") tab changes the imported geometry of the analysis
-right away: #ui("Defeature") removes fillets and chamfers (@defeature), #ui("Split by Plane")
-splits parts along a plane (@split-by-plane) and #ui("Split around Hole") splits the face around
-a hole into a ring (@split-around-hole). Each opens the editor of the CAD Operation block with
-that operation chosen; the other operations of the block are offered there too. #ui("OK")
-replaces the geometry by the result, as if it had been imported so: the parts keep their names,
-the mesh setup and the picks of the FE model follow the faces and edges by where they lie, and
-the geometry has to be meshed again. A split by plane starts from the YZ plane through the middle
-of the geometry, the other tools from a size of 3 mm.
+The #ui("Modify") group of the #ui("Geometry") tab changes the geometry of the analysis:
+#ui("Defeature") removes fillets and chamfers (@defeature), #ui("Split by Plane") splits parts
+along a plane (@split-by-plane) and #ui("Split around Hole") splits the face around a hole into a
+ring (@split-around-hole). Each opens the editor of the CAD Operation block with that operation
+chosen; the other operations of the block are offered there too. A split by plane starts from
+the YZ plane through the middle of the geometry, the other tools from a size of 3 mm.
+
+#ui("OK") adds the operation to #ui("Operations") in the Geometry tree, named like
+#ui("Split by Plane-1"). The operations there are a pipeline from the geometry as imported or
+linked to the geometry the analysis meshes, in the order of the tree, as if CAD Operation blocks
+stood before the analysis in the project (@cad-operation-block): each acts on what the ones before it
+made. The parts keep their names, the mesh setup and the picks of the FE model follow the faces
+and edges by where they lie, and the geometry has to be meshed again.
+
+- Double-click an operation to change it: its editor opens on the geometry the operations before
+  it make, and with #ui("OK") the operations act anew.
+- #ui("Delete") in its context menu, or the Delete key, removes it; the others act anew on the
+  geometry as imported or linked, and what it cut is whole again.
+- Geometry that comes from a link, such as a File block or another analysis, takes the
+  operations too: when the link brings new shapes, for example after the CAD file changed, the
+  operations act on them again. Such an analysis meshes the parts the link brings itself rather
+  than taking the link's mesh of them.
+- An operation that fails on new shapes, for example when a picked face is gone, is skipped;
+  the output says why. Change it or delete it.
+
+#ui("Edit") > #ui("Undo") takes back adding, changing or deleting an operation (@undo).
 
 #ui("Split by Plane") cuts only the parts selected in the tree when it is opened, compound parts
 selected standing for their members; with nothing selected it cuts every part the plane runs
-through. The editor outlines the selected parts in red, starts from the YZ plane through their
-middle and draws the outline of the plane over them only. The other parts stay as they are, even
-those the plane runs through or that lie wholly on a side that is not kept. Turning off
-#ui("Only the selected parts") in the #ui("Cut") row cuts every part again.
+through. With parts selected, the editor shows only them, outlined in red, starts from the YZ
+plane through their middle and draws the outline of the plane over them; the other parts stay as
+they are, even those the plane runs through or that lie wholly on a side that is not kept.
+The plane carries the manipulator of the section view (@section-view): drag the arrow to shift
+it, an arc to tilt it about a global axis in it (@split-by-plane).
 
 #screenshot("geometry-split-selected.png", [Split by Plane with SOLID-3 selected in the tree: the
-  preview cuts only that bar, the other two stay whole though the YZ plane runs through them])
+  editor shows only that bar, with the manipulator on the plane])
 
-Unlike the CAD Operation block, the tools keep no history; #ui("Edit") > #ui("Undo") takes the
-last change back (@undo). Change the geometry with them once, for example to remove cosmetic fillets before meshing. Use the block in
-the project when the change is to stay editable, to be varied by a parameter study or to follow a
-new version of the CAD file. An analysis whose geometry comes from a link refuses the tools,
-since the link would bring its geometry back; put a CAD Operation block between the two instead.
+#screenshot("geometry-operations.png", [A split by plane under Operations in the Geometry tree:
+  double-click to change it, Delete to take it back])
 
 #screenshot("geometry-defeature-tool.png", [Defeature from the Modify group of the Geometry tab:
   the fillets and chamfers up to 3 mm are found on the imported bracket])
@@ -182,8 +198,8 @@ stresses right at the cut are then less accurate than inside a piece.]
 
 === Suppressed parts <suppressed-parts>
 
-A suppressed part is left alone by everything that works on the geometry, as if it were not
-there, until it is unsuppressed. This helps with an assembly where only some parts are to be
+A suppressed part takes part in nothing of the analysis, as if it were not there, until it
+is unsuppressed. This helps with an assembly where only some parts are to be
 meshed or changed now, for example a screw that is meshed later or not at all.
 
 - #ui("Suppress") in the context menu of a part suppresses it, of several selected parts all of
@@ -191,13 +207,22 @@ meshed or changed now, for example a screw that is meshed later or not at all.
   click on the no-entry sign in front of the part, and #ui("Unsuppress All") in the menu of
   #ui("Parts") unsuppresses every part.
 - In the tree a suppressed part is gray with the no-entry sign instead of its icon, like a
-  deactivated item of the FE model; a compound whose members are all suppressed too. In the 3D
-  view it is drawn as its edges only and a click goes through it. Its check box still shows or
-  hides it.
+  deactivated item of the FE model; a compound whose members are all suppressed too. They are
+  listed apart under #ui("Suppressed") at the end of #ui("Parts"), which folds them away; its
+  menu has #ui("Unsuppress All"). In the
+  Geometry workspace it is drawn as its edges only; the FE Model and the results do not show it.
+  A click or a selection box in the 3D view goes through it: only the tree selects it, to
+  unsuppress it. Its check box still shows or hides it.
 - #ui("Mesh All Parts") (also in the mesh setup dialog), #ui("Create Mesh") and the meshing
   before a solve leave suppressed parts out. A mesh the part already has is kept but left out of
   the solve and the input file export, and it does not count as out of date. Suppressing is the
   only way to leave a part out without deleting it.
+- The solver gets nothing of a suppressed part: neither its mesh nor the items on it alone. A
+  contact found with the part before it was suppressed, a boundary condition or a load only on
+  it stay in the model for when it is unsuppressed, but are left out of the solve and the input
+  file. An item also on other parts keeps those.
+- A contact detection never searches a suppressed part, also not one it names, and part filters
+  and part groups do not match it.
 - #ui("Suppress") is also in the context menu of a part in the FE Model workspace and works on
   imported meshes too.
 - #ui("Split by Plane") never cuts a suppressed part, also not when it is selected.
@@ -209,6 +234,10 @@ meshed or changed now, for example a screw that is meshed later or not at all.
 
 #screenshot("suppressed-parts.png", [SCHRAUBE suppressed: gray with the no-entry sign in the
   tree and drawn as its edges only, Mesh All Parts meshes the other parts])
+
+#screenshot("suppressed-parts-fe-model.png", [SOLID-3 suppressed after meshing: listed under
+  Suppressed, not drawn in the FE Model, and the contact detection finds only the contact of the
+  other two parts])
 
 === Geometry for 2D models
 

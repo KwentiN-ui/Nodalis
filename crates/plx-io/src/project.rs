@@ -1440,7 +1440,9 @@ mod tests {
             .map(|p| plx_mesh::extract_part_skin(&mesh, p, 30.0))
             .collect();
         let visible = vec![true; mesh.parts.len()];
-        let report = model.detect_contacts(0, &mesh, &skins, &visible).unwrap();
+        let report = model
+            .detect_contacts(0, &mesh, &skins, &visible, &plx_model::LeftOut::nothing())
+            .unwrap();
         println!("{}", report.summary("Assembly"));
         model.steps.push(plx_model::Step::new_static("Step-1"));
         let project = single(None, &mesh, &model, None);
@@ -2161,7 +2163,7 @@ mod tests {
         let project = single(None, &mesh, &model, None);
         save_project(std::path::Path::new(&path), &project).unwrap();
         if let Some(inp) = std::env::var_os("PLX_RUBBER_DEMO_INP") {
-            std::fs::write(inp, crate::inp::write_inp(&mesh, &model, "").unwrap()).unwrap();
+            std::fs::write(inp, crate::inp::write_inp_whole(&mesh, &model, "").unwrap()).unwrap();
         }
     }
 
@@ -2399,6 +2401,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let mut saved = single(Some(&geometry), &mesh, &model, None);
         (saved.analyses_mut().next().unwrap())

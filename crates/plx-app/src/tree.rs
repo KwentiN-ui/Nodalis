@@ -35,6 +35,9 @@ pub enum TreeItem {
     MeshItem(usize),
     /// A mesh operation of the FE model, such as a transform, under Mesh > Mesh Operations.
     MeshOperation(usize),
+    /// An operation of the Geometry tree on the shapes, such as a split by plane, under
+    /// Operations, see [`plx_model::Geometry::operations`].
+    GeometryOperation(usize),
     NodeSet(String),
     ElementSet(String),
     Surface(String),
@@ -94,6 +97,9 @@ pub enum TreeItem {
 
 /// The category of the mesh operations under Mesh.
 pub const MESH_OPERATIONS: &str = "Mesh Operations";
+
+/// The category of the operations on the shapes in the Geometry tree.
+pub const GEOMETRY_OPERATIONS: &str = "Operations";
 
 /// The group of the exposed parameters in the FE Model tree.
 pub const EXPOSED: &str = "Exposed Parameters";
@@ -389,6 +395,10 @@ fn same_items(a: &[TreeItem], b: &[TreeItem]) -> bool {
 #[derive(Default)]
 pub struct TreeResponse {
     pub visibility: Vec<(usize, bool)>,
+    /// Show only these parts and hide all others.
+    pub isolate: Option<Vec<usize>>,
+    /// Show every part again, such as after Isolate.
+    pub show_all_parts: bool,
     /// Colour contours of results parts turned on (`true`) or off.
     pub contours: Vec<(usize, bool)>,
     /// A result component was picked (field, component).
@@ -698,6 +708,8 @@ fn advanced_contacts() -> Vec<TreeItem> {
 pub const CROSS_SECTIONS: &str = "Cross-Sections";
 /// The container of the contact regions, under Connections (the group "Contacts").
 pub const CONTACT_REGIONS: &str = "Contact Regions";
+/// The container of the suppressed parts, at the end of Parts.
+pub const SUPPRESSED_PARTS: &str = "Suppressed";
 /// The container of the bolts, under Connections.
 pub const BOLTS: &str = "Bolts";
 /// The container of the part groups, under Connections.
@@ -797,6 +809,7 @@ fn deletable(view: TreeView, item: &TreeItem) -> bool {
                 | TreeItem::MeshItem(_)
         )
         || (view == TreeView::FeModel && matches!(item, TreeItem::MeshOperation(_)))
+        || (view == TreeView::Geometry && matches!(item, TreeItem::GeometryOperation(_)))
         || (view == TreeView::FeModel && set_kind(item).is_some())
 }
 
@@ -876,6 +889,7 @@ fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
         Mesh => matches!(item, Part(_) | MeshOperation(_) | Group(MESH_OPERATIONS)),
         Group("Parts") => matches!(item, Part(_) | Compound(_)),
         Group(MESH_OPERATIONS) => matches!(item, MeshOperation(_)),
+        Group(GEOMETRY_OPERATIONS) => matches!(item, GeometryOperation(_)),
         Group("Constraints") => matches!(item, Constraint(_)),
         Group("Sections") => matches!(item, Section(_) | CrossSection(_) | Group(CROSS_SECTIONS)),
         Group(CROSS_SECTIONS) => matches!(item, CrossSection(_)),
@@ -985,6 +999,9 @@ fn part_icon(part: &PartInfo) -> TreeIcon {
     }
 }
 
+const ISOLATE_TIP: &str = "Hides all other parts, so that only this part (or the selected \
+                           parts) is shown. Show All Parts brings the others back.";
+
 /// Context menu of a part, the same in the tree and in the 3D view. A part of the geometry
 /// is meshed from here. On one of several selected parts, hiding and
 /// deleting take them all.
@@ -997,6 +1014,7 @@ pub fn part_menu(
     suppressed: bool,
     imported: bool,
     own_mesh: bool,
+    all_shown: bool,
     view: TreeView,
     selected: &BTreeSet<usize>,
     compounds: &[(String, Vec<usize>)],
@@ -1063,6 +1081,16 @@ pub fn part_menu(
         } else {
             response.visibility.push((index, !visible));
         }
+    }
+    if ui.button("Isolate").on_hover_text(ISOLATE_TIP).clicked() {
+        response.isolate = Some(if selected.contains(&index) {
+            selected.iter().copied().collect()
+        } else {
+            vec![index]
+        });
+    }
+    if !all_shown && ui.button("Show All Parts").clicked() {
+        response.show_all_parts = true;
     }
     if view == TreeView::Results {
         // A part without colour contours is grey and not part of the legend range.
@@ -1374,6 +1402,21 @@ impl Tree<'_> {
         let creates = (creates(&item))
             .or_else(|| (self.view == TreeView::FeModel).then(|| creates_set(&item))?)
             .filter(|_| closed.is_none());
+        if item == TreeItem::Group(SUPPRESSED_PARTS) {
+            response.context_menu(|ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                let suppressed: Vec<usize> = (self.part_indices.iter().copied())
+                    .filter(|&i| self.inactive.contains(&TreeItem::Part(i)))
+                    .collect();
+                if ui
+                    .button("Unsuppress All")
+                    .on_hover_text(SUPPRESS_TIP)
+                    .clicked()
+                {
+                    self.response.suppress = Some((suppressed, false));
+                }
+            });
+        }
         if item == TreeItem::Group("Parts") && !self.part_indices.is_empty() {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -1419,7 +1462,8 @@ impl Tree<'_> {
                     | TreeItem::HotSpot(_)
                     | TreeItem::MeshItem(_)
             )
-            || (self.view == TreeView::FeModel && matches!(item, TreeItem::MeshOperation(_)));
+            || (self.view == TreeView::FeModel && matches!(item, TreeItem::MeshOperation(_)))
+            || (self.view == TreeView::Geometry && matches!(item, TreeItem::GeometryOperation(_)));
         // The menu of one of several selected items acts on all of them.
         let several = self.is_selected(&item) && self.state.selected_items(self.view).len() > 1;
         if creates.is_some() || editable {
@@ -1642,6 +1686,9 @@ impl Tree<'_> {
             TreeItem::Group("Parts") => TreeIcon::Part,
             TreeItem::Group("Mesh Setup") => TreeIcon::MeshSetup,
             TreeItem::Group(MESH_OPERATIONS) => TreeIcon::MeshOperation,
+            TreeItem::Group(GEOMETRY_OPERATIONS) | TreeItem::GeometryOperation(_) => {
+                TreeIcon::GeometryOperation
+            }
             TreeItem::Group("Node Sets") => TreeIcon::NodeSet,
             TreeItem::Group("Element Sets") => TreeIcon::ElementSet,
             TreeItem::Group("Surfaces") => TreeIcon::Surface,
@@ -1781,6 +1828,10 @@ impl Tree<'_> {
             }
             (TreeItem::Compound(c), TreeItem::Part(p)) => {
                 (self.state.compounds.get(*c)).is_some_and(|(_, members)| members.contains(p))
+            }
+            // Only the suppressed parts lie in their branch, which stays folded otherwise.
+            (TreeItem::Group(SUPPRESSED_PARTS), TreeItem::Part(_) | TreeItem::Compound(_)) => {
+                self.inactive.contains(item)
             }
             _ => contains(branch, item),
         }
@@ -1956,8 +2007,13 @@ impl Tree<'_> {
             Vec::new()
         };
         self.branch(ui, TreeItem::Group("Parts"), parts, true, |tree, ui| {
-            // A compound part stands where its first part would, its parts under it.
+            // A compound part stands where its first part would, its parts under it. The
+            // suppressed parts, and compounds of only suppressed parts, are listed apart at
+            // the end, under a branch of their own that folds them away.
+            let suppressed: Vec<bool> = model.parts.iter().map(|p| p.suppressed).collect();
+            let suppressed = |index: usize| suppressed.get(index).copied().unwrap_or(false);
             let mut drawn = vec![false; model.parts.len()];
+            let mut apart: Vec<(usize, Option<usize>)> = Vec::new();
             for index in 0..model.parts.len() {
                 if drawn[index] {
                     continue;
@@ -1965,32 +2021,66 @@ impl Tree<'_> {
                 let compound = compounds.iter().position(|(_, m)| m.contains(&index));
                 match compound {
                     Some(c) => {
-                        let (name, members) = &compounds[c];
-                        let suppressed = (members.iter())
-                            .all(|&m| model.parts.get(m).is_some_and(|p| p.suppressed));
-                        if suppressed && !members.is_empty() {
-                            tree.inactive.insert(TreeItem::Compound(c));
-                        }
-                        let label = format!("{name} ({})", members.len());
-                        tree.branch(ui, TreeItem::Compound(c), label, true, |tree, ui| {
-                            for &member in members {
-                                tree.part_row(ui, model, member, &compounds);
-                            }
-                        });
+                        let members = &compounds[c].1;
                         for &member in members {
                             if let Some(d) = drawn.get_mut(member) {
                                 *d = true;
                             }
                         }
+                        if !members.is_empty() && members.iter().all(|&m| suppressed(m)) {
+                            tree.inactive.insert(TreeItem::Compound(c));
+                            apart.push((index, Some(c)));
+                        } else {
+                            tree.compound_rows(ui, model, c, &compounds);
+                        }
                     }
                     None => {
-                        tree.part_row(ui, model, index, &compounds);
                         drawn[index] = true;
+                        if suppressed(index) {
+                            apart.push((index, None));
+                        } else {
+                            tree.part_row(ui, model, index, &compounds);
+                        }
                     }
                 }
             }
             for name in &unmeshed {
                 tree.unmeshed_row(ui, name);
+            }
+            if apart.is_empty() {
+                return;
+            }
+            let label = counted(SUPPRESSED_PARTS, apart.len());
+            tree.branch(
+                ui,
+                TreeItem::Group(SUPPRESSED_PARTS),
+                label,
+                true,
+                |tree, ui| {
+                    for &(index, compound) in &apart {
+                        match compound {
+                            Some(c) => tree.compound_rows(ui, model, c, &compounds),
+                            None => tree.part_row(ui, model, index, &compounds),
+                        }
+                    }
+                },
+            );
+        });
+    }
+
+    /// The row of the compound part `c` with its parts under it.
+    fn compound_rows(
+        &mut self,
+        ui: &mut Ui,
+        model: &mut Model,
+        c: usize,
+        compounds: &[(String, Vec<usize>)],
+    ) {
+        let (name, members) = &compounds[c];
+        let label = format!("{name} ({})", members.len());
+        self.branch(ui, TreeItem::Compound(c), label, true, |tree, ui| {
+            for &member in members {
+                tree.part_row(ui, model, member, compounds);
             }
         });
     }
@@ -2048,6 +2138,7 @@ impl Tree<'_> {
         if self.hidden(&TreeItem::Part(index)) {
             return;
         }
+        let all_shown = model.parts.iter().all(|p| p.visible);
         let Some(part) = model.parts.get_mut(index) else {
             return;
         };
@@ -2075,6 +2166,7 @@ impl Tree<'_> {
                 part.suppressed,
                 part.imported,
                 part.own_mesh,
+                all_shown,
                 view,
                 &selected,
                 compounds,
@@ -2323,6 +2415,7 @@ pub fn show(
     view: TreeView,
     model: Option<&mut Model>,
     mesh_items: &[String],
+    operations: &[String],
     solver_findings: &[Finding],
     state: &mut TreeState,
 ) -> TreeResponse {
@@ -2371,6 +2464,11 @@ pub fn show(
                             tree.leaf(ui, TreeItem::Group("Parts"), "Parts");
                         }
                     }
+                    // What is done to the shapes as imported or linked, in order.
+                    let items = (operations.iter().enumerate())
+                        .map(|(i, name)| (TreeItem::GeometryOperation(i), name.as_str()))
+                        .collect();
+                    tree.container(ui, GEOMETRY_OPERATIONS, items);
                     let items = (mesh_items.iter().enumerate())
                         .map(|(i, name)| (TreeItem::MeshItem(i), name.as_str()))
                         .collect();
@@ -3117,7 +3215,7 @@ mod tests {
             };
             let (model, state, opened) = (&mut self.model, &mut self.state, &mut self.opened);
             let mut out = self.ctx.run_ui(input, |ui| {
-                let r = show(ui, TreeView::FeModel, Some(model), &[], &[], state);
+                let r = show(ui, TreeView::FeModel, Some(model), &[], &[], &[], state);
                 opened.extend(r.open);
             });
             out.textures_delta.clear();

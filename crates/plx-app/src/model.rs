@@ -23,7 +23,7 @@ use crate::results::ResultsView;
 
 /// Angle between neighbouring faces above which their common edge counts as a feature edge
 /// and the shading across it stays sharp.
-const FEATURE_ANGLE_DEG: f64 = 30.0;
+pub(crate) const FEATURE_ANGLE_DEG: f64 = 30.0;
 /// Within a surface patch, coarse meshes of curved surfaces can fold more than the feature
 /// angle between neighbouring faces; shading still blends across such folds.
 const SMOOTH_ANGLE_DEG: f64 = 60.0;
@@ -78,6 +78,15 @@ pub struct PartInfo {
     /// A part of loose cubes that share no node, the particles of a Particle Flow step:
     /// drawn without edges and with rounded shading, which keeps its many faces cheap.
     pub loose: bool,
+}
+
+impl PartInfo {
+    /// Whether the part can be picked or selected in the 3D view: shown and not
+    /// suppressed. A suppressed part takes part in nothing; only the tree selects it, to
+    /// unsuppress it.
+    pub fn pickable(&self) -> bool {
+        self.visible && !self.suppressed
+    }
 }
 
 /// A loaded input file with everything the GUI shows about it.
@@ -969,6 +978,12 @@ impl Model {
         Self::geometry_view_with_skins(path, display, skins)
     }
 
+    /// The parts of `mesh`, this model's own or the display of its geometry, left out of
+    /// the analysis by the suppression of the model's geometry objects.
+    pub fn left_out_of(&self, mesh: &FeMesh) -> plx_model::LeftOut {
+        plx_model::LeftOut::of(mesh, self.geometry.as_ref(), &self.origins)
+    }
+
     /// Marks the parts of a geometry view that `geometry` suppresses; true if any changed.
     pub fn mark_suppressed(&mut self, geometry: &Geometry) -> bool {
         let mut changed = false;
@@ -1577,6 +1592,15 @@ impl Model {
     /// run again when the FE model changed; the part that depends on the mesh only once per
     /// mesh. Waits for them: for solving; what is shown takes [`Model::findings_soon`].
     pub fn findings(&self) -> Vec<Finding> {
+        let mut findings = self.all_findings();
+        // A suppressed part takes part in nothing: what is missing on it is no problem.
+        let suppressed = |part: usize| self.parts.get(part).is_some_and(|p| p.suppressed);
+        findings.retain(|f| !matches!(f.item, plx_model::ModelItem::Part(p) if suppressed(p)));
+        findings
+    }
+
+    /// [`Self::findings`] with those of suppressed parts, cached while the model stays.
+    fn all_findings(&self) -> Vec<Finding> {
         let mut cache = self.checks.lock().unwrap_or_else(|e| e.into_inner());
         self.take_background_check(&mut cache);
         if let Some(checks) = cache.as_ref().filter(|c| self.checks_current(c)) {
@@ -1760,6 +1784,13 @@ impl Model {
     }
 
     /// Whether this shows CAD geometry rather than a mesh.
+    /// Whether the part `info` of this model is drawn in the 3D view: shown, and in the FE
+    /// Model and the results not suppressed, which takes part in nothing there; the Geometry
+    /// workspace draws a suppressed part as its edges.
+    pub fn drawn(&self, info: &PartInfo) -> bool {
+        info.visible && (self.is_geometry || !info.suppressed)
+    }
+
     pub fn is_geometry(&self) -> bool {
         self.is_geometry
     }
@@ -2539,7 +2570,7 @@ impl Model {
             std::borrow::Cow::Borrowed(self.mesh.coords())
         };
         (cells.iter().zip(&self.parts))
-            .filter(|(_, info)| info.visible)
+            .filter(|(_, info)| self.drawn(info))
             .map(|(cells, _)| section_values(cells, &coords, point, normal, &values))
             .reduce(|mut all, part| {
                 all.merge(part);
@@ -2641,7 +2672,7 @@ impl Model {
         self.parts
             .iter()
             .zip(&self.mesh.parts)
-            .filter(|(info, _)| info.visible)
+            .filter(|(info, _)| info.pickable())
             .flat_map(|(_, part)| &part.elements)
             .filter_map(|&id| self.mesh.element_index(id))
             .flat_map(|index| elements[index].nodes.iter().copied())
@@ -2654,7 +2685,7 @@ impl Model {
         self.skins
             .iter()
             .zip(&self.parts)
-            .filter(|(_, info)| info.visible)
+            .filter(|(_, info)| info.pickable())
             .flat_map(|(skin, _)| &skin.faces)
             .map(|f| (elements[f.element].id, f.face as u8 + 1))
             .collect()
@@ -3069,7 +3100,7 @@ impl Model {
     pub fn visible_bounds(&self) -> Option<(Vec3, Vec3)> {
         self.parts
             .iter()
-            .filter(|p| p.visible)
+            .filter(|p| self.drawn(p))
             .filter_map(|p| p.bounds)
             .reduce(|(min_a, max_a), (min_b, max_b)| (min_a.min(min_b), max_a.max(max_b)))
     }
@@ -4025,10 +4056,11 @@ mod tests {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0)
         {
-            let _ = plx_io::inp::lower_unvalidated(mesh, fe, "");
+            let _ = plx_io::inp::lower_unvalidated(&crate::solve_fingerprint::whole(mesh, fe), "");
         }
         let t = Instant::now();
-        let lowered = plx_io::inp::lower_unvalidated(mesh, fe, "");
+        let lowered =
+            plx_io::inp::lower_unvalidated(&crate::solve_fingerprint::whole(mesh, fe), "");
         eprintln!(
             "lower_unvalidated {:?} ok={:?}",
             t.elapsed(),
@@ -4322,7 +4354,7 @@ mod tests {
             steps: vec![step],
             ..FeModel::default()
         };
-        let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Platte").unwrap();
+        let inp = plx_io::inp::write_inp(&model.active(), "Platte").unwrap();
         let dir = std::env::temp_dir().join(format!("nodalis-ccx-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("platte.inp"), inp).unwrap();
@@ -4735,12 +4767,12 @@ S
             ..FeModel::default()
         };
         // A solid section would leave the shells without a thickness.
-        assert!(plx_io::inp::write_inp(&model.mesh, &model.fe, "Membran").is_err());
+        assert!(plx_io::inp::write_inp(&model.active(), "Membran").is_err());
         model.fe.sections[0].kind = SectionKind::Shell {
             thickness,
             offset: 0.0,
         };
-        let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Membran").unwrap();
+        let inp = plx_io::inp::write_inp(&model.active(), "Membran").unwrap();
         assert!(inp.contains("*Shell section"), "{inp}");
         let dir = std::env::temp_dir().join(format!("nodalis-shell-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -4841,7 +4873,8 @@ S
             steps: vec![step],
             ..FeModel::default()
         };
-        let inp = plx_io::inp::write_inp(&mesh, &fe, "Bloecke").unwrap();
+        let inp = plx_io::inp::write_inp(&crate::solve_fingerprint::whole(&mesh, &fe), "Bloecke")
+            .unwrap();
         let dir = std::env::temp_dir().join(format!("nodalis-parts-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("bloecke.inp"), inp).unwrap();

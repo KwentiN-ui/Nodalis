@@ -105,7 +105,7 @@ opens in the Geometry workspace, opening a result file switches to Results.
   spring connections and contact pairs), #ui("Delete"). Items that come from another analysis
   through a link are shown in blue with the name of that analysis; their commands are greyed
   out, and a double-click offers to open that analysis or to unlink the item (@data-links).
-/ Parts: #ui("Properties ..."), #ui("Hide")/#ui("Show"), #ui("Delete"); on the
+/ Parts: #ui("Properties ..."), #ui("Hide")/#ui("Show"), #ui("Isolate") (@view), #ui("Delete"); on the
   Geometry workspace also #ui("Create Mesh").
 
 === Deactivating items
