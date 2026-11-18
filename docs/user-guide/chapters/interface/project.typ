@@ -195,8 +195,9 @@ the state of another analysis (@data-links).
   [Frame Blocks (#key("Ctrl+J"))], [Puts the block, or the selected blocks it is one of, in a
     new frame; #ui("Remove from Frame") (#key("Alt+P")) takes it out.],
   [Rename ... (#key("F2"))], [Gives the analysis a new name. Names are unique within a project.],
-  [Duplicate (#key("Shift+D"))], [Adds a copy of the analysis, named "Copy of ...". A copy
-    of a block in a frame goes into the same frame.],
+  [Duplicate (#key("Shift+D"))], [Adds a copy of the analysis, named "Copy of ...". The copy
+    takes the same inputs as the block (@duplicate-inputs). A copy of a block in a frame goes
+    into the same frame.],
   [Delete (#key("X"))], [Removes the analysis from the project at once; the note at the
     bottom of the schematic offers #ui("Undo"). An open window closes.
     Links to and from it are removed; analyses that took items from it keep their copies.],
@@ -286,8 +287,20 @@ its ends, which Update Project follows as before; it is made once the wires reac
 block to the other through the pins of the groups, and removed once one of them goes.
 #key("Ctrl+Alt+G") or #ui("Ungroup") puts the blocks of a group back where the group is,
 with the wires between them as before. #key("Shift+D") duplicates a group with the blocks
-inside and the links between them; #key("X") deletes it with all its blocks, and undo
+inside, the links between them and its inputs (@duplicate-inputs); #key("X") deletes it with all its blocks, and undo
 brings them back.
+
+==== Duplicating blocks <duplicate-inputs>
+
+A duplicated block keeps its inputs, as Shift+D in Blender: the copy of an analysis that takes
+its geometry from a File block takes it from the same File block. When several blocks are
+duplicated together, a link between two of them joins their copies, while an input from a
+block outside the selection comes from that block. What a block feeds is not linked to its
+copy.
+
+#screenshot("duplicate-inputs.png", [#ui("Split") and #ui("Preview") duplicated together: the
+  copy of the split takes the geometry of #ui("Beam") as the split does, and feeds the copy of
+  the preview])
 
 ==== Keys of the schematic <schematic-keys>
 
@@ -302,7 +315,7 @@ block with #key("Shift") held; with #key("Shift") a rectangle adds to the select
   [#key("Shift+A")], [Searches the blocks to add at the pointer (@block-search).],
   [#key("X"), #key("Delete")], [Deletes the blocks at once; #ui("Undo") in the note at the
     bottom, or #key("Ctrl+Z"), brings them back.],
-  [#key("Shift+D")], [Duplicates the blocks.],
+  [#key("Shift+D")], [Duplicates the blocks with their inputs (@duplicate-inputs).],
   [#key("H")], [Shows the blocks compact, or in full if they all are compact.],
   [#key("Ctrl+G")], [Puts the blocks into a new node group (@node-groups).],
   [#key("Ctrl+Alt+G")], [Puts the blocks of the groups back, without the groups.],

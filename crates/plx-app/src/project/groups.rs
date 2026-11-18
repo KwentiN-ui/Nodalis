@@ -1318,9 +1318,14 @@ impl ProjectApp {
         self.output.push(format!("{} ungrouped", group.name));
     }
 
-    /// Duplicates a group with the blocks in it and the links between them, Shift+D; the
-    /// copy has the sockets of the group, without wires outside.
-    pub(super) fn duplicate_group(&mut self, id: u64, offset: egui::Vec2) -> Option<u64> {
+    /// Duplicates a group with the blocks in it, Shift+D; returns the copy of each block,
+    /// the group's first. The copy has the sockets of the group, its inputs from the same pins
+    /// outside; [`Self::link_duplicates`] makes the links.
+    pub(super) fn duplicate_group(
+        &mut self,
+        id: u64,
+        offset: egui::Vec2,
+    ) -> Option<HashMap<u64, u64>> {
         let group = self.nodes.group(id)?.clone();
         // The blocks inside, at every depth.
         let mut inner = Vec::new();
@@ -1361,8 +1366,15 @@ impl ProjectApp {
                     g.id = new;
                     g.nodes = g.nodes.iter().filter_map(|n| map.get(n).copied()).collect();
                     for socket in g.inputs.iter_mut().chain(&mut g.outputs) {
-                        socket.source = socket.source.as_ref().and_then(remap);
                         socket.targets = socket.targets.iter().filter_map(remap).collect();
+                    }
+                    for socket in &mut g.outputs {
+                        socket.source = socket.source.as_ref().and_then(remap);
+                    }
+                    // The inputs of the group copied come from the same pins outside.
+                    for socket in &mut g.inputs {
+                        socket.source = (socket.source.as_ref())
+                            .map(|pin| remap(pin).unwrap_or_else(|| pin.clone()));
                     }
                     Node::new(new, name, Block::Group(Box::new(g)))
                 }
@@ -1384,24 +1396,76 @@ impl ProjectApp {
             self.known.insert(new);
         }
         let _ = group;
-        // The links between the blocks inside.
-        let copied: Vec<Link> = (self.links.iter())
-            .filter_map(|l| {
-                Some(Link {
-                    source: *map.get(&l.source)?,
-                    target: *map.get(&l.target)?,
-                    ..l.clone()
-                })
-            })
-            .collect();
-        self.links.extend(copied);
         let copy = map[&id];
         if let Some(parent) = self.shown_group().and_then(|l| self.nodes.group_mut(l)) {
             parent.nodes.push(copy);
         }
+        Some(map)
+    }
+
+    /// Links duplicated blocks (`copies` maps each block, and each block inside a duplicated
+    /// group, to its copy) as their blocks: the links between them join the copies, an
+    /// input from a block not duplicated comes from that block, through the sockets of the
+    /// groups it comes through.
+    pub(super) fn link_duplicates(&mut self, copies: &HashMap<u64, u64>) {
+        let copied: BTreeSet<u64> = copies.values().copied().collect();
+        let pin = |p: &GroupPin| GroupPin {
+            node: copies.get(&p.node).copied().unwrap_or(p.node),
+            path: p.path.clone(),
+        };
+        for group in self.nodes.all_groups_mut() {
+            if copied.contains(&group.id) {
+                // The copy of a group: its inputs from the copies of their blocks, its outputs
+                // to the copies made with it.
+                for socket in &mut group.inputs {
+                    socket.source = socket.source.as_ref().map(pin);
+                }
+                continue;
+            }
+            if copies.contains_key(&group.id) {
+                continue;
+            }
+            // A group around the blocks or outside them: its wires into a block go to the
+            // copy too.
+            for socket in group.inputs.iter_mut().chain(&mut group.outputs) {
+                let more: Vec<GroupPin> = (socket.targets.iter())
+                    .filter(|t| copies.contains_key(&t.node))
+                    .map(pin)
+                    .collect();
+                for target in more {
+                    if !socket.targets.contains(&target) {
+                        socket.targets.push(target);
+                    }
+                }
+            }
+        }
+        // The outputs of a copied group to blocks duplicated with it.
+        let outputs: Vec<(u64, u32, Vec<GroupPin>)> = (copies.iter())
+            .filter_map(|(&old, &new)| Some((self.nodes.group(old)?, new)))
+            .flat_map(|(group, new)| {
+                (group.outputs.iter()).map(move |socket| {
+                    let targets = (socket.targets.iter())
+                        .filter(|t| copies.contains_key(&t.node))
+                        .map(pin)
+                        .collect();
+                    (new, socket.id, targets)
+                })
+            })
+            .collect();
+        for (group, socket, targets) in outputs {
+            if let Some(socket) = (self.nodes.group_mut(group))
+                .and_then(|g| g.outputs.iter_mut().find(|s| s.id == socket))
+            {
+                for target in targets {
+                    if !socket.targets.contains(&target) {
+                        socket.targets.push(target);
+                    }
+                }
+            }
+        }
+        self.links.extend(duplicated_inputs(&self.links, copies));
         self.nodes.tidy_sockets();
         self.sync_due = true;
-        Some(copy)
     }
 
     /// Opens the group in the schematic, with the groups around it.
