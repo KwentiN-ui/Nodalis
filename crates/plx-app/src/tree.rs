@@ -165,12 +165,18 @@ pub struct TreeState {
     more_parts: BTreeSet<usize>,
     /// Where the range of a Shift click starts: the part last clicked without Shift.
     anchor: Option<usize>,
+    /// The parts selected before the Shift clicks from the anchor, and the selection the
+    /// last of them left: a further Shift click while that selection stands replaces only
+    /// its range, so that ranges and Ctrl clicks accumulate.
+    range_base: Option<(BTreeSet<usize>, BTreeSet<usize>)>,
     /// Items selected along with the selected item, by Ctrl or Shift click: siblings in one
     /// container, such as many contact pairs to delete at once. They count only while the
     /// item they were selected with, the first, stays selected.
     more_items: Option<(TreeItem, Vec<TreeItem>)>,
     /// Where the range of a Shift click on items starts.
     item_anchor: Option<TreeItem>,
+    /// Like `range_base`, for items.
+    item_range_base: Option<(Vec<TreeItem>, Vec<TreeItem>)>,
     /// Items another analysis of the project owns, with its name: they are marked and
     /// cannot be changed here.
     pub linked: HashMap<TreeItem, String>,
@@ -227,6 +233,7 @@ impl TreeState {
         self.selected = Some((view, item.clone()));
         self.more_items = None;
         self.item_anchor = Some(item);
+        self.item_range_base = None;
     }
 
     /// Selects these items together, the first leading; none clears the selection.
@@ -239,16 +246,17 @@ impl TreeState {
         self.selected = Some((view, lead.clone()));
         self.more_items = (!more.is_empty()).then(|| (lead.clone(), more.to_vec()));
         self.item_anchor = Some(lead.clone());
+        self.item_range_base = None;
     }
 
-    /// Ctrl click (adds or takes out `item`) or Shift click (the items from the last one
-    /// clicked to `item`, added with Ctrl) on an item of a container listing `siblings`.
+    /// Ctrl click (adds or takes out `item`) or Shift click (adds the items from the last
+    /// one clicked without Shift to `item`) on an item of a container listing `siblings`.
+    /// Ctrl and Shift clicks accumulate; only a plain click starts anew.
     pub fn select_sibling(
         &mut self,
         view: TreeView,
         item: TreeItem,
         siblings: &[TreeItem],
-        ctrl: bool,
         shift: bool,
     ) {
         let current: Vec<TreeItem> = (self.selected_items(view).into_iter())
@@ -260,15 +268,21 @@ impl TreeState {
                 .unwrap_or_else(|| item.clone());
             let position = |i: &TreeItem| siblings.iter().position(|s| s == i).unwrap_or(0);
             let (a, b) = (position(&anchor), position(&item));
-            let mut chosen = if ctrl { current } else { Vec::new() };
+            let mut chosen = match self.item_range_base.take() {
+                Some((base, left)) if same_items(&left, &current) => base,
+                _ => current,
+            };
+            let base = chosen.clone();
             for sibling in &siblings[a.min(b)..=a.max(b)] {
                 if !chosen.contains(sibling) {
                     chosen.push(sibling.clone());
                 }
             }
             self.item_anchor = Some(anchor);
+            self.item_range_base = Some((base, chosen.clone()));
             chosen
         } else {
+            self.item_range_base = None;
             let mut chosen = current;
             match chosen.iter().position(|i| *i == item) {
                 Some(index) => {
@@ -297,6 +311,7 @@ impl TreeState {
     pub fn select_part(&mut self, view: TreeView, index: usize) {
         self.select_parts(view, BTreeSet::from([index]), index);
         self.anchor = Some(index);
+        self.range_base = None;
     }
 
     /// Ctrl click: adds a part to the selection, or takes it out when it is selected.
@@ -307,6 +322,7 @@ impl TreeState {
         }
         self.select_parts(view, parts, index);
         self.anchor = Some(index);
+        self.range_base = None;
     }
 
     /// Adds parts to the selection; the last becomes the selected one.
@@ -322,21 +338,24 @@ impl TreeState {
         }
     }
 
-    /// Shift click in the tree: the parts from the anchor to `index`, added to the selection
-    /// with Ctrl.
-    pub fn select_range(&mut self, view: TreeView, index: usize, add: bool) {
+    /// Shift click in the tree: adds the parts from the anchor, the part last clicked
+    /// without Shift, to `index`. Ranges and Ctrl clicks accumulate, as long as no plain
+    /// click starts anew; a further Shift click from the same anchor replaces only the
+    /// range of the one before, so that it can shrink again.
+    pub fn select_range(&mut self, view: TreeView, index: usize) {
+        let current = self.selected_parts(view);
         let anchor = (self.anchor)
-            .filter(|_| !self.selected_parts(view).is_empty())
+            .filter(|_| !current.is_empty())
             .unwrap_or(index);
-        let range = anchor.min(index)..=anchor.max(index);
-        let mut parts = if add {
-            self.selected_parts(view)
-        } else {
-            BTreeSet::new()
+        let mut parts = match self.range_base.take() {
+            Some((base, left)) if left == current => base,
+            _ => current,
         };
-        parts.extend(range);
+        let base = parts.clone();
+        parts.extend(anchor.min(index)..=anchor.max(index));
         self.select_parts(view, parts, index);
         self.anchor = Some(anchor);
+        self.range_base = Some((base, self.selected_parts(view)));
     }
 
     /// Selects `parts` with `lead` as the selected item, or the last part when `lead` is not
@@ -359,6 +378,11 @@ impl TreeState {
             }
         }
     }
+}
+
+/// The same items, in any order.
+fn same_items(a: &[TreeItem], b: &[TreeItem]) -> bool {
+    a.len() == b.len() && a.iter().all(|i| b.contains(i))
 }
 
 /// What the user did in the tree this frame.
@@ -1322,7 +1346,7 @@ impl Tree<'_> {
                 TreeItem::Part(_) if response.secondary_clicked() && self.is_selected(&item) => {}
                 // Several parts are selected with Ctrl and Shift, as in a Windows tree.
                 TreeItem::Part(index) if response.clicked() && shift => {
-                    self.state.select_range(self.view, index, ctrl);
+                    self.state.select_range(self.view, index);
                 }
                 TreeItem::Part(index) if response.clicked() && ctrl => {
                     self.state.toggle_part(self.view, index);
@@ -1333,7 +1357,7 @@ impl Tree<'_> {
                 _ if response.secondary_clicked() && self.is_selected(&item) => {}
                 _ if response.clicked() && (ctrl || shift) && self.siblings.contains(&item) => {
                     let siblings = self.siblings.clone();
-                    (self.state).select_sibling(self.view, item.clone(), &siblings, ctrl, shift);
+                    (self.state).select_sibling(self.view, item.clone(), &siblings, shift);
                 }
                 _ => self.state.select_item(self.view, item.clone()),
             }
@@ -2859,14 +2883,14 @@ mod tests {
         state.toggle_part(view, 4);
         assert_eq!(parts(&state, view), [1, 4]);
         assert_eq!(state.selected, Some((view, TreeItem::Part(4))));
-        // Shift selects from the part last clicked, Ctrl+Shift adds the range.
-        state.select_range(view, 2, false);
-        assert_eq!(parts(&state, view), [2, 3, 4]);
+        // Shift adds the parts from the one last clicked; a plain click starts anew.
+        state.select_range(view, 2);
+        assert_eq!(parts(&state, view), [1, 2, 3, 4]);
         state.select_part(view, 0);
-        state.select_range(view, 1, true);
+        state.select_range(view, 1);
         assert_eq!(parts(&state, view), [0, 1]);
         state.toggle_part(view, 5);
-        state.select_range(view, 7, true);
+        state.select_range(view, 7);
         assert_eq!(parts(&state, view), [0, 1, 5, 6, 7]);
         // Ctrl takes a part out again; the last one leaves nothing selected.
         state.toggle_part(view, 7);
@@ -2876,6 +2900,58 @@ mod tests {
         state.toggle_part(view, 3);
         assert_eq!(state.selected, None);
         assert!(parts(&state, view).is_empty());
+    }
+
+    #[test]
+    fn shift_ranges_and_ctrl_clicks_accumulate() {
+        let view = TreeView::Geometry;
+        let mut state = TreeState::default();
+        state.select_part(view, 0);
+        state.select_range(view, 3);
+        assert_eq!(parts(&state, view), [0, 1, 2, 3]);
+        state.toggle_part(view, 6);
+        state.select_range(view, 8);
+        assert_eq!(parts(&state, view), [0, 1, 2, 3, 6, 7, 8]);
+        // Shift again from the same anchor moves the end of that range only.
+        state.select_range(view, 7);
+        assert_eq!(parts(&state, view), [0, 1, 2, 3, 6, 7]);
+        state.select_range(view, 5);
+        assert_eq!(parts(&state, view), [0, 1, 2, 3, 5, 6]);
+        // Ctrl takes a part out and anchors there; Shift from it adds it back.
+        state.toggle_part(view, 1);
+        state.select_range(view, 2);
+        assert_eq!(parts(&state, view), [0, 1, 2, 3, 5, 6]);
+        // A selection changed elsewhere, as by a box, becomes the base of the next range.
+        state.add_parts(view, [10]);
+        state.select_range(view, 3);
+        assert_eq!(parts(&state, view), [0, 1, 2, 3, 5, 6, 10]);
+        // A plain click starts anew.
+        state.select_part(view, 9);
+        state.select_range(view, 8);
+        assert_eq!(parts(&state, view), [8, 9]);
+    }
+
+    #[test]
+    fn shift_ranges_of_items_accumulate() {
+        let view = TreeView::FeModel;
+        let siblings: Vec<TreeItem> = (0..8).map(TreeItem::ContactPair).collect();
+        let sorted = |state: &TreeState| {
+            let mut items = state.selected_items(view);
+            items.sort();
+            items
+        };
+        let mut state = TreeState::default();
+        state.select_item(view, siblings[0].clone());
+        state.select_sibling(view, siblings[2].clone(), &siblings, true);
+        state.select_sibling(view, siblings[5].clone(), &siblings, false);
+        state.select_sibling(view, siblings[7].clone(), &siblings, true);
+        let expected = |indices: &[usize]| -> Vec<TreeItem> {
+            indices.iter().map(|&i| siblings[i].clone()).collect()
+        };
+        assert_eq!(sorted(&state), expected(&[0, 1, 2, 5, 6, 7]));
+        state.select_sibling(view, siblings[6].clone(), &siblings, true);
+        assert_eq!(sorted(&state), expected(&[0, 1, 2, 5, 6]));
+        assert_eq!(state.selected_items(view)[0], siblings[6]);
     }
 
     #[test]
@@ -2891,7 +2967,7 @@ mod tests {
         let mut state = TreeState::default();
         state.select_item(view, siblings[1].clone());
         // Shift selects from the item last clicked; the clicked one leads.
-        state.select_sibling(view, siblings[3].clone(), &siblings, false, true);
+        state.select_sibling(view, siblings[3].clone(), &siblings, true);
         assert_eq!(
             state.selected_items(view),
             [
@@ -2901,8 +2977,8 @@ mod tests {
             ]
         );
         // Ctrl adds one and takes one out.
-        state.select_sibling(view, siblings[4].clone(), &siblings, true, false);
-        state.select_sibling(view, siblings[2].clone(), &siblings, true, false);
+        state.select_sibling(view, siblings[4].clone(), &siblings, false);
+        state.select_sibling(view, siblings[2].clone(), &siblings, false);
         let mut items = state.selected_items(view);
         items.sort();
         assert_eq!(
@@ -2917,9 +2993,9 @@ mod tests {
         // Another selection drops them; a plain click selects one alone.
         state.selected = Some((view, TreeItem::Material(0)));
         assert_eq!(state.selected_items(view), [TreeItem::Material(0)]);
-        state.select_sibling(view, siblings[0].clone(), &siblings, true, false);
+        state.select_sibling(view, siblings[0].clone(), &siblings, false);
         assert_eq!(state.selected_items(view), [siblings[0].clone()]);
-        state.select_sibling(view, siblings[0].clone(), &siblings, true, false);
+        state.select_sibling(view, siblings[0].clone(), &siblings, false);
         assert_eq!(state.selected, None);
     }
 
@@ -2936,7 +3012,7 @@ mod tests {
         assert_eq!(parts(&state, TreeView::FeModel), [1]);
         // Shift without a part selected starts at the clicked one.
         state.selected = None;
-        state.select_range(TreeView::FeModel, 3, false);
+        state.select_range(TreeView::FeModel, 3);
         assert_eq!(parts(&state, TreeView::FeModel), [3]);
     }
 
