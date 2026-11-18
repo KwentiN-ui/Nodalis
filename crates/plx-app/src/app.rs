@@ -7400,7 +7400,9 @@ impl Workbench {
                 ui.horizontal(|ui| {
                     ui.label("Name");
                     let edit = ui.add(egui::TextEdit::singleline(typed).desired_width(200.0));
-                    if ui.memory(|m| m.focused().is_none()) {
+                    // Asking for the focus on the frame Enter takes it away would hide
+                    // the lost focus, so Enter would not rename.
+                    if !edit.has_focus() && !edit.lost_focus() {
                         edit.request_focus();
                     }
                     if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
