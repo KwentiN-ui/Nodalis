@@ -1431,7 +1431,6 @@ pub fn worksheet(
                                             view,
                                             item.clone(),
                                             &rows,
-                                            modifiers.command,
                                             modifiers.shift,
                                         );
                                     } else {
