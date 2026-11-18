@@ -232,7 +232,7 @@ mod tests {
         for (file, text) in sources {
             for (line, content) in text.lines().enumerate() {
                 for c in content.chars() {
-                    let ok = (c as u32) < 0x100 || "…–".contains(c);
+                    let ok = (c as u32) < 0x100 || "…–›".contains(c);
                     assert!(
                         ok,
                         "{file}:{}: character {c:?} is missing from the egui font",

@@ -1615,9 +1615,8 @@ impl AnalysisWindow {
         let workspace = self.workspace();
         if let Some(search) = &mut self.search {
             let entries = crate::command::search_order(false, workspace);
-            let list: Vec<crate::node_picker::Entry> = (entries.iter())
-                .map(|e| crate::node_picker::Entry { ..e.entry })
-                .collect();
+            let list: Vec<crate::node_picker::Entry> =
+                (entries.iter()).map(|e| e.entry.clone()).collect();
             match search.show(&ctx, &list) {
                 crate::node_picker::Outcome::Open => {}
                 crate::node_picker::Outcome::Closed => self.search = None,

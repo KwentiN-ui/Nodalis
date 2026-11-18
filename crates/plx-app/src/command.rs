@@ -2327,10 +2327,36 @@ pub fn search_entries(workspaces: &[Workspace]) -> Vec<SearchEntry> {
                 label,
                 keywords,
                 tip: c.tip,
+                icon: c.icon,
+                detail: search_detail(workspace, c),
             },
         });
     }
     entries
+}
+
+/// Where the command search finds a command: its workspace, ribbon tab and group, such as
+/// "Project › Sources › Mesh".
+fn search_detail(workspace: Workspace, c: &Command) -> String {
+    let mut parts = vec![workspace.title()];
+    parts.extend(ribbon_parts(c));
+    parts.dedup();
+    parts.join(" › ")
+}
+
+/// The ribbon tab and group of a command, such as "Sources › Mesh"; `None` for one without
+/// a place on a tab.
+pub fn ribbon_path(cmd: Cmd) -> Option<String> {
+    let mut parts = ribbon_parts(find(cmd)?);
+    parts.dedup();
+    (!parts.is_empty()).then(|| parts.join(" › "))
+}
+
+fn ribbon_parts(c: &Command) -> Vec<&'static str> {
+    [c.tab, c.group]
+        .into_iter()
+        .filter(|part| !part.is_empty() && *part != PINNED)
+        .collect()
 }
 
 /// The entries of the command search, made once per set of workspaces.

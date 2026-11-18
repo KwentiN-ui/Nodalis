@@ -222,8 +222,9 @@ second click on the tile cancels. #ui("New Analysis") works the same way.
 
 #key("Ctrl+K") or a click into the search field of the app bar opens the command search. It
 finds the commands of all workspaces by their name, group, tab and tooltip; those of the
-current workspace come first. #key("Enter") or a click runs the command and switches to its
-workspace when needed.
+current workspace come first. Each row shows the icon of the command and, in grey below its
+name, where it lives: workspace, ribbon tab and group. #key("Enter") or a click runs the
+command and switches to its workspace when needed.
 
 #screenshot("command-search.png", [Command search for "contact"])
 

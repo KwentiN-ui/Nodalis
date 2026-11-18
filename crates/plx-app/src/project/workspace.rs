@@ -240,10 +240,7 @@ impl ProjectApp {
             return;
         };
         let entries = crate::command::search_order(true, workspace);
-        let list: Vec<node_picker::Entry> = entries
-            .iter()
-            .map(|e| node_picker::Entry { ..e.entry })
-            .collect();
+        let list: Vec<node_picker::Entry> = entries.iter().map(|e| e.entry.clone()).collect();
         match search.show(ctx, &list) {
             node_picker::Outcome::Open => {}
             node_picker::Outcome::Closed => self.search = None,

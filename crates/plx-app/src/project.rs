@@ -63,6 +63,10 @@ mod workspace;
 const RECENT_KEY: &str = "recent_projects";
 /// How many projects Open Recent lists.
 const RECENT_MAX: usize = 10;
+/// Storage key of the names of the blocks last added with the picker, latest first.
+const RECENT_BLOCKS_KEY: &str = "recent_blocks";
+/// How many blocks used last the empty picker lists, after Analysis.
+const RECENT_BLOCKS_MAX: usize = 5;
 
 /// What a block of the schematic is, without its data: for menus, texts and decisions that
 /// only depend on the kind.
@@ -2243,6 +2247,8 @@ pub struct ProjectApp {
     opening: Option<(PathBuf, Receiver<Opened>)>,
     /// The project files opened or saved last, the latest first; see Open Recent.
     recent: Vec<PathBuf>,
+    /// The names of the blocks last added with the picker, latest first.
+    recent_blocks: Vec<String>,
     /// The save running on a worker thread, and what autosave needs to know.
     saver: saving::Saver,
     unsaved: unsaved::Unsaved,
@@ -2393,6 +2399,9 @@ impl ProjectApp {
             new_analysis: None,
             opening: None,
             recent: cc.storage.map(stored_recent).unwrap_or_default(),
+            recent_blocks: (cc.storage)
+                .and_then(|s| eframe::get_value(s, RECENT_BLOCKS_KEY))
+                .unwrap_or_default(),
             saver: Default::default(),
             unsaved: Default::default(),
             update_queue: VecDeque::new(),
@@ -6364,7 +6373,7 @@ impl ProjectApp {
             && let Some(screen) = ui.ctx().input(|i| i.pointer.interact_pos())
         {
             let graph = viewer.to_global.inverse() * screen;
-            self.picker = Some(NodePicker::new(screen, graph));
+            self.picker = Some(self.block_picker(screen, graph));
         }
         self.schematic_keys(ui, ui.max_rect(), viewer.to_global.inverse());
         self.minimap(ui.ctx(), ui.max_rect(), viewer.to_global);
@@ -6377,6 +6386,8 @@ impl ProjectApp {
                 node_picker::Outcome::Picked(i) => {
                     viewer.actions.push(kinds[i].action(picker.graph));
                     self.picker = None;
+                    let label = entries[i].label;
+                    self.recent_blocks = with_recent_block(&self.recent_blocks, label);
                 }
             }
         }
@@ -8186,7 +8197,7 @@ impl ProjectApp {
                 }
                 self.frame_label = None;
             }
-            Action::Pick(screen, graph) => self.picker = Some(NodePicker::new(screen, graph)),
+            Action::Pick(screen, graph) => self.picker = Some(self.block_picker(screen, graph)),
             Action::AddMath(pos) => {
                 self.add_math(pos);
             }
@@ -8655,6 +8666,7 @@ impl eframe::App for ProjectApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, settings::STORAGE_KEY, &self.settings);
         eframe::set_value(storage, RECENT_KEY, &self.recent);
+        eframe::set_value(storage, RECENT_BLOCKS_KEY, &self.recent_blocks);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -11229,6 +11241,69 @@ impl BlockKind {
             label,
             keywords,
             tip,
+            icon: self.icon(),
+            detail: self.detail(category),
+        }
+    }
+
+    /// The grey line under its name in the picker: where its tile is on the ribbon, such as
+    /// "Sources › Mesh", or else its group.
+    fn detail(&self, category: &str) -> String {
+        use crate::command::{BlockTile as T, Cmd};
+        let tile = match self {
+            Self::Analysis => {
+                return crate::command::ribbon_path(Cmd::NewAnalysis)
+                    .unwrap_or_else(|| category.into());
+            }
+            Self::Materials => T::Materials,
+            Self::CrossSections => T::CrossSections,
+            Self::Mesh(MeshPrimitive::Box { .. }) => T::BoxMesh,
+            Self::Mesh(MeshPrimitive::Rectangle { .. }) => T::RectangleMesh,
+            Self::RefineMesh => T::RefineMesh,
+            Self::DeformedMesh => return category.into(),
+            Self::CadOperation => T::CadOperation,
+            Self::Transform => T::Transform,
+            Self::Parameters => T::Parameters,
+            Self::Math => T::Math,
+            Self::Switch => T::Switch,
+            Self::Formula => T::Formula,
+            Self::Measure => T::Measure,
+            Self::Study => T::Study,
+            Self::Campbell => T::Campbell,
+            Self::MeshExport => T::MeshExport,
+            Self::File => T::File,
+            Self::Note => T::Note,
+            Self::Plot => T::Plot,
+            Self::Preview => T::Preview,
+        };
+        crate::command::ribbon_path(Cmd::Place(tile)).unwrap_or_else(|| category.into())
+    }
+
+    /// The icon of its row in the picker, the one of its tile in the ribbon.
+    fn icon(&self) -> crate::command::TileIcon {
+        use crate::command::{Glyph, TileIcon};
+        let node = TileIcon::Node;
+        match self {
+            Self::Analysis => TileIcon::Shape(Glyph::Analysis),
+            Self::Materials => node(NodeIcon::Materials),
+            Self::CrossSections => node(NodeIcon::CrossSections),
+            Self::Mesh(MeshPrimitive::Box { .. }) => node(NodeIcon::BoxMesh),
+            Self::Mesh(MeshPrimitive::Rectangle { .. }) => node(NodeIcon::Mesh),
+            Self::RefineMesh | Self::DeformedMesh => node(NodeIcon::Mesh),
+            Self::CadOperation => node(NodeIcon::CadOperation),
+            Self::Transform => node(NodeIcon::Transform),
+            Self::Parameters => node(NodeIcon::Setup),
+            Self::Math => node(NodeIcon::Math),
+            Self::Switch => node(NodeIcon::Switch),
+            Self::Formula => node(NodeIcon::Formula),
+            Self::Measure => node(NodeIcon::Results),
+            Self::Study => node(NodeIcon::Steps),
+            Self::Campbell => node(NodeIcon::Solution),
+            Self::MeshExport => node(NodeIcon::Export),
+            Self::File => TileIcon::Tool(crate::icons::Icon::Import),
+            Self::Note => node(NodeIcon::Note),
+            Self::Plot => node(NodeIcon::Plot),
+            Self::Preview => node(NodeIcon::Picture),
         }
     }
 
@@ -13482,6 +13557,36 @@ struct MonitorRow {
     active: bool,
 }
 
+impl ProjectApp {
+    /// The picker of blocks to add at `screen`, `graph` in the schematic: empty, it lists
+    /// Analysis and then the blocks used last.
+    fn block_picker(&self, screen: egui::Pos2, graph: egui::Pos2) -> NodePicker {
+        let entries: Vec<_> = block_kinds().iter().map(BlockKind::entry).collect();
+        NodePicker::new(screen, graph).with_start(
+            picker_start(&entries, &self.recent_blocks),
+            "Search blocks …",
+        )
+    }
+}
+
+/// What the empty block picker lists: Analysis first, then the blocks used last.
+fn picker_start(entries: &[node_picker::Entry], recent: &[String]) -> Vec<usize> {
+    let analysis = entries.iter().position(|e| e.label == "Analysis");
+    let used = (recent.iter())
+        .filter_map(|name| entries.iter().position(|e| e.label == name))
+        .filter(|&i| Some(i) != analysis)
+        .take(RECENT_BLOCKS_MAX);
+    analysis.into_iter().chain(used).collect()
+}
+
+/// `recent` with the block `label` first, once, and at most a few more than the picker shows.
+fn with_recent_block(recent: &[String], label: &str) -> Vec<String> {
+    let mut list = vec![label.to_string()];
+    list.extend(recent.iter().filter(|r| *r != label).cloned());
+    list.truncate(RECENT_BLOCKS_MAX + 1);
+    list
+}
+
 /// The recent project files stored at the last exit that still exist.
 fn stored_recent(storage: &dyn eframe::Storage) -> Vec<PathBuf> {
     let mut recent = eframe::get_value::<Vec<PathBuf>>(storage, RECENT_KEY).unwrap_or_default();
@@ -15437,6 +15542,42 @@ mod tests {
         let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(texts[2..], ["1x: 9131 rpm"]);
         assert!(rows[2].tip.contains("mode 1 (backward)"), "{}", rows[2].tip);
+    }
+
+    #[test]
+    fn block_picker_lists_analysis_then_blocks_used_last() {
+        let entries: Vec<_> = block_kinds().iter().map(BlockKind::entry).collect();
+        let at = |label: &str| entries.iter().position(|e| e.label == label).unwrap();
+        // Nothing used yet: Analysis alone.
+        assert_eq!(picker_start(&entries, &[]), [at("Analysis")]);
+        let mut recent = Vec::new();
+        for label in [
+            "Math",
+            "Plot",
+            "Analysis",
+            "Note",
+            "Formula",
+            "Math",
+            "Switch",
+            "Parameter Study",
+        ] {
+            recent = with_recent_block(&recent, label);
+        }
+        // Latest first, each once; names no longer offered are skipped.
+        recent.insert(1, "Gone".into());
+        let start = picker_start(&entries, &recent);
+        let names: Vec<_> = start.iter().map(|&i| entries[i].label).collect();
+        assert_eq!(
+            names,
+            [
+                "Analysis",
+                "Parameter Study",
+                "Switch",
+                "Math",
+                "Formula",
+                "Note"
+            ]
+        );
     }
 
     #[test]
