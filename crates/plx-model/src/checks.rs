@@ -58,11 +58,6 @@ pub enum Problem {
     /// Slave nodes of a tie CalculiX did not tie: the master side lies opposite them but
     /// further away than the position tolerance. Found in the output of a run.
     TieNodesNotTied,
-    /// Beam, truss, shell or membrane nodes in a rigid body or rigid displacement point:
-    /// CalculiX 2.23 refuses them in a `*RIGID BODY`, so they are coupled by linear
-    /// equations, which hold for small rotations only. Warned of in steps with large
-    /// deformations, and found in the output of a CalculiX run of another input file.
-    RigidBeamNodes,
     /// A plastic hardening curve the solver rejects: no elasticity, a row without a yield
     /// stress, or plastic strains that do not start at 0 and grow.
     InvalidPlastic,
@@ -293,7 +288,6 @@ impl Problem {
             | Problem::ContactChangeIgnored
             | Problem::ContactOutputIgnored
             | Problem::DesignRegionIgnored
-            | Problem::RigidBeamNodes
             | Problem::DeformableOnRigid
             | Problem::HeldRigidBodyNodes
             | Problem::TieNodesNotTied
@@ -350,7 +344,6 @@ impl Problem {
             Problem::DeformableOnRigid => "Deformable coupling on a rigid selection",
             Problem::HeldRigidBodyNodes => "Rigid body on nodes held by a boundary condition",
             Problem::TieNodesNotTied => "Nodes of a bonded contact not tied",
-            Problem::RigidBeamNodes => "Beam or shell nodes in a rigid body",
             Problem::InvalidPlastic => "Invalid plasticity",
             Problem::InvalidCreep => "Invalid creep law",
             Problem::InvalidHyperelastic => "Invalid hyperelastic material",
@@ -448,15 +441,6 @@ impl Problem {
                 "A Frequency step, a Dynamic step, a transient heat transfer as well as \
                  gravity and centrifugal loads need the mass of the model. Without a \
                  density the run aborts."
-            }
-            Problem::RigidBeamNodes => {
-                "Nodes of beams, trusses, shells and membranes cannot be part of a rigid \
-                 body, because the solver expands these elements into solids. Nodalis therefore \
-                 couples such nodes of a Rigid Body constraint or a rigid displacement point \
-                 with linear equations to the point. They are exact for small rotations, as \
-                 in a linear analysis; with large deformations (NLGEOM) and large rotations \
-                 of the point these nodes lag behind the rigid motion. As with a rigid body, \
-                 the rotations of beam and shell nodes are not coupled."
             }
             Problem::TieNodesNotTied => {
                 "The solver ties a slave node of a bonded contact region or tie only if the \
@@ -1013,13 +997,6 @@ impl Problem {
             Problem::InvalidElastic => {
                 "Enter a Young's modulus greater than 0 and a Poisson's ratio less than \
                  0.5 (steel: 210000 MPa, 0.3)."
-            }
-            Problem::RigidBeamNodes => {
-                "If the point turns by more than a few degrees, select solid faces or nodes \
-                 for the rigid body, or join the beams with a Node Tie (rigid) at a shared \
-                 node instead of a rigid body. For small rotations nothing needs to change. \
-                 A run that stopped with this message used an input file from an older \
-                 Nodalis: run the analysis again."
             }
             Problem::TieNodesNotTied => {
                 "Set the Tolerance of the contact region (or tie) a little above the largest \
@@ -2320,23 +2297,6 @@ impl FeModel {
                 if let Ok(point) = spec.resolve(self, mesh, region, &all) {
                     let nodes = point.nodes.into_iter().collect();
                     bodies.push((ModelItem::Constraint(i), &joint.name, nodes));
-                }
-            }
-        }
-        if let Some(step) = (self.steps.iter()).find(|s| s.active && self.step_nlgeom(&s.kind)) {
-            let expanded = crate::expanded_nodes(mesh);
-            for (item, name, nodes) in &bodies {
-                let count = nodes.iter().filter(|n| expanded.contains(n)).count();
-                if count > 0 {
-                    findings.push(Finding::new(
-                        *item,
-                        Problem::RigidBeamNodes,
-                        format!(
-                            "{name}: {count} beam or shell nodes coupled by equations, {} \
-                             with large deformations",
-                            step.name
-                        ),
-                    ));
                 }
             }
         }
@@ -6301,58 +6261,6 @@ mod tests {
         assert!(refused(&model).is_empty());
     }
 
-    #[test]
-    fn beam_nodes_in_a_rigid_remote_displacement_are_warned_of_with_nlgeom() {
-        let mut mesh = FeMesh::default();
-        for (id, x) in [0.0, 1.0, 2.0].into_iter().enumerate() {
-            mesh.set_node(id as u32 + 1, [x, 0.0, 0.0]);
-        }
-        for (id, nodes) in [(1, vec![1, 2]), (2, vec![2, 3])] {
-            mesh.add_element(Element {
-                id,
-                type_name: "B31".into(),
-                shape: ElementShape::Line2,
-                nodes,
-            })
-            .unwrap();
-        }
-        mesh.parts.push(Part {
-            bodies: Vec::new(),
-            name: "BEAM".into(),
-            elements: vec![1, 2],
-        });
-        let mut model = model(&mesh);
-        beam_section(&mut model);
-        let bc = &mut model.steps[0].boundary_conditions[0];
-        bc.region = Region::Nodes(vec![1]);
-        bc.kind = BoundaryKind::Displacement(crate::Displacement::rigid([Some(0.0); 6]));
-        model.steps[0].loads[0].region = Region::Nodes(vec![3]);
-        // Linear: the equations replacing the rigid body are exact.
-        let rigid = |found: &[Finding]| {
-            (found.iter())
-                .filter(|f| f.problem == Problem::RigidBeamNodes)
-                .map(|f| (f.item, f.detail.clone()))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(rigid(&check(&model, &mesh)), []);
-        let StepKind::Static(settings) = &mut model.steps[0].kind else {
-            unreachable!()
-        };
-        settings.nlgeom = true;
-        assert_eq!(
-            rigid(&check(&model, &mesh)),
-            [(
-                ModelItem::BoundaryCondition(0, 0),
-                "Fixed-1: 1 beam or shell nodes coupled by equations, Step-1 with large \
-                 deformations"
-                    .to_string()
-            )]
-        );
-    }
-
-    /// A symmetry plane holds two rotations of the beam nodes on it by design. Beams the
-    /// solver expands into solids it holds too stiffly; general profiles lie on it as they
-    /// should, and only they are halved.
     #[test]
     fn beams_on_a_symmetry_plane() {
         let mut mesh = FeMesh::default();

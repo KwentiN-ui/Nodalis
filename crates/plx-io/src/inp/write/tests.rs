@@ -5850,9 +5850,8 @@ fn solver_bends_a_rectangular_beam_like_beam_theory() {
 }
 
 #[test]
-fn a_rigid_remote_displacement_couples_beam_nodes_by_equations() {
-    // CalculiX 2.23 stops on beam nodes in a *Rigid body ("nodes belonging to beam elements
-    // must not be subject to a RIGID MPC"); they are coupled by equations instead.
+fn a_rigid_remote_displacement_holds_beam_nodes_in_a_rigid_body() {
+    // The solver couples a beam node by its expanded nodes, rotations included.
     let mesh = line_chain(4, 0, 100.0, true);
     let tip = *mesh.node_ids().last().unwrap();
     let mut model = line_model(
@@ -5861,25 +5860,25 @@ fn a_rigid_remote_displacement_couples_beam_nodes_by_equations() {
         LoadKind::force([0.0, 0.0, 0.0]),
     );
     model.steps[0].loads.clear();
-    // The point 20 above the tip, its rotations held: the tip moves like the point.
+    // The point 20 above the tip, its rotations held: the tip moves like the point and
+    // does not turn.
     let values = [None, Some(-1.0), None, Some(0.0), Some(0.0), Some(0.0)];
     let mut bc = remote_with(values, |r| r.location = Some([100.0, 0.0, 20.0]));
     bc.region = Region::Nodes(vec![tip]);
     model.steps[0].boundary_conditions.push(bc);
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(!text.contains("*Rigid body"), "{text}");
-    let (reference, rotation) = (tip + 1, tip + 2);
-    // u_tip = u_point + theta x (0, 0, -20)
-    for expected in [
-        format!("\n3\n{tip}, 1, 1, {reference}, 1, -1, {rotation}, 2, 20\n"),
-        format!("\n3\n{tip}, 2, 1, {reference}, 2, -1, {rotation}, 1, -20\n"),
-        format!("\n2\n{tip}, 3, 1, {reference}, 3, -1\n"),
-    ] {
-        assert!(text.contains(&expected), "{expected}\n{text}");
-    }
+    assert_eq!(text.matches("*Rigid body").count(), 1, "{text}");
+    assert_eq!(equations(&mesh, &model), 0, "{text}");
     if let Some(frd) = run_solver("balken_remote_starr", &text) {
         let u2 = min_u2(&frd);
         assert!((u2 + 1.0).abs() < 1e-6, "{u2}");
+        // Clamped at both ends (guided at the tip): the tip's section stays upright, so
+        // the expanded nodes there all move by -1.
+        let tip_nodes = expanded_tip_u2(&mesh, &frd, tip);
+        assert!(
+            tip_nodes.iter().all(|u| (u + 1.0).abs() < 1e-6),
+            "{tip_nodes:?}"
+        );
     }
 
     // The same for a rigid body constraint on the tip.
@@ -5892,15 +5891,28 @@ fn a_rigid_remote_displacement_couples_beam_nodes_by_equations() {
     body.region = Region::Nodes(vec![tip]);
     model.constraints.push(Constraint::RigidBody(body));
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(!text.contains("*Rigid body"), "{text}");
-    assert!(
-        text.contains(&format!("\n2\n{tip}, 1, 1, {reference}, 1, -1\n")),
-        "{text}"
-    );
+    assert_eq!(text.matches("*Rigid body").count(), 1, "{text}");
+    assert_eq!(equations(&mesh, &model), 0, "{text}");
+}
+
+/// The `U2` of the nodes the solver expanded the node `node` of the input to.
+fn expanded_tip_u2(mesh: &FeMesh, frd: &FrdImport, node: NodeId) -> Vec<f64> {
+    let expanded = crate::frd::expanded_nodes(mesh, &frd.mesh);
+    let indices = crate::frd::node_indices(&frd.mesh, &expanded, node);
+    assert!(!indices.is_empty(), "no node {node} in the results");
+    let increment = frd.increments.last().unwrap();
+    let values = increment
+        .field("DISP")
+        .unwrap()
+        .component("U2")
+        .unwrap()
+        .values
+        .get();
+    indices.iter().map(|&i| f64::from(values[i])).collect()
 }
 
 #[test]
-fn a_rigid_body_keeps_its_solid_nodes_and_couples_beam_nodes_by_equations() {
+fn a_rigid_body_takes_solid_and_beam_nodes() {
     // The cantilever's tip face and a beam node beside it in one rigid body.
     let (mut mesh, mut model) = rigid_tip(None, None);
     let start = mesh.node_ids().iter().max().unwrap() + 1;
@@ -5933,9 +5945,8 @@ fn a_rigid_body_keeps_its_solid_nodes_and_couples_beam_nodes_by_equations() {
         .split('*')
         .next()
         .unwrap();
-    assert!(!members.contains(&start.to_string()), "{members}");
-    assert_eq!(equations(&mesh, &model), 3, "{text}");
-    assert!(text.contains(&format!("\n2\n{start}, 1, 1, ")), "{text}");
+    assert!(members.contains(&start.to_string()), "{members}");
+    assert_eq!(equations(&mesh, &model), 0, "{text}");
 }
 
 #[test]
