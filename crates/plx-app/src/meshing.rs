@@ -939,15 +939,19 @@ impl MeshItemEditor {
         }
     }
 
-    /// A selection box dragged on the geometry picks the parts, or the faces, inside it.
+    /// A selection box dragged on the geometry picks the parts, or the faces and edges,
+    /// inside it.
     pub fn box_select(&mut self, view: &Model, area: &BoxSelect, operation: Operation) {
-        if self.has_parts() {
-            self.parts.box_select(view, area, operation);
-            self.sync_parts();
-        } else {
-            self.picks
-                .push(operation, geometry_selection::pick_box(view, area));
-            self.update_face_parts(view);
+        match self.geometry_region() {
+            None => {
+                self.parts.box_select(view, area, operation);
+                self.sync_parts();
+            }
+            Some(region) => {
+                let picked = geometry_selection::pick_box(view, &self.picker, region, area);
+                self.picks.push(operation, picked);
+                self.update_face_parts(view);
+            }
         }
     }
 
@@ -1531,10 +1535,25 @@ mod tests {
             shift: false,
             ctrl: false,
         };
+        editor.picker.select_by = SelectBy::Geometry;
         editor.box_select(&view, &area(false), Operation::Replace);
-        assert_eq!(faces(&editor), (1, 0), "the end face at x = -50");
+        assert_eq!(
+            faces(&editor),
+            (1, 0),
+            "the end face at x = -50, its edges with it"
+        );
         editor.box_select(&view, &area(true), Operation::Replace);
         assert_eq!(faces(&editor), (6, 0), "all but the end face at x = 50");
+        // The edge angle mode boxes edges: those of the end face.
+        editor.picker.select_by = SelectBy::GeometryEdgeAngle;
+        editor.box_select(&view, &area(false), Operation::Replace);
+        assert_eq!(faces(&editor), (0, 4));
+        // The part mode the whole part, which only a crossing box takes.
+        editor.picker.select_by = SelectBy::GeometryPart;
+        editor.box_select(&view, &area(false), Operation::Replace);
+        assert!(editor.finish().is_err(), "nothing selected");
+        editor.box_select(&view, &area(true), Operation::Replace);
+        assert_eq!(faces(&editor), (7, 0));
     }
 
     #[test]

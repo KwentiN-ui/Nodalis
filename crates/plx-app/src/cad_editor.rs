@@ -13,7 +13,7 @@ use plx_model::{
 };
 
 use crate::model::Model;
-use crate::viewport::{Click, ViewCommand, Viewport};
+use crate::viewport::{BoxSelect, Click, ViewCommand, Viewport};
 
 pub enum CadEditorResult {
     Open,
@@ -317,6 +317,45 @@ impl CadOperationEditor {
         // The edges of holes are curved.
         let straight = (self.input.signatures.iter()).any(|s| s.entity == edge && s.kind == "Line");
         (self.kind != CadOperationKind::HoleRing || !straight).then_some(edge)
+    }
+
+    /// A selection box dragged over the input adds the edges, faces or corners inside it
+    /// that a click could pick, or those crossing it when dragged to the left, as clicks
+    /// add them one by one; with Ctrl it takes them out. A split takes its plane from one
+    /// face, which a box does not name.
+    fn box_select(&mut self, area: &BoxSelect) {
+        if !self.picking() || self.kind == CadOperationKind::SplitPlane {
+            return;
+        }
+        let Some(view) = self.view.as_ref() else {
+            return;
+        };
+        let signature = |entity: CadEntity, kind: &str| {
+            (self.input.signatures.iter()).any(|s| s.entity == entity && s.kind == kind)
+        };
+        let boxed: BTreeSet<CadEntity> = if self.corners() {
+            (self.input.signatures.iter())
+                .filter(|s| matches!(s.entity, CadEntity::Vertex(_)))
+                .filter(|s| area.contains(view.to_render(s.centroid)))
+                .map(|s| s.entity)
+                .collect()
+        } else if self.kind.picks(CadEntity::Face(0)) {
+            let defeature = self.kind == CadOperationKind::Defeature;
+            (crate::geometry_selection::faces_in_box(view, area).into_iter())
+                .filter(|&face| defeature || signature(face, "Plane"))
+                .collect()
+        } else {
+            let hole = self.kind == CadOperationKind::HoleRing;
+            (crate::geometry_selection::edges_in_box(view, area).into_iter())
+                .filter(|&edge| !hole || !signature(edge, "Line"))
+                .collect()
+        };
+        if area.ctrl {
+            self.picks.retain(|e| !boxed.contains(e));
+        } else {
+            self.picks.extend(boxed);
+        }
+        self.update_highlight();
     }
 
     /// Applies the operation to the input and shows the result, or says why it failed.
@@ -688,6 +727,9 @@ impl CadOperationEditor {
                 self.picks.insert(entity);
             }
             self.update_highlight();
+        }
+        if let Some(area) = response.box_select {
+            self.box_select(&area);
         }
         if let Some(hover) = response.hover {
             viewport.preview = (hover.and_then(|click| self.entity_at(&click)))

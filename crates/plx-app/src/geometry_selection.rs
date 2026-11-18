@@ -400,37 +400,98 @@ pub fn pick(
     }
 }
 
+/// What a selection box selects in the mode of the selection window: the whole parts
+/// inside it in the part mode, else the faces inside it and, where the region takes edges,
+/// the edges inside it that bound no face taken; in the edge angle mode only edges. Inside
+/// means all of an entity's points in the box, or for a box dragged from right to left
+/// any of them. Only visible parts count.
+pub fn pick_box(
+    model: &Model,
+    picker: &Picker,
+    region: GeometryRegion,
+    area: &BoxSelect,
+) -> BTreeSet<CadEntity> {
+    let edges = region == GeometryRegion::FacesAndEdges;
+    if picker.select_by == SelectBy::GeometryPart {
+        let mut picked = BTreeSet::new();
+        for part in (0..model.parts.len())
+            .filter(|&p| model.parts[p].visible && crate::selection::part_in_box(model, p, area))
+        {
+            let elements = &model.mesh().parts[part].elements;
+            picked.extend(
+                (elements.iter())
+                    .filter_map(|&id| model.cad_entity(id))
+                    .filter(|e| match e {
+                        CadEntity::Face(_) => true,
+                        CadEntity::Edge(_) => edges && model.skin(part).faces.is_empty(),
+                        CadEntity::Vertex(_) => false,
+                    }),
+            );
+        }
+        return picked;
+    }
+    if edges && picker.select_by == SelectBy::GeometryEdgeAngle {
+        return edges_in_box(model, area);
+    }
+    let faces = faces_in_box(model, area);
+    if !edges {
+        return faces;
+    }
+    let index = model.geometry_index();
+    let bounding: BTreeSet<i32> = (faces.iter())
+        .filter_map(|f| match f {
+            CadEntity::Face(tag) => index.face_edges.get(tag),
+            _ => None,
+        })
+        .flatten()
+        .copied()
+        .collect();
+    let free = (edges_in_box(model, area).into_iter())
+        .filter(|e| !matches!(e, CadEntity::Edge(tag) if bounding.contains(tag)));
+    faces.into_iter().chain(free).collect()
+}
+
+/// Whether the points lie inside the box, or any of them for a crossing box.
+fn points_in_box<'a>(
+    model: &Model,
+    area: &BoxSelect,
+    nodes: impl IntoIterator<Item = &'a NodeId>,
+) -> bool {
+    let mut inside = (nodes.into_iter())
+        .filter_map(|&id| model.mesh().node_index(id))
+        .map(|n| area.contains(model.render_position(n)))
+        .peekable();
+    if inside.peek().is_none() {
+        return false;
+    }
+    if area.crossing {
+        inside.any(|i| i)
+    } else {
+        inside.all(|i| i)
+    }
+}
+
 /// The faces of the visible parts inside a selection box, or crossing it when it was
 /// dragged from right to left.
-pub fn pick_box(model: &Model, area: &BoxSelect) -> BTreeSet<CadEntity> {
-    // For each face whether all and whether any of its corners lie inside.
-    let mut inside: BTreeMap<i32, (bool, bool)> = BTreeMap::new();
-    for (part, info) in model.mesh().parts.iter().zip(&model.parts) {
-        if !info.visible {
-            continue;
-        }
-        for element in part
-            .elements
-            .iter()
-            .filter_map(|&id| model.mesh().element(id))
-        {
-            let Some(CadEntity::Face(tag)) = model.cad_entity(element.id) else {
-                continue;
-            };
-            let state = inside.entry(tag).or_insert((true, false));
-            for &id in &element.nodes {
-                let Some(n) = model.mesh().node_index(id) else {
-                    continue;
-                };
-                let contained = area.contains(model.render_position(n));
-                state.0 &= contained;
-                state.1 |= contained;
-            }
-        }
-    }
-    (inside.into_iter())
-        .filter(|&(_, (all, any))| if area.crossing { any } else { all })
-        .map(|(tag, _)| CadEntity::Face(tag))
+pub fn faces_in_box(model: &Model, area: &BoxSelect) -> BTreeSet<CadEntity> {
+    let index = model.geometry_index();
+    let visible = |p: &usize| model.parts.get(*p).is_some_and(|info| info.visible);
+    (index.face_triangles.iter())
+        .filter(|(tag, _)| index.face_part.get(tag).is_some_and(visible))
+        .filter(|(_, triangles)| points_in_box(model, area, triangles.iter().flatten()))
+        .map(|(&tag, _)| CadEntity::Face(tag))
+        .collect()
+}
+
+/// The edges of the visible parts inside a selection box, or crossing it when it was
+/// dragged from right to left.
+pub fn edges_in_box(model: &Model, area: &BoxSelect) -> BTreeSet<CadEntity> {
+    let index = model.geometry_index();
+    let visible = |p: &usize| model.parts.get(*p).is_some_and(|info| info.visible);
+    (index.edge_points.iter())
+        .filter(|(tag, _)| index.edge_part.get(tag).is_some_and(visible))
+        .filter(|(_, points)| points_in_box(model, area, points.iter()))
+        .map(|(&tag, _)| CadEntity::Edge(tag))
         .collect()
 }
 
