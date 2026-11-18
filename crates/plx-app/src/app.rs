@@ -1149,8 +1149,32 @@ impl AnalysisWindow {
                 }
             }
             (None, _) if self.workbench.meshing.is_some() => {
-                ui.spinner();
-                ui.label("Meshing …");
+                let progress = (self.workbench.meshing.as_ref()).and_then(|j| j.progress());
+                match progress {
+                    // With more than one part, how many are done.
+                    Some(progress) if progress.total > 1 => {
+                        ui.spinner();
+                        ui.label(format!(
+                            "Meshing part {} of {}: {}",
+                            progress.done + 1,
+                            progress.total,
+                            progress.part
+                        ));
+                        ui.add(
+                            egui::ProgressBar::new(progress.done as f32 / progress.total as f32)
+                                .desired_width(180.0)
+                                .show_percentage(),
+                        );
+                    }
+                    Some(progress) => {
+                        ui.spinner();
+                        ui.label(format!("Meshing {} …", progress.part));
+                    }
+                    None => {
+                        ui.spinner();
+                        ui.label("Meshing …");
+                    }
+                }
                 cancel = (ui.small_button("Cancel"))
                     .on_hover_text("Stop the meshing; the parts keep their old mesh.")
                     .clicked();

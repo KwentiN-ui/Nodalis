@@ -1512,8 +1512,10 @@ fn mesh_in_worker(
     matching: Vec<PeriodicFaces>,
     parts: Option<Vec<String>>,
     cancel: &AtomicBool,
+    progress: &dyn Fn(MeshProgress),
 ) -> Result<PartMeshes, String> {
     let parts = parts_to_mesh(&geometry, parts)?;
+    let total = parts.len();
     let mut request = WorkerRequest {
         library: plx_mesher::library_path(),
         geometry,
@@ -1525,7 +1527,17 @@ fn mesh_in_worker(
         failed: Vec::new(),
     };
     while !request.parts.is_empty() {
-        let crashed = run_worker(program, &request, cancel, &mut generated)?;
+        // The parts before this worker's are done, meshed or failed.
+        let before = total - request.parts.len();
+        let parts = &request.parts;
+        let tell = |k: usize| {
+            progress(MeshProgress {
+                done: before + k,
+                total,
+                part: parts.get(k).cloned().unwrap_or_default(),
+            })
+        };
+        let crashed = run_worker(program, &request, cancel, &tell, &mut generated)?;
         let Some((k, message)) = crashed else {
             break;
         };
@@ -1548,6 +1560,7 @@ fn run_worker(
     program: &Path,
     request: &WorkerRequest,
     cancel: &AtomicBool,
+    starting: &dyn Fn(usize),
     generated: &mut PartMeshes,
 ) -> Result<Option<(usize, String)>, String> {
     let dir = WorkerDir::new().map_err(|e| format!("No folder for the mesher: {e}"))?;
@@ -1569,8 +1582,16 @@ fn run_worker(
         .spawn()
         .map_err(|e| format!("Cannot start the mesher: {e}"))?;
     let result = dir.0.join(RESULT);
+    let mut told = None;
     // The result counts once it is there, whether or not the worker has ended yet.
     let (text, status) = loop {
+        // Which part it works on now, for the progress shown.
+        let current = (std::fs::read_to_string(dir.0.join(CURRENT)).ok())
+            .and_then(|c| c.trim().parse::<usize>().ok());
+        if current.is_some() && current != told {
+            told = current;
+            starting(current.unwrap_or_default());
+        }
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
@@ -1584,7 +1605,7 @@ fn run_worker(
         match child.try_wait() {
             // It may have left its result just before it ended.
             Ok(Some(status)) => break (std::fs::read_to_string(&result).ok(), Some(status)),
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
             Err(e) => return Err(format!("The mesher could not be watched: {e}")),
         }
     };
@@ -1628,6 +1649,15 @@ fn run_worker(
     )))
 }
 
+/// How far a meshing job is: the part it works on now, the parts done before it and all
+/// it meshes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MeshProgress {
+    pub done: usize,
+    pub total: usize,
+    pub part: String,
+}
+
 /// What a cancelled job reports.
 pub const CANCELLED: &str = "Meshing cancelled";
 
@@ -1640,6 +1670,8 @@ pub struct MeshingJob {
     pub geometry: Geometry,
     receiver: Receiver<Result<PartMeshes, String>>,
     cancel: Arc<AtomicBool>,
+    /// How far it is; `None` until the first part starts.
+    progress: Arc<std::sync::Mutex<Option<MeshProgress>>>,
 }
 
 impl MeshingJob {
@@ -1656,9 +1688,18 @@ impl MeshingJob {
         let ctx = ctx.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::clone(&cancel);
+        let progress = Arc::new(std::sync::Mutex::new(None));
+        let told = Arc::clone(&progress);
         std::thread::spawn(move || {
+            let repaint = ctx.clone();
+            let tell = move |now: MeshProgress| {
+                *told.lock().unwrap_or_else(|e| e.into_inner()) = Some(now);
+                repaint.request_repaint();
+            };
             let result = match WORKER.get() {
-                Some(program) => mesh_in_worker(program, geometry, matching, parts, &cancelled),
+                Some(program) => {
+                    mesh_in_worker(program, geometry, matching, parts, &cancelled, &tell)
+                }
                 None => mesh_parts(&geometry, &matching, parts),
             };
             let _ = sender.send(result);
@@ -1669,7 +1710,17 @@ impl MeshingJob {
             geometry: meshed,
             receiver,
             cancel,
+            progress,
         }
+    }
+
+    /// How far it is: the part meshed now, with the parts done and all; `None` before the
+    /// first part starts.
+    pub fn progress(&self) -> Option<MeshProgress> {
+        self.progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The result once the worker is done.

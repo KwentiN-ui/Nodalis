@@ -36,12 +36,13 @@ suppressing a part in the Geometry workspace takes it out of the FE model.
 
 Gmsh runs in a separate process, so a meshing that takes too long, for example because the
 element size is too small, can be cancelled at any time. While it runs, the status bar shows
-#ui("Meshing ...") with a #ui("Cancel") button; #menu("Geometry", "Cancel") and the
+the part being meshed, such as #ui("Meshing part 8 of 89: NAME"), with a progress bar of the
+parts already meshed and a #ui("Cancel") button; #menu("Geometry", "Cancel") and the
 #ui("Stop") tile of the ribbon do the same. The mesher stops at once and the parts keep
 the mesh they had before. During #ui("Update Project") the #ui("Stop") buttons of the
 Solution Monitor and #ui("Stop") in the Project workspace cancel a meshing in the same way.
 
-#screenshot("meshing-cancel.png", [The status bar while meshing, with the Cancel button])
+#screenshot("meshing-cancel.png", [The status bar while meshing 89 parts, with the progress and the Cancel button])
 
 === Element types
 
