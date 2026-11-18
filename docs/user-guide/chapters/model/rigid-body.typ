@@ -43,14 +43,11 @@ deformable one is written as `*EQUATION`s between the two nodes and the region i
 deformable remote displacement (@displacement-behavior); its point has no reaction forces to
 print, so a history output of it leaves `RF` out.
 
-Nodes of beams, trusses, shells and membranes in the region are an exception: CalculiX expands
-these elements into solids internally and stops on such a node in a rigid body ("nodes
-belonging to beam elements must not be subject to a RIGID MPC"). Nodalis couples these nodes
-to the reference point with `*EQUATION`s instead, $u = u_"RP" + theta times (x - x_"RP")$, and
-keeps the other nodes in the `*RIGID BODY`. In a linear analysis this is the same as a rigid
-body. With large deformations (NLGEOM) the equations only hold for small rotations of the
-point, and the model check (@model-check) warns "Beam or shell nodes in a rigid body". As in a rigid body, the rotations of beam and shell
-nodes are not coupled: to join beams rigidly, give them a shared node with a #ui("Node Tie").
+Nodes of beams, shells and membranes in the region take part with their section: the solver
+expands these elements into solids internally, and the rigid body takes the expanded nodes of
+such a node. The shell or beam therefore turns with the reference point, and holding the
+rotations of the point clamps a shell edge or beam end. A node where shells with different
+normals meet (a knot) and a truss node take part with their translations only.
 
 === Loads and supports on a reference point
 

@@ -629,44 +629,12 @@ fn reduce(rows: Vec<Vec<(RemoteDof, f64)>>) -> Vec<Vec<(RemoteDof, f64)>> {
 }
 
 /// The nodes of line (beam, truss), shell and membrane elements, which the solver expands into
-/// solid elements. CalculiX 2.23 refuses a `*RIGID BODY` on such a node that is not a knot
-/// ("nodes belonging to beam elements must not be subject to a RIGID MPC"), so a rigid
-/// coupling takes them with [`rigid_rows`] instead.
+/// solid elements.
 pub fn expanded_nodes(mesh: &FeMesh) -> BTreeSet<NodeId> {
     (mesh.elements().iter())
         .filter(|e| e.shape.family() == ElementFamily::Line || e.is_shell())
         .flat_map(|e| e.nodes.iter().copied())
         .collect()
-}
-
-/// Rigid coupling of nodes to a point for small rotations, u = u_point + theta x (x - point),
-/// one equation per node and direction with the node's degree of freedom first. The same
-/// as a `*RIGID BODY` in a linear analysis, where CalculiX linearises its rigid MPCs too;
-/// rotations of beam and shell nodes are not coupled, as by a `*RIGID BODY` either.
-pub fn rigid_rows(
-    mesh: &FeMesh,
-    nodes: &[NodeId],
-    position: [f64; 3],
-) -> Vec<Vec<(RemoteDof, f64)>> {
-    let mut rows = Vec::new();
-    for &node in nodes {
-        let Some(x) = mesh.node(node) else {
-            continue;
-        };
-        let r: [f64; 3] = std::array::from_fn(|k| x[k] - position[k]);
-        for k in 0..3 {
-            // - (theta x r)_k = -(theta_a r_b - theta_b r_a)
-            let (a, b) = ((k + 1) % 3, (k + 2) % 3);
-            let row = [
-                (RemoteDof::Node(node, k), 1.0),
-                (RemoteDof::Translation(k), -1.0),
-                (RemoteDof::Rotation(a), -r[b]),
-                (RemoteDof::Rotation(b), r[a]),
-            ];
-            rows.push(row.into_iter().filter(|(_, v)| *v != 0.0).collect());
-        }
-    }
-    rows
 }
 
 /// Share of the face areas (edge lengths of 2D faces) of each node of the faces.

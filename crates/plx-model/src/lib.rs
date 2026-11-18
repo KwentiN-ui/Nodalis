@@ -149,7 +149,6 @@ pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
 pub use remote::{
     Behavior, Displacement, Formulation, RemoteBehavior, RemoteDof, RemotePoint, expanded_nodes,
-    rigid_rows,
 };
 pub use remote_force::RemoteForce;
 pub use section::{

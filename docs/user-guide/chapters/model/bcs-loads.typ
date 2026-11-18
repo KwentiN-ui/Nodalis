@@ -108,7 +108,7 @@ The two behaviors of a point match those of Ansys:
 
 You define no reference point, rigid body or equation for it. When the input file is written,
 Nodalis adds a reference node and a rotation node at the point. #ui("Rigid") writes a
-`*RIGID BODY` on the selection, with nodes of beams and shells coupled by `*EQUATION`s
+`*RIGID BODY` on the selection, which also holds the rotations of beam and shell nodes
 (@rigid-body); #ui("Deformable") writes `*EQUATION`s between the nodes and the point. The values
 go on these two nodes, with a `*TRANSFORM` when a coordinate system is chosen. The point is
 computed on the current mesh, so a selection of geometry faces keeps working after remeshing.

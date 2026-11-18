@@ -1155,8 +1155,6 @@ struct Sets<'a> {
     /// coordinate plane or whose displacement is in a system of its own: the set with the
     /// local x and y axes (type R), or with two points on the axis (type C).
     transforms: Vec<(String, Transform)>,
-    /// Nodes of line, shell and membrane elements, see [`rigid_body`].
-    expanded: BTreeSet<NodeId>,
     /// Nodes that boundary conditions hold in different coordinate systems, with the
     /// system each gets, see [`node_frames`].
     node_frames: BTreeMap<NodeId, node_frames::Axes>,
@@ -1203,7 +1201,6 @@ impl<'a> Sets<'a> {
             cut_originals: BTreeMap::new(),
             submodel_sets: Vec::new(),
             transforms: Vec::new(),
-            expanded: plx_model::expanded_nodes(mesh),
             node_frames: BTreeMap::new(),
             dofs: dofs::Dofs::default(),
         };
@@ -2664,15 +2661,7 @@ fn remote_point(
                 Region::Nodes(point.nodes.clone())
             };
             owners.resize(items.len(), None);
-            let written = rigid_body(
-                items,
-                sets,
-                item,
-                &region,
-                point.position,
-                point.axes,
-                [reference, rotation],
-            );
+            let written = rigid_body(items, sets, item, &region, [reference, rotation]);
             sets.dofs.replace_held(all_steps);
             written?;
             owners.resize(items.len(), Some(owner));
@@ -3530,8 +3519,6 @@ fn couple_point(
         sets,
         coupling.name,
         coupling.region,
-        point.position,
-        None,
         [reference, rotation],
     )?;
     owners.resize(items.len(), Some(ModelItem::Constraint(index)));
@@ -3539,17 +3526,13 @@ fn couple_point(
 }
 
 /// A rigid body of the nodes of `region` driven by a reference and a rotation node at
-/// `position`: a rigid body, but with the nodes of beams, trusses, shells and membranes
-/// rigidly coupled by equations. CalculiX 2.23 stops on a rigid body containing such a
-/// node ("nodes belonging to beam elements must not be subject to a RIGID MPC"); the
-/// equations hold them for small rotations as the rigid body does in a linear analysis.
+/// `position`. The solver couples the nodes of beams and shells by their expanded nodes, so
+/// the body holds their rotations too.
 fn rigid_body(
     items: &mut Vec<ConstraintItem>,
     sets: &mut Sets,
     item: &str,
     region: &Region,
-    position: [f64; 3],
-    axes: Option<[[f64; 3]; 3]>,
     nodes: [NodeId; 2],
 ) -> Result<(), WriteError> {
     let [reference, rotation] = nodes;
@@ -3557,34 +3540,16 @@ fn rigid_body(
     let all = region.nodes(sets.mesh);
     let count = all.len();
     let kept = sets.dofs.claim_nodes(item, all);
-    let whole = kept.len() == count;
-    let (expanded, others): (Vec<NodeId>, Vec<NodeId>) =
-        (kept.into_iter()).partition(|n| sets.expanded.contains(n));
-    let rigid = |set: String| {
-        ConstraintItem::RigidBody(ir::constraints::RigidBody {
-            nodes: ir::constraints::RigidBodyNodes::NodeSet(ir_name(&set)),
-            reference_node: reference,
-            rotation_node: rotation,
-        })
+    let set = if kept.len() == count {
+        sets.node_set(item, region)?
+    } else {
+        sets.node_set(item, &Region::Nodes(kept))?
     };
-    if expanded.is_empty() {
-        let set = if whole {
-            sets.node_set(item, region)?
-        } else {
-            sets.node_set(item, &Region::Nodes(others))?
-        };
-        items.push(rigid(set));
-        return Ok(());
-    }
-    if !others.is_empty() {
-        items.push(rigid(sets.node_set(item, &Region::Nodes(others))?));
-    }
-    // Nodes of beams and shells, which the solver refuses in a rigid body.
-    for row in plx_model::rigid_rows(sets.mesh, &expanded, position) {
-        items.push(ConstraintItem::Equation(equation(&remote_terms(
-            &row, axes, nodes,
-        ))));
-    }
+    items.push(ConstraintItem::RigidBody(ir::constraints::RigidBody {
+        nodes: ir::constraints::RigidBodyNodes::NodeSet(ir_name(&set)),
+        reference_node: reference,
+        rotation_node: rotation,
+    }));
     Ok(())
 }
 
