@@ -535,6 +535,12 @@ impl ModelConstraints {
     /// bolt's force, as CalculiX reports them. `active[v]` marks the DOFs elements use.
     /// Constraints whose dependent DOF is held (`held`, primary DOFs) are left alone: there
     /// the force is a reaction already.
+    ///
+    /// First the other way round: a node without elements whose DOF depends on DOFs that
+    /// elements use, all of them, as the node of a shell or beam on its expanded nodes,
+    /// gets the force they take through the constraint (the multiplier from their forces,
+    /// `λ = Σ a_i f_i / Σ a_i²`, gives it `-a_p λ`). It counts as a node with elements
+    /// then, so a rigid coupling of shell nodes to a point carries their force on to it.
     pub fn transfer_forces(&self, f: &mut [f64], held: &[u32], active: &[bool]) {
         if self.constraints.is_empty() {
             return;
@@ -564,6 +570,36 @@ impl ModelConstraints {
         let rigid = |c: &LinearConstraint| {
             (self.labels.get(c.origin as usize)).is_some_and(|l| l.starts_with("*RIGID BODY"))
         };
+        let is_active = |v: u32| active.get(v as usize).copied().unwrap_or(false);
+        // DOFs without elements that took the force of the DOFs they depend on.
+        let mut gathered: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for c in &self.constraints {
+            let p = c.preferred;
+            if rigid(c) || held.contains(&p) || is_active(p) {
+                continue;
+            }
+            let Some(&(_, a_p)) = c.terms.iter().find(|&&(v, _)| v == p) else {
+                continue;
+            };
+            let others = || c.terms.iter().filter(|&&(v, _)| v != p);
+            if a_p == 0.0 || others().next().is_none() || !others().all(|&(v, _)| is_active(v)) {
+                continue;
+            }
+            if f.get(p as usize).is_none_or(|&f_p| f_p != 0.0) {
+                continue;
+            }
+            let (along, norm) = others().fold((0.0, 0.0), |(along, norm), &(v, a)| {
+                (
+                    along + a * f.get(v as usize).copied().unwrap_or(0.0),
+                    norm + a * a,
+                )
+            });
+            if norm == 0.0 || along == 0.0 {
+                continue;
+            }
+            f[p as usize] -= a_p * along / norm;
+            gathered.insert(p);
+        }
         for c in &self.constraints {
             let rigid = rigid(c);
             let p = c.preferred;
@@ -582,7 +618,7 @@ impl ModelConstraints {
             let lambda = f_p / a_p;
             for &(v, a) in &c.terms {
                 if v != p
-                    && (rigid || !active.get(v as usize).copied().unwrap_or(false))
+                    && (rigid || !is_active(v) && !gathered.contains(&v))
                     && let Some(fv) = f.get_mut(v as usize)
                 {
                     *fv -= a * lambda;
