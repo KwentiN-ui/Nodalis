@@ -275,8 +275,10 @@ level. Groups can be put into groups, as deep as you like.
 The Group Input and Group Output blocks belong to their group and cannot be deleted. Each has
 an *empty pin* at the bottom, a ring without fill. Drag a wire from the empty pin of the
 Group Input block to a block inside, or from a block inside to the empty pin of the Group
-Output block: the group gets a new input or output of that type, and the next empty pin
-comes below. Outside, link the new pin of the group like any other. Double-click the row of
+Output block: the group gets a new input or output, and the next empty pin comes below. A
+pin of a group has no type of its own: it always has the type of the block row its wire
+reaches inside, its colour and what it can be linked to follow that row, and its tooltip
+names it. Outside, link the new pin of the group like any other. Double-click the row of
 an input or output to rename it.
 
 As in Blender, the group block lists its outputs first, with their names at the right by
@@ -301,6 +303,12 @@ A wire dropped on it adds one more.
 Groups only arrange the schematic. A link through a group is the link between the blocks at
 its ends, which Update Project follows as before; it is made once the wires reach from one
 block to the other through the pins of the groups, and removed once one of them goes.
+So a pin of a group takes and gives what the block at the other end of its wires does: a
+number a Formula block inside gives out goes to a Preview block outside, which shows it.
+
+#screenshot("group-preview.png", [The output #ui("Formula") of a group linked to a Preview
+  block, which shows the number of the Formula block inside.])
+
 #key("Ctrl+Alt+G") or #ui("Ungroup") puts the blocks of a group back where the group is,
 with the wires between them as before. #key("Shift+D") duplicates a group with the blocks
 inside, the links between them and its inputs (@duplicate-inputs); #key("X") deletes it with all its blocks, and undo
