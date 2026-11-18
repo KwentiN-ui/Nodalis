@@ -85,6 +85,12 @@ pub enum Problem {
     /// The elements of an infill section are much larger than its walls or top and bottom
     /// layers, which the export then smears over the depth of the outer elements.
     CoarseInfillWalls,
+    /// A part of the geometry that Gmsh could not mesh, or that crashed Gmsh, in the last
+    /// meshing; shown at the part in the Geometry tree.
+    MeshFailed,
+    /// A part of the geometry whose last mesh has flat tetrahedra, see
+    /// `plx_mesher::generate_solid`; shown at the part in the Geometry tree.
+    FlatElements,
     NoConductivity,
     NoSpecificHeat,
     NoInitialTemperature,
@@ -301,6 +307,7 @@ impl Problem {
             | Problem::ExplicitFullIntegration
             | Problem::SupportInMovingSystem
             | Problem::CoarseInfillWalls
+            | Problem::FlatElements
             | Problem::ParticleFlowIgnored => Severity::Warning,
             _ => Severity::Error,
         }
@@ -352,6 +359,8 @@ impl Problem {
             Problem::ExplicitFullIntegration => "Full integration in an explicit step",
             Problem::SupportInMovingSystem => "Displacement in a moving coordinate system",
             Problem::CoarseInfillWalls => "Mesh coarser than the infill walls",
+            Problem::MeshFailed => "Part could not be meshed",
+            Problem::FlatElements => "Flat elements",
             Problem::NoExpansion => "Temperature without thermal expansion",
             Problem::NoSensitivityBase => "No step for the sensitivities",
             Problem::ParticleFlowNotAlone => "Particle Flow step not alone",
@@ -491,6 +500,18 @@ impl Problem {
                 "Loads in a coordinate system that moves with a selection turn with it under \
                  large deformations. Displacement boundary conditions do not: they hold the \
                  nodes along the directions the system has in the undeformed model."
+            }
+            Problem::MeshFailed => {
+                "Gmsh stopped with an error on this part, or crashed on it. The message \
+                 says at which step, and names the face or edge Gmsh was working on, which \
+                 the geometry shows in red. The other parts were meshed; this one keeps the \
+                 mesh it had."
+            }
+            Problem::FlatElements => {
+                "Some tetrahedra of the part have all four corners in one plane. They have \
+                 no stiffness, so the solver cannot use them, and Netgen's optimization \
+                 was left out because it crashes on them. They come where the elements are \
+                 much larger than the walls of the part are thick."
             }
             Problem::CoarseInfillWalls => {
                 "An infill section gives every element the share of its depth that lies in \
@@ -1034,6 +1055,14 @@ impl Problem {
                 "Keep the rotations small, or hold the nodes through a reference point with a \
                  rigid body and give the displacement there, or use a coordinate system fixed \
                  in space."
+            }
+            Problem::MeshFailed => {
+                "Mesh the part with a smaller max element size, or a Local Mesh Size on the \
+                 face named, or repair the face in the CAD program."
+            }
+            Problem::FlatElements => {
+                "Mesh the part with a smaller max element size, about the wall thickness, \
+                 for example with its own Mesh Parameters."
             }
             Problem::CoarseInfillWalls => {
                 "Add a Local Mesh Size on the outer faces of the part with an element size \

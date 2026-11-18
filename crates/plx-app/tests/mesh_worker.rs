@@ -1,6 +1,6 @@
 //! The meshing worker: the program started with `--mesh-worker <folder> <program id>` meshes
-//! the geometry in `request.ron` there into `result.ron`, and ends when the program does: on
-//! Unix when its input is closed.
+//! the parts of the geometry in `request.ron` there, each into `part-K.ron`, says it is done
+//! in `result.ron`, and ends when the program does: on Unix when its input is closed.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,10 +16,14 @@ use serde::Serialize;
 struct Request {
     library: Option<PathBuf>,
     geometry: Geometry,
-    parts: Option<Vec<String>>,
+    parts: Vec<String>,
 }
 
-type WorkerResult = Result<Vec<(FeMesh, Vec<String>)>, String>;
+/// The worker's answer, as `meshing::WorkerResult`.
+type WorkerResult = Result<(), String>;
+
+/// One part's outcome, as `meshing::PartOutcome`.
+type PartOutcome = Result<(FeMesh, Vec<String>), String>;
 
 fn plate() -> Option<Geometry> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/platte_mit_loch.step");
@@ -43,8 +47,8 @@ fn folder(name: &str) -> PathBuf {
 fn write_request(dir: &Path, geometry: Geometry) {
     let request = Request {
         library: plx_mesher::library_path(),
+        parts: plx_mesher::part_names(&geometry).unwrap(),
         geometry,
-        parts: None,
     };
     std::fs::write(dir.join("request.ron"), ron::to_string(&request).unwrap()).unwrap();
 }
@@ -76,9 +80,13 @@ fn the_worker_meshes_the_geometry() {
     assert!(!dir.join("result.tmp").exists());
     let text = std::fs::read_to_string(dir.join("result.ron")).unwrap();
     let result: WorkerResult = ron::from_str(&text).unwrap();
-    let meshes = result.unwrap();
-    assert_eq!(meshes.len(), 1);
-    assert!(meshes[0].0.element_count() > 100);
+    result.unwrap();
+    let text = std::fs::read_to_string(dir.join("part-0.ron")).unwrap();
+    let outcome: PartOutcome = ron::from_str(&text).unwrap();
+    assert!(outcome.unwrap().0.element_count() > 100);
+    assert!(!dir.join("part-1.ron").exists());
+    // It said which part it was on.
+    assert_eq!(std::fs::read_to_string(dir.join("current")).unwrap(), "0");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -239,6 +239,15 @@ gmsh_api! {
         Ierr,
     );
     mesh_set_order = "gmshModelMeshSetOrder": fn(c_int, Ierr);
+    mesh_optimize = "gmshModelMeshOptimize":
+        fn(*const c_char, c_int, c_int, *const c_int, usize, Ierr);
+    mesh_get_element_qualities = "gmshModelMeshGetElementQualities": fn(
+        *const usize, usize,
+        *mut *mut c_double, *mut usize,
+        // task and numTasks are size_t: as int, Windows passes them with garbage upper halves.
+        *const c_char, usize, usize,
+        Ierr,
+    );
     mesh_import_stl = "gmshModelMeshImportStl": fn(Ierr);
     mesh_get_nodes = "gmshModelMeshGetNodes": fn(
         *mut *mut usize, *mut usize,
