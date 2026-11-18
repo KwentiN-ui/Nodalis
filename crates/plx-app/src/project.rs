@@ -3391,6 +3391,67 @@ impl ProjectApp {
         }
     }
 
+    /// Removes the columns of studies that lost their wire, as the inputs and outputs of a
+    /// group go once no wire inside is at them: an output column once no value comes into
+    /// its row, an input column once it gives to no number. Their values at all points go
+    /// with them; undo brings them back. Nothing changes while a study or an update runs.
+    fn prune_study_columns(&mut self) {
+        if self.busy() {
+            return;
+        }
+        let mut gone: Vec<(u64, bool, String)> = Vec::new();
+        for node in &self.nodes {
+            let Some(study) = node.as_study() else {
+                continue;
+            };
+            let id = node.id;
+            for column in &study.table.outputs {
+                let linked = (self.links.iter()).any(|l| {
+                    l.target == id
+                        && matches!(links::slot(l), [c, n] if c == links::OUTPUTS && *n == column.name)
+                });
+                if !linked {
+                    gone.push((id, false, column.name.clone()));
+                }
+            }
+            for column in &study.table.inputs {
+                let linked = (self.links.iter()).any(|l| {
+                    l.source == id
+                        && matches!(l.item.as_slice(), [c, n] if c == links::LOOP && *n == column.name)
+                });
+                if !linked {
+                    gone.push((id, true, column.name.clone()));
+                }
+            }
+        }
+        for (id, input, name) in gone {
+            if let Some(table) = self
+                .node(id)
+                .and_then(Node::as_study_mut)
+                .map(|s| &mut s.table)
+            {
+                if input {
+                    if let Some(column) = table.input(&name) {
+                        table.remove_input(column);
+                    }
+                } else if let Some(column) = table.output(&name) {
+                    table.remove_output(column);
+                }
+            }
+            // The values of the column over all points, from the right pin of its row.
+            self.links.retain(|l| {
+                !(l.source == id
+                    && matches!(l.item.as_slice(), [c, n] if c == links::VALUE && *n == name))
+            });
+            self.output.push(format!(
+                "{}: {} column {name} removed, as no wire is at it any more.",
+                self.name_of(id),
+                if input { "input" } else { "output" }
+            ));
+            self.sync_due = true;
+        }
+    }
+
     /// The rows of a study: the Outputs it reads and their columns, the Inputs it gives and
     /// theirs, and how far its points are.
     fn study_rows(
@@ -6126,6 +6187,7 @@ impl ProjectApp {
     fn schematic(&mut self, ui: &mut egui::Ui) -> Vec<Action> {
         self.keep_level();
         self.prune_sockets();
+        self.prune_study_columns();
         self.shown = self.here();
         let mut incoming: HashMap<u64, Vec<(Vec<String>, String)>> = HashMap::new();
         let mut continuations: HashMap<u64, Continuation> = HashMap::new();

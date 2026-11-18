@@ -337,11 +337,12 @@ fn from_formula(numbers: &[Number], link: &Link) -> bool {
         && (numbers.iter()).any(|(id, n, _)| *id == link.source && n.formula.is_some())
 }
 
-/// The value links at Math and Switch blocks.
+/// The value links at Math and Switch blocks, with those from the inputs of a study, which
+/// give the kind of their column too.
 fn number_links(numbers: &[Number], links: &[Link]) -> Vec<Link> {
     let is_number = |id: u64| numbers.iter().any(|n| n.0 == id);
     (links.iter())
-        .filter(|l| l.item.first().is_some_and(|c| c == links::VALUE))
+        .filter(|l| links::is_value(l))
         .filter(|l| is_number(l.source) || is_number(l.target))
         .cloned()
         .collect()

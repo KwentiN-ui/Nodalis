@@ -25,8 +25,18 @@ Add one with #menu("Evaluate", "Parameter Study"), then link its columns:
   is an output in the same way, named after the block.
 
 The first column makes the first design point, *DP 0*, which is the *current* one: the blocks
-stand at its inputs, and its outputs are those the project shows. Removing a link leaves the
-column; #ui("Remove") in the editor removes a column and its links.
+stand at its inputs, and its outputs are those the project shows.
+
+As with the inputs and outputs of a node group (@node-groups), a column goes as soon as its
+last wire goes: an output column once no value comes into its row any more, an input column
+once it gives its value to no number. Its values at all design points go with it; undo brings
+them back. #ui("Remove") in the editor removes a column and its links at once.
+
+A wire need not hit a pin exactly: let go of it just beside one, and it goes to the nearest
+pin there.
+
+#screenshot("study-columns-wired.png", [The study varies input a of a Formula block and
+  reads its result; the Formula block takes its b from a parameter])
 
 #screenshot("add-to-study.png", [#ui("Add to Study") in the context menu of an exposed
   parameter])
