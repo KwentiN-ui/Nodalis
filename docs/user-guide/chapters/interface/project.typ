@@ -204,20 +204,22 @@ the state of another analysis (@data-links).
 
 ==== Adding blocks by search <block-search>
 
-Like the add menu of Blender, a double-click or right-click into empty space of the schematic shows every kind
-of block Nodalis can add, grouped as on the tabs of the ribbon. Just start typing: the search
-field has the focus and finds blocks by fuzzy matching, so letters in order are enough
-(#ui("rct") finds #ui("Rectangle")). It also knows other words for a block, such as
-#ui("hexahedra") for #ui("Box") or #ui("library") for #ui("Materials"). Search results show
-their group on the right.
+A double-click or right-click into empty space of the schematic opens the block search, a
+list like the one of OMEdit: each row shows the icon of the block, its name in bold and its
+group in grey below. Before you type, it lists only #ui("Analysis"), always at the top, and the
+five blocks you added from it last; Nodalis remembers them between sessions. Just start
+typing: the search field has the focus and finds every kind of block by fuzzy matching, so
+letters in order are enough (#ui("rct") finds #ui("Rectangle")). It also knows other words for
+a block, such as #ui("hexahedra") for #ui("Box") or #ui("library") for #ui("Materials"). A
+long list scrolls.
 
 #key("Enter") adds the highlighted block, the best match while you type, where you
 clicked; #key("Up") and #key("Down") move the highlight, a click adds any block, and
 #key("Esc") or a click elsewhere closes the search. #ui("Analysis") asks for the model
 properties first (@new-analysis).
 
-#screenshot("node-picker.png", [All blocks after a double-click or right-click (left) and the search for
-  "mesh" (right)])
+#screenshot("node-picker.png", [The block search before typing, with Analysis and the blocks
+  used last (left), and the search for "mesh" (right)])
 
 ==== Frames, notes and compact blocks <frames-notes>
 

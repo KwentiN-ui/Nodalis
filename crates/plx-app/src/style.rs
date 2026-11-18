@@ -2,8 +2,8 @@
 //! dark one after Windows' dark mode, picked in the settings.
 //!
 //! Segoe UI, the classic Windows face, may not be redistributed. Noto Sans (SIL Open Font License,
-//! `assets/fonts/OFL.txt`) is a free face of the same humanist style; the bundled file is
-//! subset to Latin, Greek and common symbols.
+//! `assets/fonts/OFL.txt`) is a free face of the same humanist style; the bundled regular and
+//! bold files are subset to Latin, Greek and common symbols.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +12,12 @@ use egui::{Color32, CornerRadius, Stroke, Theme, Visuals};
 use serde::{Deserialize, Serialize};
 
 const NOTO_SANS: &[u8] = include_bytes!("../assets/fonts/NotoSans-Regular.ttf");
+const NOTO_SANS_BOLD: &[u8] = include_bytes!("../assets/fonts/NotoSans-Bold.ttf");
+
+/// The font family of bold text, such as the names in the node search.
+pub fn bold() -> egui::FontFamily {
+    egui::FontFamily::Name("Bold".into())
+}
 
 /// The colour scheme the user picked in the settings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,6 +363,18 @@ pub fn apply(ctx: &egui::Context) {
         .entry(egui::FontFamily::Proportional)
         .or_default()
         .insert(0, "Noto Sans".into());
+    fonts.font_data.insert(
+        "Noto Sans Bold".into(),
+        Arc::new(egui::FontData::from_static(NOTO_SANS_BOLD)),
+    );
+    // Characters the bold subset lacks come from the regular faces.
+    let mut bold_fonts = vec!["Noto Sans Bold".to_string()];
+    bold_fonts.extend(
+        fonts.families[&egui::FontFamily::Proportional]
+            .iter()
+            .cloned(),
+    );
+    fonts.families.insert(bold(), bold_fonts);
     ctx.set_fonts(fonts);
 
     // egui falls back to dark when the system does not tell; the default look is light.
