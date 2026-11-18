@@ -12,7 +12,10 @@ const G: f64 = 9.81;
 const DENSITY: f64 = 1500.0;
 
 fn solve(model: &ParticleModel) -> ParticleResults {
-    let results = plxs_particles::solve(model, &mut |_| {}).expect("solves");
+    // On a thread of the pool, as Nodalis runs it: from outside, every parallel loop of a
+    // time step hands its work to the pool and waits, which costs more than the step of a
+    // small model.
+    let results = rayon::scope(|_| plxs_particles::solve(model, &mut |_| {})).expect("solves");
     eprintln!(
         "{}: {} particles, {} steps, {:.1} s",
         model.heading, results.report.particles, results.report.steps, results.report.seconds,

@@ -93,7 +93,10 @@ static CHOICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn solve(mode: GpuMode, model: &ParticleModel) -> Result<ParticleResults, String> {
     let _one = CHOICE.lock().unwrap_or_else(|e| e.into_inner());
     GpuMode::set_preferred(mode);
-    plxs_particles::solve(model, &mut |_| {})
+    // On a thread of the pool, as Nodalis runs it: from outside, every parallel loop of a
+    // time step hands its work to the pool and waits, which costs more than the step of a
+    // small model.
+    rayon::scope(|_| plxs_particles::solve(model, &mut |_| {}))
 }
 
 fn run(mode: GpuMode, model: &ParticleModel) -> ParticleResults {
