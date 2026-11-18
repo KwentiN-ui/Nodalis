@@ -614,7 +614,10 @@ mod tests {
         let meshes = (parts.iter())
             .map(|p| plx_mesher::generate_part_mesh(&geometry, p).unwrap())
             .collect();
-        let generated = crate::meshing::PartMeshes { meshes };
+        let generated = crate::meshing::PartMeshes {
+            meshes,
+            failed: Vec::new(),
+        };
         crate::app::merge_part_meshes(model, &geometry, generated, None).unwrap();
     }
 

@@ -73,11 +73,30 @@ their section (@sections). The choice is kept with the part: meshing the part ag
 new elements the same type, and in a 2D model a new model space keeps the reduced integration
 (`CPS8R` becomes `CAX8R`).
 
-=== Meshing errors
+=== Meshing errors <meshing-errors>
 
-If Gmsh fails, the output pane shows "Meshing failed: ..." with the message of Gmsh. The faces,
-edges and points the message names are marked red in the Geometry workspace, so you can see
-where the problem is. The marking disappears with the next meshing.
+A part that cannot be meshed does not stop the others: Nodalis meshes the remaining parts and
+lists each part that failed in the output pane as "Meshing failed: PART: ...". The message says
+what Gmsh was doing when it failed, such as "while meshing surface 177", and the faces, edges
+and points it names are marked red in the Geometry workspace. Even when Gmsh crashes on a
+part, which ends the mesher process, Nodalis names the part and the step and meshes the parts
+after it in a new process.
+
+The parts that failed get a warning sign in the Geometry and FE Model trees, and their names
+turn red; the tooltip tells the problem, and a click on the sign explains it and what helps. The sign and the red marking stay until the part is
+meshed again.
+
+#screenshot("meshing-errors.png", [A part with flat tetrahedra marked in the Geometry tree; the
+tooltip tells the problem])
+
+==== Flat tetrahedra
+
+Where the max. element size is much larger than the walls of a part are thick, Gmsh can leave
+tetrahedra whose four corners lie in one plane. They have no stiffness, and Netgen's mesh
+optimization crashes on them. Nodalis checks the tetrahedra before Netgen optimizes them: if
+some are flat, Netgen is left out, the part keeps its mesh and gets a warning sign "Flat
+elements" in the trees. Mesh such a part with a smaller max. element size, about the wall
+thickness, for example with its own Meshing Parameters.
 
 == Mesh setup <mesh-setup>
 

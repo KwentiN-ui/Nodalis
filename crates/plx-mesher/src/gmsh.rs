@@ -6,6 +6,7 @@
 // Calling into a C library needs `unsafe`; it is confined to this module and `ffi`.
 #![allow(unsafe_code)]
 
+use std::collections::BTreeSet;
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -117,6 +118,16 @@ pub fn set_library_path(path: Option<PathBuf>) -> bool {
 pub fn loaded_library() -> Option<LibraryInfo> {
     let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.loaded.as_ref().map(|g| g.info.clone())
+}
+
+/// Whether Gmsh writes its messages to standard output as well, see [`log_to_terminal`].
+static TERMINAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Makes Gmsh write its messages to standard output as well as to the log, from the next
+/// time the library is loaded: a process that meshes for another one leaves them there, so
+/// that the other one can tell where Gmsh was when it crashed.
+pub fn log_to_terminal() {
+    TERMINAL.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The library another process should load to mesh like this one: the loaded one, else the
@@ -270,8 +281,10 @@ impl Gmsh {
             _ => return Err(GmshError::UnsupportedVersion { version }),
         }
         gmsh.info.version = version;
-        // Messages go to the log, not to the terminal; STEP files are read in millimetres.
-        gmsh.set_number("General.Terminal", 0.0)?;
+        // Messages go to the log, and to the terminal only if asked for; STEP files are
+        // read in millimetres.
+        let terminal = TERMINAL.load(std::sync::atomic::Ordering::Relaxed);
+        gmsh.set_number("General.Terminal", f64::from(u8::from(terminal)))?;
         gmsh.set_string("Geometry.OCCTargetUnit", "MM")?;
         Ok(gmsh)
     }
@@ -494,10 +507,59 @@ impl Gmsh {
 
     /// Removes entities given as (dimension, tag) with what bounds them and nothing else
     /// uses.
+    ///
+    /// OpenCASCADE's own recursive removal takes seconds per call in an assembly of many
+    /// solids, as when all solids but one are removed to mesh one part: what goes is found
+    /// here instead and removed one dimension after the other, from the solids down, which
+    /// takes a fraction of that.
     pub fn remove(&self, entities: &[(i32, i32)]) -> Result<(), GmshError> {
-        let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
-        self.call(|e| unsafe { (self.api.occ_remove)(flat.as_ptr(), flat.len(), 1, e) })?;
+        if entities.is_empty() {
+            return Ok(());
+        }
+        self.synchronize()?;
+        let removed: BTreeSet<(i32, i32)> = entities.iter().copied().collect();
+        // What bounds the removed entities, and what bounds the others.
+        let bounding = self.closure(removed.iter().copied())?;
+        let mut others = Vec::new();
+        for dim in 0..=3 {
+            for tag in self.entities(dim)? {
+                if !bounding.contains(&(dim, tag)) {
+                    others.push((dim, tag));
+                }
+            }
+        }
+        let used = self.closure(others)?;
+        let mut gone: Vec<(i32, i32)> = (bounding.into_iter())
+            .filter(|e| removed.contains(e) || !used.contains(e))
+            .collect();
+        gone.sort_by_key(|&(dim, tag)| (std::cmp::Reverse(dim), tag));
+        for dim in (0..=3).rev() {
+            let flat: Vec<c_int> = (gone.iter())
+                .filter(|&&(d, _)| d == dim)
+                .flat_map(|&(d, t)| [d, t])
+                .collect();
+            if !flat.is_empty() {
+                self.call(|e| unsafe { (self.api.occ_remove)(flat.as_ptr(), flat.len(), 0, e) })?;
+            }
+        }
         self.synchronize()
+    }
+
+    /// The entities with everything that bounds them, down to the points.
+    fn closure(
+        &self,
+        entities: impl IntoIterator<Item = (i32, i32)>,
+    ) -> Result<BTreeSet<(i32, i32)>, GmshError> {
+        let mut found = BTreeSet::new();
+        let mut open: Vec<(i32, i32)> = entities.into_iter().collect();
+        while let Some((dim, tag)) = open.pop() {
+            if !found.insert((dim, tag)) || dim == 0 {
+                continue;
+            }
+            let (_, down) = self.adjacencies(dim, tag)?;
+            open.extend(down.into_iter().map(|t| (dim - 1, t)));
+        }
+        Ok(found)
     }
 
     /// Merges entities that lie on each other, e.g. the edge two faces share once one of them
@@ -1249,8 +1311,27 @@ impl Gmsh {
         Ok((min, max))
     }
 
+    /// Meshes up to dimension `dim`. Gmsh's errors seldom say where they arose; the
+    /// surface or curve Gmsh was meshing then, the last its log names, is added to them, so
+    /// that the message names it and the geometry can show it.
     pub fn generate(&self, dim: i32) -> Result<(), GmshError> {
         self.call(|e| unsafe { (self.api.mesh_generate)(dim, e) })
+            .map_err(|error| match error {
+                GmshError::Call(message) => GmshError::Call(self.located(message)),
+                other => other,
+            })
+    }
+
+    /// `message` with the entity Gmsh was meshing last, unless it names one itself.
+    fn located(&self, message: String) -> String {
+        if !crate::named_entities(&message).is_empty() {
+            return message;
+        }
+        let lines = self.log().unwrap_or_default();
+        match lines.iter().rev().find_map(|line| meshing_step(line)) {
+            Some(step) => format!("{message} (while {step})"),
+            None => message,
+        }
     }
 
     /// Takes the triangulation OpenCASCADE makes of each face, with the deflections of the
@@ -1280,6 +1361,37 @@ impl Gmsh {
                 e,
             )
         })
+    }
+
+    /// Optimizes the mesh with one of Gmsh's methods, such as "Netgen".
+    pub fn optimize(&self, method: &str) -> Result<(), GmshError> {
+        let method = c_string(method)?;
+        self.call(|e| unsafe {
+            (self.api.mesh_optimize)(method.as_ptr(), 0, 1, std::ptr::null(), 0, e)
+        })
+    }
+
+    /// The qualities of elements by their tags, as Gmsh measures them with `measure`, such
+    /// as "minSICN": 1 for a regular element, 0 for a flat one, below for an inverted one.
+    pub fn element_qualities(&self, tags: &[usize], measure: &str) -> Result<Vec<f64>, GmshError> {
+        if tags.is_empty() {
+            return Ok(Vec::new());
+        }
+        let measure = c_string(measure)?;
+        let (mut qualities, mut len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.mesh_get_element_qualities)(
+                tags.as_ptr(),
+                tags.len(),
+                &mut qualities,
+                &mut len,
+                measure.as_ptr(),
+                0,
+                1,
+                e,
+            )
+        })?;
+        Ok(self.take_vec(qualities, len))
     }
 
     pub fn set_order(&self, order: i32) -> Result<(), GmshError> {
@@ -1349,12 +1461,7 @@ impl Gmsh {
 
     /// Warnings and errors Gmsh logged since the current use started.
     pub fn warnings(&self) -> Result<Vec<String>, GmshError> {
-        let (mut lines, mut len) = (std::ptr::null_mut(), 0);
-        self.call(|e| unsafe { (self.api.logger_get)(&mut lines, &mut len, e) })?;
-        let lines = self.take_vec(lines, len);
-        Ok(lines
-            .into_iter()
-            .map(|line| self.take_string(line))
+        Ok((self.log()?.into_iter())
             .filter_map(|line| {
                 let rest = line
                     .strip_prefix("Warning : ")
@@ -1363,6 +1470,52 @@ impl Gmsh {
             })
             .collect())
     }
+}
+
+impl Gmsh {
+    /// Every line Gmsh logged since the current use started.
+    fn log(&self) -> Result<Vec<String>, GmshError> {
+        let (mut lines, mut len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe { (self.api.logger_get)(&mut lines, &mut len, e) })?;
+        let lines = self.take_vec(lines, len);
+        Ok(lines
+            .into_iter()
+            .map(|line| self.take_string(line))
+            .collect())
+    }
+}
+
+/// What a line of Gmsh's log says Gmsh is doing now, if it is a step of meshing, such as
+/// "meshing surface 12" of "Info    : Meshing surface 12 (Plane, Frontal-Delaunay)" or
+/// "meshing curve 5" of "Info    : [ 10%] Meshing curve 5 (Line)". A surface or curve is
+/// named as Gmsh numbers it, so that the geometry can show it.
+pub fn meshing_step(line: &str) -> Option<String> {
+    let line = line.split_once(" : ").map_or(line, |(_, text)| text).trim();
+    // Progress such as "[ 10%] " goes first.
+    let line = match line.strip_prefix('[') {
+        Some(rest) => rest.split_once(']')?.1.trim(),
+        None => line,
+    };
+    if line.starts_with("Optimizing mesh (Netgen)") {
+        return Some("optimizing the mesh with Netgen".into());
+    }
+    if line.starts_with("Optimizing mesh") {
+        return Some("optimizing the mesh".into());
+    }
+    if line.starts_with("Meshing 3D") {
+        return Some("filling the solid with tetrahedra".into());
+    }
+    let rest = line.strip_prefix("Meshing ")?;
+    let mut words = rest.split_whitespace();
+    let kind = words.next()?;
+    if !matches!(kind, "surface" | "curve" | "volume") {
+        return None;
+    }
+    let tag: i32 = words.next()?.parse().ok()?;
+    if words.next() == Some("order") {
+        return Some(format!("making the elements of {kind} {tag} quadratic"));
+    }
+    Some(format!("meshing {kind} {tag}"))
 }
 
 /// Gmsh's flat (dim, tag) lists as pairs.

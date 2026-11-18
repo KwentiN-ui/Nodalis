@@ -4104,3 +4104,31 @@ fn shells_of_a_compound_with_a_gap_are_tied() {
     assert!(body_nodes(&mesh, 0, 0).is_disjoint(&body_nodes(&mesh, 0, 1)));
     assert_eq!(plx_model::FeModel::default().compound_ties(&mesh).len(), 1);
 }
+
+#[test]
+fn log_lines_tell_the_meshing_step() {
+    use crate::gmsh::meshing_step;
+    let step = |line: &str| meshing_step(line);
+    assert_eq!(
+        step("Info    : Meshing surface 12 (Plane, Frontal-Delaunay)").as_deref(),
+        Some("meshing surface 12")
+    );
+    assert_eq!(
+        step("Info    : [ 10%] Meshing curve 5 (Line)").as_deref(),
+        Some("meshing curve 5")
+    );
+    assert_eq!(
+        step("Info    : [100%] Meshing surface 177 order 2").as_deref(),
+        Some("making the elements of surface 177 quadratic")
+    );
+    assert_eq!(
+        step("Info    : Optimizing mesh (Netgen)...").as_deref(),
+        Some("optimizing the mesh with Netgen")
+    );
+    assert_eq!(
+        step("Info    : Meshing 3D...").as_deref(),
+        Some("filling the solid with tetrahedra")
+    );
+    assert_eq!(step("Info    : Meshing 2D..."), None);
+    assert_eq!(step("Info    : 150 illegal tets "), None);
+}

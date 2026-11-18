@@ -2228,7 +2228,8 @@ impl Tree<'_> {
 }
 
 /// `mesh_items` names the items of the geometry's mesh setup, for the Geometry tree;
-/// `solver_findings` are the problems the solver reported in the last run.
+/// `solver_findings` are problems found outside the model checks: in the FE Model tree the
+/// solver's of the last run and the meshing's, in the Geometry tree the meshing's.
 pub fn show(
     ui: &mut Ui,
     view: TreeView,
@@ -2269,6 +2270,13 @@ pub fn show(
             let lines = ui.painter().add(Shape::Noop);
             match view {
                 TreeView::Geometry => {
+                    for finding in solver_findings {
+                        let (item, containers) = tree_items(finding.item);
+                        if finding.severity() == Severity::Error {
+                            tree.holds_invalid.extend(containers);
+                        }
+                        tree.findings.entry(item).or_default().push(finding.clone());
+                    }
                     match model {
                         Some(model) => tree.parts(ui, model),
                         None => {

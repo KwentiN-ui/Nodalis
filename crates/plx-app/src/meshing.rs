@@ -1154,6 +1154,9 @@ pub fn item_highlight(view: &Model, kind: &MeshSetupKind) -> Highlight {
 /// The meshes of some parts, generated one after the other.
 pub struct PartMeshes {
     pub meshes: Vec<GeneratedMesh>,
+    /// Why the parts that could not be meshed failed, one message each, naming the part:
+    /// a part that fails leaves the others to be meshed.
+    pub failed: Vec<String>,
 }
 
 /// The argument that makes the program a meshing worker instead of opening its window.
@@ -1177,22 +1180,22 @@ struct WorkerRequest {
     /// The cut faces of cyclic symmetries, meshed alike.
     #[serde(default)]
     matching: Vec<PeriodicFaces>,
-    /// The parts to mesh, all with `None`.
-    parts: Option<Vec<String>>,
+    /// The parts to mesh, in order, as [`parts_to_mesh`] lists them.
+    parts: Vec<String>,
 }
 
-/// The worker's answer in `result.ron`: per part the mesh and Gmsh's warnings.
-type WorkerResult = Result<Vec<(FeMesh, Vec<String>)>, String>;
+/// What became of one part in the worker, in `part-K.ron` for the K-th part of the request:
+/// its mesh and Gmsh's warnings, or why it failed.
+type PartOutcome = Result<(FeMesh, Vec<String>), String>;
 
-/// Meshes the named parts, or all with `None`, one after the other, with the cut faces of
-/// the cyclic symmetries `matching` meshed alike; suppressed parts are left out.
-fn mesh_parts(
-    geometry: &Geometry,
-    matching: &[PeriodicFaces],
-    parts: Option<Vec<String>>,
-) -> Result<PartMeshes, String> {
+/// The worker's answer in `result.ron` once it is done; an error if it could not mesh at all.
+type WorkerResult = Result<(), String>;
+
+/// The parts that are meshed when the named parts are asked for, or all with `None`: a
+/// compound part is meshed as the parts of the geometry it joins, and suppressed parts are
+/// left out.
+fn parts_to_mesh(geometry: &Geometry, parts: Option<Vec<String>>) -> Result<Vec<String>, String> {
     let parts = match parts {
-        // A compound part is meshed as the parts of the geometry it joins.
         Some(parts) => {
             let mut expanded: Vec<String> = Vec::new();
             for part in parts.iter().flat_map(|p| geometry.parts_of_fe_part(p)) {
@@ -1205,26 +1208,80 @@ fn mesh_parts(
         None => plx_mesher::part_names(geometry).map_err(|e| e.to_string())?,
     };
     // Suppressed parts are left alone, with the mesh they may have.
-    let parts: Vec<String> = (parts.into_iter())
+    Ok((parts.into_iter())
         .filter(|p| !geometry.is_suppressed(p))
-        .collect();
-    let mut meshes: Vec<plx_mesher::GeneratedMesh> = Vec::with_capacity(parts.len());
-    for part in parts {
-        // The shells of a compound part are meshed together, with the first of them.
-        let done =
-            (meshes.iter().flat_map(|m| &m.mesh.parts)).any(|p| p.name.eq_ignore_ascii_case(&part));
-        if done {
+        .collect())
+}
+
+/// Meshes the listed parts one after the other, with the cut faces of the cyclic symmetries
+/// `matching` meshed alike, and hands each outcome to `outcome` with the part's place in the
+/// list; `starting` hears of each part before Gmsh starts on it. A part that cannot be meshed
+/// does not stop the others. Parts meshed with an earlier one (the shells of a compound
+/// part) are skipped.
+fn mesh_list(
+    geometry: &Geometry,
+    matching: &[PeriodicFaces],
+    parts: &[String],
+    starting: &mut dyn FnMut(usize),
+    outcome: &mut dyn FnMut(usize, Result<GeneratedMesh, String>),
+) {
+    let mut meshed: Vec<String> = Vec::new();
+    for (k, part) in parts.iter().enumerate() {
+        if meshed.iter().any(|p| p.eq_ignore_ascii_case(part)) {
             continue;
         }
-        let mesh = plx_mesher::generate_part_mesh_matching(geometry, &part, matching)
-            .map_err(|e| e.to_string())?;
-        meshes.push(mesh);
+        starting(k);
+        let result = plx_mesher::generate_part_mesh_matching(geometry, part, matching)
+            .map_err(|error| named_failure(part, &error.to_string()));
+        if let Ok(mesh) = &result {
+            meshed.extend(mesh.mesh.parts.iter().map(|p| p.name.clone()));
+        }
+        outcome(k, result);
     }
-    Ok(PartMeshes { meshes })
+}
+
+/// A failure message that begins with the part's name; most messages name it already.
+fn named_failure(part: &str, message: &str) -> String {
+    if message.starts_with(&format!("{part}: ")) {
+        message.to_string()
+    } else {
+        format!("{part}: {message}")
+    }
+}
+
+/// Meshes the named parts, or all with `None`, one after the other, with the cut faces of
+/// the cyclic symmetries `matching` meshed alike; suppressed parts are left out. A part that
+/// cannot be meshed is listed in [`PartMeshes::failed`] and the next one is meshed.
+fn mesh_parts(
+    geometry: &Geometry,
+    matching: &[PeriodicFaces],
+    parts: Option<Vec<String>>,
+) -> Result<PartMeshes, String> {
+    let parts = parts_to_mesh(geometry, parts)?;
+    let mut generated = PartMeshes {
+        meshes: Vec::with_capacity(parts.len()),
+        failed: Vec::new(),
+    };
+    mesh_list(
+        geometry,
+        matching,
+        &parts,
+        &mut |_| {},
+        &mut |_, result| match result {
+            Ok(mesh) => generated.meshes.push(mesh),
+            Err(message) => generated.failed.push(message),
+        },
+    );
+    Ok(generated)
 }
 
 /// Runs the meshing worker if the program was started as one, and returns its exit code;
 /// `None` for a normal start. The worker ends itself at once, see [`plx_solve::process::end`].
+///
+/// It tells in `current` which part Gmsh works on and leaves each part's outcome in a file of
+/// its own as soon as it has it, so that if Gmsh crashes, the program knows which part
+/// crashed it and keeps the parts meshed before. Gmsh's messages go to its standard output,
+/// which the program reads to tell where in the part Gmsh was.
 pub fn worker_main() -> Option<i32> {
     let mut args = std::env::args_os().skip(1);
     if args.next()? != WORKER_ARGUMENT {
@@ -1234,29 +1291,56 @@ pub fn worker_main() -> Option<i32> {
     let program = args.next().and_then(|id| id.to_str()?.parse::<u32>().ok());
     // The worker must not mesh on for nobody once the program ends, even if it crashes.
     plx_solve::process::end_with(program);
+    plx_mesher::log_to_terminal();
     let result: WorkerResult = (|| {
         let text = std::fs::read_to_string(dir.join("request.ron")).map_err(|e| e.to_string())?;
         let request: WorkerRequest = ron::from_str(&text).map_err(|e| e.to_string())?;
         if request.library.is_some() {
             plx_mesher::set_library_path(request.library);
         }
-        let generated = mesh_parts(&request.geometry, &request.matching, request.parts)?;
-        Ok((generated.meshes.into_iter())
-            .map(|g| (g.mesh, g.warnings))
-            .collect())
+        let mut written = Ok(());
+        mesh_list(
+            &request.geometry,
+            &request.matching,
+            &request.parts,
+            &mut |k| {
+                let _ = std::fs::write(dir.join(CURRENT), k.to_string());
+            },
+            &mut |k, result| {
+                let outcome: PartOutcome = result.map(|g| (g.mesh, g.warnings));
+                if written.is_ok() {
+                    written = write_whole(&dir, &part_file(k), &outcome);
+                }
+            },
+        );
+        written
     })();
-    // Written under another name first, so that the program never reads half a result.
-    let written = ron::to_string(&result)
-        .map_err(|e| e.to_string())
-        .and_then(|text| std::fs::write(dir.join("result.tmp"), text).map_err(|e| e.to_string()))
-        .and_then(|()| {
-            std::fs::rename(dir.join("result.tmp"), dir.join(RESULT)).map_err(|e| e.to_string())
-        });
+    let written = write_whole(&dir, RESULT, &result);
     plx_solve::process::end(if written.is_ok() { 0 } else { 1 })
+}
+
+/// Writes `value` to `name` in `dir` under another name first, so that the program never
+/// reads half of it.
+fn write_whole(dir: &Path, name: &str, value: &impl Serialize) -> Result<(), String> {
+    let text = ron::to_string(value).map_err(|e| e.to_string())?;
+    let temporary = dir.join(format!("{name}.tmp"));
+    std::fs::write(&temporary, text).map_err(|e| e.to_string())?;
+    std::fs::rename(&temporary, dir.join(name)).map_err(|e| e.to_string())
 }
 
 /// The file the worker leaves its result in, see [`WorkerResult`].
 const RESULT: &str = "result.ron";
+
+/// The file that holds the place in the request of the part Gmsh is meshing.
+const CURRENT: &str = "current";
+
+/// The file Gmsh's messages go to.
+const GMSH_LOG: &str = "gmsh.log";
+
+/// The file of the K-th part's outcome, see [`PartOutcome`].
+fn part_file(k: usize) -> String {
+    format!("part-{k}.ron")
+}
 
 /// A folder of its own for one worker, removed when dropped.
 struct WorkerDir(PathBuf);
@@ -1277,8 +1361,9 @@ impl Drop for WorkerDir {
     }
 }
 
-/// Meshes in a worker process of `program` until it is done or `cancel` is set, which kills
-/// it.
+/// Meshes in worker processes of `program` until they are done or `cancel` is set, which
+/// kills them. If Gmsh crashes on a part, the part is told as failed with where Gmsh was,
+/// and a new worker meshes the parts after it.
 fn mesh_in_worker(
     program: &Path,
     geometry: Geometry,
@@ -1286,23 +1371,56 @@ fn mesh_in_worker(
     parts: Option<Vec<String>>,
     cancel: &AtomicBool,
 ) -> Result<PartMeshes, String> {
-    let dir = WorkerDir::new().map_err(|e| format!("No folder for the mesher: {e}"))?;
-    let request = WorkerRequest {
+    let parts = parts_to_mesh(&geometry, parts)?;
+    let mut request = WorkerRequest {
         library: plx_mesher::library_path(),
         geometry,
         matching,
         parts,
     };
-    let text = ron::to_string(&request).map_err(|e| e.to_string())?;
+    let mut generated = PartMeshes {
+        meshes: Vec::new(),
+        failed: Vec::new(),
+    };
+    while !request.parts.is_empty() {
+        let crashed = run_worker(program, &request, cancel, &mut generated)?;
+        let Some((k, message)) = crashed else {
+            break;
+        };
+        generated.failed.push(message);
+        // The parts after the one that crashed Gmsh, but not those meshed with others.
+        let meshed: Vec<&str> = (generated.meshes.iter())
+            .flat_map(|m| m.mesh.parts.iter().map(|p| p.name.as_str()))
+            .collect();
+        request.parts = (request.parts.iter().skip(k + 1))
+            .filter(|p| !meshed.iter().any(|m| m.eq_ignore_ascii_case(p)))
+            .cloned()
+            .collect();
+    }
+    Ok(generated)
+}
+
+/// Runs one worker on `request` and adds what it made to `generated`; returns the place in
+/// the request of the part it crashed on, with the message that tells so.
+fn run_worker(
+    program: &Path,
+    request: &WorkerRequest,
+    cancel: &AtomicBool,
+    generated: &mut PartMeshes,
+) -> Result<Option<(usize, String)>, String> {
+    let dir = WorkerDir::new().map_err(|e| format!("No folder for the mesher: {e}"))?;
+    let text = ron::to_string(request).map_err(|e| e.to_string())?;
     std::fs::write(dir.0.join("request.ron"), text)
         .map_err(|e| format!("Cannot write the mesher's input: {e}"))?;
+    let log = std::fs::File::create(dir.0.join(GMSH_LOG))
+        .map_err(|e| format!("Cannot write the mesher's log: {e}"))?;
     let mut command = std::process::Command::new(program);
     command
         .arg(WORKER_ARGUMENT)
         .arg(&dir.0)
         .arg(std::process::id().to_string())
         .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
+        .stdout(log)
         .stderr(std::process::Stdio::null());
     plx_solve::hide_console(&mut command);
     let mut child = command
@@ -1310,7 +1428,7 @@ fn mesh_in_worker(
         .map_err(|e| format!("Cannot start the mesher: {e}"))?;
     let result = dir.0.join(RESULT);
     // The result counts once it is there, whether or not the worker has ended yet.
-    let text = loop {
+    let (text, status) = loop {
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
@@ -1319,24 +1437,53 @@ fn mesh_in_worker(
         if let Ok(text) = std::fs::read_to_string(&result) {
             let _ = child.kill();
             let _ = child.wait();
-            break text;
+            break (Some(text), None);
         }
         match child.try_wait() {
             // It may have left its result just before it ended.
-            Ok(Some(status)) => match std::fs::read_to_string(&result) {
-                Ok(text) => break text,
-                Err(_) => return Err(format!("The mesher stopped unexpectedly ({status})")),
-            },
+            Ok(Some(status)) => break (std::fs::read_to_string(&result).ok(), Some(status)),
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
             Err(e) => return Err(format!("The mesher could not be watched: {e}")),
         }
     };
-    let result: WorkerResult = ron::from_str(&text).map_err(|e| e.to_string())?;
-    Ok(PartMeshes {
-        meshes: (result?.into_iter())
-            .map(|(mesh, warnings)| GeneratedMesh { mesh, warnings })
-            .collect(),
-    })
+    // What it finished, in order, whether it ended well or not; parts meshed with an
+    // earlier one leave no file.
+    let mut last_read = None;
+    for k in 0..request.parts.len() {
+        let Ok(text) = std::fs::read_to_string(dir.0.join(part_file(k))) else {
+            continue;
+        };
+        let outcome: PartOutcome = ron::from_str(&text).map_err(|e| e.to_string())?;
+        match outcome {
+            Ok((mesh, warnings)) => generated.meshes.push(GeneratedMesh { mesh, warnings }),
+            Err(message) => generated.failed.push(message),
+        }
+        last_read = Some(k);
+    }
+    if let Some(text) = text {
+        let result: WorkerResult = ron::from_str(&text).map_err(|e| e.to_string())?;
+        return result.map(|()| None);
+    }
+    let status = status.map_or_else(String::new, |s| format!(" ({s})"));
+    // The part it was meshing when it stopped, unless it stopped before or after the parts.
+    let current = (std::fs::read_to_string(dir.0.join(CURRENT)).ok())
+        .and_then(|c| c.trim().parse::<usize>().ok())
+        .filter(|&c| last_read.is_none_or(|l| c > l) && c < request.parts.len());
+    let Some(current) = current else {
+        return Err(format!("The mesher stopped unexpectedly{status}"));
+    };
+    let gmsh_log = std::fs::read_to_string(dir.0.join(GMSH_LOG)).unwrap_or_default();
+    let place = (gmsh_log.lines().rev())
+        .find_map(plx_mesher::meshing_step)
+        .map_or_else(String::new, |step| format!(" while {step}"));
+    let part = &request.parts[current];
+    Ok(Some((
+        current,
+        format!(
+            "{part}: Gmsh crashed{place}{status}. The other parts are meshed on; a \
+             different element size or a repaired geometry of the part may help"
+        ),
+    )))
 }
 
 /// What a cancelled job reports.
@@ -1448,6 +1595,31 @@ mod tests {
         assert_eq!(names, ["SOLID-2"]);
         let asked = mesh_parts(&geometry, &[], Some(vec!["SOLID-1".into()])).unwrap();
         assert!(asked.meshes.is_empty());
+        // A part that cannot be meshed is told by name, and the others are meshed.
+        geometry.set_suppressed(&["SOLID-1".into()], false);
+        geometry.mesh_items.push(plx_model::MeshSetupItem {
+            name: "Meshing_Parameters-1".into(),
+            kind: plx_model::MeshSetupKind::MeshingParameters {
+                parts: vec!["SOLID-1".into()],
+                parameters: plx_model::MeshingParameters {
+                    max_size: 0.0,
+                    ..geometry.meshing
+                },
+            },
+        });
+        let partly = mesh_parts(&geometry, &[], None).unwrap();
+        let names: Vec<&str> = (partly.meshes.iter())
+            .flat_map(|m| m.mesh.parts.iter().map(|p| p.name.as_str()))
+            .collect();
+        assert_eq!(names, ["SOLID-2"]);
+        assert_eq!(partly.failed.len(), 1);
+        assert!(
+            partly.failed[0].starts_with("SOLID-1: "),
+            "{:?}",
+            partly.failed
+        );
+        geometry.mesh_items.pop();
+        geometry.set_suppressed(&["SOLID-1".into()], true);
         // In the view it is drawn as its edges and a click goes through it.
         assert!(view.mark_suppressed(&geometry));
         assert!(!view.mark_suppressed(&geometry));

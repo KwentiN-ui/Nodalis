@@ -33,7 +33,10 @@ use plx_model::{
 };
 
 use gmsh::{Gmsh, with_gmsh};
-pub use gmsh::{GmshError, LibraryInfo, library_path, loaded_library, set_library_path};
+pub use gmsh::{
+    GmshError, LibraryInfo, library_path, loaded_library, log_to_terminal, meshing_step,
+    set_library_path,
+};
 
 /// File extensions of the CAD formats that can be imported.
 pub const CAD_EXTENSIONS: [&str; 5] = ["step", "stp", "iges", "igs", "brep"];
@@ -893,7 +896,7 @@ fn angle(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// nodes, line parts meeting at a point included: the contact search finds such ends and
 /// ties them.
 pub fn generate_mesh(geometry: &Geometry) -> Result<GeneratedMesh, GmshError> {
-    let mut mesh = FeMesh::default();
+    let mut meshes = Vec::new();
     let mut warnings = Vec::new();
     let mut meshed: Vec<String> = Vec::new();
     for name in part_names(geometry)? {
@@ -903,9 +906,10 @@ pub fn generate_mesh(geometry: &Geometry) -> Result<GeneratedMesh, GmshError> {
         }
         let part = generate_part_mesh(geometry, &name)?;
         meshed.extend(part.mesh.parts.iter().map(|p| p.name.clone()));
-        mesh = merge_part(&mesh, part.mesh);
+        meshes.push(part.mesh);
         warnings.extend(part.warnings);
     }
+    let mut mesh = merge_parts(&FeMesh::default(), meshes);
     mesh.compose_compounds(&geometry.compound_members());
     Ok(GeneratedMesh { mesh, warnings })
 }
@@ -1384,6 +1388,18 @@ pub fn generate_part_mesh_matching(
     part: &str,
     matching: &[PeriodicFaces],
 ) -> Result<GeneratedMesh, GmshError> {
+    // Gmsh's own errors do not know the part; the message names it.
+    part_mesh(geometry, part, matching).map_err(|error| match error {
+        GmshError::Call(message) => GmshError::Other(format!("{part}: Gmsh: {message}")),
+        other => other,
+    })
+}
+
+fn part_mesh(
+    geometry: &Geometry,
+    part: &str,
+    matching: &[PeriodicFaces],
+) -> Result<GeneratedMesh, GmshError> {
     let setup = geometry.parameters(part);
     if !(setup.max_size > 0.0 && setup.min_size >= 0.0) {
         return Err(GmshError::Other(format!(
@@ -1484,10 +1500,11 @@ pub fn generate_part_mesh_matching(
         let rotations = periodic::rotations(gmsh, matching)?;
         let faces_list: Vec<i32> = faces.iter().copied().collect();
         periodic::match_rotated(gmsh, 2, &faces_list, &rotations)?;
-        gmsh.generate(3)?;
+        let flat = generate_solid(gmsh, &options, part, volume)?;
         let order = options.order;
         let mesh = solid_mesh(gmsh, order, &[(volume, part.to_string())])?;
         let mut warnings = gmsh.warnings()?;
+        warnings.extend(flat);
         // Why the part got tetrahedra although hexahedra were asked for.
         if !refused.is_empty() {
             let prefix = format!("{part}: ");
@@ -1501,6 +1518,61 @@ pub fn generate_part_mesh_matching(
         }
         Ok(GeneratedMesh { mesh, warnings })
     })
+}
+
+/// What the warning about flat tetrahedra says, see [`is_flat_warning`].
+const FLAT_WARNING: &str = "tetrahedra are flat, which the solver cannot use";
+
+/// Whether a warning of the mesher is the one about flat tetrahedra in a part.
+pub fn is_flat_warning(warning: &str) -> bool {
+    warning.contains(FLAT_WARNING)
+}
+
+/// Below this quality (Gmsh's "minSICN", 1 for a regular tetrahedron, 0 for one whose corners
+/// lie in a plane) a tetrahedron counts as flat, see [`generate_solid`]. Badly shaped but not
+/// flat ones Netgen takes and improves.
+const FLAT_TETRAHEDRON: f64 = 1e-8;
+
+/// Meshes the solid `volume` of `part` with tetrahedra, with `options` applied, and returns a
+/// warning if some are flat.
+///
+/// Netgen's optimizer crashes Gmsh, and with it the process, on a mesh with flat
+/// tetrahedra, as the max element size gives them where it is far larger than the walls of
+/// the part are thick. So the solid is meshed with linear tetrahedra and without Netgen
+/// first; Netgen optimizes only if none is flat, and the elements are made quadratic after.
+fn generate_solid(
+    gmsh: &Gmsh,
+    options: &MeshOptions,
+    part: &str,
+    volume: i32,
+) -> Result<Option<String>, GmshError> {
+    if !options.netgen {
+        gmsh.generate(3)?;
+        return Ok(None);
+    }
+    gmsh.set_number("Mesh.OptimizeNetgen", 0.0)?;
+    gmsh.set_number("Mesh.ElementOrder", 1.0)?;
+    let generated = gmsh.generate(3);
+    gmsh.set_number("Mesh.ElementOrder", f64::from(options.order))?;
+    gmsh.set_number("Mesh.OptimizeNetgen", 1.0)?;
+    generated?;
+    let (tags, _) = gmsh.elements(TET4, volume)?;
+    let qualities = gmsh.element_qualities(&tags, "minSICN")?;
+    let flat = qualities.iter().filter(|&&q| q < FLAT_TETRAHEDRON).count();
+    if flat == 0 {
+        gmsh.optimize("Netgen")?;
+    }
+    if options.order > 1 {
+        gmsh.set_order(options.order)?;
+    }
+    Ok((flat > 0).then(|| {
+        format!(
+            "{part}: {flat} of {} {FLAT_WARNING}, and the mesh was not optimized with \
+             Netgen, which crashes on them. The max element size is likely too large for the \
+             part's thin walls; a smaller one avoids them.",
+            qualities.len()
+        )
+    }))
 }
 
 /// The ways a solid is swept into hexahedra, in the order they are tried.
@@ -2274,14 +2346,22 @@ fn generate_faces(
 /// numbers the mesh had, so that nothing that referred to the old part points into the new
 /// one.
 pub fn merge_part(mesh: &FeMesh, part_mesh: FeMesh) -> FeMesh {
-    let replaced: Vec<String> = part_mesh.parts.iter().map(|p| p.name.clone()).collect();
+    merge_parts(mesh, vec![part_mesh])
+}
+
+/// [`merge_part`] for the meshes of several parts at once, in their order: one pass over the
+/// mesh however many parts come, where merging them one by one copies the mesh for each.
+pub fn merge_parts(mesh: &FeMesh, part_meshes: Vec<FeMesh>) -> FeMesh {
+    let replaced: Vec<String> = (part_meshes.iter())
+        .flat_map(|m| m.parts.iter().map(|p| p.name.clone()))
+        .collect();
     let is_replaced = |p: &Part| replaced.iter().any(|r| r.eq_ignore_ascii_case(&p.name));
     let removed: BTreeSet<ElementId> = (mesh.parts.iter())
         .filter(|p| is_replaced(p))
         .flat_map(|p| p.elements.iter().copied())
         .collect();
-    let node_offset = mesh.node_ids().iter().copied().max().unwrap_or(0);
-    let element_offset = mesh.elements().iter().map(|e| e.id).max().unwrap_or(0);
+    let mut node_offset = mesh.node_ids().iter().copied().max().unwrap_or(0);
+    let mut element_offset = mesh.elements().iter().map(|e| e.id).max().unwrap_or(0);
 
     let mut merged = FeMesh::default();
     let kept: Vec<&Element> = (mesh.elements().iter())
@@ -2302,22 +2382,33 @@ pub fn merge_part(mesh: &FeMesh, part_mesh: FeMesh) -> FeMesh {
         // The elements come from a valid mesh.
         let _ = merged.add_element(element.clone());
     }
-    for (&id, &coords) in part_mesh.node_ids().iter().zip(part_mesh.coords()) {
-        merged.set_node(id + node_offset, coords);
-    }
-    for element in part_mesh.elements() {
-        let _ = merged.add_element(Element {
-            id: element.id + element_offset,
-            nodes: element.nodes.iter().map(|n| n + node_offset).collect(),
-            ..element.clone()
-        });
-    }
-    let mut new_parts: Vec<Part> = (part_mesh.parts.into_iter())
-        .map(|p| Part {
+    merged.cad = mesh.cad.without(&removed, &removed_nodes);
+    let mut new_parts: Vec<Part> = Vec::new();
+    for part_mesh in part_meshes {
+        for (&id, &coords) in part_mesh.node_ids().iter().zip(part_mesh.coords()) {
+            merged.set_node(id + node_offset, coords);
+        }
+        for element in part_mesh.elements() {
+            let _ = merged.add_element(Element {
+                id: element.id + element_offset,
+                nodes: element.nodes.iter().map(|n| n + node_offset).collect(),
+                ..element.clone()
+            });
+        }
+        merged
+            .cad
+            .extend(part_mesh.cad.offset(node_offset, element_offset));
+        let (nodes, elements) = (
+            part_mesh.node_ids().iter().copied().max().unwrap_or(0),
+            part_mesh.elements().iter().map(|e| e.id).max().unwrap_or(0),
+        );
+        new_parts.extend(part_mesh.parts.into_iter().map(|p| Part {
             elements: p.elements.iter().map(|e| e + element_offset).collect(),
             ..p
-        })
-        .collect();
+        }));
+        node_offset += nodes;
+        element_offset += elements;
+    }
     for part in &mesh.parts {
         if !is_replaced(part) {
             merged.parts.push(part.clone());
@@ -2361,10 +2452,6 @@ pub fn merge_part(mesh: &FeMesh, part_mesh: FeMesh) -> FeMesh {
             (name.clone(), surface)
         })
         .collect();
-    merged.cad = mesh.cad.without(&removed, &removed_nodes);
-    merged
-        .cad
-        .extend(part_mesh.cad.offset(node_offset, element_offset));
     merged
 }
 
