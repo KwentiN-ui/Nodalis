@@ -2142,6 +2142,9 @@ enum Action {
     /// Rename the socket of the row of `path` of a group or its Group Input or Group
     /// Output block.
     RenameSocket(u64, Vec<String>),
+    /// Removes the input or output of a group a row of the group's block, or of its Group
+    /// Input or Group Output block, is of.
+    RemoveSocket(u64, Vec<String>),
 }
 
 /// A project read from its file, with notes on its conversion, or why it could not be read.
@@ -7895,6 +7898,7 @@ impl ProjectApp {
                 .map(|l| l.target)
                 .collect(),
             Action::Split(id, _) => vec![*id],
+            Action::RemoveSocket(id, path) => self.socket_takers(*id, path),
             // The analysis it continues takes its steps.
             Action::Merge(id) => (self.links.iter())
                 .filter(|l| l.target == *id && links::is_state(l))
@@ -8208,6 +8212,7 @@ impl ProjectApp {
             Action::EnterGroup(id) => self.enter_group(id),
             Action::LeaveGroup => self.leave_group(),
             Action::RenameSocket(id, path) => self.ask_socket_name(id, &path),
+            Action::RemoveSocket(id, path) => self.remove_socket(id, &path),
             Action::Continue {
                 source,
                 step,
@@ -12236,6 +12241,18 @@ impl SnarlViewer<u64> for Viewer {
             }
             return self.typed(BlockPin::single(info), id, &row.path, false);
         }
+        if groups::is_gap(&row.path) {
+            // Between the outputs and the inputs of a group: a thin line across, no pin.
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::hover());
+            let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+            ui.painter().hline(
+                (rect.left() + 4.0)..=(rect.right() - 4.0),
+                rect.center().y,
+                egui::Stroke::new(1.0, stroke.color),
+            );
+            return BlockPin::single(hidden_pin());
+        }
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::click());
         let painter = ui.painter();
@@ -12285,8 +12302,6 @@ impl SnarlViewer<u64> for Viewer {
             .visuals()
             .text_color()
             .gamma_multiply(if dim { 0.45 } else { 0.75 });
-        node_icons::paint(&faded, egui::pos2(x, middle - 7.0), row.icon, ink);
-        x += 20.0;
         let color = if dim {
             ui.visuals().text_color().gamma_multiply(0.5)
         } else if row.linked_from.is_some() {
@@ -12294,13 +12309,33 @@ impl SnarlViewer<u64> for Viewer {
         } else {
             ui.visuals().text_color()
         };
-        painter.text(
-            egui::pos2(x, middle),
-            egui::Align2::LEFT_CENTER,
-            &row.text,
-            egui::TextStyle::Body.resolve(ui.style()),
-            color,
-        );
+        if row.output && !row.input && row.path.first().is_some_and(|c| c == groups::SOCKET) {
+            // An output of a group, or of its Group Input block: its name sits at the right,
+            // by its pin, as in Blender, and its icon before the name.
+            let text = painter.text(
+                egui::pos2(rect.right() - 6.0, middle),
+                egui::Align2::RIGHT_CENTER,
+                &row.text,
+                egui::TextStyle::Body.resolve(ui.style()),
+                color,
+            );
+            node_icons::paint(
+                &faded,
+                egui::pos2(text.left() - 20.0, middle - 7.0),
+                row.icon,
+                ink,
+            );
+        } else {
+            node_icons::paint(&faded, egui::pos2(x, middle - 7.0), row.icon, ink);
+            x += 20.0;
+            painter.text(
+                egui::pos2(x, middle),
+                egui::Align2::LEFT_CENTER,
+                &row.text,
+                egui::TextStyle::Body.resolve(ui.style()),
+                color,
+            );
+        }
         let mut update = None;
         if let Some(state) = row.state {
             let symbol = egui::pos2(rect.right() - 18.0, middle - 8.0);
@@ -12350,8 +12385,81 @@ impl SnarlViewer<u64> for Viewer {
         if row.input || row.output {
             tip.push_str("\nRight-click a pin to remove its links.");
         }
+        let end = (self.block(id))
+            .is_some_and(|b| matches!(b.kind, Kind::GroupInput | Kind::GroupOutput));
+        let pointer = ui.ctx().pointer_hover_pos();
+        let mut removed = false;
+        if end
+            && groups::socket_of(&row.path).is_some()
+            && (response.hovered() || pointer.is_some_and(|p| rect.contains(p)))
+        {
+            // Inside the group, a cross on the side away from the pin removes the socket. The
+            // row takes its click, as the arrow of an expander.
+            let x = if row.output {
+                rect.left() + 12.0
+            } else {
+                rect.right() - 12.0
+            };
+            let area = egui::Rect::from_center_size(egui::pos2(x, middle), egui::vec2(16.0, 16.0));
+            let on = pointer.is_some_and(|p| area.contains(p));
+            let ink = if on {
+                ui.painter()
+                    .rect_filled(area, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+                ui.visuals().text_color()
+            } else {
+                ui.visuals().text_color().gamma_multiply(0.6)
+            };
+            let stroke = egui::Stroke::new(1.5, ink);
+            let r = 3.5;
+            let c = area.center();
+            ui.painter()
+                .line_segment([c + egui::vec2(-r, -r), c + egui::vec2(r, r)], stroke);
+            ui.painter()
+                .line_segment([c + egui::vec2(-r, r), c + egui::vec2(r, -r)], stroke);
+            if response.clicked()
+                && response
+                    .interact_pointer_pos()
+                    .is_some_and(|p| area.contains(p))
+            {
+                removed = true;
+                self.actions
+                    .push(Action::RemoveSocket(id, row.path.clone()));
+            }
+        }
         let response = response.on_hover_text(tip);
-        if toggled || (row.expander.is_some() && response.double_clicked_tolerant()) {
+        if groups::socket_of(&row.path).is_some() {
+            // An input of the group: on its block a pin at the left, on its Group Input block
+            // one at the right.
+            let input = match self.block(id).map(|b| b.kind) {
+                Some(Kind::GroupInput) => true,
+                Some(Kind::GroupOutput) => false,
+                _ => row.input,
+            };
+            let mut chosen = None;
+            response.context_menu(|ui| {
+                if ui.button("Rename").clicked() {
+                    chosen = Some(Action::RenameSocket(id, row.path.clone()));
+                }
+                let remove = if input {
+                    "Remove Input"
+                } else {
+                    "Remove Output"
+                };
+                if ui
+                    .button(remove)
+                    .on_hover_text(
+                        "Removes it from the group, with its wires inside and outside. Ctrl+Z \
+                         brings it back.",
+                    )
+                    .clicked()
+                {
+                    chosen = Some(Action::RemoveSocket(id, row.path.clone()));
+                }
+            });
+            self.actions.extend(chosen);
+        }
+        if removed {
+        } else if toggled || (row.expander.is_some() && response.double_clicked_tolerant()) {
             self.actions.push(Action::Toggle(id, row.path.clone()));
         } else if response.double_clicked_tolerant() && groups::socket_of(&row.path).is_some() {
             self.actions
