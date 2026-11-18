@@ -230,6 +230,10 @@ struct FormulaState {
     /// Why it gives nothing: the formula cannot be read, its units do not go together, or
     /// its result goes to a number of another unit. Found by every sync.
     problem: Option<String>,
+    /// The inputs between linked ones that no link reaches any more, by index: they keep
+    /// their letter, so that the formula stays as typed, until a new link takes them. Found
+    /// by every sync.
+    unlinked: Vec<usize>,
 }
 
 /// The first element of the path of the rows over the outputs and inputs of a study, which

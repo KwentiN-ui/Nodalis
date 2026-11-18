@@ -127,12 +127,20 @@ pub(super) fn number_rows(
             widget: Some(RowWidget::Input(index)),
             ..row(
                 path,
-                label,
+                label.clone(),
                 if formula {
-                    format!(
-                        "{what}. Its link gives it; remove the link to remove the input, and \
-                         the inputs after it move up a letter in the formula."
-                    )
+                    if number.formula_input_unlinked(index) {
+                        format!(
+                            "Input {label} of the formula lost its link. Drag the pin of a \
+                             number here, or to the empty pin below, to give it again; the \
+                             formula stays as typed."
+                        )
+                    } else {
+                        format!(
+                            "{what}. Its link gives it; remove the link and the input waits \
+                             for a new one, with the formula as typed."
+                        )
+                    }
                 } else {
                     format!(
                         "{what}. Type it, or drag the pin of a number here: a parameter, \
@@ -151,7 +159,7 @@ pub(super) fn number_rows(
                 vec![links::PARAMETERS.to_owned(), super::groups::OPEN.to_owned()],
                 String::new(),
                 "Drag the pin of a number or a series here to add it as the next input of the \
-                 formula: a, b, c, ..."
+                 formula: a, b, c, ... An input that lost its link is given first."
                     .into(),
             )
         });
@@ -197,7 +205,13 @@ pub(super) fn number_rows(
         (None, None) if number.formula_problem().is_some() => {
             let problem = number.formula_problem().unwrap_or_default();
             tip.push_str(&format!("\nNo result: {problem}."));
-            "Result: none".into()
+            match number.formula_missing().as_slice() {
+                [] => "Result: none".into(),
+                missing => {
+                    let names: Vec<String> = missing.iter().map(char::to_string).collect();
+                    format!("Result: none, {} not connected", names.join(", "))
+                }
+            }
         }
         (None, Some(value)) => {
             format!("Result: {}", shown_number(value, number.kind, units))
@@ -660,6 +674,20 @@ impl Viewer {
                 else {
                     return;
                 };
+                // An input of a formula that lost its link has no value until a new link.
+                if block.formula_input_unlinked(index) {
+                    ui.add_enabled_ui(false, |ui| {
+                        ui.add_sized(
+                            field.size(),
+                            egui::Button::new(
+                                egui::RichText::new("not connected").color(crate::style::error()),
+                            ),
+                        )
+                    })
+                    .response
+                    .on_disabled_hover_text(tip);
+                    return;
+                }
                 // A series a link gives shows how many values it has.
                 if let Some(series) = block.series.get(index).cloned().flatten() {
                     ui.add_enabled_ui(false, |ui| {
