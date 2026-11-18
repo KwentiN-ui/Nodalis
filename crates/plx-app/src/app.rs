@@ -422,8 +422,10 @@ impl AnalysisWindow {
         }
     }
 
-    /// Shows this workspace, as soon as the analysis is loaded.
+    /// Shows this workspace: at once in the app bar, and again once the analysis is loaded,
+    /// which would otherwise open on the workspace it finds fitting.
     pub fn show_workspace(&mut self, show: Show) {
+        self.workbench.set_tree_view(show.view);
         self.show_when_loaded = Some(show);
     }
 
@@ -690,6 +692,13 @@ impl AnalysisWindow {
 
     /// Opens the analysis of the project at `path` in the window, built on a worker thread.
     pub fn load(&mut self, ctx: &egui::Context, path: PathBuf, analysis: ProjectAnalysis) {
+        // Read again, e.g. after an undo in the project: the workspace shown stays.
+        if self.workbench.model.is_some() && self.show_when_loaded.is_none() {
+            self.show_when_loaded = Some(Show {
+                view: self.workbench.tree_view,
+                step: None,
+            });
+        }
         let (sender, ctx) = (self.load_events.0.clone(), ctx.clone());
         self.loading = Some(path.clone());
         std::thread::spawn(move || {
