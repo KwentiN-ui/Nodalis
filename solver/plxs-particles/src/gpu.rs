@@ -922,9 +922,8 @@ impl Card {
         self.gpu.queue.submit([encoder.finish()]);
         let grid = setup.grid;
         self.gpu.map(&self.read_hits, |b| {
-            let rows: &[[f32; 4]] = bytemuck::cast_slice(&b[..bytes as usize]);
-            for (at, pair) in rows.chunks_exact(2).enumerate() {
-                let [j, n] = [pair[0], pair[1]];
+            let rows: &[[[f32; 4]; 2]] = bytemuck::cast_slice(&b[..bytes as usize]);
+            for (at, &[j, n]) in rows.iter().enumerate() {
                 if j[3] < 0.5 || (j[0] == 0.0 && j[1] == 0.0 && j[2] == 0.0) {
                     continue;
                 }
