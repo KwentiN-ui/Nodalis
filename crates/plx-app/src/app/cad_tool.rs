@@ -1,32 +1,23 @@
-//! The CAD tools of the Geometry workspace: Defeature, Split by Plane and Split around Hole
-//! applied to the geometry of the analysis right away, in the editor of the CAD Operation
-//! block. Unlike the block they keep no history of their own: the analysis takes the changed
-//! geometry as if it had been imported so, and the selections on it follow the changed
-//! shapes. Edit > Undo takes the change back.
+//! The CAD tools of the Geometry workspace: Defeature, Split by Plane and Split around Hole,
+//! set up in the editor of the CAD Operation block. Each becomes an operation of the
+//! Geometry tree ([`plx_model::Geometry::operations`]), a step of a pipeline from the shapes
+//! as imported or linked, as a CAD Operation block before the analysis would be: it can be
+//! changed or deleted later, and acts anew on new shapes a link brings. The selections on the
+//! shapes follow the changes. Edit > Undo takes a change back.
 
 use super::*;
 use crate::cad_editor::{CadEditorResult, CadOperationEditor};
-use plx_model::{CadOperation, CadOperationKind};
+use plx_model::{CadOperation, CadOperationKind, Geometry, GeometryOperation};
 
 impl AnalysisWindow {
     /// Opens the editor of a CAD tool on the geometry of the analysis.
     pub(super) fn open_cad_tool(&mut self, kind: CadOperationKind) {
         let w = &mut self.workbench;
-        // A link would bring its geometry back over the changed one.
-        let linked = (w.incoming.paths.iter())
-            .find(|(path, _)| path.first().is_some_and(|p| p == crate::links::GEOMETRY));
-        if let Some((_, source)) = linked {
-            let line = format!(
-                "The geometry comes from {source}: change it there, or put a CAD Operation \
-                 block between the two in the project."
-            );
-            w.output.push(line);
-            return;
-        }
         let Some(model) = &w.model else {
             return;
         };
-        let Some(geometry) = model.geometry.clone() else {
+        // The operations of the Geometry tree so far make what it acts on.
+        let Some(geometry) = model.geometry.clone().map(Geometry::without_operations) else {
             return;
         };
         let geometry = if geometry.signatures.is_empty() {
@@ -95,7 +86,61 @@ impl AnalysisWindow {
             false,
         );
         let viewport = Viewport::new(w.viewport.render_state());
-        w.cad_tool = Some((editor, viewport));
+        w.cad_tool = Some((editor, viewport, None));
+    }
+
+    /// Opens the editor of the operation at `index` of the Geometry tree, on the shapes the
+    /// operations before it make.
+    pub(super) fn edit_geometry_operation(&mut self, index: usize) {
+        let w = &mut self.workbench;
+        let Some(model) = &w.model else {
+            return;
+        };
+        let Some(geometry) = &model.geometry else {
+            return;
+        };
+        let Some(step) = geometry.operations.get(index) else {
+            return;
+        };
+        let input = crate::geometry_operations::input_of(geometry, index);
+        let editor = CadOperationEditor::new(
+            0,
+            &step.name,
+            input,
+            &step.operation,
+            model.fe.properties.units,
+            false,
+        );
+        let viewport = Viewport::new(w.viewport.render_state());
+        w.cad_tool = Some((editor, viewport, Some(index)));
+    }
+
+    /// Deletes the operation at `index` of the Geometry tree: the others act anew on the
+    /// input.
+    pub(super) fn delete_geometry_operation(&mut self, index: usize) {
+        let Some(geometry) = (self.workbench.model.as_ref()).and_then(|m| m.geometry.as_ref())
+        else {
+            return;
+        };
+        let Some(name) = geometry.operations.get(index).map(|o| o.name.clone()) else {
+            return;
+        };
+        let mut operations = geometry.operations.clone();
+        operations.remove(index);
+        let (made, notes) = crate::geometry_operations::rerun(geometry, operations);
+        self.take_operations(made, notes);
+        self.workbench.tree.selected = None;
+        let line = format!("{name} deleted; mesh the geometry again.");
+        self.workbench.output.push(line);
+    }
+
+    /// Takes the shapes the operations of the Geometry tree made, as an undo step.
+    fn take_operations(&mut self, made: Geometry, notes: Vec<String>) {
+        if let Some(model) = &mut self.workbench.model {
+            crate::undo::before_shape_change(model);
+        }
+        self.take_geometry(Some(made), true);
+        self.workbench.output.extend(notes);
     }
 }
 
@@ -116,11 +161,18 @@ impl Workbench {
 }
 
 impl AnalysisWindow {
-    /// Shows the editor of a CAD tool; OK applies the operation to the geometry.
+    /// Shows the editor of a CAD tool; OK adds the operation to the Geometry tree, or
+    /// changes the one edited, and the operations act anew.
     pub(super) fn cad_tool_window(&mut self, ctx: &egui::Context) {
-        let Some((editor, viewport)) = &mut self.workbench.cad_tool else {
+        match self.workbench.geometry_operation_request.take() {
+            Some((index, true)) => self.delete_geometry_operation(index),
+            Some((index, false)) => self.edit_geometry_operation(index),
+            None => {}
+        }
+        let Some((editor, viewport, edited)) = &mut self.workbench.cad_tool else {
             return;
         };
+        let edited = *edited;
         let (operation, made) = match editor.show(ctx, viewport) {
             CadEditorResult::Open => return,
             CadEditorResult::Cancel => {
@@ -131,37 +183,60 @@ impl AnalysisWindow {
         };
         let input = editor.input().clone();
         self.workbench.cad_tool = None;
+        let Some(geometry) = (self.workbench.model.as_ref()).and_then(|m| m.geometry.clone())
+        else {
+            return;
+        };
         let label = operation.kind.label();
+        if let Some(index) = edited {
+            let mut operations = geometry.operations.clone();
+            let Some(step) = operations.get_mut(index) else {
+                return;
+            };
+            step.operation = operation;
+            let name = step.name.clone();
+            let (made, notes) = crate::geometry_operations::rerun(&geometry, operations);
+            self.take_operations(made, notes);
+            let line = format!("{name} changed; mesh the geometry again.");
+            self.workbench.output.push(line);
+            return;
+        }
         let made = match made {
             Some(made) => Ok(*made),
-            None => (operation.problem().map_or(Ok(()), Err))
-                .and_then(|()| operation.resolve(&input))
-                .and_then(|entities| {
-                    plx_mesher::apply_operation(&input, &operation, &entities)
-                        .map_err(|e| e.to_string())
-                }),
+            None => crate::geometry_operations::apply(&input, &operation),
         };
-        let geometry = match made {
-            Ok(geometry) => geometry,
+        let made = match made {
+            Ok(made) => made,
             Err(why) => {
                 let line = format!("{label} failed: {why}");
                 self.workbench.output.push(line);
                 return;
             }
         };
-        if geometry.brep == input.brep {
+        if made.brep == input.brep {
             let line = format!("{label}: nothing to change in the geometry.");
             self.workbench.output.push(line);
             return;
         }
-        // The selections follow the shapes by their signatures, which the input has.
-        if let Some(model) = &mut self.workbench.model {
-            crate::undo::before_shape_change(model);
-            model.geometry = Some(input);
-        }
-        self.take_geometry(Some(geometry), true);
+        // The operation goes after the others, on the shapes they made.
+        let name = geometry.operation_name(label);
+        let mut operations = geometry.operations.clone();
+        operations.push(GeometryOperation {
+            name: name.clone(),
+            operation: operation.clone(),
+        });
+        let start = match geometry.input.clone() {
+            Some(start) => *start,
+            None => geometry.clone().without_operations(),
+        };
+        let made = Geometry {
+            operations,
+            input: Some(Box::new(start)),
+            ..made.without_operations()
+        };
+        self.take_operations(made, Vec::new());
         let line = format!(
-            "{label} applied to the geometry ({}); mesh it again.",
+            "{name} ({}) added to the Geometry tree; mesh the geometry again.",
             operation.describe_picks()
         );
         self.workbench.output.push(line);

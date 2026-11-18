@@ -97,31 +97,46 @@ needed between them, and each face can still be picked on its own.
 
 === Modifying the geometry <geometry-modify>
 
-The #ui("Modify") group of the #ui("Geometry") tab changes the imported geometry of the analysis
-right away: #ui("Defeature") removes fillets and chamfers (@defeature), #ui("Split by Plane")
-splits parts along a plane (@split-by-plane) and #ui("Split around Hole") splits the face around
-a hole into a ring (@split-around-hole). Each opens the editor of the CAD Operation block with
-that operation chosen; the other operations of the block are offered there too. #ui("OK")
-replaces the geometry by the result, as if it had been imported so: the parts keep their names,
-the mesh setup and the picks of the FE model follow the faces and edges by where they lie, and
-the geometry has to be meshed again. A split by plane starts from the YZ plane through the middle
-of the geometry, the other tools from a size of 3 mm.
+The #ui("Modify") group of the #ui("Geometry") tab changes the geometry of the analysis:
+#ui("Defeature") removes fillets and chamfers (@defeature), #ui("Split by Plane") splits parts
+along a plane (@split-by-plane) and #ui("Split around Hole") splits the face around a hole into a
+ring (@split-around-hole). Each opens the editor of the CAD Operation block with that operation
+chosen; the other operations of the block are offered there too. A split by plane starts from
+the YZ plane through the middle of the geometry, the other tools from a size of 3 mm.
+
+#ui("OK") adds the operation to #ui("Operations") in the Geometry tree, named like
+#ui("Split by Plane-1"). The operations there are a pipeline from the geometry as imported or
+linked to the geometry the analysis meshes, in the order of the tree, as if CAD Operation blocks
+stood before the analysis in the project (@cad-operation-block): each acts on what the ones before it
+made. The parts keep their names, the mesh setup and the picks of the FE model follow the faces
+and edges by where they lie, and the geometry has to be meshed again.
+
+- Double-click an operation to change it: its editor opens on the geometry the operations before
+  it make, and with #ui("OK") the operations act anew.
+- #ui("Delete") in its context menu, or the Delete key, removes it; the others act anew on the
+  geometry as imported or linked, and what it cut is whole again.
+- Geometry that comes from a link, such as a File block or another analysis, takes the
+  operations too: when the link brings new shapes, for example after the CAD file changed, the
+  operations act on them again. Such an analysis meshes the parts the link brings itself rather
+  than taking the link's mesh of them.
+- An operation that fails on new shapes, for example when a picked face is gone, is skipped;
+  the output says why. Change it or delete it.
+
+#ui("Edit") > #ui("Undo") takes back adding, changing or deleting an operation (@undo).
 
 #ui("Split by Plane") cuts only the parts selected in the tree when it is opened, compound parts
 selected standing for their members; with nothing selected it cuts every part the plane runs
-through. The editor outlines the selected parts in red, starts from the YZ plane through their
-middle and draws the outline of the plane over them only. The other parts stay as they are, even
-those the plane runs through or that lie wholly on a side that is not kept. Turning off
-#ui("Only the selected parts") in the #ui("Cut") row cuts every part again.
+through. With parts selected, the editor shows only them, outlined in red, starts from the YZ
+plane through their middle and draws the outline of the plane over them; the other parts stay as
+they are, even those the plane runs through or that lie wholly on a side that is not kept.
+The plane carries the manipulator of the section view (@section-view): drag the arrow to shift
+it, an arc to tilt it about a global axis in it (@split-by-plane).
 
 #screenshot("geometry-split-selected.png", [Split by Plane with SOLID-3 selected in the tree: the
-  preview cuts only that bar, the other two stay whole though the YZ plane runs through them])
+  editor shows only that bar, with the manipulator on the plane])
 
-Unlike the CAD Operation block, the tools keep no history; #ui("Edit") > #ui("Undo") takes the
-last change back (@undo). Change the geometry with them once, for example to remove cosmetic fillets before meshing. Use the block in
-the project when the change is to stay editable, to be varied by a parameter study or to follow a
-new version of the CAD file. An analysis whose geometry comes from a link refuses the tools,
-since the link would bring its geometry back; put a CAD Operation block between the two instead.
+#screenshot("geometry-operations.png", [A split by plane under Operations in the Geometry tree:
+  double-click to change it, Delete to take it back])
 
 #screenshot("geometry-defeature-tool.png", [Defeature from the Modify group of the Geometry tab:
   the fillets and chamfers up to 3 mm are found on the imported bracket])

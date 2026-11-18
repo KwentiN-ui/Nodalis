@@ -473,7 +473,7 @@ impl ModelMut<'_> {
         if !nodes.is_empty() || !elements.is_empty() {
             self.fe.renumber(&nodes, &elements);
         }
-        *self.geometry = geometry;
+        *self.geometry = geometry.map(plx_model::Geometry::without_operations);
         *self.mesh = mesh;
         *self.origins = origins.linked(self.origins);
         self.fe.mesh_sets = mesh_sets;
@@ -14346,6 +14346,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let mesh = MeshPrimitive::default_box().generate(ModelSpace::ThreeD, "Solid-1");
         let space = ModelSpace::ThreeD;
@@ -15561,6 +15563,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let fe = plx_model::FeModel::default();
         let inputs = plx_model::PartOrigins::default();
@@ -15657,6 +15661,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let path = plx_model::ValuePath::new(
             plx_model::ItemRef::MeshSetup("Meshing_Parameters-1".into()),

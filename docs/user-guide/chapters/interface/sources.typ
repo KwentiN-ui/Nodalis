@@ -427,7 +427,11 @@ can be picked on their own, a symmetry model keeps only one half, or a region ge
 mesh size. Choose the #ui("Plane") in the editor:
 
 - #ui("YZ plane"), #ui("XZ plane") or #ui("XY plane"): a plane of the global coordinate system,
-  moved along its axis by the #ui("Offset"); the editor draws its outline over the geometry.
+  moved along its axis by the #ui("Offset"); the editor draws its outline over the geometry,
+  with the manipulator of the section view (@section-view) in its middle: drag the arrow to
+  shift the plane, an arc to tilt it about the global axis the arc turns around. Once tilted, the
+  plane offers only the arc of the axis it is tilted about. #ui("Offset") and #ui("Tilt") follow
+  the drag; type them for exact values.
 - #ui("Plane of a face"): click a planar face; the cut lies parallel to it, the #ui("Offset")
   into the part.
 

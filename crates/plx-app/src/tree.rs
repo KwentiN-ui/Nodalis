@@ -35,6 +35,9 @@ pub enum TreeItem {
     MeshItem(usize),
     /// A mesh operation of the FE model, such as a transform, under Mesh > Mesh Operations.
     MeshOperation(usize),
+    /// An operation of the Geometry tree on the shapes, such as a split by plane, under
+    /// Operations, see [`plx_model::Geometry::operations`].
+    GeometryOperation(usize),
     NodeSet(String),
     ElementSet(String),
     Surface(String),
@@ -94,6 +97,9 @@ pub enum TreeItem {
 
 /// The category of the mesh operations under Mesh.
 pub const MESH_OPERATIONS: &str = "Mesh Operations";
+
+/// The category of the operations on the shapes in the Geometry tree.
+pub const GEOMETRY_OPERATIONS: &str = "Operations";
 
 /// The group of the exposed parameters in the FE Model tree.
 pub const EXPOSED: &str = "Exposed Parameters";
@@ -803,6 +809,7 @@ fn deletable(view: TreeView, item: &TreeItem) -> bool {
                 | TreeItem::MeshItem(_)
         )
         || (view == TreeView::FeModel && matches!(item, TreeItem::MeshOperation(_)))
+        || (view == TreeView::Geometry && matches!(item, TreeItem::GeometryOperation(_)))
         || (view == TreeView::FeModel && set_kind(item).is_some())
 }
 
@@ -882,6 +889,7 @@ fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
         Mesh => matches!(item, Part(_) | MeshOperation(_) | Group(MESH_OPERATIONS)),
         Group("Parts") => matches!(item, Part(_) | Compound(_)),
         Group(MESH_OPERATIONS) => matches!(item, MeshOperation(_)),
+        Group(GEOMETRY_OPERATIONS) => matches!(item, GeometryOperation(_)),
         Group("Constraints") => matches!(item, Constraint(_)),
         Group("Sections") => matches!(item, Section(_) | CrossSection(_) | Group(CROSS_SECTIONS)),
         Group(CROSS_SECTIONS) => matches!(item, CrossSection(_)),
@@ -1454,7 +1462,8 @@ impl Tree<'_> {
                     | TreeItem::HotSpot(_)
                     | TreeItem::MeshItem(_)
             )
-            || (self.view == TreeView::FeModel && matches!(item, TreeItem::MeshOperation(_)));
+            || (self.view == TreeView::FeModel && matches!(item, TreeItem::MeshOperation(_)))
+            || (self.view == TreeView::Geometry && matches!(item, TreeItem::GeometryOperation(_)));
         // The menu of one of several selected items acts on all of them.
         let several = self.is_selected(&item) && self.state.selected_items(self.view).len() > 1;
         if creates.is_some() || editable {
@@ -1677,6 +1686,9 @@ impl Tree<'_> {
             TreeItem::Group("Parts") => TreeIcon::Part,
             TreeItem::Group("Mesh Setup") => TreeIcon::MeshSetup,
             TreeItem::Group(MESH_OPERATIONS) => TreeIcon::MeshOperation,
+            TreeItem::Group(GEOMETRY_OPERATIONS) | TreeItem::GeometryOperation(_) => {
+                TreeIcon::GeometryOperation
+            }
             TreeItem::Group("Node Sets") => TreeIcon::NodeSet,
             TreeItem::Group("Element Sets") => TreeIcon::ElementSet,
             TreeItem::Group("Surfaces") => TreeIcon::Surface,
@@ -2403,6 +2415,7 @@ pub fn show(
     view: TreeView,
     model: Option<&mut Model>,
     mesh_items: &[String],
+    operations: &[String],
     solver_findings: &[Finding],
     state: &mut TreeState,
 ) -> TreeResponse {
@@ -2451,6 +2464,11 @@ pub fn show(
                             tree.leaf(ui, TreeItem::Group("Parts"), "Parts");
                         }
                     }
+                    // What is done to the shapes as imported or linked, in order.
+                    let items = (operations.iter().enumerate())
+                        .map(|(i, name)| (TreeItem::GeometryOperation(i), name.as_str()))
+                        .collect();
+                    tree.container(ui, GEOMETRY_OPERATIONS, items);
                     let items = (mesh_items.iter().enumerate())
                         .map(|(i, name)| (TreeItem::MeshItem(i), name.as_str()))
                         .collect();
@@ -3193,7 +3211,7 @@ mod tests {
             };
             let (model, state, opened) = (&mut self.model, &mut self.state, &mut self.opened);
             let mut out = self.ctx.run_ui(input, |ui| {
-                let r = show(ui, TreeView::FeModel, Some(model), &[], &[], state);
+                let r = show(ui, TreeView::FeModel, Some(model), &[], &[], &[], state);
                 opened.extend(r.open);
             });
             out.textures_delta.clear();

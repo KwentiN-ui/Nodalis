@@ -571,6 +571,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let fe = crate::FeModel::default();
         let solved = active_model(&compound, &fe, Some(&geometry), &origins);
@@ -621,6 +623,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let solved = active_model(&mesh, &fe, Some(&geometry), &origins);
         assert!(matches!(solved.mesh, Cow::Borrowed(_)));
@@ -718,6 +722,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let mut fe = crate::FeModel::default();
         // A contact with the part that goes goes with it; one between parts that stay stays.
@@ -772,6 +778,8 @@ mod tests {
             own_meshes: vec!["OWN".into()],
             ids: Vec::new(),
             from_link: true,
+            operations: Vec::new(),
+            input: None,
         };
         let mut origins = PartOrigins::default();
         origins.insert("OWN", PartOrigin::Linked);
@@ -811,6 +819,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         assert_eq!(
             unmeshed_parts(Some(&geometry), &origins, &mesh),

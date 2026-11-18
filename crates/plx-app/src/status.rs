@@ -463,6 +463,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let fe = FeModel::default();
         let space = fe.properties.space;
@@ -508,6 +510,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let fe = FeModel::default();
         let space = fe.properties.space;
