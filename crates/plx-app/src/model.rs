@@ -1592,8 +1592,12 @@ impl Model {
     /// run again when the FE model changed; the part that depends on the mesh only once per
     /// mesh. Waits for them: for solving; what is shown takes [`Model::findings_soon`].
     pub fn findings(&self) -> Vec<Finding> {
-        let mut findings = self.all_findings();
-        // A suppressed part takes part in nothing: what is missing on it is no problem.
+        self.without_suppressed(self.all_findings())
+    }
+
+    /// `findings` without those of suppressed parts: a suppressed part takes part in
+    /// nothing, what is missing on it is no problem.
+    fn without_suppressed(&self, mut findings: Vec<Finding>) -> Vec<Finding> {
         let suppressed = |part: usize| self.parts.get(part).is_some_and(|p| p.suppressed);
         findings.retain(|f| !matches!(f.item, plx_model::ModelItem::Part(p) if suppressed(p)));
         findings
@@ -1625,6 +1629,11 @@ impl Model {
     /// gives the findings of the model as last checked, and the window is drawn again when
     /// they are done.
     pub fn findings_soon(&self) -> Vec<Finding> {
+        self.without_suppressed(self.all_findings_soon())
+    }
+
+    /// [`Self::findings_soon`] with those of suppressed parts.
+    fn all_findings_soon(&self) -> Vec<Finding> {
         let mut cache = self.checks.lock().unwrap_or_else(|e| e.into_inner());
         self.take_background_check(&mut cache);
         if let Some(checks) = cache.as_ref().filter(|c| self.checks_current(c)) {
@@ -1665,7 +1674,7 @@ impl Model {
             return shown;
         }
         drop((background, cache));
-        self.findings()
+        self.all_findings()
     }
 
     /// Whether the checks were made for the model as it is.
@@ -3877,7 +3886,7 @@ mod tests {
         let same = fe == model.fe;
         eprintln!("  fe clone + compare: {:?} {same}", start.elapsed());
         let start = Instant::now();
-        let _ = crate::solve_fingerprint::fingerprints_soon(&model.mesh, &model.fe);
+        let _ = crate::solve_fingerprint::fingerprints_soon(&model.active());
         eprintln!("  fingerprints_soon: {:?}", start.elapsed());
         let mesh_check = plx_model::MeshCheck::new(&model.mesh, model.fe.properties.space);
         let start = Instant::now();
