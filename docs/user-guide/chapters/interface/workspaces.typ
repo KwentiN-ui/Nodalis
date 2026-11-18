@@ -63,11 +63,11 @@ not fit into the window, its groups fold into a menu tile named after them, from
 the room is there.
 
 #fields(
-  [Project], [#ui("File"): file commands, #ui("New Analysis"), and #ui("Open"),
-    #ui("Open in New Window"), #ui("Solve"), #ui("Duplicate"), #ui("Delete"), #ui("Rename")
-    for the selected block. #ui("Sources"), #ui("Modify"), #ui("Parameters"), #ui("Evaluate")
-    and #ui("Annotate") add blocks (@place-block). #ui("Arrange") works on the selected blocks and
-    the view of the schematic.],
+  [Project], [#ui("File"): #ui("New Project"), #ui("Open"), #ui("Open Recent") and
+    #ui("Save"). #ui("Analysis"): #ui("New Analysis"), and #ui("Open"),
+    #ui("Open in New Window") and #ui("Solve") for the selected analysis. #ui("Sources"), #ui("Modify"), #ui("Parameters"), #ui("Evaluate")
+    and #ui("Annotate") add blocks (@place-block). #ui("Arrange") duplicates, deletes and renames the
+    selected blocks and sets the view of the schematic.],
   [Geometry], [#ui("Geometry"): import, modify (@geometry-modify), mesh setup, meshing and the parts. #ui("View"):
     camera, display, section and exploded view, screenshot, query.],
   [FE Model], [#ui("Mesh"), #ui("Material"), #ui("Features"), #ui("Connections"),
@@ -78,6 +78,9 @@ the room is there.
     the other workspaces and, in two rows on the right, the controls of the shown results
     (@results-toolbar).],
 )
+
+#screenshot("ribbon-project-analysis.png", [The #ui("Analysis") tab of the Project workspace
+  with an analysis selected; #ui("File") holds only what opens and saves the project])
 
 === Small windows <window-size>
 
@@ -227,7 +230,7 @@ workspace when needed.
 === Analyses in a window of their own
 
 An analysis can also be opened in a separate window, for example on a second screen:
-#ui("Open in New Window") on the #ui("File") tab or in the context menu of its block. That
+#ui("Open in New Window") on the #ui("Analysis") tab or in the context menu of its block. That
 window has its own app bar with the workspaces #ui("Geometry"), #ui("FE Model") and
 #ui("Results"). Closing it keeps the analysis in the project; it then opens in the main window again.
 
