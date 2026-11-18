@@ -210,9 +210,16 @@ struct Workbench {
     step_overview: bool,
     /// Open mesh tool: transform parts, merge nodes or renumber.
     mesh_tool: Option<MeshToolDialog>,
-    /// A CAD operation of the Geometry workspace applied to the geometry right away, in the
-    /// editor of the CAD Operation block with its own view.
-    cad_tool: Option<(crate::cad_editor::CadOperationEditor, Viewport)>,
+    /// A CAD tool of the Geometry workspace in the editor of the CAD Operation block with its
+    /// own view, with the operation of the Geometry tree it changes, if any.
+    cad_tool: Option<(
+        crate::cad_editor::CadOperationEditor,
+        Viewport,
+        Option<usize>,
+    )>,
+    /// An operation of the Geometry tree to edit, or to delete when true, by index: done by
+    /// the window, which takes the shapes it makes.
+    geometry_operation_request: Option<(usize, bool)>,
     /// The Query tool, while its window is open.
     query: Option<QueryWindow>,
     /// Open material library editor.
@@ -381,6 +388,7 @@ impl AnalysisWindow {
                 step_overview: false,
                 mesh_tool: None,
                 cad_tool: None,
+                geometry_operation_request: None,
                 query: None,
                 material_library: None,
                 field_output_dialog: None,
@@ -619,6 +627,8 @@ impl AnalysisWindow {
             &mut scratch_origins,
             &mut model.fe,
         );
+        // The mesh is the source's: of its shapes as they are, without operations here.
+        let geometry = geometry.map(plx_model::Geometry::without_operations);
         crate::links::take_geometry(&mut own, geometry, false);
         if let Some(own) = &mut own {
             own.from_link = true;
@@ -2551,12 +2561,24 @@ impl Workbench {
                 findings
             }
         };
+        let operations: Vec<String> = (self.model.as_ref())
+            .and_then(|m| m.geometry.as_ref())
+            .map(|g| g.operations.iter().map(|o| o.name.clone()).collect())
+            .unwrap_or_default();
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),
             TreeView::FeModel => self.model.as_mut(),
         };
-        let response = tree::show(ui, view, shown, &mesh_items, &findings, &mut self.tree);
+        let response = tree::show(
+            ui,
+            view,
+            shown,
+            &mesh_items,
+            &operations,
+            &findings,
+            &mut self.tree,
+        );
         self.tree_response(ui.ctx(), view, response);
     }
 
@@ -2795,6 +2817,10 @@ impl Workbench {
             (&response.open, view)
         {
             self.open_mesh_tool(MeshTool::Operation(*index));
+        } else if let (Some(TreeItem::GeometryOperation(index)), TreeView::Geometry) =
+            (&response.open, view)
+        {
+            self.geometry_operation_request = Some((*index, false));
         } else if let Some(TreeItem::MeshItem(index)) = response.open {
             self.mesh_item_editor = self.model.as_ref().and_then(|m| {
                 MeshItemEditor::edit(m.geometry.as_ref()?, index, m.fe.properties.units)
@@ -5781,6 +5807,10 @@ impl Workbench {
         if let TreeItem::MeshOperation(index) = item {
             return (model.fe.mesh_operations.get(*index)).map(|o| o.name.clone());
         }
+        if let TreeItem::GeometryOperation(index) = item {
+            let geometry = model.geometry.as_ref()?;
+            return (geometry.operations.get(*index)).map(|o| o.name.clone());
+        }
         let editor = Editor::edit(item, &model.fe, model.mesh())?;
         Some(editor.name())
     }
@@ -5828,6 +5858,8 @@ impl Workbench {
             self.delete_hot_spot(index);
         } else if let TreeItem::MeshOperation(index) = item {
             self.delete_mesh_operation(index);
+        } else if let TreeItem::GeometryOperation(index) = item {
+            self.geometry_operation_request = Some((index, true));
         } else if let TreeItem::MeshItem(index) = item {
             if let Some(geometry) = self.model.as_mut().and_then(|m| m.geometry.as_mut())
                 && index < geometry.mesh_items.len()
@@ -8964,6 +8996,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         });
         model.fe.sections.push(plx_model::Section {
             orientation: None,

@@ -54,6 +54,8 @@ pub enum TreeIcon {
     MeshSetup,
     /// A mesh operation such as a transform: a part moved along an arrow.
     MeshOperation,
+    /// An operation of the Geometry tree, such as a split: a block cut by a plane.
+    GeometryOperation,
     HotSpot,
     Plane,
     Path,
@@ -109,6 +111,7 @@ fn pixmap(icon: TreeIcon) -> &'static Pixmap {
         TreeIcon::Compound => &COMPOUND,
         TreeIcon::MeshSetup => &MESH_SETUP,
         TreeIcon::MeshOperation => &MESH_OPERATION,
+        TreeIcon::GeometryOperation => &GEOMETRY_OPERATION,
         TreeIcon::Plane => &PLANE,
         TreeIcon::Path => &PATH,
         TreeIcon::PlaneResult => &PLANE_RESULT,
@@ -1636,6 +1639,33 @@ const GEOMETRY: Pixmap = Pixmap {
 };
 
 /// Mesh_refinement.ico
+const GEOMETRY_OPERATION: Pixmap = Pixmap {
+    colors: &[
+        [80, 80, 80, 255],
+        [170, 170, 170, 255],
+        [220, 40, 40, 255],
+        [210, 210, 210, 255],
+    ],
+    rows: [
+        "..............C.",
+        ".............C..",
+        "....AAAAAAAAC...",
+        "...ADDDDDDDCA...",
+        "..ADDDDDDDCAA...",
+        ".AAAAAAAACABA...",
+        ".ABBBBBBCBABA...",
+        ".ABBBBBCBBABA...",
+        ".ABBBBCBBBABA...",
+        ".ABBBCBBBBABA...",
+        ".ABBCBBBBBAA....",
+        ".ABCBBBBBBA.....",
+        ".ACAAAAAAAA.....",
+        ".C..............",
+        "C...............",
+        "................",
+    ],
+};
+
 const MESH_OPERATION: Pixmap = Pixmap {
     colors: &[
         [80, 80, 80, 255],

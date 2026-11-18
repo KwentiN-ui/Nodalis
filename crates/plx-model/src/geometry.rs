@@ -56,6 +56,25 @@ pub struct Geometry {
     /// link brings meshed, unless it meshes the part itself ([`Geometry::own_meshes`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub from_link: bool,
+    /// The operations of the Geometry tree, such as a split by plane, in the order they act
+    /// on the shapes: a pipeline from [`Geometry::input`] to these shapes, as CAD Operation
+    /// blocks before the analysis would be. They act anew whenever the input changes, as
+    /// when a link brings new shapes, and when one is changed or deleted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<GeometryOperation>,
+    /// The shapes before the operations, as imported or as a link brought them; set while
+    /// there are operations. Only its shapes count: the mesh setup, suppression and the
+    /// like are those of the geometry holding it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<Box<Geometry>>,
+}
+
+/// An operation of the Geometry tree on the shapes of an analysis, see
+/// [`Geometry::operations`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GeometryOperation {
+    pub name: String,
+    pub operation: crate::CadOperation,
 }
 
 /// The id of a part of the geometry, see [`Geometry::ids`].
@@ -100,6 +119,28 @@ fn is_one(value: &f64) -> bool {
 }
 
 impl Geometry {
+    /// The shapes alone, without the operations of the Geometry tree and the input they act
+    /// on: what another analysis or block takes through a link, and what the operations
+    /// start from.
+    pub fn without_operations(mut self) -> Self {
+        self.operations.clear();
+        self.input = None;
+        self
+    }
+
+    /// A name for a new operation of the Geometry tree, e.g. "Split by Plane-2".
+    pub fn operation_name(&self, label: &str) -> String {
+        let taken = |n: &str| {
+            self.operations
+                .iter()
+                .any(|o| o.name.eq_ignore_ascii_case(n))
+        };
+        (1..)
+            .map(|i| format!("{label}-{i}"))
+            .find(|n| !taken(n))
+            .unwrap_or_default()
+    }
+
     /// The compound part holding the part `part`, by index.
     pub fn compound_of(&self, part: &str) -> Option<usize> {
         (self.compounds.iter()).position(|c| names(&c.parts, part))
@@ -746,6 +787,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let parts = ["SOLID-1".to_owned(), "solid-1".to_owned()];
         assert!(geometry.set_suppressed(&parts, true));
@@ -800,6 +843,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         assert_eq!(geometry.parameters("solid-1"), fine);
         assert_eq!(geometry.parameters("SOLID-2").max_size, 5.0);
@@ -889,6 +934,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         assert!(geometry.extrusion("a").is_some());
         assert!(geometry.extrusion("C").is_none());

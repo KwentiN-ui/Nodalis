@@ -1355,6 +1355,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let mut preview = Node::new(2, "Preview".into(), Block::Preview(Box::default()));
         let nodes = vec![analysis(1, Some(geometry.clone())), preview_clone(&preview)];

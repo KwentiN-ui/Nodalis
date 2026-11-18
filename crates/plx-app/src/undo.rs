@@ -418,6 +418,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         }
     }
 
@@ -534,6 +536,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         });
         record(&mut model);
         assert!(!model.history.can_undo());

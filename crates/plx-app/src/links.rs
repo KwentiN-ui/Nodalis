@@ -115,7 +115,7 @@ impl MeshCopy {
 
     pub fn of(data: Data) -> Self {
         Self {
-            geometry: data.geometry.cloned(),
+            geometry: data.geometry.cloned().map(Geometry::without_operations),
             mesh: data.mesh.clone(),
             origins: data.origins.clone(),
             mesh_sets: data.fe.mesh_sets.clone(),
@@ -1010,6 +1010,19 @@ pub fn take_geometry(
                 }
                 compounds.retain(|c| !c.parts.is_empty());
                 if !compounds.is_empty() {
+                    // Compounds the new shapes bring of parts in none of the own ones stay
+                    // too, such as the pieces of a split.
+                    let joined = |part: &String| {
+                        (compounds.iter())
+                            .any(|c| c.parts.iter().any(|p| p.eq_ignore_ascii_case(part)))
+                    };
+                    let brought: Vec<_> = (taken.compounds.drain(..))
+                        .filter(|c| {
+                            (compounds.iter()).all(|o| !o.name.eq_ignore_ascii_case(&c.name))
+                                && !c.parts.iter().any(joined)
+                        })
+                        .collect();
+                    compounds.extend(brought);
                     taken.compounds = compounds;
                 }
             }
@@ -1114,6 +1127,9 @@ pub fn take_objects(
     // The link's meshes of CAD parts come with the compound parts they were joined to.
     let cad_meshes = (incoming_origins.iter())
         .any(|(_, o)| matches!(o, PartOrigin::Meshed(_) | PartOrigin::Linked));
+    // The new shapes go through the analysis' operations of its Geometry tree.
+    let mut notes = Vec::new();
+    let shapes = crate::geometry_operations::through(geometry.as_ref(), shapes, &mut notes);
     let tags = take_geometry(geometry, shapes, !cad_meshes);
     if let Some(geometry) = geometry {
         geometry.from_link = true;
@@ -1124,8 +1140,16 @@ pub fn take_objects(
     let geometry = geometry.as_ref();
     // The link's meshes, but of the parts meshed here.
     let mut linked = incoming_origins.linked(origins);
+    // An analysis whose operations change the shapes meshes them itself.
+    let changed = geometry.is_some_and(|g| !g.operations.is_empty());
+    let cad_mesh = |b: &str| {
+        matches!(
+            incoming_origins.get(b),
+            Some(PartOrigin::Meshed(_) | PartOrigin::Linked)
+        )
+    };
     let own: Vec<String> = (incoming.parts.iter().flat_map(part_bodies))
-        .filter(|b| geometry.is_some_and(|g| g.meshes_itself(b)))
+        .filter(|b| geometry.is_some_and(|g| g.meshes_itself(b)) || (changed && cad_mesh(b)))
         .map(str::to_owned)
         .collect();
     if !own.is_empty() {
@@ -1185,7 +1209,6 @@ pub fn take_objects(
     if !nodes.is_empty() || !elements.is_empty() {
         fe.renumber(&nodes, &elements);
     }
-    let mut notes = Vec::new();
     // What the FE model says about the link's meshes comes with them; its own stays.
     if cad_meshes || !mesh_sets.is_empty() || !element_types.is_empty() {
         // The sets the link brought last time go, the analysis' own stay; one whose name
@@ -2036,6 +2059,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         }
     }
 
@@ -2366,6 +2391,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let mut meshed = tet(0.0, "FIX");
         meshed.geometry = Some(geometry.clone());
@@ -2415,6 +2442,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let mut own = shapes("old");
         own.meshing.max_size = 2.0;
@@ -2475,6 +2504,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let compound = |name: &str, parts: &[&str]| plx_model::CompoundPart {
             name: name.into(),
@@ -2529,6 +2560,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         // The bottom face 1 is now 7; the top face 2 went away.
         let own = shapes("old", vec![face(Face(1), 0.0), face(Face(2), 1.0)]);

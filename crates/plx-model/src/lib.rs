@@ -122,8 +122,9 @@ pub use field::{
     output_variable_label,
 };
 pub use geometry::{
-    Algorithm2d, Algorithm3d, CompoundPart, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem,
-    MeshSetupKind, MeshingParameters, PartId, PeriodicFaces, Recombination, ThickenShellMesh,
+    Algorithm2d, Algorithm3d, CompoundPart, ExtrudeLayers, ExtrudeMesh, Geometry,
+    GeometryOperation, MeshSetupItem, MeshSetupKind, MeshingParameters, PartId, PeriodicFaces,
+    Recombination, ThickenShellMesh,
 };
 pub use handover::Handover;
 pub use history::{HistoryKind, HistoryOutput, Totals};

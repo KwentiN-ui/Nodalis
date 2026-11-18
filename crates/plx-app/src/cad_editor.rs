@@ -48,9 +48,9 @@ pub struct CadOperationEditor {
     plane: SplitPlane,
     keep: SplitKeep,
     compound: bool,
-    /// The parts selected when the split was opened, and whether it cuts only them.
+    /// The parts selected when the split was opened: it cuts only them, and the view shows
+    /// only them. All parts when empty.
     parts: Vec<String>,
-    only_parts: bool,
     /// The global axis a split plane is tilted about and the angle in degrees.
     tilt_axis: usize,
     tilt_angle: f64,
@@ -120,7 +120,6 @@ impl CadOperationEditor {
             keep: operation.keep,
             compound: operation.compound,
             parts: operation.parts.clone(),
-            only_parts: !operation.parts.is_empty(),
             tilt_axis: operation.tilt_axis.min(2),
             tilt_angle: operation.tilt_angle,
             faces: operation.faces,
@@ -137,6 +136,10 @@ impl CadOperationEditor {
         let axes = editor.plane.tilt_axes();
         if !axes.contains(&editor.tilt_axis) {
             editor.tilt_axis = axes[0];
+        }
+        if let Some(view) = &mut editor.view {
+            let names: Vec<String> = view.parts.iter().map(|p| p.name.clone()).collect();
+            hide_unchosen(view, &names, &editor.parts);
         }
         editor.update_highlight();
         editor
@@ -179,7 +182,7 @@ impl CadOperationEditor {
 
     /// The parts a split cuts; all when empty.
     fn split_parts(&self) -> &[String] {
-        if self.kind == CadOperationKind::SplitPlane && self.only_parts {
+        if self.kind == CadOperationKind::SplitPlane {
             &self.parts
         } else {
             &[]
@@ -396,6 +399,10 @@ impl CadOperationEditor {
             let display = plx_mesher::tessellate(&geometry).map_err(|e| e.to_string())?;
             let mut view = Model::geometry_view(Path::new(&self.name), display);
             view.mark_suppressed(&geometry);
+            let names: Vec<String> = (self.view.iter().flat_map(|v| &v.parts))
+                .map(|p| p.name.clone())
+                .collect();
+            hide_unchosen(&mut view, &names, self.split_parts());
             Ok((view, geometry))
         });
         match made {
@@ -663,7 +670,13 @@ impl CadOperationEditor {
         if self.scene_due {
             self.scene_due = false;
             match self.shown_model() {
-                Some(model) => viewport.set_parts(&model.scene_meshes()),
+                Some(model) => {
+                    viewport.set_parts(&model.scene_meshes());
+                    // Only the parts a split cuts are shown.
+                    for (index, part) in model.parts.iter().enumerate() {
+                        viewport.set_part_visible(index, part.visible);
+                    }
+                }
                 None => viewport.set_parts(&[]),
             }
             // The picked edges, drawn over the input in the highlight colour.
@@ -714,7 +727,15 @@ impl CadOperationEditor {
         }
         let picking = self.shown == Shown::Input;
         viewport.selecting = picking;
+        viewport.gizmo = if picking && !self.length_linked {
+            self.split_gizmo()
+        } else {
+            None
+        };
         let response = viewport.ui(ui);
+        if let Some(drag) = response.gizmo {
+            self.drag_plane(drag);
+        }
         if let Some(command) = response.command {
             let bounds = self.shown_model().and_then(Model::visible_bounds);
             viewport.apply(command, bounds);
@@ -764,8 +785,8 @@ impl CadOperationEditor {
         if self.split_parts().is_empty() {
             "The parts the plane runs through are split."
         } else {
-            "The selected parts the plane runs through are split, drawn outlined; the \
-             others stay as they are."
+            "Only the parts selected in the tree are shown and split where the plane runs \
+             through them; the others stay as they are."
         }
     }
 
@@ -784,6 +805,12 @@ impl CadOperationEditor {
         if self.plane != before {
             self.picks.clear();
             self.update_highlight();
+            // Another global plane starts through the middle of what it cuts.
+            if let (Some(axis), Some((lo, hi))) = (self.plane.axis(), self.split_bounds()) {
+                let k = axis.iter().position(|&a| a == 1.0).unwrap_or(0);
+                self.value = self.rounded(0.5 * (lo[k] + hi[k]));
+                self.tilt_angle = 0.0;
+            }
             // Turning a plane about its own normal leaves it as it is.
             let axes = self.plane.tilt_axes();
             if !axes.contains(&self.tilt_axis) {
@@ -846,25 +873,6 @@ impl CadOperationEditor {
                 );
         });
         ui.end_row();
-        if !self.parts.is_empty() {
-            ui.label("Cut");
-            let label = match self.parts.len() {
-                1 => format!("Only the selected part ({})", self.parts[0]),
-                n => format!("Only the {n} selected parts"),
-            };
-            if ui
-                .checkbox(&mut self.only_parts, label)
-                .on_hover_text(
-                    "On: the parts selected in the tree when the tool was opened are split, \
-                     the others stay as they are. Off: every part the plane runs through.",
-                )
-                .changed()
-            {
-                self.update_highlight();
-                self.scene_due = true;
-            }
-            ui.end_row();
-        }
         if self.plane != before {
             self.scene_due = true;
         }
@@ -902,12 +910,46 @@ impl CadOperationEditor {
     /// The outline of a global plane over the input, as edges in the view: a rectangle in
     /// the plane a little larger than the geometry, or the parts it cuts.
     fn plane_outline(&self) -> Vec<[glam::Vec3; 2]> {
-        if self.kind != CadOperationKind::SplitPlane {
-            return Vec::new();
-        }
-        let (Some(axis), Some(view)) = (self.plane.axis(), self.view.as_ref()) else {
+        let (Some(rect), Some(view)) = (self.plane_rect(), self.view.as_ref()) else {
             return Vec::new();
         };
+        let c = rect.map(|p| view.to_render(p));
+        vec![[c[0], c[1]], [c[1], c[2]], [c[2], c[3]], [c[3], c[0]]]
+    }
+
+    /// The corners of the outline of a global split plane in model coordinates.
+    fn plane_rect(&self) -> Option<[[f64; 3]; 4]> {
+        if self.kind != CadOperationKind::SplitPlane {
+            return None;
+        }
+        let axis = self.plane.axis()?;
+        let (lo, hi) = self.split_bounds()?;
+        Some(tilted_rectangle(
+            axis,
+            self.value,
+            self.tilt_axis,
+            self.tilt(),
+            lo,
+            hi,
+        ))
+    }
+
+    /// An offset of the split plane rounded to a thousandth of the size of what it cuts,
+    /// to a power of ten: 0.01 mm for parts of some centimetres.
+    fn rounded(&self, offset: f64) -> f64 {
+        let size = self.split_bounds().map_or(0.0, |(lo, hi)| {
+            (0..3).map(|k| hi[k] - lo[k]).fold(0.0, f64::max)
+        });
+        if size.is_nan() || size <= 0.0 {
+            return offset;
+        }
+        let step = 10f64.powf(size.log10().floor() - 3.0);
+        (offset / step).round() * step
+    }
+
+    /// The box around the parts a split cuts, or around all, in model coordinates.
+    fn split_bounds(&self) -> Option<([f64; 3], [f64; 3])> {
+        let view = self.view.as_ref()?;
         let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
         let chosen = self.split_part_indices();
         if chosen.is_empty() {
@@ -928,22 +970,80 @@ impl CadOperationEditor {
             }
         }
         if !lo.iter().chain(&hi).all(|x| x.is_finite()) {
-            return Vec::new();
+            return None;
         }
-        let rect = tilted_rectangle(
-            axis,
-            self.value,
-            self.tilt_axis,
-            if self.tilt_angle.is_finite() {
-                self.tilt_angle
-            } else {
-                0.0
-            },
-            lo,
-            hi,
-        );
-        let c = rect.map(|p| view.to_render(p));
-        vec![[c[0], c[1]], [c[1], c[2]], [c[2], c[3]], [c[3], c[0]]]
+        Some((lo, hi))
+    }
+
+    /// The tilt angle of the split plane, zero while it is no number.
+    fn tilt(&self) -> f64 {
+        if self.tilt_angle.is_finite() {
+            self.tilt_angle
+        } else {
+            0.0
+        }
+    }
+
+    /// The manipulator of a global split plane, as in the section view: the arrow shifts the
+    /// plane, the arcs tilt it about the global axes in it. Once tilted, only about the axis
+    /// it is tilted about.
+    fn split_gizmo(&self) -> Option<crate::gizmo::PlaneGizmo> {
+        let rect = self.plane_rect()?;
+        let (axis, view) = (self.plane.axis()?, self.view.as_ref()?);
+        let centre = [0, 1, 2].map(|j| 0.25 * rect.iter().map(|p| p[j]).sum::<f64>());
+        let normal = plx_model::tilted_normal(axis, self.tilt_axis, self.tilt());
+        let unit = |k: usize| {
+            let mut e = glam::Vec3::ZERO;
+            e[k] = 1.0;
+            e
+        };
+        let axes = if self.tilt() == 0.0 {
+            let k = self.plane.tilt_axes();
+            ([unit(k[0]), unit(k[1])], 2)
+        } else {
+            ([unit(self.tilt_axis), glam::Vec3::ZERO], 1)
+        };
+        Some(crate::gizmo::PlaneGizmo {
+            point: view.to_render(centre),
+            normal: glam::DVec3::from(normal).as_vec3(),
+            half_size: 0.0,
+            axes: Some(axes),
+        })
+    }
+
+    /// Moves the split plane as the manipulator is dragged: the offset and tilt follow.
+    fn drag_plane(&mut self, drag: crate::gizmo::GizmoDrag) {
+        let (Some(rect), Some(axis)) = (self.plane_rect(), self.plane.axis()) else {
+            return;
+        };
+        let dot = |a: [f64; 3], b: [f64; 3]| (0..3).map(|k| a[k] * b[k]).sum::<f64>();
+        let mut centre = [0, 1, 2].map(|j| 0.25 * rect.iter().map(|p| p[j]).sum::<f64>());
+        match drag {
+            crate::gizmo::GizmoDrag::Translate(distance) => {
+                let normal = plx_model::tilted_normal(axis, self.tilt_axis, self.tilt());
+                centre = [0, 1, 2].map(|j| centre[j] + distance as f64 * normal[j]);
+            }
+            crate::gizmo::GizmoDrag::Rotate { axis: turn, angle } => {
+                let Some(k) = (self.plane.tilt_axes().into_iter()).find(|&k| turn[k].abs() > 0.99)
+                else {
+                    return;
+                };
+                if self.tilt() != 0.0 && k != self.tilt_axis {
+                    return;
+                }
+                self.tilt_axis = k;
+                let degrees = (angle as f64).to_degrees() * turn[k].signum() as f64;
+                self.tilt_angle = self.tilt() + degrees;
+            }
+        }
+        // The plane through the point, with its normal as tilted now.
+        let normal = plx_model::tilted_normal(axis, self.tilt_axis, self.tilt());
+        let along = dot(normal, axis);
+        if along.abs() > 1e-6 {
+            self.value = self.rounded(dot(normal, centre) / along);
+        }
+        self.tilt_angle = (self.tilt_angle * 100.0).round() / 100.0;
+        self.scene_due = true;
     }
 }
 
@@ -991,6 +1091,21 @@ fn tilted_rectangle(
     let (u0, u1, v0, v1) = (u0 - mu, u1 + mu, v0 - mv, v1 + mv);
     let at = |a: f64, b: f64| [0, 1, 2].map(|j| origin[j] + a * u[j] + b * v[j]);
     [at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)]
+}
+
+/// Hides the parts of a view of the input or of the result of a split that are parts of
+/// the input the split does not cut, so that only what is cut is shown; nothing when it
+/// cuts all parts.
+fn hide_unchosen(view: &mut Model, names: &[String], chosen: &[String]) {
+    if chosen.is_empty() {
+        return;
+    }
+    let named = |list: &[String], name: &str| list.iter().any(|n| n.eq_ignore_ascii_case(name));
+    for part in &mut view.parts {
+        if named(names, &part.name) && !named(chosen, &part.name) {
+            part.visible = false;
+        }
+    }
 }
 
 fn capitalised(text: &str) -> String {

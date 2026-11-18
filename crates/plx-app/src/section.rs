@@ -267,6 +267,7 @@ impl SectionDialog {
             normal: self.draft.normal().as_vec3(),
             // A square a little larger than the model in every direction of the plane.
             half_size: self.half_diagonal.length() as f32 * 0.8,
+            axes: None,
         }
     }
 
