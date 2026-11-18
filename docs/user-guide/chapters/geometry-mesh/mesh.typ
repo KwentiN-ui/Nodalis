@@ -23,6 +23,15 @@ hold up the view.
 #screenshot("geometry-mesh-edges.png", [Geometry workspace: the meshed part shows its element
   edges, the part without a mesh only its geometry])
 
+Every part of the geometry that is not suppressed belongs to the FE model, meshed or not. The
+FE Model workspace lists a part without a mesh under #ui("Parts") in gray as
+#ui("(not meshed)") with a warning sign; #ui("Create Mesh") in its context menu meshes it.
+Such a part is not solved until it has a mesh: #ui("Solve") meshes it first. Only
+suppressing a part in the Geometry workspace takes it out of the FE model.
+
+#screenshot("fe-model-unmeshed.png", [FE Model workspace: one part meshed, the other listed as
+  not meshed])
+
 === Cancelling the meshing <cancel-meshing>
 
 Gmsh runs in a separate process, so a meshing that takes too long, for example because the

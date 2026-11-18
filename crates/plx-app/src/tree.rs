@@ -391,6 +391,8 @@ pub struct TreeResponse {
     pub symbol_visibility: Vec<(TreeItem, bool)>,
     /// Mesh one part of the geometry, by index.
     pub mesh_part: Option<usize>,
+    /// Mesh a part of the geometry the FE Model lists without a mesh, by its name there.
+    pub mesh_unmeshed: Option<String>,
     /// Use Linked Mesh on a part of the geometry, by index.
     pub linked_mesh: Option<usize>,
     /// Transform a mesh part (translate, rotate, mirror, scale), by index.
@@ -1897,9 +1899,17 @@ impl Tree<'_> {
 
     /// Parts with visibility and colour; of the mesh, or of the geometry.
     fn parts(&mut self, ui: &mut Ui, model: &mut Model) {
+        // Every part of the geometry that is not suppressed belongs to the FE model: one
+        // without a mesh is listed too, after the meshed ones.
+        let unmeshed = if self.view == TreeView::FeModel {
+            plx_model::unmeshed_parts(model.geometry.as_ref(), model.origins(), model.mesh())
+        } else {
+            Vec::new()
+        };
         let shown = (0..model.parts.len())
             .filter(|i| !self.hidden(&TreeItem::Part(*i)))
-            .count();
+            .count()
+            + unmeshed.len();
         let parts = counted("Parts", shown);
         self.part_indices = (0..model.parts.len())
             .filter(|i| !self.hidden(&TreeItem::Part(*i)))
@@ -1954,6 +1964,51 @@ impl Tree<'_> {
                         drawn[index] = true;
                     }
                 }
+            }
+            for name in &unmeshed {
+                tree.unmeshed_row(ui, name);
+            }
+        });
+    }
+
+    /// The row of a part of the geometry without a mesh in the FE Model: gray, with a
+    /// warning sign, and Create Mesh in its menu. It is no item of the FE model yet, so it
+    /// cannot be selected.
+    fn unmeshed_row(&mut self, ui: &mut Ui, name: &str) {
+        let tip = format!(
+            "{name} is not meshed: it is a part of the geometry but has no mesh, so it is not \
+             solved. Mesh it with Create Mesh, or in the Geometry workspace."
+        );
+        ui.horizontal(|ui| {
+            let left = ui.cursor().left();
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(ui.spacing().indent);
+            let (rect, _) =
+                ui.allocate_exact_size(Vec2::splat(tree_icons::SIZE), egui::Sense::hover());
+            if ui.is_rect_visible(rect) {
+                tree_icons::paint(ui.painter(), rect.min, TreeIcon::Geometry);
+            }
+            ui.add_space(3.0);
+            let response = row_label(ui, false, Some(INACTIVE), format!("{name} (not meshed)"))
+                .on_hover_text(&tip);
+            warning_sign(ui).on_hover_text(&tip);
+            response.context_menu(|ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                if ui
+                    .button("Create Mesh")
+                    .on_hover_text("Meshes the part with the mesh setup of the geometry.")
+                    .clicked()
+                {
+                    self.response.mesh_unmeshed = Some(name.to_owned());
+                    ui.close();
+                }
+            });
+            let row = Row {
+                y: rect.top() + LINE_OFFSET,
+                left,
+            };
+            if let Some(level) = self.levels.last_mut() {
+                level.push(row);
             }
         });
     }
