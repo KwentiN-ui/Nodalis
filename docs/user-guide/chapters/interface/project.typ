@@ -25,7 +25,7 @@ both.
 
 === Creating an analysis <new-analysis>
 
-#menu("File", "New Analysis"), a double-click or right-click on the background of the
+#menu("Analysis", "New Analysis"), a double-click or right-click on the background of the
 schematic or #ui("Analysis") in the block search (@block-search) open #ui("Model Properties") for the new analysis
 (@model-properties). Choose its *model space* (3D, plane stress, plane strain or axisymmetric)
 there. It takes the unit system of the project (@project-units).
@@ -341,15 +341,16 @@ placed and worked on with the ribbon (@ribbon) and the keys above.
 The ribbon tabs of the Project workspace:
 
 #fields(
-  [Project], [File commands, #ui("New Analysis") (@new-analysis), and #ui("Open"),
-    #ui("Open in New Window"), #ui("Solve"), #ui("Duplicate"), #ui("Delete") and
-    #ui("Rename") for the selected block.],
+  [File], [#ui("New Project"), #ui("Open"), #ui("Open Recent") and #ui("Save")
+    (@files).],
+  [Analysis], [#ui("New Analysis") (@new-analysis), and #ui("Open"),
+    #ui("Open in New Window") and #ui("Solve") for the selected analysis.],
   [Sources], [Materials (@materials-block), cross-sections, box, rectangle and refined
     meshes (@mesh-block), CAD operations and files.],
   [Parameters], [Parameters, Math, Switch and Formula blocks.],
   [Evaluate], [Measure, parameter study, Campbell and mesh export blocks.],
   [Annotate], [Notes and frames (@frames-notes).],
-  [Arrange], [#ui("Duplicate"), #ui("Delete") and #ui("Compact View") for the selected
+  [Arrange], [#ui("Duplicate"), #ui("Delete"), #ui("Rename") and #ui("Compact View") for the selected
     blocks, as their keys do (@schematic-keys); #ui("Show All") (#key("Home")) fits all
     blocks into the view, #ui("Minimap") shows or hides the minimap.],
 )

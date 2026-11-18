@@ -13293,7 +13293,7 @@ fn empty_hint(ui: &egui::Ui, schematic: egui::LayerId) {
 
 /// The lines of the hint in an empty schematic, see [`empty_hint`].
 const EMPTY_HINT: [&str; 4] = [
-    "Click New Analysis in the ribbon and choose its model space and units.",
+    "Click New Analysis on the Analysis tab of the ribbon and choose its model space and units.",
     "Add materials, meshes and other blocks with the tiles of the ribbon,",
     "or double-click here to search all blocks.",
     "Double-click an analysis to open it in Geometry, FE Model and Results.",

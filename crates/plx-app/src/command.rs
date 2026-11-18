@@ -58,6 +58,7 @@ impl Workspace {
         match self {
             Self::Project => &[
                 "File",
+                "Analysis",
                 "Sources",
                 "Modify",
                 "Parameters",
@@ -509,7 +510,7 @@ fn build() -> Vec<Command> {
         c
     };
 
-    // Project workspace, tab Project.
+    // Project workspace, tab File: only what opens and saves the project.
     let (p, t) = (PROJECT, "File");
     add(command(
         C::NewProject,
@@ -580,12 +581,14 @@ fn build() -> Vec<Command> {
         ),
         Tile::Hidden,
     ));
+    // Tab Analysis: the analyses of the project, a new one and the selected one.
+    let t = "Analysis";
     add(command(
         C::NewAnalysis,
         "New\nAnalysis",
         p,
         t,
-        "Analysis",
+        "Create",
         Shape(Glyph::Analysis),
         "",
         "Adds an analysis: asks for its model space and unit system, then hangs its block at the pointer.",
@@ -619,36 +622,6 @@ fn build() -> Vec<Command> {
         Tool(Icon::Solve),
         "",
         "Solves the selected analysis and what it takes data from.",
-    ));
-    add(command(
-        C::Duplicate,
-        "Duplicate",
-        p,
-        t,
-        "Selected",
-        Shape(Glyph::Duplicate),
-        "Shift+D",
-        "Duplicates the selected blocks.",
-    ));
-    add(command(
-        C::Delete,
-        "Delete",
-        p,
-        t,
-        "Selected",
-        Tool(Icon::Remove),
-        "X",
-        "Deletes the selected blocks.",
-    ));
-    add(command(
-        C::Rename,
-        "Rename",
-        p,
-        t,
-        "Selected",
-        Shape(Glyph::Rename),
-        "F2",
-        "Renames the selected block.",
     ));
     add(command(
         C::UpdateProject,
@@ -878,7 +851,7 @@ fn build() -> Vec<Command> {
         "Ctrl+Alt+G",
         "Puts the blocks of the selected groups back where the groups are.",
     ));
-    // Commands shown on a second tab; the search lists the first.
+    // Tab Arrange: what edits and lays out the selected blocks.
     add(command(
         C::Duplicate,
         "Duplicate",
@@ -898,6 +871,16 @@ fn build() -> Vec<Command> {
         Tool(Icon::Remove),
         "X",
         "Deletes the selected blocks.",
+    ));
+    add(command(
+        C::Rename,
+        "Rename",
+        p,
+        "Arrange",
+        "Selection",
+        Shape(Glyph::Rename),
+        "F2",
+        "Renames the selected block.",
     ));
     add(command(
         C::Compact,
