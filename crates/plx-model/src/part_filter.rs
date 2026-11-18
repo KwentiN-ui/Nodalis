@@ -60,9 +60,17 @@ pub struct PartContext {
     pub names: Vec<String>,
     pub materials: Vec<BTreeSet<crate::Id>>,
     groups: HashMap<crate::Id, PartFilter>,
+    /// The parts left out of the analysis (suppressed): no filter takes them, not even by
+    /// their names.
+    left_out: crate::LeftOut,
 }
 
 impl PartContext {
+    /// Whether the part `part` is left out of the analysis, see [`crate::LeftOut`].
+    pub fn is_left_out(&self, part: usize) -> bool {
+        self.left_out.contains(part)
+    }
+
     pub fn len(&self) -> usize {
         self.names.len()
     }
@@ -104,7 +112,7 @@ impl PartFilter {
     }
 
     fn matches_at(&self, part: usize, context: &PartContext, depth: usize) -> bool {
-        if depth > GROUP_DEPTH {
+        if depth > GROUP_DEPTH || context.is_left_out(part) {
             return false;
         }
         let named = |term: &PartTerm| term.matches(part, context, depth);
@@ -254,8 +262,8 @@ pub fn name_matches(pattern: &str, name: &str) -> bool {
 
 impl FeModel {
     /// The parts of `mesh` as filters see them: their names, the materials of their
-    /// sections and the part groups of the model.
-    pub fn part_context(&self, mesh: &FeMesh) -> PartContext {
+    /// sections and the part groups of the model; the parts `left_out` they never take.
+    pub fn part_context(&self, mesh: &FeMesh, left_out: &crate::LeftOut) -> PartContext {
         let index: HashMap<&str, usize> = (mesh.parts.iter().enumerate())
             .map(|(i, p)| (p.name.as_str(), i))
             .collect();
@@ -294,6 +302,7 @@ impl FeModel {
             groups: (self.part_groups.iter())
                 .map(|g| (g.id, g.filter.clone()))
                 .collect(),
+            left_out: left_out.clone(),
         }
     }
 
@@ -334,7 +343,23 @@ mod tests {
             names: names.iter().map(|n| n.to_string()).collect(),
             materials: vec![BTreeSet::new(); names.len()],
             groups: groups.iter().map(|g| (g.id, g.filter.clone())).collect(),
+            left_out: crate::LeftOut::nothing(),
         }
+    }
+
+    #[test]
+    fn a_left_out_part_matches_no_filter_not_even_by_name() {
+        let mut context = context(&["A", "B"], &[]);
+        context.left_out = crate::LeftOut(vec![false, true]);
+        let named = PartFilter {
+            include: vec![PartTerm::Part("B".into())],
+            exclude: Vec::new(),
+        };
+        assert_eq!(named.searched(&context, &[true, true]), [false, false]);
+        assert_eq!(
+            PartFilter::all().searched(&context, &[true, true]),
+            [true, false]
+        );
     }
 
     #[test]

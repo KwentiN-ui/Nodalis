@@ -821,9 +821,9 @@ struct SweepInput {
     /// Threads of the pool the speeds share, see [`plx_solve::pool`].
     threads: u32,
     work_dir: std::path::PathBuf,
-    mesh: Arc<plx_mesh::FeMesh>,
-    /// The model at its own speed, with the default solver resolved.
-    fe: FeModel,
+    /// What is solved of the model at its own speed, with the default solver resolved:
+    /// without its suppressed objects.
+    model: plx_model::Active<'static>,
     /// Index of the complex frequency step in the model.
     step: usize,
 }
@@ -874,14 +874,15 @@ fn run_speed(
     cancel: &AtomicBool,
 ) -> Result<SpeedPoint, String> {
     let label = format!("{} rpm", numeric::format_physical(rpm(speed)));
-    let fe = with_speed(&input.fe, speed);
+    let at_speed = input.model.with_fe(with_speed(input.model.fe(), speed));
+    let fe = at_speed.fe();
     let heading = format!("Nodalis Campbell sweep: {label}");
-    let lowered = plx_io::inp::lower_unvalidated(&input.mesh, &fe, &heading)
+    let lowered = plx_io::inp::lower_unvalidated(&at_speed, &heading)
         .map_err(|e| format!("{label}: analysis not set up: {e}"))?;
     let name = job_name(index);
     let step = solver_step(&lowered, input.step)
         .ok_or_else(|| format!("{label}: the Complex Frequency step is not solved"))?;
-    let prepared = crate::analysis::prepare(lowered, &fe, &[]);
+    let prepared = crate::analysis::prepare(lowered, fe, &[]);
     let mut job = Run::start_analysis(input.threads, &input.work_dir, &name, prepared)
         .map_err(|e| format!("{label}: solver not started: {e}"))?;
     let status = loop {
@@ -1113,10 +1114,11 @@ impl CampbellWindow {
     pub fn start(
         &mut self,
         solver: &crate::settings::Solver,
-        (mesh, fe): (&plx_mesh::FeMesh, &FeModel),
+        active: &plx_model::Active,
         work_dir: std::path::PathBuf,
         keep: bool,
     ) -> Result<(), String> {
+        let (mesh, fe) = (active.mesh(), active.fe());
         if keep && let Some(sweep) = &mut self.sweep {
             sweep.paused = false;
             self.log.push("Sweep continued.".into());
@@ -1149,7 +1151,7 @@ impl CampbellWindow {
             return Err("The lowest speed must be below the highest.".into());
         }
         // The speeds solved at the same time share the solver's one pool.
-        let fe = fe.clone();
+        let model = active.clone().into_owned();
         let grid_count = if max_runs == 0 {
             GRID
         } else {
@@ -1196,8 +1198,7 @@ impl CampbellWindow {
             input: Arc::new(SweepInput {
                 threads: solver.threads,
                 work_dir,
-                mesh: Arc::new(mesh.clone()),
-                fe,
+                model,
                 step,
             }),
             sender,
@@ -2424,8 +2425,7 @@ mod tests {
         let input = SweepInput {
             threads: 1,
             work_dir: work_dir.clone(),
-            mesh: Arc::new(mesh),
-            fe,
+            model: crate::solve_fingerprint::whole(&mesh, &fe).into_owned(),
             step: 0,
         };
         let cancel = AtomicBool::new(false);
@@ -2574,8 +2574,7 @@ mod tests {
         let input = SweepInput {
             threads: 2,
             work_dir: work_dir.clone(),
-            mesh: Arc::new(mesh.clone()),
-            fe: fe.clone(),
+            model: crate::solve_fingerprint::whole(&mesh, &fe).into_owned(),
             step: 0,
         };
         let cancel = AtomicBool::new(false);

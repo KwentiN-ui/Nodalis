@@ -1240,8 +1240,7 @@ impl Node {
             model.geometry.as_ref(),
             &model.origins,
         );
-        let text =
-            plx_io::inp::write_inp(&active.mesh, &active.fe, &name).map_err(|e| e.to_string())?;
+        let text = plx_io::inp::write_inp(&active, &name).map_err(|e| e.to_string())?;
         std::fs::write(&file, text).map_err(|e| format!("{} not written: {e}", file.display()))?;
         export.written = Some(print);
         Ok(file)
@@ -4534,7 +4533,7 @@ impl ProjectApp {
         let solver = &self.settings.solver;
         // Suppressed geometry objects are not swept.
         let active = data.active();
-        window.start(solver, (&active.mesh, &active.fe), dir, keep)
+        window.start(solver, &active, dir, keep)
     }
 
     /// Takes the finished speeds of the Campbell blocks and shows their open diagrams.
@@ -7419,7 +7418,7 @@ impl ProjectApp {
                     .and_then(Node::link_data)
                     .map(|d| {
                         let active = d.active();
-                        crate::campbell::sweep_fingerprint(&active.mesh, &active.fe)
+                        crate::campbell::sweep_fingerprint(active.mesh(), active.fe())
                     });
                 if let Some(campbell) = self.node(target).and_then(Node::as_campbell_mut) {
                     campbell.input = input;

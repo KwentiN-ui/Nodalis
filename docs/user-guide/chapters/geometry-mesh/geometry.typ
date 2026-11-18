@@ -74,7 +74,8 @@ The context menu of a geometry part has #ui("Create Mesh"), #ui("Clear Mesh"), #
 the entries of the compound parts (@compound-parts), #ui("Properties ..."),
 #ui("Hide")/#ui("Show"), #ui("Isolate") and #ui("Delete").
 A mesh always belongs to its geometry part: deleting the part, in the Geometry or in the FE
-Model workspace, deletes its mesh too, and renaming it renames the mesh. #ui("Clear Mesh") deletes
+Model workspace, deletes its mesh too, and renaming it renames the mesh. The items on the deleted
+part alone, such as a contact found with it or a load on it, are deleted with it. #ui("Clear Mesh") deletes
 only the mesh and keeps the part. A part without a mesh makes the mesh out of date, unless it is
 suppressed. #ui("Edit") > #ui("Undo") brings a deleted part back with its mesh.
 
@@ -182,8 +183,8 @@ stresses right at the cut are then less accurate than inside a piece.]
 
 === Suppressed parts <suppressed-parts>
 
-A suppressed part is left alone by everything that works on the geometry, as if it were not
-there, until it is unsuppressed. This helps with an assembly where only some parts are to be
+A suppressed part takes part in nothing of the analysis, as if it were not there, until it
+is unsuppressed. This helps with an assembly where only some parts are to be
 meshed or changed now, for example a screw that is meshed later or not at all.
 
 - #ui("Suppress") in the context menu of a part suppresses it, of several selected parts all of
@@ -191,13 +192,22 @@ meshed or changed now, for example a screw that is meshed later or not at all.
   click on the no-entry sign in front of the part, and #ui("Unsuppress All") in the menu of
   #ui("Parts") unsuppresses every part.
 - In the tree a suppressed part is gray with the no-entry sign instead of its icon, like a
-  deactivated item of the FE model; a compound whose members are all suppressed too. In the 3D
-  view it is drawn as its edges only and a click goes through it. Its check box still shows or
-  hides it.
+  deactivated item of the FE model; a compound whose members are all suppressed too. They are
+  listed apart under #ui("Suppressed") at the end of #ui("Parts"), which folds them away; its
+  menu has #ui("Unsuppress All"). In the
+  Geometry workspace it is drawn as its edges only; the FE Model and the results do not show it.
+  A click or a selection box in the 3D view goes through it: only the tree selects it, to
+  unsuppress it. Its check box still shows or hides it.
 - #ui("Mesh All Parts") (also in the mesh setup dialog), #ui("Create Mesh") and the meshing
   before a solve leave suppressed parts out. A mesh the part already has is kept but left out of
   the solve and the input file export, and it does not count as out of date. Suppressing is the
   only way to leave a part out without deleting it.
+- The solver gets nothing of a suppressed part: neither its mesh nor the items on it alone. A
+  contact found with the part before it was suppressed, a boundary condition or a load only on
+  it stay in the model for when it is unsuppressed, but are left out of the solve and the input
+  file. An item also on other parts keeps those.
+- A contact detection never searches a suppressed part, also not one it names, and part filters
+  and part groups do not match it.
 - #ui("Suppress") is also in the context menu of a part in the FE Model workspace and works on
   imported meshes too.
 - #ui("Split by Plane") never cuts a suppressed part, also not when it is selected.
@@ -209,6 +219,10 @@ meshed or changed now, for example a screw that is meshed later or not at all.
 
 #screenshot("suppressed-parts.png", [SCHRAUBE suppressed: gray with the no-entry sign in the
   tree and drawn as its edges only, Mesh All Parts meshes the other parts])
+
+#screenshot("suppressed-parts-fe-model.png", [SOLID-3 suppressed after meshing: listed under
+  Suppressed, not drawn in the FE Model, and the contact detection finds only the contact of the
+  other two parts])
 
 === Geometry for 2D models
 

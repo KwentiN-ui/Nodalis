@@ -103,7 +103,8 @@ impl ContactDetection {
     /// names none. An automatic tolerance is 0.5 % of it.
     pub fn searched_diagonal(&self, fe: &FeModel, mesh: &FeMesh) -> f64 {
         let (mut min, mut max) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
-        let context = fe.part_context(mesh);
+        // The model solved has nothing suppressed left.
+        let context = fe.part_context(mesh, &crate::LeftOut::nothing());
         let searched = (mesh.parts.iter().enumerate())
             .filter(|(i, _)| self.scope.matches(*i, &context))
             .map(|(_, p)| p);
@@ -401,14 +402,16 @@ impl FeModel {
     /// Runs the detection `index`: finds the touching surfaces of the parts it searches
     /// (`visible` says which parts are shown, for a detection of all parts) and replaces its
     /// regions with the ones found. Regions the user changed since stay as they are.
+    /// Parts `left_out` (suppressed) are searched by no detection.
     pub fn detect_contacts(
         &mut self,
         index: usize,
         mesh: &FeMesh,
         skins: &[PartSkin],
         visible: &[bool],
+        left_out: &crate::LeftOut,
     ) -> Option<DetectionReport> {
-        self.detect(index, mesh, skins, visible, None)
+        self.detect(index, mesh, skins, (visible, left_out), None)
     }
 
     /// [`Self::detect_contacts`] on the display of the CAD geometry: the sides of the
@@ -420,6 +423,7 @@ impl FeModel {
         index: usize,
         geometry: &DetectionGeometry,
         visible: &[bool],
+        left_out: &crate::LeftOut,
     ) -> Option<DetectionReport> {
         let mut mesh = geometry.mesh.clone();
         mesh.cad = display_cad_map(&mesh, geometry.entities, geometry.face_edges);
@@ -452,7 +456,7 @@ impl FeModel {
             one_sided: &one_sided,
             compounds: geometry.compounds,
         };
-        self.detect(index, &mesh, &skins, visible, Some(display))
+        self.detect(index, &mesh, &skins, (visible, left_out), Some(display))
     }
 
     /// The detection on a mesh, or on a display of CAD geometry with the dimensions of its
@@ -462,11 +466,11 @@ impl FeModel {
         index: usize,
         mesh: &FeMesh,
         skins: &[PartSkin],
-        visible: &[bool],
+        (visible, left_out): (&[bool], &crate::LeftOut),
         display: Option<Display>,
     ) -> Option<DetectionReport> {
         let detection = self.contact_detections.get(index)?.clone();
-        let context = self.part_context(mesh);
+        let context = self.part_context(mesh, left_out);
         let searched = detection.searched(&context, visible);
         let tolerance = (detection.tolerance)
             .unwrap_or_else(|| tolerance_of(mesh, skins, &searched, display.is_none()));
@@ -710,7 +714,7 @@ impl FeModel {
         // The display of the geometry has no nodes of the mesh to tie; the caller ties the
         // line ends of the mesh, see [`Self::detect_line_ends`].
         if display.is_none() {
-            self.detect_line_ends(index, mesh, visible, &mut report);
+            self.detect_line_ends(index, mesh, visible, left_out, &mut report);
         }
         Some(report)
     }
@@ -839,6 +843,7 @@ impl FeModel {
         index: usize,
         mesh: &FeMesh,
         visible: &[bool],
+        left_out: &crate::LeftOut,
         report: &mut DetectionReport,
     ) {
         let Some(detection) = self.contact_detections.get(index).cloned() else {
@@ -853,7 +858,8 @@ impl FeModel {
             .map(|t| node_parts(&t.region, mesh))
             .collect();
         report.node_ties += edited.len();
-        let searched = detection.searched(&self.part_context(mesh), visible);
+        let context = self.part_context(mesh, left_out);
+        let searched = detection.searched(&context, visible);
         for joint in find_line_joints(mesh, &searched, report.tolerance) {
             if edited.contains(&joint.parts) {
                 continue;
