@@ -62,6 +62,11 @@ pub struct ResultsSettings {
     /// [`plx_mesh::FeMesh::fingerprint`] of the results' mesh, to tell whether what refers
     /// to its nodes and elements still fits results of another run.
     pub mesh: Option<u64>,
+    /// The unit system the results showed when these settings were taken: positions, the
+    /// camera and the limits are in it. Results opened in other units convert them, see
+    /// the program's `convert_settings`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub units: Option<plx_model::UnitSystem>,
 }
 
 impl ResultsSettings {

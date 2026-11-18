@@ -4499,6 +4499,7 @@ S
             result_paths: vec![plx_model::ResultPath::new("Path-1")],
             plain_part_names: vec![model.parts[0].name.clone()],
             mesh: Some(model.mesh.fingerprint()),
+            units: model.results.as_ref().map(|view| view.units),
             increment: 0,
             shown: Some(("SCALED".into(), "VALUE".into())),
             view: plx_results::saved_view::SavedView {

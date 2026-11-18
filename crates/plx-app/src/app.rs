@@ -699,6 +699,23 @@ impl AnalysisWindow {
         });
     }
 
+    /// Shows the analysis in `units`, the project's new unit system. The FE model keeps its
+    /// values, which are stored in SI units, and only shows them otherwise; open results are
+    /// read again in the new units on a worker thread, keeping what was defined on them, the
+    /// camera and the workspace, and stay shown until then. Returns whether the units changed.
+    pub fn set_units(&mut self, units: UnitSystem) -> bool {
+        let workbench = &mut self.workbench;
+        let Some(model) = &mut workbench.model else {
+            return false;
+        };
+        if model.fe.properties.units == units {
+            return false;
+        }
+        model.fe.properties.units = units;
+        workbench.units_changed();
+        true
+    }
+
     pub fn rename(&mut self, name: &str) {
         self.workbench.analysis_name = name.to_owned();
     }
@@ -2170,12 +2187,17 @@ impl Workbench {
                         });
                     let carried_over = carried.is_some();
                     // Results bound to the project come back as they were saved.
-                    let settings = carried.or_else(|| {
+                    let mut settings = carried.or_else(|| {
                         (self.model.as_ref())
                             .filter(|_| previous.is_none())
                             .filter(|p| p.bound_results_file.as_ref() == Some(&model.path))
                             .and_then(|p| p.bound_results.as_ref()?.settings.clone())
                     });
+                    // Settings taken in other units, e.g. before the unit system changed,
+                    // keep their positions and limits physically.
+                    if let (Some(settings), Some(view)) = (&mut settings, &model.results) {
+                        crate::results::convert_settings(settings, view.units);
+                    }
                     if let Some(settings) = &settings {
                         let warnings =
                             model.restore_results_settings(settings, self.moving_load_stations());
@@ -2202,7 +2224,9 @@ impl Workbench {
                     let previous_scale = previous
                         .and_then(|i| self.results[i].results.as_ref())
                         .map(|v| v.color_scale.clone());
-                    if let (Some(view), Some(scale)) = (model.results.as_mut(), previous_scale) {
+                    if let (Some(view), Some(scale), false) =
+                        (model.results.as_mut(), previous_scale, carried_over)
+                    {
                         view.color_scale = scale;
                     }
                     match previous {
@@ -4061,6 +4085,37 @@ impl Workbench {
         });
         settings.view.mesh_edges = Some(self.viewport.options.mesh_edges);
         Some(settings)
+    }
+
+    /// The FE model shows its values in other units: what took the old ones is made again,
+    /// and the open results are read again in the new units, see
+    /// [`AnalysisWindow::set_units`].
+    fn units_changed(&mut self) {
+        // Editors took the units when they opened.
+        self.editor = None;
+        self.mesh_setup = None;
+        self.mesh_item_editor = None;
+        self.symbols_shown = None;
+        self.results_changed = true;
+        self.update_contour();
+        let Some(results) = self.results.first() else {
+            return;
+        };
+        let units = self.import_units();
+        if results
+            .results
+            .as_ref()
+            .is_none_or(|view| view.units == units)
+        {
+            return;
+        }
+        let path = results.path.clone();
+        if let Some(settings) = self.view_settings(results) {
+            self.carried_settings = Some((path.clone(), settings));
+        }
+        // The workspace shown stays, as for results opened beside another one.
+        self.pinned_view = (self.tree_view != TreeView::Results).then_some(self.tree_view);
+        self.open_results = Some(path);
     }
 
     /// Opens the results bound to the project, written into the work directory first.

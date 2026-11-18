@@ -52,9 +52,13 @@ values in SI units, so another unit system changes no value, only how it is show
   the project window])
 
 The unit system is saved with the project; a new project starts in the one chosen last. A
-change of the unit system can be undone like other changes of the project (@undo). Analyses
-that are open read their model again in the new units; while one of them is busy, for example
-loading or meshing, the button waits for it.
+change of the unit system can be undone like other changes of the project (@undo). An open
+analysis shows its model in the new units at once and reads its results again in them in the
+background. The workspace, the camera and what was set up on the results, such as
+transformations, the shown component, features, hot spots and manual legend limits, stay as
+they were and keep their physical size: a symmetry point at `50 mm` moves to `0.05 m`. Only
+constants typed into equations of derived outputs keep their number. While an analysis is busy,
+for example loading or meshing, the button waits for it.
 
 #note[Equations of distributions take their coordinates in the length unit of the project
   (@unit-systems), so they give other values in another unit system. A File block reads an input

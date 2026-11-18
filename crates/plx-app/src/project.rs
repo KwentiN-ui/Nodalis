@@ -8460,7 +8460,7 @@ impl ProjectApp {
                     }
                 }
                 Request::Campbell => self.open_campbell_of(ctx, id),
-                Request::SetUnits(units) => self.set_units(ctx, units),
+                Request::SetUnits(units) => self.set_units(units),
                 Request::Close => {
                     if self.close_window(id) && self.active == Some(id) {
                         self.in_project = true;
