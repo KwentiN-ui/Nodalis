@@ -2936,6 +2936,9 @@ impl Workbench {
                 self.generate_mesh(ctx, Some(names));
             }
         }
+        if let Some(name) = response.mesh_unmeshed {
+            self.generate_mesh(ctx, Some(vec![name]));
+        }
         if let Some(action) = response.compound {
             self.compound_action(ctx, action);
         }

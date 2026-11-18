@@ -138,7 +138,7 @@ pub use moving_load::{AXIS_LABELS, LoadStations, MovingFrame, MovingLoad, Wheel,
 pub use number::{MathOp, apply_series, switch};
 pub use origin::{
     Active, PartOrigin, PartOrigins, active_model, bodies as part_bodies, drop_orphans, orphans,
-    suppressed_bodies,
+    suppressed_bodies, unmeshed_parts,
 };
 pub use overview::{Cell, OverviewGroup, OverviewRow, StepItemKey, StepOverview};
 pub use parameter::{Parameter, ValueKind};
