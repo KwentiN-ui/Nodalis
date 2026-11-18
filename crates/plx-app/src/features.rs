@@ -78,6 +78,9 @@ pub enum FeatureResult {
 /// The read-out points of a path for one definition; located again when it changes.
 struct Located {
     path: ResultPath,
+    /// The increment of particle results it was located in, see
+    /// [`crate::path_plot::particle_increment`].
+    at: Option<(u32, u32)>,
     /// Read-out points, or why there are none.
     points: Result<Vec<PathPoint>, String>,
 }
@@ -729,13 +732,12 @@ impl FeatureDialog {
             ui.weak("No results loaded.");
             return;
         };
-        if self.located.as_ref().is_none_or(|l| l.path != *path) {
-            let points = path
-                .samples(&model.fe)
-                .map(|samples| path::path_points(model.mesh(), &samples));
+        let at = crate::path_plot::particle_increment(model);
+        if (self.located.as_ref()).is_none_or(|l| l.path != *path || l.at != at) {
             self.located = Some(Located {
                 path: path.clone(),
-                points,
+                at,
+                points: crate::path_plot::locate_path(model, path),
             });
         }
         let Some(located) = &self.located else {

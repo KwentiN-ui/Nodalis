@@ -25,7 +25,7 @@ both.
 
 === Creating an analysis <new-analysis>
 
-#menu("File", "New Analysis"), a double-click or right-click on the background of the
+#menu("Analysis", "New Analysis"), a double-click or right-click on the background of the
 schematic or #ui("Analysis") in the block search (@block-search) open #ui("Model Properties") for the new analysis
 (@model-properties). Choose its *model space* (3D, plane stress, plane strain or axisymmetric)
 there. It takes the unit system of the project (@project-units).
@@ -52,9 +52,13 @@ values in SI units, so another unit system changes no value, only how it is show
   the project window])
 
 The unit system is saved with the project; a new project starts in the one chosen last. A
-change of the unit system can be undone like other changes of the project (@undo). Analyses
-that are open read their model again in the new units; while one of them is busy, for example
-loading or meshing, the button waits for it.
+change of the unit system can be undone like other changes of the project (@undo). An open
+analysis shows its model in the new units at once and reads its results again in them in the
+background. The workspace, the camera and what was set up on the results, such as
+transformations, the shown component, features, hot spots and manual legend limits, stay as
+they were and keep their physical size: a symmetry point at `50 mm` moves to `0.05 m`. Only
+constants typed into equations of derived outputs keep their number. While an analysis is busy,
+for example loading or meshing, the button waits for it.
 
 #note[Equations of distributions take their coordinates in the length unit of the project
   (@unit-systems), so they give other values in another unit system. A File block reads an input
@@ -191,8 +195,9 @@ the state of another analysis (@data-links).
   [Frame Blocks (#key("Ctrl+J"))], [Puts the block, or the selected blocks it is one of, in a
     new frame; #ui("Remove from Frame") (#key("Alt+P")) takes it out.],
   [Rename ... (#key("F2"))], [Gives the analysis a new name. Names are unique within a project.],
-  [Duplicate (#key("Shift+D"))], [Adds a copy of the analysis, named "Copy of ...". A copy
-    of a block in a frame goes into the same frame.],
+  [Duplicate (#key("Shift+D"))], [Adds a copy of the analysis, named "Copy of ...". The copy
+    takes the same inputs as the block (@duplicate-inputs). A copy of a block in a frame goes
+    into the same frame.],
   [Delete (#key("X"))], [Removes the analysis from the project at once; the note at the
     bottom of the schematic offers #ui("Undo"). An open window closes.
     Links to and from it are removed; analyses that took items from it keep their copies.],
@@ -200,20 +205,22 @@ the state of another analysis (@data-links).
 
 ==== Adding blocks by search <block-search>
 
-Like the add menu of Blender, a double-click or right-click into empty space of the schematic shows every kind
-of block Nodalis can add, grouped as on the tabs of the ribbon. Just start typing: the search
-field has the focus and finds blocks by fuzzy matching, so letters in order are enough
-(#ui("rct") finds #ui("Rectangle")). It also knows other words for a block, such as
-#ui("hexahedra") for #ui("Box") or #ui("library") for #ui("Materials"). Search results show
-their group on the right.
+A double-click or right-click into empty space of the schematic opens the block search, a
+list like the one of OMEdit: each row shows the icon of the block, its name in bold and its
+group in grey below. Before you type, it lists only #ui("Analysis"), always at the top, and the
+five blocks you added from it last; Nodalis remembers them between sessions. Just start
+typing: the search field has the focus and finds every kind of block by fuzzy matching, so
+letters in order are enough (#ui("rct") finds #ui("Rectangle")). It also knows other words for
+a block, such as #ui("hexahedra") for #ui("Box") or #ui("library") for #ui("Materials"). A
+long list scrolls.
 
 #key("Enter") adds the highlighted block, the best match while you type, where you
 clicked; #key("Up") and #key("Down") move the highlight, a click adds any block, and
 #key("Esc") or a click elsewhere closes the search. #ui("Analysis") asks for the model
 properties first (@new-analysis).
 
-#screenshot("node-picker.png", [All blocks after a double-click or right-click (left) and the search for
-  "mesh" (right)])
+#screenshot("node-picker.png", [The block search before typing, with Analysis and the blocks
+  used last (left), and the search for "mesh" (right)])
 
 ==== Frames, notes and compact blocks <frames-notes>
 
@@ -268,9 +275,25 @@ level. Groups can be put into groups, as deep as you like.
 The Group Input and Group Output blocks belong to their group and cannot be deleted. Each has
 an *empty pin* at the bottom, a ring without fill. Drag a wire from the empty pin of the
 Group Input block to a block inside, or from a block inside to the empty pin of the Group
-Output block: the group gets a new input or output of that type, and the next empty pin
-comes below. Outside, link the new pin of the group like any other. Double-click the row of
-an input or output to rename it; once it has no wires left on either side it goes.
+Output block: the group gets a new input or output, and the next empty pin comes below. A
+pin of a group has no type of its own: it always has the type of the block row its wire
+reaches inside, its colour and what it can be linked to follow that row, and its tooltip
+names it. Outside, link the new pin of the group like any other. Double-click the row of
+an input or output to rename it.
+
+As in Blender, the group block lists its outputs first, with their names at the right by
+their pins, then a line, then its inputs on the left.
+
+#screenshot("node-group-sockets.png", [A group with one output on top and two inputs below
+  the line])
+
+An input or output goes as soon as no wire inside the group is at it any more: remove the
+last wire from the Group Input block to the blocks inside, or the wire into the Group Output
+block, and the pin goes with its wires outside. Wires removed outside leave it, so that it
+can be linked again. To remove one at once, point at its row in the Group Input or Group
+Output block and click the cross that shows on it, or choose #ui("Remove Input") or
+#ui("Remove Output") in the context menu of its row, also on the group block. Undo brings it
+back with its wires.
 
 The same empty pin marks every block that takes any number of inputs: the choices of a
 Switch block (@math-switch), the inputs of a Formula block (@formula-block) and the outputs and
@@ -280,10 +303,28 @@ A wire dropped on it adds one more.
 Groups only arrange the schematic. A link through a group is the link between the blocks at
 its ends, which Update Project follows as before; it is made once the wires reach from one
 block to the other through the pins of the groups, and removed once one of them goes.
+So a pin of a group takes and gives what the block at the other end of its wires does: a
+number a Formula block inside gives out goes to a Preview block outside, which shows it.
+
+#screenshot("group-preview.png", [The output #ui("Formula") of a group linked to a Preview
+  block, which shows the number of the Formula block inside.])
+
 #key("Ctrl+Alt+G") or #ui("Ungroup") puts the blocks of a group back where the group is,
 with the wires between them as before. #key("Shift+D") duplicates a group with the blocks
-inside and the links between them; #key("X") deletes it with all its blocks, and undo
+inside, the links between them and its inputs (@duplicate-inputs); #key("X") deletes it with all its blocks, and undo
 brings them back.
+
+==== Duplicating blocks <duplicate-inputs>
+
+A duplicated block keeps its inputs, as Shift+D in Blender: the copy of an analysis that takes
+its geometry from a File block takes it from the same File block. When several blocks are
+duplicated together, a link between two of them joins their copies, while an input from a
+block outside the selection comes from that block. What a block feeds is not linked to its
+copy.
+
+#screenshot("duplicate-inputs.png", [#ui("Split") and #ui("Preview") duplicated together: the
+  copy of the split takes the geometry of #ui("Beam") as the split does, and feeds the copy of
+  the preview])
 
 ==== Keys of the schematic <schematic-keys>
 
@@ -298,7 +339,7 @@ block with #key("Shift") held; with #key("Shift") a rectangle adds to the select
   [#key("Shift+A")], [Searches the blocks to add at the pointer (@block-search).],
   [#key("X"), #key("Delete")], [Deletes the blocks at once; #ui("Undo") in the note at the
     bottom, or #key("Ctrl+Z"), brings them back.],
-  [#key("Shift+D")], [Duplicates the blocks.],
+  [#key("Shift+D")], [Duplicates the blocks with their inputs (@duplicate-inputs).],
   [#key("H")], [Shows the blocks compact, or in full if they all are compact.],
   [#key("Ctrl+G")], [Puts the blocks into a new node group (@node-groups).],
   [#key("Ctrl+Alt+G")], [Puts the blocks of the groups back, without the groups.],
@@ -337,15 +378,16 @@ placed and worked on with the ribbon (@ribbon) and the keys above.
 The ribbon tabs of the Project workspace:
 
 #fields(
-  [Project], [File commands, #ui("New Analysis") (@new-analysis), and #ui("Open"),
-    #ui("Open in New Window"), #ui("Solve"), #ui("Duplicate"), #ui("Delete") and
-    #ui("Rename") for the selected block.],
+  [File], [#ui("New Project"), #ui("Open"), #ui("Open Recent") and #ui("Save")
+    (@files).],
+  [Analysis], [#ui("New Analysis") (@new-analysis), and #ui("Open"),
+    #ui("Open in New Window") and #ui("Solve") for the selected analysis.],
   [Sources], [Materials (@materials-block), cross-sections, box, rectangle and refined
     meshes (@mesh-block), CAD operations and files.],
   [Parameters], [Parameters, Math, Switch and Formula blocks.],
   [Evaluate], [Measure, parameter study, Campbell and mesh export blocks.],
   [Annotate], [Notes and frames (@frames-notes).],
-  [Arrange], [#ui("Duplicate"), #ui("Delete") and #ui("Compact View") for the selected
+  [Arrange], [#ui("Duplicate"), #ui("Delete"), #ui("Rename") and #ui("Compact View") for the selected
     blocks, as their keys do (@schematic-keys); #ui("Show All") (#key("Home")) fits all
     blocks into the view, #ui("Minimap") shows or hides the minimap.],
 )

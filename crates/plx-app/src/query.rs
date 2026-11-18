@@ -421,11 +421,17 @@ impl QueryWindow {
             return false;
         }
         if self.picks_geometry(model) {
-            if self.kind == QueryKind::Edge {
-                return false;
-            }
-            let items = Items::Geometry(crate::geometry_selection::pick_box(model, area));
-            self.selection.take(model.mesh(), items, operation);
+            let entities = match self.kind {
+                QueryKind::Edge => crate::geometry_selection::edges_in_box(model, area),
+                _ => crate::geometry_selection::pick_box(
+                    model,
+                    &self.picker,
+                    GeometryRegion::Faces,
+                    area,
+                ),
+            };
+            self.selection
+                .take(model.mesh(), Items::Geometry(entities), operation);
         } else {
             self.selection
                 .box_select(model, &self.picker, area, operation);

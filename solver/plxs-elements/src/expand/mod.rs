@@ -329,6 +329,7 @@ impl Expander {
         self.transforms()?;
         let knot_nodes = self.knot_nodes();
         self.constraints(&knot_nodes);
+        self.rigid_members(&knot_nodes);
         self.remap_steps(&original)?;
         let mut model = std::mem::take(&mut self.analysis.model);
         model.constraints.equations.append(&mut self.equations);
@@ -408,6 +409,58 @@ impl Expander {
             analysis: self.analysis,
             output,
         })
+    }
+
+    /// A `*RIGID BODY` takes the expanded nodes of its shell and beam nodes in place of
+    /// them: the section turns with the body, so a rigid coupling holds the rotations of
+    /// the shell or beam too. The original node follows as the mean of its expansion. A
+    /// knot keeps its original node (its expansion is a rigid body about that node
+    /// already, with rotations of its own), as does a truss, whose twist a constraint of
+    /// the expansion holds.
+    fn rigid_members(&mut self, knots: &HashSet<NodeId>) {
+        use plxs_core::constraints::RigidBodyNodes;
+        let model = &mut self.analysis.model;
+        for k in 0..model.constraints.rigid_bodies.len() {
+            let body = &model.constraints.rigid_bodies[k];
+            let mut nodes: Vec<NodeId> = match &body.nodes {
+                RigidBodyNodes::NodeSet(set) => model.nodes_of(&NodeRef::Set(set.clone())),
+                RigidBodyNodes::ElementSet(set) => model
+                    .elements_of(&ElementRef::Set(set.clone()))
+                    .iter()
+                    .filter_map(|&id| model.element(id))
+                    .flat_map(|e| e.nodes.iter().copied())
+                    .collect(),
+            };
+            nodes.sort_unstable();
+            nodes.dedup();
+            let mut changed = false;
+            let mut members = Vec::with_capacity(nodes.len());
+            for node in nodes {
+                let groups = match self.groups.get(&node) {
+                    Some(g) if !knots.contains(&node) && g.iter().all(|g| !g.truss) => g,
+                    _ => {
+                        members.push(node);
+                        continue;
+                    }
+                };
+                changed = true;
+                for g in groups {
+                    let used = g.nodes.iter().zip(&g.used).filter(|(_, u)| **u);
+                    members.extend(used.map(|(&n, _)| n));
+                }
+            }
+            if !changed {
+                continue;
+            }
+            members.sort_unstable();
+            members.dedup();
+            let mut name = format!("__RIGID_BODY_EXPANDED_{}", k + 1);
+            while model.sets.node_sets.contains_key(&name) {
+                name.push('_');
+            }
+            model.sets.node_sets.insert(name.clone(), members);
+            model.constraints.rigid_bodies[k].nodes = RigidBodyNodes::NodeSet(name);
+        }
     }
 
     /// Groups the structural elements at every node by normal, thickness, offset and

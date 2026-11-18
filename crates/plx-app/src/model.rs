@@ -170,6 +170,10 @@ pub struct Model {
     pub history: crate::undo::History,
     /// Counts the replacements of the mesh ([`Model::set_mesh`]).
     mesh_revision: u64,
+    /// For a geometry display, the element edges of the meshes of its parts, drawn over
+    /// them where the mesh edges are shown, with the key of what they were made of
+    /// ([`Model::set_mesh_overlay`]).
+    mesh_overlay: Option<(u64, std::sync::Arc<Vec<Option<MeshOverlay>>>)>,
     /// Counts the changes of the FE model, the meshing settings and the mesh, see
     /// [`crate::undo::record`]; the project brings its links up to date when it changes.
     pub revision: u64,
@@ -930,6 +934,7 @@ impl Model {
             cad_index: Default::default(),
             history: Default::default(),
             mesh_revision: 0,
+            mesh_overlay: None,
             revision: 0,
             thick_shells: Vec::new(),
             thick_lines: Vec::new(),
@@ -2101,9 +2106,71 @@ impl Model {
             // A suppressed part is drawn as its edges only.
             if info.suppressed {
                 mesh.triangles.clear();
+            } else if let Some(overlay) = self.mesh_overlay(index) {
+                // The element edges of its mesh, moved with the part in the exploded view.
+                let offset = (self.explosion.is_shown())
+                    .then(|| self.explosion.offsets().get(index).copied())
+                    .flatten()
+                    .unwrap_or(DVec3::ZERO)
+                    .as_vec3();
+                overlay.append_to(&mut mesh, offset);
             }
         }
         mesh
+    }
+
+    /// What the element edges of the meshes of the parts of the geometry display `view` are
+    /// made of, from this FE model: the mesh of a part of the geometry, of its compound
+    /// only its body, or an imported mesh. Parts whose mesh is out of date, among the parts
+    /// of the mesh `stale`, have none: it no longer fits their geometry.
+    pub fn mesh_overlay_source(&self, view: &Model, stale: &[String]) -> MeshOverlaySource {
+        let mesh = &self.mesh;
+        let geometry = self.geometry.as_ref();
+        let fe_part =
+            |name: &str| (mesh.parts.iter()).position(|p| p.name.eq_ignore_ascii_case(name));
+        let parts = (view.parts.iter())
+            .map(|part| {
+                let name = part.name.as_str();
+                let fe_name = geometry.map_or(name, |g| g.fe_part_name(name));
+                if stale.iter().any(|s| s.eq_ignore_ascii_case(fe_name)) {
+                    return None;
+                }
+                let index = fe_part(fe_name)?;
+                let bodies = &mesh.parts[index].bodies;
+                if bodies.is_empty() {
+                    return Some((index, None));
+                }
+                let body = bodies.iter().find(|b| b.name.eq_ignore_ascii_case(name))?;
+                let elements = (body.elements.iter())
+                    .filter_map(|&id| mesh.element_index(id))
+                    .collect();
+                Some((index, Some(elements)))
+            })
+            .collect();
+        MeshOverlaySource {
+            coords: mesh.coords().to_vec(),
+            skins: std::sync::Arc::clone(&self.skins),
+            origin: view.origin,
+            parts,
+        }
+    }
+
+    /// The element edges of the mesh of part `index` of a geometry display, if it has one.
+    fn mesh_overlay(&self, index: usize) -> Option<&MeshOverlay> {
+        let (_, overlays) = self.mesh_overlay.as_ref()?;
+        overlays.get(index)?.as_ref()
+    }
+
+    /// The key of what the element edges drawn over the parts of a geometry display were
+    /// made of, see [`Model::set_mesh_overlay`].
+    pub fn mesh_overlay_key(&self) -> Option<u64> {
+        self.mesh_overlay.as_ref().map(|(key, _)| *key)
+    }
+
+    /// Draws the element edges `overlays`, one entry per part, over the parts of a geometry
+    /// display; `key` tells what they were made of.
+    pub fn set_mesh_overlay(&mut self, key: u64, overlays: Vec<Option<MeshOverlay>>) {
+        self.mesh_overlay = Some((key, std::sync::Arc::new(overlays)));
     }
 
     /// The mesh of one part as [`Model::scene_meshes`] draws it, so that a change of the
@@ -2999,6 +3066,107 @@ fn smooth_angle(info: &PartInfo) -> f64 {
     }
 }
 
+/// The element edges of the mesh of a geometry object, drawn over its faces in the Geometry
+/// view: lines between `positions`, relative to the origin of the geometry display.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MeshOverlay {
+    pub positions: Vec<[f32; 3]>,
+    /// Pairs of indices into `positions`.
+    pub edges: Vec<u32>,
+}
+
+impl MeshOverlay {
+    /// Adds the edges to `mesh` as its mesh edges, moved by `offset`: drawn where the view
+    /// shows mesh edges, not with Edges Only.
+    fn append_to(&self, mesh: &mut RenderMesh, offset: Vec3) {
+        let base = mesh.vertices.len() as u32;
+        mesh.vertices.extend(self.positions.iter().map(|p| Vertex {
+            position: (Vec3::from(*p) + offset).to_array(),
+            normal: [0.0; 3],
+            color: [0.0; 3],
+            scalar: plx_render::MESH_EDGE_OPACITY,
+        }));
+        (mesh.mesh_edges).extend(self.edges.iter().map(|&i| base + i));
+    }
+}
+
+/// What the element edges drawn over the parts of a geometry display are made of, taken
+/// from the FE model ([`Model::mesh_overlay_source`]) so that they can be made on another
+/// thread.
+pub struct MeshOverlaySource {
+    coords: Vec<[f64; 3]>,
+    skins: std::sync::Arc<Vec<PartSkin>>,
+    /// The origin of the geometry display.
+    origin: DVec3,
+    /// Per part of the geometry display, the part of the mesh that is its mesh, with the
+    /// elements (by index) of its body where the part of the mesh is a compound.
+    parts: Vec<Option<(usize, Option<HashSet<usize>>)>>,
+}
+
+impl MeshOverlaySource {
+    /// The element edges of each part of the geometry display that has a mesh.
+    pub fn build(self) -> Vec<Option<MeshOverlay>> {
+        let Self {
+            coords,
+            skins,
+            origin,
+            parts,
+        } = self;
+        (parts.into_iter())
+            .map(|part| {
+                let (index, elements) = part?;
+                let skin = skins.get(index)?;
+                let overlay = skin_overlay(&coords, skin, origin, elements.as_ref());
+                (!overlay.edges.is_empty()).then_some(overlay)
+            })
+            .collect()
+    }
+}
+
+/// The element edges of the faces of `skin`, of all of them or those of `elements`, each
+/// once; a quadratic edge runs through its midside node.
+fn skin_overlay(
+    coords: &[[f64; 3]],
+    skin: &PartSkin,
+    origin: DVec3,
+    elements: Option<&HashSet<usize>>,
+) -> MeshOverlay {
+    let mut overlay = MeshOverlay::default();
+    let mut vertex: HashMap<usize, u32> = HashMap::new();
+    let mut seen: HashSet<(usize, usize)> = HashSet::new();
+    let mut add = |overlay: &mut MeshOverlay, node: usize| -> Option<u32> {
+        if let Some(&index) = vertex.get(&node) {
+            return Some(index);
+        }
+        let point = DVec3::from(*coords.get(node)?) - origin;
+        let index = overlay.positions.len() as u32;
+        overlay.positions.push(point.as_vec3().to_array());
+        vertex.insert(node, index);
+        Some(index)
+    };
+    let faces =
+        (skin.faces.iter()).filter(|face| elements.is_none_or(|e| e.contains(&face.element)));
+    for face in faces {
+        let corners = &face.corners;
+        for (i, &a) in corners.iter().enumerate() {
+            let b = corners[(i + 1) % corners.len()];
+            let segments = match face.mids.get(i) {
+                Some(&mid) => vec![[a, mid], [mid, b]],
+                None => vec![[a, b]],
+            };
+            for [a, b] in segments {
+                if a == b || !seen.insert((a.min(b), a.max(b))) {
+                    continue;
+                }
+                if let (Some(a), Some(b)) = (add(&mut overlay, a), add(&mut overlay, b)) {
+                    overlay.edges.extend([a, b]);
+                }
+            }
+        }
+    }
+    overlay
+}
+
 /// What the surfaces of the parts of a results scene are built from, taken from the model
 /// ([`Model::scene_base`]) so that they can be built on another thread: the part of
 /// building the scene that takes long for a large model.
@@ -3762,6 +3930,39 @@ mod tests {
     }
 
     #[test]
+    fn meshed_parts_show_their_element_edges_over_the_geometry() {
+        if !gmsh_available() {
+            return;
+        }
+        let loaded = load(&testdata("zwei_bloecke.step"), UnitSystem::Unitless).unwrap();
+        let mut view = loaded.geometry_view.unwrap();
+        let mut model = loaded.model;
+        let geometry = model.geometry.clone().unwrap();
+        let mut mesh = plx_mesher::generate_mesh(&geometry).unwrap().mesh;
+        // Only the first block is meshed.
+        let second = mesh.parts[1].name.clone();
+        mesh.remove_parts(&[second]);
+        model.set_mesh(mesh);
+        let overlays = model.mesh_overlay_source(&view, &[]).build();
+        assert_eq!(overlays.len(), 2);
+        let first = overlays[0].clone().expect("the meshed block has its edges");
+        assert!(overlays[1].is_none());
+        // Each element edge on the surface once.
+        let pairs: HashSet<(u32, u32)> = (first.edges.chunks(2))
+            .map(|e| (e[0].min(e[1]), e[0].max(e[1])))
+            .collect();
+        assert_eq!(pairs.len() * 2, first.edges.len());
+        view.set_mesh_overlay(1, overlays);
+        let meshes = view.render_meshes();
+        assert_eq!(meshes[0].mesh_edges.len(), first.edges.len());
+        assert!(meshes[1].mesh_edges.is_empty());
+        // An out-of-date mesh no longer fits its geometry and is not drawn.
+        let name = model.mesh.parts[0].name.clone();
+        let stale = model.mesh_overlay_source(&view, &[name]).build();
+        assert!(stale.iter().all(Option::is_none));
+    }
+
+    #[test]
     fn step_files_open_as_geometry_and_mesh_into_the_project() {
         if !gmsh_available() {
             return;
@@ -4499,6 +4700,7 @@ S
             result_paths: vec![plx_model::ResultPath::new("Path-1")],
             plain_part_names: vec![model.parts[0].name.clone()],
             mesh: Some(model.mesh.fingerprint()),
+            units: model.results.as_ref().map(|view| view.units),
             increment: 0,
             shown: Some(("SCALED".into(), "VALUE".into())),
             view: plx_results::saved_view::SavedView {

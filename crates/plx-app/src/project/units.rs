@@ -3,8 +3,9 @@
 //! Every value is stored in SI units ([`plx_model::STORED`]); the unit system only says in
 //! which units the blocks of the schematic, their editors and the analyses show the values
 //! and take them typed. The analyses follow it: each keeps it in its model properties, which
-//! the analysis window reads, and an open window reads its analysis again once it changes,
-//! so that its results are shown in the new units too.
+//! the analysis window reads; an open window shows its model in the new units at once and
+//! reads its results again in them, keeping what was defined on them. Settings saved with
+//! bound results know the units they were taken in and are converted when the results open.
 
 use plx_model::UnitSystem;
 
@@ -15,7 +16,7 @@ impl ProjectApp {
     pub(super) fn units_menu(&mut self, ui: &mut egui::Ui) {
         let busy = self.units_busy();
         if let Some(units) = crate::units_menu::button(ui, self.units, busy.as_deref()) {
-            self.set_units(ui.ctx(), units);
+            self.set_units(units);
         }
     }
 
@@ -29,7 +30,7 @@ impl ProjectApp {
     }
 
     /// Makes `units` the unit system of the project, as a change that can be undone.
-    pub(super) fn set_units(&mut self, ctx: &egui::Context, units: UnitSystem) {
+    pub(super) fn set_units(&mut self, units: UnitSystem) {
         if units == self.units {
             return;
         }
@@ -41,37 +42,26 @@ impl ProjectApp {
         self.units = units;
         // A new project starts in the units chosen last.
         self.settings.new_model.units = units;
-        self.apply_units(ctx);
+        self.apply_units();
         self.output
             .push(format!("Unit system of the project: {}", units.label()));
     }
 
-    /// Gives the analyses the unit system of the project. An open window reads its analysis
-    /// again, so that what it shows, its results among them, is in the new units.
-    pub(super) fn apply_units(&mut self, ctx: &egui::Context) {
-        let (units, path) = (self.units, self.model_path());
+    /// Gives the analyses the unit system of the project. An open window shows its model in
+    /// the new units at once and reads its results again in them, keeping what was defined
+    /// on them, the camera and the workspace.
+    pub(super) fn apply_units(&mut self) {
+        let units = self.units;
         for node in &mut self.nodes {
-            let (id, name) = (node.id, node.name.clone());
             let Some(analysis) = node.as_analysis_mut() else {
                 continue;
             };
             if let Some(data) = &mut analysis.data {
                 data.model.properties.units = units;
             }
-            let Some(window) = &mut analysis.window else {
-                continue;
-            };
-            if window
-                .model()
-                .is_none_or(|m| m.fe.properties.units == units)
+            if let Some(window) = &mut analysis.window
+                && window.set_units(units)
             {
-                continue;
-            }
-            if let Some(mut data) = window.data() {
-                data.id = id;
-                data.name = name;
-                data.model.properties.units = units;
-                window.load(ctx, path.clone(), data);
                 analysis.seen = None;
             }
         }

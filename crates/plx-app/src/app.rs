@@ -174,6 +174,8 @@ struct Workbench {
     /// The surfaces of the results scene being built on another thread; the scene shown
     /// stays until they are ready.
     scene_job: Option<SceneJob>,
+    /// The element edges drawn over the geometry being made on another thread.
+    mesh_overlay_job: Option<MeshOverlayJob>,
     /// Open dialog creating or editing an item of the FE model.
     editor: Option<Editor>,
     /// The step new boundary conditions, loads, outputs and defined fields go into, by name;
@@ -361,6 +363,7 @@ impl AnalysisWindow {
                 frame_changed: false,
                 frame_cache: Default::default(),
                 scene_job: None,
+                mesh_overlay_job: None,
                 editor: None,
                 active_step: None,
                 step_selection: None,
@@ -426,8 +429,10 @@ impl AnalysisWindow {
         }
     }
 
-    /// Shows this workspace, as soon as the analysis is loaded.
+    /// Shows this workspace: at once in the app bar, and again once the analysis is loaded,
+    /// which would otherwise open on the workspace it finds fitting.
     pub fn show_workspace(&mut self, show: Show) {
+        self.workbench.set_tree_view(show.view);
         self.show_when_loaded = Some(show);
     }
 
@@ -694,6 +699,13 @@ impl AnalysisWindow {
 
     /// Opens the analysis of the project at `path` in the window, built on a worker thread.
     pub fn load(&mut self, ctx: &egui::Context, path: PathBuf, analysis: ProjectAnalysis) {
+        // Read again, e.g. after an undo in the project: the workspace shown stays.
+        if self.workbench.model.is_some() && self.show_when_loaded.is_none() {
+            self.show_when_loaded = Some(Show {
+                view: self.workbench.tree_view,
+                step: None,
+            });
+        }
         let (sender, ctx) = (self.load_events.0.clone(), ctx.clone());
         self.loading = Some(path.clone());
         std::thread::spawn(move || {
@@ -701,6 +713,23 @@ impl AnalysisWindow {
             let _ = sender.send(LoadEvent::Finished(path, Ok(Box::new(loaded))));
             ctx.request_repaint();
         });
+    }
+
+    /// Shows the analysis in `units`, the project's new unit system. The FE model keeps its
+    /// values, which are stored in SI units, and only shows them otherwise; open results are
+    /// read again in the new units on a worker thread, keeping what was defined on them, the
+    /// camera and the workspace, and stay shown until then. Returns whether the units changed.
+    pub fn set_units(&mut self, units: UnitSystem) -> bool {
+        let workbench = &mut self.workbench;
+        let Some(model) = &mut workbench.model else {
+            return false;
+        };
+        if model.fe.properties.units == units {
+            return false;
+        }
+        model.fe.properties.units = units;
+        workbench.units_changed();
+        true
     }
 
     pub fn rename(&mut self, name: &str) {
@@ -745,8 +774,8 @@ impl AnalysisWindow {
     }
 
     /// Sets the number at `path` of the FE model, for the project window to set an exposed
-    /// parameter; a number of a mesh operation moves the mesh along. Returns whether it
-    /// changed.
+    /// parameter; a number of a mesh operation moves the mesh along, one of the mesh setup
+    /// is of the geometry. Returns whether it changed.
     pub fn set_value(&mut self, path: &plx_model::ValuePath, value: f64) -> bool {
         let workbench = &mut self.workbench;
         let Some(model) = workbench.model.as_mut() else {
@@ -760,6 +789,10 @@ impl AnalysisWindow {
                 let mut changed = false;
                 model.edit_mesh(|mesh, fe| changed = fe.set_value_meshed(mesh, path, value));
                 changed
+            }
+            // A number of the mesh setup: the parts it meshes are out of date.
+            plx_model::ItemRef::MeshSetup(_) | plx_model::ItemRef::DefaultMeshing => {
+                (model.geometry.as_mut()).is_some_and(|g| g.set_value(path, value))
             }
             _ => model.fe.set_value(path, value),
         };
@@ -1174,6 +1207,13 @@ pub fn export_calculix_results(
 
 /// The surfaces of the parts of a results scene, built on another thread
 /// ([`crate::model::SceneBase`]).
+/// The element edges of the meshed parts drawn over the geometry, being made on another
+/// thread from what the key tells.
+struct MeshOverlayJob {
+    key: u64,
+    overlays: std::sync::mpsc::Receiver<Vec<Option<crate::model::MeshOverlay>>>,
+}
+
 struct SceneJob {
     meshes: std::sync::mpsc::Receiver<Vec<RenderMesh>>,
     /// Only the animation frame changed: the scenes of the other frames stay.
@@ -1586,9 +1626,8 @@ impl AnalysisWindow {
         let workspace = self.workspace();
         if let Some(search) = &mut self.search {
             let entries = crate::command::search_order(false, workspace);
-            let list: Vec<crate::node_picker::Entry> = (entries.iter())
-                .map(|e| crate::node_picker::Entry { ..e.entry })
-                .collect();
+            let list: Vec<crate::node_picker::Entry> =
+                (entries.iter()).map(|e| e.entry.clone()).collect();
             match search.show(&ctx, &list) {
                 crate::node_picker::Outcome::Open => {}
                 crate::node_picker::Outcome::Closed => self.search = None,
@@ -1810,6 +1849,8 @@ impl AnalysisWindow {
                 || self.workbench.section_picks()
                 || self.workbench.transformation_picks()
                 || self.workbench.feature_picks();
+            // Without a dialog picking, a box selects parts as a click on each would.
+            self.workbench.viewport.box_parts = self.workbench.tree_view != TreeView::Results;
             self.workbench.viewport.gizmo =
                 match (&self.workbench.section_dialog, self.workbench.shown()) {
                     (Some(dialog), Some(model)) => Some(dialog.gizmo(model)),
@@ -1924,6 +1965,7 @@ impl AnalysisWindow {
         self.workbench.linked_prompt_window(&ctx);
         self.workbench.update_explosion(&ctx);
         self.workbench.update_thick_shells();
+        self.workbench.update_mesh_overlay(&ctx);
         self.workbench.rebuild_if_results_changed();
         self.workbench.update_section();
         self.workbench.update_feature_overlay();
@@ -1959,6 +2001,7 @@ fn saved_camera(saved: plx_results::saved_view::SavedCamera) -> plx_render::Came
         distance: saved.distance,
         rotation: glam::Quat::from_array(saved.rotation).normalize(),
         scene_radius: saved.scene_radius,
+        drawn_bounds: None,
     }
 }
 
@@ -2177,12 +2220,17 @@ impl Workbench {
                         });
                     let carried_over = carried.is_some();
                     // Results bound to the project come back as they were saved.
-                    let settings = carried.or_else(|| {
+                    let mut settings = carried.or_else(|| {
                         (self.model.as_ref())
                             .filter(|_| previous.is_none())
                             .filter(|p| p.bound_results_file.as_ref() == Some(&model.path))
                             .and_then(|p| p.bound_results.as_ref()?.settings.clone())
                     });
+                    // Settings taken in other units, e.g. before the unit system changed,
+                    // keep their positions and limits physically.
+                    if let (Some(settings), Some(view)) = (&mut settings, &model.results) {
+                        crate::results::convert_settings(settings, view.units);
+                    }
                     if let Some(settings) = &settings {
                         let warnings =
                             model.restore_results_settings(settings, self.moving_load_stations());
@@ -2209,7 +2257,9 @@ impl Workbench {
                     let previous_scale = previous
                         .and_then(|i| self.results[i].results.as_ref())
                         .map(|v| v.color_scale.clone());
-                    if let (Some(view), Some(scale)) = (model.results.as_mut(), previous_scale) {
+                    if let (Some(view), Some(scale), false) =
+                        (model.results.as_mut(), previous_scale, carried_over)
+                    {
                         view.color_scale = scale;
                     }
                     match previous {
@@ -2896,6 +2946,9 @@ impl Workbench {
             if !names.is_empty() {
                 self.generate_mesh(ctx, Some(names));
             }
+        }
+        if let Some(name) = response.mesh_unmeshed {
+            self.generate_mesh(ctx, Some(vec![name]));
         }
         if let Some(action) = response.compound {
             self.compound_action(ctx, action);
@@ -3711,20 +3764,25 @@ impl Workbench {
     }
 
     fn mesh_setup_window(&mut self, ctx: &egui::Context) {
-        let Some(window) = &mut self.mesh_setup else {
+        let (Some(window), Some(model)) = (&mut self.mesh_setup, &mut self.model) else {
             return;
         };
-        let (setup, mesh) = match window.show(ctx) {
+        window.set_linked(crate::links::linked_parameters(&self.incoming.paths));
+        let (setup, mesh) = match window.show(ctx, &model.fe) {
             MeshSetupResult::Open => return,
             MeshSetupResult::Cancel => (None, false),
             MeshSetupResult::Ok(setup) => (Some(setup), false),
             MeshSetupResult::Mesh(setup) => (Some(setup), true),
         };
+        let expose = window.take_expose();
         self.mesh_setup = None;
-        if let (Some(setup), Some(geometry)) =
-            (setup, self.model.as_mut().and_then(|m| m.geometry.as_mut()))
-        {
+        if let (Some(setup), Some(geometry)) = (setup, model.geometry.as_mut()) {
             geometry.meshing = setup;
+            // The numbers clicked to be exposed become parameters of the analysis.
+            if let Some(scope) = expose {
+                let item = plx_model::ItemRef::DefaultMeshing;
+                scope.apply(&mut model.fe, model.geometry.as_ref(), &item);
+            }
         }
         if mesh {
             self.generate_mesh(ctx, None);
@@ -3733,15 +3791,17 @@ impl Workbench {
 
     /// The dialog of a mesh setup item; OK stores the item in the geometry.
     fn mesh_item_window(&mut self, ctx: &egui::Context) {
-        let (Some(editor), Some(geometry)) = (
-            &mut self.mesh_item_editor,
-            self.model.as_mut().and_then(|m| m.geometry.as_mut()),
-        ) else {
+        let (Some(editor), Some(model)) = (&mut self.mesh_item_editor, self.model.as_mut()) else {
             self.mesh_item_editor = None;
             return;
         };
+        let (fe, Some(geometry)) = (&mut model.fe, model.geometry.as_mut()) else {
+            self.mesh_item_editor = None;
+            return;
+        };
+        editor.set_linked(crate::links::linked_parameters(&self.incoming.paths));
         let mut remesh = None;
-        match editor.show(ctx, geometry, self.geometry.as_ref()) {
+        match editor.show(ctx, fe, geometry, self.geometry.as_ref()) {
             MeshItemResult::Open => return,
             MeshItemResult::Cancel => {}
             result @ (MeshItemResult::Ok(..) | MeshItemResult::OkRemesh(..)) => {
@@ -3770,6 +3830,7 @@ impl Workbench {
                         _ => item.kind.parts().map(<[String]>::to_vec),
                     });
                 }
+                let exposed = (editor.take_expose()).map(|s| (s, item.name.clone()));
                 let index = match index.filter(|&i| i < geometry.mesh_items.len()) {
                     Some(index) => {
                         geometry.mesh_items[index] = item;
@@ -3780,6 +3841,11 @@ impl Workbench {
                         geometry.mesh_items.len() - 1
                     }
                 };
+                // The numbers clicked to be exposed become parameters of the analysis, and
+                // those exposed follow the item under its new name.
+                if let Some((scope, name)) = exposed {
+                    scope.apply(fe, Some(geometry), &plx_model::ItemRef::MeshSetup(name));
+                }
                 self.tree.selected = Some((TreeView::Geometry, TreeItem::MeshItem(index)));
                 // The parts a local mesh size does not touch stay up to date.
                 if let (Some(before), Some(affected), Some(model)) =
@@ -4162,6 +4228,37 @@ impl Workbench {
         });
         settings.view.mesh_edges = Some(self.viewport.options.mesh_edges);
         Some(settings)
+    }
+
+    /// The FE model shows its values in other units: what took the old ones is made again,
+    /// and the open results are read again in the new units, see
+    /// [`AnalysisWindow::set_units`].
+    fn units_changed(&mut self) {
+        // Editors took the units when they opened.
+        self.editor = None;
+        self.mesh_setup = None;
+        self.mesh_item_editor = None;
+        self.symbols_shown = None;
+        self.results_changed = true;
+        self.update_contour();
+        let Some(results) = self.results.first() else {
+            return;
+        };
+        let units = self.import_units();
+        if results
+            .results
+            .as_ref()
+            .is_none_or(|view| view.units == units)
+        {
+            return;
+        }
+        let path = results.path.clone();
+        if let Some(settings) = self.view_settings(results) {
+            self.carried_settings = Some((path.clone(), settings));
+        }
+        // The workspace shown stays, as for results opened beside another one.
+        self.pinned_view = (self.tree_view != TreeView::Results).then_some(self.tree_view);
+        self.open_results = Some(path);
     }
 
     /// Opens the results bound to the project, written into the work directory first.
@@ -4985,7 +5082,11 @@ impl Workbench {
     }
 
     fn box_select(&mut self, area: &BoxSelect) {
-        if !self.picking() || self.section_picks() {
+        if self.section_picks() || self.transformation_picks() {
+            return;
+        }
+        if !self.picking() && !self.feature_picks() {
+            self.box_select_parts(area);
             return;
         }
         let operation = Operation::from_modifiers(area.shift, area.ctrl);
@@ -5036,6 +5137,40 @@ impl Workbench {
                 area,
                 Operation::from_modifiers(area.shift, area.ctrl),
             );
+        }
+    }
+
+    /// A selection box dragged with no dialog picking selects the visible parts inside it,
+    /// or crossing it when dragged to the left, in the tree: Shift adds them, Ctrl takes
+    /// them out again.
+    fn box_select_parts(&mut self, area: &BoxSelect) {
+        let view = self.tree_view;
+        if view == TreeView::Results {
+            return;
+        }
+        let Some(model) = self.shown() else {
+            return;
+        };
+        let parts: Vec<usize> = (0..model.parts.len())
+            .filter(|&p| model.parts[p].visible && crate::selection::part_in_box(model, p, area))
+            .collect();
+        if area.ctrl {
+            let picked = self.tree.selected_parts(view);
+            for part in parts.into_iter().filter(|p| picked.contains(p)) {
+                self.tree.toggle_part(view, part);
+            }
+        } else if area.shift {
+            self.tree.add_parts(view, parts);
+        } else if parts.is_empty() {
+            self.tree.selected = None;
+        } else {
+            self.tree.selected = None;
+            self.tree.add_parts(view, parts);
+            if view == TreeView::FeModel {
+                self.tree.reveal_acting = true;
+            } else {
+                self.tree.reveal = true;
+            }
         }
     }
 
@@ -7918,6 +8053,59 @@ impl Workbench {
             .map(|(s, p)| (s.clone(), p.cloned()))
             .collect();
         self.results_changed = true;
+    }
+
+    /// Draws the element edges of the meshed parts over the geometry in the Geometry
+    /// workspace, so that it shows which parts are meshed and how. They are made on another
+    /// thread, only while the workspace is shown and when the mesh or the geometry display
+    /// changed; a part whose mesh is out of date gets none.
+    fn update_mesh_overlay(&mut self, ctx: &egui::Context) {
+        use std::sync::mpsc::TryRecvError;
+        if let Some(job) = &self.mesh_overlay_job {
+            match job.overlays.try_recv() {
+                Ok(overlays) => {
+                    let key = job.key;
+                    self.mesh_overlay_job = None;
+                    if let Some(view) = &mut self.geometry {
+                        view.set_mesh_overlay(key, overlays);
+                        self.results_changed |= self.tree_view == TreeView::Geometry;
+                    }
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.mesh_overlay_job = None,
+            }
+        }
+        if self.tree_view != TreeView::Geometry {
+            return;
+        }
+        let stale = (self.cached_status()).map_or_else(Vec::new, |s| s.stale_parts);
+        let (Some(model), Some(view)) = (&self.model, &self.geometry) else {
+            return;
+        };
+        let mut hash = plx_mesh::Fnv::new();
+        hash.add(&model.mesh_revision().to_le_bytes());
+        let mesh = model.mesh();
+        hash.add_debug(&(mesh.node_count(), mesh.element_count()));
+        hash.add_debug(&model.geometry.as_ref().map(|g| &g.compounds));
+        hash.add_debug(&stale);
+        let names: Vec<&str> = view.parts.iter().map(|p| p.name.as_str()).collect();
+        hash.add_debug(&names);
+        hash.add_debug(&view.origin().to_array());
+        let key = hash.finish();
+        let running = self.mesh_overlay_job.as_ref().map(|job| job.key);
+        if view.mesh_overlay_key() == Some(key) || running == Some(key) {
+            return;
+        }
+        let source = model.mesh_overlay_source(view, &stale);
+        let (sender, overlays) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("mesh overlay".into())
+            .spawn(move || {
+                let _ = sender.send(source.build());
+                ctx.request_repaint();
+            });
+        self.mesh_overlay_job = spawned.is_ok().then_some(MeshOverlayJob { key, overlays });
     }
 
     /// Rebuilds the scene after the result selection or deformation changed, once the

@@ -19,6 +19,7 @@ impl NumberBlock {
                 text,
                 kinds: vec![Some(ValueKind::Factor); values.len()],
                 problem: None,
+                unlinked: Vec::new(),
             })),
             values,
         };
@@ -33,6 +34,52 @@ impl NumberBlock {
     /// Why a Formula block gives nothing, see [`FormulaState::problem`].
     pub(super) fn formula_problem(&self) -> Option<&str> {
         self.formula.as_ref()?.problem.as_deref()
+    }
+
+    /// Whether input `index` of a Formula block lost its link and waits for a new one.
+    pub(super) fn formula_input_unlinked(&self, index: usize) -> bool {
+        self.formula
+            .as_ref()
+            .is_some_and(|f| f.unlinked.contains(&index))
+    }
+
+    /// The input a wire dropped on its empty pin takes: the first one that lost its link,
+    /// so that a formula naming it works again, or else a new one by the next letter.
+    pub(super) fn next_formula_input(&self) -> Option<Vec<String>> {
+        let index = (self.formula.as_ref())
+            .and_then(|f| f.unlinked.iter().min().copied())
+            .unwrap_or(self.values.len());
+        (index < MAX_INPUTS).then(|| {
+            vec![
+                links::PARAMETERS.to_owned(),
+                input_letter(index).to_string(),
+            ]
+        })
+    }
+
+    /// Takes the input of [`Self::next_formula_input`], adding it if it is new. A new one
+    /// goes again at the next sync unless the link is made, see [`drop_unlinked_inputs`].
+    pub(super) fn take_formula_input(&mut self) -> Option<Vec<String>> {
+        let slot = self.next_formula_input()?;
+        let index = input_index(&slot[1])?;
+        if index >= self.values.len() {
+            self.values.resize(index + 1, 0.0);
+        }
+        if let Some(formula) = &mut self.formula {
+            formula.unlinked.retain(|i| *i != index);
+        }
+        self.settle_formula();
+        Some(slot)
+    }
+
+    /// The letters of the inputs its formula names that no link gives.
+    pub(super) fn formula_missing(&self) -> Vec<char> {
+        match (&self.formula, self.parsed()) {
+            (Some(formula), Ok(expr)) => {
+                missing_inputs(&expr, self.values.len(), &formula.unlinked)
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// Its formula read, or why it cannot be.
@@ -60,6 +107,25 @@ impl NumberBlock {
                 return;
             }
         };
+        // An input the formula names that no link gives: the formula stays as typed and says
+        // which pin to link.
+        let missing = missing_inputs(&expr, self.values.len(), &formula.unlinked);
+        if !missing.is_empty() {
+            let names: Vec<String> = missing.iter().map(char::to_string).collect();
+            formula.problem = Some(match names.as_slice() {
+                [one] => format!(
+                    "input {one} is not connected: link a number to the empty pin to give it \
+                     again"
+                ),
+                more => format!(
+                    "inputs {} are not connected: link numbers to the empty pins to give them \
+                     again",
+                    more.join(", ")
+                ),
+            });
+            self.kind = None;
+            return;
+        }
         let open = (expr.inputs().into_iter())
             .any(|i| i < formula.kinds.len() && formula.kinds[i].is_none());
         if open {
@@ -155,6 +221,17 @@ impl NumberBlock {
     }
 }
 
+/// The letters of the inputs `expr` names that a Formula block of `count` inputs, of
+/// which `unlinked` lost their link, does not have.
+fn missing_inputs(expr: &Expr, count: usize, unlinked: &[usize]) -> Vec<char> {
+    let mut missing: Vec<usize> = (expr.inputs().into_iter())
+        .filter(|&i| i >= count || unlinked.contains(&i))
+        .collect();
+    missing.sort_unstable();
+    missing.dedup();
+    missing.into_iter().map(input_letter).collect()
+}
+
 /// Whether the result of the Formula block `number` of block `id` is a series, with the
 /// inputs links give series of by `series`.
 pub(super) fn formula_gives_series(
@@ -178,9 +255,10 @@ pub(super) fn formula_gives_series(
     expr.gives_series(&flags)
 }
 
-/// Removes the inputs of Formula blocks that no link and no wire through a group reaches
-/// any more: the inputs after one that goes move up a letter, in the formula, the links and
-/// the wires of groups too, so that the formula keeps its meaning. Whether any went.
+/// Removes the last inputs of Formula blocks that no link and no wire through a group
+/// reaches any more. An input before a linked one keeps its letter and waits for a new link,
+/// see [`FormulaState::unlinked`]: no input moves to another letter, so the formula stays
+/// as typed. Whether any input went.
 pub(super) fn drop_unlinked_inputs(nodes: &mut [Node], links: &mut [Link]) -> bool {
     let formulas: Vec<(u64, usize)> = (nodes.iter())
         .filter_map(|n| match &n.block {
@@ -213,68 +291,23 @@ pub(super) fn drop_unlinked_inputs(nodes: &mut [Node], links: &mut [Link]) -> bo
                 }
             }
         }
-        if used.iter().all(|u| *u) {
-            continue;
-        }
-        dropped = true;
-        // The new index of every input that stays.
-        let mut moved = vec![0; count];
-        let mut next = 0;
-        for i in 0..count {
-            moved[i] = next;
-            if used[i] {
-                next += 1;
-            }
-        }
-        let rename = |path: &mut Vec<String>| {
-            if let Some(i) = input_of(path).filter(|i| *i < count) {
-                path[1] = input_letter(moved[i]).to_string();
-            }
-        };
-        for l in links.iter_mut().filter(|l| l.target == id) {
-            if l.slot.is_empty() {
-                rename(&mut l.item);
-            } else {
-                rename(&mut l.slot);
-            }
-        }
-        for node in nodes.iter_mut() {
-            if let Block::Group(group) = &mut node.block {
-                for socket in group.inputs.iter_mut().chain(group.outputs.iter_mut()) {
-                    let pins = socket.targets.iter_mut().chain(socket.source.iter_mut());
-                    for pin in pins.filter(|p| p.node == id) {
-                        rename(&mut pin.path);
-                    }
-                }
-            }
-        }
         let Some(Block::Formula(number)) =
             (nodes.iter_mut().find(|n| n.id == id)).map(|n| &mut n.block)
         else {
             continue;
         };
-        let keep = |v: &mut Vec<f64>| {
-            let mut i = 0;
-            v.retain(|_| {
-                i += 1;
-                used.get(i - 1).copied().unwrap_or(false)
-            });
-        };
-        keep(&mut number.values);
-        let mut i = 0;
-        number.series.retain(|_| {
-            i += 1;
-            used.get(i - 1).copied().unwrap_or(false)
-        });
-        if let Some(formula) = &mut number.formula {
-            formula.text = plx_model::formula::rename_inputs(&formula.text, &|i| {
-                match used.get(i) {
-                    Some(true) => Some(moved[i]),
-                    Some(false) => None,
-                    // A letter beyond the inputs stays as typed, and is reported.
-                    None => Some(i),
-                }
-            });
+        let kept = used.iter().rposition(|u| *u).map_or(0, |last| last + 1);
+        if kept < count {
+            dropped = true;
+            number.values.truncate(kept);
+            number.series.truncate(kept);
+        }
+        let unlinked: Vec<usize> = (0..kept).filter(|&i| !used[i]).collect();
+        if let Some(formula) = &mut number.formula
+            && formula.unlinked != unlinked
+        {
+            formula.unlinked = unlinked;
+            dropped = true;
         }
         number.settle_formula();
     }
@@ -512,24 +545,15 @@ impl ProjectApp {
         self.sync_due = true;
     }
 
-    /// The input of a Formula block a wire dropped on its empty pin takes: a new one, by
-    /// the next letter, which is added. It goes again at the next sync unless the link is
-    /// made, see [`drop_unlinked_inputs`].
+    /// The input of a Formula block a wire dropped on its empty pin takes, see
+    /// [`NumberBlock::take_formula_input`].
     pub(super) fn new_formula_input(&mut self, target: u64) -> Option<Vec<String>> {
         let Some(Block::Formula(number)) = self.node(target).map(|n| &mut n.block) else {
             return None;
         };
-        let count = number.values.len();
-        if count >= MAX_INPUTS {
-            return None;
-        }
-        number.values.push(0.0);
-        number.settle_formula();
+        let slot = number.take_formula_input()?;
         self.sync_due = true;
-        Some(vec![
-            links::PARAMETERS.to_owned(),
-            input_letter(count).to_string(),
-        ])
+        Some(slot)
     }
 
     /// The input a wire dropped on the empty pin of a Formula block is checked against:
@@ -539,10 +563,7 @@ impl ProjectApp {
         let Block::Formula(number) = &node.block else {
             return None;
         };
-        Some(vec![
-            links::PARAMETERS.to_owned(),
-            input_letter(number.values.len()).to_string(),
-        ])
+        number.next_formula_input()
     }
 
     pub(super) fn edit_formula(&mut self, id: u64) {
@@ -697,6 +718,14 @@ mod tests {
         }))
     }
 
+    fn take_input(nodes: &mut [Node], id: u64) -> Vec<String> {
+        let node = nodes.iter_mut().find(|n| n.id == id).unwrap();
+        let Block::Formula(number) = &mut node.block else {
+            panic!("no formula");
+        };
+        number.take_formula_input().unwrap()
+    }
+
     fn number(nodes: &[Node], id: u64) -> NumberBlock {
         let node = nodes.iter().find(|n| n.id == id).unwrap();
         node.as_number().unwrap().0.clone()
@@ -805,28 +834,84 @@ mod tests {
     }
 
     #[test]
-    fn an_input_whose_link_goes_goes_too_and_later_ones_move_up() {
+    fn an_input_whose_link_goes_keeps_the_formula_as_typed() {
         let length = Parameter::new("L", ValueKind::LENGTH, 2.0);
         let mut nodes = vec![
             parameters(1, vec![length]),
             formula(2, "a + max(b, c) + 2[mm]", 3),
         ];
-        // b lost its link: c becomes b, in the formula and in its link.
+        // b lost its link: c keeps its letter, the formula stays and names b.
         let mut links = vec![
             link(1, &["Value", "L"], 2, &["Parameters", "a"]),
             link(1, &["Value", "L"], 2, &["Parameters", "c"]),
         ];
         numbers::refresh_kinds(&mut nodes, &mut links);
         let block = number(&nodes, 2);
-        assert_eq!(block.formula_text(), "a + max(?, b) + 2[mm]");
+        assert_eq!(block.formula_text(), "a + max(b, c) + 2[mm]");
+        assert_eq!(
+            block.formula_problem(),
+            Some("input b is not connected: link a number to the empty pin to give it again")
+        );
+        assert_eq!(block.values.len(), 3);
+        assert!(block.formula_input_unlinked(1));
+        assert_eq!(links[1].slot, path(&["Parameters", "c"]));
+        assert_eq!(block.kind, None);
+        // The last input goes once its link goes, still with the formula as typed.
+        links.pop();
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        let block = number(&nodes, 2);
+        assert_eq!(block.formula_text(), "a + max(b, c) + 2[mm]");
+        assert_eq!(block.values.len(), 1);
         assert!(
             block
                 .formula_problem()
-                .is_some_and(|p| p.contains("link was removed"))
+                .is_some_and(|p| p.starts_with("inputs b, c are not connected"))
         );
-        assert_eq!(block.values.len(), 2);
-        assert_eq!(links[1].slot, path(&["Parameters", "b"]));
-        assert_eq!(block.kind, None);
+    }
+
+    #[test]
+    fn a_new_link_gives_the_input_that_lost_its_link_again() {
+        let length = Parameter::new("L", ValueKind::LENGTH, 2.0);
+        let mut nodes = vec![
+            parameters(1, vec![length]),
+            formula(2, "(a - b) / a * 100", 2),
+        ];
+        let mut links = vec![link(1, &["Value", "L"], 2, &["Parameters", "a"])];
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        let block = number(&nodes, 2);
+        assert_eq!(block.formula_text(), "(a - b) / a * 100");
+        assert_eq!(block.values.len(), 1);
+        assert!(
+            block
+                .formula_problem()
+                .is_some_and(|p| p.contains("input b"))
+        );
+        // A wire on the empty pin gives b again, and the formula works.
+        let slot = take_input(&mut nodes, 2);
+        assert_eq!(slot, path(&["Parameters", "b"]));
+        links.push(link(1, &["Value", "L"], 2, &[&slot[0], &slot[1]]));
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        let block = number(&nodes, 2);
+        assert_eq!(block.formula_problem(), None);
+        assert_eq!(block.formula_text(), "(a - b) / a * 100");
+    }
+
+    #[test]
+    fn a_new_link_fills_the_first_input_that_lost_its_link() {
+        let length = Parameter::new("L", ValueKind::LENGTH, 2.0);
+        let mut nodes = vec![parameters(1, vec![length]), formula(2, "a + b + c", 3)];
+        let mut links = vec![
+            link(1, &["Value", "L"], 2, &["Parameters", "a"]),
+            link(1, &["Value", "L"], 2, &["Parameters", "c"]),
+        ];
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        let slot = take_input(&mut nodes, 2);
+        assert_eq!(slot, path(&["Parameters", "b"]));
+        links.push(link(1, &["Value", "L"], 2, &[&slot[0], &slot[1]]));
+        numbers::refresh_kinds(&mut nodes, &mut links);
+        let block = number(&nodes, 2);
+        assert_eq!(block.formula_problem(), None);
+        assert_eq!(block.next_formula_input(), Some(path(&["Parameters", "d"])));
     }
 
     #[test]

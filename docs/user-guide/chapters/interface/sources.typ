@@ -220,6 +220,15 @@ dialog asks for the file at once. Its rows depend on the file:
   is a geometry object of its own (@mesh-import);
 - geometry: #ui("Geometry"), to link to the #ui("Geometry") row of analyses.
 
+A file dragged from the file manager onto the schematic becomes a file block where it is
+dropped, without the dialog; several files dropped together give a block each, one below the
+other. A project file (`.ndl`) opens instead (@unsaved-changes), and a file a file block cannot
+read is named in the output pane. In #ui("Geometry"), #ui("FE Model") and #ui("Results") a
+dropped file goes into the analysis shown instead (@geometry-import).
+
+#screenshot("file-block-drop.png", [A STEP file dropped onto the schematic: the file block
+  reads it at once, and the output pane names the file])
+
 ==== Single parts of an assembly <file-block-parts>
 
 A STEP file often holds a whole assembly while an analysis needs only some of its parts. When
@@ -350,7 +359,10 @@ right of that row to the #ui("Geometry") row of the analyses that are to use the
 geometry. Blocks in a row apply their operations one after the other.
 
 Double-click the block to open its editor. It shows the geometry linked to it in its own 3D
-view: click the edges or faces to act on, a click on a picked one removes it again. Picked
+view: click the edges or faces to act on, a click on a picked one removes it again. A box
+dragged with the left button adds all edges, faces or corners inside it that a click could
+pick (dragged to the left also those it crosses), with #key("Ctrl") it removes them; a split
+by plane takes its plane from a single click. Picked
 ones are drawn red, the one under the resting mouse orange. Choose the operation and type its
 radius, distance or offset; #ui("Preview") applies it and shows the result, #ui("Input") goes back to picking.
 #ui("OK") keeps the operation, and the result of the preview with it if nothing changed since.
@@ -696,10 +708,18 @@ components, the utilization of the largest stress of a region. Add it with
 A new block has no inputs, only an empty pin. Drag the pin of a number or a series to it, and
 it becomes the input #ui("a"); the next one #ui("b"), then #ui("c"), up to #ui("z"), as with
 the inputs of a group (@node-groups). Every input comes from its link: remove the link (right-click
-its pin) and the input goes. The inputs after it move up a letter, in the formula too, and
-where the formula used the removed input it now shows `?`, so it gives no result until you
-link a new input or change the formula. The #ui("Result") row gives the number or the series the formula computes; drag
-its pin on to any number of its kind, another Math or Formula block, a Plot or a Preview block.
+its pin) and the input waits for a new one. The formula stays as you typed it, and no other
+input changes its letter. Until a new link gives the input, the formula gives no result: the
+#ui("Result") row names the input that is not connected, and an input between linked ones
+shows #ui("not connected"). Drag the pin of a number to the empty pin, and it gives the
+first input that lost its link, so the formula works again; with none, it adds the next
+letter. The last inputs without a link go from the block. The #ui("Result") row gives the
+number or the series the formula computes; drag its pin on to any number of its kind, another
+Math or Formula block, a Plot or a Preview block.
+
+#screenshot("formula-unconnected-input.png", [Copy of Formula names b, which no link gives:
+  it gives no result and says so. In Sum the link of b was removed: b waits for a new link,
+  c keeps its letter, and a wire dropped on the empty pin gives b again])
 
 The block shows its formula read-only. Click it, or double-click the block, to edit it in its
 window: the formula, the result it gives as you type, the inputs with their kinds and where
@@ -769,11 +789,16 @@ and the field in the dialog is read-only while the link is there. Renaming the i
 parameter. The numbers that can be exposed are those of loads, boundary conditions, defined
 fields and initial conditions, of materials and sections, the duration and the number of frames
 of static, heat transfer, visco and Dynamic steps, the number of modes of a frequency step and
-the numbers of the transforms under #ui("Mesh Operations") (@mesh-tools). A Materials block (@materials-block)
+the numbers of the transforms under #ui("Mesh Operations") (@mesh-tools) and those of the mesh
+setup (@mesh-setup): the sizes, the elements per curvature radius and the options of the default
+meshing parameters and of Meshing Parameters items, the size and depth of Local Mesh Size items.
+An option is a number too, 1 for on and 0 for off. A Materials block (@materials-block)
 exposes the numbers of its own materials in the same way, a Cross-Sections block
 (@cross-sections-block) the dimensions of its cross-sections.
 
-Exposing a number does not change the analysis: only a new value makes it out of date.
+Exposing a number does not change the analysis: only a new value makes it out of date. A new
+number of the mesh setup makes the parts it meshes out of date: #ui("Update Project") meshes
+them anew before it solves.
 
 === Measure <measure-block>
 

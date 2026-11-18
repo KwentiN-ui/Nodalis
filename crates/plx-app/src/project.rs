@@ -63,6 +63,10 @@ mod workspace;
 const RECENT_KEY: &str = "recent_projects";
 /// How many projects Open Recent lists.
 const RECENT_MAX: usize = 10;
+/// Storage key of the names of the blocks last added with the picker, latest first.
+const RECENT_BLOCKS_KEY: &str = "recent_blocks";
+/// How many blocks used last the empty picker lists, after Analysis.
+const RECENT_BLOCKS_MAX: usize = 5;
 
 /// What a block of the schematic is, without its data: for menus, texts and decisions that
 /// only depend on the kind.
@@ -226,6 +230,10 @@ struct FormulaState {
     /// Why it gives nothing: the formula cannot be read, its units do not go together, or
     /// its result goes to a number of another unit. Found by every sync.
     problem: Option<String>,
+    /// The inputs between linked ones that no link reaches any more, by index: they keep
+    /// their letter, so that the formula stays as typed, until a new link takes them. Found
+    /// by every sync.
+    unlinked: Vec<usize>,
 }
 
 /// The first element of the path of the rows over the outputs and inputs of a study, which
@@ -1817,6 +1825,14 @@ impl Node {
         }
     }
 
+    /// The geometry whose mesh setup exposed parameters of the analysis can set.
+    fn exposing_geometry(&self) -> Option<&plx_model::Geometry> {
+        match self.kind() {
+            Kind::Analysis => self.link_data()?.geometry,
+            _ => None,
+        }
+    }
+
     fn exposing_fe_mut(&mut self) -> Option<&mut plx_model::FeModel> {
         match &mut self.block {
             Block::Analysis(analysis) => match (&mut analysis.window, &mut analysis.data) {
@@ -1837,10 +1853,13 @@ impl Node {
         let Some(path) = fe.exposed(key).map(|e| e.path.clone()) else {
             return false;
         };
-        // A number of a mesh operation moves the mesh of the analysis along.
+        // A number of a mesh operation moves the mesh of the analysis along; one of the mesh
+        // setup makes the parts it meshes out of date, to be meshed anew by the solve.
         let changed = match &mut self.block {
             Block::Analysis(analysis) => match (&mut analysis.window, &mut analysis.data) {
                 (Some(window), _) => window.set_value(&path, value),
+                (None, Some(data)) if path.item.is_meshing() => (data.geometry.as_mut())
+                    .is_some_and(|geometry| geometry.set_value(&path, value)),
                 (None, Some(data)) => data.model.set_value_meshed(&mut data.mesh, &path, value),
                 _ => false,
             },
@@ -2142,6 +2161,9 @@ enum Action {
     /// Rename the socket of the row of `path` of a group or its Group Input or Group
     /// Output block.
     RenameSocket(u64, Vec<String>),
+    /// Removes the input or output of a group a row of the group's block, or of its Group
+    /// Input or Group Output block, is of.
+    RemoveSocket(u64, Vec<String>),
 }
 
 /// A project read from its file, with notes on its conversion, or why it could not be read.
@@ -2221,6 +2243,9 @@ pub struct ProjectApp {
     update_scope: Option<Vec<u64>>,
     /// The overview of blocks to add, open after a double-click into the schematic.
     picker: Option<NodePicker>,
+    /// Files dropped onto the schematic that wait for the pointer to come back, with the
+    /// time they were dropped: each becomes a file block where they were dropped.
+    dropped_files: Option<(Vec<PathBuf>, f64)>,
     /// Show All Blocks was asked for: the view fits the blocks in the next frame.
     show_all: bool,
     /// Whether the minimap of the schematic is shown.
@@ -2240,6 +2265,8 @@ pub struct ProjectApp {
     opening: Option<(PathBuf, Receiver<Opened>)>,
     /// The project files opened or saved last, the latest first; see Open Recent.
     recent: Vec<PathBuf>,
+    /// The names of the blocks last added with the picker, latest first.
+    recent_blocks: Vec<String>,
     /// The save running on a worker thread, and what autosave needs to know.
     saver: saving::Saver,
     unsaved: unsaved::Unsaved,
@@ -2380,6 +2407,7 @@ impl ProjectApp {
             update_after_sync: false,
             update_scope: None,
             picker: None,
+            dropped_files: None,
             show_all: false,
             show_minimap: true,
             look_at: None,
@@ -2389,6 +2417,9 @@ impl ProjectApp {
             new_analysis: None,
             opening: None,
             recent: cc.storage.map(stored_recent).unwrap_or_default(),
+            recent_blocks: (cc.storage)
+                .and_then(|s| eframe::get_value(s, RECENT_BLOCKS_KEY))
+                .unwrap_or_default(),
             saver: Default::default(),
             unsaved: Default::default(),
             update_queue: VecDeque::new(),
@@ -3811,7 +3842,10 @@ impl ProjectApp {
                     .map(|(.., value)| value)
             }
             [cell, key] if cell == links::PARAMETERS => match node.exposing_fe() {
-                Some(fe) => fe.value_at(&fe.exposed(key.parse().ok()?)?.path),
+                Some(fe) => {
+                    let path = &fe.exposed(key.parse().ok()?)?.path;
+                    fe.value_in(node.exposing_geometry(), path)
+                }
                 None => node.as_mesh()?.primitive.value(key),
             },
             _ => None,
@@ -3962,23 +3996,79 @@ impl ProjectApp {
 
     /// Adds a file block and asks for its file; returns its id.
     fn add_file(&mut self, position: egui::Pos2) -> u64 {
-        let id = self.next_id();
-        let name = block_name("File");
-        let units = self.units;
-        self.nodes.push(Node::file_block(
-            id,
-            name.clone(),
-            String::new(),
-            units,
-            None,
-        ));
-        self.graph.insert_node(position, id);
+        let id = self.add_file_block(position, String::new());
+        let name = self.name_of(id);
         self.output.push(format!(
             "{name} created: choose a results file (.frd), an input file (.inp) or geometry \
              (STEP, IGES, BREP, STL) and drag what it reads to an analysis."
         ));
         self.choose_source_file(id);
         id
+    }
+
+    /// Adds a file block reading `path` at the position.
+    fn add_file_block(&mut self, position: egui::Pos2, path: String) -> u64 {
+        let id = self.next_id();
+        let name = block_name("File");
+        let units = self.units;
+        self.nodes
+            .push(Node::file_block(id, name, path, units, None));
+        self.graph.insert_node(position, id);
+        self.files_checked = None;
+        id
+    }
+
+    /// Adds a file block for each dropped file, the first at `position` and the others below
+    /// it; files a file block cannot read are named in the output.
+    fn add_dropped_files(&mut self, position: egui::Pos2, paths: Vec<PathBuf>) {
+        let base = self.export_base();
+        let mut position = position;
+        for path in paths {
+            let shown = match &base {
+                Some(base) => path.strip_prefix(base).unwrap_or(&path),
+                None => &path,
+            };
+            let shown = shown.to_string_lossy().into_owned();
+            let file = path
+                .file_name()
+                .map_or_else(|| shown.clone(), |n| n.to_string_lossy().into_owned());
+            if FileKind::of(&shown).is_none() {
+                self.output.push(format!(
+                    "{file} was not added: a file block reads results files (.frd), input \
+                     files (.inp) and geometry (STEP, IGES, BREP, STL)."
+                ));
+                continue;
+            }
+            let id = self.add_file_block(position, shown);
+            let name = self.name_of(id);
+            self.output.push(format!(
+                "{name} reads {file}: drag what it reads to an analysis."
+            ));
+            position.y += DROPPED_FILE_SPACING;
+        }
+    }
+
+    /// Places the files dropped onto the schematic once the pointer is back over it, as
+    /// the pointer is not followed while files are dragged in; without the pointer the
+    /// blocks go to the middle of the view.
+    fn place_dropped_files(&mut self, ui: &egui::Ui, to_graph: egui::emath::TSTransform) {
+        let Some((_, dropped_at)) = &self.dropped_files else {
+            return;
+        };
+        let rect = ui.max_rect();
+        let (pointer, now) = ui.ctx().input(|i| (i.pointer.hover_pos(), i.time));
+        let screen = match pointer.filter(|p| rect.contains(*p)) {
+            Some(pointer) => pointer,
+            None if now - dropped_at > DROP_POINTER_WAIT => rect.center(),
+            None => {
+                ui.ctx().request_repaint();
+                return;
+            }
+        };
+        let Some((paths, _)) = self.dropped_files.take() else {
+            return;
+        };
+        self.add_dropped_files(to_graph * screen, paths);
     }
 
     /// Asks for the file a file block reads.
@@ -5154,20 +5244,45 @@ impl ProjectApp {
         }
     }
 
-    fn duplicate(&mut self, id: u64) {
+    /// Duplicates the blocks, Shift+D as in Blender: each copy takes the inputs of its
+    /// block, from the copy of the source when that was duplicated too, else from the
+    /// source itself; what the blocks feed is not linked to the copies. A group is copied
+    /// with the blocks in it.
+    fn duplicate_all(&mut self, ids: &[u64]) {
+        let mut copies = HashMap::new();
+        for &id in ids {
+            match self.node(id).map(|n| n.kind()) {
+                Some(Kind::Group) => {
+                    if let Some(map) = self.duplicate_group(id, egui::vec2(40.0, 260.0)) {
+                        let name = self.name_of(map[&id]);
+                        self.output.push(format!("{name} created"));
+                        copies.extend(map);
+                    }
+                }
+                Some(Kind::GroupInput | Kind::GroupOutput) | None => {}
+                _ => {
+                    if let Some(copy) = self.duplicate(id) {
+                        copies.insert(id, copy);
+                    }
+                }
+            }
+        }
+        if !copies.is_empty() {
+            self.link_duplicates(&copies);
+        }
+    }
+
+    /// Copies the block next to it, without links; returns the id of the copy.
+    fn duplicate(&mut self, id: u64) -> Option<u64> {
         let position = (self.graph_node(id))
             .and_then(|g| self.graph.get_node_info(g))
             .map_or(egui::pos2(40.0, 40.0), |info| {
                 info.pos + egui::vec2(40.0, 260.0)
             });
-        let Some(name) = self.node(id).map(|n| format!("Copy of {}", n.name)) else {
-            return;
-        };
+        let name = self.node(id).map(|n| format!("Copy of {}", n.name))?;
         let new_id = self.next_id();
         let name = block_name(&name);
-        let Some(copy) = self.node(id).and_then(|n| n.copied(new_id, name.clone())) else {
-            return;
-        };
+        let copy = self.node(id).and_then(|n| n.copied(new_id, name.clone()))?;
         self.nodes.push(copy);
         self.graph.insert_node(position, new_id);
         // The copy goes into the frame of the block, and looks like it.
@@ -5178,6 +5293,7 @@ impl ProjectApp {
             self.compact.insert(new_id);
         }
         self.output.push(format!("{name} created"));
+        Some(new_id)
     }
 
     /// Deletes the block, a group with the blocks in it; undo brings it back.
@@ -6050,7 +6166,7 @@ impl ProjectApp {
                         .map(|(fe, collection)| {
                             let mut rows = collection_rows(collection, fe, &n.expanded);
                             let incoming = incoming.get(&n.id).map_or(&[][..], Vec::as_slice);
-                            rows.extend(exposed_rows(fe, &n.expanded, incoming));
+                            rows.extend(exposed_rows(fe, None, &n.expanded, incoming));
                             rows
                         })
                         .unwrap_or_default(),
@@ -6100,6 +6216,7 @@ impl ProjectApp {
                     (Kind::Analysis, Some(status)) => block_rows(
                         status,
                         fe,
+                        n.exposing_geometry(),
                         &n.expanded,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
                         bundles.get(&n.id).map_or(&[][..], Vec::as_slice),
@@ -6155,7 +6272,8 @@ impl ProjectApp {
                     transform: n.as_transform().map(|t| t.transform),
                     point: n.as_measure().and_then(|m| m.kind.point()),
                     parameters: (n.as_parameters()).map_or_else(Vec::new, |p| p.parameters.clone()),
-                    exposed: n.exposing_fe().map_or_else(Vec::new, ExposedView::of),
+                    exposed: (n.exposing_fe())
+                        .map_or_else(Vec::new, |fe| ExposedView::of(fe, n.exposing_geometry())),
                     note: match &n.block {
                         Block::Note(text) => text.clone(),
                         _ => String::new(),
@@ -6278,7 +6396,7 @@ impl ProjectApp {
             && let Some(screen) = ui.ctx().input(|i| i.pointer.interact_pos())
         {
             let graph = viewer.to_global.inverse() * screen;
-            self.picker = Some(NodePicker::new(screen, graph));
+            self.picker = Some(self.block_picker(screen, graph));
         }
         self.schematic_keys(ui, ui.max_rect(), viewer.to_global.inverse());
         self.minimap(ui.ctx(), ui.max_rect(), viewer.to_global);
@@ -6291,10 +6409,13 @@ impl ProjectApp {
                 node_picker::Outcome::Picked(i) => {
                     viewer.actions.push(kinds[i].action(picker.graph));
                     self.picker = None;
+                    let label = entries[i].label;
+                    self.recent_blocks = with_recent_block(&self.recent_blocks, label);
                 }
             }
         }
         self.place_block(ui, viewer.to_global.inverse(), &mut viewer.actions);
+        self.place_dropped_files(ui, viewer.to_global.inverse());
         if self.nodes.is_empty() {
             empty_hint(ui, layer);
         }
@@ -6412,6 +6533,7 @@ impl ProjectApp {
             return self.group_refusal(from, to);
         }
         let slot = visualize::preview_slot(&self.nodes, to.0, from.1)
+            .or_else(|| self.setup_category_slot(to.0, from.1, to.1))
             .or_else(|| {
                 groups::is_open(to.1)
                     .then(|| self.next_formula_input(to.0))
@@ -6419,6 +6541,20 @@ impl ProjectApp {
             })
             .unwrap_or_else(|| self.checked_slot(to.0, to.1));
         refusal(&self.nodes, &self.links, from.0, from.1, to.0, &slot)
+    }
+
+    /// The category a wire of `item` dropped on the Setup row `slot` of the analysis `target`
+    /// goes to, so that the setup need not be opened for it; `None` for other pins.
+    fn setup_category_slot(
+        &self,
+        target: u64,
+        item: &[String],
+        slot: &[String],
+    ) -> Option<Vec<String>> {
+        let analysis = (self.nodes.iter()).any(|n| n.id == target && n.kind() == Kind::Analysis);
+        analysis
+            .then(|| links::setup_category_slot(item, slot))
+            .flatten()
     }
 
     /// Says why the wire being dragged cannot end at the pin under the pointer.
@@ -6438,6 +6574,33 @@ impl ProjectApp {
                 egui::PopupAnchor::Pointer,
             )
             .show(|ui| ui.label(format!("Cannot link: {why}")));
+            return;
+        }
+        // A category dropped on the closed setup says where it goes.
+        let Some(drag) = &self.dragging else {
+            return;
+        };
+        let routed = (self.pin_rects.iter())
+            .filter(|(key, rect)| {
+                rect.expand(2.0).contains(pointer) && verdicts.get(key) == Some(&None)
+            })
+            .find_map(|(key, _)| {
+                let (item, target, slot) = if drag.output {
+                    (&drag.path, key.id, &key.path)
+                } else {
+                    (&key.path, drag.id, &drag.path)
+                };
+                self.setup_category_slot(target, item, slot)
+            });
+        if let Some(slot) = routed {
+            let id = egui::Id::new("schematic link routed");
+            egui::Tooltip::always_open(
+                ui.ctx().clone(),
+                ui.layer_id(),
+                id,
+                egui::PopupAnchor::Pointer,
+            )
+            .show(|ui| ui.label(format!("Links to {}", slot.join(" > "))));
         }
     }
 
@@ -7808,6 +7971,7 @@ impl ProjectApp {
                 .map(|l| l.target)
                 .collect(),
             Action::Split(id, _) => vec![*id],
+            Action::RemoveSocket(id, path) => self.socket_takers(*id, path),
             // The analysis it continues takes its steps.
             Action::Merge(id) => (self.links.iter())
                 .filter(|l| l.target == *id && links::is_state(l))
@@ -8028,20 +8192,7 @@ impl ProjectApp {
                 self.rename = name.map(|name| (id, name));
             }
             Action::DeleteAll(ids) => self.confirm_delete = self.deletable(ids),
-            Action::DuplicateAll(ids) => {
-                for id in ids {
-                    match self.node(id).map(|n| n.kind()) {
-                        Some(Kind::Group) => {
-                            if let Some(copy) = self.duplicate_group(id, egui::vec2(40.0, 260.0)) {
-                                let name = self.name_of(copy);
-                                self.output.push(format!("{name} created"));
-                            }
-                        }
-                        Some(Kind::GroupInput | Kind::GroupOutput) => {}
-                        _ => self.duplicate(id),
-                    }
-                }
-            }
+            Action::DuplicateAll(ids) => self.duplicate_all(&ids),
             Action::AddNote(pos) => {
                 self.add_note(pos);
             }
@@ -8070,7 +8221,7 @@ impl ProjectApp {
                 }
                 self.frame_label = None;
             }
-            Action::Pick(screen, graph) => self.picker = Some(NodePicker::new(screen, graph)),
+            Action::Pick(screen, graph) => self.picker = Some(self.block_picker(screen, graph)),
             Action::AddMath(pos) => {
                 self.add_math(pos);
             }
@@ -8121,6 +8272,8 @@ impl ProjectApp {
                 } else if let Some(slot) = visualize::preview_slot(&self.nodes, target, &item) {
                     self.keep_one_preview_link(target, &slot);
                     self.link(source, item, target, slot);
+                } else if let Some(slot) = self.setup_category_slot(target, &item, &slot) {
+                    self.link(source, item, target, slot);
                 } else {
                     self.link(source, item, target, slot);
                 }
@@ -8134,6 +8287,7 @@ impl ProjectApp {
             Action::EnterGroup(id) => self.enter_group(id),
             Action::LeaveGroup => self.leave_group(),
             Action::RenameSocket(id, path) => self.ask_socket_name(id, &path),
+            Action::RemoveSocket(id, path) => self.remove_socket(id, &path),
             Action::Continue {
                 source,
                 step,
@@ -8460,7 +8614,7 @@ impl ProjectApp {
                     }
                 }
                 Request::Campbell => self.open_campbell_of(ctx, id),
-                Request::SetUnits(units) => self.set_units(ctx, units),
+                Request::SetUnits(units) => self.set_units(units),
                 Request::Close => {
                     if self.close_window(id) && self.active == Some(id) {
                         self.in_project = true;
@@ -8537,6 +8691,7 @@ impl eframe::App for ProjectApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, settings::STORAGE_KEY, &self.settings);
         eframe::set_value(storage, RECENT_KEY, &self.recent);
+        eframe::set_value(storage, RECENT_BLOCKS_KEY, &self.recent_blocks);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -8597,11 +8752,20 @@ impl eframe::App for ProjectApp {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             (i.raw.dropped_files.iter())
                 .map(|f| f.path().to_path_buf())
-                .filter(|p| crate::model::is_project_file(p))
+                .filter(|p| !p.as_os_str().is_empty())
                 .collect()
         });
-        if let Some(path) = dropped.into_iter().next() {
+        let (projects, others): (Vec<PathBuf>, Vec<PathBuf>) = dropped
+            .into_iter()
+            .partition(|p| crate::model::is_project_file(p));
+        if let Some(path) = projects.into_iter().next() {
             self.ask_open(&ctx, path);
+        }
+        // Other files dropped onto the project workspace become file blocks; in Geometry,
+        // FE Model and Results the analysis imports them itself.
+        if !others.is_empty() && (self.in_project || self.embedded().is_none()) {
+            let now = ctx.input(|i| i.time);
+            self.dropped_files = Some((others, now));
         }
         self.app_bar(ui);
         // The analysis shown here, in Geometry, FE Model or Results.
@@ -9020,13 +9184,15 @@ struct ExposedView {
 }
 
 impl ExposedView {
-    fn of(fe: &plx_model::FeModel) -> Vec<Self> {
+    /// The exposed parameters of `fe`, those of the mesh setup with their numbers in
+    /// `geometry`.
+    fn of(fe: &plx_model::FeModel, geometry: Option<&plx_model::Geometry>) -> Vec<Self> {
         (fe.exposed.iter())
             .map(|e| Self {
                 key: e.key,
                 name: e.name.clone(),
-                value: fe.value_at(&e.path),
-                kind: fe.value_kind(&e.path),
+                value: fe.value_in(geometry, &e.path),
+                kind: fe.value_kind_in(geometry, &e.path),
             })
             .collect()
     }
@@ -9036,6 +9202,7 @@ impl ExposedView {
 /// a row with a pin for each, where value links set it.
 fn exposed_rows(
     fe: &plx_model::FeModel,
+    geometry: Option<&plx_model::Geometry>,
     expanded: &BTreeSet<Vec<String>>,
     incoming: &[(Vec<String>, String)],
 ) -> Vec<Row> {
@@ -9068,7 +9235,7 @@ fn exposed_rows(
     for exposed in &fe.exposed {
         let mut path = path.clone();
         path.push(exposed.key.to_string());
-        let gone = fe.value_at(&exposed.path).is_none();
+        let gone = fe.value_in(geometry, &exposed.path).is_none();
         let item = &exposed.path.item;
         let tip = if gone {
             format!(
@@ -9117,6 +9284,7 @@ const EXPOSED: &str = "Exposed Parameters";
 fn block_rows(
     status: &AnalysisStatus,
     fe: Option<&plx_model::FeModel>,
+    meshed_from: Option<&plx_model::Geometry>,
     expanded: &BTreeSet<Vec<String>>,
     incoming: &[(Vec<String>, String)],
     bundles: &[Bundle],
@@ -9358,7 +9526,7 @@ fn block_rows(
         }
     }
     if let Some(fe) = fe {
-        rows.extend(exposed_rows(fe, expanded, incoming));
+        rows.extend(exposed_rows(fe, meshed_from, expanded, incoming));
     }
     rows.push(cell("Solution", NodeIcon::Solution, status.solution, false));
     rows.push(cell("Results", NodeIcon::Results, status.results, false));
@@ -9860,14 +10028,24 @@ fn refusal(
         && item.first().is_some_and(|c| transform::takes(c))
         && item.len() <= 2;
     if !transformed && !links::compatible(item, slot) {
-        let kind = |path: &[String]| links::DataType::of(path).map_or("nothing", |t| t.label());
-        return Some(format!(
-            "{} of {from} is {} and {} of {to} takes {}.",
-            links::label(item),
-            with_article(kind(item)),
-            links::label(slot),
-            with_article(kind(slot)),
-        ));
+        let kind = |path: &[String]| links::DataType::of(path).map(|t| with_article(t.label()));
+        return Some(match (kind(item), kind(slot)) {
+            (Some(given), Some(taken)) => format!(
+                "{} of {from} is {given} and {} of {to} takes {taken}.",
+                links::label(item),
+                links::label(slot),
+            ),
+            (Some(given), None) => format!(
+                "{} of {from} is {given}, which {} of {to} does not take.",
+                links::label(item),
+                links::label(slot),
+            ),
+            (None, _) => format!(
+                "{} of {from} gives nothing {} of {to} takes.",
+                links::label(item),
+                links::label(slot),
+            ),
+        });
     }
     // A refine mesh block takes the model space of the mesh it refines.
     let target_space = match target_node.kind() {
@@ -10107,7 +10285,10 @@ fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
             Some(ValueKind::Quantity(Quantity::Length))
         }
         [cell, key] if cell == links::PARAMETERS => match node.exposing_fe() {
-            Some(fe) => fe.value_kind(&fe.exposed(key.parse().ok()?)?.path),
+            Some(fe) => {
+                let path = &fe.exposed(key.parse().ok()?)?.path;
+                fe.value_kind_in(node.exposing_geometry(), path)
+            }
             None => node.as_mesh()?.primitive.value_kind(key),
         },
 
@@ -10135,6 +10316,13 @@ fn with_article(word: &str) -> String {
 /// The file a relative export path names: next to the project file, or in the working folder
 /// while the project has none.
 /// How often the files of file blocks are looked at for changes.
+/// How far below each other the file blocks of files dropped together are put.
+const DROPPED_FILE_SPACING: f32 = 140.0;
+
+/// How long, in seconds, dropped files wait for the pointer to come back over the
+/// schematic before their blocks go to the middle of the view.
+const DROP_POINTER_WAIT: f64 = 0.3;
+
 const FILE_CHECK_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// What tells a change of a file: its path, size and time of modification; `None` when it is
@@ -10578,9 +10766,15 @@ enum StudyMesh {
 /// says.
 fn study_analysis_print(data: links::Data, mesh: StudyMesh, driven: impl Fn(u32) -> bool) -> u64 {
     let mut fe = data.fe.clone();
+    // The mesh setup counts without the numbers the study gives: set to one each, a number
+    // the setup takes.
+    let mut geometry = data.geometry.map(plx_model::Geometry::setup_only);
     for exposed in &data.fe.exposed {
         if driven(exposed.key) {
             fe.set_value(&exposed.path, 0.0);
+            if let Some(geometry) = &mut geometry {
+                geometry.set_value(&exposed.path, 1.0);
+            }
         }
     }
     let empty = plx_mesh::FeMesh::default();
@@ -10596,6 +10790,12 @@ fn study_analysis_print(data: links::Data, mesh: StudyMesh, driven: impl Fn(u32)
         })
         .flat_map(|o| o.part_indices(data.mesh))
         .collect();
+    // A mesh setup the study gives makes the mesh anew from point to point.
+    let remeshes = (data.fe.exposed.iter()).any(|e| driven(e.key) && e.path.item.is_meshing());
+    let mesh = match mesh {
+        StudyMesh::Own if remeshes => StudyMesh::Remeshed,
+        mesh => mesh,
+    };
     let still;
     let fe_mesh = match mesh {
         StudyMesh::Own if moved.is_empty() => data.mesh,
@@ -10613,7 +10813,7 @@ fn study_analysis_print(data: links::Data, mesh: StudyMesh, driven: impl Fn(u32)
     print.add(&plx_model::fingerprint::solve_input(fe_mesh, &fe).to_le_bytes());
     // How it meshes: the element sizes, the mesh setup and the refinement.
     if mesh != StudyMesh::None
-        && let Some(geometry) = data.geometry
+        && let Some(geometry) = &geometry
     {
         print.add_debug(&geometry.meshing);
         print.add_debug(&geometry.mesh_items);
@@ -11095,6 +11295,69 @@ impl BlockKind {
             label,
             keywords,
             tip,
+            icon: self.icon(),
+            detail: self.detail(category),
+        }
+    }
+
+    /// The grey line under its name in the picker: where its tile is on the ribbon, such as
+    /// "Sources › Mesh", or else its group.
+    fn detail(&self, category: &str) -> String {
+        use crate::command::{BlockTile as T, Cmd};
+        let tile = match self {
+            Self::Analysis => {
+                return crate::command::ribbon_path(Cmd::NewAnalysis)
+                    .unwrap_or_else(|| category.into());
+            }
+            Self::Materials => T::Materials,
+            Self::CrossSections => T::CrossSections,
+            Self::Mesh(MeshPrimitive::Box { .. }) => T::BoxMesh,
+            Self::Mesh(MeshPrimitive::Rectangle { .. }) => T::RectangleMesh,
+            Self::RefineMesh => T::RefineMesh,
+            Self::DeformedMesh => return category.into(),
+            Self::CadOperation => T::CadOperation,
+            Self::Transform => T::Transform,
+            Self::Parameters => T::Parameters,
+            Self::Math => T::Math,
+            Self::Switch => T::Switch,
+            Self::Formula => T::Formula,
+            Self::Measure => T::Measure,
+            Self::Study => T::Study,
+            Self::Campbell => T::Campbell,
+            Self::MeshExport => T::MeshExport,
+            Self::File => T::File,
+            Self::Note => T::Note,
+            Self::Plot => T::Plot,
+            Self::Preview => T::Preview,
+        };
+        crate::command::ribbon_path(Cmd::Place(tile)).unwrap_or_else(|| category.into())
+    }
+
+    /// The icon of its row in the picker, the one of its tile in the ribbon.
+    fn icon(&self) -> crate::command::TileIcon {
+        use crate::command::{Glyph, TileIcon};
+        let node = TileIcon::Node;
+        match self {
+            Self::Analysis => TileIcon::Shape(Glyph::Analysis),
+            Self::Materials => node(NodeIcon::Materials),
+            Self::CrossSections => node(NodeIcon::CrossSections),
+            Self::Mesh(MeshPrimitive::Box { .. }) => node(NodeIcon::BoxMesh),
+            Self::Mesh(MeshPrimitive::Rectangle { .. }) => node(NodeIcon::Mesh),
+            Self::RefineMesh | Self::DeformedMesh => node(NodeIcon::Mesh),
+            Self::CadOperation => node(NodeIcon::CadOperation),
+            Self::Transform => node(NodeIcon::Transform),
+            Self::Parameters => node(NodeIcon::Setup),
+            Self::Math => node(NodeIcon::Math),
+            Self::Switch => node(NodeIcon::Switch),
+            Self::Formula => node(NodeIcon::Formula),
+            Self::Measure => node(NodeIcon::Results),
+            Self::Study => node(NodeIcon::Steps),
+            Self::Campbell => node(NodeIcon::Solution),
+            Self::MeshExport => node(NodeIcon::Export),
+            Self::File => TileIcon::Tool(crate::icons::Icon::Import),
+            Self::Note => node(NodeIcon::Note),
+            Self::Plot => node(NodeIcon::Plot),
+            Self::Preview => node(NodeIcon::Picture),
         }
     }
 
@@ -12136,6 +12399,18 @@ impl SnarlViewer<u64> for Viewer {
             }
             return self.typed(BlockPin::single(info), id, &row.path, false);
         }
+        if groups::is_gap(&row.path) {
+            // Between the outputs and the inputs of a group: a thin line across, no pin.
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::hover());
+            let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+            ui.painter().hline(
+                (rect.left() + 4.0)..=(rect.right() - 4.0),
+                rect.center().y,
+                egui::Stroke::new(1.0, stroke.color),
+            );
+            return BlockPin::single(hidden_pin());
+        }
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::click());
         let painter = ui.painter();
@@ -12185,8 +12460,6 @@ impl SnarlViewer<u64> for Viewer {
             .visuals()
             .text_color()
             .gamma_multiply(if dim { 0.45 } else { 0.75 });
-        node_icons::paint(&faded, egui::pos2(x, middle - 7.0), row.icon, ink);
-        x += 20.0;
         let color = if dim {
             ui.visuals().text_color().gamma_multiply(0.5)
         } else if row.linked_from.is_some() {
@@ -12194,13 +12467,33 @@ impl SnarlViewer<u64> for Viewer {
         } else {
             ui.visuals().text_color()
         };
-        painter.text(
-            egui::pos2(x, middle),
-            egui::Align2::LEFT_CENTER,
-            &row.text,
-            egui::TextStyle::Body.resolve(ui.style()),
-            color,
-        );
+        if row.output && !row.input && row.path.first().is_some_and(|c| c == groups::SOCKET) {
+            // An output of a group, or of its Group Input block: its name sits at the right,
+            // by its pin, as in Blender, and its icon before the name.
+            let text = painter.text(
+                egui::pos2(rect.right() - 6.0, middle),
+                egui::Align2::RIGHT_CENTER,
+                &row.text,
+                egui::TextStyle::Body.resolve(ui.style()),
+                color,
+            );
+            node_icons::paint(
+                &faded,
+                egui::pos2(text.left() - 20.0, middle - 7.0),
+                row.icon,
+                ink,
+            );
+        } else {
+            node_icons::paint(&faded, egui::pos2(x, middle - 7.0), row.icon, ink);
+            x += 20.0;
+            painter.text(
+                egui::pos2(x, middle),
+                egui::Align2::LEFT_CENTER,
+                &row.text,
+                egui::TextStyle::Body.resolve(ui.style()),
+                color,
+            );
+        }
         let mut update = None;
         if let Some(state) = row.state {
             let symbol = egui::pos2(rect.right() - 18.0, middle - 8.0);
@@ -12250,8 +12543,81 @@ impl SnarlViewer<u64> for Viewer {
         if row.input || row.output {
             tip.push_str("\nRight-click a pin to remove its links.");
         }
+        let end = (self.block(id))
+            .is_some_and(|b| matches!(b.kind, Kind::GroupInput | Kind::GroupOutput));
+        let pointer = ui.ctx().pointer_hover_pos();
+        let mut removed = false;
+        if end
+            && groups::socket_of(&row.path).is_some()
+            && (response.hovered() || pointer.is_some_and(|p| rect.contains(p)))
+        {
+            // Inside the group, a cross on the side away from the pin removes the socket. The
+            // row takes its click, as the arrow of an expander.
+            let x = if row.output {
+                rect.left() + 12.0
+            } else {
+                rect.right() - 12.0
+            };
+            let area = egui::Rect::from_center_size(egui::pos2(x, middle), egui::vec2(16.0, 16.0));
+            let on = pointer.is_some_and(|p| area.contains(p));
+            let ink = if on {
+                ui.painter()
+                    .rect_filled(area, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+                ui.visuals().text_color()
+            } else {
+                ui.visuals().text_color().gamma_multiply(0.6)
+            };
+            let stroke = egui::Stroke::new(1.5, ink);
+            let r = 3.5;
+            let c = area.center();
+            ui.painter()
+                .line_segment([c + egui::vec2(-r, -r), c + egui::vec2(r, r)], stroke);
+            ui.painter()
+                .line_segment([c + egui::vec2(-r, r), c + egui::vec2(r, -r)], stroke);
+            if response.clicked()
+                && response
+                    .interact_pointer_pos()
+                    .is_some_and(|p| area.contains(p))
+            {
+                removed = true;
+                self.actions
+                    .push(Action::RemoveSocket(id, row.path.clone()));
+            }
+        }
         let response = response.on_hover_text(tip);
-        if toggled || (row.expander.is_some() && response.double_clicked_tolerant()) {
+        if groups::socket_of(&row.path).is_some() {
+            // An input of the group: on its block a pin at the left, on its Group Input block
+            // one at the right.
+            let input = match self.block(id).map(|b| b.kind) {
+                Some(Kind::GroupInput) => true,
+                Some(Kind::GroupOutput) => false,
+                _ => row.input,
+            };
+            let mut chosen = None;
+            response.context_menu(|ui| {
+                if ui.button("Rename").clicked() {
+                    chosen = Some(Action::RenameSocket(id, row.path.clone()));
+                }
+                let remove = if input {
+                    "Remove Input"
+                } else {
+                    "Remove Output"
+                };
+                if ui
+                    .button(remove)
+                    .on_hover_text(
+                        "Removes it from the group, with its wires inside and outside. Ctrl+Z \
+                         brings it back.",
+                    )
+                    .clicked()
+                {
+                    chosen = Some(Action::RemoveSocket(id, row.path.clone()));
+                }
+            });
+            self.actions.extend(chosen);
+        }
+        if removed {
+        } else if toggled || (row.expander.is_some() && response.double_clicked_tolerant()) {
             self.actions.push(Action::Toggle(id, row.path.clone()));
         } else if response.double_clicked_tolerant() && groups::socket_of(&row.path).is_some() {
             self.actions
@@ -13216,7 +13582,7 @@ fn empty_hint(ui: &egui::Ui, schematic: egui::LayerId) {
 
 /// The lines of the hint in an empty schematic, see [`empty_hint`].
 const EMPTY_HINT: [&str; 4] = [
-    "Click New Analysis in the ribbon and choose its model space and units.",
+    "Click New Analysis on the Analysis tab of the ribbon and choose its model space and units.",
     "Add materials, meshes and other blocks with the tiles of the ribbon,",
     "or double-click here to search all blocks.",
     "Double-click an analysis to open it in Geometry, FE Model and Results.",
@@ -13348,6 +13714,36 @@ struct MonitorRow {
     active: bool,
 }
 
+impl ProjectApp {
+    /// The picker of blocks to add at `screen`, `graph` in the schematic: empty, it lists
+    /// Analysis and then the blocks used last.
+    fn block_picker(&self, screen: egui::Pos2, graph: egui::Pos2) -> NodePicker {
+        let entries: Vec<_> = block_kinds().iter().map(BlockKind::entry).collect();
+        NodePicker::new(screen, graph).with_start(
+            picker_start(&entries, &self.recent_blocks),
+            "Search blocks …",
+        )
+    }
+}
+
+/// What the empty block picker lists: Analysis first, then the blocks used last.
+fn picker_start(entries: &[node_picker::Entry], recent: &[String]) -> Vec<usize> {
+    let analysis = entries.iter().position(|e| e.label == "Analysis");
+    let used = (recent.iter())
+        .filter_map(|name| entries.iter().position(|e| e.label == name))
+        .filter(|&i| Some(i) != analysis)
+        .take(RECENT_BLOCKS_MAX);
+    analysis.into_iter().chain(used).collect()
+}
+
+/// `recent` with the block `label` first, once, and at most a few more than the picker shows.
+fn with_recent_block(recent: &[String], label: &str) -> Vec<String> {
+    let mut list = vec![label.to_string()];
+    list.extend(recent.iter().filter(|r| *r != label).cloned());
+    list.truncate(RECENT_BLOCKS_MAX + 1);
+    list
+}
+
 /// The recent project files stored at the last exit that still exist.
 fn stored_recent(storage: &dyn eframe::Storage) -> Vec<PathBuf> {
     let mut recent = eframe::get_value::<Vec<PathBuf>>(storage, RECENT_KEY).unwrap_or_default();
@@ -13388,6 +13784,21 @@ fn timestamped(message: String) -> String {
     format!("{} {message}", chrono::Local::now().format("%H:%M:%S"))
 }
 
+/// The input links of duplicated blocks, for their copies (`copies` maps a block to its
+/// copy): a link between two duplicated blocks joins the copies, one from a block left as
+/// it is goes from that block to the copy.
+fn duplicated_inputs(links: &[Link], copies: &HashMap<u64, u64>) -> Vec<Link> {
+    (links.iter())
+        .filter_map(|l| {
+            Some(Link {
+                source: copies.get(&l.source).copied().unwrap_or(l.source),
+                target: *copies.get(&l.target)?,
+                ..l.clone()
+            })
+        })
+        .collect()
+}
+
 /// The name a new block starts with: blocks may share a name, they are told apart by their
 /// ids, so it is always `base`.
 fn block_name(base: &str) -> String {
@@ -13396,6 +13807,41 @@ fn block_name(base: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Duplicating Analysis of File -> Analysis gives File -> Copy of Analysis; File ->
+    /// Mesh -> Analysis duplicated together links the copies, and nothing the blocks feed
+    /// is linked to a copy.
+    #[test]
+    fn duplicates_take_the_inputs_of_their_blocks() {
+        use super::{Link, duplicated_inputs};
+        use std::collections::HashMap;
+        let link = |source, target, item: &str| Link {
+            source,
+            target,
+            item: vec![item.into()],
+            slot: Vec::new(),
+            inherited: Vec::new(),
+            excluded: Vec::new(),
+        };
+        let pairs = |links: Vec<Link>| -> Vec<(u64, u64)> {
+            links.iter().map(|l| (l.source, l.target)).collect()
+        };
+        // File 1 -> Analysis 2 -> Analysis 3.
+        let links = vec![link(1, 2, "Geometry"), link(2, 3, "Results")];
+        let one = HashMap::from([(2, 10)]);
+        let copied = duplicated_inputs(&links, &one);
+        assert_eq!(pairs(copied.clone()), vec![(1, 10)]);
+        assert_eq!(copied[0].item, vec!["Geometry".to_string()]);
+        // Both analyses: the second copy takes the first copy.
+        let both = HashMap::from([(2, 10), (3, 11)]);
+        assert_eq!(
+            pairs(duplicated_inputs(&links, &both)),
+            vec![(1, 10), (10, 11)]
+        );
+        // The file alone: it has no inputs, its targets keep the original.
+        let file = HashMap::from([(1, 12)]);
+        assert!(duplicated_inputs(&links, &file).is_empty());
+    }
+
     /// Zoomed out, the background has about as many dots as at true size, not a hundred
     /// times as many, and they stay as large on the screen.
     #[test]
@@ -13871,6 +14317,7 @@ mod tests {
         let rows = block_rows(
             nodes[0].status().unwrap(),
             None,
+            None,
             &BTreeSet::new(),
             &[],
             &[],
@@ -14313,7 +14760,7 @@ mod tests {
             ..Default::default()
         };
         let mut analysis = Node::analysis(1, "Analysis-1".into(), data);
-        let rows = exposed_rows(analysis.exposing_fe().unwrap(), &BTreeSet::new(), &[]);
+        let rows = exposed_rows(analysis.exposing_fe().unwrap(), None, &BTreeSet::new(), &[]);
         assert_eq!(rows[1].text, "Transform-1 Y");
         assert!(analysis.set_exposed(key, 4.0));
         let data = analysis.link_data().unwrap();
@@ -14372,7 +14819,7 @@ mod tests {
             }),
         );
         let fe = analysis.exposing_fe().unwrap();
-        let rows = exposed_rows(fe, &BTreeSet::new(), &[]);
+        let rows = exposed_rows(fe, None, &BTreeSet::new(), &[]);
         assert_eq!(rows[0].path, [links::PARAMETERS]);
         assert_eq!(rows[1].path, path(&["Parameters", &key.to_string()]));
         assert!(rows[1].input && rows[1].text == "Force-1 Y");
@@ -14962,7 +15409,15 @@ mod tests {
         let node = Node::analysis(1, "Detail".into(), data);
         let status = node.status().unwrap();
         let global = |fe: &plx_model::FeModel, incoming: &[(Vec<String>, String)]| {
-            let rows = block_rows(status, Some(fe), &BTreeSet::new(), incoming, &[], None);
+            let rows = block_rows(
+                status,
+                Some(fe),
+                None,
+                &BTreeSet::new(),
+                incoming,
+                &[],
+                None,
+            );
             rows.into_iter().find(|r| r.path == [links::GLOBAL_RESULTS])
         };
         // A general model has none; a submodel has an input for the global results.
@@ -15001,7 +15456,7 @@ mod tests {
             vec!["Setup".to_owned()],
             vec!["Setup".into(), "Steps".into()],
         ];
-        let rows = block_rows(status, Some(&model), &open.into(), &[], &[], None);
+        let rows = block_rows(status, Some(&model), None, &open.into(), &[], &[], None);
         let marks = chain_marks(&model, &rows);
         for group in [vec!["Setup", "Steps"], vec!["Results"]] {
             let mark = |step: &str| {
@@ -15091,6 +15546,87 @@ mod tests {
             print(&coarse, &empty, StudyMesh::None),
             print(&fine, &meshed, StudyMesh::None)
         );
+
+        // A max. element size the study gives counts without its value, and the analysis
+        // meshes anew from point to point: its own mesh does not count either.
+        let mut fe = plx_model::FeModel::default();
+        let path = plx_model::ValuePath::new(
+            plx_model::ItemRef::DefaultMeshing,
+            plx_model::Field::MaxElementSize,
+        );
+        let key = fe.expose(path);
+        let driven = |geometry: &plx_model::Geometry, mesh: &plx_mesh::FeMesh| {
+            let data = links::Data {
+                geometry: Some(geometry),
+                mesh,
+                fe: &fe,
+                origins: &inputs,
+            };
+            study_analysis_print(data, StudyMesh::Own, |k| k == key)
+        };
+        assert_eq!(driven(&coarse, &meshed), driven(&fine, &empty));
+        let mut second = fine.clone();
+        second.meshing.second_order = false;
+        assert_ne!(driven(&coarse, &meshed), driven(&second, &meshed));
+    }
+
+    /// An exposed number of the mesh setup of a closed analysis changes its geometry, and
+    /// the parts meshed with the old number are out of date, to be meshed anew.
+    #[test]
+    fn an_exposed_mesh_size_makes_the_parts_out_of_date() {
+        let geometry = plx_model::Geometry {
+            compounds: Vec::new(),
+            suppressed: Vec::new(),
+            source: "part.step".into(),
+            brep: "shapes".into(),
+            meshing: plx_model::MeshingParameters::default(),
+            mesh_items: vec![plx_model::MeshSetupItem {
+                name: "Meshing_Parameters-1".into(),
+                kind: plx_model::MeshSetupKind::MeshingParameters {
+                    parts: vec!["PART_1".into()],
+                    parameters: plx_model::MeshingParameters {
+                        max_size: 0.03,
+                        ..Default::default()
+                    },
+                },
+            }],
+            part_names: Vec::new(),
+            refinement: 1.0,
+            signatures: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
+        };
+        let path = plx_model::ValuePath::new(
+            plx_model::ItemRef::MeshSetup("Meshing_Parameters-1".into()),
+            plx_model::Field::MaxElementSize,
+        );
+        let mut model = plx_model::FeModel::default();
+        let key = model.expose(path.clone());
+        let input = |g: &plx_model::Geometry| {
+            plx_model::fingerprint::mesh_input(g, &[], Default::default(), "PART_1")
+        };
+        let made_from = input(&geometry);
+        let data = ProjectAnalysis {
+            model,
+            geometry: Some(geometry),
+            ..Default::default()
+        };
+        let mut analysis = Node::analysis(1, "Analysis-1".into(), data);
+        let views = ExposedView::of(
+            analysis.exposing_fe().unwrap(),
+            analysis.exposing_geometry(),
+        );
+        assert_eq!(views[0].name, "Meshing_Parameters-1 Max. element size");
+        assert_eq!(views[0].value, Some(0.03));
+        assert_eq!(views[0].kind, Some(ValueKind::LENGTH));
+        assert!(analysis.set_exposed(key, 0.01));
+        assert!(!analysis.set_exposed(key, 0.01));
+        // Gmsh cannot mesh with no size.
+        assert!(!analysis.set_exposed(key, 0.0));
+        let data = analysis.link_data().unwrap();
+        assert_eq!(data.fe.value_in(data.geometry, &path), Some(0.01));
+        assert_ne!(input(data.geometry.unwrap()), made_from);
     }
 
     #[test]
@@ -15253,6 +15789,42 @@ mod tests {
         let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(texts[2..], ["1x: 9131 rpm"]);
         assert!(rows[2].tip.contains("mode 1 (backward)"), "{}", rows[2].tip);
+    }
+
+    #[test]
+    fn block_picker_lists_analysis_then_blocks_used_last() {
+        let entries: Vec<_> = block_kinds().iter().map(BlockKind::entry).collect();
+        let at = |label: &str| entries.iter().position(|e| e.label == label).unwrap();
+        // Nothing used yet: Analysis alone.
+        assert_eq!(picker_start(&entries, &[]), [at("Analysis")]);
+        let mut recent = Vec::new();
+        for label in [
+            "Math",
+            "Plot",
+            "Analysis",
+            "Note",
+            "Formula",
+            "Math",
+            "Switch",
+            "Parameter Study",
+        ] {
+            recent = with_recent_block(&recent, label);
+        }
+        // Latest first, each once; names no longer offered are skipped.
+        recent.insert(1, "Gone".into());
+        let start = picker_start(&entries, &recent);
+        let names: Vec<_> = start.iter().map(|&i| entries[i].label).collect();
+        assert_eq!(
+            names,
+            [
+                "Analysis",
+                "Parameter Study",
+                "Switch",
+                "Math",
+                "Formula",
+                "Note"
+            ]
+        );
     }
 
     #[test]

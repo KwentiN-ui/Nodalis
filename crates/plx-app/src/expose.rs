@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use egui::{Response, Ui};
-use plx_model::{FeModel, Field, ItemRef, ValuePath};
+use plx_model::{FeModel, Field, Geometry, ItemRef, ValuePath};
 
 /// What the expose buttons of one dialog know: the item, which of its fields are exposed and
 /// which of those a link gives, and the fields toggled while the dialog is open.
@@ -71,7 +71,8 @@ impl Scope {
 
     /// Applies the toggles to the item, now named `item` in `fe` after the dialog's OK: fields
     /// clicked on are exposed, those clicked off are no longer, unless a link gives them.
-    pub fn apply(mut self, fe: &mut FeModel, item: &ItemRef) {
+    /// `geometry` holds the numbers of an item of the mesh setup.
+    pub fn apply(mut self, fe: &mut FeModel, geometry: Option<&Geometry>, item: &ItemRef) {
         if let Some(old) = &self.item {
             fe.rename_exposed(old, item.name());
         }
@@ -83,7 +84,7 @@ impl Scope {
                     fe.exposed.remove(at);
                 }
                 Some(_) => {}
-                None if fe.value_at(&path).is_some() => {
+                None if fe.value_in(geometry, &path).is_some() => {
                     fe.expose(path);
                 }
                 None => {}

@@ -16,6 +16,10 @@ impl AnalysisWindow {
         if let Some(view) = workspace.view() {
             self.workbench.pinned_view = None;
             self.workbench.set_tree_view(view);
+            // While the analysis is (re)loaded, the workspace it opens on would replace it.
+            if self.loading.is_some() {
+                self.show_when_loaded = Some(Show { view, step: None });
+            }
         }
     }
 

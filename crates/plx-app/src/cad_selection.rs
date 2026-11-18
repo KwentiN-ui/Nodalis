@@ -2,7 +2,7 @@
 //! They are stored as CAD entities and found on
 //! the mesh again after remeshing, see [`plx_model::Region::Geometry`].
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glam::{DVec3, Vec3};
 
@@ -11,7 +11,7 @@ use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 
 use crate::model::{Highlight, Hit, Model};
 use crate::selection::Target;
-use crate::viewport::Preview;
+use crate::viewport::{BoxSelect, Preview};
 
 /// Lookups from the mesh to the CAD entities, built once per mesh.
 #[derive(Debug, Default)]
@@ -241,6 +241,87 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
                 Some((edge, d)) if d <= precision => Some(CadEntity::Edge(edge)),
                 _ => Some(CadEntity::Face(face)),
             }
+        }
+    }
+}
+
+/// What a selection box selects by geometry on a mesh generated from CAD geometry: the
+/// faces on the surface of the visible parts, for contact surfaces too, the edges for
+/// edges and lines, and the corner points for a point. For nodes it takes the faces, then
+/// the edges that bound no face taken, then the vertices on no edge taken, so the region
+/// names what the box went round. An entity counts with all its nodes inside the box, or
+/// any of them for a box dragged from right to left.
+pub fn pick_box(model: &Model, area: &BoxSelect, target: Target) -> BTreeSet<CadEntity> {
+    let mesh = model.mesh();
+    let index = model.cad_index();
+    let visible: HashSet<NodeId> = model.visible_nodes().into_iter().collect();
+    let taken = |entity: CadEntity| {
+        let nodes = mesh.cad.nodes.get(&entity).map_or(&[][..], Vec::as_slice);
+        let mut inside = (nodes.iter())
+            .filter(|id| visible.contains(id))
+            .filter_map(|&id| mesh.node_index(id))
+            .map(|n| area.contains(model.render_position(n)))
+            .peekable();
+        inside.peek().is_some()
+            && if area.crossing {
+                inside.any(|i| i)
+            } else {
+                inside.all(|i| i)
+            }
+    };
+    let faces = || -> BTreeSet<i32> {
+        // The faces on the skin: those inside a solid or between bodies sharing nodes
+        // cannot be clicked either.
+        let mut on_skin = BTreeSet::new();
+        for part in (0..model.parts.len()).filter(|&p| model.parts[p].visible) {
+            for face in &model.skin(part).faces {
+                let element = mesh.elements()[face.element].id;
+                on_skin.extend(index.face(mesh, (element, face.face as u8 + 1)));
+            }
+        }
+        (on_skin.into_iter())
+            .filter(|&tag| taken(CadEntity::Face(tag)))
+            .collect()
+    };
+    let edges = || -> BTreeSet<i32> {
+        (mesh.cad.segments.keys())
+            .copied()
+            .filter(|&tag| taken(CadEntity::Edge(tag)))
+            .collect()
+    };
+    let vertices = || -> BTreeSet<i32> {
+        (mesh.cad.nodes.keys())
+            .filter_map(|e| match e {
+                CadEntity::Vertex(tag) => Some(*tag),
+                _ => None,
+            })
+            .filter(|&tag| taken(CadEntity::Vertex(tag)))
+            .collect()
+    };
+    match target {
+        Target::Faces | Target::Surfaces => faces().into_iter().map(CadEntity::Face).collect(),
+        Target::Edges | Target::Lines => edges().into_iter().map(CadEntity::Edge).collect(),
+        Target::Point => vertices().into_iter().map(CadEntity::Vertex).collect(),
+        Target::Nodes => {
+            let faces = faces();
+            let bounding: BTreeSet<i32> = (faces.iter())
+                .filter_map(|f| index.face_edges.get(f))
+                .flatten()
+                .copied()
+                .collect();
+            let edges: BTreeSet<i32> = (edges().into_iter())
+                .filter(|e| !bounding.contains(e))
+                .collect();
+            let ends: BTreeSet<i32> = (bounding.iter().chain(&edges))
+                .filter_map(|e| index.edge_vertices.get(e))
+                .flatten()
+                .copied()
+                .collect();
+            let vertices = (vertices().into_iter()).filter(|v| !ends.contains(v));
+            (faces.into_iter().map(CadEntity::Face))
+                .chain(edges.into_iter().map(CadEntity::Edge))
+                .chain(vertices.map(CadEntity::Vertex))
+                .collect()
         }
     }
 }
@@ -665,6 +746,49 @@ mod tests {
             matches!(&items, crate::selection::Items::Geometry(e) if e.len() >= 4 && e.iter().all(|e| matches!(e, CadEntity::Edge(_)))),
             "{items:?}"
         );
+
+        // A box around the end face at x = 0, seen from above, takes it as a whole; its
+        // edges and corners go with it. Dragged to the left it also takes the faces it
+        // crosses: the end face and the four around it.
+        let area = |crossing| crate::viewport::BoxSelect {
+            view_proj: glam::Mat4::from_translation(Vec3::new(0.0, 0.0, 0.5))
+                * glam::Mat4::from_scale(Vec3::new(1.0 / 200.0, 1.0 / 200.0, 1.0 / 1000.0))
+                * glam::Mat4::from_translation(-model.to_render([0.0, 0.0, 0.0])),
+            min: glam::Vec2::new(-0.05, -1.0),
+            max: glam::Vec2::new(0.05, 1.0),
+            crossing,
+            shift: false,
+            ctrl: false,
+        };
+        let kinds = |entities: BTreeSet<CadEntity>| {
+            let count = |f: fn(&CadEntity) -> bool| entities.iter().filter(|e| f(e)).count();
+            (
+                count(|e| matches!(e, CadEntity::Face(_))),
+                count(|e| matches!(e, CadEntity::Edge(_))),
+                count(|e| matches!(e, CadEntity::Vertex(_))),
+            )
+        };
+        assert_eq!(
+            kinds(pick_box(&model, &area(false), Target::Faces)),
+            (1, 0, 0)
+        );
+        assert_eq!(
+            kinds(pick_box(&model, &area(false), Target::Nodes)),
+            (1, 0, 0)
+        );
+        assert_eq!(
+            kinds(pick_box(&model, &area(false), Target::Lines)),
+            (0, 4, 0)
+        );
+        assert_eq!(
+            kinds(pick_box(&model, &area(true), Target::Faces)),
+            (5, 0, 0)
+        );
+        let picker = Picker::default();
+        assert!(matches!(
+            picker.pick_box(&model, &area(false), Target::Faces),
+            crate::selection::Items::Geometry(e) if e.len() == 1
+        ));
 
         // Mixed with picked nodes the geometry turns into nodes; undo goes back to it.
         let mut draft = RegionDraft::from_region(&fixed, NODE_SOURCES, Target::Nodes, model.mesh());

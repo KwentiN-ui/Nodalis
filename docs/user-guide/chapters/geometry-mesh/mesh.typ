@@ -12,6 +12,26 @@ with ties, contacts or node ties (@constraints).
 The output pane lists each part with its element count and size range. Afterwards Nodalis
 switches to the FE Model workspace.
 
+The Geometry workspace shows the mesh too: a part that is meshed has its element edges drawn
+over its faces, so one sees which parts are meshed and how without switching to the FE Model
+workspace. Parts without a mesh, suppressed parts and parts whose mesh is out of date
+show only their geometry. #ui("Edges Only") on the #ui("View") tab hides the
+element edges, #ui("Mesh Edges") shows them again (@view). The edges are made in the
+background the first time the workspace is shown after meshing, so a large model does not
+hold up the view.
+
+#screenshot("geometry-mesh-edges.png", [Geometry workspace: the meshed part shows its element
+  edges, the part without a mesh only its geometry])
+
+Every part of the geometry that is not suppressed belongs to the FE model, meshed or not. The
+FE Model workspace lists a part without a mesh under #ui("Parts") in gray as
+#ui("(not meshed)") with a warning sign; #ui("Create Mesh") in its context menu meshes it.
+Such a part is not solved until it has a mesh: #ui("Solve") meshes it first. Only
+suppressing a part in the Geometry workspace takes it out of the FE model.
+
+#screenshot("fe-model-unmeshed.png", [FE Model workspace: one part meshed, the other listed as
+  not meshed])
+
 === Cancelling the meshing <cancel-meshing>
 
 Gmsh runs in a separate process, so a meshing that takes too long, for example because the
@@ -117,7 +137,8 @@ values and meshes at once.
   [Min. element size], [Smallest element edge length.],
   [Elements per curvature radius], [Refines the mesh on curved faces: about this many elements
     per radius (default 2). 0 switches curvature refinement off.],
-  [Second order], [Quadratic elements with midside nodes (default on).],
+  [Second order], [Quadratic elements with midside nodes, such as C3D10, S6/S8 and CPS6/CPS8
+    (default on).],
   [Midside nodes on geometry], [Places midside nodes on the curved geometry instead of on the
     straight edge between the corner nodes (only with second order).],
   [Optimize mesh (Netgen)], [Improves the element quality after meshing (default on).],
@@ -178,7 +199,8 @@ triangles are then joined to quadrilaterals, which is faster and less regular.
   the clicked edge and the edges that continue it, also in touching parts, #ui("Surface angle")
   the clicked face and the neighbouring faces that meet it at less than the angle, such as the
   pieces of a split cylinder, on into the visible parts that touch it along an edge. A box
-  takes the faces inside it. The default size is a quarter of the maximum element size. #ui("Depth") keeps
+  takes the whole faces inside it, with the edges inside it that bound none of them; in
+  #ui("Edge angle") only edges, in #ui("Part") the parts inside it. The default size is a quarter of the maximum element size. #ui("Depth") keeps
   the size inside the solid up to that distance below the selected faces (and around the
   selected edges), so that a layer of that thickness gets elements of the size, such as the
   walls of an infill section (@infill-section); beyond it the elements grow to the size of the
@@ -200,6 +222,13 @@ triangles are then joined to quadrilaterals, which is faster and less regular.
 
 #screenshot("local-mesh-size-surface-angle.png", [A Local Mesh Size on the three faces of a
   split cylinder, picked with one click in the #ui("Surface angle") mode])
+
+Each number of the default parameters, of a Meshing Parameters item and of a Local Mesh Size
+has a #ui("P") button: it exposes the number to the project window, where a parameter study
+can vary it for a mesh study (@exposed-parameters).
+
+#screenshot("mesh-parameters-expose.png", [The #ui("P") buttons of a Meshing Parameters item:
+  the max. element size is exposed and given by a parameter study])
 
 #ui("OK") stores the item. #ui("OK & Remesh") stores it and meshes again the parts it names.
 A Local Mesh Size item is picked on faces and edges: #ui("OK & Remesh") meshes again only the parts that hold them,

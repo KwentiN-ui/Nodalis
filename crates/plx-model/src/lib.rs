@@ -138,7 +138,7 @@ pub use moving_load::{AXIS_LABELS, LoadStations, MovingFrame, MovingLoad, Wheel,
 pub use number::{MathOp, apply_series, switch};
 pub use origin::{
     Active, PartOrigin, PartOrigins, active_model, bodies as part_bodies, drop_orphans, orphans,
-    suppressed_bodies,
+    suppressed_bodies, unmeshed_parts,
 };
 pub use overview::{Cell, OverviewGroup, OverviewRow, StepItemKey, StepOverview};
 pub use parameter::{Parameter, ValueKind};
@@ -149,7 +149,6 @@ pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
 pub use remote::{
     Behavior, Displacement, Formulation, RemoteBehavior, RemoteDof, RemotePoint, expanded_nodes,
-    rigid_rows,
 };
 pub use remote_force::RemoteForce;
 pub use section::{
@@ -245,8 +244,9 @@ use serde::{Deserialize, Serialize};
 /// table of factors of the flow with a table of values per value of the flow law
 /// ([`particle_flow::FlowTables`]); older formats read as they are, without their table.
 /// Format 51 adds the Flow boundary conditions and one default side of the Particle Flow
-/// step; older steps take the default side.
-pub const PROJECT_FORMAT: u32 = 51;
+/// step; older steps take the default side. Format 52 exposes the numbers of the mesh setup
+/// ([`ItemRef::MeshSetup`], [`ItemRef::DefaultMeshing`]); older formats read as they are.
+pub const PROJECT_FORMAT: u32 = 52;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

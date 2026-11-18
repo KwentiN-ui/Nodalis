@@ -293,6 +293,34 @@ pub fn drop_orphans(
     orphans
 }
 
+/// The parts of the FE model that `geometry` has without a mesh: every part of the geometry
+/// that is not suppressed belongs to the FE model, meshed or not, so the FE Model lists those
+/// without a mesh too. By FE name (a compound part once), in the order of the geometry; a
+/// compound part whose mesh lacks only some of its bodies has a mesh and is not among them.
+pub fn unmeshed_parts(
+    geometry: Option<&crate::Geometry>,
+    origins: &PartOrigins,
+    mesh: &FeMesh,
+) -> Vec<String> {
+    let Some(geometry) = geometry else {
+        return Vec::new();
+    };
+    let mut unmeshed: Vec<String> = Vec::new();
+    for part in geometry.known_parts() {
+        if geometry.is_suppressed(part) || origins.get(part).is_some() {
+            continue;
+        }
+        let name = geometry.fe_part_name(part);
+        let listed = (unmeshed.iter().map(String::as_str))
+            .chain(mesh.parts.iter().map(|p| p.name.as_str()))
+            .any(|n| n.eq_ignore_ascii_case(name));
+        if !listed {
+            unmeshed.push(name.to_owned());
+        }
+    }
+    unmeshed
+}
+
 /// The names of the geometry objects of `mesh` that are suppressed: parts of the geometry
 /// suppressed in `geometry`, imported meshes suppressed in `origins`.
 pub fn suppressed_bodies(
@@ -595,5 +623,36 @@ mod tests {
         origins.insert("OTHER", PartOrigin::Meshed(3));
         origins.settle(Some(&geometry));
         assert_eq!(origins.get("OTHER"), Some(PartOrigin::Meshed(3)));
+    }
+
+    /// Every part of the geometry that is not suppressed is a part of the FE model: those
+    /// without a mesh are listed by their FE name, a compound part once.
+    #[test]
+    fn unmeshed_parts_are_the_unsuppressed_parts_without_a_mesh() {
+        let mut origins = PartOrigins::default();
+        origins.set_meshed("A", 1);
+        let mesh = mesh(&["A"]);
+        let geometry = crate::Geometry {
+            source: String::new(),
+            brep: String::new(),
+            meshing: crate::MeshingParameters::default(),
+            mesh_items: Vec::new(),
+            part_names: ["A", "B", "C", "D", "E"].map(String::from).to_vec(),
+            refinement: 1.0,
+            signatures: Vec::new(),
+            compounds: vec![crate::CompoundPart {
+                name: "JOINED".into(),
+                parts: vec!["D".into(), "E".into()],
+            }],
+            suppressed: vec!["C".into()],
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
+        };
+        assert_eq!(
+            unmeshed_parts(Some(&geometry), &origins, &mesh),
+            ["B", "JOINED"]
+        );
+        assert!(unmeshed_parts(None, &origins, &mesh).is_empty());
     }
 }

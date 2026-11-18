@@ -773,11 +773,183 @@ impl Picker {
         ]))
     }
 
-    /// What a selection box selects: nodes in the node modes, otherwise element faces (whole
-    /// elements in the element mode) inside the box, or crossing it when dragged from right
-    /// to left. Only visible parts count.
+    /// What a selection box selects: in the geometry modes whole entities of the geometry,
+    /// see [`Picker::pick_box_geometry`], in the node modes nodes, otherwise element faces
+    /// (whole elements in the element mode) inside the box, or crossing it when dragged
+    /// from right to left. Only visible parts count.
     pub fn pick_box(&self, model: &Model, area: &BoxSelect, target: Target) -> Items {
+        if self.select_by.is_geometry() {
+            return self.pick_box_geometry(model, area, target);
+        }
         self.pick_box_inner(model, area, target)
+    }
+
+    /// What a selection box selects in the geometry modes. The part mode takes the parts
+    /// inside the box as a click on each would. The other modes take what a click would
+    /// pick, each entity as a whole: on a mesh generated from CAD geometry its faces, edges
+    /// and vertices, else the surface patches between feature edges, the edges of the
+    /// outline running from corner to corner and its corner points.
+    fn pick_box_geometry(&self, model: &Model, area: &BoxSelect, target: Target) -> Items {
+        let mesh = model.mesh();
+        let visible: Vec<usize> = (0..model.parts.len())
+            .filter(|&p| model.parts[p].visible)
+            .collect();
+        if self.select_by == SelectBy::GeometryPart {
+            let parts = visible.into_iter().filter(|&p| part_in_box(model, p, area));
+            return match target {
+                Target::Nodes | Target::Point => {
+                    let elements = mesh.elements();
+                    Items::Nodes(
+                        parts
+                            .flat_map(|p| &mesh.parts[p].elements)
+                            .filter_map(|&id| mesh.element_index(id))
+                            .flat_map(|e| elements[e].nodes.iter().copied())
+                            .collect(),
+                    )
+                }
+                Target::Faces | Target::Surfaces => Items::Faces(
+                    parts
+                        .flat_map(|p| {
+                            let picker = MeshPicker::new(model, p);
+                            (0..picker.faces().len()).map(move |f| picker.face_id(f))
+                        })
+                        .collect(),
+                ),
+                Target::Edges => {
+                    let parts: BTreeSet<usize> = parts.collect();
+                    Items::Faces(
+                        (model.outline_edges().into_iter())
+                            .filter(|(p, _, _)| parts.contains(p))
+                            .map(|(_, face, _)| face)
+                            .collect(),
+                    )
+                }
+                Target::Lines => Items::Edges(
+                    parts
+                        .flat_map(|p| {
+                            let picker = MeshPicker::new(model, p);
+                            let edges: Vec<usize> =
+                                picker.feature_edges().map(|(i, _)| i).collect();
+                            picker.segments(edges)
+                        })
+                        .collect(),
+                ),
+            };
+        }
+        if model.has_cad() {
+            return Items::Geometry(crate::cad_selection::pick_box(model, area, target));
+        }
+        let taken = |nodes: &mut dyn Iterator<Item = usize>| {
+            let mut inside = nodes
+                .map(|n| area.contains(model.render_position(n)))
+                .peekable();
+            inside.peek().is_some()
+                && if area.crossing {
+                    inside.any(|i| i)
+                } else {
+                    inside.all(|i| i)
+                }
+        };
+        let ids = mesh.node_ids();
+        // The patches inside the box, by part and face.
+        let mut faces: Vec<(usize, usize)> = Vec::new();
+        // The edges of the outline from corner to corner inside it, by part and skin edge.
+        let mut edges: Vec<(usize, BTreeSet<usize>)> = Vec::new();
+        let mut corners: BTreeSet<NodeId> = BTreeSet::new();
+        let mut lines: BTreeSet<NodeId> = BTreeSet::new();
+        for &part in &visible {
+            let picker = MeshPicker::new(model, part);
+            let skin = model.skin(part);
+            if matches!(target, Target::Faces | Target::Surfaces | Target::Nodes) {
+                let mut patches: BTreeMap<_, Vec<usize>> = BTreeMap::new();
+                for (f, face) in picker.faces().iter().enumerate() {
+                    patches.entry(face.region).or_default().push(f);
+                }
+                for patch in patches.into_values() {
+                    if taken(&mut patch.iter().flat_map(|&f| picker.face_nodes(f))) {
+                        faces.extend(patch.into_iter().map(|f| (part, f)));
+                    }
+                }
+            }
+            if matches!(target, Target::Edges | Target::Lines | Target::Nodes) {
+                let mut seen: BTreeSet<usize> = BTreeSet::new();
+                for (e, _) in picker.feature_edges() {
+                    if seen.contains(&e) {
+                        continue;
+                    }
+                    let chain = match target {
+                        // The outline of a 2D model is one loop; its edges end where it bends.
+                        Target::Edges => picker.chain_edges(e, Some(OUTLINE_ANGLE.to_radians())),
+                        _ => picker.geometry_edge(e),
+                    };
+                    seen.extend(&chain);
+                    let mut nodes = chain.iter().flat_map(|&c| {
+                        let edge = &skin.edges[c];
+                        [Some(edge.a), Some(edge.b), edge.mid].into_iter().flatten()
+                    });
+                    if taken(&mut nodes) {
+                        edges.push((part, chain));
+                    }
+                }
+            }
+            if target == Target::Nodes || target == Target::Point {
+                corners.extend(
+                    (picker.corners().into_iter())
+                        .filter(|&n| area.contains(model.render_position(n)))
+                        .map(|n| ids[n]),
+                );
+                // Lines (beams, trusses) as a whole, as a click away from their ends.
+                let elements = mesh.elements();
+                let mut nodes = (skin.line_elements.iter())
+                    .flat_map(|&e| elements[e].nodes.iter())
+                    .filter_map(|&id| mesh.node_index(id));
+                if taken(&mut nodes) {
+                    lines.extend(
+                        (skin.line_elements.iter())
+                            .flat_map(|&e| elements[e].nodes.iter().copied()),
+                    );
+                }
+            }
+        }
+        let edge_nodes = || -> BTreeSet<NodeId> {
+            (edges.iter())
+                .flat_map(|(part, chain)| {
+                    let skin = &model.skin(*part).edges;
+                    chain.iter().flat_map(move |&c| {
+                        let edge = &skin[c];
+                        [Some(edge.a), Some(edge.b), edge.mid].into_iter().flatten()
+                    })
+                })
+                .map(|n| ids[n])
+                .collect()
+        };
+        match target {
+            Target::Faces | Target::Surfaces => Items::Faces(
+                (faces.iter())
+                    .map(|&(part, f)| MeshPicker::new(model, part).face_id(f))
+                    .collect(),
+            ),
+            Target::Edges => Items::Faces(outline_edges_within(model, None, &edge_nodes())),
+            Target::Lines => Items::Edges(
+                (edges.iter())
+                    .flat_map(|(part, chain)| {
+                        MeshPicker::new(model, *part).segments(chain.iter().copied())
+                    })
+                    .collect(),
+            ),
+            Target::Point => Items::Nodes(corners),
+            Target::Nodes => {
+                let mut nodes = edge_nodes();
+                nodes.extend(corners);
+                nodes.extend(lines);
+                nodes.extend(
+                    (faces.iter())
+                        .flat_map(|&(part, f)| MeshPicker::new(model, part).face_nodes(f))
+                        .map(|n| ids[n]),
+                );
+                Items::Nodes(nodes)
+            }
+        }
     }
 
     /// What a click on a line segment (beam, truss) selects: the nearest node, the nodes of
@@ -1055,7 +1227,7 @@ impl PartPicks {
 }
 
 /// Whether the part lies inside the box, or crosses it for a box dragged to the left.
-fn part_in_box(model: &Model, part: usize, area: &BoxSelect) -> bool {
+pub(crate) fn part_in_box(model: &Model, part: usize, area: &BoxSelect) -> bool {
     let mesh = &model.mesh();
     let picker = MeshPicker::new(model, part);
     let elements = mesh.elements();
@@ -1749,6 +1921,13 @@ mod tests {
         }
     }
 
+    fn edges(items: Items) -> BTreeSet<[NodeId; 2]> {
+        match items {
+            Items::Edges(edges) => edges,
+            other => panic!("{other:?} instead of edges"),
+        }
+    }
+
     #[test]
     fn part_picks_take_whole_parts_like_any_selection() {
         let (model, hit) = beam_hit(95.0, 5.0);
@@ -2156,15 +2335,41 @@ mod tests {
             ctrl: false,
         };
         let pick = |mode, crossing, target| picker(mode).pick_box(&model, &area(crossing), target);
-        // 5 elements along x times 2 on each of the 4 long sides, plus the 4 end faces.
+        // The surface mode takes element faces: 5 elements along x times 2 on each of the 4
+        // long sides, plus the 4 end faces.
         assert_eq!(
-            faces(pick(SelectBy::Geometry, false, Target::Faces)).len(),
+            faces(pick(SelectBy::Surface, false, Target::Faces)).len(),
             44
         );
         // Crossing also takes the faces of the elements touching x = 0.
         assert_eq!(
-            faces(pick(SelectBy::Geometry, true, Target::Faces)).len(),
+            faces(pick(SelectBy::Surface, true, Target::Faces)).len(),
             52
+        );
+        // The geometry mode takes whole faces of the geometry: only the end face lies inside;
+        // all but the other end face cross the box.
+        assert_eq!(
+            faces(pick(SelectBy::Geometry, false, Target::Faces)).len(),
+            4
+        );
+        assert_eq!(
+            faces(pick(SelectBy::Geometry, true, Target::Faces)).len(),
+            84
+        );
+        // Its edges and corners: the 4 edges and 4 corners of the end face.
+        assert_eq!(
+            nodes(pick(SelectBy::Geometry, false, Target::Nodes)).len(),
+            9
+        );
+        assert_eq!(
+            edges(pick(SelectBy::Geometry, false, Target::Lines)).len(),
+            8
+        );
+        // The part mode takes the beam only when it crosses the box.
+        assert!(faces(pick(SelectBy::GeometryPart, false, Target::Faces)).is_empty());
+        assert_eq!(
+            faces(pick(SelectBy::GeometryPart, true, Target::Faces)).len(),
+            88
         );
         // 6 cross sections of 3 x 3 nodes.
         assert_eq!(nodes(pick(SelectBy::Node, false, Target::Nodes)).len(), 54);

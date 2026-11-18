@@ -340,7 +340,7 @@ impl MeshToolDialog {
             Ok(_) => {
                 if let Some(scope) = self.expose.take() {
                     let item = ItemRef::MeshOperation(self.name.trim().to_owned());
-                    scope.apply(&mut model.fe, &item);
+                    scope.apply(&mut model.fe, None, &item);
                 }
             }
         }
@@ -666,6 +666,39 @@ mod tests {
         assert!((min_x(&model, 0) - start).abs() < 1e-9);
         remesh(&mut model, None);
         assert!((min_x(&model, 0) - start).abs() < 1e-9);
+    }
+
+    /// The parts of the FE model: the meshed parts of the mesh and the unmeshed ones.
+    fn fe_parts(model: &Model) -> (Vec<String>, Vec<String>) {
+        let mut meshed: Vec<String> = model.parts.iter().map(|p| p.name.clone()).collect();
+        meshed.sort();
+        let unmeshed =
+            plx_model::unmeshed_parts(model.geometry.as_ref(), model.origins(), model.mesh());
+        (meshed, unmeshed)
+    }
+
+    /// Meshing one part anew, also in shapes a link brings, keeps the mesh of the other;
+    /// every part of the geometry stays in the FE model, a part without a mesh as unmeshed.
+    #[test]
+    fn meshing_one_part_again_keeps_every_part_in_the_fe_model() {
+        let Some(mut model) = meshed_blocks() else {
+            return;
+        };
+        let both = vec!["SOLID-1".to_owned(), "SOLID-2".to_owned()];
+        assert_eq!(fe_parts(&model), (both.clone(), vec![]));
+        remesh(&mut model, Some(vec!["SOLID-1".into()]));
+        assert_eq!(fe_parts(&model), (both.clone(), vec![]));
+        model.geometry.as_mut().unwrap().from_link = true;
+        remesh(&mut model, Some(vec!["SOLID-2".into()]));
+        assert_eq!(fe_parts(&model), (both.clone(), vec![]));
+        // Without its mesh, a part is still listed.
+        model.edit_mesh(|mesh, _| mesh.remove_bodies(&["SOLID-1".to_owned()]));
+        assert_eq!(
+            fe_parts(&model),
+            (vec!["SOLID-2".to_owned()], vec!["SOLID-1".to_owned()])
+        );
+        remesh(&mut model, Some(vec!["SOLID-1".into()]));
+        assert_eq!(fe_parts(&model), (both, vec![]));
     }
 
     #[test]

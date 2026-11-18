@@ -604,10 +604,6 @@ pub struct GroupSocket {
     /// `["Socket", id]`.
     pub id: u32,
     pub name: String,
-    /// The path of the pin the socket was made from, which gives it its type: its colour and
-    /// what it can be linked to.
-    #[serde(default)]
-    pub kind: Vec<String>,
     /// Where its wire comes from: of an input, a pin outside the group; of an output, one
     /// inside.
     #[serde(default, skip_serializing_if = "Option::is_none")]

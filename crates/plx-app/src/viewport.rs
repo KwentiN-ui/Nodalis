@@ -30,6 +30,9 @@ pub struct Viewport {
     pub path_plots: Vec<crate::path_plot::PlotBox>,
     /// A dialog picks in the 3D view: the left button selects and draws selection boxes.
     pub selecting: bool,
+    /// Without a dialog picking, left drags draw selection boxes for parts, with no hover
+    /// preview.
+    pub box_parts: bool,
     /// What a click at the resting mouse would select, drawn in orange.
     pub preview: Preview,
     /// Where the selection box drag started.
@@ -252,6 +255,7 @@ impl Viewport {
             labels: LabelOffsets::default(),
             path_plots: Vec::new(),
             selecting: false,
+            box_parts: false,
             preview: Preview::default(),
             box_start: None,
             resting: None,
@@ -356,6 +360,14 @@ impl Viewport {
         self.renderer.set_part_visible(index, visible);
     }
 
+    /// Lets the clipping planes of the camera enclose what is drawn now, so that no part of a
+    /// large or moved scene is cut off, whatever the camera was fitted to.
+    fn enclose_drawn(&mut self) {
+        if let Some(bounds) = self.renderer.drawn_bounds() {
+            self.camera.drawn_bounds = Some(bounds);
+        }
+    }
+
     pub fn apply(&mut self, command: ViewCommand, bounds: Option<(Vec3, Vec3)>) {
         match command {
             ViewCommand::Fit => {
@@ -379,6 +391,7 @@ impl Viewport {
     /// Draws the scene with its annotations; reports camera commands and clicks.
     pub fn ui(&mut self, ui: &mut Ui) -> ViewportResponse {
         let mut result = ViewportResponse::default();
+        self.enclose_drawn();
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         self.rect = rect;
         let delta = response.drag_delta();
@@ -423,10 +436,11 @@ impl Viewport {
                 self.camera.orbit(delta.x, delta.y);
             }
         }
-        if free && self.selecting && response.drag_started_by(PointerButton::Primary) {
+        let boxes = self.selecting || self.box_parts;
+        if free && boxes && response.drag_started_by(PointerButton::Primary) {
             self.box_start = response.interact_pointer_pos();
         }
-        if !self.selecting {
+        if !boxes {
             self.box_start = None;
         }
         if response.hovered()
