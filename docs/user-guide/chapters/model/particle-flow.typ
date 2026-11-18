@@ -367,3 +367,40 @@ Buckingham-Reiner flow of a Bingham paste through a pipe, the flow out of a slot
 torque on a cylinder turning in a viscous fluid (Couette flow) and the heat it dissipates
 there, and the conduction between a warm and a cold block (the error function of the
 analytic solution).
+
+=== Loads on the tools for FE steps <particle-flow-wall-loads>
+
+The pressure and the friction of the material on the walls can go on to a static or dynamic
+step of another analysis, where the tools are meshed and deformable: the strength of a screw,
+a blade or a hole plate under the loads of the process. Drag the result row of the Particle
+Flow step onto a step of the other analysis (or onto its #ui("Wall loads") input, see
+@results-links). The step gets a load #ui("Linked Wall Loads"): every point of the walls
+where the material pushed on them during the run, with its force, is spread as nodal forces
+onto the faces of the load's region near it.
+
+#fields(
+  [Region], [At first the parts of the walls of the run, found by their names in the other
+    analysis; whole parts, picked faces or a surface. Only the faces near a wall take
+    loads: a point of a wall reaches the faces within a cell of the run along the surface
+    (more where the mesh is coarser) that face the same way, so the two sides of a thin
+    blade keep their own loads.],
+  [Walls], [All walls of the run, or the ones ticked.],
+  [Time of the run], [Each frame of the run holds the mean load since the frame before.
+    #ui("Last frame") takes the last one, #ui("Frame at time") the one nearest a time,
+    #ui("Mean over time") the mean over the frames between two times: for a steady flow,
+    such as a screw that turns for a while, the load without the noise of single frames.
+    #ui("Over time") lets every frame act at its time of the run as the time of the step,
+    linear in between: the loads over time, for a dynamic step.],
+)
+
+The loads are taken where they act on the tool: a turning screw takes the loads of every
+frame in its own frame, as it stood at the start, so the mean over a turn is a load around
+the whole screw. The force of the walls is kept whole: the dialog shows it next to the
+force that reaches the faces, and how many points of the walls lie near no face of the
+region (their force is left out, e.g. when the region misses a part of the tool). The moment
+moves by less than a cell. A new run of the Particle Flow step makes the step out of date,
+like any results it takes. The loads go to 3D models; those of a 2D run are refused.
+
+#screenshot("particle-flow-wall-loads.png", [A stirred paste giving the loads on its blade
+to a static analysis of the blade, held at its shaft: the mean over the second half of the
+run, and the stress in the blade.])

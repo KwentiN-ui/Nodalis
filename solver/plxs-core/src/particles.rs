@@ -572,6 +572,24 @@ pub struct ParticleFrame {
     /// after all before), in 3D the part of the particle it was made as; empty: all 1.
     #[serde(default)]
     pub shares: Vec<f32>,
+    /// Per wall of the model, in its order: what the material did to it since the frame
+    /// before (empty in the first frame).
+    #[serde(default)]
+    pub walls: Vec<WallFrame>,
+}
+
+/// The load of the material on one wall over the time since the frame before, as points
+/// on its surface that each take a mean force: one point per cell of the grid the wall
+/// passed through. Points, normals and forces are in the wall's own frame, where it was at
+/// the start: a turning screw takes them where they act on it. In a 2D model the forces
+/// are per unit length along z (plane strain), of the whole ring (axisymmetric).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WallFrame {
+    pub points: Vec<[f32; 3]>,
+    /// The outward unit normal of the wall at each point.
+    pub normals: Vec<[f32; 3]>,
+    /// The mean force of the material on the wall at each point.
+    pub forces: Vec<[f32; 3]>,
 }
 
 /// Quantities of the whole model over the time.

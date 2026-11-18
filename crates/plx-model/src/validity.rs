@@ -382,6 +382,19 @@ impl FeModel {
                             _ => None,
                         })
                         .or_else(|| load_system_problem(self, load))
+                        .or_else(|| match &load.kind {
+                            LoadKind::WallLoads(walls) => match walls.file() {
+                                None => Some(
+                                    "No Particle Flow step is linked to the Wall loads of the \
+                                     step"
+                                        .into(),
+                                ),
+                                Some(file) => (!file.is_file()).then(|| {
+                                    format!("Wall loads file {} does not exist", file.display())
+                                }),
+                            },
+                            _ => None,
+                        })
                 };
                 if let Some(reason) = reason {
                     invalid.push(Invalid {

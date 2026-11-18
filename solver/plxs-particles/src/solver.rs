@@ -21,7 +21,8 @@ use std::time::Instant;
 
 use plxs_core::particles::{
     BodyHistory, Domain, FlowTables, PARTICLE_FIELDS, ParticleFrame, ParticleHistory, ParticleLaw,
-    ParticleModel, ParticleReport, ParticleResults, RigidMotion, Side, Space, WallHistory, WallLaw,
+    ParticleModel, ParticleReport, ParticleResults, RigidMotion, Side, Space, WallFrame,
+    WallHistory, WallLaw,
 };
 use rayon::prelude::*;
 
@@ -341,6 +342,78 @@ fn wall_velocity(law: WallLaw, v: Vec3, wall: Vec3, n: Vec3) -> Vec3 {
         }
     };
     add(out, wall)
+}
+
+/// The impulses the material gives the walls between two frames, summed in the walls' own
+/// frames (where they were at the start) per cell of the grid there: the loads on the walls
+/// a frame hands on to FE steps ([`WallFrame`]).
+struct WallImpulses {
+    h: f64,
+    origin: Vec3,
+    walls: Vec<std::collections::HashMap<[i64; 3], ImpulseBin>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ImpulseBin {
+    impulse: Vec3,
+    /// The normal and the point, weighted by the size of the impulse.
+    normal: Vec3,
+    at: Vec3,
+    weight: f64,
+}
+
+impl WallImpulses {
+    fn new(walls: usize, grid: &Grid) -> Self {
+        Self {
+            h: grid.h,
+            origin: grid.origin,
+            walls: vec![Default::default(); walls],
+        }
+    }
+
+    /// Adds the impulse `j` (force times time) the material gave wall `w` at the node at
+    /// `x`, where the wall's outward normal is `n`, while the wall was at `pose`; all in
+    /// world coordinates.
+    fn add(&mut self, w: usize, wall: &Wall, pose: &Pose, x: Vec3, j: Vec3, n: Vec3) {
+        let size = norm(j);
+        if size == 0.0 || !size.is_finite() {
+            return;
+        }
+        let back = transpose(&pose.rotation);
+        let body = add(mat_vec(&back, sub(x, pose.center)), wall.motion.center);
+        let key = std::array::from_fn(|a| ((body[a] - self.origin[a]) / self.h).round() as i64);
+        let bin = self.walls[w].entry(key).or_default();
+        bin.impulse = add(bin.impulse, mat_vec(&back, j));
+        bin.normal = add(bin.normal, scale(mat_vec(&back, n), size));
+        bin.at = add(bin.at, scale(body, size));
+        bin.weight += size;
+    }
+
+    /// The loads on the walls since the last call, as mean forces over `duration`.
+    fn take(&mut self, duration: f64) -> Vec<WallFrame> {
+        let per = if duration > 0.0 { 1.0 / duration } else { 0.0 };
+        (self.walls.iter_mut())
+            .map(|bins| {
+                let mut keys: Vec<_> = bins.keys().copied().collect();
+                keys.sort_unstable();
+                let mut out = WallFrame::default();
+                for key in keys {
+                    let b = bins[&key];
+                    let n = norm(b.normal);
+                    out.points
+                        .push(scale(b.at, 1.0 / b.weight).map(|v| v as f32));
+                    out.normals.push(if n > 0.0 {
+                        scale(b.normal, 1.0 / n).map(|v| v as f32)
+                    } else {
+                        [0.0; 3]
+                    });
+                    out.forces.push(scale(b.impulse, per).map(|v| v as f32));
+                }
+                bins.clear();
+                out
+            })
+            .collect()
+    }
 }
 
 /// What one node of the grid holds while particles spread to it.
@@ -693,6 +766,8 @@ fn run_cpu(
     let mut pushed: Vec<(usize, Vec3)> = Vec::new();
     let mut wall_force = vec![Load::default(); history.walls.len()];
     let mut wall_samples = 0usize;
+    let mut impulses = WallImpulses::new(walls.len(), grid);
+    let mut last_frame = 0.0;
 
     let mut t = 0.0;
     let mut steps = 0usize;
@@ -758,16 +833,16 @@ fn run_cpu(
             .collect();
         let side_index = walls.len();
         let heat = model.heat;
-        let (loss, forces) = (values.par_iter_mut().zip(nodes.par_iter()))
+        let (loss, forces, hits) = (values.par_iter_mut().zip(nodes.par_iter()))
             .zip(node_heat.par_iter_mut())
             .enumerate()
             .fold(
-                || (0.0, vec![Load::default(); side_index + 6]),
-                |(mut loss, mut forces), (at, ((value, node), q))| {
+                || (0.0, vec![Load::default(); side_index + 6], Vec::new()),
+                |(mut loss, mut forces, mut hits), (at, ((value, node), q))| {
                     *q = 0.0;
                     if node.mass <= 0.0 {
                         *value = [0.0; 4];
-                        return (loss, forces);
+                        return (loss, forces, hits);
                     }
                     let i = [
                         at % grid.n[0],
@@ -796,6 +871,9 @@ fn run_cpu(
                     if let Some((w, law, n, vw)) = owner {
                         after = wall_velocity(law, after, vw, n);
                         record(&mut forces[w], node.mass, before, after, dt, x, vw);
+                        if after != before {
+                            hits.push((w, x, scale(sub(before, after), node.mass), n));
+                        }
                         // Heat transfer with a wall that has a temperature, never past it.
                         if let (Some(heat), Some(tw)) = (heat, wall_temperature[w])
                             && node.heat_capacity > 0.0
@@ -866,19 +944,23 @@ fn run_cpu(
                         }
                     }
                     *value = [after[0], after[1], after[2], node.volume / node.mass];
-                    (loss, forces)
+                    (loss, forces, hits)
                 },
             )
             .reduce(
-                || (0.0, vec![Load::default(); side_index + 6]),
-                |(l1, mut f1), (l2, f2)| {
+                || (0.0, vec![Load::default(); side_index + 6], Vec::new()),
+                |(l1, mut f1, mut h1), (l2, f2, h2)| {
                     for (a, b) in f1.iter_mut().zip(&f2) {
                         a.add(b);
                     }
-                    (l1 + l2, f1)
+                    h1.extend(h2);
+                    (l1 + l2, f1, h1)
                 },
             );
         wall_loss += loss;
+        for (w, x, j, n) in hits {
+            impulses.add(w, &walls[w], &pose[w], x, j, n);
+        }
         for (w, (sum, f)) in wall_force.iter_mut().zip(&forces).enumerate() {
             let mut f = *f;
             // A wall's moment about its center of motion, where it is.
@@ -1185,7 +1267,10 @@ fn run_cpu(
             wall_samples = 0;
         }
         if t >= target * (1.0 - 1e-12) {
-            on_frame(frame(t, &particles, grid));
+            let mut written = frame(t, &particles, grid);
+            written.walls = impulses.take(t - last_frame);
+            last_frame = t;
+            on_frame(written);
             next_frame += 1;
         }
         if last_report.elapsed().as_secs_f64() > 0.2 {
@@ -1944,6 +2029,7 @@ fn frame(time: f64, particles: &[Particle], grid: &Grid) -> ParticleFrame {
         } else {
             Vec::new()
         },
+        walls: Vec::new(),
     }
 }
 

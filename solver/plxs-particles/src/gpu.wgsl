@@ -206,6 +206,10 @@ struct Pose {
 // Only `control` binds these: the dispatches of a step, and the ones it copies.
 @group(0) @binding(19) var<storage, read_write> args: array<u32>;
 @group(0) @binding(20) var<storage, read> plan: array<u32>;
+// Per node of the grid, two rows: the impulse the material gave a wall since the processor
+// last read them, with the wall's number plus one; the wall's outward normal weighted by the
+// size of the impulse.
+@group(0) @binding(21) var<storage, read_write> wall_hits: array<vec4f>;
 
 var<workgroup> shared_f: array<f32, 64>;
 var<workgroup> shared_u: array<u32, 256>;
@@ -881,6 +885,13 @@ fn grid_node(at: vec4u) -> NodeLoads {
         out.wall_slot = owner;
         var l = out.wall_load;
         record_load(&l, mass, before, after, dt, x - poses[owner].center.xyz, owner_velocity);
+        let j = (before - after) * mass;
+        let size = length(j);
+        if size > 0.0 {
+            let k = 2u * index;
+            wall_hits[k] = vec4f(wall_hits[k].xyz + j, f32(owner + 1u));
+            wall_hits[k + 1u] = vec4f(wall_hits[k + 1u].xyz + owner_normal * size, 0.0);
+        }
         // Heat transfer with a wall that has a temperature, never past it.
         if heat_on() && wall.extra.z != 0u && node.d.x > 0.0 {
             let gap = wall.angular.w - node.d.y / node.d.x;

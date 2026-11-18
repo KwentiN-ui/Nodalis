@@ -709,9 +709,35 @@ fn couette(per_gap: f64) {
         "power {rate} vs {power}"
     );
     assert!(max_balance_error(&results) < 0.1);
+    // The loads of the frames on the rotor, in its own frame: on its surface, and with the
+    // moment of the history over the time since the frame before.
+    let frame = last(&results);
+    let before = results.frames[results.frames.len() - 2].time;
+    let rotor_load = &frame.walls[0];
+    assert!(!rotor_load.points.is_empty());
+    let mut moment = 0.0;
+    for (p, f) in rotor_load.points.iter().zip(&rotor_load.forces) {
+        let [x, y, _] = p.map(f64::from);
+        let r = x.hypot(y);
+        assert!((r - inner).abs() < 2.0 * cell, "a load at radius {r}");
+        moment += x * f64::from(f[1]) - y * f64::from(f[0]);
+    }
+    let sampled: Vec<f64> = (times.iter().zip(&rotor.moment))
+        .filter(|(t, _)| **t > before + 1e-9 && **t <= frame.time + 1e-9)
+        .map(|(_, m)| m[2])
+        .collect();
+    let history_mean = sampled.iter().sum::<f64>() / sampled.len() as f64;
+    eprintln!("rotor moment of the frame {moment:.6}, of the history {history_mean:.6}");
+    assert!(
+        (moment - history_mean).abs() < 0.03 * history_mean.abs(),
+        "moment of the frame {moment} vs {history_mean}"
+    );
+    for n in &rotor_load.normals {
+        let length = n.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!((length - 1.0).abs() < 1e-3);
+    }
     // The heat in the fluid at the end: what the flow and the walls dissipated, and about
     // the rotor's work (less the kinetic energy).
-    let frame = last(&results);
     let particle_mass = 1000.0 * (0.5 * cell).powi(3);
     let heat: f64 = (frame.fields[5].iter())
         .map(|&t| particle_mass * specific_heat * (f64::from(t) - start))

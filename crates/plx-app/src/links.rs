@@ -647,6 +647,9 @@ pub enum ResultsUse {
     Modes,
     /// The temperatures the model starts at: `["Setup", "Initial Conditions", "Temperature"]`.
     InitialTemperatures,
+    /// The loads of the material on the walls of a Particle Flow step, as a load of a
+    /// step: `["Setup", "Steps", step, "Wall loads"]`.
+    WallLoads,
 }
 
 pub const TEMPERATURE: &str = "Temperature";
@@ -654,10 +657,11 @@ pub const STEPS: &str = "Steps";
 pub const TEMPERATURES: &str = "Temperatures";
 pub const EIGENMODES: &str = "Eigenmodes";
 pub const GLOBAL_RESULTS: &str = "Global results";
+pub const WALL_LOADS: &str = "Wall loads";
 const INITIAL_CONDITIONS: &str = "Initial Conditions";
 
 /// The inputs a step has for the results of steps of other analyses, the rows under it.
-pub const STEP_INPUTS: [&str; 3] = [TEMPERATURES, EIGENMODES, GLOBAL_RESULTS];
+pub const STEP_INPUTS: [&str; 4] = [TEMPERATURES, EIGENMODES, GLOBAL_RESULTS, WALL_LOADS];
 
 /// Where the global results of a step of a submodel come from, as the boundary condition
 /// dialog tells it: the analysis (or results file) and its step linked to the Global
@@ -729,6 +733,9 @@ pub fn displacement_writers(fe: &FeModel, step: &str) -> Option<DisplacementWrit
 /// Name of the defined field a temperature link sets in its step.
 pub const LINKED_TEMPERATURES: &str = "Linked Temperatures";
 
+/// Name of the load a wall loads link sets in its step.
+pub const LINKED_WALL_LOADS: &str = "Linked Wall Loads";
+
 impl ResultsUse {
     /// What the results go to in the target, by the slot of a results link.
     pub fn of(link: &Link) -> Option<Self> {
@@ -745,6 +752,7 @@ impl ResultsUse {
                 TEMPERATURES => Some(Self::Temperature),
                 EIGENMODES => Some(Self::Modes),
                 GLOBAL_RESULTS => Some(Self::Submodel),
+                WALL_LOADS => Some(Self::WallLoads),
                 _ => None,
             },
             [cell, category, input] if cell == SETUP && category == INITIAL_CONDITIONS => {
@@ -774,8 +782,17 @@ pub fn step_inputs(step: &Step) -> Vec<&'static str> {
     if step.kind.uses_stored_modes() {
         inputs.push(EIGENMODES);
     }
+    if takes_wall_loads(step) {
+        inputs.push(WALL_LOADS);
+    }
     inputs.push(GLOBAL_RESULTS);
     inputs
+}
+
+/// Whether a step takes the loads on the walls of a Particle Flow step: a step that takes
+/// mechanical loads.
+pub fn takes_wall_loads(step: &Step) -> bool {
+    (step.kind).supports_load(&plx_model::LoadKind::WallLoads(Default::default()))
 }
 
 /// Where results of `source_step` dropped on `slot` of `target` go: a step of the target
@@ -790,6 +807,7 @@ pub fn results_slot(
 ) -> Result<Vec<String>, String> {
     let path = |parts: &[&str]| parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
     let thermal = source_step.kind.is_thermal();
+    let particles = matches!(source_step.kind, StepKind::ParticleFlow(_));
     let source = &source_step.name;
     match slot {
         // The Global results row of a submodel's block: the step whose submodel boundary
@@ -837,6 +855,12 @@ pub fn results_slot(
                 }
                 Some(input) => input,
                 // Dropped on the step: the input that fits.
+                None if particles && inputs.contains(&WALL_LOADS) => WALL_LOADS,
+                None if particles => {
+                    return Err(format!(
+                        "{step} takes no loads, so no wall loads of {source}"
+                    ));
+                }
                 None if modes.is_some() && inputs.contains(&EIGENMODES) => EIGENMODES,
                 None if thermal && inputs.contains(&TEMPERATURES) => TEMPERATURES,
                 None => GLOBAL_RESULTS,
@@ -852,6 +876,17 @@ pub fn results_slot(
                 }
                 TEMPERATURES if !thermal => {
                     return Err(format!("{source} is no thermal step"));
+                }
+                WALL_LOADS if !particles => {
+                    return Err(format!(
+                        "{source} is no Particle Flow step, which the wall loads come from"
+                    ));
+                }
+                _ if input != WALL_LOADS && particles => {
+                    return Err(format!(
+                        "of a Particle Flow step like {source} only the loads on its walls go \
+                         to other analyses, to the Wall loads of a step"
+                    ));
                 }
                 _ => {}
             }
@@ -871,6 +906,7 @@ pub fn apply_results(fe: &mut FeModel, link: &Link, global: u32, file: PathBuf) 
     let step = target_step(link).unwrap_or_default().to_owned();
     match kind {
         ResultsUse::Submodel => apply_submodel(fe, &step, global, file),
+        ResultsUse::WallLoads => apply_wall_loads(fe, &step, file),
         ResultsUse::Modes => {
             let changed = fe.properties.stored_modes.as_ref() != Some(&file);
             fe.properties.stored_modes = Some(file);
@@ -909,6 +945,54 @@ pub fn apply_results(fe: &mut FeModel, link: &Link, global: u32, file: PathBuf) 
     }
 }
 
+/// Lets step `step` of `fe` take the loads on the walls in `file`: its load
+/// [`LINKED_WALL_LOADS`] reads them, made on the parts of the walls the first time. Returns
+/// whether anything changed.
+fn apply_wall_loads(fe: &mut FeModel, step: &str, file: PathBuf) -> bool {
+    let Some(step) = fe.steps.iter_mut().find(|s| s.name == step) else {
+        return false;
+    };
+    if let Some(load) = (step.loads.iter_mut()).find(|l| l.name == LINKED_WALL_LOADS) {
+        return match &mut load.kind {
+            plx_model::LoadKind::WallLoads(walls) if walls.file == file => false,
+            plx_model::LoadKind::WallLoads(walls) => {
+                walls.file = file;
+                true
+            }
+            _ => false,
+        };
+    }
+    // The parts of the walls, by name, as the run lists them.
+    let mut parts: Vec<String> = Vec::new();
+    if let Ok(loads) = plx_results::wall_loads::WallLoads::read(&file) {
+        for wall in &loads.walls {
+            for part in &wall.parts {
+                if !parts.contains(part) {
+                    parts.push(part.clone());
+                }
+            }
+        }
+    }
+    step.loads.push(plx_model::Load {
+        id: plx_model::Id::new(),
+        name: LINKED_WALL_LOADS.into(),
+        active: true,
+        visible: true,
+        region: plx_model::Region::Parts(parts),
+        kind: plx_model::LoadKind::WallLoads(plx_model::WallLoads {
+            file,
+            ..Default::default()
+        }),
+        amplitude: None,
+        factor_amplitude: None,
+        tables: Default::default(),
+        distribution: None,
+        system: None,
+        follower: false,
+    });
+    true
+}
+
 /// Takes back what a results link set in `fe`, once it is removed; `submodel` tells
 /// whether other links still make it a submodel.
 pub fn clear_results(fe: &mut FeModel, link: &Link, submodel: bool) {
@@ -924,6 +1008,12 @@ pub fn clear_results(fe: &mut FeModel, link: &Link, submodel: bool) {
                 .filter(|s| Some(s.name.as_str()) == step)
             {
                 s.defined_fields.retain(|f| f.name != LINKED_TEMPERATURES);
+            }
+        }
+        Some(ResultsUse::WallLoads) => {
+            let step = target_step(link);
+            for s in (fe.steps.iter_mut()).filter(|s| Some(s.name.as_str()) == step) {
+                s.loads.retain(|l| l.name != LINKED_WALL_LOADS);
             }
         }
         _ => {}
@@ -2901,7 +2991,7 @@ mod tests {
         assert_eq!(modes, path(&["Setup", "Steps", "Shake", "Eigenmodes"]));
         assert_eq!(
             step_inputs(&target.steps[0]),
-            ["Temperatures", "Global results"]
+            ["Temperatures", "Wall loads", "Global results"]
         );
         assert!(step_inputs(&target.steps[1]).contains(&"Eigenmodes"));
         // The Global results row of a submodel's block: the step with submodel boundary
@@ -2970,6 +3060,70 @@ mod tests {
         clear_results(&mut target, &modes, false);
         assert!(target.result_files().is_empty());
         assert_eq!(target.properties.stored_modes, None);
+    }
+
+    #[test]
+    fn the_loads_on_the_walls_of_a_particle_flow_step_go_to_a_load_of_a_step() {
+        let mut flow = Step::new_static("Flow");
+        flow.kind = StepKind::ParticleFlow(Default::default());
+        let mut target = FeModel::default();
+        target.steps.push(Step::new_static("Load"));
+        target.steps.push(Step::new_frequency("Modes"));
+        // Dropped on a step that takes loads, they go to its Wall loads.
+        let load = path(&["Setup", "Steps", "Load"]);
+        let walls = path(&["Setup", "Steps", "Load", "Wall loads"]);
+        assert_eq!(results_slot(&flow, &target, &load).unwrap(), walls);
+        assert_eq!(results_slot(&flow, &target, &walls).unwrap(), walls);
+        // Not to a step without loads, nor as a submodel or temperatures.
+        assert!(results_slot(&flow, &target, &path(&["Setup", "Steps", "Modes"])).is_err());
+        let global = path(&["Setup", "Steps", "Load", "Global results"]);
+        assert!(results_slot(&flow, &target, &global).is_err());
+        // Only a Particle Flow step gives wall loads.
+        assert!(results_slot(&Step::new_static("Other"), &target, &walls).is_err());
+        assert!(!step_inputs(&target.steps[1]).contains(&WALL_LOADS));
+
+        // The link makes a load on the parts of the walls, which follows the file.
+        let dir = std::env::temp_dir().join(format!("plx-wall-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("job.walls");
+        plx_results::wall_loads::WallLoads::new(
+            0.01,
+            Default::default(),
+            vec![("Screw".into(), vec!["SCREW".into(), "SHAFT".into()])],
+        )
+        .write(&file)
+        .unwrap();
+        let link = Link {
+            source: 1,
+            target: 2,
+            item: path(&["Results", "Flow"]),
+            slot: walls,
+            ..Default::default()
+        };
+        assert_eq!(ResultsUse::of(&link), Some(ResultsUse::WallLoads));
+        assert!(apply_results(&mut target, &link, 1, file.clone()));
+        assert!(!apply_results(&mut target, &link, 1, file.clone()));
+        let made = &target.steps[0].loads[0];
+        assert_eq!(made.name, LINKED_WALL_LOADS);
+        assert_eq!(
+            made.region,
+            plx_model::Region::Parts(vec!["SCREW".into(), "SHAFT".into()])
+        );
+        // A new run: the same load reads the new file, keeping what the user chose.
+        if let plx_model::LoadKind::WallLoads(w) = &mut target.steps[0].loads[0].kind {
+            w.time = plx_model::WallLoadTime::OverTime;
+        }
+        assert!(apply_results(&mut target, &link, 1, dir.join("new.walls")));
+        let plx_model::LoadKind::WallLoads(w) = &target.steps[0].loads[0].kind else {
+            panic!("not a wall load");
+        };
+        assert_eq!(
+            (w.file.clone(), w.time),
+            (dir.join("new.walls"), plx_model::WallLoadTime::OverTime)
+        );
+        clear_results(&mut target, &link, false);
+        assert!(target.steps[0].loads.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

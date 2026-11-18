@@ -26,6 +26,8 @@ pub struct PreparedParticles {
     pub steps: Vec<plx_results::steps::StepRecord>,
     /// The history the step's outputs ask for.
     pub history: HistoryRequest,
+    /// The names of the FE parts of each wall, for the loads on them FE steps take.
+    pub wall_parts: Vec<Vec<String>>,
 }
 
 /// The particle model in words: what the solver gets, without the triangles.
@@ -180,8 +182,19 @@ impl Run {
                     warnings,
                     steps: records,
                     history: request,
+                    wall_parts,
                     ..
                 } = prepared;
+                // The loads on the walls, beside the results.
+                let mut wall_loads = plx_results::wall_loads::WallLoads::new(
+                    model.domain.cell,
+                    model.domain.space,
+                    (model.walls.iter().enumerate())
+                        .map(|(w, wall)| {
+                            (wall.name.clone(), wall_parts.get(w).cloned().unwrap_or_default())
+                        })
+                        .collect(),
+                );
                 let mut track = Convergence::default();
                 // Both callbacks of the solver report progress.
                 let progress = Mutex::new(|event: ProgressEvent| {
@@ -257,6 +270,9 @@ impl Run {
                                         FrameTrack::new(&model, &frame)
                                     });
                                     increment += 1;
+                                    if increment > 1 {
+                                        wall_loads.push(frame.time, &frame.walls);
+                                    }
                                     let size = frame.time - last_time;
                                     last_time = frame.time;
                                     if spool_error.is_none()
@@ -347,6 +363,15 @@ impl Run {
                         Ok(again) => spool = again,
                         Err(e) => return fail(format!("results not spooled: {e}")),
                     }
+                }
+                let walls_file = results_file.with_extension(plx_results::wall_loads::EXTENSION);
+                if wall_loads.walls.is_empty() {
+                    let _ = std::fs::remove_file(&walls_file);
+                } else if let Err(e) = wall_loads.write(&walls_file) {
+                    return fail(format!(
+                        "loads on the walls not written to {}: {e}",
+                        walls_file.display()
+                    ));
                 }
                 let solved = plxs_core::Results {
                     history: history_blocks(&results.history, &request, 1),
@@ -442,6 +467,7 @@ mod tests {
                 energies: vec!["ALLKE".into()],
                 ..Default::default()
             },
+            wall_parts: Vec::new(),
         };
         let mut run = Run::start_particles(1, &dir, "drop", prepared).unwrap();
         assert_eq!(run.wait(), JobStatus::Completed, "{:?}", run.new_output());
@@ -504,6 +530,7 @@ mod tests {
             warnings: Vec::new(),
             steps: Vec::new(),
             history: HistoryRequest::default(),
+            wall_parts: Vec::new(),
         };
         let mut run = Run::start_particles(1, &dir, "slosh", prepared).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(500));

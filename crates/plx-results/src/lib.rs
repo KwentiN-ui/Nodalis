@@ -20,6 +20,7 @@ pub mod solver;
 pub mod steps;
 pub mod transformation;
 pub mod values;
+pub mod wall_loads;
 
 pub use derived::{add_derived_components, principal_values, split_rotations};
 pub use equation::Equation;

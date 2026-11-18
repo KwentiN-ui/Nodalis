@@ -51,7 +51,7 @@ pub fn pool(threads: u32) -> std::io::Result<Arc<rayon::ThreadPool>> {
 pub const VERSION: &str = plxs_session::job::VERSION;
 
 /// Files of a previous run that would be mistaken for results of this one.
-const OLD_FILES: [&str; 5] = ["inp", "dat", "sta", "frd", "ndlr"];
+const OLD_FILES: [&str; 6] = ["inp", "dat", "sta", "frd", "ndlr", "walls"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobStatus {

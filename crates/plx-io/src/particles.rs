@@ -55,6 +55,8 @@ pub struct LoweredParticles {
     /// The name of the FE part each body is filled from, in the order of
     /// [`ParticleModel::bodies`].
     pub bodies: Vec<String>,
+    /// The names of the FE parts of each wall, in the order of [`ParticleModel::walls`].
+    pub wall_parts: Vec<Vec<String>>,
     /// What the history outputs of the step ask for.
     pub history: HistoryRequest,
     /// What the lowering noticed but did not stop for.
@@ -272,6 +274,7 @@ pub fn lower(
     }
 
     // The walls with the laws of the contact regions between them and the bodies.
+    let mut wall_parts = Vec::new();
     for wall in &walls {
         let name = &wall.name;
         let parts: Vec<usize> = wall.parts.iter().copied().collect();
@@ -306,6 +309,7 @@ pub fn lower(
                  temperature."
             ));
         }
+        wall_parts.push(parts.iter().map(|&p| mesh.parts[p].name.clone()).collect());
         model.walls.push(RigidWall {
             name: name.clone(),
             shape: shapes.surface(mesh, &parts),
@@ -481,6 +485,7 @@ pub fn lower(
         model,
         step: index,
         bodies,
+        wall_parts,
         history,
         warnings,
     })

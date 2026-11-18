@@ -10,3 +10,4 @@ pub mod particles;
 pub mod project;
 pub mod solver;
 pub mod vtk;
+pub mod wall_loads;

@@ -1623,6 +1623,43 @@ fn amplitudes(model: &FeModel) -> Result<Vec<ir::amplitude::Amplitude>, WriteErr
                 signal: None,
             });
         }
+        // Wall loads over time: an amplitude per frame of the run, 1 at its time and 0 at
+        // the frames before and after, so that the loads go linearly from frame to frame.
+        for load in step.loads.iter().filter(|l| l.active) {
+            let LoadKind::WallLoads(walls) = &load.kind else {
+                continue;
+            };
+            if walls.time != plx_model::WallLoadTime::OverTime {
+                continue;
+            }
+            let Some(file) = walls.file() else {
+                continue;
+            };
+            let loads =
+                crate::wall_loads::read(file).map_err(|reason| WriteError::InvalidLoad {
+                    item: load.name.clone(),
+                    reason,
+                })?;
+            let times = &loads.times;
+            for k in 0..times.len() {
+                let before = if k == 0 { 0.0 } else { times[k - 1] };
+                let mut points = vec![(before, 0.0), (times[k], 1.0)];
+                if k == 0 && before == times[k] {
+                    points.remove(0);
+                }
+                if let Some(&next) = times.get(k + 1) {
+                    points.push((next, 0.0));
+                }
+                amplitudes.push(ir::amplitude::Amplitude {
+                    name: wall_amplitude(&step.name, &load.name, k),
+                    total_time: false,
+                    shift_x: 0.0,
+                    shift_y: 0.0,
+                    points,
+                    signal: None,
+                });
+            }
+        }
         // The signal of each excitation is an amplitude of its own, in step time, that the
         // solver evaluates at every time step.
         let StepKind::Dynamic(dynamic) = &step.kind else {
@@ -1680,6 +1717,11 @@ fn table_owner<'a>(step: &'a Step, table: &plx_model::StepTable) -> (&'a str, &'
 /// as the solver compares it.
 fn table_amplitude(step: &str, item: &str, label: &str) -> String {
     ir_name(&name(&format!("Table~{step}~{item}~{label}")))
+}
+
+/// The name of the amplitude of frame `frame` of the wall loads `item` in a step.
+fn wall_amplitude(step: &str, item: &str, frame: usize) -> String {
+    ir_name(&name(&format!("Walls~{step}~{item}~{frame}")))
 }
 
 /// The name of the amplitude of the signal of excitation `item` in a step.
@@ -4237,6 +4279,41 @@ fn step_block<'f>(
             _ => None,
         };
         let cards = match load.kind {
+            LoadKind::WallLoads(ref walls) => {
+                let invalid = |reason: String| WriteError::InvalidLoad {
+                    item: load.name.clone(),
+                    reason,
+                };
+                let file = (walls.file())
+                    .ok_or_else(|| invalid("no Particle Flow step is linked to it".into()))?;
+                let loads = crate::wall_loads::read(file).map_err(invalid)?;
+                let sets_of_forces =
+                    crate::wall_loads::nodal_forces(sets.mesh, &load.region, walls, &loads)
+                        .map_err(invalid)?;
+                let mut items = Vec::new();
+                for (k, (time, mapped)) in sets_of_forces.into_iter().enumerate() {
+                    let amplitude = match time {
+                        Some(_) => Some(wall_amplitude(&step.name, &load.name, k)),
+                        None => amplitude.clone(),
+                    };
+                    for (node, force) in mapped.forces {
+                        for (dof, value) in (1..).zip(force).take(dofs) {
+                            if value != 0.0 {
+                                items.push(cload(NodeRef::Node(node), dof, value, &amplitude));
+                            }
+                        }
+                    }
+                }
+                if items.is_empty() {
+                    return Err(invalid(
+                        "no face of the region lies near the walls of the Particle Flow run".into(),
+                    ));
+                }
+                vec![Card::Cload {
+                    op_new: false,
+                    items,
+                }]
+            }
             LoadKind::Moving(_) => {
                 let frame = moving(index).cloned().unwrap_or_default();
                 loads.push((Some(index), moving_load_cards(load, &frame, context)?));

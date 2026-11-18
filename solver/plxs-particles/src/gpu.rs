@@ -16,7 +16,7 @@ use plxs_core::particles::{ParticleFrame, ParticleHistory, Side, WallLaw};
 use plxs_gpu::{Double, Gpu, Options, wgpu};
 use plxs_linalg::amg::GpuMode;
 
-use super::{HISTORY_POINTS, Load, Particle, Setup, Status, Tally, frame};
+use super::{HISTORY_POINTS, Load, Particle, Setup, Status, Tally, WallImpulses, frame};
 use crate::law::{Kind, PointState};
 use crate::math::{IDENTITY, add, norm, scale};
 
@@ -163,6 +163,11 @@ pub(super) struct Card {
     particles: wgpu::Buffer,
     partials: wgpu::Buffer,
     loads: wgpu::Buffer,
+    /// Per node the impulses on the walls since they were last read, and their copy.
+    wall_hits: wgpu::Buffer,
+    read_hits: wgpu::Buffer,
+    /// Nodes of the grid.
+    cells: usize,
     args: wgpu::Buffer,
     control: (wgpu::ComputePipeline, wgpu::BindGroup),
     body_sums: (wgpu::ComputePipeline, wgpu::BindGroup, (u32, u32)),
@@ -593,6 +598,12 @@ impl Card {
                 largest as f64 / 1048576.0
             ));
         }
+        // Two rows per node of the grid when there are walls.
+        let hits_bytes = if walls.is_empty() {
+            16
+        } else {
+            cells as u64 * 32
+        };
         let built = gpu.validated(|| Buffers {
             params: gpu.uniform("particle params", bytemuck::bytes_of(&params)),
             ctl: gpu.storage("particle control", std::mem::size_of::<Control>() as u64),
@@ -613,6 +624,7 @@ impl Card {
             bodies: gpu.init("particle bodies", bytemuck::cast_slice(&bodies)),
             partials: gpu.storage("particle partials", words(partial_words)),
             loads: gpu.storage("wall loads", words(slots * LOAD)),
+            wall_hits: gpu.init("wall hits", &vec![0u8; hits_bytes as usize]),
         })?;
         if let Some(e) = gpu.take_error() {
             return Err(e);
@@ -643,7 +655,7 @@ impl Card {
         steps.push(("gather", vec![0, 3, 7, 9], tile_groups, None));
         steps.push((
             "grid",
-            vec![0, 1, 9, 10, 11, 13, 14, 15, 17],
+            vec![0, 1, 9, 10, 11, 13, 14, 15, 17, 21],
             gpu.fold(grid_groups * GROUP, GROUP),
             None,
         ));
@@ -688,6 +700,7 @@ impl Card {
                 16 => &built.bodies,
                 17 => &built.partials,
                 18 => &built.loads,
+                21 => &built.wall_hits,
                 _ => &args,
             };
             buffer.as_entire_binding()
@@ -748,6 +761,7 @@ impl Card {
         );
         let read_loads = gpu.staging("wall loads read", words(slots * LOAD));
         let read_bodies = gpu.staging("body sums read", words(body_rows));
+        let read_hits = gpu.staging("wall hits read", hits_bytes);
         let read_particles = gpu.staging(
             "particles read",
             count as u64 * std::mem::size_of::<CardParticle>() as u64,
@@ -758,6 +772,9 @@ impl Card {
             particles: built.particles,
             partials: built.partials,
             loads: built.loads,
+            wall_hits: built.wall_hits,
+            read_hits,
+            cells,
             args,
             control,
             body_sums: (body_sums.0, body_sums.1, particle_threads),
@@ -885,6 +902,53 @@ impl Card {
         Ok((loads, sums))
     }
 
+    /// Adds the impulses on the walls since the last call to `impulses`, the walls at
+    /// `pose`, and clears them on the card.
+    fn read_hits(
+        &self,
+        setup: &Setup<'_>,
+        pose: &[super::Pose],
+        impulses: &mut WallImpulses,
+    ) -> Result<(), String> {
+        let bytes = (self.cells * 32) as u64;
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("wall hits read"),
+            });
+        encoder.copy_buffer_to_buffer(&self.wall_hits, 0, &self.read_hits, 0, bytes);
+        encoder.clear_buffer(&self.wall_hits, 0, Some(bytes));
+        self.gpu.queue.submit([encoder.finish()]);
+        let grid = setup.grid;
+        self.gpu.map(&self.read_hits, |b| {
+            let rows: &[[f32; 4]] = bytemuck::cast_slice(&b[..bytes as usize]);
+            for (at, pair) in rows.chunks_exact(2).enumerate() {
+                let [j, n] = [pair[0], pair[1]];
+                if j[3] < 0.5 || (j[0] == 0.0 && j[1] == 0.0 && j[2] == 0.0) {
+                    continue;
+                }
+                let w = j[3] as usize - 1;
+                let (Some(wall), Some(pose)) = (setup.walls.get(w), pose.get(w)) else {
+                    continue;
+                };
+                let i = [
+                    at % grid.n[0],
+                    (at / grid.n[0]) % grid.n[1],
+                    at / (grid.n[0] * grid.n[1]),
+                ];
+                let impulse = [j[0], j[1], j[2]].map(f64::from);
+                let size = norm(impulse);
+                let normal = [n[0], n[1], n[2]].map(|v| f64::from(v) / size);
+                impulses.add(w, wall, pose, grid.position(i), impulse, normal);
+            }
+        })?;
+        if let Some(e) = self.gpu.take_error() {
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// The particles that are left, as the processor's frame takes them.
     fn read_particles(&self) -> Result<Vec<Particle>, String> {
         let size = (self.count * std::mem::size_of::<CardParticle>()) as u64;
@@ -947,6 +1011,9 @@ impl Card {
         let mut outflow_energy = 0.0;
         let mut wall_force = vec![Load::default(); history.walls.len()];
         let mut wall_samples = 0usize;
+        let mut impulses = WallImpulses::new(setup.walls.len(), setup.grid);
+        // When the impulses were last read and when the last frame was written.
+        let (mut hits_read, mut last_frame) = (0.0f64, 0.0f64);
         let mut t = 0.0f64;
         let mut steps = 0usize;
         let mut next_frame = 1usize;
@@ -1123,8 +1190,20 @@ impl Card {
                 }
                 wall_samples = 0;
             }
-            if ctl.reason & FRAME != 0 {
-                on_frame(frame(t, &self.read_particles()?, setup.grid));
+            // The impulses on the walls are summed where the walls are halfway since they
+            // were last read: read once they moved by more than a little.
+            let framed = ctl.reason & FRAME != 0;
+            if !setup.walls.is_empty() && (framed || moved_much(setup, hits_read, t)) {
+                let mid = 0.5 * (hits_read + t);
+                let pose: Vec<_> = setup.walls.iter().map(|w| w.pose(mid, 0.0)).collect();
+                self.read_hits(setup, &pose, &mut impulses)?;
+                hits_read = t;
+            }
+            if framed {
+                let mut written = frame(t, &self.read_particles()?, setup.grid);
+                written.walls = impulses.take(t - last_frame);
+                last_frame = t;
+                on_frame(written);
                 next_frame += 1;
             }
             if ctl.reason & EMPTY != 0 {
@@ -1142,6 +1221,17 @@ impl Card {
             particles: self.count - gone as usize,
         })
     }
+}
+
+/// Whether a wall moved between `from` and `to` by more than the impulses on it may be
+/// summed at one pose: a turn of 2 degrees, or a tenth of a cell.
+fn moved_much(setup: &Setup<'_>, from: f64, to: f64) -> bool {
+    setup.walls.iter().any(|w| {
+        let moved = w.motion.moved_time(to) - w.motion.moved_time(from);
+        let turn = norm(w.motion.angular) * moved.abs();
+        let shift = norm(w.motion.velocity) * moved.abs();
+        turn > 2f64.to_radians() || shift > 0.1 * setup.grid.h
+    })
 }
 
 /// A pass of a time step as planned: its entry point, its bindings, its workgroups and the
@@ -1169,6 +1259,7 @@ struct Buffers {
     bodies: wgpu::Buffer,
     partials: wgpu::Buffer,
     loads: wgpu::Buffer,
+    wall_hits: wgpu::Buffer,
 }
 
 /// A bind group layout with the bindings of `gpu.wgsl` numbered `bindings`.
