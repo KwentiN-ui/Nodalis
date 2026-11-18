@@ -477,7 +477,9 @@ impl Problem {
             Problem::NoRigidBody => {
                 "A boundary condition or load on a reference point acts on the rigid body the \
                  point drives, a history output prints its values. Without an active rigid body constraint with this reference \
-                 point there is no node to apply it to; the input file would be incomplete."
+                 point there is no node to apply it to; the input file would be incomplete. \
+                 A reference point a spring ends on is fixed to the world instead: it takes \
+                 displacements and history outputs, but no loads."
             }
             Problem::InvalidCreep => {
                 "The solver reads Norton's creep law only after an isotropic elasticity and \
@@ -2962,15 +2964,16 @@ impl FeModel {
         let space = self.properties.space;
         let dofs = if space.is_2d() { 2 } else { 6 };
         let driven = |region: &Region| {
-            region.reference_point().is_none_or(|point| {
-                self.constraints.iter().any(|c| {
-                    c.coupling()
-                        .is_some_and(|body| body.active && body.reference_point == point)
-                })
-            })
+            region
+                .reference_point()
+                .is_none_or(|point| self.point_coupled(point))
         };
+        // A point fixed to the world takes displacements, which move the end of its
+        // springs, and prints its reactions, the forces of the springs; loads on it would
+        // go into the ground.
+        let held = |region: &Region| driven(region) || self.region_grounded(region);
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
-            if bc.active && step.kind.supports_boundary(&bc.kind) && !driven(&bc.region) {
+            if bc.active && step.kind.supports_boundary(&bc.kind) && !held(&bc.region) {
                 findings.push(Finding::new(
                     ModelItem::BoundaryCondition(s, i),
                     Problem::NoRigidBody,
@@ -3014,7 +3017,7 @@ impl FeModel {
         for (i, output) in self.step_history_outputs(s).into_iter().enumerate() {
             if let Some(region) = output.kind.region()
                 && output.active
-                && !driven(region)
+                && !held(region)
             {
                 findings.push(Finding::new(
                     ModelItem::HistoryOutput(s, i),
@@ -3490,7 +3493,9 @@ impl FeModel {
             let Constraint::Spring(spring) = constraint else {
                 continue;
             };
-            if spring.layout() != Some(SpringLayout::PointToWorld { point }) {
+            if spring.acting_layout(|r| self.region_grounded(r))
+                != Some(SpringLayout::PointToWorld { point })
+            {
                 continue;
             }
             out.extend((0..3).filter(|&d| spring.stiffness[d] > 0.0));
@@ -3624,7 +3629,7 @@ impl FeModel {
         };
         for constraint in self.constraints.iter().filter(|c| c.active()) {
             match constraint {
-                Constraint::Spring(c) => match c.layout() {
+                Constraint::Spring(c) => match c.acting_layout(|r| self.region_grounded(r)) {
                     Some(SpringLayout::SelectionToWorld { selection }) => {
                         for node in selection.nodes(mesh) {
                             for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
@@ -4005,7 +4010,7 @@ impl FeModel {
             match constraint {
                 // Moved to the node ties when the project was read.
                 Constraint::NodeTie(_) => {}
-                Constraint::Spring(c) => match c.layout() {
+                Constraint::Spring(c) => match c.acting_layout(|r| self.region_grounded(r)) {
                     Some(SpringLayout::SelectionToWorld { selection }) => {
                         for node in selection.nodes(mesh) {
                             for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
@@ -5755,6 +5760,49 @@ mod tests {
         let found = problems(&check(&model, &mesh));
         assert!(
             found.contains(&(ModelItem::Load(0, 0), Problem::NoRigidBody)),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_spring_end_on_a_free_reference_point_is_ground() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        model
+            .reference_points
+            .push(ReferencePoint::new("RP-1", [-1.0, 0.5, 0.5]));
+        let rp = model.reference_points[0].id;
+        // Springs from the face at x = 0 to the point hold the cube instead of the support.
+        let face = model.steps[0].boundary_conditions[0].region.clone();
+        let spring = crate::Spring {
+            ends: [
+                crate::SpringEnd::Region(face),
+                crate::SpringEnd::Region(Region::ReferencePoint(rp)),
+            ],
+            stiffness: [100.0; 3],
+            ..crate::Spring::new("Spring-1")
+        };
+        model.constraints.push(Constraint::Spring(spring));
+        assert!(model.point_grounded(rp));
+        // A displacement of the point moves the ground end of the springs.
+        model.steps[0].boundary_conditions[0].region = Region::ReferencePoint(rp);
+        model.steps[0].boundary_conditions[0].kind =
+            BoundaryKind::displacement([Some(1.0), None, None, None, None, None]);
+        assert_eq!(problems(&check(&model, &mesh)), []);
+        // A load on it would go into the ground.
+        model.steps[0].loads[0].region = Region::ReferencePoint(rp);
+        let found = problems(&check(&model, &mesh));
+        assert_eq!(found, [(ModelItem::Load(0, 0), Problem::NoRigidBody)]);
+        // Driven by a rigid body, the point is no ground: the cube hangs on a loose point.
+        model.steps[0].loads.clear();
+        model.steps[0].boundary_conditions.clear();
+        let mut body = RigidBody::new("Rigid_Body-1", rp);
+        body.region = Region::Nodes(vec![2, 3]);
+        model.constraints.push(Constraint::RigidBody(body));
+        assert!(!model.point_grounded(rp));
+        let found = problems(&check(&model, &mesh));
+        assert!(
+            found.contains(&(ModelItem::Part(0), Problem::RigidBodyMotion)),
             "{found:?}"
         );
     }

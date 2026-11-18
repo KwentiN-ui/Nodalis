@@ -74,8 +74,21 @@ a Displacement/Rotation condition that fixes the translations and leaves the rot
 the hinge axis free. Its point then appears under #ui("Reference Point") of the spring dialog
 (listed under "Displacements on a point"); choose it as #ui("End 1"), #ui("World") as
 #ui("End 2") and give #ui("KR3") (for a hinge about z). Between two such points the spring
-couples two parts instead. A reference point needs a rigid body that it drives, as for
-boundary conditions on it.
+couples two parts instead.
+
+A reference point that no active rigid body drives is fixed to the world: the spring ends on
+ground there, as with #ui("World"), and the dialog says so under the stiffness. Unlike
+#ui("World") such a point can be moved. A Displacement/Rotation condition on the reference
+point moves the ground end of the spring, so the spring is deflected from the start of the
+step: a preloaded spring, for example a spring pressing a part against a stop with a given
+travel. The directions the condition leaves free stay fixed, the point is ground in every
+step without such a condition, and a history output on the point prints its reaction force
+`RF`, the force of the spring. Loads on such a point go into the ground; the model check
+reports them.
+
+#screenshot("constraint-spring-grounded.png", [Spring from the tip of a cantilever to a
+  reference point without rigid body: the point is ground, a Displacement/Rotation on it
+  preloads the spring])
 
 #screenshot("constraint-spring-hinge.png", [Torsion spring on the point of a Displacement/Rotation
   condition with the rotation about z free])

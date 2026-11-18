@@ -4802,6 +4802,74 @@ fn springs_between_points_connect_their_nodes() {
     }
 }
 
+/// A spring ending on a reference point that no rigid body drives ends on ground there: the
+/// point gets a node of its own, held in every direction that no displacement on the point
+/// moves. Held, it carries the tip like springs to World; moved, it deflects the springs
+/// from the start.
+#[test]
+fn solver_grounds_springs_on_a_free_reference_point() {
+    let k = 50.0;
+    let (mesh, mut model) = cantilever(tip_force());
+    let point = ReferencePoint::new("Anchor", [100.0, 5.0, -50.0]);
+    let rp = point.id;
+    model.reference_points.push(point);
+    let to_point = |region: Region| plx_model::Spring {
+        ends: [
+            plx_model::SpringEnd::Region(region),
+            plx_model::SpringEnd::Region(Region::ReferencePoint(rp)),
+        ],
+        stiffness: [0.0, 0.0, k],
+        each_node: true,
+        ..plx_model::Spring::new("Spring-1")
+    };
+    model
+        .constraints
+        .push(Constraint::Spring(to_point(Region::Nodes(vec![99]))));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Element, Type=SPRING2\n"), "{text}");
+    // Reference node 100 and rotation node 101, held at zero.
+    assert!(text.contains("100, 1, 3, 0\n101, 1, 3, 0\n"), "{text}");
+    let mut world = model.clone();
+    world.constraints[0] =
+        Constraint::Spring(spring("Spring-1", Region::Nodes(vec![99]), [0.0, 0.0, k]));
+    let Some(frd) = run_solver("feder-punkt-geerdet", &text) else {
+        return;
+    };
+    let grounded = node_value(&frd, "DISP", "U3", 99);
+    let frd = run_solver("feder-welt", &write_inp(&mesh, &world, "").unwrap()).unwrap();
+    let to_world = node_value(&frd, "DISP", "U3", 99);
+    assert!(grounded < 0.0);
+    assert!(
+        (grounded - to_world).abs() < 1e-9 * to_world.abs(),
+        "{grounded} != {to_world}"
+    );
+    // Without the force, moving the point 2 mm down pulls the tip after it through the
+    // springs: the spring force k (u - 2) bends the beam by u = (k (u - 2)) / c.
+    model.steps[0].loads.clear();
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        id: plx_model::Id::new(),
+        distribution: None,
+        name: "Preload".into(),
+        active: true,
+        visible: true,
+        region: Region::ReferencePoint(rp),
+        kind: BoundaryKind::displacement([None, None, Some(-2.0), None, None, None]),
+        amplitude: None,
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("100, 1, 2, 0\n101, 1, 3, 0\n"), "{text}");
+    assert!(text.contains("_ANCHOR, 3, 3, -2\n"), "{text}");
+    let frd = run_solver("feder-punkt-vorspannung", &text).unwrap();
+    let pulled = node_value(&frd, "DISP", "U3", 99);
+    // The beam's tip stiffness from the loaded case: 100 N = (c + k) |u|.
+    let c = 100.0 / to_world.abs() - k;
+    let expected = -2.0 * k / (k + c);
+    assert!(
+        (pulled - expected).abs() < 1e-6 * expected.abs(),
+        "{pulled} != {expected}"
+    );
+}
+
 #[test]
 fn springs_on_edges_are_spread_by_length() {
     let blocks = blocks(2, 2);
