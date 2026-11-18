@@ -317,6 +317,48 @@ impl FeModel {
         held || joined
     }
 
+    /// Whether an active rigid body (or the coupling of a point mass) drives a reference
+    /// point.
+    pub fn point_coupled(&self, id: Id) -> bool {
+        (self.constraints.iter()).any(|c| {
+            c.coupling()
+                .is_some_and(|b| b.active && b.reference_point == id)
+        })
+    }
+
+    /// Whether a reference point is fixed to the world: no active rigid body drives it, and
+    /// an active spring ends on it. The spring then ends on ground at the point, and a
+    /// displacement boundary condition on the point moves that ground end, which deflects
+    /// the spring from the start.
+    pub fn point_grounded(&self, id: Id) -> bool {
+        self.reference_point(id).is_some()
+            && !self.point_coupled(id)
+            && (self.constraints.iter()).any(|c| match c {
+                crate::Constraint::Spring(spring) => {
+                    spring.active
+                        && (spring.ends.iter())
+                            .filter_map(crate::SpringEnd::region)
+                            .any(|r| r.reference_point() == Some(id))
+                }
+                _ => false,
+            })
+    }
+
+    /// Whether a region is a reference point [`FeModel::point_grounded`] fixes.
+    pub fn region_grounded(&self, region: &crate::Region) -> bool {
+        region
+            .reference_point()
+            .is_some_and(|id| self.point_grounded(id))
+    }
+
+    /// The reference points [`FeModel::point_grounded`] fixes to the world.
+    pub fn grounded_points(&self) -> Vec<Id> {
+        (self.reference_points.iter())
+            .map(|r| r.id)
+            .filter(|&id| self.point_grounded(id))
+            .collect()
+    }
+
     pub fn reference_point_named(&self, name: &str) -> Option<&ReferencePoint> {
         self.reference_points.iter().find(|r| r.name == name)
     }

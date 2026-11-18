@@ -356,6 +356,27 @@ impl Spring {
         })
     }
 
+    /// [`Spring::layout`] as the springs act: an end on a reference point that is
+    /// `grounded` ([`FeModel::point_grounded`](crate::FeModel::point_grounded)) is ground.
+    /// `None` where nothing but ground is left.
+    pub fn acting_layout(&self, grounded: impl Fn(&Region) -> bool) -> Option<SpringLayout<'_>> {
+        Some(match self.layout()? {
+            SpringLayout::PointToWorld { point } if grounded(point) => return None,
+            SpringLayout::PointToPoint { first, second } => {
+                match (grounded(first), grounded(second)) {
+                    (true, true) => return None,
+                    (false, true) => SpringLayout::PointToWorld { point: first },
+                    (true, false) => SpringLayout::PointToWorld { point: second },
+                    (false, false) => SpringLayout::PointToPoint { first, second },
+                }
+            }
+            SpringLayout::SelectionToPoint { selection, point } if grounded(point) => {
+                SpringLayout::SelectionToWorld { selection }
+            }
+            layout => layout,
+        })
+    }
+
     /// The selection whose nodes get the springs, if an end is one.
     pub fn selection(&self) -> Option<&Region> {
         match self.layout()? {

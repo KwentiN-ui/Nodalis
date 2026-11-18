@@ -1183,6 +1183,9 @@ struct Sets<'a> {
     node_frames: BTreeMap<NodeId, node_frames::Axes>,
     /// The dependent degrees of freedom of all MPCs so far.
     dofs: dofs::Dofs,
+    /// Reference points fixed to the world ([`FeModel::point_grounded`]): their nodes in
+    /// `reference_nodes` are held in every mechanical step where no displacement moves them.
+    grounded: Vec<Id>,
 }
 
 /// The nodes CalculiX's `*Rigid body` adds for a reference point: the reference node takes
@@ -1226,6 +1229,7 @@ impl<'a> Sets<'a> {
             transforms: Vec::new(),
             node_frames: BTreeMap::new(),
             dofs: dofs::Dofs::default(),
+            grounded: Vec::new(),
         };
         for (name, ids) in &mesh.node_sets {
             sets.node_sets.push((name.clone(), ids.clone()));
@@ -2546,6 +2550,26 @@ fn constraints(
     }
     for t in model.ties.iter().filter(|t| t.active) {
         items.push(tie(sets, t)?);
+    }
+    // A spring ending on a reference point no rigid body drives ends on ground there: a
+    // node of its own at the point, which a displacement on the point moves.
+    for id in model.grounded_points() {
+        let Some(point) = model.reference_point(id) else {
+            continue;
+        };
+        let (reference, rotation) = (next_node, next_node + 1);
+        next_node += 2;
+        generated.nodes.push((reference, point.position));
+        generated.nodes.push((rotation, point.position));
+        let nodes = ReferenceNodes {
+            name: point.name.clone(),
+            reference,
+            rotation,
+            set: None,
+            behavior: RemoteBehavior::Rigid,
+        };
+        sets.reference_nodes.insert(id, nodes);
+        sets.grounded.push(id);
     }
     owners.resize(items.len(), None);
     Ok((items, owners))
@@ -4201,6 +4225,7 @@ fn step_block<'f>(
     // Boundary conditions that constraints need.
     if step.kind.is_mechanical() {
         boundaries.extend(extra_boundary.cloned());
+        boundaries.extend(grounded_boundaries(sets, step, space));
     }
     let mut loads: Vec<(Option<usize>, Vec<Card>)> = Vec::new();
     // A step resets the loads it takes; one that takes no loads gets none,
@@ -5426,6 +5451,41 @@ fn history_output(
         }
     };
     Ok(vec![card])
+}
+
+/// Holds the reference points fixed to the world in a mechanical step: every degree of
+/// freedom at zero that no displacement of the step on the point moves, the rotations as
+/// the displacements of the rotation node.
+fn grounded_boundaries(sets: &Sets, step: &Step, space: ModelSpace) -> Option<Card> {
+    let mut items = Vec::new();
+    for id in &sets.grounded {
+        let nodes = &sets.reference_nodes[id];
+        let mut moved = [false; 6];
+        for bc in &step.boundary_conditions {
+            if let BoundaryKind::Displacement(displacement) = &bc.kind
+                && bc.active
+                && step.kind.supports_boundary(&bc.kind)
+                && bc.region.reference_point() == Some(*id)
+            {
+                for (moved, value) in moved.iter_mut().zip(displacement.values) {
+                    *moved |= value.is_some();
+                }
+            }
+        }
+        let held: [Option<f64>; 6] =
+            std::array::from_fn(|d| (space.remote_dofs().contains(&d) && !moved[d]).then_some(0.0));
+        items.extend(displacement_boundaries(
+            &NodeRef::Node(nodes.reference),
+            Some(&NodeRef::Node(nodes.rotation)),
+            &held,
+            6,
+            &[const { None }; 6],
+        ));
+    }
+    (!items.is_empty()).then_some(Card::Boundary {
+        op_new: false,
+        items,
+    })
 }
 
 /// Reference and rotation node of a reference point or the point of a remote displacement,

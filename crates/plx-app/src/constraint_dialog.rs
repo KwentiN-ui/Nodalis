@@ -655,6 +655,25 @@ fn spring_rows(
             .to_string(),
     };
     hint(ui, &text);
+    // Ends on reference points no rigid body drives are ground at the point.
+    for end in &spring.ends {
+        let Some(point) = (end.region())
+            .and_then(Region::reference_point)
+            .filter(|&id| !model.fe.point_coupled(id))
+            .and_then(|id| model.fe.reference_point(id))
+        else {
+            continue;
+        };
+        hint(
+            ui,
+            &format!(
+                "{} drives no rigid body: the spring ends on ground at the point. A \
+                 Displacement/Rotation condition on {0} moves that end, which deflects the \
+                 spring from the start.",
+                point.name
+            ),
+        );
+    }
 }
 
 /// The two ends of a joint, its kind and, for a general joint, the free degrees of
