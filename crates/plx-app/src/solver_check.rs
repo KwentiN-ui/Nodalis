@@ -160,7 +160,9 @@ fn solve(
     mesh: &FeMesh,
     model: &FeModel,
 ) -> Result<FrdImport, String> {
-    let lowered = plx_io::inp::lower_unvalidated(mesh, model, "Nodalis self-test")
+    // The self-test's models are built without a geometry: nothing of them is suppressed.
+    let whole = plx_model::active_model(mesh, model, None, &Default::default());
+    let lowered = plx_io::inp::lower_unvalidated(&whole, "Nodalis self-test")
         .map_err(|e| format!("Analysis not set up: {e}"))?;
     let prepared = crate::analysis::prepare(lowered, model, &[]);
     let mut job =
@@ -226,7 +228,8 @@ pub(crate) fn solve_beam_built_in(dir: &Path) -> std::path::PathBuf {
     let fixed = (mesh.node_ids().iter().copied()).filter(|&n| mesh.node(n).unwrap()[0] == 0.0);
     let output = plx_model::HistoryOutput::node("H-Output-1", Region::Nodes(fixed.collect()));
     fe.put_history_output(0, output);
-    let lowered = plx_io::inp::lower_unvalidated(&mesh, &fe, "built-in").unwrap();
+    let whole = plx_model::active_model(&mesh, &fe, None, &Default::default());
+    let lowered = plx_io::inp::lower_unvalidated(&whole, "built-in").unwrap();
     let prepared = crate::analysis::prepare(lowered, &fe, &[]);
     let mut run = Run::start_analysis(1, dir, "Beam", prepared).unwrap();
     assert_eq!(run.wait(), JobStatus::Completed, "{:?}", run.new_output());

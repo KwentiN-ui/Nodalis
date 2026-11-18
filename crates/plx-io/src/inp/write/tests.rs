@@ -11,6 +11,13 @@ use plx_model::{
 };
 
 use super::*;
+// The tests lower whole models: nothing of them is suppressed.
+use super::{lower_whole as lower_unvalidated, write_inp_whole as write_inp};
+
+/// [`super::lower`] of a whole model.
+fn lower(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Lowered, LowerError> {
+    validated(lower_unvalidated(mesh, model, heading)?)
+}
 use crate::frd::{FrdImport, read_frd};
 use crate::inp::{read_inp, read_inp_str};
 
@@ -5595,7 +5602,13 @@ fn a_detection_ties_meeting_line_ends_and_keeps_node_ties_the_user_changed() {
         .map(|p| plx_mesh::extract_part_skin(&mesh, p, 30.0))
         .collect();
     let report = model
-        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .detect_contacts(
+            0,
+            &mesh,
+            &skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!((report.added, report.node_ties), (0, 1));
     // Without faces, Auto is 0.5 % of the diagonal of the lines, 100 long.
@@ -5615,13 +5628,25 @@ fn a_detection_ties_meeting_line_ends_and_keeps_node_ties_the_user_changed() {
     assert!(tie.rotations);
     assert_eq!(tie.detected_by, Some(named("Contacts")));
     // Detecting again replaces it.
-    model.detect_contacts(0, &mesh, &skins, &[true, true]);
+    model.detect_contacts(
+        0,
+        &mesh,
+        &skins,
+        &[true, true],
+        &plx_model::LeftOut::nothing(),
+    );
     assert_eq!(model.node_ties.len(), 1);
     // A node tie changed by the user stays, and none is added for its parts.
     model.node_ties[0].rotations = false;
     model.node_ties[0].edited = true;
     let report = model
-        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .detect_contacts(
+            0,
+            &mesh,
+            &skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!(report.node_ties, 1);
     assert_eq!(model.node_ties.len(), 1);
@@ -5630,14 +5655,26 @@ fn a_detection_ties_meeting_line_ends_and_keeps_node_ties_the_user_changed() {
     model.node_ties[0].edited = false;
     model.contact_detections[0].filter.line_end = false;
     let report = model
-        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .detect_contacts(
+            0,
+            &mesh,
+            &skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!(report.node_ties, 0);
     assert!(model.node_ties.is_empty());
     // A node tie made by hand is left alone.
     model.node_ties.push(NodeTie::new("Node_Tie-1"));
     model.contact_detections[0].filter.line_end = true;
-    model.detect_contacts(0, &mesh, &skins, &[true, true]);
+    model.detect_contacts(
+        0,
+        &mesh,
+        &skins,
+        &[true, true],
+        &plx_model::LeftOut::nothing(),
+    );
     assert_eq!(model.node_ties.len(), 2);
 }
 
@@ -10192,7 +10229,13 @@ fn a_detection_finds_the_touching_blocks_and_keeps_regions_the_user_changed() {
     let auto = plx_model::auto_detection_tolerance(&mesh, &skins, &[true, true]);
     assert!(auto > 2.0 && auto < 5.0, "{auto}");
     let report = model
-        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .detect_contacts(
+            0,
+            &mesh,
+            &skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!((report.added, report.replaced), (1, 0));
     let region = &model.contact_regions[0];
@@ -10205,7 +10248,13 @@ fn a_detection_finds_the_touching_blocks_and_keeps_regions_the_user_changed() {
     // Detecting again replaces what it found, keeping its id for what refers to it.
     let id = model.contact_regions[0].id;
     let report = model
-        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .detect_contacts(
+            0,
+            &mesh,
+            &skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!((report.added, report.replaced), (1, 1));
     assert_eq!(model.contact_regions.len(), 1);
@@ -10214,7 +10263,13 @@ fn a_detection_finds_the_touching_blocks_and_keeps_regions_the_user_changed() {
     model.contact_regions[0].behavior = plx_model::ContactBehavior::Frictionless;
     model.contact_regions[0].edited = true;
     let report = model
-        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .detect_contacts(
+            0,
+            &mesh,
+            &skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!((report.added, report.replaced), (0, 0));
     assert_eq!(report.kept, ["Bonded - LOWER to UPPER"]);
@@ -10226,7 +10281,13 @@ fn a_detection_finds_the_touching_blocks_and_keeps_regions_the_user_changed() {
         .collect();
     model.contact_detections[0].tolerance = Some(0.5);
     let report = model
-        .detect_contacts(0, &far, &far_skins, &[true, true])
+        .detect_contacts(
+            0,
+            &far,
+            &far_skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!(report.added, 0);
     assert_eq!(report.lost, ["Bonded - LOWER to UPPER"]);
@@ -10235,7 +10296,13 @@ fn a_detection_finds_the_touching_blocks_and_keeps_regions_the_user_changed() {
     model.contact_detections[0].tolerance = None;
     model.contact_detections[0].scope = plx_model::PartFilter::parts(["LOWER"]);
     let report = model
-        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .detect_contacts(
+            0,
+            &mesh,
+            &skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!(report.added, 0);
 }
@@ -10258,20 +10325,32 @@ fn detection_rules_give_the_pairs_their_type_and_the_lower_detection_wins() {
         action: RuleAction::Type(ContactBehavior::Frictional { mu: 0.3 }),
     });
     let report = model
-        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .detect_contacts(
+            0,
+            &mesh,
+            &skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!(report.per_rule, [1, 0]);
     assert_eq!(
         model.contact_regions[0].behavior,
         ContactBehavior::Frictional { mu: 0.3 }
     );
-    let context = model.part_context(&mesh);
+    let context = model.part_context(&mesh, &plx_model::LeftOut::nothing());
     let counts = model.rule_counts(&model.contact_detections[0], &mesh, &context);
     assert_eq!(counts, [1, 0]);
     // A rule matching neither side leaves the pair to the type of all other pairs.
     model.contact_detections[0].rules[0].side_a = PartFilter::parts(["NOPE"]);
     let report = model
-        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .detect_contacts(
+            0,
+            &mesh,
+            &skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!(report.per_rule, [0, 1]);
     assert_eq!(model.contact_regions[0].behavior, ContactBehavior::Bonded);
@@ -10282,7 +10361,13 @@ fn detection_rules_give_the_pairs_their_type_and_the_lower_detection_wins() {
         action: RuleAction::Exclude,
     };
     let report = model
-        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .detect_contacts(
+            0,
+            &mesh,
+            &skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!((report.added, report.excluded), (0, 1));
     assert!(model.contact_regions.is_empty());
@@ -10293,17 +10378,35 @@ fn detection_rules_give_the_pairs_their_type_and_the_lower_detection_wins() {
         .exclude
         .push(PartTerm::Group(group));
     let report = model
-        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .detect_contacts(
+            0,
+            &mesh,
+            &skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!(report.added, 0);
     model.contact_detections[0].scope = PartFilter::all();
     // Two detections finding the same pair: the lower one in the tree keeps it.
-    model.detect_contacts(0, &mesh, &skins, &[true, true]);
+    model.detect_contacts(
+        0,
+        &mesh,
+        &skins,
+        &[true, true],
+        &plx_model::LeftOut::nothing(),
+    );
     let mut second = plx_model::ContactDetection::new("Friction");
     second.behavior = ContactBehavior::Frictionless;
     model.contact_detections.push(second);
     let report = model
-        .detect_contacts(1, &mesh, &skins, &[true, true])
+        .detect_contacts(
+            1,
+            &mesh,
+            &skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!(report.taken_from.get("Contacts"), Some(&1));
     assert_eq!(model.contact_regions.len(), 1);
@@ -10312,7 +10415,13 @@ fn detection_rules_give_the_pairs_their_type_and_the_lower_detection_wins() {
         ContactBehavior::Frictionless
     );
     let report = model
-        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .detect_contacts(
+            0,
+            &mesh,
+            &skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!(report.left_to.get("Friction"), Some(&1));
     assert_eq!(report.added, 0);
@@ -10337,7 +10446,13 @@ fn detection_rules_give_the_pairs_their_type_and_the_lower_detection_wins() {
 #[test]
 fn solver_carries_the_load_across_detected_contacts() {
     let (mesh, mut model, skins) = detected_blocks(0.01);
-    model.detect_contacts(0, &mesh, &skins, &[true, true]);
+    model.detect_contacts(
+        0,
+        &mesh,
+        &skins,
+        &[true, true],
+        &plx_model::LeftOut::nothing(),
+    );
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains("*Tie, Name=BONDED_-_LOWER_TO_UPPER"),
@@ -12489,7 +12604,13 @@ fn a_detection_finds_a_rope_lying_on_a_surface() {
         .map(|p| plx_mesh::extract_part_skin(&mesh, p, 30.0))
         .collect();
     let report = model
-        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .detect_contacts(
+            0,
+            &mesh,
+            &skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!(report.added, 1, "{report:?}");
     let region = &model.contact_regions[0];
@@ -12528,7 +12649,13 @@ fn a_detection_finds_a_rope_lying_on_a_surface() {
         .map(|p| plx_mesh::extract_part_skin(&far, p, 30.0))
         .collect();
     let report = model
-        .detect_contacts(0, &far, &skins, &[true, true])
+        .detect_contacts(
+            0,
+            &far,
+            &skins,
+            &[true, true],
+            &plx_model::LeftOut::nothing(),
+        )
         .unwrap();
     assert_eq!(report.added, 0, "{report:?}");
 }

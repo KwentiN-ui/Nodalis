@@ -1260,7 +1260,7 @@ fn detection_on_geometry_keeps_to_the_faces_that_touch() {
     };
     let visible = vec![true; display.mesh.parts.len()];
     let report = model
-        .detect_contacts_on_geometry(0, &geometry, &visible)
+        .detect_contacts_on_geometry(0, &geometry, &visible, &plx_model::LeftOut::nothing())
         .unwrap();
     assert_eq!(report.added, 4, "{:#?}", model.contact_regions);
     // Each side is the one face of its block at the plane between the two blocks.
@@ -2330,7 +2330,7 @@ fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
     };
     let visible = vec![true; display.mesh.parts.len()];
     let report = model
-        .detect_contacts_on_geometry(0, &detection, &visible)
+        .detect_contacts_on_geometry(0, &detection, &visible, &plx_model::LeftOut::nothing())
         .unwrap();
     // Both lines touch the running surface at the top, where they meet.
     assert_eq!(report.added, 2, "{:#?}", model.contact_regions);
@@ -2348,7 +2348,7 @@ fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
     // Without the rope profile nothing touches: the lines are 8 off the surface.
     model.sections.clear();
     let report = model
-        .detect_contacts_on_geometry(0, &detection, &visible)
+        .detect_contacts_on_geometry(0, &detection, &visible, &plx_model::LeftOut::nothing())
         .unwrap();
     assert_eq!(report.added, 0, "{:#?}", model.contact_regions);
 }
@@ -3857,7 +3857,7 @@ fn a_detected_bonded_pin_with_play_passes_the_model_check() {
     };
     let visible = vec![true; display.mesh.parts.len()];
     let report = model
-        .detect_contacts_on_geometry(0, &detection, &visible)
+        .detect_contacts_on_geometry(0, &detection, &visible, &plx_model::LeftOut::nothing())
         .unwrap();
     assert_eq!(report.added, 1, "{:#?}", model.contact_regions);
     let mesh = generate_mesh(&geometry).unwrap().mesh;

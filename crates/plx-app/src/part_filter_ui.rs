@@ -9,11 +9,19 @@ use egui::{RichText, Ui};
 use plx_mesh::FeMesh;
 use plx_model::{FeModel, PartContext, PartFilter, PartTerm};
 
-/// The parts of `mesh` as filters see them, worked out again only when the parts, the
-/// sections or the part groups change.
-pub fn cached_context(ctx: &egui::Context, fe: &FeModel, mesh: &FeMesh) -> Arc<PartContext> {
+/// The parts of `mesh`, the mesh of `model` or the display of its geometry, as filters see
+/// them, worked out again only when the parts, their suppression, the sections or the part
+/// groups change. A suppressed part is taken by no filter.
+pub fn cached_context(
+    ctx: &egui::Context,
+    model: &crate::model::Model,
+    mesh: &FeMesh,
+) -> Arc<PartContext> {
     use std::hash::{Hash, Hasher};
+    let fe = &model.fe;
+    let left_out = model.left_out_of(mesh);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    format!("{left_out:?}").hash(&mut hasher);
     mesh.elements().len().hash(&mut hasher);
     for part in &mesh.parts {
         part.name.hash(&mut hasher);
@@ -35,7 +43,7 @@ pub fn cached_context(ctx: &egui::Context, fe: &FeModel, mesh: &FeMesh) -> Arc<P
     {
         return context;
     }
-    let context = Arc::new(fe.part_context(mesh));
+    let context = Arc::new(fe.part_context(mesh, &left_out));
     ctx.data_mut(|d| d.insert_temp(id, (key, context.clone())));
     context
 }

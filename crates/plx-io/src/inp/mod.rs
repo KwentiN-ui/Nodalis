@@ -16,6 +16,8 @@ use plx_model::{
     BeamOrientation, BeamProfile, BeamSection, CrossSection, Region, Section, SectionKind,
 };
 
+#[cfg(test)]
+pub(crate) use write::write_inp_whole;
 pub use write::{
     LowerError, Lowered, ModelError, SHORTENED_NAME, WriteError, lower, lower_unvalidated,
     lower_with_sets_of, lower_with_sets_unvalidated, resolved_overlaps, write_deformed_mesh_inp,

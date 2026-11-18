@@ -956,7 +956,7 @@ pub(crate) fn confirm_button(ui: &mut Ui, picking: bool) -> bool {
 /// Edges of the outline of the visible parts, the faces of a 2D model.
 fn visible_edges(model: &Model) -> BTreeSet<(ElementId, u8)> {
     (model.outline_edges().into_iter())
-        .filter(|(part, _, _)| model.parts[*part].visible)
+        .filter(|(part, _, _)| model.parts[*part].pickable())
         .map(|(_, face, _)| face)
         .collect()
 }
@@ -4315,9 +4315,7 @@ impl Editor {
                 name_row(ui, &mut group.name);
                 let context = match &self.detection_scope {
                     Some(scope) => scope.context.clone(),
-                    None => {
-                        crate::part_filter_ui::cached_context(ui.ctx(), &model.fe, model.mesh())
-                    }
+                    None => crate::part_filter_ui::cached_context(ui.ctx(), model, model.mesh()),
                 };
                 ui.label("Parts");
                 crate::part_filter_ui::filter_editor(

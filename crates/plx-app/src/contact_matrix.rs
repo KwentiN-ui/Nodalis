@@ -58,7 +58,7 @@ struct Axes {
 
 fn axes(ctx: &egui::Context, model: &Model) -> Axes {
     let fe = &model.fe;
-    let context = crate::part_filter_ui::cached_context(ctx, fe, model.mesh());
+    let context = crate::part_filter_ui::cached_context(ctx, model, model.mesh());
     if fe.part_groups.is_empty() {
         return Axes {
             names: context.names.clone(),

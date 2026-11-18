@@ -698,6 +698,8 @@ fn advanced_contacts() -> Vec<TreeItem> {
 pub const CROSS_SECTIONS: &str = "Cross-Sections";
 /// The container of the contact regions, under Connections (the group "Contacts").
 pub const CONTACT_REGIONS: &str = "Contact Regions";
+/// The container of the suppressed parts, at the end of Parts.
+pub const SUPPRESSED_PARTS: &str = "Suppressed";
 /// The container of the bolts, under Connections.
 pub const BOLTS: &str = "Bolts";
 /// The container of the part groups, under Connections.
@@ -1374,6 +1376,21 @@ impl Tree<'_> {
         let creates = (creates(&item))
             .or_else(|| (self.view == TreeView::FeModel).then(|| creates_set(&item))?)
             .filter(|_| closed.is_none());
+        if item == TreeItem::Group(SUPPRESSED_PARTS) {
+            response.context_menu(|ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                let suppressed: Vec<usize> = (self.part_indices.iter().copied())
+                    .filter(|&i| self.inactive.contains(&TreeItem::Part(i)))
+                    .collect();
+                if ui
+                    .button("Unsuppress All")
+                    .on_hover_text(SUPPRESS_TIP)
+                    .clicked()
+                {
+                    self.response.suppress = Some((suppressed, false));
+                }
+            });
+        }
         if item == TreeItem::Group("Parts") && !self.part_indices.is_empty() {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -1782,6 +1799,10 @@ impl Tree<'_> {
             (TreeItem::Compound(c), TreeItem::Part(p)) => {
                 (self.state.compounds.get(*c)).is_some_and(|(_, members)| members.contains(p))
             }
+            // Only the suppressed parts lie in their branch, which stays folded otherwise.
+            (TreeItem::Group(SUPPRESSED_PARTS), TreeItem::Part(_) | TreeItem::Compound(_)) => {
+                self.inactive.contains(item)
+            }
             _ => contains(branch, item),
         }
     }
@@ -1956,8 +1977,13 @@ impl Tree<'_> {
             Vec::new()
         };
         self.branch(ui, TreeItem::Group("Parts"), parts, true, |tree, ui| {
-            // A compound part stands where its first part would, its parts under it.
+            // A compound part stands where its first part would, its parts under it. The
+            // suppressed parts, and compounds of only suppressed parts, are listed apart at
+            // the end, under a branch of their own that folds them away.
+            let suppressed: Vec<bool> = model.parts.iter().map(|p| p.suppressed).collect();
+            let suppressed = |index: usize| suppressed.get(index).copied().unwrap_or(false);
             let mut drawn = vec![false; model.parts.len()];
+            let mut apart: Vec<(usize, Option<usize>)> = Vec::new();
             for index in 0..model.parts.len() {
                 if drawn[index] {
                     continue;
@@ -1965,32 +1991,66 @@ impl Tree<'_> {
                 let compound = compounds.iter().position(|(_, m)| m.contains(&index));
                 match compound {
                     Some(c) => {
-                        let (name, members) = &compounds[c];
-                        let suppressed = (members.iter())
-                            .all(|&m| model.parts.get(m).is_some_and(|p| p.suppressed));
-                        if suppressed && !members.is_empty() {
-                            tree.inactive.insert(TreeItem::Compound(c));
-                        }
-                        let label = format!("{name} ({})", members.len());
-                        tree.branch(ui, TreeItem::Compound(c), label, true, |tree, ui| {
-                            for &member in members {
-                                tree.part_row(ui, model, member, &compounds);
-                            }
-                        });
+                        let members = &compounds[c].1;
                         for &member in members {
                             if let Some(d) = drawn.get_mut(member) {
                                 *d = true;
                             }
                         }
+                        if !members.is_empty() && members.iter().all(|&m| suppressed(m)) {
+                            tree.inactive.insert(TreeItem::Compound(c));
+                            apart.push((index, Some(c)));
+                        } else {
+                            tree.compound_rows(ui, model, c, &compounds);
+                        }
                     }
                     None => {
-                        tree.part_row(ui, model, index, &compounds);
                         drawn[index] = true;
+                        if suppressed(index) {
+                            apart.push((index, None));
+                        } else {
+                            tree.part_row(ui, model, index, &compounds);
+                        }
                     }
                 }
             }
             for name in &unmeshed {
                 tree.unmeshed_row(ui, name);
+            }
+            if apart.is_empty() {
+                return;
+            }
+            let label = counted(SUPPRESSED_PARTS, apart.len());
+            tree.branch(
+                ui,
+                TreeItem::Group(SUPPRESSED_PARTS),
+                label,
+                true,
+                |tree, ui| {
+                    for &(index, compound) in &apart {
+                        match compound {
+                            Some(c) => tree.compound_rows(ui, model, c, &compounds),
+                            None => tree.part_row(ui, model, index, &compounds),
+                        }
+                    }
+                },
+            );
+        });
+    }
+
+    /// The row of the compound part `c` with its parts under it.
+    fn compound_rows(
+        &mut self,
+        ui: &mut Ui,
+        model: &mut Model,
+        c: usize,
+        compounds: &[(String, Vec<usize>)],
+    ) {
+        let (name, members) = &compounds[c];
+        let label = format!("{name} ({})", members.len());
+        self.branch(ui, TreeItem::Compound(c), label, true, |tree, ui| {
+            for &member in members {
+                tree.part_row(ui, model, member, compounds);
             }
         });
     }
