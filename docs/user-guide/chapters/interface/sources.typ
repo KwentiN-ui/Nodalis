@@ -359,7 +359,10 @@ right of that row to the #ui("Geometry") row of the analyses that are to use the
 geometry. Blocks in a row apply their operations one after the other.
 
 Double-click the block to open its editor. It shows the geometry linked to it in its own 3D
-view: click the edges or faces to act on, a click on a picked one removes it again. Picked
+view: click the edges or faces to act on, a click on a picked one removes it again. A box
+dragged with the left button adds all edges, faces or corners inside it that a click could
+pick (dragged to the left also those it crosses), with #key("Ctrl") it removes them; a split
+by plane takes its plane from a single click. Picked
 ones are drawn red, the one under the resting mouse orange. Choose the operation and type its
 radius, distance or offset; #ui("Preview") applies it and shows the result, #ui("Input") goes back to picking.
 #ui("OK") keeps the operation, and the result of the preview with it if nothing changed since.

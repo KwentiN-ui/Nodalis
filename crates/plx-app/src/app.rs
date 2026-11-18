@@ -1829,6 +1829,8 @@ impl AnalysisWindow {
                 || self.workbench.section_picks()
                 || self.workbench.transformation_picks()
                 || self.workbench.feature_picks();
+            // Without a dialog picking, a box selects parts as a click on each would.
+            self.workbench.viewport.box_parts = self.workbench.tree_view != TreeView::Results;
             self.workbench.viewport.gizmo =
                 match (&self.workbench.section_dialog, self.workbench.shown()) {
                     (Some(dialog), Some(model)) => Some(dialog.gizmo(model)),
@@ -4948,7 +4950,11 @@ impl Workbench {
     }
 
     fn box_select(&mut self, area: &BoxSelect) {
-        if !self.picking() || self.section_picks() {
+        if self.section_picks() || self.transformation_picks() {
+            return;
+        }
+        if !self.picking() && !self.feature_picks() {
+            self.box_select_parts(area);
             return;
         }
         let operation = Operation::from_modifiers(area.shift, area.ctrl);
@@ -4999,6 +5005,40 @@ impl Workbench {
                 area,
                 Operation::from_modifiers(area.shift, area.ctrl),
             );
+        }
+    }
+
+    /// A selection box dragged with no dialog picking selects the visible parts inside it,
+    /// or crossing it when dragged to the left, in the tree: Shift adds them, Ctrl takes
+    /// them out again.
+    fn box_select_parts(&mut self, area: &BoxSelect) {
+        let view = self.tree_view;
+        if view == TreeView::Results {
+            return;
+        }
+        let Some(model) = self.shown() else {
+            return;
+        };
+        let parts: Vec<usize> = (0..model.parts.len())
+            .filter(|&p| model.parts[p].visible && crate::selection::part_in_box(model, p, area))
+            .collect();
+        if area.ctrl {
+            let picked = self.tree.selected_parts(view);
+            for part in parts.into_iter().filter(|p| picked.contains(p)) {
+                self.tree.toggle_part(view, part);
+            }
+        } else if area.shift {
+            self.tree.add_parts(view, parts);
+        } else if parts.is_empty() {
+            self.tree.selected = None;
+        } else {
+            self.tree.selected = None;
+            self.tree.add_parts(view, parts);
+            if view == TreeView::FeModel {
+                self.tree.reveal_acting = true;
+            } else {
+                self.tree.reveal = true;
+            }
         }
     }
 

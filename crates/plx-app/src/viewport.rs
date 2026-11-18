@@ -30,6 +30,9 @@ pub struct Viewport {
     pub path_plots: Vec<crate::path_plot::PlotBox>,
     /// A dialog picks in the 3D view: the left button selects and draws selection boxes.
     pub selecting: bool,
+    /// Without a dialog picking, left drags draw selection boxes for parts, with no hover
+    /// preview.
+    pub box_parts: bool,
     /// What a click at the resting mouse would select, drawn in orange.
     pub preview: Preview,
     /// Where the selection box drag started.
@@ -252,6 +255,7 @@ impl Viewport {
             labels: LabelOffsets::default(),
             path_plots: Vec::new(),
             selecting: false,
+            box_parts: false,
             preview: Preview::default(),
             box_start: None,
             resting: None,
@@ -423,10 +427,11 @@ impl Viewport {
                 self.camera.orbit(delta.x, delta.y);
             }
         }
-        if free && self.selecting && response.drag_started_by(PointerButton::Primary) {
+        let boxes = self.selecting || self.box_parts;
+        if free && boxes && response.drag_started_by(PointerButton::Primary) {
             self.box_start = response.interact_pointer_pos();
         }
-        if !self.selecting {
+        if !boxes {
             self.box_start = None;
         }
         if response.hovered()
