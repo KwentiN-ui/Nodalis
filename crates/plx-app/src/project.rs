@@ -1817,6 +1817,14 @@ impl Node {
         }
     }
 
+    /// The geometry whose mesh setup exposed parameters of the analysis can set.
+    fn exposing_geometry(&self) -> Option<&plx_model::Geometry> {
+        match self.kind() {
+            Kind::Analysis => self.link_data()?.geometry,
+            _ => None,
+        }
+    }
+
     fn exposing_fe_mut(&mut self) -> Option<&mut plx_model::FeModel> {
         match &mut self.block {
             Block::Analysis(analysis) => match (&mut analysis.window, &mut analysis.data) {
@@ -1837,10 +1845,13 @@ impl Node {
         let Some(path) = fe.exposed(key).map(|e| e.path.clone()) else {
             return false;
         };
-        // A number of a mesh operation moves the mesh of the analysis along.
+        // A number of a mesh operation moves the mesh of the analysis along; one of the mesh
+        // setup makes the parts it meshes out of date, to be meshed anew by the solve.
         let changed = match &mut self.block {
             Block::Analysis(analysis) => match (&mut analysis.window, &mut analysis.data) {
                 (Some(window), _) => window.set_value(&path, value),
+                (None, Some(data)) if path.item.is_meshing() => (data.geometry.as_mut())
+                    .is_some_and(|geometry| geometry.set_value(&path, value)),
                 (None, Some(data)) => data.model.set_value_meshed(&mut data.mesh, &path, value),
                 _ => false,
             },
@@ -3811,7 +3822,10 @@ impl ProjectApp {
                     .map(|(.., value)| value)
             }
             [cell, key] if cell == links::PARAMETERS => match node.exposing_fe() {
-                Some(fe) => fe.value_at(&fe.exposed(key.parse().ok()?)?.path),
+                Some(fe) => {
+                    let path = &fe.exposed(key.parse().ok()?)?.path;
+                    fe.value_in(node.exposing_geometry(), path)
+                }
                 None => node.as_mesh()?.primitive.value(key),
             },
             _ => None,
@@ -6050,7 +6064,7 @@ impl ProjectApp {
                         .map(|(fe, collection)| {
                             let mut rows = collection_rows(collection, fe, &n.expanded);
                             let incoming = incoming.get(&n.id).map_or(&[][..], Vec::as_slice);
-                            rows.extend(exposed_rows(fe, &n.expanded, incoming));
+                            rows.extend(exposed_rows(fe, None, &n.expanded, incoming));
                             rows
                         })
                         .unwrap_or_default(),
@@ -6100,6 +6114,7 @@ impl ProjectApp {
                     (Kind::Analysis, Some(status)) => block_rows(
                         status,
                         fe,
+                        n.exposing_geometry(),
                         &n.expanded,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
                         bundles.get(&n.id).map_or(&[][..], Vec::as_slice),
@@ -6155,7 +6170,8 @@ impl ProjectApp {
                     transform: n.as_transform().map(|t| t.transform),
                     point: n.as_measure().and_then(|m| m.kind.point()),
                     parameters: (n.as_parameters()).map_or_else(Vec::new, |p| p.parameters.clone()),
-                    exposed: n.exposing_fe().map_or_else(Vec::new, ExposedView::of),
+                    exposed: (n.exposing_fe())
+                        .map_or_else(Vec::new, |fe| ExposedView::of(fe, n.exposing_geometry())),
                     note: match &n.block {
                         Block::Note(text) => text.clone(),
                         _ => String::new(),
@@ -9020,13 +9036,15 @@ struct ExposedView {
 }
 
 impl ExposedView {
-    fn of(fe: &plx_model::FeModel) -> Vec<Self> {
+    /// The exposed parameters of `fe`, those of the mesh setup with their numbers in
+    /// `geometry`.
+    fn of(fe: &plx_model::FeModel, geometry: Option<&plx_model::Geometry>) -> Vec<Self> {
         (fe.exposed.iter())
             .map(|e| Self {
                 key: e.key,
                 name: e.name.clone(),
-                value: fe.value_at(&e.path),
-                kind: fe.value_kind(&e.path),
+                value: fe.value_in(geometry, &e.path),
+                kind: fe.value_kind_in(geometry, &e.path),
             })
             .collect()
     }
@@ -9036,6 +9054,7 @@ impl ExposedView {
 /// a row with a pin for each, where value links set it.
 fn exposed_rows(
     fe: &plx_model::FeModel,
+    geometry: Option<&plx_model::Geometry>,
     expanded: &BTreeSet<Vec<String>>,
     incoming: &[(Vec<String>, String)],
 ) -> Vec<Row> {
@@ -9068,7 +9087,7 @@ fn exposed_rows(
     for exposed in &fe.exposed {
         let mut path = path.clone();
         path.push(exposed.key.to_string());
-        let gone = fe.value_at(&exposed.path).is_none();
+        let gone = fe.value_in(geometry, &exposed.path).is_none();
         let item = &exposed.path.item;
         let tip = if gone {
             format!(
@@ -9117,6 +9136,7 @@ const EXPOSED: &str = "Exposed Parameters";
 fn block_rows(
     status: &AnalysisStatus,
     fe: Option<&plx_model::FeModel>,
+    meshed_from: Option<&plx_model::Geometry>,
     expanded: &BTreeSet<Vec<String>>,
     incoming: &[(Vec<String>, String)],
     bundles: &[Bundle],
@@ -9358,7 +9378,7 @@ fn block_rows(
         }
     }
     if let Some(fe) = fe {
-        rows.extend(exposed_rows(fe, expanded, incoming));
+        rows.extend(exposed_rows(fe, meshed_from, expanded, incoming));
     }
     rows.push(cell("Solution", NodeIcon::Solution, status.solution, false));
     rows.push(cell("Results", NodeIcon::Results, status.results, false));
@@ -10107,7 +10127,10 @@ fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
             Some(ValueKind::Quantity(Quantity::Length))
         }
         [cell, key] if cell == links::PARAMETERS => match node.exposing_fe() {
-            Some(fe) => fe.value_kind(&fe.exposed(key.parse().ok()?)?.path),
+            Some(fe) => {
+                let path = &fe.exposed(key.parse().ok()?)?.path;
+                fe.value_kind_in(node.exposing_geometry(), path)
+            }
             None => node.as_mesh()?.primitive.value_kind(key),
         },
 
@@ -10578,9 +10601,15 @@ enum StudyMesh {
 /// says.
 fn study_analysis_print(data: links::Data, mesh: StudyMesh, driven: impl Fn(u32) -> bool) -> u64 {
     let mut fe = data.fe.clone();
+    // The mesh setup counts without the numbers the study gives: set to one each, a number
+    // the setup takes.
+    let mut geometry = data.geometry.map(plx_model::Geometry::setup_only);
     for exposed in &data.fe.exposed {
         if driven(exposed.key) {
             fe.set_value(&exposed.path, 0.0);
+            if let Some(geometry) = &mut geometry {
+                geometry.set_value(&exposed.path, 1.0);
+            }
         }
     }
     let empty = plx_mesh::FeMesh::default();
@@ -10596,6 +10625,12 @@ fn study_analysis_print(data: links::Data, mesh: StudyMesh, driven: impl Fn(u32)
         })
         .flat_map(|o| o.part_indices(data.mesh))
         .collect();
+    // A mesh setup the study gives makes the mesh anew from point to point.
+    let remeshes = (data.fe.exposed.iter()).any(|e| driven(e.key) && e.path.item.is_meshing());
+    let mesh = match mesh {
+        StudyMesh::Own if remeshes => StudyMesh::Remeshed,
+        mesh => mesh,
+    };
     let still;
     let fe_mesh = match mesh {
         StudyMesh::Own if moved.is_empty() => data.mesh,
@@ -10613,7 +10648,7 @@ fn study_analysis_print(data: links::Data, mesh: StudyMesh, driven: impl Fn(u32)
     print.add(&plx_model::fingerprint::solve_input(fe_mesh, &fe).to_le_bytes());
     // How it meshes: the element sizes, the mesh setup and the refinement.
     if mesh != StudyMesh::None
-        && let Some(geometry) = data.geometry
+        && let Some(geometry) = &geometry
     {
         print.add_debug(&geometry.meshing);
         print.add_debug(&geometry.mesh_items);
@@ -13871,6 +13906,7 @@ mod tests {
         let rows = block_rows(
             nodes[0].status().unwrap(),
             None,
+            None,
             &BTreeSet::new(),
             &[],
             &[],
@@ -14313,7 +14349,7 @@ mod tests {
             ..Default::default()
         };
         let mut analysis = Node::analysis(1, "Analysis-1".into(), data);
-        let rows = exposed_rows(analysis.exposing_fe().unwrap(), &BTreeSet::new(), &[]);
+        let rows = exposed_rows(analysis.exposing_fe().unwrap(), None, &BTreeSet::new(), &[]);
         assert_eq!(rows[1].text, "Transform-1 Y");
         assert!(analysis.set_exposed(key, 4.0));
         let data = analysis.link_data().unwrap();
@@ -14372,7 +14408,7 @@ mod tests {
             }),
         );
         let fe = analysis.exposing_fe().unwrap();
-        let rows = exposed_rows(fe, &BTreeSet::new(), &[]);
+        let rows = exposed_rows(fe, None, &BTreeSet::new(), &[]);
         assert_eq!(rows[0].path, [links::PARAMETERS]);
         assert_eq!(rows[1].path, path(&["Parameters", &key.to_string()]));
         assert!(rows[1].input && rows[1].text == "Force-1 Y");
@@ -14962,7 +14998,15 @@ mod tests {
         let node = Node::analysis(1, "Detail".into(), data);
         let status = node.status().unwrap();
         let global = |fe: &plx_model::FeModel, incoming: &[(Vec<String>, String)]| {
-            let rows = block_rows(status, Some(fe), &BTreeSet::new(), incoming, &[], None);
+            let rows = block_rows(
+                status,
+                Some(fe),
+                None,
+                &BTreeSet::new(),
+                incoming,
+                &[],
+                None,
+            );
             rows.into_iter().find(|r| r.path == [links::GLOBAL_RESULTS])
         };
         // A general model has none; a submodel has an input for the global results.
@@ -15001,7 +15045,7 @@ mod tests {
             vec!["Setup".to_owned()],
             vec!["Setup".into(), "Steps".into()],
         ];
-        let rows = block_rows(status, Some(&model), &open.into(), &[], &[], None);
+        let rows = block_rows(status, Some(&model), None, &open.into(), &[], &[], None);
         let marks = chain_marks(&model, &rows);
         for group in [vec!["Setup", "Steps"], vec!["Results"]] {
             let mark = |step: &str| {
@@ -15091,6 +15135,87 @@ mod tests {
             print(&coarse, &empty, StudyMesh::None),
             print(&fine, &meshed, StudyMesh::None)
         );
+
+        // A max. element size the study gives counts without its value, and the analysis
+        // meshes anew from point to point: its own mesh does not count either.
+        let mut fe = plx_model::FeModel::default();
+        let path = plx_model::ValuePath::new(
+            plx_model::ItemRef::DefaultMeshing,
+            plx_model::Field::MaxElementSize,
+        );
+        let key = fe.expose(path);
+        let driven = |geometry: &plx_model::Geometry, mesh: &plx_mesh::FeMesh| {
+            let data = links::Data {
+                geometry: Some(geometry),
+                mesh,
+                fe: &fe,
+                origins: &inputs,
+            };
+            study_analysis_print(data, StudyMesh::Own, |k| k == key)
+        };
+        assert_eq!(driven(&coarse, &meshed), driven(&fine, &empty));
+        let mut second = fine.clone();
+        second.meshing.second_order = false;
+        assert_ne!(driven(&coarse, &meshed), driven(&second, &meshed));
+    }
+
+    /// An exposed number of the mesh setup of a closed analysis changes its geometry, and
+    /// the parts meshed with the old number are out of date, to be meshed anew.
+    #[test]
+    fn an_exposed_mesh_size_makes_the_parts_out_of_date() {
+        let geometry = plx_model::Geometry {
+            compounds: Vec::new(),
+            suppressed: Vec::new(),
+            source: "part.step".into(),
+            brep: "shapes".into(),
+            meshing: plx_model::MeshingParameters::default(),
+            mesh_items: vec![plx_model::MeshSetupItem {
+                name: "Meshing_Parameters-1".into(),
+                kind: plx_model::MeshSetupKind::MeshingParameters {
+                    parts: vec!["PART_1".into()],
+                    parameters: plx_model::MeshingParameters {
+                        max_size: 0.03,
+                        ..Default::default()
+                    },
+                },
+            }],
+            part_names: Vec::new(),
+            refinement: 1.0,
+            signatures: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
+        };
+        let path = plx_model::ValuePath::new(
+            plx_model::ItemRef::MeshSetup("Meshing_Parameters-1".into()),
+            plx_model::Field::MaxElementSize,
+        );
+        let mut model = plx_model::FeModel::default();
+        let key = model.expose(path.clone());
+        let input = |g: &plx_model::Geometry| {
+            plx_model::fingerprint::mesh_input(g, &[], Default::default(), "PART_1")
+        };
+        let made_from = input(&geometry);
+        let data = ProjectAnalysis {
+            model,
+            geometry: Some(geometry),
+            ..Default::default()
+        };
+        let mut analysis = Node::analysis(1, "Analysis-1".into(), data);
+        let views = ExposedView::of(
+            analysis.exposing_fe().unwrap(),
+            analysis.exposing_geometry(),
+        );
+        assert_eq!(views[0].name, "Meshing_Parameters-1 Max. element size");
+        assert_eq!(views[0].value, Some(0.03));
+        assert_eq!(views[0].kind, Some(ValueKind::LENGTH));
+        assert!(analysis.set_exposed(key, 0.01));
+        assert!(!analysis.set_exposed(key, 0.01));
+        // Gmsh cannot mesh with no size.
+        assert!(!analysis.set_exposed(key, 0.0));
+        let data = analysis.link_data().unwrap();
+        assert_eq!(data.fe.value_in(data.geometry, &path), Some(0.01));
+        assert_ne!(input(data.geometry.unwrap()), made_from);
     }
 
     #[test]

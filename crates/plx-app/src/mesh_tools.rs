@@ -340,7 +340,7 @@ impl MeshToolDialog {
             Ok(_) => {
                 if let Some(scope) = self.expose.take() {
                     let item = ItemRef::MeshOperation(self.name.trim().to_owned());
-                    scope.apply(&mut model.fe, &item);
+                    scope.apply(&mut model.fe, None, &item);
                 }
             }
         }

@@ -245,8 +245,9 @@ use serde::{Deserialize, Serialize};
 /// table of factors of the flow with a table of values per value of the flow law
 /// ([`particle_flow::FlowTables`]); older formats read as they are, without their table.
 /// Format 51 adds the Flow boundary conditions and one default side of the Particle Flow
-/// step; older steps take the default side.
-pub const PROJECT_FORMAT: u32 = 51;
+/// step; older steps take the default side. Format 52 exposes the numbers of the mesh setup
+/// ([`ItemRef::MeshSetup`], [`ItemRef::DefaultMeshing`]); older formats read as they are.
+pub const PROJECT_FORMAT: u32 = 52;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

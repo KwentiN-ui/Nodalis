@@ -11,12 +11,13 @@ use std::time::Instant;
 use plx_mesh::{ElementShape, FeMesh, NodeId};
 use plx_mesher::{CadEntity, GeneratedMesh};
 use plx_model::{
-    Algorithm2d, Algorithm3d, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem, MeshSetupKind,
-    MeshingParameters, PeriodicFaces, Quantity, Recombination, ThickenShellMesh, UnitSystem,
-    next_name,
+    Algorithm2d, Algorithm3d, ExtrudeLayers, ExtrudeMesh, FeModel, Field, Geometry, ItemRef,
+    MeshSetupItem, MeshSetupKind, MeshingParameters, PeriodicFaces, Quantity, Recombination,
+    ThickenShellMesh, UnitSystem, next_name,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::expose;
 use crate::geometry_selection;
 use crate::model::{Highlight, Hit, Model};
 use crate::numeric;
@@ -34,60 +35,117 @@ fn reaches_faces(view: Option<&Model>, parts: &BTreeSet<String>) -> bool {
 
 /// The rows of the meshing parameters in a two-column grid. `faces`: whether they reach a
 /// part of faces; the quad-dominated option is greyed out otherwise.
+///
+/// Each number has the expose button of a surrounding [`expose::Scope`]; an option exposed is
+/// 1 for on and 0 for off.
 fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem, faces: bool) {
     ui.label("Max. element size");
-    ui.add(numeric::quantity(&mut d.max_size, units, Quantity::Length).range(0.0..=f64::MAX));
+    expose::field(ui, Field::MaxElementSize, |ui| {
+        ui.add(numeric::quantity(&mut d.max_size, units, Quantity::Length).range(0.0..=f64::MAX))
+    });
     ui.end_row();
     ui.label("Min. element size");
-    ui.add(numeric::quantity(&mut d.min_size, units, Quantity::Length).range(0.0..=f64::MAX));
+    expose::field(ui, Field::MinElementSize, |ui| {
+        ui.add(numeric::quantity(&mut d.min_size, units, Quantity::Length).range(0.0..=f64::MAX))
+    });
     ui.end_row();
     ui.label("Elements per curvature radius")
         .on_hover_text("0 turns off the refinement on curved surfaces.");
-    ui.add(numeric::drag_value(&mut d.elements_per_curvature).range(0.0..=100.0));
+    expose::field(ui, Field::ElementsPerCurvature, |ui| {
+        ui.add(numeric::drag_value(&mut d.elements_per_curvature).range(0.0..=100.0))
+    });
     ui.end_row();
     ui.label("Mesh type");
     ui.vertical(|ui| {
-        ui.checkbox(
-            &mut d.second_order,
-            "Second order (C3D10, S6/S8, CPS6/CPS8)",
-        );
-        ui.add_enabled(
-            d.second_order,
-            egui::Checkbox::new(
-                &mut d.midside_nodes_on_geometry,
-                "Midside nodes on geometry",
-            ),
-        );
-        ui.checkbox(&mut d.optimize, "Optimize mesh (Netgen)");
-        ui.add_enabled(
-            faces,
-            egui::Checkbox::new(&mut d.quad_dominated, "Quadrilaterals on faces"),
-        )
-        .on_hover_text(
-            "Mesh faces (2D models and shells) with quadrilaterals in a mostly regular grid, \
-             by Gmsh's quasi-structured algorithm; off for triangles. A Tetrahedral Gmsh item \
-             chooses another algorithm, whose triangles are joined to quadrilaterals. Solids \
-             keep triangles on their faces, as tetrahedra need them.",
-        )
-        .on_disabled_hover_text(
-            "Only for faces (2D models and shells): the parts are solids, meshed with \
-             tetrahedra, which need triangles on their faces.",
-        );
-        ui.checkbox(&mut d.hexahedra_where_possible, "Hexahedra where possible")
+        expose::field(ui, Field::SecondOrder, |ui| {
+            // The element types in the hover text keep the row short enough for its
+            // expose button in the docked dialog.
+            ui.checkbox(&mut d.second_order, "Second order")
+                .on_hover_text("Quadratic elements: C3D10, S6/S8, CPS6/CPS8.")
+        });
+        let second_order = d.second_order;
+        expose::field(ui, Field::MidsideNodes, |ui| {
+            ui.add_enabled(
+                second_order,
+                egui::Checkbox::new(
+                    &mut d.midside_nodes_on_geometry,
+                    "Midside nodes on geometry",
+                ),
+            )
+        });
+        expose::field(ui, Field::Optimize, |ui| {
+            ui.checkbox(&mut d.optimize, "Optimize mesh (Netgen)")
+        });
+        expose::field(ui, Field::Quadrilaterals, |ui| {
+            ui.add_enabled(
+                faces,
+                egui::Checkbox::new(&mut d.quad_dominated, "Quadrilaterals on faces"),
+            )
             .on_hover_text(
-                "Parts that can be swept get hexahedra: stacks of extrusions along one \
-                 direction (stepped shafts, plates with bosses, pockets and counterbores), \
-                 straight extrusions of a face and bodies of revolution. The others get \
-                 tetrahedra, with a warning that says why.",
-            );
+                "Mesh faces (2D models and shells) with quadrilaterals in a mostly regular \
+                 grid, by Gmsh's quasi-structured algorithm; off for triangles. A Tetrahedral \
+                 Gmsh item chooses another algorithm, whose triangles are joined to \
+                 quadrilaterals. Solids keep triangles on their faces, as tetrahedra need \
+                 them.",
+            )
+            .on_disabled_hover_text(
+                "Only for faces (2D models and shells): the parts are solids, meshed with \
+                 tetrahedra, which need triangles on their faces.",
+            )
+        });
+        expose::field(ui, Field::Hexahedra, |ui| {
+            ui.checkbox(&mut d.hexahedra_where_possible, "Hexahedra where possible")
+                .on_hover_text(
+                    "Parts that can be swept get hexahedra: stacks of extrusions along one \
+                     direction (stepped shafts, plates with bosses, pockets and \
+                     counterbores), straight extrusions of a face and bodies of revolution. \
+                     The others get tetrahedra, with a warning that says why.",
+                )
+        });
     });
     ui.end_row();
+}
+
+/// The numbers of meshing parameters, each with an expose button.
+const PARAMETER_FIELDS: [Field; 8] = [
+    Field::MaxElementSize,
+    Field::MinElementSize,
+    Field::ElementsPerCurvature,
+    Field::SecondOrder,
+    Field::MidsideNodes,
+    Field::Optimize,
+    Field::Quadrilaterals,
+    Field::Hexahedra,
+];
+
+/// The expose buttons of a dialog of the mesh setup: the scope of `item` in `fe`, kept from
+/// frame to frame in `kept`, with `available` fields.
+fn exposing<R>(
+    ui: &mut egui::Ui,
+    kept: &mut Option<expose::Scope>,
+    fe: &FeModel,
+    item: Option<ItemRef>,
+    linked: &[(u32, String)],
+    available: &[Field],
+    form: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let mut scope = kept
+        .take()
+        .unwrap_or_else(|| expose::Scope::new(fe, item, linked));
+    scope.available = available.to_vec();
+    let result = scope.show(ui, form);
+    *kept = Some(scope);
+    result
 }
 
 /// The open window of the default meshing parameters, which apply to every part that no
 /// Meshing Parameters item covers.
 pub struct MeshSetupWindow {
     draft: MeshingParameters,
+    /// The expose buttons of its numbers, see [`Self::set_linked`].
+    expose: Option<expose::Scope>,
+    /// The exposed parameters of the analysis that value links give, with where from.
+    linked: Vec<(u32, String)>,
     /// Whether the geometry has a part of faces, for the quad-dominated option.
     faces: bool,
     /// Unit system of the model, the unit of the sizes.
@@ -107,12 +165,29 @@ impl MeshSetupWindow {
     pub fn new(setup: &MeshingParameters, units: UnitSystem, view: Option<&Model>) -> Self {
         Self {
             draft: *setup,
+            expose: None,
+            linked: Vec::new(),
             faces: reaches_faces(view, &BTreeSet::new()),
             units,
         }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context) -> MeshSetupResult {
+    /// The exposed parameters value links give, by key, with the blocks they come from: the
+    /// window shows those numbers read-only.
+    pub fn set_linked(&mut self, linked: Vec<(u32, String)>) {
+        if self.linked != linked {
+            self.linked = linked;
+            self.expose = None;
+        }
+    }
+
+    /// The fields clicked to be exposed or no longer, to apply once the parameters are
+    /// taken over.
+    pub fn take_expose(&mut self) -> Option<expose::Scope> {
+        self.expose.take()
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context, fe: &FeModel) -> MeshSetupResult {
         let mut open = true;
         let mut result = MeshSetupResult::Open;
         egui::Window::new("Default Meshing Parameters")
@@ -126,10 +201,21 @@ impl MeshSetupWindow {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 let (d, units, faces) = (&mut self.draft, self.units, self.faces);
                 ui.weak("Apply to all parts without their own Meshing Parameters.");
-                egui::Grid::new("mesh size")
-                    .num_columns(2)
-                    .spacing([12.0, 6.0])
-                    .show(ui, |ui| parameters_ui(ui, d, units, faces));
+                let item = Some(ItemRef::DefaultMeshing);
+                exposing(
+                    ui,
+                    &mut self.expose,
+                    fe,
+                    item,
+                    &self.linked,
+                    &PARAMETER_FIELDS,
+                    |ui| {
+                        egui::Grid::new("mesh size")
+                            .num_columns(2)
+                            .spacing([12.0, 6.0])
+                            .show(ui, |ui| parameters_ui(ui, d, units, faces));
+                    },
+                );
                 if d.max_size <= 0.0 {
                     ui.colored_label(
                         crate::style::error(),
@@ -303,6 +389,12 @@ pub struct MeshItemEditor {
     face_parts: (BTreeSet<CadEntity>, Vec<String>),
     /// Names of the geometry's shell parts, the parts a thicken shell mesh takes.
     shells: BTreeSet<String>,
+    /// The name the edited item has in the geometry, for its exposed parameters.
+    original: Option<String>,
+    /// The expose buttons of its numbers, see [`Self::set_linked`].
+    expose: Option<expose::Scope>,
+    /// The exposed parameters of the analysis that value links give, with where from.
+    linked: Vec<(u32, String)>,
 }
 
 pub enum MeshItemResult {
@@ -332,6 +424,9 @@ impl MeshItemEditor {
             layer_text: ["0.2; 0.6; 0.2;".into(), "2; 4; 2;".into()],
             face_parts: Default::default(),
             shells: BTreeSet::new(),
+            original: None,
+            expose: None,
+            linked: Vec::new(),
         }
     }
 
@@ -388,7 +483,34 @@ impl MeshItemEditor {
             layer_text,
             face_parts: Default::default(),
             shells: BTreeSet::new(),
+            original: Some(geometry.mesh_items.get(index)?.name.clone()),
+            expose: None,
+            linked: Vec::new(),
         })
+    }
+
+    /// The exposed parameters value links give, by key, with the blocks they come from: the
+    /// dialog shows those numbers read-only.
+    pub fn set_linked(&mut self, linked: Vec<(u32, String)>) {
+        if self.linked != linked {
+            self.linked = linked;
+            self.expose = None;
+        }
+    }
+
+    /// The fields clicked to be exposed or no longer, with the item they were clicked for
+    /// as the geometry had it, to apply once the item is stored.
+    pub fn take_expose(&mut self) -> Option<expose::Scope> {
+        self.expose.take()
+    }
+
+    /// The numbers of the item that have an expose button.
+    fn exposable(&self) -> &'static [Field] {
+        match self.draft.kind {
+            MeshSetupKind::MeshingParameters { .. } => &PARAMETER_FIELDS,
+            MeshSetupKind::LocalMeshSize { .. } => &[Field::ElementSize, Field::Depth],
+            _ => &[],
+        }
     }
 
     fn title(&self) -> String {
@@ -406,6 +528,7 @@ impl MeshItemEditor {
     pub fn show(
         &mut self,
         ctx: &egui::Context,
+        fe: &FeModel,
         geometry: &Geometry,
         view: Option<&Model>,
     ) -> MeshItemResult {
@@ -450,11 +573,19 @@ impl MeshItemEditor {
                 });
             ui.separator();
             ui.strong("Properties");
-            egui::Grid::new("mesh item form")
-                .max_col_width(crate::dock::column_limit(ui))
-                .num_columns(2)
-                .spacing([12.0, 6.0])
-                .show(ui, |ui| self.form(ui, view));
+            let item = self.original.clone().map(ItemRef::MeshSetup);
+            let available = self.exposable();
+            let mut kept = self.expose.take();
+            let linked = std::mem::take(&mut self.linked);
+            exposing(ui, &mut kept, fe, item, &linked, available, |ui| {
+                egui::Grid::new("mesh item form")
+                    .max_col_width(crate::dock::column_limit(ui))
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| self.form(ui, view));
+            });
+            self.expose = kept;
+            self.linked = linked;
             if let Some(error) = &self.error {
                 ui.colored_label(crate::style::error(), error);
             }
@@ -625,16 +756,23 @@ impl MeshItemEditor {
                 });
                 ui.end_row();
                 ui.label("Element size");
-                ui.add(numeric::quantity(size, self.units, Quantity::Length).range(0.0..=f64::MAX));
+                expose::field(ui, Field::ElementSize, |ui| {
+                    ui.add(
+                        numeric::quantity(size, self.units, Quantity::Length).range(0.0..=f64::MAX),
+                    )
+                });
                 ui.end_row();
                 ui.label("Depth").on_hover_text(
                     "How deep below the selected faces the element size holds inside the \
                      solid, for a layer such as the walls of an infill section. 0 refines \
                      the faces alone.",
                 );
-                ui.add(
-                    numeric::quantity(depth, self.units, Quantity::Length).range(0.0..=f64::MAX),
-                );
+                expose::field(ui, Field::Depth, |ui| {
+                    ui.add(
+                        numeric::quantity(depth, self.units, Quantity::Length)
+                            .range(0.0..=f64::MAX),
+                    )
+                });
                 ui.end_row();
             }
             MeshSetupKind::TetrahedralGmsh {

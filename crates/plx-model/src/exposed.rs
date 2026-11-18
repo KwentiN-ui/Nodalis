@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use plx_mesh::{FeMesh, MeshTransform};
 
 use crate::{
-    BoundaryKind, DefinedFieldKind, FeModel, InitialConditionKind, LoadKind, MeshOperationKind,
-    Quantity, SectionKind, StepKind, ValueKind,
+    BoundaryKind, DefinedFieldKind, FeModel, Geometry, InitialConditionKind, LoadKind,
+    MeshOperationKind, MeshSetupKind, MeshingParameters, Quantity, SectionKind, StepKind,
+    ValueKind,
 };
 
 /// The item of the model a field belongs to, by its name, and of the step it is in.
@@ -35,6 +36,11 @@ pub enum ItemRef {
     MeshOperation(String),
     /// A distribution, whose variables can be exposed.
     Distribution(String),
+    /// A mesh setup item of the geometry, such as Meshing Parameters or a Local Mesh Size.
+    MeshSetup(String),
+    /// The default meshing parameters of the geometry, for the parts no Meshing Parameters
+    /// item covers.
+    DefaultMeshing,
 }
 
 impl ItemRef {
@@ -49,7 +55,9 @@ impl ItemRef {
             | Self::Step(name)
             | Self::InitialCondition(name)
             | Self::MeshOperation(name)
-            | Self::Distribution(name) => name,
+            | Self::Distribution(name)
+            | Self::MeshSetup(name) => name,
+            Self::DefaultMeshing => "Default meshing",
         }
     }
 
@@ -66,6 +74,8 @@ impl ItemRef {
             Self::InitialCondition(_) => "Initial condition",
             Self::MeshOperation(_) => "Mesh operation",
             Self::Distribution(_) => "Distribution",
+            Self::MeshSetup(_) => "Mesh setup item",
+            Self::DefaultMeshing => "Meshing",
         }
     }
 
@@ -82,7 +92,9 @@ impl ItemRef {
             | Self::Step(name)
             | Self::InitialCondition(name)
             | Self::MeshOperation(name)
-            | Self::Distribution(name) => new.clone_into(name),
+            | Self::Distribution(name)
+            | Self::MeshSetup(name) => new.clone_into(name),
+            Self::DefaultMeshing => {}
         }
         item
     }
@@ -96,6 +108,11 @@ impl ItemRef {
             Self::Step(name) => Some(name),
             _ => None,
         }
+    }
+
+    /// Whether its numbers are of the geometry's mesh setup rather than of the FE model.
+    pub fn is_meshing(&self) -> bool {
+        matches!(self, Self::MeshSetup(_) | Self::DefaultMeshing)
     }
 
     /// The same item in the step renamed from `old` to `new`.
@@ -214,6 +231,20 @@ pub enum Field {
     FineGrain,
     FineFraction,
     InertialNumber,
+    /// The meshing parameters of a Meshing Parameters item or of the default ones: the
+    /// element sizes, the elements per curvature radius and the options, 1 for on and 0 for
+    /// off.
+    MaxElementSize,
+    MinElementSize,
+    ElementsPerCurvature,
+    SecondOrder,
+    MidsideNodes,
+    Optimize,
+    Quadrilaterals,
+    Hexahedra,
+    /// The size and depth of a Local Mesh Size.
+    ElementSize,
+    Depth,
     /// A named variable of a distribution, by its key ([`crate::DistributionVariable::key`]).
     Variable(u32),
 }
@@ -289,6 +320,16 @@ impl Field {
             Self::FineGrain => "Fine grain diameter",
             Self::FineFraction => "Fine fraction",
             Self::InertialNumber => "I0",
+            Self::MaxElementSize => "Max. element size",
+            Self::MinElementSize => "Min. element size",
+            Self::ElementsPerCurvature => "Elements per curvature radius",
+            Self::SecondOrder => "Second order",
+            Self::MidsideNodes => "Midside nodes on geometry",
+            Self::Optimize => "Optimize",
+            Self::Quadrilaterals => "Quadrilaterals",
+            Self::Hexahedra => "Hexahedra",
+            Self::ElementSize => "Size",
+            Self::Depth => "Depth",
             Self::Variable(_) => "Variable",
         }
     }
@@ -299,7 +340,7 @@ impl Field {
     pub const AXIS: [Self; 3] = [Self::AxisX, Self::AxisY, Self::AxisZ];
     pub const NORMAL: [Self; 3] = [Self::NormalX, Self::NormalY, Self::NormalZ];
     pub const SCALE: [Self; 3] = [Self::ScaleX, Self::ScaleY, Self::ScaleZ];
-    pub const ALL: [Self; 67] = [
+    pub const ALL: [Self; 77] = [
         Self::Value,
         Self::X,
         Self::Y,
@@ -367,6 +408,16 @@ impl Field {
         Self::FineGrain,
         Self::FineFraction,
         Self::InertialNumber,
+        Self::MaxElementSize,
+        Self::MinElementSize,
+        Self::ElementsPerCurvature,
+        Self::SecondOrder,
+        Self::MidsideNodes,
+        Self::Optimize,
+        Self::Quadrilaterals,
+        Self::Hexahedra,
+        Self::ElementSize,
+        Self::Depth,
     ];
 
     /// The component of a vector it names.
@@ -410,6 +461,33 @@ pub struct Exposed {
 enum Slot<'a> {
     Real(&'a mut f64),
     Count(&'a mut u32),
+    /// An option, 1 for on and 0 for off.
+    Flag(&'a mut bool),
+}
+
+impl Slot<'_> {
+    fn get(&self) -> f64 {
+        match self {
+            Slot::Real(value) => **value,
+            Slot::Count(value) => f64::from(**value),
+            Slot::Flag(value) => f64::from(u8::from(**value)),
+        }
+    }
+
+    /// Sets it to `value`, cleaned for `kind`; returns whether it changed. An option is on
+    /// from one half.
+    fn set(self, kind: ValueKind, value: f64) -> bool {
+        let value = kind.clean(value);
+        match self {
+            Slot::Real(field) if *field != value => *field = value,
+            Slot::Count(field) if f64::from(*field) != value => {
+                *field = value.min(f64::from(u32::MAX)) as u32
+            }
+            Slot::Flag(field) if *field != (value >= 0.5) => *field = value >= 0.5,
+            _ => return false,
+        }
+        true
+    }
 }
 
 /// The field of the model a path names, with its kind.
@@ -594,6 +672,128 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
             let distribution = fe.distributions.iter_mut().find(|d| &d.name == name)?;
             let variable = distribution.variables.iter_mut().find(|v| v.key == key)?;
             Some((Slot::Real(&mut variable.value), ValueKind::Factor))
+        }
+        // Numbers of the geometry's mesh setup, see [`Geometry::value_at`].
+        ItemRef::MeshSetup(_) | ItemRef::DefaultMeshing => None,
+    }
+}
+
+/// The field of the geometry's mesh setup a path names, with its kind.
+fn meshing_slot_mut<'a>(
+    geometry: &'a mut Geometry,
+    path: &ValuePath,
+) -> Option<(Slot<'a>, ValueKind)> {
+    let field = path.field;
+    match &path.item {
+        ItemRef::DefaultMeshing => parameters_slot(&mut geometry.meshing, field),
+        ItemRef::MeshSetup(name) => {
+            let item = geometry.mesh_items.iter_mut().find(|i| &i.name == name)?;
+            match &mut item.kind {
+                MeshSetupKind::MeshingParameters { parameters, .. } => {
+                    parameters_slot(parameters, field)
+                }
+                MeshSetupKind::LocalMeshSize { size, depth, .. } => {
+                    let length = ValueKind::Quantity(Quantity::Length);
+                    match field {
+                        Field::ElementSize => Some((Slot::Real(size), length)),
+                        Field::Depth => Some((Slot::Real(depth), length)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The numbers of meshing parameters: sizes, elements per curvature radius and options.
+fn parameters_slot(
+    parameters: &mut MeshingParameters,
+    field: Field,
+) -> Option<(Slot<'_>, ValueKind)> {
+    let length = ValueKind::Quantity(Quantity::Length);
+    let flag = |value| Some((Slot::Flag(value), ValueKind::Factor));
+    match field {
+        Field::MaxElementSize => Some((Slot::Real(&mut parameters.max_size), length)),
+        Field::MinElementSize => Some((Slot::Real(&mut parameters.min_size), length)),
+        Field::ElementsPerCurvature => Some((
+            Slot::Real(&mut parameters.elements_per_curvature),
+            ValueKind::Factor,
+        )),
+        Field::SecondOrder => flag(&mut parameters.second_order),
+        Field::MidsideNodes => flag(&mut parameters.midside_nodes_on_geometry),
+        Field::Optimize => flag(&mut parameters.optimize),
+        Field::Quadrilaterals => flag(&mut parameters.quad_dominated),
+        Field::Hexahedra => flag(&mut parameters.hexahedra_where_possible),
+        _ => None,
+    }
+}
+
+/// Whether a number of the mesh setup is one Gmsh can mesh with: element sizes greater than
+/// zero, no negative minimum size, depth or elements per curvature radius.
+fn meshing_value_valid(field: Field, value: f64) -> bool {
+    match field {
+        Field::MaxElementSize | Field::ElementSize => value > 0.0,
+        Field::MinElementSize | Field::Depth | Field::ElementsPerCurvature => value >= 0.0,
+        _ => true,
+    }
+}
+
+impl Geometry {
+    /// The number of its mesh setup at `path`, in SI units; `None` when the item or field
+    /// does not exist, or the path names a number of the FE model.
+    pub fn value_at(&self, path: &ValuePath) -> Option<f64> {
+        let mut copy = self.setup_only();
+        meshing_slot_mut(&mut copy, path).map(|(slot, _)| slot.get())
+    }
+
+    /// What the number of its mesh setup at `path` is.
+    pub fn value_kind(&self, path: &ValuePath) -> Option<ValueKind> {
+        let mut copy = self.setup_only();
+        meshing_slot_mut(&mut copy, path).map(|(_, kind)| kind)
+    }
+
+    /// Sets the number of its mesh setup at `path`, given in SI units; returns whether it
+    /// changed. A size Gmsh cannot mesh with, such as zero, is not taken. The parts it
+    /// meshes are out of date after a change, see [`crate::fingerprint::mesh_input`].
+    pub fn set_value(&mut self, path: &ValuePath, value: f64) -> bool {
+        if !value.is_finite() || !meshing_value_valid(path.field, value) {
+            return false;
+        }
+        match meshing_slot_mut(self, path) {
+            Some((slot, kind)) => slot.set(kind, value),
+            None => false,
+        }
+    }
+
+    /// The fields of a mesh setup item, or of the default meshing parameters, that can be
+    /// exposed.
+    pub fn exposable(&self, item: &ItemRef) -> Vec<Field> {
+        let mut copy = self.setup_only();
+        (Field::ALL.into_iter())
+            .filter(|&field| {
+                meshing_slot_mut(&mut copy, &ValuePath::new(item.clone(), field)).is_some()
+            })
+            .collect()
+    }
+
+    /// A geometry of its mesh setup alone, without the shapes, to reach a field through the
+    /// one accessor or to compare setups without copying the shapes.
+    pub fn setup_only(&self) -> Geometry {
+        Geometry {
+            source: String::new(),
+            brep: String::new(),
+            meshing: self.meshing,
+            mesh_items: self.mesh_items.clone(),
+            part_names: Vec::new(),
+            refinement: self.refinement,
+            signatures: Vec::new(),
+            compounds: Vec::new(),
+            suppressed: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
         }
     }
 }
@@ -787,6 +987,7 @@ impl FeModel {
             ItemRef::Distribution(name) => fe
                 .distributions
                 .push(self.distribution_named(name)?.clone()),
+            ItemRef::MeshSetup(_) | ItemRef::DefaultMeshing => return None,
         }
         Some(fe)
     }
@@ -794,9 +995,27 @@ impl FeModel {
     /// The number at `path`, in SI units; `None` when the item or field does not exist.
     pub fn value_at(&self, path: &ValuePath) -> Option<f64> {
         let mut fe = self.item_copy(&path.item)?;
-        match slot_mut(&mut fe, path)?.0 {
-            Slot::Real(value) => Some(*value),
-            Slot::Count(value) => Some(f64::from(*value)),
+        slot_mut(&mut fe, path).map(|(slot, _)| slot.get())
+    }
+
+    /// The number at `path` of this model or, for a number of the mesh setup, of
+    /// `geometry`, the geometry it meshes.
+    pub fn value_in(&self, geometry: Option<&Geometry>, path: &ValuePath) -> Option<f64> {
+        match path.item.is_meshing() {
+            true => geometry?.value_at(path),
+            false => self.value_at(path),
+        }
+    }
+
+    /// What the number at `path` of this model or of `geometry` is, see [`Self::value_in`].
+    pub fn value_kind_in(
+        &self,
+        geometry: Option<&Geometry>,
+        path: &ValuePath,
+    ) -> Option<ValueKind> {
+        match path.item.is_meshing() {
+            true => geometry?.value_kind(path),
+            false => self.value_kind(path),
         }
     }
 
@@ -816,15 +1035,7 @@ impl FeModel {
         let Some((slot, kind)) = slot_mut(self, path) else {
             return false;
         };
-        let value = kind.clean(value);
-        match slot {
-            Slot::Real(field) if *field != value => *field = value,
-            Slot::Count(field) if f64::from(*field) != value => {
-                *field = value.min(f64::from(u32::MAX)) as u32
-            }
-            _ => return false,
-        }
-        true
+        slot.set(kind, value)
     }
 
     /// Sets the number at `path` like [`Self::set_value`]; a number of a mesh operation
@@ -1163,6 +1374,99 @@ mod tests {
         assert!(fe.set_value_meshed(&mut mesh, &angle, 90.0));
         let [x, y, _] = mesh.node(2).unwrap();
         assert!(x.abs() < 1e-12 && (y - 1.0).abs() < 1e-12);
+    }
+
+    /// The numbers of the mesh setup are those of the geometry: sizes in metres, options 1
+    /// or 0. A size Gmsh cannot mesh with is not taken, and a changed number makes the parts
+    /// it meshes out of date.
+    #[test]
+    fn mesh_setup_numbers_are_exposed_through_the_geometry() {
+        use crate::{MeshSetupItem, MeshingParameters, ModelSpace};
+        let mut geometry = Geometry {
+            source: "plate.step".into(),
+            brep: "shapes".into(),
+            meshing: MeshingParameters::default(),
+            mesh_items: vec![
+                MeshSetupItem {
+                    name: "Meshing_Parameters-1".into(),
+                    kind: MeshSetupKind::MeshingParameters {
+                        parts: vec!["PART_1".into()],
+                        parameters: MeshingParameters {
+                            max_size: 0.03,
+                            ..MeshingParameters::default()
+                        },
+                    },
+                },
+                MeshSetupItem {
+                    name: "Local_Mesh_Size-1".into(),
+                    kind: MeshSetupKind::LocalMeshSize {
+                        faces: vec![1],
+                        edges: Vec::new(),
+                        size: 0.002,
+                        depth: 0.0,
+                    },
+                },
+            ],
+            part_names: Vec::new(),
+            refinement: 1.0,
+            signatures: Vec::new(),
+            compounds: Vec::new(),
+            suppressed: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
+        };
+        let item = ItemRef::MeshSetup("Meshing_Parameters-1".into());
+        let exposable = geometry.exposable(&item);
+        assert_eq!(exposable.len(), 8);
+        assert!(
+            exposable.contains(&Field::MaxElementSize) && exposable.contains(&Field::Hexahedra)
+        );
+        let local = ItemRef::MeshSetup("Local_Mesh_Size-1".into());
+        assert_eq!(
+            geometry.exposable(&local),
+            [Field::ElementSize, Field::Depth]
+        );
+        assert_eq!(geometry.exposable(&ItemRef::DefaultMeshing).len(), 8);
+
+        let max = ValuePath::new(item.clone(), Field::MaxElementSize);
+        let kind = ValueKind::Quantity(Quantity::Length);
+        assert_eq!(geometry.value_at(&max), Some(0.03));
+        assert_eq!(geometry.value_kind(&max), Some(kind));
+        let fe = FeModel::default();
+        assert_eq!(fe.value_in(Some(&geometry), &max), Some(0.03));
+        assert_eq!(fe.value_kind_in(Some(&geometry), &max), Some(kind));
+        assert_eq!(fe.value_at(&max), None);
+        assert_eq!(fe.value_in(None, &max), None);
+
+        let input =
+            |g: &Geometry| crate::fingerprint::mesh_input(g, &[], ModelSpace::default(), "PART_1");
+        let before = input(&geometry);
+        assert!(geometry.set_value(&max, 0.01));
+        assert!(!geometry.set_value(&max, 0.01));
+        assert_ne!(input(&geometry), before);
+        // Gmsh needs a size greater than zero.
+        assert!(!geometry.set_value(&max, 0.0));
+        assert!(!geometry.set_value(&max, f64::NAN));
+        assert_eq!(geometry.value_at(&max), Some(0.01));
+
+        let second = ValuePath::new(item, Field::SecondOrder);
+        assert_eq!(geometry.value_at(&second), Some(1.0));
+        assert!(geometry.set_value(&second, 0.0));
+        assert_eq!(geometry.value_at(&second), Some(0.0));
+        assert!(geometry.set_value(&second, 1.0));
+        assert!(!geometry.set_value(&second, 0.8));
+
+        let size = ValuePath::new(local, Field::ElementSize);
+        assert!(geometry.set_value(&size, 0.001));
+        assert_eq!(geometry.value_at(&size), Some(0.001));
+        let default = ValuePath::new(ItemRef::DefaultMeshing, Field::ElementsPerCurvature);
+        assert!(geometry.set_value(&default, 3.0));
+        assert_eq!(geometry.meshing.elements_per_curvature, 3.0);
+        // Gone with the item.
+        let gone = ValuePath::new(ItemRef::MeshSetup("Other".into()), Field::MaxElementSize);
+        assert_eq!(geometry.value_at(&gone), None);
+        assert!(!geometry.set_value(&gone, 1.0));
     }
 
     #[test]
