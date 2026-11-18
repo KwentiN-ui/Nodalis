@@ -3,11 +3,11 @@
 //! measured runout of collapsing columns (Lube et al. 2005). The finer versions run with
 //! `--ignored`.
 //!
-//! Plane cases are computed in 3D with a box three cells thick and periodic in z.
+//! Plane cases are computed as plane strain slabs one cell thick, periodic in z.
 
 use plxs_core::particles::{
     Domain, MaterialBody, ParticleControl, ParticleFrame, ParticleLaw, ParticleMaterial,
-    ParticleModel, ParticleResults, Side, TriangleSurface, WallLaw,
+    ParticleModel, ParticleResults, Side, Space, TriangleSurface, WallLaw,
 };
 
 const G: f64 = 9.81;
@@ -48,7 +48,10 @@ fn sand() -> ParticleMaterial {
 }
 
 fn solve(model: &ParticleModel) -> ParticleResults {
-    let results = plxs_particles::solve(model, &mut |_| {}).expect("solves");
+    // On a thread of the pool, as Nodalis runs it: from outside, every parallel loop of a
+    // time step hands its work to the pool and waits, which costs more than the step of a
+    // small model.
+    let results = rayon::scope(|_| plxs_particles::solve(model, &mut |_| {})).expect("solves");
     eprintln!(
         "{}: {} particles, {} steps, {:.1} s, factor {:.1}",
         model.heading,
@@ -63,7 +66,7 @@ fn solve(model: &ParticleModel) -> ParticleResults {
     results
 }
 
-/// A plane model in x and y, three cells thick in z, periodic in z.
+/// A plane model in x and y: a slab one cell thick, periodic in z.
 fn plane(
     heading: &str,
     min: [f64; 2],
@@ -72,7 +75,7 @@ fn plane(
     material: ParticleMaterial,
     body: ([f64; 2], [f64; 2]),
 ) -> ParticleModel {
-    let depth = 3.0 * cell;
+    let depth = cell;
     let (lo, hi) = body;
     ParticleModel {
         heading: heading.into(),
@@ -92,7 +95,7 @@ fn plane(
             cell,
             sides: [Side::Wall(WallLaw::Slip); 6],
             periodic: [false, false, true],
-            ..Default::default()
+            space: Space::PlaneStrain,
         },
         gravity: [0.0, -G, 0.0],
         control: ParticleControl::default(),
@@ -132,7 +135,7 @@ fn incline_of(
     model.gravity = [G * theta.sin(), -G * theta.cos(), 0.0];
     model.control.end_time = end_time;
     model.control.frames = 20;
-    model.control.sound_speed = Some(8.0);
+    model.control.sound_speed = Some(4.0);
     (solve(&model), h)
 }
 

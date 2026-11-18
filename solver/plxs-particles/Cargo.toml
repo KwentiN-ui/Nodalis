@@ -19,6 +19,7 @@ bytemuck = { workspace = true, optional = true }
 [dev-dependencies]
 # The mode of the card for the comparison with the processor.
 plxs-linalg.workspace = true
+rayon.workspace = true
 
 [features]
 gpu = ["dep:plxs-gpu", "dep:plxs-linalg", "dep:bytemuck"]

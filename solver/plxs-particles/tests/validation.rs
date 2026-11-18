@@ -2,19 +2,23 @@
 //! against an analytical solution or a measurement. The quick versions run in every test
 //! run; the finer ones with `--ignored`.
 //!
-//! Plane cases are computed in 3D with a box three cells thick and periodic in z: every
-//! field is then constant along z, which is the plane strain state.
+//! Plane cases are computed as plane strain slabs one cell thick (`Space::PlaneStrain`), which
+//! give the same as a box three cells thick and periodic in z (`tests/two_d.rs`) at a
+//! fraction of the cost.
 
 use plxs_core::particles::{
     Domain, Heat, MaterialBody, ParticleControl, ParticleFrame, ParticleLaw, ParticleMaterial,
-    ParticleModel, ParticleResults, ParticleThermal, RigidMotion, RigidWall, Side, TriangleSurface,
-    WallLaw,
+    ParticleModel, ParticleResults, ParticleThermal, RigidMotion, RigidWall, Side, Space,
+    TriangleSurface, WallLaw,
 };
 
 const G: f64 = 9.81;
 
 fn solve(model: &ParticleModel) -> ParticleResults {
-    let results = plxs_particles::solve(model, &mut |_| {}).expect("solves");
+    // On a thread of the pool, as Nodalis runs it: from outside, every parallel loop of a
+    // time step hands its work to the pool and waits, which costs more than the step of a
+    // small model.
+    let results = rayon::scope(|_| plxs_particles::solve(model, &mut |_| {})).expect("solves");
     eprintln!(
         "{}: {} particles, {} steps, dt {:.2e}..{:.2e}, {:.1} s, factor {:.1}, mach {:.3}",
         model.heading,
@@ -32,7 +36,8 @@ fn solve(model: &ParticleModel) -> ParticleResults {
     results
 }
 
-/// A plane model in x and y, three cells thick in z.
+/// A plane model in x and y: a slab one cell thick, periodic in z, its masses and forces
+/// per unit length in z.
 fn plane(
     heading: &str,
     min: [f64; 2],
@@ -41,7 +46,7 @@ fn plane(
     material: ParticleMaterial,
     bodies: Vec<([f64; 2], [f64; 2])>,
 ) -> ParticleModel {
-    let depth = 3.0 * cell;
+    let depth = cell;
     ParticleModel {
         heading: heading.into(),
         materials: vec![material],
@@ -64,7 +69,7 @@ fn plane(
             cell,
             sides: [Side::Wall(WallLaw::Slip); 6],
             periodic: [false, false, true],
-            ..Default::default()
+            space: Space::PlaneStrain,
         },
         gravity: [0.0, -G, 0.0],
         control: ParticleControl::default(),
@@ -175,7 +180,7 @@ fn resting_basin() {
         .unwrap();
     let n = floor.force.len();
     let late: f64 = floor.force[n / 3..].iter().map(|f| f[1]).sum::<f64>() / (n - n / 3) as f64;
-    let weight = -1000.0 * G * width * height * 3.0 * cell;
+    let weight = -1000.0 * G * width * height;
     eprintln!("floor force {late:.3} weight {weight:.3}");
     assert!((late - weight).abs() < 0.03 * weight.abs());
 }
@@ -245,27 +250,44 @@ fn plane_wall(name: &str, lo: [f64; 2], hi: [f64; 2], depth: f64, law: WallLaw) 
 /// planes of symmetry let the material near them sink (the stencils of the particles next
 /// to a wall miss the mirrored material). The theory is static: the paste is viscous enough
 /// (40 Pa s) to come to rest without the overshoot of a fast collapse, which slumps further.
-fn slump(per_height: f64) {
+///
+/// In `Space::Axisymmetric` the cylinder is a ring of revolution about the y axis, a
+/// fraction of the cost of the whole cylinder in 3D (`Space::Solid`).
+fn slump(per_height: f64, space: Space) {
     let height = 0.1;
     let radius = 0.05;
     let tau = 0.15;
     let yield_stress = tau * 1000.0 * G * height;
     let cell = height / per_height;
+    let solid = space == Space::Solid;
+    let (shape, min, max) = if solid {
+        (
+            TriangleSurface::cylinder([0.0; 3], [0.0, height, 0.0], radius, 96),
+            [-0.15, 0.0, -0.15],
+            [0.15, 1.2 * height, 0.15],
+        )
+    } else {
+        (
+            TriangleSurface::cuboid([-cell, 0.0, -cell], [radius, height, 2.0 * cell]),
+            [0.0, 0.0, 0.0],
+            [0.15, 1.2 * height, cell],
+        )
+    };
     let model = ParticleModel {
         heading: "Bingham slump".into(),
         materials: vec![bingham(yield_stress, 40.0)],
         bodies: vec![MaterialBody {
             name: "Cylinder".into(),
             material: 0,
-            shape: TriangleSurface::cylinder([0.0; 3], [0.0, height, 0.0], radius, 96),
+            shape,
             velocity: [0.0; 3],
             temperature: 0.0,
             gravity: [0.0; 3],
         }],
         walls: Vec::new(),
         domain: Domain {
-            min: [-0.15, 0.0, -0.15],
-            max: [0.15, 1.2 * height, 0.15],
+            min,
+            max,
             cell,
             sides: [
                 Side::Wall(WallLaw::Slip),
@@ -275,8 +297,8 @@ fn slump(per_height: f64) {
                 Side::Wall(WallLaw::Slip),
                 Side::Wall(WallLaw::Slip),
             ],
-            periodic: [false; 3],
-            ..Default::default()
+            periodic: [false, false, !solid],
+            space,
         },
         gravity: [0.0, -G, 0.0],
         heat: None,
@@ -297,7 +319,10 @@ fn slump(per_height: f64) {
     let mut slumps = Vec::new();
     for frame in &results.frames {
         let top = (frame.positions.iter())
-            .filter(|p| f64::from(p[0]).hypot(f64::from(p[2])) < cell)
+            .filter(|p| {
+                let z = if solid { f64::from(p[2]) } else { 0.0 };
+                f64::from(p[0]).hypot(z) < cell
+            })
             .map(|p| f64::from(p[1]))
             .fold(0.0, f64::max);
         // The particles' centres lie a quarter cell below the surface.
@@ -315,13 +340,20 @@ fn slump(per_height: f64) {
 
 #[test]
 fn bingham_slump() {
-    slump(10.0);
+    slump(10.0, Space::Axisymmetric);
 }
 
 #[test]
 #[ignore]
 fn bingham_slump_fine() {
-    slump(20.0);
+    slump(20.0, Space::Axisymmetric);
+}
+
+/// The whole cylinder in 3D.
+#[test]
+#[ignore]
+fn bingham_slump_solid() {
+    slump(10.0, Space::Solid);
 }
 
 /// A plane Bingham column collapses to both sides and comes to rest in the shape where the
@@ -514,7 +546,7 @@ fn die(per_gap: f64) {
     let (width, head, gap, slot) = (0.1, 0.1, 0.02, 0.12);
     let (density, viscosity) = (1000.0, 10.0);
     let cell = gap / per_gap;
-    let depth = 3.0 * cell;
+    let depth = cell;
     let paste = ParticleMaterial {
         name: "Newtonian paste".into(),
         density,
@@ -570,7 +602,7 @@ fn die(per_gap: f64) {
     // scale is b² ρ / η = 0.04 s).
     let at = |t: f64| h.time.iter().position(|&x| x >= t).unwrap();
     let (i, j) = (at(0.1), h.time.len() - 1);
-    let rate = (h.outflow[j] - h.outflow[i]) / density / (3.0 * cell) / (h.time[j] - h.time[i]);
+    let rate = (h.outflow[j] - h.outflow[i]) / density / (h.time[j] - h.time[i]);
     let level = largest(&results.frames[results.frames.len() / 2 + 1], 1) + 0.25 * cell - slot;
     let expected = gap.powi(3) * density * G * (level + slot) / (12.0 * viscosity * slot);
     eprintln!("rate {rate:.5} expected {expected:.5} (head {level:.4})");
