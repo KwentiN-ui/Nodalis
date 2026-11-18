@@ -356,6 +356,14 @@ impl Viewport {
         self.renderer.set_part_visible(index, visible);
     }
 
+    /// Lets the clipping planes of the camera enclose what is drawn now, so that no part of a
+    /// large or moved scene is cut off, whatever the camera was fitted to.
+    fn enclose_drawn(&mut self) {
+        if let Some(bounds) = self.renderer.drawn_bounds() {
+            self.camera.drawn_bounds = Some(bounds);
+        }
+    }
+
     pub fn apply(&mut self, command: ViewCommand, bounds: Option<(Vec3, Vec3)>) {
         match command {
             ViewCommand::Fit => {
@@ -379,6 +387,7 @@ impl Viewport {
     /// Draws the scene with its annotations; reports camera commands and clicks.
     pub fn ui(&mut self, ui: &mut Ui) -> ViewportResponse {
         let mut result = ViewportResponse::default();
+        self.enclose_drawn();
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         self.rect = rect;
         let delta = response.drag_delta();

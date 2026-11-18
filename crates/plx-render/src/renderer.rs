@@ -70,6 +70,8 @@ struct GpuMesh {
     wide_edges: Option<GpuBuffer>,
     glyphs: Option<GpuBuffer>,
     directions: Option<GpuBuffer>,
+    /// Bounding box of all its points, surfaces and lines alike.
+    bounds: Option<(glam::Vec3, glam::Vec3)>,
     visible: bool,
 }
 
@@ -377,6 +379,15 @@ impl ViewportRenderer {
                 mapped_at_creation: false,
             })
         });
+    }
+
+    /// Bounding box of the visible parts with all their lines and arrows, in render
+    /// coordinates; `None` while nothing is shown.
+    pub fn drawn_bounds(&self) -> Option<(glam::Vec3, glam::Vec3)> {
+        (self.parts.iter())
+            .filter(|part| part.visible)
+            .filter_map(|part| part.bounds)
+            .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
     }
 
     pub fn set_part_visible(&mut self, index: usize, visible: bool) {
@@ -875,6 +886,21 @@ impl Pipelines {
     }
 }
 
+/// Bounding box of the finite points of a mesh: its vertices and every kind of line.
+fn mesh_bounds(mesh: &RenderMesh) -> Option<(glam::Vec3, glam::Vec3)> {
+    (mesh.vertices.iter())
+        .chain(&mesh.feature_edges)
+        .chain(&mesh.wireframe_edges)
+        .chain(&mesh.wide_edges)
+        .chain(&mesh.glyphs)
+        .map(|v| glam::Vec3::from(v.position))
+        .filter(|p| p.is_finite())
+        .fold(None, |bounds, p| match bounds {
+            None => Some((p, p)),
+            Some((min, max)) => Some((p.min(min), p.max(max))),
+        })
+}
+
 fn upload(device: &wgpu::Device, mesh: &RenderMesh) -> GpuMesh {
     let buffer = |label: &str, contents: &[u8], count: usize, usage: wgpu::BufferUsages| {
         (count > 0).then(|| GpuBuffer {
@@ -888,6 +914,7 @@ fn upload(device: &wgpu::Device, mesh: &RenderMesh) -> GpuMesh {
     };
     let vertex = wgpu::BufferUsages::VERTEX;
     GpuMesh {
+        bounds: mesh_bounds(mesh),
         vertices: buffer(
             "part vertices",
             bytemuck::cast_slice(&mesh.vertices),
