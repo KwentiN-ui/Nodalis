@@ -22,10 +22,17 @@ pub struct Camera {
     pub distance: f32,
     pub rotation: Quat,
     pub scene_radius: f32,
+    /// Bounding box of everything drawn, in render coordinates: the near and far clipping
+    /// planes enclose it wherever the camera looks from. `None` until the scene is known; the
+    /// planes then lie around the target, `scene_radius` deep.
+    pub drawn_bounds: Option<(Vec3, Vec3)>,
 }
 
 const ORBIT_RADIANS_PER_PIXEL: f32 = 0.008;
 const MIN_HALF_EXTENT: f32 = 1e-6;
+/// Room between the drawn scene and the clipping planes, as a share of the scene radius: keeps
+/// the outermost faces off the planes, where rounding would cut them.
+const DEPTH_MARGIN: f32 = 0.02;
 
 impl Default for Camera {
     fn default() -> Self {
@@ -34,6 +41,7 @@ impl Default for Camera {
             distance: 1.0,
             rotation: Quat::IDENTITY,
             scene_radius: 1.0,
+            drawn_bounds: None,
         };
         camera.set_isometric();
         camera
@@ -80,22 +88,41 @@ impl Camera {
         } else {
             (self.half_extent(), self.half_extent() / aspect)
         };
-        let depth = self.depth_range() * 0.5;
+        let (near, far) = self.clip_depths();
         let view = look_at_mat4(self.eye(), self.target, self.up());
         let proj = directx::orthographic(
             -half_width,
             half_width,
             -half_height,
             half_height,
-            self.distance - depth,
-            self.distance + depth,
+            near,
+            far,
         );
         proj * view
     }
 
+    /// Distances of the near and far clipping planes from the eye, in world units. They
+    /// enclose the bounding sphere of the drawn scene, so nothing of it is cut off however the
+    /// view was turned, panned or zoomed, and the depth range stays no deeper than the scene
+    /// for depth precision. The sphere does not change as the view turns, so neither does the
+    /// depth range. The view is orthographic: the near plane may lie behind the eye.
+    pub fn clip_depths(&self) -> (f32, f32) {
+        let (center, radius) = match self.drawn_bounds {
+            Some((min, max)) if min.is_finite() && max.is_finite() && min.cmple(max).all() => {
+                ((min + max) * 0.5, (max - min).length() * 0.5)
+            }
+            // Before the scene is known, a slab around the target.
+            _ => (self.target, self.scene_radius.max(self.distance) * 4.0),
+        };
+        let radius = radius.max(MIN_HALF_EXTENT) * (1.0 + DEPTH_MARGIN);
+        let depth = (center - self.eye()).dot(self.forward());
+        (depth - radius, depth + radius)
+    }
+
     /// Distance between the near and far clipping planes in world units.
     pub fn depth_range(&self) -> f32 {
-        self.scene_radius.max(self.distance) * 8.0
+        let (near, far) = self.clip_depths();
+        far - near
     }
 
     /// World size of one pixel for a viewport of the given size.
@@ -309,6 +336,68 @@ mod tests {
                 assert!((0.0..=1.0).contains(&ndc.z), "{ndc}");
             }
         }
+    }
+
+    fn corners(min: Vec3, max: Vec3) -> impl Iterator<Item = Vec3> {
+        (0..8).map(move |corner| {
+            Vec3::new(
+                if corner & 1 == 0 { min.x } else { max.x },
+                if corner & 2 == 0 { min.y } else { max.y },
+                if corner & 4 == 0 { min.z } else { max.z },
+            )
+        })
+    }
+
+    /// A long girder in millimetres, fitted while only a small part at one end was shown,
+    /// then shown whole: looking along it from that end, the far end must stay between the
+    /// clipping planes however the view is panned, turned and zoomed.
+    #[test]
+    fn far_end_of_a_long_scene_is_not_clipped() {
+        let (min, max) = (
+            Vec3::new(-17000.0, -400.0, -800.0),
+            Vec3::new(17000.0, 400.0, 800.0),
+        );
+        let mut camera = Camera::default();
+        camera.fit(
+            Vec3::new(16800.0, -100.0, -100.0),
+            Vec3::new(17000.0, 100.0, 100.0),
+        );
+        camera.drawn_bounds = Some((min, max));
+        camera.set_axis_view(Vec3::X);
+        camera.orbit(4.0, 2.0);
+        for step in 0..40 {
+            camera.pan(-9.0, 1.5, 800.0, 600.0);
+            camera.orbit_about(max, 2.3, -0.7 * (step % 3) as f32);
+            camera.zoom(if step % 2 == 0 { 0.7 } else { 1.35 });
+            let view_proj = camera.view_proj(1.6);
+            for point in corners(min, max) {
+                let z = view_proj.project_point3(point).z;
+                assert!(
+                    (0.0..=1.0).contains(&z),
+                    "step {step}: {point} at depth {z}"
+                );
+            }
+        }
+    }
+
+    /// The clipping planes hug the scene: no deeper than its bounding sphere with a little
+    /// room, however far the view is zoomed out, and the depth range does not change while
+    /// the view turns.
+    #[test]
+    fn depth_range_follows_the_scene() {
+        let (min, max) = (Vec3::new(0.0, 0.0, 0.0), Vec3::new(6000.0, 300.0, 800.0));
+        let mut camera = Camera::default();
+        camera.fit(min, max);
+        camera.drawn_bounds = Some((min, max));
+        camera.zoom(50.0);
+        let diameter = (max - min).length();
+        let range = camera.depth_range();
+        assert!(
+            range >= diameter && range < diameter * 1.1,
+            "{range} {diameter}"
+        );
+        camera.orbit(200.0, 70.0);
+        assert!((camera.depth_range() - range).abs() < range * 1e-5);
     }
 
     #[test]

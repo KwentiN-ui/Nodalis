@@ -1980,6 +1980,7 @@ fn saved_camera(saved: plx_results::saved_view::SavedCamera) -> plx_render::Came
         distance: saved.distance,
         rotation: glam::Quat::from_array(saved.rotation).normalize(),
         scene_radius: saved.scene_radius,
+        drawn_bounds: None,
     }
 }
 
