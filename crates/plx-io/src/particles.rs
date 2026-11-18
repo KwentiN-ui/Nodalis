@@ -70,8 +70,14 @@ pub fn particle_step(fe: &FeModel) -> Option<usize> {
     (fe.steps.iter()).position(|s| s.active && matches!(s.kind, StepKind::ParticleFlow(_)))
 }
 
-/// The particle model of the active Particle Flow step of `fe` on `mesh`.
-pub fn lower(
+/// The particle model of the active Particle Flow step of `model`, what the analysis solves
+/// without its suppressed objects.
+pub fn lower(model: &plx_model::Active, heading: &str) -> Result<LoweredParticles, ParticleError> {
+    lower_whole(model.mesh(), model.fe(), heading)
+}
+
+/// [`lower`] of all of `mesh` and `fe`.
+fn lower_whole(
     mesh: &FeMesh,
     fe: &FeModel,
     heading: &str,
@@ -1505,6 +1511,7 @@ fn signed_volume(points: &[[f64; 3]], triangles: &[[u32; 3]]) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use super::lower_whole as lower;
     use super::*;
     use plx_mesh::{Element, ElementShape, Part};
     use plx_model::{

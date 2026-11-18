@@ -42,6 +42,7 @@ mod exploded;
 mod expose;
 mod features;
 mod field_output_dialog;
+mod geometry_operations;
 mod geometry_selection;
 mod gizmo;
 mod help;

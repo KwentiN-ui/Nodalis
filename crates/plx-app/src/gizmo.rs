@@ -34,8 +34,11 @@ pub struct PlaneGizmo {
     pub point: Vec3,
     /// Unit normal; the arrow points along it.
     pub normal: Vec3,
-    /// Half the edge length of the drawn plane, in world units.
+    /// Half the edge length of the drawn plane, in world units; none drawn when zero.
     pub half_size: f32,
+    /// The axes in the plane the arcs turn it around, one arc each for as many as the count
+    /// says; two of any orthogonal axes in the plane when `None`.
+    pub axes: Option<([Vec3; 2], usize)>,
 }
 
 /// How a drag on the manipulator moves the plane.
@@ -150,11 +153,13 @@ impl GizmoState {
 
     pub fn draw(&self, painter: &Painter, gizmo: &PlaneGizmo, camera: &Camera, rect: Rect) {
         let shapes = Shapes::new(gizmo, camera, rect);
-        painter.add(Shape::convex_polygon(
-            shapes.plane.to_vec(),
-            PLANE_FILL,
-            Stroke::new(1.5, PLANE_BORDER),
-        ));
+        if gizmo.half_size > 0.0 {
+            painter.add(Shape::convex_polygon(
+                shapes.plane.to_vec(),
+                PLANE_FILL,
+                Stroke::new(1.5, PLANE_BORDER),
+            ));
+        }
         let highlight = self.active.map(|(h, _)| h).or(self.hovered);
         let style = |handle: Handle, color: Color32| {
             if highlight == Some(handle) {
@@ -165,7 +170,7 @@ impl GizmoState {
         };
         let halo = |stroke: Stroke| Stroke::new(stroke.width + 3.0, HALO);
         for (k, arc) in shapes.arcs.iter().enumerate() {
-            let stroke = style(Handle::Arc(k), ARC_COLORS[k]);
+            let stroke = style(Handle::Arc(k), ARC_COLORS[k % ARC_COLORS.len()]);
             painter.add(Shape::line(arc.clone(), halo(stroke)));
             painter.add(Shape::line(arc.clone(), stroke));
             if let Some(&end) = arc.last() {
@@ -196,8 +201,8 @@ struct Shapes {
     plane: [Pos2; 4],
     arrow: [Pos2; 2],
     /// Axes in the plane the arcs turn around.
-    axes: [Vec3; 2],
-    arcs: [Vec<Pos2>; 2],
+    axes: Vec<Vec3>,
+    arcs: Vec<Vec<Pos2>>,
 }
 
 impl Shapes {
@@ -205,7 +210,10 @@ impl Shapes {
         let to_screen = |p: Vec3| overlay::project(camera, rect, p);
         let pixel = camera.pixel_size(rect.width(), rect.height());
         let n = gizmo.normal;
-        let u = n.any_orthonormal_vector();
+        let given = gizmo.axes.map(|(a, _)| a[0].normalize_or_zero());
+        let u = given
+            .filter(|u| u.length_squared() > 0.5)
+            .unwrap_or_else(|| n.any_orthonormal_vector());
         let v = n.cross(u);
         let (p, h) = (gizmo.point, gizmo.half_size);
         let plane = [
@@ -216,9 +224,12 @@ impl Shapes {
         ]
         .map(to_screen);
         let arrow = [p, p + n * ARROW_LENGTH * pixel].map(to_screen);
-        let axes = [u, v];
+        let axes = match gizmo.axes {
+            Some((axes, count)) => axes[..count.min(2)].to_vec(),
+            None => vec![u, v],
+        };
         let radius = ARC_RADIUS * pixel;
-        let arcs = axes.map(|axis| {
+        let arcs = (axes.iter()).map(|&axis| {
             let side = axis.cross(n);
             let (from, to) = (ARC_ANGLES_DEG.0.to_radians(), ARC_ANGLES_DEG.1.to_radians());
             (0..=ARC_SEGMENTS)
@@ -228,6 +239,7 @@ impl Shapes {
                 })
                 .collect()
         });
+        let arcs = arcs.collect();
         Self {
             center: to_screen(p),
             plane,
@@ -244,13 +256,9 @@ impl Shapes {
                 .map(|s| segment_distance(pointer, s[0], s[1]))
                 .fold(f32::INFINITY, f32::min)
         };
-        let candidates = [
-            (Handle::Arrow, near(&self.arrow)),
-            (Handle::Arc(0), near(&self.arcs[0])),
-            (Handle::Arc(1), near(&self.arcs[1])),
-        ];
-        candidates
-            .into_iter()
+        let arcs = (self.arcs.iter().enumerate()).map(|(k, arc)| (Handle::Arc(k), near(arc)));
+        std::iter::once((Handle::Arrow, near(&self.arrow)))
+            .chain(arcs)
             .filter(|(_, d)| *d <= GRAB_DISTANCE)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(h, _)| h)
@@ -278,6 +286,7 @@ mod tests {
             point: Vec3::ZERO,
             normal: Vec3::X,
             half_size: 0.5,
+            axes: None,
         };
         (
             gizmo,

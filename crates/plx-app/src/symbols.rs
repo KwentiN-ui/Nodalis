@@ -740,14 +740,14 @@ struct Visible {
 
 impl Visible {
     fn new(model: &Model) -> Self {
-        if model.parts.iter().all(|p| p.visible) {
+        if model.parts.iter().all(|p| model.drawn(p)) {
             return Self {
                 hidden_elements: HashSet::new(),
                 nodes: None,
             };
         }
         let hidden_elements = (model.parts.iter().zip(&model.mesh().parts))
-            .filter(|(info, _)| !info.visible)
+            .filter(|(info, _)| !model.drawn(info))
             .flat_map(|(_, part)| part.elements.iter().copied())
             .collect();
         Self {

@@ -35,6 +35,9 @@ pub enum TreeItem {
     MeshItem(usize),
     /// A mesh operation of the FE model, such as a transform, under Mesh > Mesh Operations.
     MeshOperation(usize),
+    /// An operation of the Geometry tree on the shapes, such as a split by plane, under
+    /// Operations, see [`plx_model::Geometry::operations`].
+    GeometryOperation(usize),
     NodeSet(String),
     ElementSet(String),
     Surface(String),
@@ -94,6 +97,9 @@ pub enum TreeItem {
 
 /// The category of the mesh operations under Mesh.
 pub const MESH_OPERATIONS: &str = "Mesh Operations";
+
+/// The category of the operations on the shapes in the Geometry tree.
+pub const GEOMETRY_OPERATIONS: &str = "Operations";
 
 /// The group of the exposed parameters in the FE Model tree.
 pub const EXPOSED: &str = "Exposed Parameters";
@@ -165,12 +171,18 @@ pub struct TreeState {
     more_parts: BTreeSet<usize>,
     /// Where the range of a Shift click starts: the part last clicked without Shift.
     anchor: Option<usize>,
+    /// The parts selected before the Shift clicks from the anchor, and the selection the
+    /// last of them left: a further Shift click while that selection stands replaces only
+    /// its range, so that ranges and Ctrl clicks accumulate.
+    range_base: Option<(BTreeSet<usize>, BTreeSet<usize>)>,
     /// Items selected along with the selected item, by Ctrl or Shift click: siblings in one
     /// container, such as many contact pairs to delete at once. They count only while the
     /// item they were selected with, the first, stays selected.
     more_items: Option<(TreeItem, Vec<TreeItem>)>,
     /// Where the range of a Shift click on items starts.
     item_anchor: Option<TreeItem>,
+    /// Like `range_base`, for items.
+    item_range_base: Option<(Vec<TreeItem>, Vec<TreeItem>)>,
     /// Items another analysis of the project owns, with its name: they are marked and
     /// cannot be changed here.
     pub linked: HashMap<TreeItem, String>,
@@ -227,6 +239,7 @@ impl TreeState {
         self.selected = Some((view, item.clone()));
         self.more_items = None;
         self.item_anchor = Some(item);
+        self.item_range_base = None;
     }
 
     /// Selects these items together, the first leading; none clears the selection.
@@ -239,16 +252,17 @@ impl TreeState {
         self.selected = Some((view, lead.clone()));
         self.more_items = (!more.is_empty()).then(|| (lead.clone(), more.to_vec()));
         self.item_anchor = Some(lead.clone());
+        self.item_range_base = None;
     }
 
-    /// Ctrl click (adds or takes out `item`) or Shift click (the items from the last one
-    /// clicked to `item`, added with Ctrl) on an item of a container listing `siblings`.
+    /// Ctrl click (adds or takes out `item`) or Shift click (adds the items from the last
+    /// one clicked without Shift to `item`) on an item of a container listing `siblings`.
+    /// Ctrl and Shift clicks accumulate; only a plain click starts anew.
     pub fn select_sibling(
         &mut self,
         view: TreeView,
         item: TreeItem,
         siblings: &[TreeItem],
-        ctrl: bool,
         shift: bool,
     ) {
         let current: Vec<TreeItem> = (self.selected_items(view).into_iter())
@@ -260,15 +274,21 @@ impl TreeState {
                 .unwrap_or_else(|| item.clone());
             let position = |i: &TreeItem| siblings.iter().position(|s| s == i).unwrap_or(0);
             let (a, b) = (position(&anchor), position(&item));
-            let mut chosen = if ctrl { current } else { Vec::new() };
+            let mut chosen = match self.item_range_base.take() {
+                Some((base, left)) if same_items(&left, &current) => base,
+                _ => current,
+            };
+            let base = chosen.clone();
             for sibling in &siblings[a.min(b)..=a.max(b)] {
                 if !chosen.contains(sibling) {
                     chosen.push(sibling.clone());
                 }
             }
             self.item_anchor = Some(anchor);
+            self.item_range_base = Some((base, chosen.clone()));
             chosen
         } else {
+            self.item_range_base = None;
             let mut chosen = current;
             match chosen.iter().position(|i| *i == item) {
                 Some(index) => {
@@ -297,6 +317,7 @@ impl TreeState {
     pub fn select_part(&mut self, view: TreeView, index: usize) {
         self.select_parts(view, BTreeSet::from([index]), index);
         self.anchor = Some(index);
+        self.range_base = None;
     }
 
     /// Ctrl click: adds a part to the selection, or takes it out when it is selected.
@@ -307,6 +328,7 @@ impl TreeState {
         }
         self.select_parts(view, parts, index);
         self.anchor = Some(index);
+        self.range_base = None;
     }
 
     /// Adds parts to the selection; the last becomes the selected one.
@@ -322,21 +344,24 @@ impl TreeState {
         }
     }
 
-    /// Shift click in the tree: the parts from the anchor to `index`, added to the selection
-    /// with Ctrl.
-    pub fn select_range(&mut self, view: TreeView, index: usize, add: bool) {
+    /// Shift click in the tree: adds the parts from the anchor, the part last clicked
+    /// without Shift, to `index`. Ranges and Ctrl clicks accumulate, as long as no plain
+    /// click starts anew; a further Shift click from the same anchor replaces only the
+    /// range of the one before, so that it can shrink again.
+    pub fn select_range(&mut self, view: TreeView, index: usize) {
+        let current = self.selected_parts(view);
         let anchor = (self.anchor)
-            .filter(|_| !self.selected_parts(view).is_empty())
+            .filter(|_| !current.is_empty())
             .unwrap_or(index);
-        let range = anchor.min(index)..=anchor.max(index);
-        let mut parts = if add {
-            self.selected_parts(view)
-        } else {
-            BTreeSet::new()
+        let mut parts = match self.range_base.take() {
+            Some((base, left)) if left == current => base,
+            _ => current,
         };
-        parts.extend(range);
+        let base = parts.clone();
+        parts.extend(anchor.min(index)..=anchor.max(index));
         self.select_parts(view, parts, index);
         self.anchor = Some(anchor);
+        self.range_base = Some((base, self.selected_parts(view)));
     }
 
     /// Selects `parts` with `lead` as the selected item, or the last part when `lead` is not
@@ -361,10 +386,19 @@ impl TreeState {
     }
 }
 
+/// The same items, in any order.
+fn same_items(a: &[TreeItem], b: &[TreeItem]) -> bool {
+    a.len() == b.len() && a.iter().all(|i| b.contains(i))
+}
+
 /// What the user did in the tree this frame.
 #[derive(Default)]
 pub struct TreeResponse {
     pub visibility: Vec<(usize, bool)>,
+    /// Show only these parts and hide all others.
+    pub isolate: Option<Vec<usize>>,
+    /// Show every part again, such as after Isolate.
+    pub show_all_parts: bool,
     /// Colour contours of results parts turned on (`true`) or off.
     pub contours: Vec<(usize, bool)>,
     /// A result component was picked (field, component).
@@ -674,6 +708,8 @@ fn advanced_contacts() -> Vec<TreeItem> {
 pub const CROSS_SECTIONS: &str = "Cross-Sections";
 /// The container of the contact regions, under Connections (the group "Contacts").
 pub const CONTACT_REGIONS: &str = "Contact Regions";
+/// The container of the suppressed parts, at the end of Parts.
+pub const SUPPRESSED_PARTS: &str = "Suppressed";
 /// The container of the bolts, under Connections.
 pub const BOLTS: &str = "Bolts";
 /// The container of the part groups, under Connections.
@@ -773,6 +809,7 @@ fn deletable(view: TreeView, item: &TreeItem) -> bool {
                 | TreeItem::MeshItem(_)
         )
         || (view == TreeView::FeModel && matches!(item, TreeItem::MeshOperation(_)))
+        || (view == TreeView::Geometry && matches!(item, TreeItem::GeometryOperation(_)))
         || (view == TreeView::FeModel && set_kind(item).is_some())
 }
 
@@ -852,6 +889,7 @@ fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
         Mesh => matches!(item, Part(_) | MeshOperation(_) | Group(MESH_OPERATIONS)),
         Group("Parts") => matches!(item, Part(_) | Compound(_)),
         Group(MESH_OPERATIONS) => matches!(item, MeshOperation(_)),
+        Group(GEOMETRY_OPERATIONS) => matches!(item, GeometryOperation(_)),
         Group("Constraints") => matches!(item, Constraint(_)),
         Group("Sections") => matches!(item, Section(_) | CrossSection(_) | Group(CROSS_SECTIONS)),
         Group(CROSS_SECTIONS) => matches!(item, CrossSection(_)),
@@ -961,6 +999,9 @@ fn part_icon(part: &PartInfo) -> TreeIcon {
     }
 }
 
+const ISOLATE_TIP: &str = "Hides all other parts, so that only this part (or the selected \
+                           parts) is shown. Show All Parts brings the others back.";
+
 /// Context menu of a part, the same in the tree and in the 3D view. A part of the geometry
 /// is meshed from here. On one of several selected parts, hiding and
 /// deleting take them all.
@@ -973,6 +1014,7 @@ pub fn part_menu(
     suppressed: bool,
     imported: bool,
     own_mesh: bool,
+    all_shown: bool,
     view: TreeView,
     selected: &BTreeSet<usize>,
     compounds: &[(String, Vec<usize>)],
@@ -1039,6 +1081,16 @@ pub fn part_menu(
         } else {
             response.visibility.push((index, !visible));
         }
+    }
+    if ui.button("Isolate").on_hover_text(ISOLATE_TIP).clicked() {
+        response.isolate = Some(if selected.contains(&index) {
+            selected.iter().copied().collect()
+        } else {
+            vec![index]
+        });
+    }
+    if !all_shown && ui.button("Show All Parts").clicked() {
+        response.show_all_parts = true;
     }
     if view == TreeView::Results {
         // A part without colour contours is grey and not part of the legend range.
@@ -1322,7 +1374,7 @@ impl Tree<'_> {
                 TreeItem::Part(_) if response.secondary_clicked() && self.is_selected(&item) => {}
                 // Several parts are selected with Ctrl and Shift, as in a Windows tree.
                 TreeItem::Part(index) if response.clicked() && shift => {
-                    self.state.select_range(self.view, index, ctrl);
+                    self.state.select_range(self.view, index);
                 }
                 TreeItem::Part(index) if response.clicked() && ctrl => {
                     self.state.toggle_part(self.view, index);
@@ -1333,7 +1385,7 @@ impl Tree<'_> {
                 _ if response.secondary_clicked() && self.is_selected(&item) => {}
                 _ if response.clicked() && (ctrl || shift) && self.siblings.contains(&item) => {
                     let siblings = self.siblings.clone();
-                    (self.state).select_sibling(self.view, item.clone(), &siblings, ctrl, shift);
+                    (self.state).select_sibling(self.view, item.clone(), &siblings, shift);
                 }
                 _ => self.state.select_item(self.view, item.clone()),
             }
@@ -1350,6 +1402,21 @@ impl Tree<'_> {
         let creates = (creates(&item))
             .or_else(|| (self.view == TreeView::FeModel).then(|| creates_set(&item))?)
             .filter(|_| closed.is_none());
+        if item == TreeItem::Group(SUPPRESSED_PARTS) {
+            response.context_menu(|ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                let suppressed: Vec<usize> = (self.part_indices.iter().copied())
+                    .filter(|&i| self.inactive.contains(&TreeItem::Part(i)))
+                    .collect();
+                if ui
+                    .button("Unsuppress All")
+                    .on_hover_text(SUPPRESS_TIP)
+                    .clicked()
+                {
+                    self.response.suppress = Some((suppressed, false));
+                }
+            });
+        }
         if item == TreeItem::Group("Parts") && !self.part_indices.is_empty() {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -1395,7 +1462,8 @@ impl Tree<'_> {
                     | TreeItem::HotSpot(_)
                     | TreeItem::MeshItem(_)
             )
-            || (self.view == TreeView::FeModel && matches!(item, TreeItem::MeshOperation(_)));
+            || (self.view == TreeView::FeModel && matches!(item, TreeItem::MeshOperation(_)))
+            || (self.view == TreeView::Geometry && matches!(item, TreeItem::GeometryOperation(_)));
         // The menu of one of several selected items acts on all of them.
         let several = self.is_selected(&item) && self.state.selected_items(self.view).len() > 1;
         if creates.is_some() || editable {
@@ -1618,6 +1686,9 @@ impl Tree<'_> {
             TreeItem::Group("Parts") => TreeIcon::Part,
             TreeItem::Group("Mesh Setup") => TreeIcon::MeshSetup,
             TreeItem::Group(MESH_OPERATIONS) => TreeIcon::MeshOperation,
+            TreeItem::Group(GEOMETRY_OPERATIONS) | TreeItem::GeometryOperation(_) => {
+                TreeIcon::GeometryOperation
+            }
             TreeItem::Group("Node Sets") => TreeIcon::NodeSet,
             TreeItem::Group("Element Sets") => TreeIcon::ElementSet,
             TreeItem::Group("Surfaces") => TreeIcon::Surface,
@@ -1757,6 +1828,10 @@ impl Tree<'_> {
             }
             (TreeItem::Compound(c), TreeItem::Part(p)) => {
                 (self.state.compounds.get(*c)).is_some_and(|(_, members)| members.contains(p))
+            }
+            // Only the suppressed parts lie in their branch, which stays folded otherwise.
+            (TreeItem::Group(SUPPRESSED_PARTS), TreeItem::Part(_) | TreeItem::Compound(_)) => {
+                self.inactive.contains(item)
             }
             _ => contains(branch, item),
         }
@@ -1932,8 +2007,13 @@ impl Tree<'_> {
             Vec::new()
         };
         self.branch(ui, TreeItem::Group("Parts"), parts, true, |tree, ui| {
-            // A compound part stands where its first part would, its parts under it.
+            // A compound part stands where its first part would, its parts under it. The
+            // suppressed parts, and compounds of only suppressed parts, are listed apart at
+            // the end, under a branch of their own that folds them away.
+            let suppressed: Vec<bool> = model.parts.iter().map(|p| p.suppressed).collect();
+            let suppressed = |index: usize| suppressed.get(index).copied().unwrap_or(false);
             let mut drawn = vec![false; model.parts.len()];
+            let mut apart: Vec<(usize, Option<usize>)> = Vec::new();
             for index in 0..model.parts.len() {
                 if drawn[index] {
                     continue;
@@ -1941,32 +2021,66 @@ impl Tree<'_> {
                 let compound = compounds.iter().position(|(_, m)| m.contains(&index));
                 match compound {
                     Some(c) => {
-                        let (name, members) = &compounds[c];
-                        let suppressed = (members.iter())
-                            .all(|&m| model.parts.get(m).is_some_and(|p| p.suppressed));
-                        if suppressed && !members.is_empty() {
-                            tree.inactive.insert(TreeItem::Compound(c));
-                        }
-                        let label = format!("{name} ({})", members.len());
-                        tree.branch(ui, TreeItem::Compound(c), label, true, |tree, ui| {
-                            for &member in members {
-                                tree.part_row(ui, model, member, &compounds);
-                            }
-                        });
+                        let members = &compounds[c].1;
                         for &member in members {
                             if let Some(d) = drawn.get_mut(member) {
                                 *d = true;
                             }
                         }
+                        if !members.is_empty() && members.iter().all(|&m| suppressed(m)) {
+                            tree.inactive.insert(TreeItem::Compound(c));
+                            apart.push((index, Some(c)));
+                        } else {
+                            tree.compound_rows(ui, model, c, &compounds);
+                        }
                     }
                     None => {
-                        tree.part_row(ui, model, index, &compounds);
                         drawn[index] = true;
+                        if suppressed(index) {
+                            apart.push((index, None));
+                        } else {
+                            tree.part_row(ui, model, index, &compounds);
+                        }
                     }
                 }
             }
             for name in &unmeshed {
                 tree.unmeshed_row(ui, name);
+            }
+            if apart.is_empty() {
+                return;
+            }
+            let label = counted(SUPPRESSED_PARTS, apart.len());
+            tree.branch(
+                ui,
+                TreeItem::Group(SUPPRESSED_PARTS),
+                label,
+                true,
+                |tree, ui| {
+                    for &(index, compound) in &apart {
+                        match compound {
+                            Some(c) => tree.compound_rows(ui, model, c, &compounds),
+                            None => tree.part_row(ui, model, index, &compounds),
+                        }
+                    }
+                },
+            );
+        });
+    }
+
+    /// The row of the compound part `c` with its parts under it.
+    fn compound_rows(
+        &mut self,
+        ui: &mut Ui,
+        model: &mut Model,
+        c: usize,
+        compounds: &[(String, Vec<usize>)],
+    ) {
+        let (name, members) = &compounds[c];
+        let label = format!("{name} ({})", members.len());
+        self.branch(ui, TreeItem::Compound(c), label, true, |tree, ui| {
+            for &member in members {
+                tree.part_row(ui, model, member, compounds);
             }
         });
     }
@@ -2024,6 +2138,7 @@ impl Tree<'_> {
         if self.hidden(&TreeItem::Part(index)) {
             return;
         }
+        let all_shown = model.parts.iter().all(|p| p.visible);
         let Some(part) = model.parts.get_mut(index) else {
             return;
         };
@@ -2051,6 +2166,7 @@ impl Tree<'_> {
                 part.suppressed,
                 part.imported,
                 part.own_mesh,
+                all_shown,
                 view,
                 &selected,
                 compounds,
@@ -2292,12 +2408,14 @@ impl Tree<'_> {
 }
 
 /// `mesh_items` names the items of the geometry's mesh setup, for the Geometry tree;
-/// `solver_findings` are the problems the solver reported in the last run.
+/// `solver_findings` are problems found outside the model checks: in the FE Model tree the
+/// solver's of the last run and the meshing's, in the Geometry tree the meshing's.
 pub fn show(
     ui: &mut Ui,
     view: TreeView,
     model: Option<&mut Model>,
     mesh_items: &[String],
+    operations: &[String],
     solver_findings: &[Finding],
     state: &mut TreeState,
 ) -> TreeResponse {
@@ -2333,12 +2451,24 @@ pub fn show(
             let lines = ui.painter().add(Shape::Noop);
             match view {
                 TreeView::Geometry => {
+                    for finding in solver_findings {
+                        let (item, containers) = tree_items(finding.item);
+                        if finding.severity() == Severity::Error {
+                            tree.holds_invalid.extend(containers);
+                        }
+                        tree.findings.entry(item).or_default().push(finding.clone());
+                    }
                     match model {
                         Some(model) => tree.parts(ui, model),
                         None => {
                             tree.leaf(ui, TreeItem::Group("Parts"), "Parts");
                         }
                     }
+                    // What is done to the shapes as imported or linked, in order.
+                    let items = (operations.iter().enumerate())
+                        .map(|(i, name)| (TreeItem::GeometryOperation(i), name.as_str()))
+                        .collect();
+                    tree.container(ui, GEOMETRY_OPERATIONS, items);
                     let items = (mesh_items.iter().enumerate())
                         .map(|(i, name)| (TreeItem::MeshItem(i), name.as_str()))
                         .collect();
@@ -2859,14 +2989,14 @@ mod tests {
         state.toggle_part(view, 4);
         assert_eq!(parts(&state, view), [1, 4]);
         assert_eq!(state.selected, Some((view, TreeItem::Part(4))));
-        // Shift selects from the part last clicked, Ctrl+Shift adds the range.
-        state.select_range(view, 2, false);
-        assert_eq!(parts(&state, view), [2, 3, 4]);
+        // Shift adds the parts from the one last clicked; a plain click starts anew.
+        state.select_range(view, 2);
+        assert_eq!(parts(&state, view), [1, 2, 3, 4]);
         state.select_part(view, 0);
-        state.select_range(view, 1, true);
+        state.select_range(view, 1);
         assert_eq!(parts(&state, view), [0, 1]);
         state.toggle_part(view, 5);
-        state.select_range(view, 7, true);
+        state.select_range(view, 7);
         assert_eq!(parts(&state, view), [0, 1, 5, 6, 7]);
         // Ctrl takes a part out again; the last one leaves nothing selected.
         state.toggle_part(view, 7);
@@ -2876,6 +3006,58 @@ mod tests {
         state.toggle_part(view, 3);
         assert_eq!(state.selected, None);
         assert!(parts(&state, view).is_empty());
+    }
+
+    #[test]
+    fn shift_ranges_and_ctrl_clicks_accumulate() {
+        let view = TreeView::Geometry;
+        let mut state = TreeState::default();
+        state.select_part(view, 0);
+        state.select_range(view, 3);
+        assert_eq!(parts(&state, view), [0, 1, 2, 3]);
+        state.toggle_part(view, 6);
+        state.select_range(view, 8);
+        assert_eq!(parts(&state, view), [0, 1, 2, 3, 6, 7, 8]);
+        // Shift again from the same anchor moves the end of that range only.
+        state.select_range(view, 7);
+        assert_eq!(parts(&state, view), [0, 1, 2, 3, 6, 7]);
+        state.select_range(view, 5);
+        assert_eq!(parts(&state, view), [0, 1, 2, 3, 5, 6]);
+        // Ctrl takes a part out and anchors there; Shift from it adds it back.
+        state.toggle_part(view, 1);
+        state.select_range(view, 2);
+        assert_eq!(parts(&state, view), [0, 1, 2, 3, 5, 6]);
+        // A selection changed elsewhere, as by a box, becomes the base of the next range.
+        state.add_parts(view, [10]);
+        state.select_range(view, 3);
+        assert_eq!(parts(&state, view), [0, 1, 2, 3, 5, 6, 10]);
+        // A plain click starts anew.
+        state.select_part(view, 9);
+        state.select_range(view, 8);
+        assert_eq!(parts(&state, view), [8, 9]);
+    }
+
+    #[test]
+    fn shift_ranges_of_items_accumulate() {
+        let view = TreeView::FeModel;
+        let siblings: Vec<TreeItem> = (0..8).map(TreeItem::ContactPair).collect();
+        let sorted = |state: &TreeState| {
+            let mut items = state.selected_items(view);
+            items.sort();
+            items
+        };
+        let mut state = TreeState::default();
+        state.select_item(view, siblings[0].clone());
+        state.select_sibling(view, siblings[2].clone(), &siblings, true);
+        state.select_sibling(view, siblings[5].clone(), &siblings, false);
+        state.select_sibling(view, siblings[7].clone(), &siblings, true);
+        let expected = |indices: &[usize]| -> Vec<TreeItem> {
+            indices.iter().map(|&i| siblings[i].clone()).collect()
+        };
+        assert_eq!(sorted(&state), expected(&[0, 1, 2, 5, 6, 7]));
+        state.select_sibling(view, siblings[6].clone(), &siblings, true);
+        assert_eq!(sorted(&state), expected(&[0, 1, 2, 5, 6]));
+        assert_eq!(state.selected_items(view)[0], siblings[6]);
     }
 
     #[test]
@@ -2891,7 +3073,7 @@ mod tests {
         let mut state = TreeState::default();
         state.select_item(view, siblings[1].clone());
         // Shift selects from the item last clicked; the clicked one leads.
-        state.select_sibling(view, siblings[3].clone(), &siblings, false, true);
+        state.select_sibling(view, siblings[3].clone(), &siblings, true);
         assert_eq!(
             state.selected_items(view),
             [
@@ -2901,8 +3083,8 @@ mod tests {
             ]
         );
         // Ctrl adds one and takes one out.
-        state.select_sibling(view, siblings[4].clone(), &siblings, true, false);
-        state.select_sibling(view, siblings[2].clone(), &siblings, true, false);
+        state.select_sibling(view, siblings[4].clone(), &siblings, false);
+        state.select_sibling(view, siblings[2].clone(), &siblings, false);
         let mut items = state.selected_items(view);
         items.sort();
         assert_eq!(
@@ -2917,9 +3099,9 @@ mod tests {
         // Another selection drops them; a plain click selects one alone.
         state.selected = Some((view, TreeItem::Material(0)));
         assert_eq!(state.selected_items(view), [TreeItem::Material(0)]);
-        state.select_sibling(view, siblings[0].clone(), &siblings, true, false);
+        state.select_sibling(view, siblings[0].clone(), &siblings, false);
         assert_eq!(state.selected_items(view), [siblings[0].clone()]);
-        state.select_sibling(view, siblings[0].clone(), &siblings, true, false);
+        state.select_sibling(view, siblings[0].clone(), &siblings, false);
         assert_eq!(state.selected, None);
     }
 
@@ -2936,7 +3118,7 @@ mod tests {
         assert_eq!(parts(&state, TreeView::FeModel), [1]);
         // Shift without a part selected starts at the clicked one.
         state.selected = None;
-        state.select_range(TreeView::FeModel, 3, false);
+        state.select_range(TreeView::FeModel, 3);
         assert_eq!(parts(&state, TreeView::FeModel), [3]);
     }
 
@@ -3029,7 +3211,7 @@ mod tests {
             };
             let (model, state, opened) = (&mut self.model, &mut self.state, &mut self.opened);
             let mut out = self.ctx.run_ui(input, |ui| {
-                let r = show(ui, TreeView::FeModel, Some(model), &[], &[], state);
+                let r = show(ui, TreeView::FeModel, Some(model), &[], &[], &[], state);
                 opened.extend(r.open);
             });
             out.textures_delta.clear();

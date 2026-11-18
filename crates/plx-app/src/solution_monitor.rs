@@ -408,6 +408,10 @@ impl BackgroundSolve {
                 };
                 let (geometry, started) = (job.geometry.clone(), job.started);
                 match result {
+                    // A solve needs every part meshed.
+                    Ok(generated) if !generated.failed.is_empty() => {
+                        self.meshing_failed(generated.failed.join("\n"))
+                    }
                     Ok(generated) => self.run(ctx, Some((geometry, generated, started))),
                     Err(error) => self.meshing_failed(error),
                 }

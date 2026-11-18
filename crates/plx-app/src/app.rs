@@ -129,6 +129,9 @@ struct Workbench {
     meshing: Option<MeshingJob>,
     /// CAD faces and edges Gmsh named when meshing failed, shown red on the geometry.
     mesh_failure: BTreeSet<plx_mesher::CadEntity>,
+    /// Problems of the last meshing of each part, by part name: shown with a warning sign at
+    /// the part in the Geometry and FE Model trees until the part is meshed again.
+    mesh_findings: Vec<(String, plx_model::Problem, String)>,
     /// The results workspace: every results file opened in this session.
     /// One of them is shown on the Results tab.
     results: Vec<Model>,
@@ -209,9 +212,16 @@ struct Workbench {
     step_overview: bool,
     /// Open mesh tool: transform parts, merge nodes or renumber.
     mesh_tool: Option<MeshToolDialog>,
-    /// A CAD operation of the Geometry workspace applied to the geometry right away, in the
-    /// editor of the CAD Operation block with its own view.
-    cad_tool: Option<(crate::cad_editor::CadOperationEditor, Viewport)>,
+    /// A CAD tool of the Geometry workspace in the editor of the CAD Operation block with its
+    /// own view, with the operation of the Geometry tree it changes, if any.
+    cad_tool: Option<(
+        crate::cad_editor::CadOperationEditor,
+        Viewport,
+        Option<usize>,
+    )>,
+    /// An operation of the Geometry tree to edit, or to delete when true, by index: done by
+    /// the window, which takes the shapes it makes.
+    geometry_operation_request: Option<(usize, bool)>,
     /// The Query tool, while its window is open.
     query: Option<QueryWindow>,
     /// Open material library editor.
@@ -246,6 +256,10 @@ struct Workbench {
     carried_settings: Option<(PathBuf, plx_results::ResultsSettings)>,
     /// Problems the solver reported when the last analysis failed, shown in the tree.
     solver_findings: Vec<plx_model::Finding>,
+    /// The revision of the model the solver findings were last checked at: a change of the
+    /// model drops those of an analysis that could not be set up, which name items by
+    /// their place and would point at others once items are deleted.
+    findings_revision: u64,
     /// The findings of a tree item whose warning sign was clicked, explained in a window.
     findings_window: Option<Vec<plx_model::Finding>>,
     /// Results file the user asked to open; read by the app on a worker thread.
@@ -341,6 +355,7 @@ impl AnalysisWindow {
                 mesh_item_editor: None,
                 meshing: None,
                 mesh_failure: BTreeSet::new(),
+                mesh_findings: Vec::new(),
                 results: Vec::new(),
                 current_result: 0,
                 parked_camera: None,
@@ -380,6 +395,7 @@ impl AnalysisWindow {
                 step_overview: false,
                 mesh_tool: None,
                 cad_tool: None,
+                geometry_operation_request: None,
                 query: None,
                 material_library: None,
                 field_output_dialog: None,
@@ -395,6 +411,7 @@ impl AnalysisWindow {
                 global_work: None,
                 carried_settings: None,
                 solver_findings: Vec::new(),
+                findings_revision: 0,
                 findings_window: None,
                 open_results: None,
                 results_asked: None,
@@ -618,6 +635,8 @@ impl AnalysisWindow {
             &mut scratch_origins,
             &mut model.fe,
         );
+        // The mesh is the source's: of its shapes as they are, without operations here.
+        let geometry = geometry.map(plx_model::Geometry::without_operations);
         crate::links::take_geometry(&mut own, geometry, false);
         if let Some(own) = &mut own {
             own.from_link = true;
@@ -678,6 +697,11 @@ impl AnalysisWindow {
             model.set_mesh_with(mesh, origins);
             workbench.after_parts_changed();
             workbench.view_command = Some(ViewCommand::Fit);
+        }
+        // The findings are of the model as the run left it, its mesh included.
+        if let Some(model) = &mut workbench.model {
+            crate::undo::record(model);
+            workbench.findings_revision = model.revision;
         }
         let Some(results) = solved.results else {
             workbench.status = None;
@@ -814,6 +838,7 @@ impl AnalysisWindow {
     pub fn note_change(&mut self) {
         if let Some(model) = &mut self.workbench.model {
             crate::undo::record(model);
+            self.workbench.forget_stale_findings();
         }
     }
 
@@ -1153,11 +1178,34 @@ impl AnalysisWindow {
                 }
             }
             (None, _) if self.workbench.meshing.is_some() => {
+                let job = self.workbench.meshing.as_ref();
+                let cancelling = job.is_some_and(MeshingJob::cancelling);
+                let progress = job.and_then(MeshingJob::progress);
                 ui.spinner();
-                ui.label("Meshing …");
-                cancel = (ui.small_button("Cancel"))
-                    .on_hover_text("Stop the meshing; the parts keep their old mesh.")
-                    .clicked();
+                // The bar and the button first, at fixed places, and the text that changes
+                // its length after them.
+                let several = progress.as_ref().filter(|p| p.total > 1);
+                if let Some(progress) = several {
+                    ui.add(
+                        egui::ProgressBar::new(progress.done as f32 / progress.total as f32)
+                            .desired_width(180.0)
+                            .show_percentage(),
+                    );
+                }
+                if !cancelling {
+                    cancel = (ui.small_button("Cancel"))
+                        .on_hover_text("Stop the meshing; the parts meshed so far are kept.")
+                        .clicked();
+                }
+                let text = match (&progress, cancelling) {
+                    (_, true) => "Cancelling the meshing …".to_string(),
+                    (Some(p), _) if p.total > 1 => {
+                        format!("Part {} of {}: {}", p.done + 1, p.total, p.part)
+                    }
+                    (Some(p), _) => format!("Meshing {} …", p.part),
+                    (None, _) => "Meshing …".to_string(),
+                };
+                ui.add(egui::Label::new(text).truncate());
             }
             (None, Some(model)) if model.is_geometry() => {
                 ui.label(format!(
@@ -1395,6 +1443,7 @@ pub(crate) fn merge_part_meshes(
     // its own mesh; joined again after.
     mesh.split_compounds();
     let space = model.fe.properties.space;
+    let mut meshes = Vec::with_capacity(generated.meshes.len());
     for mut part in generated.meshes {
         space
             .prepare_generated_mesh(&mut part.mesh)
@@ -1441,8 +1490,10 @@ pub(crate) fn merge_part_meshes(
                 units.unit(plx_model::Quantity::Length),
             ));
         }
-        mesh = plx_mesher::merge_part(&mesh, part.mesh);
+        meshes.push(part.mesh);
     }
+    // All at once: merging part by part would copy the whole mesh for each part.
+    mesh = plx_mesher::merge_parts(&mesh, meshes);
     mesh.compose_compounds(&geometry.compound_members());
     mesh.unshare_parts();
     model.set_mesh(mesh);
@@ -1985,6 +2036,7 @@ impl AnalysisWindow {
         // Last, after everything the user changed in this frame.
         if let Some(model) = &mut self.workbench.model {
             crate::undo::record(model);
+            self.workbench.forget_stale_findings();
         }
     }
 }
@@ -2341,8 +2393,13 @@ impl Workbench {
                     model.update_plain_nodes();
                 }
                 let hidden: Vec<usize> = (self.shown().into_iter())
-                    .flat_map(|m| m.parts.iter().enumerate())
-                    .filter(|(_, p)| !p.shown())
+                    .flat_map(|m| {
+                        m.parts
+                            .iter()
+                            .enumerate()
+                            .map(move |(i, p)| (i, m.drawn(p)))
+                    })
+                    .filter(|(_, drawn)| !drawn)
                     .map(|(i, _)| i)
                     .collect();
                 for part in hidden {
@@ -2524,6 +2581,21 @@ impl Workbench {
         self.tree.compounds = self.compound_rows();
         self.sync_imported();
         self.sync_suppressed();
+        // The problems of the last meshing go with the parts in the Geometry and FE Model
+        // trees, the solver's with the FE Model.
+        let findings = match view {
+            TreeView::Results => self.solver_findings.clone(),
+            TreeView::Geometry => self.mesh_part_findings(self.geometry.as_ref()),
+            TreeView::FeModel => {
+                let mut findings = self.mesh_part_findings(self.model.as_ref());
+                findings.extend(self.solver_findings.iter().cloned());
+                findings
+            }
+        };
+        let operations: Vec<String> = (self.model.as_ref())
+            .and_then(|m| m.geometry.as_ref())
+            .map(|g| g.operations.iter().map(|o| o.name.clone()).collect())
+            .unwrap_or_default();
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),
@@ -2534,7 +2606,8 @@ impl Workbench {
             view,
             shown,
             &mesh_items,
-            &self.solver_findings,
+            &operations,
+            &findings,
             &mut self.tree,
         );
         self.tree_response(ui.ctx(), view, response);
@@ -2716,12 +2789,21 @@ impl Workbench {
     /// Acts on what the user picked in the tree or in a part's context menu in the 3D view.
     fn tree_response(&mut self, ctx: &egui::Context, view: TreeView, mut response: TreeResponse) {
         self.guard_linked(view, &mut response);
+        let parts = self.shown().map_or(0, |m| m.parts.len());
+        if let Some(isolated) = response.isolate.take() {
+            (response.visibility).extend((0..parts).map(|i| (i, isolated.contains(&i))));
+        }
+        if std::mem::take(&mut response.show_all_parts) {
+            response.visibility.extend((0..parts).map(|i| (i, true)));
+        }
         if !response.visibility.is_empty() {
             for (index, visible) in response.visibility {
                 let mut drawn = visible;
-                if let Some(part) = self.shown_mut().and_then(|m| m.parts.get_mut(index)) {
+                if let Some(model) = self.shown_mut()
+                    && let Some(part) = model.parts.get_mut(index)
+                {
                     part.visible = visible;
-                    drawn = part.shown();
+                    drawn = model.drawn(&model.parts[index]);
                 }
                 self.viewport.set_part_visible(index, drawn);
             }
@@ -2777,6 +2859,10 @@ impl Workbench {
             (&response.open, view)
         {
             self.open_mesh_tool(MeshTool::Operation(*index));
+        } else if let (Some(TreeItem::GeometryOperation(index)), TreeView::Geometry) =
+            (&response.open, view)
+        {
+            self.geometry_operation_request = Some((*index, false));
         } else if let Some(TreeItem::MeshItem(index)) = response.open {
             self.mesh_item_editor = self.model.as_ref().and_then(|m| {
                 MeshItemEditor::edit(m.geometry.as_ref()?, index, m.fe.properties.units)
@@ -3981,10 +4067,11 @@ impl Workbench {
         self.mesh_failure.clear();
     }
 
-    /// Cancels the meshing under way: the mesher is killed and the parts keep their mesh.
+    /// Cancels the meshing under way: the mesher is killed, the parts it finished get their
+    /// new mesh and the others keep theirs, see [`Self::poll_meshing`].
     fn cancel_meshing(&mut self) {
-        if self.meshing.take().is_some() {
-            self.output.push(crate::meshing::CANCELLED.into());
+        if let Some(job) = &self.meshing {
+            job.cancel();
         }
     }
 
@@ -3996,11 +4083,36 @@ impl Workbench {
             return;
         };
         let started = Some(job.started);
-        let Some(model) = self.model.as_mut() else {
+        if self.model.is_none() {
             return;
-        };
+        }
         match result {
-            Ok(generated) => {
+            Ok(mut generated) => {
+                if generated.cancelled {
+                    let kept = (generated.meshes.iter())
+                        .map(|m| m.mesh.parts.len())
+                        .sum::<usize>();
+                    self.output.push(match kept {
+                        0 => format!("{}; no part was finished", crate::meshing::CANCELLED),
+                        1 => format!(
+                            "{}; the part finished before is kept",
+                            crate::meshing::CANCELLED
+                        ),
+                        n => format!(
+                            "{}; the {n} parts finished before are kept",
+                            crate::meshing::CANCELLED
+                        ),
+                    });
+                }
+                let failed = std::mem::take(&mut generated.failed);
+                self.note_mesh_findings(&generated, &failed);
+                if generated.meshes.is_empty() {
+                    self.show_mesh_failures(&failed);
+                    return;
+                }
+                let Some(model) = self.model.as_mut() else {
+                    return;
+                };
                 let had_mesh = model.mesh().element_count() > 0;
                 match merge_part_meshes(model, &job.geometry, generated, started) {
                     Ok(lines) => self.output.extend(lines),
@@ -4016,19 +4128,100 @@ impl Workbench {
                 if !had_mesh {
                     self.view_command = Some(ViewCommand::Fit);
                 }
-            }
-            Err(error) => {
-                let message = error.to_string();
-                self.mesh_failure = plx_mesher::named_entities(&message).into_iter().collect();
-                self.output.push(format!("Meshing failed: {message}"));
-                // The geometry shows the faces and edges Gmsh names in red.
-                if !self.mesh_failure.is_empty() {
-                    self.output
-                        .push("The affected faces and edges are marked red in the geometry".into());
-                    self.tree.selected = None;
-                    self.set_tree_view(TreeView::Geometry);
+                // The parts that failed are told last, where they are seen, and their faces
+                // are shown in the geometry.
+                if !failed.is_empty() {
+                    let total = failed.len();
+                    self.output.push(format!(
+                        "{total} {} could not be meshed, the others were meshed:",
+                        if total == 1 { "part" } else { "parts" }
+                    ));
+                    self.show_mesh_failures(&failed);
                 }
             }
+            Err(error) => self.show_mesh_failures(&[error]),
+        }
+    }
+
+    /// Keeps what went wrong with each part meshed now, for the warning signs in the trees:
+    /// the part that failed, or the one with flat elements; the parts meshed now lose what
+    /// their last meshing left.
+    fn note_mesh_findings(&mut self, generated: &crate::meshing::PartMeshes, failed: &[String]) {
+        let names: Vec<String> = (self.geometry.as_ref())
+            .map(|g| g.parts.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default();
+        // The part a message is about, which it begins with; the longest name that fits.
+        let part_of = |message: &str| {
+            (names.iter())
+                .filter(|n| {
+                    message.len() > n.len() + 1
+                        && message.is_char_boundary(n.len())
+                        && message[..n.len()].eq_ignore_ascii_case(n)
+                        && message[n.len()..].starts_with(": ")
+                })
+                .max_by_key(|n| n.len())
+                .cloned()
+        };
+        let mut found = Vec::new();
+        let mut touched: Vec<String> = Vec::new();
+        for generated in &generated.meshes {
+            touched.extend(generated.mesh.parts.iter().map(|p| p.name.clone()));
+            for warning in &generated.warnings {
+                if plx_mesher::is_flat_warning(warning)
+                    && let Some(part) = part_of(warning)
+                {
+                    let detail = warning[part.len() + 2..].to_string();
+                    found.push((part, plx_model::Problem::FlatElements, detail));
+                }
+            }
+        }
+        for message in failed {
+            if let Some(part) = part_of(message) {
+                let detail = message[part.len() + 2..].to_string();
+                touched.push(part.clone());
+                found.push((part, plx_model::Problem::MeshFailed, detail));
+            }
+        }
+        (self.mesh_findings).retain(|(p, ..)| !touched.iter().any(|t| t.eq_ignore_ascii_case(p)));
+        self.mesh_findings.extend(found);
+    }
+
+    /// The problems of the last meshing as findings at the parts of `model`, by name.
+    fn mesh_part_findings(&self, model: Option<&Model>) -> Vec<plx_model::Finding> {
+        let Some(model) = model else {
+            return Vec::new();
+        };
+        (self.mesh_findings.iter())
+            .filter_map(|(part, problem, detail)| {
+                let index = (model.parts.iter()).position(|p| p.name.eq_ignore_ascii_case(part))?;
+                Some(plx_model::Finding::new(
+                    plx_model::ModelItem::Part(index),
+                    *problem,
+                    detail.clone(),
+                ))
+            })
+            .collect()
+    }
+
+    /// Writes why meshing failed, one message per part, and marks the faces and edges the
+    /// messages name red in the geometry.
+    fn show_mesh_failures(&mut self, messages: &[String]) {
+        self.mesh_failure.clear();
+        for message in messages {
+            self.output.push(format!("Meshing failed: {message}"));
+            self.mesh_failure
+                .extend(plx_mesher::named_entities(message));
+        }
+        if !self.mesh_failure.is_empty() {
+            self.output
+                .push("The affected faces and edges are marked red in the geometry".into());
+        }
+        // The Geometry tree shows the parts that failed with a warning sign.
+        let at_parts = (self.mesh_findings.iter())
+            .any(|(_, problem, _)| *problem == plx_model::Problem::MeshFailed);
+        if !self.mesh_failure.is_empty() || at_parts {
+            self.tree.selected = None;
+            self.set_tree_view(TreeView::Geometry);
         }
     }
 
@@ -4542,10 +4735,9 @@ impl Workbench {
         };
         let heading = format!("Nodalis: {}", model.file_name());
         // Suppressed geometry objects are not written.
-        let active = model.active();
-        let mut fe = active.fe.clone().into_owned();
+        let mut active = model.active();
         // Checked before asking for the file; the global results are staged once it is known.
-        if let Err(error) = plx_io::inp::write_inp(&active.mesh, &fe, &heading) {
+        if let Err(error) = plx_io::inp::write_inp(&active, &heading) {
             self.output.push(format!("Export not possible: {error}"));
             return;
         }
@@ -4562,20 +4754,21 @@ impl Workbench {
             let dir = path.parent().unwrap_or(std::path::Path::new("."));
             let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
             if let Err(error) = crate::analysis::stage_global_results(
-                &mut fe,
+                active.fe_mut(),
                 dir,
                 stem.as_deref().unwrap_or("Analysis"),
             ) {
                 self.output.push(error);
                 return;
             }
-            let text = match plx_io::inp::write_inp(&active.mesh, &fe, &heading) {
+            let text = match plx_io::inp::write_inp(&active, &heading) {
                 Ok(text) => text,
                 Err(error) => {
                     self.output.push(format!("Export not possible: {error}"));
                     return;
                 }
             };
+            let fe = active.fe().clone();
             if fe.uses_global_results()
                 && let Some(global) = fe.properties.submodel_input()
             {
@@ -4964,6 +5157,7 @@ impl Workbench {
                 info.own_mesh,
             ))
         });
+        let all_shown = (self.shown()).is_none_or(|m| m.parts.iter().all(|p| p.visible));
         let mut tree_response = TreeResponse::default();
         let mut command = None;
         let selected = self.tree.selected_parts(self.tree_view);
@@ -4980,11 +5174,18 @@ impl Workbench {
                     suppressed,
                     imported,
                     own_mesh,
+                    all_shown,
                     view,
                     &selected,
                     &compounds,
                     &mut tree_response,
                 );
+                ui.separator();
+            } else if !all_shown {
+                // Off the parts, the way back after Isolate or Hide.
+                if ui.button("Show All Parts").clicked() {
+                    tree_response.show_all_parts = true;
+                }
                 ui.separator();
             }
             command = crate::viewport::view_menu(ui, self.viewport.planar());
@@ -5067,7 +5268,7 @@ impl Workbench {
             return;
         };
         let parts: Vec<usize> = (0..model.parts.len())
-            .filter(|&p| model.parts[p].visible && crate::selection::part_in_box(model, p, area))
+            .filter(|&p| model.parts[p].pickable() && crate::selection::part_in_box(model, p, area))
             .collect();
         if area.ctrl {
             let picked = self.tree.selected_parts(view);
@@ -5656,6 +5857,10 @@ impl Workbench {
         if let TreeItem::MeshOperation(index) = item {
             return (model.fe.mesh_operations.get(*index)).map(|o| o.name.clone());
         }
+        if let TreeItem::GeometryOperation(index) = item {
+            let geometry = model.geometry.as_ref()?;
+            return (geometry.operations.get(*index)).map(|o| o.name.clone());
+        }
         let editor = Editor::edit(item, &model.fe, model.mesh())?;
         Some(editor.name())
     }
@@ -5703,6 +5908,8 @@ impl Workbench {
             self.delete_hot_spot(index);
         } else if let TreeItem::MeshOperation(index) = item {
             self.delete_mesh_operation(index);
+        } else if let TreeItem::GeometryOperation(index) = item {
+            self.geometry_operation_request = Some((index, true));
         } else if let TreeItem::MeshItem(index) = item {
             if let Some(geometry) = self.model.as_mut().and_then(|m| m.geometry.as_mut())
                 && index < geometry.mesh_items.len()
@@ -5986,6 +6193,21 @@ impl Workbench {
         // Both changes happen in one frame, so one undo brings back the mesh and the
         // selections.
         model.edit_mesh(|mesh, fe| {
+            // The items on the deleted parts alone, e.g. contacts with them, go with them,
+            // judged before the geometry is numbered anew.
+            // A selection on the geometry of only the deleted parts is gone too, meshed or
+            // not.
+            let mut smaller = mesh.clone();
+            smaller.remove_bodies(names);
+            fe.drop_items_where(|region| {
+                let lost = |tags: &std::collections::BTreeMap<_, _>| match region {
+                    plx_model::Region::Geometry(entities) => {
+                        !entities.is_empty() && entities.iter().all(|e| !tags.contains_key(e))
+                    }
+                    _ => false,
+                };
+                plx_model::region_left_empty(region, mesh, &smaller) || tags.is_some_and(lost)
+            });
             if let Some(tags) = tags {
                 // Gmsh numbers the faces, edges and vertices anew; the mesh and the
                 // selections on the geometry follow.
@@ -6109,6 +6331,19 @@ impl Workbench {
         (geometry.compounds.iter())
             .map(|c| (c.name.clone(), c.parts.iter().filter_map(index).collect()))
             .collect()
+    }
+
+    /// Drops the solver findings of an analysis that could not be set up once the model
+    /// changed since: the next run finds them anew, and they name items by their place,
+    /// which a deleted item hands to another.
+    fn forget_stale_findings(&mut self) {
+        let Some(revision) = self.model.as_ref().map(|m| m.revision) else {
+            return;
+        };
+        if revision != self.findings_revision {
+            self.findings_revision = revision;
+            (self.solver_findings).retain(|f| f.problem != plx_model::Problem::NotLowered);
+        }
     }
 
     /// Marks the suppressed geometry objects in the geometry view and in the FE model as the
@@ -7571,7 +7806,9 @@ impl Workbench {
                 ui.horizontal(|ui| {
                     ui.label("Name");
                     let edit = ui.add(egui::TextEdit::singleline(typed).desired_width(200.0));
-                    if ui.memory(|m| m.focused().is_none()) {
+                    // Asking for the focus on the frame Enter takes it away would hide
+                    // the lost focus, so Enter would not rename.
+                    if !edit.has_focus() && !edit.lost_focus() {
                         edit.request_focus();
                     }
                     if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -8148,9 +8385,11 @@ impl Workbench {
             }
         };
         self.viewport.set_parts(meshes);
-        for (index, (part, mesh)) in model.parts.iter_mut().zip(meshes).enumerate() {
+        for (part, mesh) in model.parts.iter_mut().zip(meshes) {
             part.bounds = mesh.bounds();
-            self.viewport.set_part_visible(index, part.shown());
+        }
+        for (index, part) in model.parts.iter().enumerate() {
+            self.viewport.set_part_visible(index, model.drawn(part));
         }
         if model.explosion.is_shown()
             && let Some(bounds) = model.visible_bounds()
@@ -8863,6 +9102,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         });
         model.fe.sections.push(plx_model::Section {
             orientation: None,

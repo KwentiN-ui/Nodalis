@@ -184,11 +184,8 @@ pub fn analysis_status(
     let prints = results.map(|_| {
         let active = plx_model::active_model(mesh, fe, geometry, origins);
         match previous {
-            Some(_) => crate::solve_fingerprint::fingerprints_soon(&active.mesh, &active.fe),
-            None => Some(crate::solve_fingerprint::fingerprints(
-                &active.mesh,
-                &active.fe,
-            )),
+            Some(_) => crate::solve_fingerprint::fingerprints_soon(&active),
+            None => Some(crate::solve_fingerprint::fingerprints(&active)),
         }
     });
     if let (Some(None), Some(previous)) = (&prints, previous) {
@@ -466,6 +463,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let fe = FeModel::default();
         let space = fe.properties.space;
@@ -511,6 +510,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let fe = FeModel::default();
         let space = fe.properties.space;

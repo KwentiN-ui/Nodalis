@@ -514,6 +514,8 @@ fn rectangle(origin: [f64; 3], size: [f64; 2], radius: f64) -> Geometry {
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     }
 }
 
@@ -693,6 +695,8 @@ fn box_and_lines() -> Geometry {
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     }
 }
 
@@ -729,6 +733,8 @@ fn a_long_thin_round_bar_is_displayed_with_few_triangles() {
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     };
     let display = tessellate(&geometry).unwrap();
     let triangles = display
@@ -1131,6 +1137,8 @@ fn beam_on_block() -> Geometry {
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     }
 }
 
@@ -1232,6 +1240,8 @@ fn detection_on_geometry_keeps_to_the_faces_that_touch() {
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     };
     let display = tessellate(&geometry).unwrap();
     let skins: Vec<_> = (display.mesh.parts.iter())
@@ -1260,7 +1270,7 @@ fn detection_on_geometry_keeps_to_the_faces_that_touch() {
     };
     let visible = vec![true; display.mesh.parts.len()];
     let report = model
-        .detect_contacts_on_geometry(0, &geometry, &visible)
+        .detect_contacts_on_geometry(0, &geometry, &visible, &plx_model::LeftOut::nothing())
         .unwrap();
     assert_eq!(report.added, 4, "{:#?}", model.contact_regions);
     // Each side is the one face of its block at the plane between the two blocks.
@@ -1734,6 +1744,8 @@ fn revolved(origin: [f64; 3], size: [f64; 2], radius: f64, angle: f64) -> Geomet
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     }
 }
 
@@ -1913,6 +1925,8 @@ fn plate_and_cube(size: [f64; 3], cube_first: bool) -> Geometry {
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     })
     .unwrap()
 }
@@ -2001,6 +2015,8 @@ fn cube() -> Geometry {
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     })
     .unwrap()
 }
@@ -2150,6 +2166,8 @@ fn corners_of_flat_faces_are_rounded_and_bevelled() {
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     })
     .unwrap();
     let vertex = |geometry: &Geometry, x: f64, y: f64| {
@@ -2265,6 +2283,8 @@ fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     };
     let display = tessellate(&geometry).unwrap();
     let skins: Vec<_> = (display.mesh.parts.iter())
@@ -2330,7 +2350,7 @@ fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
     };
     let visible = vec![true; display.mesh.parts.len()];
     let report = model
-        .detect_contacts_on_geometry(0, &detection, &visible)
+        .detect_contacts_on_geometry(0, &detection, &visible, &plx_model::LeftOut::nothing())
         .unwrap();
     // Both lines touch the running surface at the top, where they meet.
     assert_eq!(report.added, 2, "{:#?}", model.contact_regions);
@@ -2348,7 +2368,7 @@ fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
     // Without the rope profile nothing touches: the lines are 8 off the surface.
     model.sections.clear();
     let report = model
-        .detect_contacts_on_geometry(0, &detection, &visible)
+        .detect_contacts_on_geometry(0, &detection, &visible, &plx_model::LeftOut::nothing())
         .unwrap();
     assert_eq!(report.added, 0, "{:#?}", model.contact_regions);
 }
@@ -2406,6 +2426,8 @@ fn cut_block() -> Geometry {
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     })
     .unwrap();
     geometry.compounds.push(plx_model::CompoundPart {
@@ -3265,6 +3287,8 @@ fn rounded_plate() -> Geometry {
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     })
     .unwrap();
     let upright: Vec<CadEntity> = (input.signatures.iter())
@@ -3412,6 +3436,8 @@ fn defeaturing_keeps_the_round_ends_of_slots_and_removes_pocket_corners() {
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     })
     .unwrap();
     let found = find_blends(&input, 3.0).unwrap();
@@ -3509,6 +3535,8 @@ fn bracket() -> Geometry {
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     })
     .unwrap()
 }
@@ -3857,7 +3885,7 @@ fn a_detected_bonded_pin_with_play_passes_the_model_check() {
     };
     let visible = vec![true; display.mesh.parts.len()];
     let report = model
-        .detect_contacts_on_geometry(0, &detection, &visible)
+        .detect_contacts_on_geometry(0, &detection, &visible, &plx_model::LeftOut::nothing())
         .unwrap();
     assert_eq!(report.added, 1, "{:#?}", model.contact_regions);
     let mesh = generate_mesh(&geometry).unwrap().mesh;
@@ -3910,6 +3938,8 @@ fn a_square_bar_is_swept_along_its_length_with_the_size_asked_for() {
         own_meshes: Vec::new(),
         ids: Vec::new(),
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     };
     let generated = generate_part_mesh(&geometry, "SOLID-1").unwrap();
     let mesh = generated.mesh;
@@ -4103,4 +4133,32 @@ fn shells_of_a_compound_with_a_gap_are_tied() {
     assert_eq!(mesh.parts[0].bodies.len(), 2);
     assert!(body_nodes(&mesh, 0, 0).is_disjoint(&body_nodes(&mesh, 0, 1)));
     assert_eq!(plx_model::FeModel::default().compound_ties(&mesh).len(), 1);
+}
+
+#[test]
+fn log_lines_tell_the_meshing_step() {
+    use crate::gmsh::meshing_step;
+    let step = |line: &str| meshing_step(line);
+    assert_eq!(
+        step("Info    : Meshing surface 12 (Plane, Frontal-Delaunay)").as_deref(),
+        Some("meshing surface 12")
+    );
+    assert_eq!(
+        step("Info    : [ 10%] Meshing curve 5 (Line)").as_deref(),
+        Some("meshing curve 5")
+    );
+    assert_eq!(
+        step("Info    : [100%] Meshing surface 177 order 2").as_deref(),
+        Some("making the elements of surface 177 quadratic")
+    );
+    assert_eq!(
+        step("Info    : Optimizing mesh (Netgen)...").as_deref(),
+        Some("optimizing the mesh with Netgen")
+    );
+    assert_eq!(
+        step("Info    : Meshing 3D...").as_deref(),
+        Some("filling the solid with tetrahedra")
+    );
+    assert_eq!(step("Info    : Meshing 2D..."), None);
+    assert_eq!(step("Info    : 150 illegal tets "), None);
 }

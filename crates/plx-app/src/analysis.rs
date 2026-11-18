@@ -432,33 +432,32 @@ impl Analysis {
         }
         // What the run solves, before anything of the run (linked results) is added.
         // A suppressed geometry object takes part in nothing, with its geometry and its mesh.
-        let active = model.active();
-        let prints = crate::solve_fingerprint::fingerprints(&active.mesh, &active.fe);
+        let mut active = model.active();
+        let prints = crate::solve_fingerprint::fingerprints(&active);
         let heading = format!("Nodalis: {}", model.file_name());
-        let mut fe = active.fe.clone().into_owned();
         let job_name = job_name(name);
         // A Particle Flow step is computed by the particle solver, from the model as it is.
-        if plx_io::particles::particle_step(&fe).is_some() {
+        if plx_io::particles::particle_step(active.fe()).is_some() {
             return Self::start_particles(
                 solver,
-                (&active.mesh, &fe),
+                &active,
                 (check_model, name, &job_name, &heading),
                 work_dir,
                 prints,
             );
         }
-        stage_global_results(&mut fe, work_dir, &job_name)?;
-        let initial = stage_linked_results(&fe, work_dir, &job_name)?;
+        stage_global_results(active.fe_mut(), work_dir, &job_name)?;
+        let initial = stage_linked_results(active.fe(), work_dir, &job_name)?;
         // The sets of the analyses that continue from its states go into the input file too.
         // The model check reads the whole input with its steps: it checks every step's
         // supports.
         let dependent = &continuation.dependent_steps;
-        let mut lowered =
-            plx_io::inp::lower_with_sets_unvalidated(&active.mesh, &fe, &heading, dependent)
-                .map_err(|e| StartError {
-                    message: format!("Analysis not set up: {e}"),
-                    item: e.item,
-                })?;
+        let mut lowered = plx_io::inp::lower_with_sets_unvalidated(&active, &heading, dependent)
+            .map_err(|e| StartError {
+                message: format!("Analysis not set up: {e}"),
+                item: e.item,
+            })?;
+        let fe = active.fe();
         if let Some(initial) = &initial {
             initial.apply(&mut lowered.analysis)?;
         }
@@ -468,8 +467,8 @@ impl Analysis {
             .map(crate::solver_profile::step_line)
             .collect();
         let origins = lowered.origins.clone();
-        let prepared = prepare(lowered, &fe, &continuation.inherited_steps);
-        let copied = copy_result_files(&fe, work_dir);
+        let prepared = prepare(lowered, fe, &continuation.inherited_steps);
+        let copied = copy_result_files(fe, work_dir);
         let job = if check_model {
             Run::check_analysis(solver.threads, work_dir, &job_name, prepared)
         } else {
@@ -518,12 +517,13 @@ impl Analysis {
     /// of it and solved by the particle solver; the model check only makes it.
     fn start_particles(
         solver: &Solver,
-        (mesh, fe): (&plx_mesh::FeMesh, &plx_model::FeModel),
+        active: &plx_model::Active,
         (check_model, name, job_name, heading): (bool, &str, &str, &str),
         work_dir: &std::path::Path,
         prints: plx_io::fingerprint::Fingerprints,
     ) -> Result<Self, StartError> {
-        let lowered = plx_io::particles::lower(mesh, fe, heading).map_err(|e| StartError {
+        let fe = active.fe();
+        let lowered = plx_io::particles::lower(active, heading).map_err(|e| StartError {
             message: format!("Analysis not set up: {e}"),
             item: e.item,
         })?;
@@ -540,7 +540,8 @@ impl Analysis {
                 .filter(|s| s.active)
                 .map(|s| (s.name.clone(), Some(s.kind.period())))
                 .collect();
-            let (mesh, fe, heading) = (mesh.clone(), fe.clone(), heading.to_owned());
+            let active = active.clone().into_owned();
+            let heading = heading.to_owned();
             let origins = std::sync::Arc::clone(&later_origins);
             let flow = plx_io::particles::LoweredParticles {
                 model: Default::default(),
@@ -550,9 +551,17 @@ impl Analysis {
             plx_solve::particles::FollowUp {
                 plan,
                 prepare: Box::new(move |walls: &std::path::Path| {
-                    let (mesh, fe) = plx_io::particles::after_flow(&mesh, &fe, &flow, walls);
+                    let (mesh, fe) =
+                        plx_io::particles::after_flow(active.mesh(), active.fe(), &flow, walls);
+                    // The active mesh has no suppressed part left to leave out.
+                    let after = plx_model::active_model(
+                        &mesh,
+                        &fe,
+                        None,
+                        &plx_model::PartOrigins::default(),
+                    );
                     let lowered =
-                        plx_io::inp::lower_with_sets_unvalidated(&mesh, &fe, &heading, &[])
+                        plx_io::inp::lower_with_sets_unvalidated(&after, &heading, &[])
                             .map_err(|e| format!("FE steps after the flow not set up: {e}"))?;
                     *origins.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(lowered.origins.clone());
@@ -1282,7 +1291,11 @@ mod tests {
         let value = |node: u32| initial.values.iter().find(|(n, _)| *n == node).unwrap().1;
         assert!((value(1) - 100.0).abs() < 1e-3 && (value(16) - 20.0).abs() < 1e-3);
         assert!((value(8) - 100.0 + 80.0 / 3.0).abs() < 1e-2, "{initial:?}");
-        let mut lowered = plx_io::inp::lower_unvalidated(cubes().mesh(), &fe, "Start").unwrap();
+        let mut lowered = plx_io::inp::lower_unvalidated(
+            &crate::solve_fingerprint::whole(cubes().mesh(), &fe),
+            "Start",
+        )
+        .unwrap();
         initial.apply(&mut lowered.analysis).unwrap();
         let temperatures = &lowered.analysis.model.initial.temperatures;
         assert_eq!(temperatures.len(), 16);

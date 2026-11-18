@@ -173,6 +173,8 @@ pub fn merge_geometries(inputs: &[Geometry]) -> Result<MergedGeometry, GmshError
         own_meshes: Vec::new(),
         ids,
         from_link: false,
+        operations: Vec::new(),
+        input: None,
     };
     geometry.ensure_ids();
     Ok(MergedGeometry {

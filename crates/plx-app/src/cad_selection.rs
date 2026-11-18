@@ -273,7 +273,7 @@ pub fn pick_box(model: &Model, area: &BoxSelect, target: Target) -> BTreeSet<Cad
         // The faces on the skin: those inside a solid or between bodies sharing nodes
         // cannot be clicked either.
         let mut on_skin = BTreeSet::new();
-        for part in (0..model.parts.len()).filter(|&p| model.parts[p].visible) {
+        for part in (0..model.parts.len()).filter(|&p| model.parts[p].pickable()) {
             for face in &model.skin(part).faces {
                 let element = mesh.elements()[face.element].id;
                 on_skin.extend(index.face(mesh, (element, face.face as u8 + 1)));
@@ -378,7 +378,7 @@ pub fn pick_edge_angle(
         let node =
             (model.mesh().cad.segments.get(&edge)).and_then(|segments| Some(segments.first()?[0]));
         node.and_then(|n| model.node_part(n))
-            .is_none_or(|p| model.parts.get(p).is_some_and(|info| info.visible))
+            .is_none_or(|p| model.parts.get(p).is_some_and(|info| info.pickable()))
     };
     let edges = index.smooth_edges(model.mesh(), start, angle.to_radians(), visible);
     let entities: BTreeSet<CadEntity> = if target == Target::Surfaces {
@@ -1113,7 +1113,7 @@ mod tests {
 
     /// The largest downward displacement CalculiX computes, if ccx is installed.
     fn tip_deflection(model: &Model) -> Option<f32> {
-        let inp = plx_io::inp::write_inp(model.mesh(), &model.fe, "Kragarm").unwrap();
+        let inp = plx_io::inp::write_inp(&model.active(), "Kragarm").unwrap();
         let dir = std::env::temp_dir().join(format!(
             "nodalis-lines-remesh-{}-{}",
             std::process::id(),
@@ -1131,7 +1131,7 @@ mod tests {
 
     /// The largest displacement along x CalculiX computes, if ccx is installed.
     fn elongation(model: &Model) -> Option<f32> {
-        let inp = plx_io::inp::write_inp(model.mesh(), &model.fe, "Platte").unwrap();
+        let inp = plx_io::inp::write_inp(&model.active(), "Platte").unwrap();
         let dir = std::env::temp_dir().join(format!(
             "nodalis-remesh-{}-{}",
             std::process::id(),

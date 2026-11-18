@@ -81,10 +81,18 @@ opens in the Geometry workspace, opening a result file switches to Results.
 - Selecting an item highlights its region in the 3D view. Master and slave regions of contacts and
   ties get different colours.
 - Parts can be selected together: #key("Ctrl")+click toggles a part, #key("Shift")+click
-  selects a range. The same works for the items of one container, for example many contact
-  pairs: the 3D view highlights them all, and #ui("Delete Selected"), #ui("Activate Selected") /
+  adds the range from the part last clicked without #key("Shift"). Ranges and #key("Ctrl")
+  clicks add up until a plain click starts anew; a second #key("Shift")+click from the same
+  part moves the end of its range. The same works for the items of one container, for example
+  many contact pairs: the 3D view highlights them all, and #ui("Delete Selected"), #ui("Activate Selected") /
   #ui("Deactivate Selected") (or #key("Del") and #key("Space")) and #ui("Swap Master/Slave of
   Selected") in the context menu act on all of them.
+
+#figure(
+  image("../../images/tree-accumulated-selection.png", width: 70%),
+  caption: [Click on SOLID-1, #key("Shift")+click on SOLID-4, #key("Ctrl")+click on SOLID-7 and
+    #key("Shift")+click on SOLID-9: both ranges stay selected],
+)
 
 === Context menus
 
@@ -97,7 +105,7 @@ opens in the Geometry workspace, opening a result file switches to Results.
   spring connections and contact pairs), #ui("Delete"). Items that come from another analysis
   through a link are shown in blue with the name of that analysis; their commands are greyed
   out, and a double-click offers to open that analysis or to unlink the item (@data-links).
-/ Parts: #ui("Properties ..."), #ui("Hide")/#ui("Show"), #ui("Delete"); on the
+/ Parts: #ui("Properties ..."), #ui("Hide")/#ui("Show"), #ui("Isolate") (@view), #ui("Delete"); on the
   Geometry workspace also #ui("Create Mesh").
 
 === Deactivating items

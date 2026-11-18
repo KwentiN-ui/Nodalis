@@ -1254,6 +1254,36 @@ where
     // Wire end position will be overridden when link graph menu is opened.
     let mut wire_end_pos = latest_pos.unwrap_or_else(|| snarl_resp.rect.center());
 
+    // Nodalis: a wire dropped just beside a pin goes to the nearest pin it can end at, so
+    // that the small pins need no exact aim.
+    if drag_released
+        && pin_hovered.is_none()
+        && snarl_state.has_new_wires()
+        && let Some(pos) = latest_pos
+    {
+        let reach = style.get_pin_size(ui.style()) * 1.6;
+        let near = |p: Pos2| p.distance(pos) <= reach;
+        let mut best: Option<(f32, AnyPin)> = None;
+        let mut consider = |d: f32, pin: AnyPin| {
+            if best.as_ref().is_none_or(|(b, _)| d < *b) {
+                best = Some((d, pin));
+            }
+        };
+        for (id, r) in &input_info {
+            if near(r.pos) {
+                consider(r.pos.distance(pos), AnyPin::In(*id));
+            }
+        }
+        if snarl_state.has_new_wires_in() {
+            for (id, r) in &output_info {
+                if near(r.pos) {
+                    consider(r.pos.distance(pos), AnyPin::Out(*id));
+                }
+            }
+        }
+        pin_hovered = best.map(|(_, pin)| pin);
+    }
+
     if drag_released {
         let new_wires = snarl_state.take_new_wires();
         if new_wires.is_some() {

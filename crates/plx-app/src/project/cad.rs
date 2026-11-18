@@ -185,7 +185,8 @@ pub(super) fn take_cad_input(nodes: &mut [Node], links: &[Link], id: u64) {
         _ => link
             .and_then(|l| nodes.iter().find(|n| n.id == l.source))
             .and_then(Node::link_data)
-            .and_then(|d| d.geometry.cloned()),
+            .and_then(|d| d.geometry.cloned())
+            .map(Geometry::without_operations),
     };
     // An analysis that is loading in its window gives its geometry once it has loaded.
     if link.is_some() && input.is_none() {

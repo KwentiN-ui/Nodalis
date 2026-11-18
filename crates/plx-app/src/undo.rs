@@ -418,6 +418,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         }
     }
 
@@ -459,13 +461,13 @@ mod tests {
     #[test]
     fn a_suppressed_imported_mesh_is_not_solved() {
         let mut model = model();
-        assert_eq!(model.active().mesh.element_count(), 1);
+        assert_eq!(model.active().mesh().element_count(), 1);
         assert!(model.set_imported_suppressed(&["part-1".into()], true));
         assert!(model.mark_own_suppressed());
         assert!(model.parts[0].suppressed);
         let active = model.active();
-        assert_eq!(active.mesh.element_count(), 0);
-        assert_eq!(active.left_out, ["PART-1"]);
+        assert_eq!(active.mesh().element_count(), 0);
+        assert_eq!(active.left_out(), ["PART-1"]);
         // The mesh is kept for when it is unsuppressed.
         assert_eq!(model.mesh().element_count(), 1);
     }
@@ -534,6 +536,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         });
         record(&mut model);
         assert!(!model.history.can_undo());

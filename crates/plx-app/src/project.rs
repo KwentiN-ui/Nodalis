@@ -473,7 +473,7 @@ impl ModelMut<'_> {
         if !nodes.is_empty() || !elements.is_empty() {
             self.fe.renumber(&nodes, &elements);
         }
-        *self.geometry = geometry;
+        *self.geometry = geometry.map(plx_model::Geometry::without_operations);
         *self.mesh = mesh;
         *self.origins = origins.linked(self.origins);
         self.fe.mesh_sets = mesh_sets;
@@ -1240,8 +1240,7 @@ impl Node {
             model.geometry.as_ref(),
             &model.origins,
         );
-        let text =
-            plx_io::inp::write_inp(&active.mesh, &active.fe, &name).map_err(|e| e.to_string())?;
+        let text = plx_io::inp::write_inp(&active, &name).map_err(|e| e.to_string())?;
         std::fs::write(&file, text).map_err(|e| format!("{} not written: {e}", file.display()))?;
         export.written = Some(print);
         Ok(file)
@@ -3391,6 +3390,67 @@ impl ProjectApp {
         }
     }
 
+    /// Removes the columns of studies that lost their wire, as the inputs and outputs of a
+    /// group go once no wire inside is at them: an output column once no value comes into
+    /// its row, an input column once it gives to no number. Their values at all points go
+    /// with them; undo brings them back. Nothing changes while a study or an update runs.
+    fn prune_study_columns(&mut self) {
+        if self.busy() {
+            return;
+        }
+        let mut gone: Vec<(u64, bool, String)> = Vec::new();
+        for node in &self.nodes {
+            let Some(study) = node.as_study() else {
+                continue;
+            };
+            let id = node.id;
+            for column in &study.table.outputs {
+                let linked = (self.links.iter()).any(|l| {
+                    l.target == id
+                        && matches!(links::slot(l), [c, n] if c == links::OUTPUTS && *n == column.name)
+                });
+                if !linked {
+                    gone.push((id, false, column.name.clone()));
+                }
+            }
+            for column in &study.table.inputs {
+                let linked = (self.links.iter()).any(|l| {
+                    l.source == id
+                        && matches!(l.item.as_slice(), [c, n] if c == links::LOOP && *n == column.name)
+                });
+                if !linked {
+                    gone.push((id, true, column.name.clone()));
+                }
+            }
+        }
+        for (id, input, name) in gone {
+            if let Some(table) = self
+                .node(id)
+                .and_then(Node::as_study_mut)
+                .map(|s| &mut s.table)
+            {
+                if input {
+                    if let Some(column) = table.input(&name) {
+                        table.remove_input(column);
+                    }
+                } else if let Some(column) = table.output(&name) {
+                    table.remove_output(column);
+                }
+            }
+            // The values of the column over all points, from the right pin of its row.
+            self.links.retain(|l| {
+                !(l.source == id
+                    && matches!(l.item.as_slice(), [c, n] if c == links::VALUE && *n == name))
+            });
+            self.output.push(format!(
+                "{}: {} column {name} removed, as no wire is at it any more.",
+                self.name_of(id),
+                if input { "input" } else { "output" }
+            ));
+            self.sync_due = true;
+        }
+    }
+
     /// The rows of a study: the Outputs it reads and their columns, the Inputs it gives and
     /// theirs, and how far its points are.
     fn study_rows(
@@ -4473,7 +4533,7 @@ impl ProjectApp {
         let solver = &self.settings.solver;
         // Suppressed geometry objects are not swept.
         let active = data.active();
-        window.start(solver, (&active.mesh, &active.fe), dir, keep)
+        window.start(solver, &active, dir, keep)
     }
 
     /// Takes the finished speeds of the Campbell blocks and shows their open diagrams.
@@ -6127,6 +6187,7 @@ impl ProjectApp {
     fn schematic(&mut self, ui: &mut egui::Ui) -> Vec<Action> {
         self.keep_level();
         self.prune_sockets();
+        self.prune_study_columns();
         self.shown = self.here();
         let mut incoming: HashMap<u64, Vec<(Vec<String>, String)>> = HashMap::new();
         let mut continuations: HashMap<u64, Continuation> = HashMap::new();
@@ -7363,7 +7424,7 @@ impl ProjectApp {
                     .and_then(Node::link_data)
                     .map(|d| {
                         let active = d.active();
-                        crate::campbell::sweep_fingerprint(&active.mesh, &active.fe)
+                        crate::campbell::sweep_fingerprint(active.mesh(), active.fe())
                     });
                 if let Some(campbell) = self.node(target).and_then(Node::as_campbell_mut) {
                     campbell.input = input;
@@ -14332,6 +14393,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let mesh = MeshPrimitive::default_box().generate(ModelSpace::ThreeD, "Solid-1");
         let space = ModelSpace::ThreeD;
@@ -15547,6 +15610,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let fe = plx_model::FeModel::default();
         let inputs = plx_model::PartOrigins::default();
@@ -15643,6 +15708,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let path = plx_model::ValuePath::new(
             plx_model::ItemRef::MeshSetup("Meshing_Parameters-1".into()),

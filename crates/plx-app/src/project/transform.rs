@@ -202,9 +202,8 @@ pub(super) fn take_transform_input(nodes: &mut [Node], all: &[Link], id: u64) {
                 Some(d) if d.mesh.element_count() > 0 => {
                     Some(Input::Mesh(Box::new(links::MeshCopy::of(d))))
                 }
-                data => {
-                    (data.and_then(|d| d.geometry.cloned())).map(|g| Input::Geometry(Box::new(g)))
-                }
+                data => (data.and_then(|d| d.geometry.cloned()))
+                    .map(|g| Input::Geometry(Box::new(g.without_operations()))),
             }
         }
         None => None,

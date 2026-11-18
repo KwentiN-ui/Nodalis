@@ -123,8 +123,9 @@ pub use field::{
     output_variable_label,
 };
 pub use geometry::{
-    Algorithm2d, Algorithm3d, CompoundPart, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem,
-    MeshSetupKind, MeshingParameters, PartId, PeriodicFaces, Recombination, ThickenShellMesh,
+    Algorithm2d, Algorithm3d, CompoundPart, ExtrudeLayers, ExtrudeMesh, Geometry,
+    GeometryOperation, MeshSetupItem, MeshSetupKind, MeshingParameters, PartId, PeriodicFaces,
+    Recombination, ThickenShellMesh,
 };
 pub use handover::Handover;
 pub use history::{HistoryKind, HistoryOutput, Totals};
@@ -138,8 +139,8 @@ pub use mesh_set::{MeshSet, SetKind};
 pub use moving_load::{AXIS_LABELS, LoadStations, MovingFrame, MovingLoad, Wheel, load_stations};
 pub use number::{MathOp, apply_series, switch};
 pub use origin::{
-    Active, PartOrigin, PartOrigins, active_model, bodies as part_bodies, drop_orphans, orphans,
-    suppressed_bodies, unmeshed_parts,
+    Active, LeftOut, PartOrigin, PartOrigins, active_model, bodies as part_bodies, drop_orphans,
+    orphans, suppressed_bodies, unmeshed_parts,
 };
 pub use overview::{Cell, OverviewGroup, OverviewRow, StepItemKey, StepOverview};
 pub use parameter::{Parameter, ValueKind};
@@ -650,6 +651,48 @@ impl FeModel {
         (self.initial_conditions.iter_mut()).for_each(|i| drop(&mut i.region));
     }
 
+    /// Drops the items whose regions pick something of `full` but nothing of `smaller`, the
+    /// mesh without the suppressed or deleted geometry objects: a contact, tie, constraint,
+    /// bolt, boundary condition, load, defined field or history output on those objects
+    /// alone takes part in nothing either. True if it dropped any.
+    pub fn drop_items_left_empty(
+        &mut self,
+        full: &plx_mesh::FeMesh,
+        smaller: &plx_mesh::FeMesh,
+    ) -> bool {
+        self.drop_items_where(|region| region_left_empty(region, full, smaller))
+    }
+
+    /// Drops the items one of whose regions is `gone`, see [`Self::drop_items_left_empty`].
+    /// True if it dropped any.
+    pub fn drop_items_where(&mut self, gone: impl Fn(&Region) -> bool) -> bool {
+        let emptied = gone;
+        let mut dropped = false;
+        let mut keep = |regions: Vec<&mut Region>| {
+            let gone = regions.iter().any(|r| emptied(r));
+            dropped |= gone;
+            !gone
+        };
+        self.constraints.retain_mut(|c| keep(c.regions_mut()));
+        self.contact_pairs
+            .retain_mut(|c| keep(vec![&mut c.master, &mut c.slave]));
+        self.ties
+            .retain_mut(|t| keep(vec![&mut t.master, &mut t.slave]));
+        self.node_ties.retain_mut(|t| keep(vec![&mut t.region]));
+        self.contact_regions
+            .retain_mut(|c| keep(c.regions_mut().into_iter().collect()));
+        self.bolts
+            .retain_mut(|b| keep(b.regions_mut().into_iter().collect()));
+        self.history_outputs
+            .retain_mut(|h| keep(h.kind.region_mut().into_iter().collect()));
+        for step in &mut self.steps {
+            (step.boundary_conditions).retain_mut(|b| keep(vec![&mut b.region]));
+            step.loads.retain_mut(|l| keep(vec![&mut l.region]));
+            (step.defined_fields).retain_mut(|f| keep(vec![&mut f.region]));
+        }
+        dropped
+    }
+
     /// Regions on the part `old`, or on the element set of its name, are on the parts `new`.
     fn replace_part_in_regions(&mut self, old: &str, new: &[String]) {
         let replace = |region: &mut Region| match region {
@@ -669,6 +712,19 @@ impl FeModel {
         self.regions_mut().for_each(replace);
         (self.initial_conditions.iter_mut()).for_each(|i| replace(&mut i.region));
     }
+}
+
+/// Whether `region` picks something of the mesh `full` but nothing of `smaller`, the mesh
+/// without some of its geometry objects.
+pub fn region_left_empty(
+    region: &Region,
+    full: &plx_mesh::FeMesh,
+    smaller: &plx_mesh::FeMesh,
+) -> bool {
+    // Picked nodes are kept by number: only those the mesh has count.
+    let picks =
+        |mesh: &plx_mesh::FeMesh| (region.nodes(mesh).into_iter()).any(|n| mesh.node(n).is_some());
+    !picks(smaller) && picks(full)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -371,7 +371,7 @@ pub fn pick(
         }
         SelectBy::GeometrySurfaceAngle => face_at(model, hit)
             .map(|face| {
-                let visible = |p: usize| model.parts.get(p).is_some_and(|info| info.visible);
+                let visible = |p: usize| model.parts.get(p).is_some_and(|info| info.pickable());
                 (index
                     .smooth_faces(model.mesh(), face, picker.angle(), visible)
                     .into_iter())
@@ -383,7 +383,7 @@ pub fn pick(
             .map(|edge| {
                 (index
                     .smooth_edges(model.mesh(), edge, picker.angle(), |p| {
-                        model.parts.get(p).is_some_and(|info| info.visible)
+                        model.parts.get(p).is_some_and(|info| info.pickable())
                     })
                     .into_iter())
                 .map(CadEntity::Edge)
@@ -415,7 +415,7 @@ pub fn pick_box(
     if picker.select_by == SelectBy::GeometryPart {
         let mut picked = BTreeSet::new();
         for part in (0..model.parts.len())
-            .filter(|&p| model.parts[p].visible && crate::selection::part_in_box(model, p, area))
+            .filter(|&p| model.parts[p].pickable() && crate::selection::part_in_box(model, p, area))
         {
             let elements = &model.mesh().parts[part].elements;
             picked.extend(
@@ -475,7 +475,7 @@ fn points_in_box<'a>(
 /// dragged from right to left.
 pub fn faces_in_box(model: &Model, area: &BoxSelect) -> BTreeSet<CadEntity> {
     let index = model.geometry_index();
-    let visible = |p: &usize| model.parts.get(*p).is_some_and(|info| info.visible);
+    let visible = |p: &usize| model.parts.get(*p).is_some_and(|info| info.pickable());
     (index.face_triangles.iter())
         .filter(|(tag, _)| index.face_part.get(tag).is_some_and(visible))
         .filter(|(_, triangles)| points_in_box(model, area, triangles.iter().flatten()))
@@ -487,7 +487,7 @@ pub fn faces_in_box(model: &Model, area: &BoxSelect) -> BTreeSet<CadEntity> {
 /// dragged from right to left.
 pub fn edges_in_box(model: &Model, area: &BoxSelect) -> BTreeSet<CadEntity> {
     let index = model.geometry_index();
-    let visible = |p: &usize| model.parts.get(*p).is_some_and(|info| info.visible);
+    let visible = |p: &usize| model.parts.get(*p).is_some_and(|info| info.pickable());
     (index.edge_points.iter())
         .filter(|(tag, _)| index.edge_part.get(tag).is_some_and(visible))
         .filter(|(_, points)| points_in_box(model, area, points.iter()))
@@ -498,7 +498,7 @@ pub fn edges_in_box(model: &Model, area: &BoxSelect) -> BTreeSet<CadEntity> {
 /// The faces of the visible parts.
 pub fn visible_faces(model: &Model) -> BTreeSet<CadEntity> {
     (model.mesh().parts.iter().zip(&model.parts))
-        .filter(|(_, info)| info.visible)
+        .filter(|(_, info)| info.pickable())
         .flat_map(|(part, _)| &part.elements)
         .filter_map(|&id| model.cad_entity(id))
         .filter(|e| matches!(e, CadEntity::Face(_)))

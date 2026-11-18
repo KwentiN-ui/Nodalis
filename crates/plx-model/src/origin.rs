@@ -268,7 +268,8 @@ pub fn orphans(geometry: Option<&crate::Geometry>, origins: &PartOrigins) -> Vec
 }
 
 /// Deletes the meshes of parts that `geometry` no longer has ([`orphans`]) with the regions
-/// of the parts of the FE model that go whole; returns their names.
+/// of the parts of the FE model that go whole and the items on them alone; returns their
+/// names.
 pub fn drop_orphans(
     mesh: &mut FeMesh,
     fe: &mut crate::FeModel,
@@ -287,7 +288,10 @@ pub fn drop_orphans(
         })
         .map(|p| p.name.clone())
         .collect();
+    let full = mesh.clone();
     mesh.remove_bodies(&orphans);
+    // The items on them alone, e.g. contacts with them, go with them.
+    fe.drop_items_left_empty(&full, mesh);
     fe.remove_parts_from_regions(&gone);
     origins.reconcile(mesh);
     orphans
@@ -336,14 +340,102 @@ pub fn suppressed_bodies(
         .collect()
 }
 
+/// Of each part of a mesh, whether it is left out of the analysis: all its geometry objects
+/// are suppressed. Contact detection and part filters take it, made by [`LeftOut::of`] from
+/// the geometry and the imported meshes with their suppression, so that no search can
+/// forget the suppressed parts.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LeftOut(pub(crate) Vec<bool>);
+
+impl LeftOut {
+    /// The parts of `mesh` (of an FE model, or the display of a geometry) whose geometry
+    /// objects are all suppressed: parts of `geometry` suppressed there, imported meshes
+    /// suppressed in `origins`.
+    pub fn of(mesh: &FeMesh, geometry: Option<&crate::Geometry>, origins: &PartOrigins) -> Self {
+        let parts: Vec<bool> = (mesh.parts.iter())
+            .map(|part| {
+                bodies(part).iter().all(|body| {
+                    origins.is_suppressed(body) || geometry.is_some_and(|g| g.is_suppressed(body))
+                })
+            })
+            .collect();
+        Self(if parts.contains(&true) {
+            parts
+        } else {
+            Vec::new()
+        })
+    }
+
+    /// Nothing left out: for a mesh without a geometry or imported meshes, e.g. one read
+    /// from an input file, and for the parts of an [`Active`] mesh, which has none left.
+    pub fn nothing() -> Self {
+        Self::default()
+    }
+
+    /// Whether the part `part`, by index, is left out.
+    pub fn contains(&self, part: usize) -> bool {
+        self.0.get(part).copied().unwrap_or(false)
+    }
+}
+
 /// What is solved of an analysis: its mesh without the suppressed geometry objects, and its
-/// FE model without them in its regions of parts. Borrowed while nothing is suppressed.
+/// FE model without them in its regions of parts and without the items on them alone.
+/// Borrowed while nothing is suppressed.
+///
+/// The solver input (`plx_io::inp`), the particle model and the fingerprints of what is
+/// solved take only this type, and it is made only by [`active_model`], from the geometry
+/// and the imported meshes with their suppression: a suppressed object cannot reach the
+/// solver by a call that forgets to leave it out. Its fields are private for that.
+#[derive(Clone, Debug)]
 pub struct Active<'a> {
-    pub mesh: Cow<'a, FeMesh>,
-    pub fe: Cow<'a, crate::FeModel>,
+    mesh: Cow<'a, FeMesh>,
+    fe: Cow<'a, crate::FeModel>,
     /// The parts of the mesh left out, whole; bodies of compound parts are left out of
     /// their part.
-    pub left_out: Vec<String>,
+    left_out: Vec<String>,
+}
+
+impl<'a> Active<'a> {
+    /// The mesh solved: without the suppressed objects.
+    pub fn mesh(&self) -> &FeMesh {
+        &self.mesh
+    }
+
+    /// The FE model solved: without the suppressed objects in its regions, nor the items on
+    /// them alone.
+    pub fn fe(&self) -> &crate::FeModel {
+        &self.fe
+    }
+
+    /// The FE model to change before it is solved, e.g. with the files of linked results;
+    /// the mesh stays without the suppressed objects.
+    pub fn fe_mut(&mut self) -> &mut crate::FeModel {
+        self.fe.to_mut()
+    }
+
+    /// The same mesh with the FE model `fe`, a variant of [`Self::fe`] such as the model at
+    /// another speed of a sweep.
+    pub fn with_fe(&self, fe: crate::FeModel) -> Active<'_> {
+        Active {
+            mesh: Cow::Borrowed(&*self.mesh),
+            fe: Cow::Owned(fe),
+            left_out: self.left_out.clone(),
+        }
+    }
+
+    /// The parts of the mesh left out whole, by name.
+    pub fn left_out(&self) -> &[String] {
+        &self.left_out
+    }
+
+    /// Owns what it borrowed, to be kept beyond the model it was made of.
+    pub fn into_owned(self) -> Active<'static> {
+        Active {
+            mesh: Cow::Owned(self.mesh.into_owned()),
+            fe: Cow::Owned(self.fe.into_owned()),
+            left_out: self.left_out,
+        }
+    }
 }
 
 /// The mesh and FE model the solver gets, see [`Active`]: a suppressed geometry object
@@ -373,6 +465,9 @@ pub fn active_model<'a>(
     let mut smaller = mesh.clone();
     smaller.remove_bodies(&suppressed);
     let mut fe = fe.clone();
+    // An item on suppressed objects alone, e.g. a contact found with a suppressed part
+    // before it was suppressed, goes with them; one on others too keeps those.
+    fe.drop_items_left_empty(mesh, &smaller);
     fe.remove_parts_from_regions(&left_out);
     Active {
         mesh: Cow::Owned(smaller),
@@ -476,6 +571,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let fe = crate::FeModel::default();
         let solved = active_model(&compound, &fe, Some(&geometry), &origins);
@@ -526,6 +623,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let solved = active_model(&mesh, &fe, Some(&geometry), &origins);
         assert!(matches!(solved.mesh, Cow::Borrowed(_)));
@@ -543,6 +642,64 @@ mod tests {
         assert_eq!(solved.left_out, ["SOLID-1"]);
         assert_eq!(solved.mesh.parts[0].name, "PART-1");
         assert_eq!(solved.mesh.node_count(), 4);
+    }
+
+    /// A contact found with a part before it was suppressed reaches the solver with nothing
+    /// on one side unless it goes with the part; a contact between parts that stay, and a
+    /// load also on a part that stays, are kept.
+    #[test]
+    fn items_on_suppressed_objects_alone_are_left_out_of_what_is_solved() {
+        use crate::Region;
+        let mesh = mesh(&["PART-1", "PART-2", "PART-3"]);
+        let mut origins = PartOrigins::default();
+        origins.reconcile(&mesh);
+        let faces = |element: u32| Region::Faces(vec![(element, 1)]);
+        let contact = |a: u32, b: u32| crate::ContactRegion {
+            side_a: faces(a),
+            side_b: faces(b),
+            ..crate::ContactRegion::new(format!("Contact {a}-{b}"), crate::ContactBehavior::Bonded)
+        };
+        let mut fe = crate::FeModel {
+            contact_regions: vec![contact(1, 3), contact(1, 2)],
+            ..Default::default()
+        };
+        let mut step = crate::Step::new_static("Step-1");
+        for (name, nodes) in [("On 3", vec![9, 10]), ("On 2 and 3", vec![5, 9])] {
+            step.boundary_conditions.push(crate::BoundaryCondition::new(
+                name,
+                Region::Nodes(nodes),
+                crate::BoundaryKind::Temperature(20.0),
+            ));
+        }
+        fe.steps.push(step);
+        origins.set_suppressed(&["PART-3".into()], true);
+        let solved = active_model(&mesh, &fe, None, &origins);
+        assert_eq!(solved.left_out(), ["PART-3"]);
+        let names = |fe: &crate::FeModel| -> Vec<String> {
+            (fe.contact_regions.iter().map(|c| c.name.clone()))
+                .chain(
+                    fe.steps[0]
+                        .boundary_conditions
+                        .iter()
+                        .map(|b| b.name.clone()),
+                )
+                .collect()
+        };
+        assert_eq!(names(solved.fe()), ["Contact 1-2", "On 2 and 3"]);
+        // The model itself keeps them for when the part is unsuppressed.
+        assert_eq!(names(&fe).len(), 4);
+        // What a filter of the detection sees: the suppressed part matches none.
+        let left_out = LeftOut::of(&mesh, None, &origins);
+        assert_eq!(
+            (0..3).map(|p| left_out.contains(p)).collect::<Vec<_>>(),
+            [false, false, true]
+        );
+        let context = fe.part_context(&mesh, &left_out);
+        let named = crate::PartFilter {
+            include: vec![crate::PartTerm::Part("PART-3".into())],
+            exclude: Vec::new(),
+        };
+        assert_eq!(named.searched(&context, &[true; 3]), [false; 3]);
     }
 
     #[test]
@@ -565,10 +722,22 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         let mut fe = crate::FeModel::default();
+        // A contact with the part that goes goes with it; one between parts that stay stays.
+        let faces = |element: u32| crate::Region::Faces(vec![(element, 1)]);
+        let contact = |a: u32, b: u32| crate::ContactRegion {
+            side_a: faces(a),
+            side_b: faces(b),
+            ..crate::ContactRegion::new(format!("{a}-{b}"), crate::ContactBehavior::Bonded)
+        };
+        fe.contact_regions = vec![contact(1, 2), contact(2, 3)];
         let gone = drop_orphans(&mut mesh, &mut fe, Some(&geometry), &mut origins);
         assert_eq!(gone, ["SOLID-1"]);
+        assert_eq!(fe.contact_regions.len(), 1);
+        assert_eq!(fe.contact_regions[0].name, "2-3");
         let names: Vec<&str> = mesh.parts.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["SOLID-2", "PART-1"]);
         assert!(origins.complete_for(&mesh));
@@ -609,6 +778,8 @@ mod tests {
             own_meshes: vec!["OWN".into()],
             ids: Vec::new(),
             from_link: true,
+            operations: Vec::new(),
+            input: None,
         };
         let mut origins = PartOrigins::default();
         origins.insert("OWN", PartOrigin::Linked);
@@ -648,6 +819,8 @@ mod tests {
             own_meshes: Vec::new(),
             ids: Vec::new(),
             from_link: false,
+            operations: Vec::new(),
+            input: None,
         };
         assert_eq!(
             unmeshed_parts(Some(&geometry), &origins, &mesh),

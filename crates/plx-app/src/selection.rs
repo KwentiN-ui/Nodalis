@@ -792,7 +792,7 @@ impl Picker {
     fn pick_box_geometry(&self, model: &Model, area: &BoxSelect, target: Target) -> Items {
         let mesh = model.mesh();
         let visible: Vec<usize> = (0..model.parts.len())
-            .filter(|&p| model.parts[p].visible)
+            .filter(|&p| model.parts[p].pickable())
             .collect();
         if self.select_by == SelectBy::GeometryPart {
             let parts = visible.into_iter().filter(|&p| part_in_box(model, p, area));
@@ -987,7 +987,7 @@ impl Picker {
         let mesh = &model.mesh();
         if target == Target::Lines {
             let mut edges = BTreeSet::new();
-            for part in (0..model.parts.len()).filter(|&p| model.parts[p].visible) {
+            for part in (0..model.parts.len()).filter(|&p| model.parts[p].pickable()) {
                 let picker = MeshPicker::new(model, part);
                 let inside = (picker.feature_edges()).filter(|(_, edge)| {
                     let mut nodes = [Some(edge.a), Some(edge.b), edge.mid].into_iter().flatten();
@@ -1004,7 +1004,7 @@ impl Picker {
         }
         if target == Target::Edges {
             let edges = (model.outline_edges().into_iter())
-                .filter(|(part, _, _)| model.parts[*part].visible)
+                .filter(|(part, _, _)| model.parts[*part].pickable())
                 .filter(|(_, _, nodes)| {
                     let mut inside = (nodes.iter())
                         .filter_map(|&id| mesh.node_index(id))
@@ -1048,7 +1048,7 @@ impl Picker {
             );
         }
         let mut faces = Vec::new();
-        for part in (0..model.parts.len()).filter(|&p| model.parts[p].visible) {
+        for part in (0..model.parts.len()).filter(|&p| model.parts[p].pickable()) {
             let picker = MeshPicker::new(model, part);
             if self.select_by == SelectBy::Element {
                 let mut elements: Vec<usize> = picker.faces().iter().map(|f| f.element).collect();
@@ -1138,7 +1138,7 @@ impl PartPicks {
     /// The visible parts inside a selection box, or crossing it when dragged to the left.
     pub fn box_select(&mut self, model: &Model, area: &BoxSelect, operation: Operation) {
         let names = (0..model.parts.len())
-            .filter(|&p| model.parts[p].visible && part_in_box(model, p, area))
+            .filter(|&p| model.parts[p].pickable() && part_in_box(model, p, area))
             .map(|p| model.parts[p].name.clone())
             .collect();
         self.history.push(operation, names);
@@ -1342,7 +1342,7 @@ pub fn cad_segments(mesh: &plx_mesh::FeMesh, entities: &[CadEntity]) -> BTreeSet
 /// All outline edges of the visible parts, for the selection of edges of 3D parts.
 pub fn visible_segments(model: &Model) -> BTreeSet<[NodeId; 2]> {
     (0..model.parts.len())
-        .filter(|&p| model.parts[p].visible)
+        .filter(|&p| model.parts[p].pickable())
         .flat_map(|p| {
             let picker = MeshPicker::new(model, p);
             let edges: Vec<usize> = picker.feature_edges().map(|(i, _)| i).collect();
@@ -1685,7 +1685,7 @@ fn faces_by_angle_across(
     let cos_limit = angle.cos();
     let across = !model.is_plane();
     let seams = across.then(|| model.seams());
-    let visible = |p: usize| model.parts.get(p).is_some_and(|info| info.visible);
+    let visible = |p: usize| model.parts.get(p).is_some_and(|info| info.pickable());
     // The faces at each edge of a part, built when the selection reaches it.
     let mut edge_faces: HashMap<usize, HashMap<(usize, usize), Vec<usize>>> = HashMap::new();
     let mut faces_at = |part: usize, a: usize, b: usize| -> Vec<usize> {
@@ -1752,7 +1752,7 @@ fn edges_by_angle_across(
     let point = |n: usize| DVec3::from(coords[n]);
     let cos_limit = angle.cos();
     let seams = (!model.is_plane()).then(|| model.seams());
-    let visible = |p: usize| model.parts.get(p).is_some_and(|info| info.visible);
+    let visible = |p: usize| model.parts.get(p).is_some_and(|info| info.pickable());
     // The feature edges of each part by node and by end nodes, built when reached.
     let mut lookups: HashMap<usize, PartEdges> = HashMap::new();
     let ensure = |lookups: &mut HashMap<usize, PartEdges>, part: usize| {
