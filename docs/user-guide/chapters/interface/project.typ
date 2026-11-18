@@ -275,7 +275,21 @@ an *empty pin* at the bottom, a ring without fill. Drag a wire from the empty pi
 Group Input block to a block inside, or from a block inside to the empty pin of the Group
 Output block: the group gets a new input or output of that type, and the next empty pin
 comes below. Outside, link the new pin of the group like any other. Double-click the row of
-an input or output to rename it; once it has no wires left on either side it goes.
+an input or output to rename it.
+
+As in Blender, the group block lists its outputs first, with their names at the right by
+their pins, then a line, then its inputs on the left.
+
+#screenshot("node-group-sockets.png", [A group with one output on top and two inputs below
+  the line])
+
+An input or output goes as soon as no wire inside the group is at it any more: remove the
+last wire from the Group Input block to the blocks inside, or the wire into the Group Output
+block, and the pin goes with its wires outside. Wires removed outside leave it, so that it
+can be linked again. To remove one at once, point at its row in the Group Input or Group
+Output block and click the cross that shows on it, or choose #ui("Remove Input") or
+#ui("Remove Output") in the context menu of its row, also on the group block. Undo brings it
+back with its wires.
 
 The same empty pin marks every block that takes any number of inputs: the choices of a
 Switch block (@math-switch), the inputs of a Formula block (@formula-block) and the outputs and
