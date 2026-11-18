@@ -114,6 +114,14 @@ of the tree at once, in the geometry, FE model and results trees alike.
   caption: [Context menu of the #ui("Parts") node.],
 )
 
+#ui("Isolate") in the context menu of a part, in the tree or in the 3D view, shows only this part,
+or all selected parts when the menu is opened on one of them, and hides all others.
+#ui("Show All Parts") brings them back; it is in the context menu of a part and of the empty 3D view while a part
+is hidden. In the Results workspace hidden parts leave the legend range, so isolating a part
+scales the colours to it.
+
+#screenshot("isolate-part.png", [#ui("Isolate") in the context menu of a part in the 3D view])
+
 === Screenshots <screenshot>
 
 The #ui("Screenshot") tile on the #ui("View") tab of the ribbon captures the 3D view including legend and labels:

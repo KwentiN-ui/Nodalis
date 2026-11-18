@@ -72,7 +72,7 @@ CAD file where it has names, otherwise they are `SOLID-1`, `SHELL-1`, `LINE-1` a
 
 The context menu of a geometry part has #ui("Create Mesh"), #ui("Clear Mesh"), #ui("Suppress") (@suppressed-parts),
 the entries of the compound parts (@compound-parts), #ui("Properties ..."),
-#ui("Hide")/#ui("Show") and #ui("Delete").
+#ui("Hide")/#ui("Show"), #ui("Isolate") and #ui("Delete").
 A mesh always belongs to its geometry part: deleting the part, in the Geometry or in the FE
 Model workspace, deletes its mesh too, and renaming it renames the mesh. #ui("Clear Mesh") deletes
 only the mesh and keeps the part. A part without a mesh makes the mesh out of date, unless it is
