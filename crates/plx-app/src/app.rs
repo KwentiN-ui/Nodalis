@@ -1149,35 +1149,34 @@ impl AnalysisWindow {
                 }
             }
             (None, _) if self.workbench.meshing.is_some() => {
-                let progress = (self.workbench.meshing.as_ref()).and_then(|j| j.progress());
-                match progress {
-                    // With more than one part, how many are done.
-                    Some(progress) if progress.total > 1 => {
-                        ui.spinner();
-                        ui.label(format!(
-                            "Meshing part {} of {}: {}",
-                            progress.done + 1,
-                            progress.total,
-                            progress.part
-                        ));
-                        ui.add(
-                            egui::ProgressBar::new(progress.done as f32 / progress.total as f32)
-                                .desired_width(180.0)
-                                .show_percentage(),
-                        );
-                    }
-                    Some(progress) => {
-                        ui.spinner();
-                        ui.label(format!("Meshing {} …", progress.part));
-                    }
-                    None => {
-                        ui.spinner();
-                        ui.label("Meshing …");
-                    }
+                let job = self.workbench.meshing.as_ref();
+                let cancelling = job.is_some_and(MeshingJob::cancelling);
+                let progress = job.and_then(MeshingJob::progress);
+                ui.spinner();
+                // The bar and the button first, at fixed places, and the text that changes
+                // its length after them.
+                let several = progress.as_ref().filter(|p| p.total > 1);
+                if let Some(progress) = several {
+                    ui.add(
+                        egui::ProgressBar::new(progress.done as f32 / progress.total as f32)
+                            .desired_width(180.0)
+                            .show_percentage(),
+                    );
                 }
-                cancel = (ui.small_button("Cancel"))
-                    .on_hover_text("Stop the meshing; the parts keep their old mesh.")
-                    .clicked();
+                if !cancelling {
+                    cancel = (ui.small_button("Cancel"))
+                        .on_hover_text("Stop the meshing; the parts meshed so far are kept.")
+                        .clicked();
+                }
+                let text = match (&progress, cancelling) {
+                    (_, true) => "Cancelling the meshing …".to_string(),
+                    (Some(p), _) if p.total > 1 => {
+                        format!("Part {} of {}: {}", p.done + 1, p.total, p.part)
+                    }
+                    (Some(p), _) => format!("Meshing {} …", p.part),
+                    (None, _) => "Meshing …".to_string(),
+                };
+                ui.add(egui::Label::new(text).truncate());
             }
             (None, Some(model)) if model.is_geometry() => {
                 ui.label(format!(
@@ -4000,10 +3999,11 @@ impl Workbench {
         self.mesh_failure.clear();
     }
 
-    /// Cancels the meshing under way: the mesher is killed and the parts keep their mesh.
+    /// Cancels the meshing under way: the mesher is killed, the parts it finished get their
+    /// new mesh and the others keep theirs, see [`Self::poll_meshing`].
     fn cancel_meshing(&mut self) {
-        if self.meshing.take().is_some() {
-            self.output.push(crate::meshing::CANCELLED.into());
+        if let Some(job) = &self.meshing {
+            job.cancel();
         }
     }
 
@@ -4020,6 +4020,22 @@ impl Workbench {
         }
         match result {
             Ok(mut generated) => {
+                if generated.cancelled {
+                    let kept = (generated.meshes.iter())
+                        .map(|m| m.mesh.parts.len())
+                        .sum::<usize>();
+                    self.output.push(match kept {
+                        0 => format!("{}; no part was finished", crate::meshing::CANCELLED),
+                        1 => format!(
+                            "{}; the part finished before is kept",
+                            crate::meshing::CANCELLED
+                        ),
+                        n => format!(
+                            "{}; the {n} parts finished before are kept",
+                            crate::meshing::CANCELLED
+                        ),
+                    });
+                }
                 let failed = std::mem::take(&mut generated.failed);
                 self.note_mesh_findings(&generated, &failed);
                 if generated.meshes.is_empty() {

@@ -36,11 +36,12 @@ suppressing a part in the Geometry workspace takes it out of the FE model.
 
 Gmsh runs in a separate process, so a meshing that takes too long, for example because the
 element size is too small, can be cancelled at any time. While it runs, the status bar shows
-the part being meshed, such as #ui("Meshing part 8 of 89: NAME"), with a progress bar of the
+the part being meshed, such as #ui("Part 8 of 89: NAME"), with a progress bar of the
 parts already meshed and a #ui("Cancel") button; #menu("Geometry", "Cancel") and the
-#ui("Stop") tile of the ribbon do the same. The mesher stops at once and the parts keep
-the mesh they had before. During #ui("Update Project") the #ui("Stop") buttons of the
-Solution Monitor and #ui("Stop") in the Project workspace cancel a meshing in the same way.
+#ui("Stop") tile of the ribbon do the same. The mesher stops at once: the parts it has
+finished get their new mesh, and the others keep the mesh they had before. During
+#ui("Update Project") the #ui("Stop") buttons of the Solution Monitor and #ui("Stop") in the
+Project workspace cancel a meshing as well.
 
 #screenshot("meshing-cancel.png", [The status bar while meshing 89 parts, with the progress and the Cancel button])
 
@@ -101,7 +102,11 @@ lists each part that failed in the output pane as "Meshing failed: PART: ...". T
 what Gmsh was doing when it failed, such as "while meshing surface 177", and the faces, edges
 and points it names are marked red in the Geometry workspace. Even when Gmsh crashes on a
 part, which ends the mesher process, Nodalis names the part and the step and meshes the parts
-after it in a new process.
+after it in a new process. A part on which Gmsh crashed is meshed once more without
+#ui("Optimize mesh (Netgen)"), where most crashes happen; if that works, the part keeps this
+mesh and the output pane says so. Gmsh's own messages up to the crash are kept in the file
+`nodalis-gmsh-crash.log` in the temporary folder (`%TEMP%` on Windows, `/tmp` on Linux), which
+the message names; it shows where Gmsh stopped.
 
 The parts that failed get a warning sign in the Geometry and FE Model trees, and their names
 turn red; the tooltip tells the problem, and a click on the sign explains it and what helps. The sign and the red marking stay until the part is

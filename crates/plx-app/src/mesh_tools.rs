@@ -616,7 +616,7 @@ mod tests {
             .collect();
         let generated = crate::meshing::PartMeshes {
             meshes,
-            failed: Vec::new(),
+            ..Default::default()
         };
         crate::app::merge_part_meshes(model, &geometry, generated, None).unwrap();
     }

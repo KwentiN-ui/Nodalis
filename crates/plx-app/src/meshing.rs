@@ -1294,11 +1294,14 @@ pub fn item_highlight(view: &Model, kind: &MeshSetupKind) -> Highlight {
 }
 
 /// The meshes of some parts, generated one after the other.
+#[derive(Default)]
 pub struct PartMeshes {
     pub meshes: Vec<GeneratedMesh>,
     /// Why the parts that could not be meshed failed, one message each, naming the part:
     /// a part that fails leaves the others to be meshed.
     pub failed: Vec<String>,
+    /// Cancelled before all parts were done; the meshes are those finished before.
+    pub cancelled: bool,
 }
 
 /// The argument that makes the program a meshing worker instead of opening its window.
@@ -1402,7 +1405,7 @@ fn mesh_parts(
     let parts = parts_to_mesh(geometry, parts)?;
     let mut generated = PartMeshes {
         meshes: Vec::with_capacity(parts.len()),
-        failed: Vec::new(),
+        ..PartMeshes::default()
     };
     mesh_list(
         geometry,
@@ -1478,6 +1481,8 @@ const CURRENT: &str = "current";
 
 /// The file Gmsh's messages go to.
 const GMSH_LOG: &str = "gmsh.log";
+/// Where the log of the last worker that crashed is kept, in the temporary folder.
+const CRASH_LOG: &str = "nodalis-gmsh-crash.log";
 
 /// The file of the K-th part's outcome, see [`PartOutcome`].
 fn part_file(k: usize) -> String {
@@ -1522,11 +1527,8 @@ fn mesh_in_worker(
         matching,
         parts,
     };
-    let mut generated = PartMeshes {
-        meshes: Vec::new(),
-        failed: Vec::new(),
-    };
-    while !request.parts.is_empty() {
+    let mut generated = PartMeshes::default();
+    while !request.parts.is_empty() && !generated.cancelled {
         // The parts before this worker's are done, meshed or failed.
         let before = total - request.parts.len();
         let parts = &request.parts;
@@ -1541,7 +1543,10 @@ fn mesh_in_worker(
         let Some((k, message)) = crashed else {
             break;
         };
-        generated.failed.push(message);
+        let part = request.parts[k].clone();
+        if !generated.cancelled {
+            mesh_without_netgen(program, &request, &part, message, cancel, &mut generated)?;
+        }
         // The parts after the one that crashed Gmsh, but not those meshed with others.
         let meshed: Vec<&str> = (generated.meshes.iter())
             .flat_map(|m| m.mesh.parts.iter().map(|p| p.name.as_str()))
@@ -1554,8 +1559,68 @@ fn mesh_in_worker(
     Ok(generated)
 }
 
+/// Meshes `part`, on which Gmsh crashed with `message`, once more without the Netgen
+/// optimization, which is where Gmsh crashes most; the part fails with `message` if it
+/// crashes again or was not optimized anyway.
+fn mesh_without_netgen(
+    program: &Path,
+    request: &WorkerRequest,
+    part: &str,
+    message: String,
+    cancel: &AtomicBool,
+    generated: &mut PartMeshes,
+) -> Result<(), String> {
+    let parameters = request.geometry.parameters(part);
+    if !parameters.optimize {
+        generated.failed.push(message);
+        return Ok(());
+    }
+    let mut geometry = request.geometry.clone();
+    geometry.mesh_items.push(plx_model::MeshSetupItem {
+        name: "Without Netgen".into(),
+        kind: plx_model::MeshSetupKind::MeshingParameters {
+            parts: vec![part.to_string()],
+            // The parameters the part has, with the sizes before any refinement.
+            parameters: plx_model::MeshingParameters {
+                optimize: false,
+                ..unrefined(&request.geometry, part)
+            },
+        },
+    });
+    let retry = WorkerRequest {
+        library: request.library.clone(),
+        geometry,
+        matching: request.matching.clone(),
+        parts: vec![part.to_string()],
+    };
+    let (meshes, failed) = (generated.meshes.len(), generated.failed.len());
+    run_worker(program, &retry, cancel, &|_| {}, generated)?;
+    // Only the first failure is told, which is what the user meshed with.
+    generated.failed.truncate(failed);
+    match generated.meshes.get_mut(meshes) {
+        Some(mesh) => mesh.warnings.push(format!(
+            "{message}. It was meshed again without Optimize mesh (Netgen), which worked"
+        )),
+        None if generated.cancelled => generated.failed.push(message),
+        None => generated.failed.push(format!(
+            "{message}. Meshed again without Optimize mesh (Netgen), it failed as well"
+        )),
+    }
+    Ok(())
+}
+
+/// The meshing parameters of `part` as set, before the refinement of the geometry.
+fn unrefined(geometry: &Geometry, part: &str) -> plx_model::MeshingParameters {
+    let mut parameters = geometry.parameters(part);
+    let refinement = geometry.refined(1.0);
+    parameters.max_size /= refinement;
+    parameters.min_size /= refinement;
+    parameters
+}
+
 /// Runs one worker on `request` and adds what it made to `generated`; returns the place in
-/// the request of the part it crashed on, with the message that tells so.
+/// the request of the part it crashed on, with the message that tells so. Cancelled, it
+/// keeps the parts finished before and marks `generated` cancelled.
 fn run_worker(
     program: &Path,
     request: &WorkerRequest,
@@ -1595,7 +1660,8 @@ fn run_worker(
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(CANCELLED.into());
+            generated.cancelled = true;
+            break (None, None);
         }
         if let Ok(text) = std::fs::read_to_string(&result) {
             let _ = child.kill();
@@ -1627,6 +1693,9 @@ fn run_worker(
         let result: WorkerResult = ron::from_str(&text).map_err(|e| e.to_string())?;
         return result.map(|()| None);
     }
+    if generated.cancelled {
+        return Ok(None);
+    }
     let status = status.map_or_else(String::new, |s| format!(" ({s})"));
     // The part it was meshing when it stopped, unless it stopped before or after the parts.
     let current = (std::fs::read_to_string(dir.0.join(CURRENT)).ok())
@@ -1640,12 +1709,15 @@ fn run_worker(
         .find_map(plx_mesher::meshing_step)
         .map_or_else(String::new, |step| format!(" while {step}"));
     let part = &request.parts[current];
+    // Gmsh's own words up to the crash, for a report of it.
+    let kept = std::env::temp_dir().join(CRASH_LOG);
+    let kept = match std::fs::write(&kept, &gmsh_log) {
+        Ok(()) => format!(" (Gmsh's log: {})", kept.display()),
+        Err(_) => String::new(),
+    };
     Ok(Some((
         current,
-        format!(
-            "{part}: Gmsh crashed{place}{status}. The other parts are meshed on; a \
-             different element size or a repaired geometry of the part may help"
-        ),
+        format!("{part}: Gmsh crashed{place}{status}{kept}"),
     )))
 }
 
@@ -1712,6 +1784,16 @@ impl MeshingJob {
             cancel,
             progress,
         }
+    }
+
+    /// Stops the meshing; the parts finished before are kept, see [`PartMeshes::cancelled`].
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`Self::cancel`] was called.
+    pub fn cancelling(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
     }
 
     /// How far it is: the part meshed now, with the parts done and all; `None` before the
