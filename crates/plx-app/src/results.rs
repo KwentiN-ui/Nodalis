@@ -474,6 +474,7 @@ impl ResultsView {
             transformations: self.transformations.clone(),
             increment: self.increment,
             shown: self.shown_names(),
+            units: Some(self.units),
             view: plx_results::saved_view::SavedView {
                 deformation: self.deformation_chosen.then_some(self.deformation.into()),
                 user_scale: Some(self.user_scale),
@@ -2255,6 +2256,110 @@ pub fn convert_history(sets: &mut [HistorySet], units: UnitSystem) {
     }
 }
 
+/// A value of a component of a field, shown in `from`, in `to`; unchanged for values without
+/// a unit.
+fn converted_field_value(
+    value: f64,
+    measure: Option<Measure>,
+    from: UnitSystem,
+    to: UnitSystem,
+) -> f64 {
+    match measure {
+        Some(Measure::Of(quantity)) => from.convert(value, quantity, to),
+        Some(Measure::Per(a, b)) => value * from.factor_to(a, to) / from.factor_to(b, to),
+        None => value,
+    }
+}
+
+/// Converts what the user defined on results, in the units they showed then, so that it
+/// stays the same physically on results shown in `to`: the positions of the features, the
+/// transformations and hot spots, the camera, the limits of the legend and of the plots
+/// and the limits of derived field outputs. Equations keep their text, constants in them
+/// stay as they were typed.
+pub fn convert_settings(settings: &mut plx_results::ResultsSettings, to: UnitSystem) {
+    use plx_results::transformation::TransformationKind;
+    let from = settings.units.replace(to).unwrap_or(to);
+    if from == to {
+        return;
+    }
+    let c = plx_model::convert::Conversion::new(from, to);
+    let length = c.length_factor();
+    let point = |p: &mut [f64; 3]| c.all(p, Quantity::Length);
+    // The features as the FE model converts its own.
+    let mut fe = plx_model::FeModel {
+        reference_points: std::mem::take(&mut settings.reference_points),
+        coordinate_systems: std::mem::take(&mut settings.coordinate_systems),
+        planes: std::mem::take(&mut settings.planes),
+        result_paths: std::mem::take(&mut settings.result_paths),
+        ..Default::default()
+    };
+    fe.convert_features(&c);
+    settings.reference_points = fe.reference_points;
+    settings.coordinate_systems = fe.coordinate_systems;
+    settings.planes = fe.planes;
+    settings.result_paths = fe.result_paths;
+    for transformation in &mut settings.transformations {
+        match &mut transformation.kind {
+            TransformationKind::Symmetry { point: p, .. } => point(p),
+            TransformationKind::LinearPattern { start, end, .. } => {
+                point(start);
+                point(end);
+            }
+            TransformationKind::CircularPattern {
+                axis_start,
+                axis_end,
+                ..
+            } => {
+                point(axis_start);
+                point(axis_end);
+            }
+        }
+    }
+    for hot_spot in &mut settings.hot_spots {
+        c.value(&mut hot_spot.thickness, Quantity::Length);
+    }
+    for output in &mut settings.field_outputs {
+        if let plx_results::field_output::FieldOutputKind::Limit {
+            field,
+            component,
+            limits,
+            ..
+        } = &mut output.kind
+        {
+            let measure = field_measure(field, component);
+            for (_, limit) in limits {
+                *limit = converted_field_value(*limit, measure, from, to);
+            }
+        }
+    }
+    let view = &mut settings.view;
+    if let Some(camera) = &mut view.camera {
+        let f = length as f32;
+        camera.target = camera.target.map(|x| x * f);
+        camera.distance *= f;
+        camera.scene_radius *= f;
+    }
+    c.option(&mut view.mode_amplitude, Quantity::Length);
+    // The legend and the path plots show the shown component.
+    let shown =
+        (settings.shown.as_ref()).and_then(|(field, component)| field_measure(field, component));
+    let convert = |range: &mut [f64; 2], measure| {
+        *range = range.map(|v| converted_field_value(v, measure, from, to));
+    };
+    if let Some(range) = view.color_scale.as_mut().and_then(|s| s.manual.as_mut()) {
+        convert(range, shown);
+    }
+    let stress = Some(Measure::Of(Quantity::Pressure));
+    for plot in &mut view.path_plots {
+        match (&plot.table, plot.y_range.as_mut()) {
+            // Tables mix columns of any unit; they are plotted again from the new results.
+            (Some(_), _) => plot.y_range = None,
+            (None, Some(range)) => convert(range, if plot.hot_spot { stress } else { shown }),
+            (None, None) => {}
+        }
+    }
+}
+
 /// The measure of the largest displacement: the root of the summed squares of the
 /// largest absolute value of every `DISP` component, including `ALL`.
 /// Most increments [`ResultsView::read_ahead`] reads ahead.
@@ -2488,6 +2593,52 @@ mod tests {
         let wanted = view.wanted_output_systems(&fe.steps, &fe.coordinate_systems);
         view.set_output_systems(wanted, &mesh);
         assert!(view.increments[0].field("DISP_Arm").is_none());
+    }
+
+    #[test]
+    fn settings_keep_their_meaning_in_other_units() {
+        use plx_results::saved_view::{SavedCamera, SavedView};
+        use plx_results::transformation::TransformationKind;
+        let mut settings = plx_results::ResultsSettings {
+            transformations: vec![plx_results::Transformation {
+                name: "Pattern".into(),
+                kind: TransformationKind::LinearPattern {
+                    start: [0.0; 3],
+                    end: [0.1, 0.0, 0.0],
+                    count: 3,
+                },
+            }],
+            shown: Some(("STRESS".into(), "MISES".into())),
+            view: SavedView {
+                camera: Some(SavedCamera {
+                    target: [0.01, 0.0, 0.0],
+                    distance: 2.0,
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scene_radius: 0.5,
+                }),
+                color_scale: Some(ColorScale {
+                    manual: Some([0.0, 2.0e8]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            units: Some(UnitSystem::MKgSC),
+            ..Default::default()
+        };
+        let mut unchanged = settings.clone();
+        convert_settings(&mut unchanged, UnitSystem::MKgSC);
+        assert_eq!(unchanged, settings);
+        convert_settings(&mut settings, UnitSystem::MmTonSC);
+        assert_eq!(settings.units, Some(UnitSystem::MmTonSC));
+        let TransformationKind::LinearPattern { end, .. } = settings.transformations[0].kind else {
+            panic!("pattern expected");
+        };
+        assert!((end[0] - 100.0).abs() < 1e-9);
+        let camera = settings.view.camera.unwrap();
+        assert!((camera.distance - 2000.0).abs() < 1e-3);
+        assert!((camera.target[0] - 10.0).abs() < 1e-4);
+        let manual = settings.view.color_scale.unwrap().manual.unwrap();
+        assert!((manual[1] - 200.0).abs() < 1e-9);
     }
 
     #[test]

@@ -409,7 +409,7 @@ impl ProjectApp {
         self.compact = before.compact;
         if self.units != before.units {
             self.units = before.units;
-            self.apply_units(ctx);
+            self.apply_units();
         }
         self.applied.clear();
         self.sync_due = true;
