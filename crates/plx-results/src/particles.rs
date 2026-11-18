@@ -212,6 +212,9 @@ pub struct FrameTrack {
     /// Whether a material is a mixture of two grain sizes (the results then have the fine
     /// fraction).
     mixtures: bool,
+    /// Whether the model is 2D: its results leave the components along z out, which the
+    /// reader fills in as zeros out of the plane, as for a 2D model of the FE solver.
+    plane: bool,
 }
 
 impl FrameTrack {
@@ -245,6 +248,7 @@ impl FrameTrack {
                     plxs_core::particles::ParticleLaw::Granular { fine_grain, .. } if fine_grain > 0.0
                 )
             }),
+            plane: model.domain.space != Space::Solid,
         }
     }
 
@@ -415,6 +419,10 @@ impl FrameTrack {
                 fine.push(f64::NAN);
             }
         }
+        // A 2D model moves in its plane only.
+        let axes = if self.plane { 2 } else { 3 };
+        disp.truncate(axes);
+        velo.truncate(axes);
         let field = |name: &str, components: &[&str], values| ResultField {
             name: name.into(),
             components: components.iter().map(|c| (*c).to_string()).collect(),
@@ -429,8 +437,8 @@ impl FrameTrack {
             total_time: frame.time,
             nodal_diameter: None,
             fields: [
-                field("DISP", &["D1", "D2", "D3"], disp),
-                field("VELO", &["V1", "V2", "V3"], velo),
+                field("DISP", &["D1", "D2", "D3"][..axes], disp),
+                field("VELO", &["V1", "V2", "V3"][..axes], velo),
                 field(FIELD, &COMPONENTS, quantities),
             ]
             .into_iter()
