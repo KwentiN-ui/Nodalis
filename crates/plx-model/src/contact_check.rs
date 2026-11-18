@@ -4,7 +4,7 @@
 //! region that ties nothing, or a frictional one that starts open and lets a part fly
 //! away, before the solver runs.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use plx_mesh::{ElementId, FeMesh, NodeId};
 
@@ -156,16 +156,30 @@ impl Piece {
     }
 }
 
-/// The master side cut into pieces, with a grid of cells for finding the pieces near a
-/// point.
+/// The master side cut into pieces, with a tree of boxes around them for finding the piece
+/// nearest to a point.
 struct Master {
     pieces: Vec<Piece>,
-    cell: f64,
-    grid: HashMap<[i64; 3], Vec<usize>>,
+    tree: Vec<BoxNode>,
+    /// The pieces in the order of the leaves of the tree.
+    order: Vec<usize>,
     /// The box around all pieces.
     min: Point,
     max: Point,
 }
+
+/// A node of the box tree of [`Master`] around the `count` pieces of `order` from `first`;
+/// all but the leaves have two children, each around half of them.
+struct BoxNode {
+    min: Point,
+    max: Point,
+    first: usize,
+    count: usize,
+    children: Option<[usize; 2]>,
+}
+
+/// Pieces a leaf of the box tree holds at most.
+const LEAF: usize = 4;
 
 /// Distance of `p` to the box from `min` to `max`, 0 inside.
 fn box_distance(p: Point, min: Point, max: Point) -> f64 {
@@ -174,9 +188,8 @@ fn box_distance(p: Point, min: Point, max: Point) -> f64 {
 }
 
 impl Master {
-    fn new(mesh: &FeMesh, faces: &[(ElementId, u8)], reach: f64) -> Self {
+    fn new(mesh: &FeMesh, faces: &[(ElementId, u8)]) -> Self {
         let mut pieces = Vec::new();
-        let mut size = 0.0;
         for &(element_id, face) in faces {
             let Some(element) = mesh.element(element_id) else {
                 continue;
@@ -229,7 +242,6 @@ impl Master {
                         max[d] = max[d].max(p[d]);
                     }
                 }
-                size += length(sub(max, min));
                 pieces.push(Piece {
                     points,
                     normal,
@@ -238,71 +250,110 @@ impl Master {
                 });
             }
         }
-        // At least the reach, so that a search looks into the few cells around its point.
-        let cell = (size / pieces.len().max(1) as f64).max(reach).max(1e-12);
-        let mut min = [f64::INFINITY; 3];
-        let mut max = [f64::NEG_INFINITY; 3];
-        for piece in &pieces {
-            for d in 0..3 {
-                min[d] = min[d].min(piece.min[d]);
-                max[d] = max[d].max(piece.max[d]);
-            }
-        }
-        let mut master = Self {
+        let mut order: Vec<usize> = (0..pieces.len()).collect();
+        let mut tree = Vec::new();
+        build_tree(&pieces, &mut order, 0, &mut tree);
+        let (min, max) = tree
+            .first()
+            .map_or(([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]), |n| {
+                (n.min, n.max)
+            });
+        Self {
             pieces,
-            cell,
-            grid: HashMap::new(),
+            tree,
+            order,
             min,
             max,
-        };
-        for (i, piece) in master.pieces.iter().enumerate() {
-            let (lo, hi) = (master.key(piece.min), master.key(piece.max));
-            for x in lo[0]..=hi[0] {
-                for y in lo[1]..=hi[1] {
-                    for z in lo[2]..=hi[2] {
-                        master.grid.entry([x, y, z]).or_default().push(i);
-                    }
-                }
-            }
         }
-        master
-    }
-
-    fn key(&self, p: Point) -> [i64; 3] {
-        p.map(|v| (v / self.cell).floor() as i64)
     }
 
     /// The signed distance of `p` to the nearest piece within `radius`, if any, and the
     /// closest point of that piece.
     fn closest(&self, p: Point, radius: f64) -> Option<(f64, Point)> {
-        if box_distance(p, self.min, self.max) > radius {
+        if self.tree.is_empty() || box_distance(p, self.min, self.max) > radius {
             return None;
         }
-        let (lo, hi) = (
-            self.key(p.map(|v| v - radius)),
-            self.key(p.map(|v| v + radius)),
-        );
-        let mut best: Option<(f64, Point)> = None;
-        for x in lo[0]..=hi[0] {
-            for y in lo[1]..=hi[1] {
-                for z in lo[2]..=hi[2] {
-                    // A piece in several cells is met again, but its box is no nearer then.
-                    for &i in self.grid.get(&[x, y, z]).into_iter().flatten() {
-                        let piece = &self.pieces[i];
-                        let bound = best.map_or(radius, |(b, _)| b.abs());
-                        if box_distance(p, piece.min, piece.max) > bound {
-                            continue;
-                        }
-                        let (d, q) = piece.closest(p);
-                        if d.abs() <= radius && best.is_none_or(|(b, _)| d.abs() < b.abs()) {
-                            best = Some((d, q));
-                        }
-                    }
+        // The nearest piece and its index: of equally near pieces the first counts.
+        let mut best: Option<(f64, Point, usize)> = None;
+        let mut stack = vec![0];
+        while let Some(n) = stack.pop() {
+            let node = &self.tree[n];
+            let bound = best.map_or(radius, |(b, _, _)| b.abs());
+            if box_distance(p, node.min, node.max) > bound {
+                continue;
+            }
+            if let Some([a, b]) = node.children {
+                // The nearer child is searched first, so that it bounds the other.
+                let near_a = box_distance(p, self.tree[a].min, self.tree[a].max)
+                    <= box_distance(p, self.tree[b].min, self.tree[b].max);
+                stack.extend(if near_a { [b, a] } else { [a, b] });
+                continue;
+            }
+            for &i in &self.order[node.first..node.first + node.count] {
+                let piece = &self.pieces[i];
+                let bound = best.map_or(radius, |(b, _, _)| b.abs());
+                if box_distance(p, piece.min, piece.max) > bound {
+                    continue;
+                }
+                let (d, q) = piece.closest(p);
+                let nearer =
+                    best.is_none_or(|(b, _, j)| d.abs() < b.abs() || (d.abs() == b.abs() && i < j));
+                if d.abs() <= radius && nearer {
+                    best = Some((d, q, i));
                 }
             }
         }
-        best
+        best.map(|(d, q, _)| (d, q))
     }
+}
+
+/// Adds the node of the box tree over the pieces `order` holds, which start at `first` of
+/// all, and below it the nodes of their halves; returns its index.
+fn build_tree(
+    pieces: &[Piece],
+    order: &mut [usize],
+    first: usize,
+    tree: &mut Vec<BoxNode>,
+) -> usize {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for &i in order.iter() {
+        for d in 0..3 {
+            min[d] = min[d].min(pieces[i].min[d]);
+            max[d] = max[d].max(pieces[i].max[d]);
+        }
+    }
+    let index = tree.len();
+    tree.push(BoxNode {
+        min,
+        max,
+        first,
+        count: order.len(),
+        children: None,
+    });
+    if order.len() <= LEAF {
+        return index;
+    }
+    // Halved across the longest side of the box around the centres of the pieces.
+    let centre = |i: usize| [0, 1, 2].map(|d| pieces[i].min[d] + pieces[i].max[d]);
+    let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    for &i in order.iter() {
+        let c = centre(i);
+        for d in 0..3 {
+            lo[d] = lo[d].min(c[d]);
+            hi[d] = hi[d].max(c[d]);
+        }
+    }
+    let axis = (0..3)
+        .max_by(|&a, &b| (hi[a] - lo[a]).total_cmp(&(hi[b] - lo[b])))
+        .unwrap_or(0);
+    let half = order.len() / 2;
+    order.select_nth_unstable_by(half, |&a, &b| centre(a)[axis].total_cmp(&centre(b)[axis]));
+    let (left, right) = order.split_at_mut(half);
+    let a = build_tree(pieces, left, first, tree);
+    let b = build_tree(pieces, right, first + half, tree);
+    tree[index].children = Some([a, b]);
+    index
 }
 
 /// Nearer than this many tolerances counts as near open.
@@ -312,7 +363,15 @@ impl FeModel {
     /// The contact check of every contact region, in their order; `None` for a region
     /// whose sides have no element faces.
     pub fn check_contacts(&self, mesh: &FeMesh) -> Vec<Option<ContactCheck>> {
-        let resolved = self.resolve_contacts(mesh);
+        self.checks_of(mesh, &self.resolve_contacts(mesh))
+    }
+
+    /// [`Self::check_contacts`] of the regions resolved as `resolved` says.
+    pub(crate) fn checks_of(
+        &self,
+        mesh: &FeMesh,
+        resolved: &crate::ResolvedContacts,
+    ) -> Vec<Option<ContactCheck>> {
         (self.contact_regions.iter().zip(&resolved.items))
             .map(|(region, resolved)| self.check_resolved(mesh, region, resolved))
             .collect()
@@ -323,12 +382,17 @@ impl FeModel {
         self.check_resolved(mesh, region, &self.resolve_contact(region, mesh))
     }
 
-    fn check_resolved(
+    /// The contact check of `region` as resolved before by `resolve_contact`.
+    pub fn check_resolved(
         &self,
         mesh: &FeMesh,
         region: &ContactRegion,
         resolved: &Resolved,
     ) -> Option<ContactCheck> {
+        // Made while resolving a bonded region adjusted to touch, with the same tolerance.
+        if let Some(check) = &resolved.check {
+            return Some((**check).clone());
+        }
         let (master, slave) = if resolved.a_is_master {
             (&region.side_a, &region.side_b)
         } else {
@@ -347,39 +411,42 @@ impl FeModel {
         check(mesh, master, slave, tolerance, offset, adjust, None)
     }
 
-    /// How many elements moving the slave nodes of `region` on to its master side at the
-    /// start would turn inside out, were it adjusted to touch as `resolved` says; 0 for a
-    /// region not adjusted. `elements_of` lists the elements of each node.
-    pub(crate) fn folded_by_adjusting(
+    /// The contact check of `region` adjusted to touch as `resolved` says, whose `folded`
+    /// are the elements moving the slave nodes on to its master side at the start would
+    /// turn inside out; `None` for a region not adjusted. `elements_of` lists the elements
+    /// of each node of the sides.
+    pub(crate) fn adjusted_check(
         mesh: &FeMesh,
         region: &ContactRegion,
         resolved: &Resolved,
         elements_of: &HashMap<NodeId, Vec<ElementId>>,
-    ) -> usize {
+    ) -> Option<ContactCheck> {
         if !resolved.adjusts() || resolved.node_to_surface {
-            return 0;
+            return None;
         }
         let (master, slave) = if resolved.a_is_master {
             (&region.side_a, &region.side_b)
         } else {
             (&region.side_b, &region.side_a)
         };
-        let Some(tolerance) =
-            (resolved.tolerance()).or(resolved.mesh_size.map(|h| crate::TOLERANCE_FACTOR * h))
-        else {
-            return 0;
-        };
+        let tolerance =
+            (resolved.tolerance()).or(resolved.mesh_size.map(|h| crate::TOLERANCE_FACTOR * h))?;
         check(mesh, master, slave, tolerance, 0.0, true, Some(elements_of))
-            .map_or(0, |c| c.folded.len())
     }
 }
 
-/// The elements of each node of the mesh.
-pub(crate) fn elements_of_nodes(mesh: &FeMesh) -> HashMap<NodeId, Vec<ElementId>> {
+/// The elements of each of `nodes`.
+pub(crate) fn elements_of_nodes(
+    mesh: &FeMesh,
+    nodes: &HashSet<NodeId>,
+) -> HashMap<NodeId, Vec<ElementId>> {
     let mut map: HashMap<NodeId, Vec<ElementId>> = HashMap::new();
+    if nodes.is_empty() {
+        return map;
+    }
     for element in mesh.elements() {
-        for &n in &element.nodes {
-            map.entry(n).or_default().push(element.id);
+        for n in element.nodes.iter().filter(|n| nodes.contains(n)) {
+            map.entry(*n).or_default().push(element.id);
         }
     }
     map
@@ -404,7 +471,7 @@ fn check(
         return None;
     }
     let radius = NEAR * tolerance + offset;
-    let master = Master::new(mesh, &faces, radius);
+    let master = Master::new(mesh, &faces);
     let mut check = ContactCheck {
         status: ContactStatus::FarOpen,
         slave_nodes: nodes.len(),
@@ -458,7 +525,7 @@ fn check(
 /// The distance of each point to the nearest of the faces, infinite where there is none.
 /// Every face is tried: meant for a few faces, such as those of a thread.
 pub(crate) fn distances(mesh: &FeMesh, faces: &[(ElementId, u8)], points: &[Point]) -> Vec<f64> {
-    let master = Master::new(mesh, faces, 0.0);
+    let master = Master::new(mesh, faces);
     (points.iter())
         .map(|&p| {
             let mut best = f64::INFINITY;

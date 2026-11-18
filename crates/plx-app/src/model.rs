@@ -166,6 +166,8 @@ pub struct Model {
     cad_index: std::sync::OnceLock<crate::cad_selection::CadIndex>,
     /// The model checks of the last FE model checked, see [`Model::findings`].
     checks: std::sync::Mutex<Option<Checks>>,
+    /// The model check running in the background for [`Model::findings_soon`].
+    background_check: std::sync::Arc<std::sync::Mutex<BackgroundCheck>>,
     /// What the user changed, to undo and redo it.
     pub history: crate::undo::History,
     /// Counts the replacements of the mesh ([`Model::set_mesh`]).
@@ -259,9 +261,17 @@ struct SolidElements {
 
 /// Findings of the model checks with what they were computed for.
 struct Checks {
-    mesh: MeshCheck,
+    mesh: std::sync::Arc<MeshCheck>,
     fe: FeModel,
     findings: Vec<Finding>,
+}
+
+/// The model check of [`Model::findings_soon`] in a thread of its own.
+#[derive(Default)]
+struct BackgroundCheck {
+    running: bool,
+    /// The checks it finished, not yet taken over.
+    done: Option<Checks>,
 }
 
 /// Which nodes belong to which part; a node shared by parts belongs to the first of them.
@@ -931,6 +941,7 @@ impl Model {
             seams: Default::default(),
             cad_display: Default::default(),
             checks: Default::default(),
+            background_check: Default::default(),
             cad_index: Default::default(),
             history: Default::default(),
             mesh_revision: 0,
@@ -1543,6 +1554,8 @@ impl Model {
         self.seams = Default::default();
         self.cad_display = Default::default();
         self.checks = Default::default();
+        // A check still running for the old mesh delivers to the slot left behind.
+        self.background_check = Default::default();
         self.cad_index = Default::default();
         self.geometry_index = Default::default();
         self.query_annotations.clear();
@@ -1562,19 +1575,17 @@ impl Model {
 
     /// Problems of the FE model that make CalculiX abort or give useless results. The checks
     /// run again when the FE model changed; the part that depends on the mesh only once per
-    /// mesh.
+    /// mesh. Waits for them: for solving; what is shown takes [`Model::findings_soon`].
     pub fn findings(&self) -> Vec<Finding> {
         let mut cache = self.checks.lock().unwrap_or_else(|e| e.into_inner());
-        let space = self.fe.properties.space;
-        if let Some(checks) = cache.as_ref()
-            && checks.fe == self.fe
-            && checks.mesh.is_current(&self.mesh, space)
-        {
+        self.take_background_check(&mut cache);
+        if let Some(checks) = cache.as_ref().filter(|c| self.checks_current(c)) {
             return checks.findings.clone();
         }
+        let space = self.fe.properties.space;
         let mesh = match cache.take() {
             Some(checks) if checks.mesh.is_current(&self.mesh, space) => checks.mesh,
-            _ => MeshCheck::new(&self.mesh, space),
+            _ => std::sync::Arc::new(MeshCheck::new(&self.mesh, space)),
         };
         let findings = self.fe.check(&self.mesh, &mesh);
         *cache = Some(Checks {
@@ -1583,6 +1594,74 @@ impl Model {
             findings: findings.clone(),
         });
         findings
+    }
+
+    /// [`Model::findings`] without waiting: on a large model with contact regions the checks
+    /// take a second or more, too long for a frame. While they run in the background this
+    /// gives the findings of the model as last checked, and the window is drawn again when
+    /// they are done.
+    pub fn findings_soon(&self) -> Vec<Finding> {
+        let mut cache = self.checks.lock().unwrap_or_else(|e| e.into_inner());
+        self.take_background_check(&mut cache);
+        if let Some(checks) = cache.as_ref().filter(|c| self.checks_current(c)) {
+            return checks.findings.clone();
+        }
+        let shown = cache.as_ref().map_or_else(Vec::new, |c| c.findings.clone());
+        let mut background = (self.background_check.lock()).unwrap_or_else(|e| e.into_inner());
+        if background.running {
+            // Started for an earlier state of the model; the next check follows it.
+            return shown;
+        }
+        let space = self.fe.properties.space;
+        let mesh_check = (cache.as_ref())
+            .filter(|c| c.mesh.is_current(&self.mesh, space))
+            .map(|c| c.mesh.clone());
+        let (mesh, fe) = (self.mesh.clone(), self.fe.clone());
+        let slot = self.background_check.clone();
+        let started = std::thread::Builder::new()
+            .name("model check".into())
+            .spawn(move || {
+                let mesh_check = mesh_check.unwrap_or_else(|| {
+                    std::sync::Arc::new(MeshCheck::new(&mesh, fe.properties.space))
+                });
+                let findings = fe.check(&mesh, &mesh_check);
+                drop(mesh);
+                if let Ok(mut background) = slot.lock() {
+                    background.running = false;
+                    background.done = Some(Checks {
+                        mesh: mesh_check,
+                        fe,
+                        findings,
+                    });
+                }
+                crate::solve_fingerprint::request_repaint();
+            });
+        if started.is_ok() {
+            background.running = true;
+            return shown;
+        }
+        drop((background, cache));
+        self.findings()
+    }
+
+    /// Whether the checks were made for the model as it is.
+    fn checks_current(&self, checks: &Checks) -> bool {
+        checks.fe == self.fe && checks.mesh.is_current(&self.mesh, self.fe.properties.space)
+    }
+
+    /// Takes over the checks the background finished, unless those at hand are current or
+    /// they were made for another mesh.
+    fn take_background_check(&self, cache: &mut Option<Checks>) {
+        let done = (self.background_check.lock().ok()).and_then(|mut b| b.done.take());
+        let Some(done) = done else {
+            return;
+        };
+        let space = self.fe.properties.space;
+        if done.mesh.is_current(&self.mesh, space)
+            && cache.as_ref().is_none_or(|c| !self.checks_current(c))
+        {
+            *cache = Some(done);
+        }
     }
 
     /// Lookups for selections on the geometry display, see [`crate::geometry_selection`].
@@ -3708,6 +3787,147 @@ mod tests {
         let start = Instant::now();
         let meshes = view.scene_meshes();
         eprintln!("scene in {:?} ({} meshes)", start.elapsed(), meshes.len());
+    }
+
+    /// Times what a fine mesh with contact regions costs on the UI thread: the model check
+    /// after a change such as a new step, a click on a face with the hover preview, and the
+    /// highlight of the picked region: `NODALIS_CONTACT_BENCH=project.ndl cargo test
+    /// --release -p plx-app contact_bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn contact_bench() {
+        use crate::selection::{Picker, Target};
+        use std::time::Instant;
+        let Some(path) = std::env::var_os("NODALIS_CONTACT_BENCH") else {
+            return;
+        };
+        let start = Instant::now();
+        let project = plx_io::project::read_project(std::path::Path::new(&path)).unwrap();
+        let analysis = (project.nodes.into_iter())
+            .find_map(|n| match n {
+                plx_io::project::ProjectNode::Analysis(a) => Some(a),
+                _ => None,
+            })
+            .unwrap();
+        let mut model = Model::new(std::path::Path::new(&path), analysis.mesh);
+        model.fe = analysis.model;
+        eprintln!(
+            "loaded in {:?}: {} elements, {} contact regions",
+            start.elapsed(),
+            model.mesh.element_count(),
+            model.fe.contact_regions.len()
+        );
+        let start = Instant::now();
+        let findings = model.findings();
+        eprintln!(
+            "first check: {:?} ({} findings)",
+            start.elapsed(),
+            findings.len()
+        );
+        let mut step = plx_model::Step::new_static("Step-New");
+        step.active = true;
+        model.fe.steps.push(step);
+        let start = Instant::now();
+        model.findings();
+        eprintln!("check after a new step: {:?}", start.elapsed());
+        // What a frame waits for: the check runs in the background.
+        let mut step = plx_model::Step::new_static("Step-Other");
+        step.active = true;
+        model.fe.steps.push(step);
+        let start = Instant::now();
+        model.findings_soon();
+        eprintln!("findings_soon after another step: {:?}", start.elapsed());
+        let start = Instant::now();
+        let copy = model.mesh.clone();
+        eprintln!("  mesh clone: {:?}", start.elapsed());
+        drop(copy);
+        let start = Instant::now();
+        let fe = model.fe.clone();
+        let same = fe == model.fe;
+        eprintln!("  fe clone + compare: {:?} {same}", start.elapsed());
+        let start = Instant::now();
+        let _ = crate::solve_fingerprint::fingerprints_soon(&model.mesh, &model.fe);
+        eprintln!("  fingerprints_soon: {:?}", start.elapsed());
+        let mesh_check = plx_model::MeshCheck::new(&model.mesh, model.fe.properties.space);
+        let start = Instant::now();
+        model.fe.resolve_contacts(&model.mesh);
+        eprintln!("  resolve_contacts: {:?}", start.elapsed());
+        // What the contact region dialog does for each edit of a region.
+        for region in &model.fe.contact_regions {
+            let start = Instant::now();
+            let resolved = model.fe.resolve_contact(region, &model.mesh);
+            model.fe.check_resolved(&model.mesh, region, &resolved);
+            eprintln!("  region dialog {}: {:?}", region.name, start.elapsed());
+        }
+        if let Some(region) = model.fe.contact_regions.last() {
+            // As picked by hand: no detection to take the tolerance from.
+            let region = plx_model::ContactRegion {
+                detected_by: None,
+                ..region.clone()
+            };
+            let start = Instant::now();
+            let resolved = model.fe.resolve_contact(&region, &model.mesh);
+            model.fe.check_resolved(&model.mesh, &region, &resolved);
+            eprintln!("  region dialog, picked by hand: {:?}", start.elapsed());
+        }
+        let start = Instant::now();
+        model.fe.lower_contacts(&model.mesh);
+        eprintln!("  lower_contacts: {:?}", start.elapsed());
+        let start = Instant::now();
+        model.fe.check_contacts(&model.mesh);
+        eprintln!("  check_contacts: {:?}", start.elapsed());
+        let start = Instant::now();
+        model.fe.check(&model.mesh, &mesh_check);
+        eprintln!("  check: {:?}", start.elapsed());
+        // Clicks on the skin faces of the part with the most CAD faces, on the CAD face
+        // with the most element faces first (a thread flank).
+        let part = (0..model.parts.len())
+            .max_by_key(|&p| model.skin(p).faces.len())
+            .unwrap();
+        let index = model.cad_index();
+        let mut by_face: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+        for (f, face) in model.skin(part).faces.iter().enumerate() {
+            let element = model.mesh.elements()[face.element].id;
+            if let Some(tag) = index.face(&model.mesh, (element, face.face as u8 + 1)) {
+                by_face.entry(tag).or_default().push(f);
+            }
+        }
+        let mut faces: Vec<(i32, Vec<usize>)> = by_face.into_iter().collect();
+        faces.sort_by_key(|(_, f)| std::cmp::Reverse(f.len()));
+        let picker = Picker::default();
+        for (tag, skin_faces) in faces.iter().take(3) {
+            let face = &model.skin(part).faces[skin_faces[0]];
+            let point = model.render_position(face.corners[0]);
+            let hit = Hit {
+                part,
+                face: skin_faces[0],
+                point,
+                line: false,
+            };
+            for target in [Target::Nodes, Target::Surfaces] {
+                let start = Instant::now();
+                let items = picker.pick(&model, &hit, target, 1e-3);
+                let picked = start.elapsed();
+                let start = Instant::now();
+                let _preview = crate::selection::preview(&model, &items);
+                let previewed = start.elapsed();
+                let region = match &items {
+                    crate::selection::Items::Geometry(e) => {
+                        plx_model::Region::Geometry(e.iter().copied().collect())
+                    }
+                    _ => plx_model::Region::Nodes(Vec::new()),
+                };
+                let start = Instant::now();
+                let _highlight = crate::setup::region_highlight(&model, &region);
+                eprintln!(
+                    "CAD face {tag} ({} skin faces), {target:?}: pick {picked:?}, preview \
+                     {previewed:?}, highlight {:?}, {} nodes",
+                    skin_faces.len(),
+                    start.elapsed(),
+                    region.nodes(&model.mesh).len()
+                );
+            }
+        }
     }
 
     #[test]

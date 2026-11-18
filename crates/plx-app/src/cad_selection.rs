@@ -168,7 +168,7 @@ impl CadIndex {
     }
 
     /// The CAD face an element face of the skin lies on.
-    fn face(&self, mesh: &FeMesh, (element, face): (ElementId, u8)) -> Option<i32> {
+    pub(crate) fn face(&self, mesh: &FeMesh, (element, face): (ElementId, u8)) -> Option<i32> {
         if let Some(&tag) = self.face_of.get(&(element, face)) {
             return Some(tag);
         }

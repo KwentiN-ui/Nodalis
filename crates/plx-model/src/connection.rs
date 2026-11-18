@@ -8,7 +8,7 @@
 //! [`FeModel::lower_contacts`] turns the regions into the explicit ties, surface interactions
 //! and contact pairs the writer and the model checks already know.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use plx_mesh::{ElementId, FeMesh, NodeId};
 use serde::{Deserialize, Serialize};
@@ -390,6 +390,9 @@ pub struct Resolved {
     /// A side is a rope or beam, whose nodes touch the other side: the region is a contact
     /// pair of node to surface contact, whatever the formulation of the others.
     pub node_to_surface: bool,
+    /// The contact check made on the way, for a bonded region adjusted to touch, so that
+    /// the model check does not search the sides again.
+    pub(crate) check: Option<Box<crate::ContactCheck>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -551,7 +554,10 @@ struct Properties {
     /// The distance each detection that found regions with an automatic tolerance searched
     /// within, by its id.
     detections: HashMap<Id, f64>,
-    /// The elements of each node, built when a region first needs them.
+    /// The nodes of the sides of the regions resolved, the only ones whose elements an
+    /// adjustment to touch moves.
+    side_nodes: HashSet<NodeId>,
+    /// The elements of each of `side_nodes`, built when a region first needs them.
     elements_of: std::cell::OnceCell<HashMap<NodeId, Vec<ElementId>>>,
 }
 
@@ -745,10 +751,17 @@ impl FeModel {
         values
     }
 
-    fn properties_of_elements(&self, mesh: &FeMesh) -> Properties {
+    fn properties_of_elements<'a>(
+        &self,
+        mesh: &FeMesh,
+        regions: impl IntoIterator<Item = &'a ContactRegion>,
+    ) -> Properties {
+        let regions: Vec<&ContactRegion> = regions.into_iter().collect();
+        // The searched size of a detection takes a pass over all its elements: only for the
+        // regions resolved that need it.
         let detections = (self.contact_detections.iter())
             .filter(|d| {
-                (self.contact_regions.iter())
+                (regions.iter())
                     .any(|r| r.settings.tolerance.is_none() && r.detected_by == Some(d.id))
             })
             .map(|d| {
@@ -762,6 +775,12 @@ impl FeModel {
             young: self.young_of_elements(mesh),
             conductivity: self.material_of_elements(mesh, |m| m.conductivity),
             detections,
+            // Only bonded regions are adjusted to touch, see `resolve_with`.
+            side_nodes: (regions.iter())
+                .filter(|r| r.behavior == ContactBehavior::Bonded && r.settings.interface.is_none())
+                .flat_map(|r| [&r.side_a, &r.side_b])
+                .flat_map(|side| side.nodes(mesh))
+                .collect(),
             elements_of: std::cell::OnceCell::new(),
         }
     }
@@ -801,7 +820,14 @@ impl FeModel {
     /// What each contact region becomes in the input file and why.
     pub fn resolve_contacts(&self, mesh: &FeMesh) -> ResolvedContacts {
         let (formulation, formulation_reason) = self.contact_formulation();
-        let properties = self.properties_of_elements(mesh);
+        if self.contact_regions.is_empty() {
+            return ResolvedContacts {
+                formulation,
+                formulation_reason,
+                items: Vec::new(),
+            };
+        }
+        let properties = self.properties_of_elements(mesh, &self.contact_regions);
         let items = (self.contact_regions.iter())
             .map(|region| self.resolve_with(region, mesh, &properties, formulation))
             .collect();
@@ -814,7 +840,7 @@ impl FeModel {
 
     /// What a contact region, of the model or not yet, becomes in the input file and why.
     pub fn resolve_contact(&self, region: &ContactRegion, mesh: &FeMesh) -> Resolved {
-        let properties = self.properties_of_elements(mesh);
+        let properties = self.properties_of_elements(mesh, [region]);
         self.resolve_with(region, mesh, &properties, self.contact_formulation().0)
     }
 
@@ -847,12 +873,21 @@ impl FeModel {
         // elements (a pin with play in its hole): moving the slave nodes across it would turn
         // their elements inside out, so the sides are tied where they are.
         if region.behavior == ContactBehavior::Bonded && region.settings.interface.is_none() {
-            let elements_of = (properties.elements_of)
-                .get_or_init(|| crate::contact_check::elements_of_nodes(mesh));
-            let folded = Self::folded_by_adjusting(mesh, region, &resolved, elements_of);
+            let elements_of = (properties.elements_of).get_or_init(|| {
+                crate::contact_check::elements_of_nodes(mesh, &properties.side_nodes)
+            });
+            let check = Self::adjusted_check(mesh, region, &resolved, elements_of);
+            let folded = check.as_ref().map_or(0, |c| c.folded.len());
             if folded > 0 {
                 resolved.tie_as_is(folded);
             }
+            // Tied as is, no node moves and no element folds.
+            resolved.check = check.map(|mut check| {
+                if !resolved.adjusts() {
+                    check.folded.clear();
+                }
+                Box::new(check)
+            });
         }
         resolved
     }
@@ -866,6 +901,16 @@ impl FeModel {
     /// The bodies of compound parts are tied as bonded regions added after the user's, see
     /// [`FeModel::compound_ties`]; [`Lowered::part_of`] tells the part of their ties.
     pub fn lower_contacts(&self, mesh: &FeMesh) -> (FeModel, Lowered) {
+        let (lowered, origin, _) = self.lower_contacts_resolved(mesh);
+        (lowered, origin)
+    }
+
+    /// [`Self::lower_contacts`], and what each of the model's contact regions became, as
+    /// [`Self::resolve_contacts`] tells it, for the model check.
+    pub(crate) fn lower_contacts_resolved(
+        &self,
+        mesh: &FeMesh,
+    ) -> (FeModel, Lowered, ResolvedContacts) {
         let compound = self.compound_ties(mesh);
         if compound.is_empty() {
             return self.lower_regions(mesh);
@@ -876,28 +921,30 @@ impl FeModel {
         extended
             .contact_regions
             .extend(compound.into_iter().map(|t| t.region));
-        let (mut lowered, mut origin) = extended.lower_regions(mesh);
-        // The regions written stay the user's.
+        let (mut lowered, mut origin, mut resolved) = extended.lower_regions(mesh);
+        // The regions written stay the user's. Theirs come first and are derived alike,
+        // as the regions of the compound parts name no detection.
         lowered
             .contact_regions
             .retain(|r| self.contact_regions.iter().any(|c| c.id == r.id));
         origin.first_compound = Some(first);
         origin.compound_parts = parts;
-        (lowered, origin)
+        resolved.items.truncate(first);
+        (lowered, origin, resolved)
     }
 
-    /// [`Self::lower_contacts`] of the model's contact regions.
-    fn lower_regions(&self, mesh: &FeMesh) -> (FeModel, Lowered) {
+    /// [`Self::lower_contacts_resolved`] of the model's contact regions.
+    fn lower_regions(&self, mesh: &FeMesh) -> (FeModel, Lowered, ResolvedContacts) {
         let mut lowered = self.clone();
         let mut origin = Lowered {
             first_tie: self.ties.len(),
             first_pair: self.contact_pairs.len(),
             ..Lowered::default()
         };
-        if self.contact_regions.is_empty() {
-            return (lowered, origin);
-        }
         let resolved = self.resolve_contacts(mesh);
+        if self.contact_regions.is_empty() {
+            return (lowered, origin, resolved);
+        }
         lowered.contact_regions.clear();
         let mut tie_names: Vec<String> = self.ties.iter().map(|t| t.name.clone()).collect();
         // Active ties by their slave nodes, for merging those that share some.
@@ -1050,7 +1097,7 @@ impl FeModel {
                 }
             }
         }
-        (lowered, origin)
+        (lowered, origin, resolved)
     }
 }
 
@@ -1365,6 +1412,7 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
         conductivity,
         why,
         node_to_surface,
+        check: None,
     }
 }
 

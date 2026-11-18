@@ -45,7 +45,8 @@ impl RegionView {
         let stale =
             !matches!(self.check.as_deref(), Some((r, d, _)) if r == region && d == defaults);
         if stale {
-            let check = model.fe.check_contact(region, model.mesh());
+            let resolved = self.resolved(model, region);
+            let check = model.fe.check_resolved(model.mesh(), region, resolved);
             self.check = Some(Box::new((region.clone(), defaults.clone(), check)));
         }
         self.check.as_ref().expect("checked above").2.as_ref()

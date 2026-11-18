@@ -2430,7 +2430,11 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 tree.detected.insert(r, d);
             }
         }
-        for finding in model.findings().into_iter().chain(solver.iter().cloned()) {
+        for finding in model
+            .findings_soon()
+            .into_iter()
+            .chain(solver.iter().cloned())
+        {
             let (item, mut containers) = tree_items(finding.item);
             if let TreeItem::ContactRegion(r) = item
                 && let Some(&d) = tree.detected.get(&r)

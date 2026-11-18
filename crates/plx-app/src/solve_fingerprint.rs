@@ -77,6 +77,13 @@ pub fn repaint_with(ctx: &egui::Context) {
     }
 }
 
+/// Draws the window again, once work done in the background is ready.
+pub fn request_repaint() {
+    if let Some(ctx) = REPAINT.lock().ok().and_then(|r| r.clone()) {
+        ctx.request_repaint();
+    }
+}
+
 /// Changes each time fingerprints made in the background are ready: what waits for them
 /// asks [`fingerprints_soon`] again.
 pub fn generation() -> u64 {

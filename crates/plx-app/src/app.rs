@@ -2477,9 +2477,10 @@ impl Workbench {
     }
 
     /// The problems of the FE model: what the model check finds and what the solver found
-    /// in the last run.
+    /// in the last run. While the check of a changed model runs in the background, those of
+    /// the model before.
     fn problems(&self) -> Vec<plx_model::Finding> {
-        let mut findings = (self.model.as_ref()).map_or_else(Vec::new, Model::findings);
+        let mut findings = (self.model.as_ref()).map_or_else(Vec::new, Model::findings_soon);
         findings.extend(self.solver_findings.iter().cloned());
         // Errors first.
         findings.sort_by_key(|f| f.severity() != plx_model::Severity::Error);
