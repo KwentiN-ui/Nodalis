@@ -209,6 +209,15 @@ the other side of the path. #ui("Show in Box") puts it back into its box.
 On a deformed shape the plot stands on the path as the view draws it: its baseline follows the
 deformed path, point by point, so the plot always starts at the deformed toe or start point.
 
+The results of a Particle Flow step (@particle-flow) are read where the particles are at the
+shown increment, not where they started: the path is a fixed line in space through the flowing
+material, and stays straight. A point between particles that parted reads the nearest one within
+a particle's size; a point with no particle near has no value. Another increment reads the path
+again.
+
+#screenshot("path-particles.png", [The speed across the nozzle of a Particle Flow step, read
+from the particles on the path at the end of the step])
+
 #ui("Edit ...") in the context menu, or a double-click on the plot, opens #ui("Edit Annotation").
 Changes show at once; #ui("Cancel") restores the plot.
 
