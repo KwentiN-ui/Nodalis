@@ -412,6 +412,20 @@ pub fn is_collection(path: &[String]) -> bool {
     matches!(path, [cell, category] if cell == SETUP && CATEGORIES.contains(&category.as_str()))
 }
 
+/// The category of the setup a link of `item` dropped on the Setup row `slot` of an analysis
+/// goes to: the category it is of, as each category has its own type of data. A category,
+/// or an item of one, goes there without the setup being opened; `None` for anything else.
+pub fn setup_category_slot(item: &[String], slot: &[String]) -> Option<Vec<String>> {
+    match (item, slot) {
+        ([cell, category, ..], [row])
+            if cell == SETUP && row == SETUP && CATEGORIES.contains(&category.as_str()) =>
+        {
+            Some(vec![SETUP.to_owned(), category.clone()])
+        }
+        _ => None,
+    }
+}
+
 /// Whether the row of `path` puts the geometry objects of several links together when it
 /// is a row of an analysis: its Geometry row.
 pub fn assembles(path: &[String]) -> bool {
@@ -1917,6 +1931,32 @@ pub struct Incoming {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn categories_dropped_on_the_setup_go_to_their_row() {
+        let path = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let setup = path(&[SETUP]);
+        for category in CATEGORIES {
+            let slot = setup_category_slot(&path(&[SETUP, category]), &setup);
+            assert_eq!(slot, Some(path(&[SETUP, category])));
+            let item = path(&[SETUP, category, "Item-1"]);
+            assert_eq!(
+                setup_category_slot(&item, &setup),
+                Some(path(&[SETUP, category]))
+            );
+            assert!(compatible(&item, &slot.unwrap()));
+        }
+        // The whole setup, a geometry or results keep their own rules.
+        assert_eq!(setup_category_slot(&setup, &setup), None);
+        assert_eq!(setup_category_slot(&path(&[GEOMETRY]), &setup), None);
+        assert_eq!(
+            setup_category_slot(&path(&[RESULTS, "Step-1"]), &setup),
+            None
+        );
+        // Only the Setup row itself routes.
+        let materials = path(&[SETUP, "Materials"]);
+        assert_eq!(setup_category_slot(&materials, &materials), None);
+    }
     use super::*;
     use plx_model::{BoundaryCondition, Material, Region, Step};
 

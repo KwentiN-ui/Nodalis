@@ -6499,6 +6499,7 @@ impl ProjectApp {
             return self.group_refusal(from, to);
         }
         let slot = visualize::preview_slot(&self.nodes, to.0, from.1)
+            .or_else(|| self.setup_category_slot(to.0, from.1, to.1))
             .or_else(|| {
                 groups::is_open(to.1)
                     .then(|| self.next_formula_input(to.0))
@@ -6506,6 +6507,20 @@ impl ProjectApp {
             })
             .unwrap_or_else(|| self.checked_slot(to.0, to.1));
         refusal(&self.nodes, &self.links, from.0, from.1, to.0, &slot)
+    }
+
+    /// The category a wire of `item` dropped on the Setup row `slot` of the analysis `target`
+    /// goes to, so that the setup need not be opened for it; `None` for other pins.
+    fn setup_category_slot(
+        &self,
+        target: u64,
+        item: &[String],
+        slot: &[String],
+    ) -> Option<Vec<String>> {
+        let analysis = (self.nodes.iter()).any(|n| n.id == target && n.kind() == Kind::Analysis);
+        analysis
+            .then(|| links::setup_category_slot(item, slot))
+            .flatten()
     }
 
     /// Says why the wire being dragged cannot end at the pin under the pointer.
@@ -6525,6 +6540,33 @@ impl ProjectApp {
                 egui::PopupAnchor::Pointer,
             )
             .show(|ui| ui.label(format!("Cannot link: {why}")));
+            return;
+        }
+        // A category dropped on the closed setup says where it goes.
+        let Some(drag) = &self.dragging else {
+            return;
+        };
+        let routed = (self.pin_rects.iter())
+            .filter(|(key, rect)| {
+                rect.expand(2.0).contains(pointer) && verdicts.get(key) == Some(&None)
+            })
+            .find_map(|(key, _)| {
+                let (item, target, slot) = if drag.output {
+                    (&drag.path, key.id, &key.path)
+                } else {
+                    (&key.path, drag.id, &drag.path)
+                };
+                self.setup_category_slot(target, item, slot)
+            });
+        if let Some(slot) = routed {
+            let id = egui::Id::new("schematic link routed");
+            egui::Tooltip::always_open(
+                ui.ctx().clone(),
+                ui.layer_id(),
+                id,
+                egui::PopupAnchor::Pointer,
+            )
+            .show(|ui| ui.label(format!("Links to {}", slot.join(" > "))));
         }
     }
 
@@ -8194,6 +8236,8 @@ impl ProjectApp {
                     self.link(source, item, target, slot);
                 } else if let Some(slot) = visualize::preview_slot(&self.nodes, target, &item) {
                     self.keep_one_preview_link(target, &slot);
+                    self.link(source, item, target, slot);
+                } else if let Some(slot) = self.setup_category_slot(target, &item, &slot) {
                     self.link(source, item, target, slot);
                 } else {
                     self.link(source, item, target, slot);
