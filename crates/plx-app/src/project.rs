@@ -5154,20 +5154,45 @@ impl ProjectApp {
         }
     }
 
-    fn duplicate(&mut self, id: u64) {
+    /// Duplicates the blocks, Shift+D as in Blender: each copy takes the inputs of its
+    /// block, from the copy of the source when that was duplicated too, else from the
+    /// source itself; what the blocks feed is not linked to the copies. A group is copied
+    /// with the blocks in it.
+    fn duplicate_all(&mut self, ids: &[u64]) {
+        let mut copies = HashMap::new();
+        for &id in ids {
+            match self.node(id).map(|n| n.kind()) {
+                Some(Kind::Group) => {
+                    if let Some(map) = self.duplicate_group(id, egui::vec2(40.0, 260.0)) {
+                        let name = self.name_of(map[&id]);
+                        self.output.push(format!("{name} created"));
+                        copies.extend(map);
+                    }
+                }
+                Some(Kind::GroupInput | Kind::GroupOutput) | None => {}
+                _ => {
+                    if let Some(copy) = self.duplicate(id) {
+                        copies.insert(id, copy);
+                    }
+                }
+            }
+        }
+        if !copies.is_empty() {
+            self.link_duplicates(&copies);
+        }
+    }
+
+    /// Copies the block next to it, without links; returns the id of the copy.
+    fn duplicate(&mut self, id: u64) -> Option<u64> {
         let position = (self.graph_node(id))
             .and_then(|g| self.graph.get_node_info(g))
             .map_or(egui::pos2(40.0, 40.0), |info| {
                 info.pos + egui::vec2(40.0, 260.0)
             });
-        let Some(name) = self.node(id).map(|n| format!("Copy of {}", n.name)) else {
-            return;
-        };
+        let name = self.node(id).map(|n| format!("Copy of {}", n.name))?;
         let new_id = self.next_id();
         let name = block_name(&name);
-        let Some(copy) = self.node(id).and_then(|n| n.copied(new_id, name.clone())) else {
-            return;
-        };
+        let copy = self.node(id).and_then(|n| n.copied(new_id, name.clone()))?;
         self.nodes.push(copy);
         self.graph.insert_node(position, new_id);
         // The copy goes into the frame of the block, and looks like it.
@@ -5178,6 +5203,7 @@ impl ProjectApp {
             self.compact.insert(new_id);
         }
         self.output.push(format!("{name} created"));
+        Some(new_id)
     }
 
     /// Deletes the block, a group with the blocks in it; undo brings it back.
@@ -8028,20 +8054,7 @@ impl ProjectApp {
                 self.rename = name.map(|name| (id, name));
             }
             Action::DeleteAll(ids) => self.confirm_delete = self.deletable(ids),
-            Action::DuplicateAll(ids) => {
-                for id in ids {
-                    match self.node(id).map(|n| n.kind()) {
-                        Some(Kind::Group) => {
-                            if let Some(copy) = self.duplicate_group(id, egui::vec2(40.0, 260.0)) {
-                                let name = self.name_of(copy);
-                                self.output.push(format!("{name} created"));
-                            }
-                        }
-                        Some(Kind::GroupInput | Kind::GroupOutput) => {}
-                        _ => self.duplicate(id),
-                    }
-                }
-            }
+            Action::DuplicateAll(ids) => self.duplicate_all(&ids),
             Action::AddNote(pos) => {
                 self.add_note(pos);
             }
@@ -13388,6 +13401,21 @@ fn timestamped(message: String) -> String {
     format!("{} {message}", chrono::Local::now().format("%H:%M:%S"))
 }
 
+/// The input links of duplicated blocks, for their copies (`copies` maps a block to its
+/// copy): a link between two duplicated blocks joins the copies, one from a block left as
+/// it is goes from that block to the copy.
+fn duplicated_inputs(links: &[Link], copies: &HashMap<u64, u64>) -> Vec<Link> {
+    (links.iter())
+        .filter_map(|l| {
+            Some(Link {
+                source: copies.get(&l.source).copied().unwrap_or(l.source),
+                target: *copies.get(&l.target)?,
+                ..l.clone()
+            })
+        })
+        .collect()
+}
+
 /// The name a new block starts with: blocks may share a name, they are told apart by their
 /// ids, so it is always `base`.
 fn block_name(base: &str) -> String {
@@ -13396,6 +13424,41 @@ fn block_name(base: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Duplicating Analysis of File -> Analysis gives File -> Copy of Analysis; File ->
+    /// Mesh -> Analysis duplicated together links the copies, and nothing the blocks feed
+    /// is linked to a copy.
+    #[test]
+    fn duplicates_take_the_inputs_of_their_blocks() {
+        use super::{Link, duplicated_inputs};
+        use std::collections::HashMap;
+        let link = |source, target, item: &str| Link {
+            source,
+            target,
+            item: vec![item.into()],
+            slot: Vec::new(),
+            inherited: Vec::new(),
+            excluded: Vec::new(),
+        };
+        let pairs = |links: Vec<Link>| -> Vec<(u64, u64)> {
+            links.iter().map(|l| (l.source, l.target)).collect()
+        };
+        // File 1 -> Analysis 2 -> Analysis 3.
+        let links = vec![link(1, 2, "Geometry"), link(2, 3, "Results")];
+        let one = HashMap::from([(2, 10)]);
+        let copied = duplicated_inputs(&links, &one);
+        assert_eq!(pairs(copied.clone()), vec![(1, 10)]);
+        assert_eq!(copied[0].item, vec!["Geometry".to_string()]);
+        // Both analyses: the second copy takes the first copy.
+        let both = HashMap::from([(2, 10), (3, 11)]);
+        assert_eq!(
+            pairs(duplicated_inputs(&links, &both)),
+            vec![(1, 10), (10, 11)]
+        );
+        // The file alone: it has no inputs, its targets keep the original.
+        let file = HashMap::from([(1, 12)]);
+        assert!(duplicated_inputs(&links, &file).is_empty());
+    }
+
     /// Zoomed out, the background has about as many dots as at true size, not a hundred
     /// times as many, and they stay as large on the screen.
     #[test]
