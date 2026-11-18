@@ -2221,6 +2221,9 @@ pub struct ProjectApp {
     update_scope: Option<Vec<u64>>,
     /// The overview of blocks to add, open after a double-click into the schematic.
     picker: Option<NodePicker>,
+    /// Files dropped onto the schematic that wait for the pointer to come back, with the
+    /// time they were dropped: each becomes a file block where they were dropped.
+    dropped_files: Option<(Vec<PathBuf>, f64)>,
     /// Show All Blocks was asked for: the view fits the blocks in the next frame.
     show_all: bool,
     /// Whether the minimap of the schematic is shown.
@@ -2380,6 +2383,7 @@ impl ProjectApp {
             update_after_sync: false,
             update_scope: None,
             picker: None,
+            dropped_files: None,
             show_all: false,
             show_minimap: true,
             look_at: None,
@@ -3962,23 +3966,79 @@ impl ProjectApp {
 
     /// Adds a file block and asks for its file; returns its id.
     fn add_file(&mut self, position: egui::Pos2) -> u64 {
-        let id = self.next_id();
-        let name = block_name("File");
-        let units = self.units;
-        self.nodes.push(Node::file_block(
-            id,
-            name.clone(),
-            String::new(),
-            units,
-            None,
-        ));
-        self.graph.insert_node(position, id);
+        let id = self.add_file_block(position, String::new());
+        let name = self.name_of(id);
         self.output.push(format!(
             "{name} created: choose a results file (.frd), an input file (.inp) or geometry \
              (STEP, IGES, BREP, STL) and drag what it reads to an analysis."
         ));
         self.choose_source_file(id);
         id
+    }
+
+    /// Adds a file block reading `path` at the position.
+    fn add_file_block(&mut self, position: egui::Pos2, path: String) -> u64 {
+        let id = self.next_id();
+        let name = block_name("File");
+        let units = self.units;
+        self.nodes
+            .push(Node::file_block(id, name, path, units, None));
+        self.graph.insert_node(position, id);
+        self.files_checked = None;
+        id
+    }
+
+    /// Adds a file block for each dropped file, the first at `position` and the others below
+    /// it; files a file block cannot read are named in the output.
+    fn add_dropped_files(&mut self, position: egui::Pos2, paths: Vec<PathBuf>) {
+        let base = self.export_base();
+        let mut position = position;
+        for path in paths {
+            let shown = match &base {
+                Some(base) => path.strip_prefix(base).unwrap_or(&path),
+                None => &path,
+            };
+            let shown = shown.to_string_lossy().into_owned();
+            let file = path
+                .file_name()
+                .map_or_else(|| shown.clone(), |n| n.to_string_lossy().into_owned());
+            if FileKind::of(&shown).is_none() {
+                self.output.push(format!(
+                    "{file} was not added: a file block reads results files (.frd), input \
+                     files (.inp) and geometry (STEP, IGES, BREP, STL)."
+                ));
+                continue;
+            }
+            let id = self.add_file_block(position, shown);
+            let name = self.name_of(id);
+            self.output.push(format!(
+                "{name} reads {file}: drag what it reads to an analysis."
+            ));
+            position.y += DROPPED_FILE_SPACING;
+        }
+    }
+
+    /// Places the files dropped onto the schematic once the pointer is back over it, as
+    /// the pointer is not followed while files are dragged in; without the pointer the
+    /// blocks go to the middle of the view.
+    fn place_dropped_files(&mut self, ui: &egui::Ui, to_graph: egui::emath::TSTransform) {
+        let Some((_, dropped_at)) = &self.dropped_files else {
+            return;
+        };
+        let rect = ui.max_rect();
+        let (pointer, now) = ui.ctx().input(|i| (i.pointer.hover_pos(), i.time));
+        let screen = match pointer.filter(|p| rect.contains(*p)) {
+            Some(pointer) => pointer,
+            None if now - dropped_at > DROP_POINTER_WAIT => rect.center(),
+            None => {
+                ui.ctx().request_repaint();
+                return;
+            }
+        };
+        let Some((paths, _)) = self.dropped_files.take() else {
+            return;
+        };
+        self.add_dropped_files(to_graph * screen, paths);
     }
 
     /// Asks for the file a file block reads.
@@ -6295,6 +6355,7 @@ impl ProjectApp {
             }
         }
         self.place_block(ui, viewer.to_global.inverse(), &mut viewer.actions);
+        self.place_dropped_files(ui, viewer.to_global.inverse());
         if self.nodes.is_empty() {
             empty_hint(ui, layer);
         }
@@ -8597,11 +8658,20 @@ impl eframe::App for ProjectApp {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             (i.raw.dropped_files.iter())
                 .map(|f| f.path().to_path_buf())
-                .filter(|p| crate::model::is_project_file(p))
+                .filter(|p| !p.as_os_str().is_empty())
                 .collect()
         });
-        if let Some(path) = dropped.into_iter().next() {
+        let (projects, others): (Vec<PathBuf>, Vec<PathBuf>) = dropped
+            .into_iter()
+            .partition(|p| crate::model::is_project_file(p));
+        if let Some(path) = projects.into_iter().next() {
             self.ask_open(&ctx, path);
+        }
+        // Other files dropped onto the project workspace become file blocks; in Geometry,
+        // FE Model and Results the analysis imports them itself.
+        if !others.is_empty() && (self.in_project || self.embedded().is_none()) {
+            let now = ctx.input(|i| i.time);
+            self.dropped_files = Some((others, now));
         }
         self.app_bar(ui);
         // The analysis shown here, in Geometry, FE Model or Results.
@@ -10135,6 +10205,13 @@ fn with_article(word: &str) -> String {
 /// The file a relative export path names: next to the project file, or in the working folder
 /// while the project has none.
 /// How often the files of file blocks are looked at for changes.
+/// How far below each other the file blocks of files dropped together are put.
+const DROPPED_FILE_SPACING: f32 = 140.0;
+
+/// How long, in seconds, dropped files wait for the pointer to come back over the
+/// schematic before their blocks go to the middle of the view.
+const DROP_POINTER_WAIT: f64 = 0.3;
+
 const FILE_CHECK_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// What tells a change of a file: its path, size and time of modification; `None` when it is

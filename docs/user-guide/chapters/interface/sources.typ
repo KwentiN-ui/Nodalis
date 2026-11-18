@@ -220,6 +220,15 @@ dialog asks for the file at once. Its rows depend on the file:
   is a geometry object of its own (@mesh-import);
 - geometry: #ui("Geometry"), to link to the #ui("Geometry") row of analyses.
 
+A file dragged from the file manager onto the schematic becomes a file block where it is
+dropped, without the dialog; several files dropped together give a block each, one below the
+other. A project file (`.ndl`) opens instead (@unsaved-changes), and a file a file block cannot
+read is named in the output pane. In #ui("Geometry"), #ui("FE Model") and #ui("Results") a
+dropped file goes into the analysis shown instead (@geometry-import).
+
+#screenshot("file-block-drop.png", [A STEP file dropped onto the schematic: the file block
+  reads it at once, and the output pane names the file])
+
 ==== Single parts of an assembly <file-block-parts>
 
 A STEP file often holds a whole assembly while an analysis needs only some of its parts. When
