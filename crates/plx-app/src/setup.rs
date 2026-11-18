@@ -200,6 +200,8 @@ pub(crate) const SPRING_END_SOURCES: &[Source] = &[
 ];
 /// Solid elements: whole parts, element sets or the elements of picked faces.
 pub(crate) const SOLID_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet, Source::Selection];
+/// Whole parts or picked faces: for the loads on the walls of a Particle Flow step.
+pub(crate) const WALL_SOURCES: &[Source] = &[Source::Parts, Source::Selection, Source::Surface];
 pub(crate) const ELEMENT_SOURCES: &[Source] =
     &[Source::Parts, Source::ElementSet, Source::PointMass];
 /// Nodes or elements of a user-defined set: picked, or of whole parts.
@@ -1541,6 +1543,7 @@ const GRAVITY: &str = "Gravity";
 const CENTRIFUGAL: &str = "Centrifugal_Load";
 const MOVING: &str = "Moving_Load";
 const EXCITATION: &str = "Excitation";
+const WALL_LOADS: &str = "Wall_Loads";
 const FLOW: &str = "Flow";
 
 /// Whether the boundary condition dialog offers a preview of the motion: a prescribed
@@ -2297,7 +2300,7 @@ fn nearest_direction(vector: [f64; 3]) -> GravityDirection {
     }
 }
 
-fn load_kinds() -> [(&'static str, &'static str, LoadKind); 11] {
+fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
     [
         ("Force", FORCE, LoadKind::force([0.0; 3])),
         (
@@ -2348,7 +2351,38 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 11] {
                 emissivity: 0.8,
             },
         ),
+        (
+            "Wall loads (of the Particle Flow step)",
+            WALL_LOADS,
+            LoadKind::WallLoads(Default::default()),
+        ),
     ]
+}
+
+/// The parts of the walls of the Particle Flow step of `fe`: those of its rigid bodies and
+/// those a boundary condition of the step holds in shape.
+fn flow_wall_parts(fe: &FeModel, mesh: &FeMesh) -> Vec<String> {
+    let Some(flow) = fe.particle_flow_step() else {
+        return Vec::new();
+    };
+    let rigid = (fe.constraints.iter()).filter_map(|c| match c {
+        plx_model::Constraint::RigidBody(body) if body.active => Some(&body.region),
+        _ => None,
+    });
+    let held = (fe.steps[flow].boundary_conditions.iter())
+        .filter(|bc| plx_model::holds_particle_wall(bc))
+        .map(|bc| &bc.region);
+    let elements: std::collections::BTreeSet<_> = rigid
+        .chain(held)
+        .flat_map(|region| {
+            (region.elements(mesh).into_iter())
+                .chain(region.faces(mesh).into_iter().map(|(e, _)| e))
+        })
+        .collect();
+    (mesh.parts.iter())
+        .filter(|p| p.elements.iter().any(|e| elements.contains(e)))
+        .map(|p| p.name.clone())
+        .collect()
 }
 
 /// The initial condition kinds of the dialog: label, default name and the kind with zero
@@ -2419,6 +2453,7 @@ fn load_kind_name(kind: &LoadKind) -> &'static str {
         LoadKind::Centrifugal { .. } => CENTRIFUGAL,
         LoadKind::Moving(_) => MOVING,
         LoadKind::Excitation(_) => EXCITATION,
+        LoadKind::WallLoads(_) => WALL_LOADS,
     }
 }
 
@@ -2446,6 +2481,9 @@ fn load_target(kind: &LoadKind) -> LoadTarget {
 
 /// What a load picks its region with.
 fn load_picks(kind: &LoadKind, fe: &FeModel) -> (&'static [Source], Target) {
+    if matches!(kind, LoadKind::WallLoads(_)) {
+        return (WALL_SOURCES, face_target(fe));
+    }
     match load_target(kind) {
         // A force picks faces, edges or points of the geometry, like a boundary condition.
         // Forces and moments also act on the reference point of a rigid body.
@@ -3708,36 +3746,58 @@ impl Editor {
                 let label = (load_kinds().into_iter())
                     .find(|(_, name, _)| *name == current)
                     .map_or("", |(label, ..)| label);
-                egui::ComboBox::from_id_salt("load kind")
-                    .selected_text(label)
-                    .width(crate::dock::fit_width(ui, 200.0))
-                    .show_ui(ui, |ui| {
-                        for (label, name, kind) in load_kinds() {
-                            // Only the kinds the step takes.
-                            if step_kind.is_some_and(|s| !s.supports_load(&kind)) {
-                                continue;
-                            }
-                            // A moving load drives over a surface, which a revolution has not.
-                            if axisymmetric && matches!(kind, LoadKind::Moving(_)) {
-                                continue;
-                            }
-                            if ui.selectable_label(current == name, label).clicked()
-                                && current != name
-                            {
-                                let moved = load_target(&kind) != load_target(&load.kind);
-                                load.kind = kind;
-                                load.tables = Default::default();
-                                rename_default(&mut load.name, current, name, &taken);
-                                if moved {
-                                    let (sources, target) = load_picks(&load.kind, &model.fe);
-                                    let (kept, dropped) =
-                                        region.converted(sources, target, model.mesh());
-                                    *region = kept;
-                                    dropped_note(ui, dropped);
+                // The loads on walls a link brings stay what they are.
+                let linked = matches!(&load.kind, LoadKind::WallLoads(w) if w.file().is_some());
+                if linked {
+                    ui.label("Wall loads (linked from a Particle Flow step)");
+                }
+                // Those of a Particle Flow step before the step.
+                let flow_before = model.fe.flow_before(*step);
+                if !linked {
+                    egui::ComboBox::from_id_salt("load kind")
+                        .selected_text(label)
+                        .width(crate::dock::fit_width(ui, 200.0))
+                        .show_ui(ui, |ui| {
+                            for (label, name, kind) in load_kinds() {
+                                // Only the kinds the step takes.
+                                if step_kind.is_some_and(|s| !s.supports_load(&kind)) {
+                                    continue;
+                                }
+                                // A moving load drives over a surface, which a revolution has not.
+                                if axisymmetric && matches!(kind, LoadKind::Moving(_)) {
+                                    continue;
+                                }
+                                if !flow_before && matches!(kind, LoadKind::WallLoads(_)) {
+                                    continue;
+                                }
+                                if ui.selectable_label(current == name, label).clicked()
+                                    && current != name
+                                {
+                                    let moved = load_target(&kind) != load_target(&load.kind);
+                                    load.kind = kind;
+                                    load.tables = Default::default();
+                                    rename_default(&mut load.name, current, name, &taken);
+                                    if matches!(load.kind, LoadKind::WallLoads(_)) {
+                                        // On the tools: the parts of the walls.
+                                        let (sources, target) = load_picks(&load.kind, &model.fe);
+                                        let parts = flow_wall_parts(&model.fe, model.mesh());
+                                        *region = RegionDraft::from_region(
+                                            &Region::Parts(parts),
+                                            sources,
+                                            target,
+                                            model.mesh(),
+                                        );
+                                    } else if moved {
+                                        let (sources, target) = load_picks(&load.kind, &model.fe);
+                                        let (kept, dropped) =
+                                            region.converted(sources, target, model.mesh());
+                                        *region = kept;
+                                        dropped_note(ui, dropped);
+                                    }
                                 }
                             }
-                        }
-                    });
+                        });
+                }
                 ui.end_row();
                 show_dropped_note(ui);
                 // Only a pressure varies by a distribution.
@@ -3832,6 +3892,9 @@ impl Editor {
                         revolution_hint(ui, axisymmetric);
                         let nlgeom = step_kind.is_some_and(|k| model.fe.step_nlgeom(k));
                         direction_rows(ui, &mut load.system, &mut load.follower, &model.fe, nlgeom);
+                    }
+                    LoadKind::WallLoads(walls) => {
+                        crate::wall_loads_rows::rows(ui, walls, &region.region(), model, units);
                     }
                     LoadKind::PreTension { .. } => {
                         // Written for bolts only; a Bolt under Connections makes them.
@@ -4051,8 +4114,10 @@ impl Editor {
                 } else {
                     "Amplitude"
                 };
-                // An excitation follows its signal.
-                if matches!(load.kind, LoadKind::Excitation(_)) {
+                // An excitation follows its signal; wall loads over time follow the frames.
+                if matches!(load.kind, LoadKind::Excitation(_))
+                    || matches!(&load.kind, LoadKind::WallLoads(w) if w.time == plx_model::WallLoadTime::OverTime)
+                {
                     load.amplitude = None;
                 } else {
                     amplitude_row(ui, label, "load amplitude", &mut load.amplitude, &model.fe);

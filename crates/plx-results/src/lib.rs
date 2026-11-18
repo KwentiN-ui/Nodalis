@@ -4,6 +4,7 @@
 //! of the result mesh, in the order of [`plx_mesh::FeMesh::coords`]; nodes without a value are
 //! `NaN`.
 
+pub mod chained;
 mod derived;
 pub mod display;
 pub use plx_model::equation;
@@ -20,6 +21,7 @@ pub mod solver;
 pub mod steps;
 pub mod transformation;
 pub mod values;
+pub mod wall_loads;
 
 pub use derived::{add_derived_components, principal_values, split_rotations};
 pub use equation::Equation;

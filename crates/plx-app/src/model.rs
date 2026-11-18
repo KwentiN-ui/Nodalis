@@ -78,14 +78,23 @@ pub struct PartInfo {
     /// A part of loose cubes that share no node, the particles of a Particle Flow step:
     /// drawn without edges and with rounded shading, which keeps its many faces cheap.
     pub loose: bool,
+    /// A part of the results the shown step does not show, see
+    /// [`plx_results::steps::StepRecord::elements`]: the particles in the FE steps after a
+    /// Particle Flow step, the tools in the flow.
+    pub off_step: bool,
 }
 
 impl PartInfo {
+    /// Whether the part is drawn: visible, and shown by the step.
+    pub fn shown(&self) -> bool {
+        self.visible && !self.off_step
+    }
+
     /// Whether the part can be picked or selected in the 3D view: shown and not
     /// suppressed. A suppressed part takes part in nothing; only the tree selects it, to
     /// unsuppress it.
     pub fn pickable(&self) -> bool {
-        self.visible && !self.suppressed
+        self.visible && !self.suppressed && !self.off_step
     }
 }
 
@@ -908,6 +917,7 @@ impl Model {
                 imported: false,
                 own_mesh: false,
                 loose,
+                off_step: false,
             });
         }
         let origins = plx_model::PartOrigins::imported(&mesh);
@@ -1797,7 +1807,7 @@ impl Model {
     /// Model and the results not suppressed, which takes part in nothing there; the Geometry
     /// workspace draws a suppressed part as its edges.
     pub fn drawn(&self, info: &PartInfo) -> bool {
-        info.visible && (self.is_geometry || !info.suppressed)
+        info.visible && !info.off_step && (self.is_geometry || !info.suppressed)
     }
 
     pub fn is_geometry(&self) -> bool {
@@ -1862,7 +1872,7 @@ impl Model {
         let Some(view) = &mut self.results else {
             return;
         };
-        if self.parts.iter().all(|p| p.contours && p.visible) {
+        if self.parts.iter().all(|p| p.contours && p.shown()) {
             view.plain_nodes.clear();
             return;
         }
@@ -1870,7 +1880,7 @@ impl Model {
         let mut plain = vec![false; count];
         let mut coloured = vec![false; count];
         for (index, info) in self.parts.iter().enumerate() {
-            let target = if info.contours && info.visible {
+            let target = if info.contours && info.shown() {
                 &mut coloured
             } else {
                 &mut plain
@@ -2903,7 +2913,7 @@ impl Model {
         let skin_nodes = &self.skin_lookup().nodes;
         let unit = direction.normalize_or_zero();
         let mut parts: Vec<(f32, usize)> = (self.parts.iter().enumerate())
-            .filter(|(index, info)| info.visible && !info.suppressed && *index < self.skins.len())
+            .filter(|(index, info)| info.shown() && !info.suppressed && *index < self.skins.len())
             .filter_map(|(index, _)| {
                 let nodes = skin_nodes.get(index)?;
                 let (min, max) = (nodes.iter())
@@ -3103,6 +3113,22 @@ impl Model {
             || self.path.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         )
+    }
+    /// Marks the parts the shown step of the results does not show ([`PartInfo::off_step`]);
+    /// returns whether any changed.
+    pub fn sync_step_parts(&mut self) -> bool {
+        let range = (self.results.as_ref())
+            .and_then(|view| view.current_step())
+            .and_then(|step| step.elements);
+        let mut changed = false;
+        for (part, mesh_part) in self.parts.iter_mut().zip(&self.mesh.parts) {
+            let off = range.is_some_and(|[first, last]| {
+                (mesh_part.elements.first()).is_some_and(|&e| e < first || e > last)
+            });
+            changed |= part.off_step != off;
+            part.off_step = off;
+        }
+        changed
     }
 
     /// Bounding box of all visible parts, relative to the model origin.

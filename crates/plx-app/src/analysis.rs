@@ -34,6 +34,8 @@ pub struct Analysis {
     /// The item of the model each item of the solver's analysis came from, which leads the
     /// solver's diagnostics back to the tree.
     origins: plx_model::Origins,
+    /// Those of the FE steps after a Particle Flow step, once the run has made them.
+    later_origins: Option<std::sync::Arc<std::sync::Mutex<Option<plx_model::Origins>>>>,
     /// The active steps, a line each, for the solver report.
     step_lines: Vec<String>,
 }
@@ -506,6 +508,7 @@ impl Analysis {
             finished: None,
             status: JobStatus::Running,
             origins,
+            later_origins: None,
             step_lines,
         })
     }
@@ -529,12 +532,50 @@ impl Analysis {
         record.nlgeom = true;
         let mut output = Vec::new();
         let text = plx_solve::particles::describe(&lowered.model);
+        // The FE steps after the flow are made of the model once the flow has written the
+        // loads on its walls.
+        let later_origins = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let then = (!check_model && plx_io::particles::has_steps_after_flow(fe)).then(|| {
+            let plan = (fe.steps[lowered.step + 1..].iter())
+                .filter(|s| s.active)
+                .map(|s| (s.name.clone(), Some(s.kind.period())))
+                .collect();
+            let active = active.clone().into_owned();
+            let heading = heading.to_owned();
+            let origins = std::sync::Arc::clone(&later_origins);
+            let flow = plx_io::particles::LoweredParticles {
+                model: Default::default(),
+                warnings: Vec::new(),
+                ..lowered.clone()
+            };
+            plx_solve::particles::FollowUp {
+                plan,
+                prepare: Box::new(move |walls: &std::path::Path| {
+                    let (mesh, fe) =
+                        plx_io::particles::after_flow(active.mesh(), active.fe(), &flow, walls);
+                    // The active mesh has no suppressed part left to leave out.
+                    let after = plx_model::active_model(
+                        &mesh,
+                        &fe,
+                        None,
+                        &plx_model::PartOrigins::default(),
+                    );
+                    let lowered =
+                        plx_io::inp::lower_with_sets_unvalidated(&after, &heading, &[])
+                            .map_err(|e| format!("FE steps after the flow not set up: {e}"))?;
+                    *origins.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(lowered.origins.clone());
+                    Ok(prepare(lowered, &fe, &[]))
+                }),
+            }
+        });
         let prepared = plx_solve::particles::PreparedParticles {
             model: lowered.model,
             text,
             warnings: lowered.warnings,
             steps: vec![record],
             history: lowered.history,
+            wall_parts: lowered.wall_parts,
         };
         let job = if check_model {
             output.push(format!(
@@ -544,7 +585,7 @@ impl Analysis {
             plx_solve::Run::check_particles(work_dir, job_name, prepared)
         } else {
             output.push(format!("{name} started in {}", work_dir.display()));
-            plx_solve::Run::start_particles(solver.threads, work_dir, job_name, prepared)
+            plx_solve::Run::start_particles(solver.threads, work_dir, job_name, prepared, then)
         }
         .map_err(|e| format!("Solver not started: {e}"))?;
         job.keep_results_in_memory(false);
@@ -560,6 +601,7 @@ impl Analysis {
             finished: None,
             status: JobStatus::Running,
             origins: Default::default(),
+            later_origins: Some(later_origins),
             step_lines: (fe.steps.iter())
                 .filter(|s| s.active)
                 .map(crate::solver_profile::step_line)
@@ -620,6 +662,11 @@ impl Analysis {
             return None;
         }
         let status = self.job.poll();
+        if let Some(later) = &self.later_origins
+            && let Some(origins) = later.lock().unwrap_or_else(|e| e.into_inner()).take()
+        {
+            self.origins = origins;
+        }
         if status == JobStatus::Running {
             return None;
         }

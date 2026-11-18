@@ -111,6 +111,14 @@ fn run(mode: GpuMode, model: &ParticleModel) -> ParticleResults {
     results
 }
 
+/// The moment about z of the loads a frame gives wall `w`, in the wall's own frame.
+fn frame_moment(frame: &plxs_core::particles::ParticleFrame, w: usize) -> f64 {
+    let wall = &frame.walls[w];
+    (wall.points.iter().zip(&wall.forces))
+        .map(|(p, f)| f64::from(p[0]) * f64::from(f[1]) - f64::from(p[1]) * f64::from(f[0]))
+        .sum()
+}
+
 fn mean(values: &[f64]) -> f64 {
     values.iter().sum::<f64>() / values.len().max(1) as f64
 }
@@ -211,6 +219,13 @@ fn the_card_computes_what_the_processor_computes() {
             mean(&ha.walls[5].force.iter().map(|f| f[2]).collect::<Vec<_>>()),
             mean(&hb.walls[5].force.iter().map(|f| f[2]).collect::<Vec<_>>()),
             0.005,
+        ),
+        // The loads the last frame hands on, moment of the paddle in its own frame.
+        (
+            "paddle moment of the frame",
+            frame_moment(a, 0),
+            frame_moment(b, 0),
+            0.01,
         ),
         // Relative to the warming of the paste.
         (

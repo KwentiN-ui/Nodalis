@@ -112,6 +112,7 @@ mod value_table;
 mod viewport;
 mod virtual_table;
 mod vtk_export_dialog;
+mod wall_loads_rows;
 mod xy_plot;
 
 fn main() -> eframe::Result {

@@ -96,6 +96,8 @@ struct Workbench {
     /// Folder of the project in the work directory; each analysis of the project runs in a
     /// folder of its own in it.
     project_folder: String,
+    /// The block of the analysis in the project, whose runs go to a folder of its number.
+    run_id: Option<u64>,
     /// What the window asks of the project window.
     requests: Vec<Request>,
     /// What the analysis takes from other analyses of the project; the window shows it but
@@ -338,6 +340,7 @@ impl AnalysisWindow {
                 settings_window: None,
                 analysis_name: name.to_owned(),
                 project_folder: String::new(),
+                run_id: None,
                 requests: Vec::new(),
                 incoming: Default::default(),
                 upstream: Default::default(),
@@ -759,6 +762,11 @@ impl AnalysisWindow {
     /// The folder of the project in the work directory, from the project file's name.
     pub fn set_project_folder(&mut self, folder: String) {
         self.workbench.project_folder = folder;
+    }
+
+    /// The number of the analysis block in the project, which names the folder of its runs.
+    pub fn set_run_id(&mut self, id: u64) {
+        self.workbench.run_id = Some(id);
     }
 
     pub fn settings(&self) -> &Settings {
@@ -2378,6 +2386,12 @@ impl Workbench {
                 }
                 self.frame_cache.clear();
                 self.viewport.set_parts(&render_meshes);
+                // The step shown shows its own parts.
+                if let Some(model) = self.shown_mut()
+                    && model.sync_step_parts()
+                {
+                    model.update_plain_nodes();
+                }
                 let hidden: Vec<usize> = (self.shown().into_iter())
                     .flat_map(|m| {
                         m.parts
@@ -6752,6 +6766,26 @@ impl Workbench {
     }
 
     fn editor_window(&mut self, ctx: &egui::Context) {
+        // The loads on the walls of a Particle Flow step of the analysis are where its run
+        // writes them.
+        let walls = match self.run_id {
+            // A run of the project: in the folder of the block's number, named after it.
+            Some(id) => {
+                let job = crate::analysis::job_dir(id);
+                let mut dir = self.settings.solver.work_dir();
+                if !self.project_folder.is_empty() {
+                    dir.push(&self.project_folder);
+                }
+                dir.join(&job)
+                    .join(format!("{job}.{}", plx_results::wall_loads::EXTENSION))
+            }
+            None => self.work_dir().join(format!(
+                "{}.{}",
+                crate::analysis::job_name(&self.analysis_name),
+                plx_results::wall_loads::EXTENSION
+            )),
+        };
+        crate::wall_loads_rows::set_own_file(ctx, walls);
         let (Some(editor), Some(model)) = (&mut self.editor, &mut self.model) else {
             return;
         };
@@ -8305,6 +8339,10 @@ impl Workbench {
             self.update_contour();
             return;
         };
+        // The step shown shows its own parts; the others leave the legend range.
+        if model.sync_step_parts() {
+            model.update_plain_nodes();
+        }
         let frame = model
             .results
             .as_ref()

@@ -142,6 +142,10 @@ pub struct StepRecord {
     /// For a step that leaves the state as it found it: the state it was computed about,
     /// "End of Preload" or "Unloaded model".
     pub base: Option<String>,
+    /// The elements of the results the step shows, the first and the last number; `None`
+    /// for all. A Particle Flow step followed by FE steps in one analysis shows the
+    /// particles and the walls, the FE steps the parts they computed.
+    pub elements: Option<[u32; 2]>,
 }
 
 impl StepRecord {
@@ -171,6 +175,7 @@ impl StepRecord {
             solver_steps,
             inherited_from: None,
             base: None,
+            elements: None,
         }
     }
 }
@@ -203,6 +208,8 @@ pub struct ResultStep {
     pub inherited_from: Option<String>,
     /// The state a probing step was computed about, see [`StepRecord::base`].
     pub base: Option<String>,
+    /// The elements it shows, see [`StepRecord::elements`].
+    pub elements: Option<[u32; 2]>,
     pub solver_steps: Vec<u32>,
     /// Indices into the increments of the results, in order.
     pub increments: Vec<usize>,
@@ -338,6 +345,7 @@ impl ResultSteps {
                         time_period: r.time_period,
                         inherited_from: r.inherited_from.clone(),
                         base: r.base.clone(),
+                        elements: r.elements,
                         solver_steps: r.solver_steps.clone(),
                         increments: Vec::new(),
                         start_time: 0.0,
@@ -357,6 +365,7 @@ impl ResultSteps {
                         time_period: None,
                         inherited_from: None,
                         base: None,
+                        elements: None,
                         solver_steps: vec![*n],
                         increments: Vec::new(),
                         start_time: 0.0,
@@ -539,6 +548,7 @@ mod tests {
             solver_steps: steps.to_vec(),
             inherited_from: None,
             base: None,
+            elements: None,
         }
     }
 

@@ -26,6 +26,112 @@ pub struct PreparedParticles {
     pub steps: Vec<plx_results::steps::StepRecord>,
     /// The history the step's outputs ask for.
     pub history: HistoryRequest,
+    /// The names of the FE parts of each wall, for the loads on them FE steps take.
+    pub wall_parts: Vec<Vec<String>>,
+}
+
+/// Makes the analysis of the FE steps with the loads on the walls of the file given.
+pub type Prepare = Box<dyn FnOnce(&Path) -> Result<crate::Prepared, String> + Send>;
+
+/// The FE steps after a Particle Flow step in one analysis: made of the model once the flow
+/// has written the loads on its walls, the file given, and solved after it.
+pub struct FollowUp {
+    /// The FE steps, by name and length in time, for the monitor.
+    pub plan: Vec<(String, Option<f64>)>,
+    /// The analysis of the FE steps, made with the loads on the walls of the file given.
+    pub prepare: Prepare,
+}
+
+impl std::fmt::Debug for FollowUp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FollowUp")
+            .field("plan", &self.plan)
+            .finish()
+    }
+}
+
+/// `event` of the FE steps after `steps` steps and the time `time` of a flow.
+fn after_flow(event: ProgressEvent, steps: u32, time: f64) -> ProgressEvent {
+    use ProgressEvent as E;
+    match event {
+        E::Step { step } => E::Step { step: step + steps },
+        E::Increment {
+            step,
+            increment,
+            attempt,
+            size,
+            step_time,
+            total_time,
+        } => E::Increment {
+            step: step + steps,
+            increment,
+            attempt,
+            size,
+            step_time,
+            total_time: total_time + time,
+        },
+        E::Iteration {
+            step,
+            increment,
+            iteration,
+            residual,
+            correction,
+            residual_limit,
+            correction_limit,
+            converged,
+        } => E::Iteration {
+            step: step + steps,
+            increment,
+            iteration,
+            residual,
+            correction,
+            residual_limit,
+            correction_limit,
+            converged,
+        },
+        E::IncrementDone {
+            step,
+            increment,
+            attempt,
+            iterations,
+            total_time,
+            step_time,
+            size,
+        } => E::IncrementDone {
+            step: step + steps,
+            increment,
+            attempt,
+            iterations,
+            total_time: total_time + time,
+            step_time,
+            size,
+        },
+        E::Integration { step, explicit } => E::Integration {
+            step: step + steps,
+            explicit,
+        },
+        E::Cutback {
+            step,
+            increment,
+            attempt,
+            reason,
+        } => E::Cutback {
+            step: step + steps,
+            increment,
+            attempt,
+            reason,
+        },
+        E::Eigenvalue { step, mode, value } => E::Eigenvalue {
+            step: step + steps,
+            mode,
+            value,
+        },
+        E::StepDone { step, converged } => E::StepDone {
+            step: step + steps,
+            converged,
+        },
+        other => other,
+    }
 }
 
 /// The particle model in words: what the solver gets, without the triangles.
@@ -125,11 +231,13 @@ impl Run {
 
     /// Starts the particle solver on a Particle Flow step, on the shared [`pool`] of
     /// `threads` threads (0: all cores): the results are written to `<work_dir>/<name>.ndlr`.
+    /// The FE steps `then`, if any, are solved after the flow, into the same results.
     pub fn start_particles(
         threads: u32,
         work_dir: &Path,
         name: &str,
         prepared: PreparedParticles,
+        then: Option<FollowUp>,
     ) -> std::io::Result<Self> {
         std::fs::create_dir_all(work_dir)?;
         for extension in crate::OLD_FILES {
@@ -146,9 +254,21 @@ impl Run {
             "************************************************************".to_owned(),
         ]));
         let cancel = CancelToken::new();
-        let plan = (prepared.steps.iter())
+        let mut plan: Vec<(String, Option<f64>)> = (prepared.steps.iter())
             .map(|s| (s.name.clone(), Some(prepared.model.control.end_time)))
             .collect();
+        if let Some(then) = &then {
+            plan.extend(then.plan.iter().cloned());
+        }
+        let input_path = work_dir.join(format!("{name}.inp"));
+        let fe_spool_file = work_dir.join(format!(
+            "{name}.{}.fe.spool",
+            plx_results::solver::EXTENSION
+        ));
+        let chained_spool_file = work_dir.join(format!(
+            "{name}.{}.all.spool",
+            plx_results::solver::EXTENSION
+        ));
         let convergence = monitor::LiveLog::new(monitor::ConvergenceLog::new(plan));
         let lines = Arc::clone(&output);
         let log = convergence.clone();
@@ -162,6 +282,7 @@ impl Run {
         let diagnostics = Arc::new(Mutex::new(None));
         let found = Arc::clone(&diagnostics);
         let token = cancel.clone();
+        let (work_dir_owned, name_owned) = (work_dir.to_owned(), name.to_owned());
         let handle = std::thread::Builder::new()
             .name(format!("plxs particles {name}"))
             .spawn(move || {
@@ -180,8 +301,19 @@ impl Run {
                     warnings,
                     steps: records,
                     history: request,
+                    wall_parts,
                     ..
                 } = prepared;
+                // The loads on the walls, beside the results.
+                let mut wall_loads = plx_results::wall_loads::WallLoads::new(
+                    model.domain.cell,
+                    model.domain.space,
+                    (model.walls.iter().enumerate())
+                        .map(|(w, wall)| {
+                            (wall.name.clone(), wall_parts.get(w).cloned().unwrap_or_default())
+                        })
+                        .collect(),
+                );
                 let mut track = Convergence::default();
                 // Both callbacks of the solver report progress.
                 let progress = Mutex::new(|event: ProgressEvent| {
@@ -257,6 +389,9 @@ impl Run {
                                         FrameTrack::new(&model, &frame)
                                     });
                                     increment += 1;
+                                    if increment > 1 {
+                                        wall_loads.push(frame.time, &frame.walls);
+                                    }
                                     let size = frame.time - last_time;
                                     last_time = frame.time;
                                     if spool_error.is_none()
@@ -348,14 +483,111 @@ impl Run {
                         Err(e) => return fail(format!("results not spooled: {e}")),
                     }
                 }
+                let walls_file = results_file.with_extension(plx_results::wall_loads::EXTENSION);
+                if wall_loads.walls.is_empty() {
+                    let _ = std::fs::remove_file(&walls_file);
+                } else if let Err(e) = wall_loads.write(&walls_file) {
+                    return fail(format!(
+                        "loads on the walls not written to {}: {e}",
+                        walls_file.display()
+                    ));
+                }
                 let solved = plxs_core::Results {
                     history: history_blocks(&results.history, &request, 1),
                     ..Default::default()
                 };
                 let mut out = SolverResults::new(&mesh, solved, VERSION);
                 out.steps = records;
+                // The FE steps after the flow, with the loads on its walls.
+                let mut failed = None;
+                if let Some(then) = then {
+                    let flow_steps = out.steps.len().max(1) as u32;
+                    let flow_end = end_time;
+                    let mut fe_progress =
+                        |event: ProgressEvent| progress(after_flow(event, flow_steps, flow_end));
+                    say(String::new());
+                    say(format!("Nodalis solver plxs {VERSION}: the FE steps after the flow"));
+                    match (then.prepare)(&walls_file) {
+                        Err(message) => failed = Some(message),
+                        Ok(mut fe) => {
+                            crate::keep_modes_as_shapes(&mut fe.analysis);
+                            if let Ok(mut text) = std::fs::read_to_string(&input_path) {
+                                text.push_str("**\n** The FE steps after the flow\n**\n");
+                                text.push_str(&fe.text);
+                                let _ = std::fs::write(&input_path, text);
+                            }
+                            let fe_records = fe.steps.clone();
+                            let preparation = fe.preparation_steps.clone();
+                            let options = plxs_session::JobOptions {
+                                threads: threads as usize,
+                                pool: Some(Arc::clone(&pool)),
+                                write_files: false,
+                                cancel: token.clone(),
+                                spool: Some(fe_spool_file.clone()),
+                                ..plxs_session::JobOptions::new(&work_dir_owned, &name_owned)
+                            };
+                            let mut kept = None;
+                            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                || {
+                                    crate::Job::Analysis(Box::new(fe)).run(
+                                        &input_path,
+                                        &options,
+                                        &mut fe_progress,
+                                        &mut kept,
+                                    )
+                                },
+                            ));
+                            match &run {
+                                Ok(Ok(plxs_session::JobOutcome::Finished)) => {}
+                                Ok(Ok(plxs_session::JobOutcome::Cancelled)) => {
+                                    say(" *INFO: the run was stopped".into());
+                                    return Finished::Cancelled;
+                                }
+                                Ok(Ok(plxs_session::JobOutcome::Diverged)) => {
+                                    failed = Some("an FE step did not converge".into());
+                                }
+                                Ok(Err(error)) => failed = Some(error.to_string()),
+                                Err(_) => failed = Some("the solver failed".into()),
+                            }
+                            if let Some(kept) = kept {
+                                let mut fe_results =
+                                    SolverResults::new(&kept.model, kept.results, VERSION);
+                                fe_results.steps = fe_records;
+                                crate::drop_preparation_steps(&mut fe_results, &preparation);
+                                let mut fe_spool = kept.spool;
+                                if let Some(fe_spool) = &mut fe_spool {
+                                    fe_spool.retain(|i| !preparation.contains(&i.step));
+                                }
+                                match plx_results::chained::chain(
+                                    out,
+                                    &spool,
+                                    fe_results,
+                                    fe_spool.as_ref(),
+                                    &chained_spool_file,
+                                ) {
+                                    Ok((all, all_spool)) => {
+                                        out = all;
+                                        spool = all_spool;
+                                    }
+                                    Err(e) => return fail(format!("results not spooled: {e}")),
+                                }
+                                drop(fe_spool);
+                                let _ = std::fs::remove_file(&fe_spool_file);
+                            }
+                        }
+                    }
+                }
                 out.convergence = track.increments;
-                match out.write_spooled(spool, &[], &results_file) {
+                out.unconverged_step = track.unconverged.or(failed.as_ref().and(track.step));
+                let written = out.write_spooled(spool, &[], &results_file);
+                let _ = std::fs::remove_file(&chained_spool_file);
+                if let Some(message) = failed {
+                    if written.is_ok() {
+                        writing.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    return fail(message);
+                }
+                match written {
                     Ok(()) => {
                         writing.store(true, std::sync::atomic::Ordering::Release);
                         if keeping.load(std::sync::atomic::Ordering::Acquire) {
@@ -442,8 +674,9 @@ mod tests {
                 energies: vec!["ALLKE".into()],
                 ..Default::default()
             },
+            wall_parts: Vec::new(),
         };
-        let mut run = Run::start_particles(1, &dir, "drop", prepared).unwrap();
+        let mut run = Run::start_particles(1, &dir, "drop", prepared, None).unwrap();
         assert_eq!(run.wait(), JobStatus::Completed, "{:?}", run.new_output());
         let results = run.solver_results().unwrap();
         // Four cells of two particles each way, three frames.
@@ -504,8 +737,9 @@ mod tests {
             warnings: Vec::new(),
             steps: Vec::new(),
             history: HistoryRequest::default(),
+            wall_parts: Vec::new(),
         };
-        let mut run = Run::start_particles(1, &dir, "slosh", prepared).unwrap();
+        let mut run = Run::start_particles(1, &dir, "slosh", prepared, None).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(500));
         let output = std::sync::Arc::clone(&run.output);
         run.kill();

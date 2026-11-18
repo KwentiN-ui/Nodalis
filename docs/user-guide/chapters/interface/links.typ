@@ -176,13 +176,17 @@ its inputs are listed below it, each with an orange pin:
   [#ui("Eigenmodes") (steady state dynamics steps)],
   [a frequency step with #ui("Storage") on],
   [the eigenmodes the step works on: the `.eig` file of the other run (@modal-dynamics)],
+  [#ui("Wall loads") (every step that takes forces)],
+  [a Particle Flow step],
+  [the loads of the material on its rigid bodies: a load named #ui("Linked Wall Loads") of
+    nodal forces on the faces of the tool parts, see @particle-flow-wall-loads],
   [#ui("Global results") (every step, and a row of the block of a submodel)],
   [any step of the global model],
   [the displacements on the cut boundary of a submodel (@submodel)],
 )
 
-Results dropped on the row of the step itself, while it is closed, go to the input that fits: eigenmodes to #ui("Eigenmodes"), temperatures to #ui("Temperatures"), anything
-else to #ui("Global results"). Once the step is opened, the wire is seen to end at that input.
+Results dropped on the row of the step itself, while it is closed, go to the input that fits: eigenmodes to #ui("Eigenmodes"), temperatures to #ui("Temperatures"), the
+results of a Particle Flow step to #ui("Wall loads"), anything else to #ui("Global results"). Once the step is opened, the wire is seen to end at that input.
 Results dropped on an input they do not fit are refused, and the output pane says why
 ("Heat is no frequency step").
 

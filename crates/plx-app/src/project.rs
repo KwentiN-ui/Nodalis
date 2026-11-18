@@ -5081,6 +5081,7 @@ impl ProjectApp {
         };
         let mut window = AnalysisWindow::new(render_state, settings, &name);
         window.set_project_folder(folder);
+        window.set_run_id(id);
         window.set_links(incoming, upstream);
         if let Some(view) = view {
             window.show_workspace(view.clone());
@@ -6897,8 +6898,8 @@ impl ProjectApp {
                         Some(links::ResultsUse::Submodel) => {
                             link.source != source || links::slot(link) == slot.as_slice()
                         }
-                        // A step takes one temperature field.
-                        Some(links::ResultsUse::Temperature) => {
+                        // A step takes one temperature field, one set of wall loads.
+                        Some(links::ResultsUse::Temperature | links::ResultsUse::WallLoads) => {
                             links::slot(link) == slot.as_slice()
                         }
                         // The model takes one set of eigenmodes and of initial temperatures.
@@ -6967,6 +6968,11 @@ impl ProjectApp {
             Some(links::ResultsUse::Temperature) => {
                 format!("{to} takes the temperatures of {what} of {from} in {step}.")
             }
+            Some(links::ResultsUse::WallLoads) => format!(
+                "{to} takes the loads on the walls of {what} of {from} in {step}, as its load \
+                 {}.",
+                links::LINKED_WALL_LOADS
+            ),
             Some(links::ResultsUse::Modes) => format!(
                 "{to} takes the eigenmodes of {what} of {from} for its modal and steady state \
                  dynamics steps."
@@ -7568,7 +7574,10 @@ impl ProjectApp {
                     return None;
                 }
                 let usage = links::ResultsUse::of(link)?;
-                if usage == links::ResultsUse::Modes {
+                if matches!(
+                    usage,
+                    links::ResultsUse::Modes | links::ResultsUse::WallLoads
+                ) {
                     return None;
                 }
                 if usage != links::ResultsUse::Submodel
@@ -7633,6 +7642,40 @@ impl ProjectApp {
                 let global = links::global_step_number(data.fe, step)?;
                 let usage = links::ResultsUse::of(link)?;
                 let key = source.step_key(step);
+                if usage == links::ResultsUse::WallLoads {
+                    // The loads file of the run, copied for the target into a folder named
+                    // after the solved model, from the run's own folder or the kept results.
+                    let project = crate::analysis::job_name(&self.project_name());
+                    let job = crate::analysis::job_dir(source.id);
+                    let name = format!("{job}.{}", plx_results::wall_loads::EXTENSION);
+                    let solved =
+                        (self.settings.solver.work_dir().join(&project).join(&job)).join(&name);
+                    let dir = (self.settings.solver.work_dir().join(project))
+                        .join(crate::analysis::job_dir(target.id))
+                        .join(format!("Walls-{job}-{key:016x}"));
+                    let file = dir.join(&name);
+                    let restored = || {
+                        plx_io::project::restore_file(bound, &name, &file).is_ok_and(|done| done)
+                    };
+                    let copied = || {
+                        bound.input.is_some()
+                            && std::fs::create_dir_all(&dir).is_ok()
+                            && solved.is_file()
+                            && std::fs::copy(&solved, &file).is_ok()
+                    };
+                    if !file.is_file() && !restored() && !copied() {
+                        let line = format!(
+                            "{} has no loads on walls to give {}: its Particle Flow step has \
+                             no rigid bodies, or it was solved before they were kept.",
+                            source.name, target.name
+                        );
+                        if self.warned.insert(line.clone()) {
+                            self.output.push(line);
+                        }
+                        return None;
+                    }
+                    return Some(Payload::Results(global, file));
+                }
                 if usage != links::ResultsUse::Submodel
                     && target.link_data()?.mesh.input_fingerprint() != data.mesh.input_fingerprint()
                 {
@@ -11529,6 +11572,10 @@ fn step_input_tip(step: &str, input: &str) -> String {
         links::EIGENMODES => format!(
             "the eigenmodes of a frequency step of another analysis (with Storage on), which \
              the modal or steady state dynamics of {step} use"
+        ),
+        links::WALL_LOADS => format!(
+            "the loads of the material on the rigid bodies of a Particle Flow step of another \
+             analysis: pressure and friction on the tool faces, as nodal forces of {step}"
         ),
         _ => format!(
             "the results of a step of another analysis, the global model: {step} reads the \

@@ -320,6 +320,14 @@ impl FeModel {
                             }
                         }
                     }
+                    LoadKind::WallLoads(walls) => match &mut walls.time {
+                        crate::WallLoadTime::At(time) => c.value(time, Quantity::Time),
+                        crate::WallLoadTime::Mean { from, to } => {
+                            c.value(from, Quantity::Time);
+                            c.option(to, Quantity::Time);
+                        }
+                        crate::WallLoadTime::Last | crate::WallLoadTime::OverTime => {}
+                    },
                     LoadKind::Moving(moving) => {
                         for length in [
                             &mut moving.start,

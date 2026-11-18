@@ -669,6 +669,7 @@ mod tests {
             positions,
             fields: vec![vec![2.0; n]; PARTICLE_FIELDS.len()],
             shares: Vec::new(),
+            walls: Vec::new(),
         }
     }
 

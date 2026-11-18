@@ -496,6 +496,7 @@ mod tests {
             time_period: period,
             solver_steps: steps.to_vec(),
             inherited_from: None,
+            elements: None,
             base: None,
         }
     }

@@ -64,6 +64,7 @@ mod study;
 mod symmetry;
 mod tables;
 pub mod units;
+mod wall_loads;
 pub use tables::{StepTable, TableOwner};
 mod validity;
 
@@ -161,6 +162,7 @@ pub use study::{DesignPoint, FillMode, FillRule, PointRun, PointState, StudyColu
 pub use symmetry::{BeamsOnPlane, SymmetryError, SymmetryPlane, symmetry_dofs, symmetry_plane};
 pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, LengthUnit, Quantity, STORED, UnitSystem};
 pub use validity::{Invalid, ModelItem};
+pub use wall_loads::{WallLoadTime, WallLoads};
 
 use std::path::{Path, PathBuf};
 
@@ -247,7 +249,9 @@ use serde::{Deserialize, Serialize};
 /// Format 51 adds the Flow boundary conditions and one default side of the Particle Flow
 /// step; older steps take the default side. Format 52 exposes the numbers of the mesh setup
 /// ([`ItemRef::MeshSetup`], [`ItemRef::DefaultMeshing`]); older formats read as they are.
-pub const PROJECT_FORMAT: u32 = 52;
+/// Format 53 adds the loads of the walls of a Particle Flow step that steps of other
+/// analyses take ([`LoadKind::WallLoads`]); older formats read as they are.
+pub const PROJECT_FORMAT: u32 = 53;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2542,6 +2546,10 @@ pub enum LoadKind {
     /// A force that follows a signal (an impulse, a sine, a frequency sweep) to excite the
     /// structure in a dynamic step; see [`Excitation`].
     Excitation(Excitation),
+    /// The loads of the material on the walls of a Particle Flow step of another analysis,
+    /// spread as nodal forces onto the faces of the region near the walls; see
+    /// [`WallLoads`].
+    WallLoads(WallLoads),
 }
 
 impl LoadKind {
@@ -2614,6 +2622,7 @@ impl LoadKind {
                 | LoadKind::Centrifugal { .. }
                 | LoadKind::Moving(_)
                 | LoadKind::Excitation(_)
+                | LoadKind::WallLoads(_)
         )
     }
 

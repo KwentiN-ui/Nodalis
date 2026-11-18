@@ -112,6 +112,11 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
             *file = short(file);
         }
     }
+    for load in steps.iter_mut().flat_map(|s| s.loads.iter_mut()) {
+        if let crate::LoadKind::WallLoads(walls) = &mut load.kind {
+            walls.file = short(&walls.file);
+        }
+    }
     hash.add_debug(&steps);
     // The history outputs these steps print.
     let printed: Vec<_> = (history_outputs.iter())

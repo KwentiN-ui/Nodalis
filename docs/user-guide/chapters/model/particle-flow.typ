@@ -40,8 +40,9 @@ FE Model and Results workspaces:
     left out, and the model check warns of it.],
 )
 
-A Particle Flow step is computed alone: the other steps of its analysis must be
-deactivated. Create it with #ui("Steps") > #ui("Step"), type #ui("Particle Flow").
+A Particle Flow step comes first in its analysis: steps before it must be deactivated.
+Static and dynamic steps may follow it; they take the loads on its walls (see
+@particle-flow-wall-loads). Create it with #ui("Steps") > #ui("Step"), type #ui("Particle Flow").
 
 #screenshot("particle-flow-step.png", [A paste flows out of a tube through the holes of a die
 plate under gravity, coloured by its speed and cut in half by a section view. Each particle
@@ -367,3 +368,52 @@ Buckingham-Reiner flow of a Bingham paste through a pipe, the flow out of a slot
 torque on a cylinder turning in a viscous fluid (Couette flow) and the heat it dissipates
 there, and the conduction between a warm and a cold block (the error function of the
 analytic solution).
+
+=== Loads on the tools for FE steps <particle-flow-wall-loads>
+
+The pressure and the friction of the material on the walls can go on to a static or dynamic
+step, where the tools are deformable: the strength of a screw, a blade or a hole plate under
+the loads of the process. Every point of the walls where the material pushed on them during
+the run, with its force, is spread as nodal forces onto the faces of the load's region near
+it.
+
+The simplest way keeps everything in one analysis: add a static or dynamic step after the
+Particle Flow step, support the tool there (e.g. at its shaft) and give it a load of the type
+#ui("Wall loads (of the Particle Flow step)"), which the load dialog offers only in steps
+after a Particle Flow step. The region starts as the parts of the walls. The analysis then
+solves the flow first and the FE steps after it, from the unloaded model: in those steps the
+parts the flow filled are left out, the rigid bodies of the walls hold nothing, and the tools
+are deformable parts with their sections (which the flow ignores). The results hold both: the
+particles in the frames of the flow, the tools with their stresses in the FE steps; each step
+shows its own parts.
+
+The loads also go to a step of another analysis: drag the result row of the Particle Flow
+step onto a step of the other analysis (or onto its #ui("Wall loads") input, see
+@results-links). The step gets a load #ui("Linked Wall Loads").
+
+#fields(
+  [Region], [At first the parts of the walls of the run (in another analysis found by their
+    names); whole parts, picked faces or a surface. Only the faces near a wall take
+    loads: a point of a wall reaches the faces within a cell of the run along the surface
+    (more where the mesh is coarser) that face the same way, so the two sides of a thin
+    blade keep their own loads.],
+  [Walls], [All walls of the run, or the ones ticked.],
+  [Time of the run], [Each frame of the run holds the mean load since the frame before.
+    #ui("Last frame") takes the last one, #ui("Frame at time") the one nearest a time,
+    #ui("Mean over time") the mean over the frames between two times: for a steady flow,
+    such as a screw that turns for a while, the load without the noise of single frames.
+    #ui("Over time") lets every frame act at its time of the run as the time of the step,
+    linear in between: the loads over time, for a dynamic step.],
+)
+
+The loads are taken where they act on the tool: a turning screw takes the loads of every
+frame in its own frame, as it stood at the start, so the mean over a turn is a load around
+the whole screw. The force of the walls is kept whole: the dialog shows it next to the
+force that reaches the faces, and how many points of the walls lie near no face of the
+region (their force is left out, e.g. when the region misses a part of the tool). The moment
+moves by less than a cell. Before the analysis has run, the dialog asks to solve it first. A
+new run of a linked Particle Flow step makes the step out of date, like any results it takes. The loads go to 3D models; those of a 2D run are refused.
+
+#screenshot("particle-flow-wall-loads.png", [A static step #ui("Load") after the Particle
+Flow step of a stirred paste: the blade, held at its shaft, takes the loads of the paste, the
+mean over the second half of the run.])

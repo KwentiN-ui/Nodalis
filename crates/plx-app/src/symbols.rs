@@ -351,6 +351,21 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     add(points[index], moment, SymbolShape::MomentArrow);
                 }
             }
+            // The loads of a Particle Flow run push onto the faces near the walls.
+            Kind::Load(LoadKind::WallLoads(_)) => {
+                let region = match &item.region {
+                    Region::Parts(_) => {
+                        Region::Faces(plx_io::wall_loads::region_faces(model.mesh(), &item.region))
+                    }
+                    other => other.clone(),
+                };
+                let faces = face_geometry(model, &region, &visible);
+                let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
+                for index in sample(&centers, DIVISIONS) {
+                    let face = &faces[index];
+                    add(face.center, -face.normal, SymbolShape::ArrowOnto);
+                }
+            }
             Kind::Load(LoadKind::Pressure(pressure)) => {
                 let faces = face_geometry(model, &item.region, &visible);
                 let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
