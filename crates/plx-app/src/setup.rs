@@ -2300,7 +2300,7 @@ fn nearest_direction(vector: [f64; 3]) -> GravityDirection {
     }
 }
 
-fn load_kinds() -> [(&'static str, &'static str, LoadKind); 11] {
+fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
     [
         ("Force", FORCE, LoadKind::force([0.0; 3])),
         (
@@ -2351,7 +2351,38 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 11] {
                 emissivity: 0.8,
             },
         ),
+        (
+            "Wall loads (of the Particle Flow step)",
+            WALL_LOADS,
+            LoadKind::WallLoads(Default::default()),
+        ),
     ]
+}
+
+/// The parts of the walls of the Particle Flow step of `fe`: those of its rigid bodies and
+/// those a boundary condition of the step holds in shape.
+fn flow_wall_parts(fe: &FeModel, mesh: &FeMesh) -> Vec<String> {
+    let Some(flow) = fe.particle_flow_step() else {
+        return Vec::new();
+    };
+    let rigid = (fe.constraints.iter()).filter_map(|c| match c {
+        plx_model::Constraint::RigidBody(body) if body.active => Some(&body.region),
+        _ => None,
+    });
+    let held = (fe.steps[flow].boundary_conditions.iter())
+        .filter(|bc| plx_model::holds_particle_wall(bc))
+        .map(|bc| &bc.region);
+    let elements: std::collections::BTreeSet<_> = rigid
+        .chain(held)
+        .flat_map(|region| {
+            (region.elements(mesh).into_iter())
+                .chain(region.faces(mesh).into_iter().map(|(e, _)| e))
+        })
+        .collect();
+    (mesh.parts.iter())
+        .filter(|p| p.elements.iter().any(|e| elements.contains(e)))
+        .map(|p| p.name.clone())
+        .collect()
 }
 
 /// The initial condition kinds of the dialog: label, default name and the kind with zero
@@ -3715,11 +3746,13 @@ impl Editor {
                 let label = (load_kinds().into_iter())
                     .find(|(_, name, _)| *name == current)
                     .map_or("", |(label, ..)| label);
-                // The loads on walls come from a link and stay what they are.
-                let linked = matches!(load.kind, LoadKind::WallLoads(_));
+                // The loads on walls a link brings stay what they are.
+                let linked = matches!(&load.kind, LoadKind::WallLoads(w) if w.file().is_some());
                 if linked {
                     ui.label("Wall loads (linked from a Particle Flow step)");
                 }
+                // Those of a Particle Flow step before the step.
+                let flow_before = model.fe.flow_before(*step);
                 if !linked {
                     egui::ComboBox::from_id_salt("load kind")
                         .selected_text(label)
@@ -3734,6 +3767,9 @@ impl Editor {
                                 if axisymmetric && matches!(kind, LoadKind::Moving(_)) {
                                     continue;
                                 }
+                                if !flow_before && matches!(kind, LoadKind::WallLoads(_)) {
+                                    continue;
+                                }
                                 if ui.selectable_label(current == name, label).clicked()
                                     && current != name
                                 {
@@ -3741,7 +3777,17 @@ impl Editor {
                                     load.kind = kind;
                                     load.tables = Default::default();
                                     rename_default(&mut load.name, current, name, &taken);
-                                    if moved {
+                                    if matches!(load.kind, LoadKind::WallLoads(_)) {
+                                        // On the tools: the parts of the walls.
+                                        let (sources, target) = load_picks(&load.kind, &model.fe);
+                                        let parts = flow_wall_parts(&model.fe, model.mesh());
+                                        *region = RegionDraft::from_region(
+                                            &Region::Parts(parts),
+                                            sources,
+                                            target,
+                                            model.mesh(),
+                                        );
+                                    } else if moved {
                                         let (sources, target) = load_picks(&load.kind, &model.fe);
                                         let (kept, dropped) =
                                             region.converted(sources, target, model.mesh());

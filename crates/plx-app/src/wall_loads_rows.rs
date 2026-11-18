@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use egui::Ui;
 use plx_model::units::{Quantity, UnitSystem};
@@ -32,10 +33,30 @@ struct Summary {
     missed: usize,
 }
 
-fn summary(model: &Model, region: &Region, load: &WallLoads) -> Result<Summary, String> {
-    let file = load
-        .file()
-        .ok_or_else(|| "Link a Particle Flow step to the Wall loads of the step.".to_string())?;
+/// Tells the rows where the run of the analysis shown writes the loads on the walls of its
+/// Particle Flow step, which the wall loads of its later steps take.
+pub fn set_own_file(ctx: &egui::Context, file: PathBuf) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(OWN_FILE), file));
+}
+
+const OWN_FILE: &str = "wall loads of the analysis";
+
+fn summary(
+    model: &Model,
+    region: &Region,
+    load: &WallLoads,
+    own: Option<&Path>,
+) -> Result<Summary, String> {
+    let file = match (load.file(), own) {
+        (Some(file), _) => file,
+        (None, Some(own)) if model.fe.particle_flow_step().is_some() => {
+            if !own.is_file() {
+                return Err("Solve the analysis: its Particle Flow step gives the loads.".into());
+            }
+            own
+        }
+        _ => return Err("Link a Particle Flow step to the Wall loads of the step.".into()),
+    };
     let modified = std::fs::metadata(file).and_then(|m| m.modified()).ok();
     let key = format!("{file:?}{modified:?}{region:?}{load:?}");
     if let Some(found) = SUMMARIES.with(|s| s.borrow().get(&key).cloned()) {
@@ -81,7 +102,8 @@ fn summary(model: &Model, region: &Region, load: &WallLoads) -> Result<Summary, 
 
 /// The rows of `load`, on the faces of `region`.
 pub fn rows(ui: &mut Ui, load: &mut WallLoads, region: &Region, model: &Model, units: UnitSystem) {
-    let found = summary(model, region, load);
+    let own: Option<PathBuf> = ui.data(|d| d.get_temp(egui::Id::new(OWN_FILE)));
+    let found = summary(model, region, load, own.as_deref());
     // The walls: all, or those ticked.
     if let Ok(summary) = &found
         && summary.walls.len() > 1

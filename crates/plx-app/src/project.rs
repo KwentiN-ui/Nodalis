@@ -5021,6 +5021,7 @@ impl ProjectApp {
         };
         let mut window = AnalysisWindow::new(render_state, settings, &name);
         window.set_project_folder(folder);
+        window.set_run_id(id);
         window.set_links(incoming, upstream);
         if let Some(view) = view {
             window.show_workspace(view.clone());

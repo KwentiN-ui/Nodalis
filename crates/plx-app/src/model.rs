@@ -78,6 +78,17 @@ pub struct PartInfo {
     /// A part of loose cubes that share no node, the particles of a Particle Flow step:
     /// drawn without edges and with rounded shading, which keeps its many faces cheap.
     pub loose: bool,
+    /// A part of the results the shown step does not show, see
+    /// [`plx_results::steps::StepRecord::elements`]: the particles in the FE steps after a
+    /// Particle Flow step, the tools in the flow.
+    pub off_step: bool,
+}
+
+impl PartInfo {
+    /// Whether the part is drawn: visible, and shown by the step.
+    pub fn shown(&self) -> bool {
+        self.visible && !self.off_step
+    }
 }
 
 /// A loaded input file with everything the GUI shows about it.
@@ -889,6 +900,7 @@ impl Model {
                 imported: false,
                 own_mesh: false,
                 loose,
+                off_step: false,
             });
         }
         let origins = plx_model::PartOrigins::imported(&mesh);
@@ -1743,7 +1755,7 @@ impl Model {
         let Some(view) = &mut self.results else {
             return;
         };
-        if self.parts.iter().all(|p| p.contours && p.visible) {
+        if self.parts.iter().all(|p| p.contours && p.shown()) {
             view.plain_nodes.clear();
             return;
         }
@@ -1751,7 +1763,7 @@ impl Model {
         let mut plain = vec![false; count];
         let mut coloured = vec![false; count];
         for (index, info) in self.parts.iter().enumerate() {
-            let target = if info.contours && info.visible {
+            let target = if info.contours && info.shown() {
                 &mut coloured
             } else {
                 &mut plain
@@ -2460,7 +2472,7 @@ impl Model {
             std::borrow::Cow::Borrowed(self.mesh.coords())
         };
         (cells.iter().zip(&self.parts))
-            .filter(|(_, info)| info.visible)
+            .filter(|(_, info)| info.shown())
             .map(|(cells, _)| section_values(cells, &coords, point, normal, &values))
             .reduce(|mut all, part| {
                 all.merge(part);
@@ -2562,7 +2574,7 @@ impl Model {
         self.parts
             .iter()
             .zip(&self.mesh.parts)
-            .filter(|(info, _)| info.visible)
+            .filter(|(info, _)| info.shown())
             .flat_map(|(_, part)| &part.elements)
             .filter_map(|&id| self.mesh.element_index(id))
             .flat_map(|index| elements[index].nodes.iter().copied())
@@ -2575,7 +2587,7 @@ impl Model {
         self.skins
             .iter()
             .zip(&self.parts)
-            .filter(|(_, info)| info.visible)
+            .filter(|(_, info)| info.shown())
             .flat_map(|(skin, _)| &skin.faces)
             .map(|f| (elements[f.element].id, f.face as u8 + 1))
             .collect()
@@ -2784,7 +2796,7 @@ impl Model {
         let skin_nodes = &self.skin_lookup().nodes;
         let unit = direction.normalize_or_zero();
         let mut parts: Vec<(f32, usize)> = (self.parts.iter().enumerate())
-            .filter(|(index, info)| info.visible && !info.suppressed && *index < self.skins.len())
+            .filter(|(index, info)| info.shown() && !info.suppressed && *index < self.skins.len())
             .filter_map(|(index, _)| {
                 let nodes = skin_nodes.get(index)?;
                 let (min, max) = (nodes.iter())
@@ -2985,12 +2997,28 @@ impl Model {
             |n| n.to_string_lossy().into_owned(),
         )
     }
+    /// Marks the parts the shown step of the results does not show ([`PartInfo::off_step`]);
+    /// returns whether any changed.
+    pub fn sync_step_parts(&mut self) -> bool {
+        let range = (self.results.as_ref())
+            .and_then(|view| view.current_step())
+            .and_then(|step| step.elements);
+        let mut changed = false;
+        for (part, mesh_part) in self.parts.iter_mut().zip(&self.mesh.parts) {
+            let off = range.is_some_and(|[first, last]| {
+                (mesh_part.elements.first()).is_some_and(|&e| e < first || e > last)
+            });
+            changed |= part.off_step != off;
+            part.off_step = off;
+        }
+        changed
+    }
 
     /// Bounding box of all visible parts, relative to the model origin.
     pub fn visible_bounds(&self) -> Option<(Vec3, Vec3)> {
         self.parts
             .iter()
-            .filter(|p| p.visible)
+            .filter(|p| p.shown())
             .filter_map(|p| p.bounds)
             .reduce(|(min_a, max_a), (min_b, max_b)| (min_a.min(min_b), max_a.max(max_b)))
     }

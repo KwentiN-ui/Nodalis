@@ -57,6 +57,8 @@ pub struct LoweredParticles {
     pub bodies: Vec<String>,
     /// The names of the FE parts of each wall, in the order of [`ParticleModel::walls`].
     pub wall_parts: Vec<Vec<String>>,
+    /// The rigid bodies of the model that are walls, by index of the constraints.
+    pub rigid_walls: Vec<usize>,
     /// What the history outputs of the step ask for.
     pub history: HistoryRequest,
     /// What the lowering noticed but did not stop for.
@@ -81,12 +83,25 @@ pub fn lower(
         unreachable!("particle_step finds Particle Flow steps")
     };
     let item = Some(ModelItem::Step(index));
-    if let Some(other) = (fe.steps.iter()).position(|s| s.active && !std::ptr::eq(s, step)) {
+    // FE steps may follow the flow; none comes before it.
+    if let Some(other) = (fe.steps[..index].iter()).find(|s| s.active) {
         return Err(error(
             format!(
-                "{}: a Particle Flow step is computed alone. Deactivate step {} or put the \
-                 Particle Flow step into an analysis of its own.",
-                step.name, fe.steps[other].name
+                "{}: a Particle Flow step comes first. Deactivate step {} or move it after \
+                 the Particle Flow step.",
+                step.name, other.name
+            ),
+            item,
+        ));
+    }
+    if let Some(other) = (fe.steps[index + 1..].iter())
+        .find(|s| s.active && matches!(s.kind, StepKind::ParticleFlow(_)))
+    {
+        return Err(error(
+            format!(
+                "{}: an analysis computes one Particle Flow step. Deactivate step {} or put \
+                 it into an analysis of its own.",
+                step.name, other.name
             ),
             item,
         ));
@@ -486,9 +501,83 @@ pub fn lower(
         step: index,
         bodies,
         wall_parts,
+        rigid_walls: walls.iter().filter_map(|w| w.constraint).collect(),
         history,
         warnings,
     })
+}
+
+/// Whether the model has active steps after its Particle Flow step: FE steps that are
+/// computed after the flow, with the loads on its walls.
+pub fn has_steps_after_flow(fe: &FeModel) -> bool {
+    particle_step(fe).is_some_and(|index| fe.steps[index + 1..].iter().any(|s| s.active))
+}
+
+/// The model of the FE steps after the Particle Flow step of `fe` that `lowered` was made
+/// of: the steps up to the flow are left out, and so are the parts the flow fills and the
+/// rigid bodies of its walls; the tools are parts of their own there, with their sections.
+/// The wall loads of the steps without a file take the loads on the walls of `walls`, the
+/// file the run of the flow writes.
+pub fn after_flow(
+    mesh: &FeMesh,
+    fe: &FeModel,
+    lowered: &LoweredParticles,
+    walls: &std::path::Path,
+) -> (FeMesh, FeModel) {
+    let mut fe = fe.clone();
+    for step in &mut fe.steps[..=lowered.step] {
+        step.active = false;
+    }
+    for &c in &lowered.rigid_walls {
+        if let Some(Constraint::RigidBody(body)) = fe.constraints.get_mut(c) {
+            body.active = false;
+        }
+    }
+    // What touches the filled parts goes with them: the contact of the walls with the
+    // material, for one.
+    let filled_elements: BTreeSet<plx_mesh::ElementId> = (mesh.parts.iter())
+        .filter(|p| lowered.bodies.contains(&p.name))
+        .flat_map(|p| p.elements.iter().copied())
+        .collect();
+    let touches = |region: &plx_model::Region| {
+        (region.elements(mesh).into_iter())
+            .chain(region.faces(mesh).into_iter().map(|(e, _)| e))
+            .any(|e| filled_elements.contains(&e))
+    };
+    for pair in &mut fe.contact_pairs {
+        if touches(&pair.master) || touches(&pair.slave) {
+            pair.active = false;
+        }
+    }
+    for tie in &mut fe.ties {
+        if touches(&tie.master) || touches(&tie.slave) {
+            tie.active = false;
+        }
+    }
+    for region in &mut fe.contact_regions {
+        if touches(&region.side_a) || touches(&region.side_b) {
+            region.active = false;
+        }
+    }
+    let mut mesh = mesh.clone();
+    mesh.remove_bodies(&lowered.bodies);
+    // The sections of the filled parts alone go with them.
+    let filled = |section: &plx_model::Section| {
+        matches!(&section.region, plx_model::Region::Parts(names)
+            if !names.is_empty() && names.iter().all(|n| lowered.bodies.contains(n)))
+    };
+    fe.sections.retain(|section| !filled(section));
+    fe.remove_parts_from_regions(&lowered.bodies);
+    for step in &mut fe.steps {
+        for load in &mut step.loads {
+            if let plx_model::LoadKind::WallLoads(w) = &mut load.kind
+                && w.file().is_none()
+            {
+                w.file = walls.to_owned();
+            }
+        }
+    }
+    (mesh, fe)
 }
 
 /// What the history outputs of step `step` ask for: the energies, and of a node output
@@ -1516,6 +1605,40 @@ mod tests {
             steps: vec![step],
             ..FeModel::default()
         }
+    }
+
+    /// FE steps after the flow: they come after it, without the paste and with a
+    /// deformable tool, and take the loads on its walls from the file of the run.
+    #[test]
+    fn fe_steps_after_the_flow_compute_the_tools_alone() {
+        let mesh = mesh();
+        let mut fe = model(Some(0.5));
+        let mut load = plx_model::Step::new_static("Load");
+        load.loads.push(plx_model::Load::new(
+            "Walls",
+            Region::Parts(vec!["Tool".into()]),
+            plx_model::LoadKind::WallLoads(Default::default()),
+        ));
+        fe.steps.push(load);
+        assert!(has_steps_after_flow(&fe));
+        let lowered = lower(&mesh, &fe, "after").unwrap();
+        assert_eq!(lowered.bodies, ["Paste"]);
+        assert_eq!(lowered.rigid_walls, [0]);
+        let walls = std::path::Path::new("/runs/a1.walls");
+        let (mesh, fe) = after_flow(&mesh, &fe, &lowered, walls);
+        assert!(!fe.steps[0].active && fe.steps[1].active);
+        assert!(matches!(&fe.constraints[0], Constraint::RigidBody(b) if !b.active));
+        let parts: Vec<_> = mesh.parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(parts, ["Tool"]);
+        assert!(fe.sections.is_empty());
+        let plx_model::LoadKind::WallLoads(w) = &fe.steps[1].loads[0].kind else {
+            panic!("a wall load")
+        };
+        assert_eq!(w.file(), Some(walls));
+        // A step before the flow is not computed with it.
+        let mut fe = model(None);
+        fe.steps.insert(0, plx_model::Step::new_static("Before"));
+        assert!(lower(&mesh, &fe, "before").is_err());
     }
 
     /// The two parts of [`mesh`] in the plane: the paste of two squares, the tool of one.

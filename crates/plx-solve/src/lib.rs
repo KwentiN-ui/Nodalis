@@ -162,7 +162,7 @@ pub struct Prepared {
 
 /// `results` without what the steps `preparation` gave; a run that stopped in one of them
 /// stopped in the step it prepares.
-fn drop_preparation_steps(results: &mut SolverResults, preparation: &[u32]) {
+pub(crate) fn drop_preparation_steps(results: &mut SolverResults, preparation: &[u32]) {
     if preparation.is_empty() {
         return;
     }
@@ -227,7 +227,7 @@ impl Convergence {
 }
 
 /// What a run computes: an input text the solver reads, or an analysis given directly.
-enum Job {
+pub(crate) enum Job {
     Text(String),
     Analysis(Box<Prepared>),
 }
@@ -288,7 +288,7 @@ impl Job {
         }
     }
 
-    fn run(
+    pub(crate) fn run(
         self,
         path: &Path,
         options: &plxs_session::JobOptions,

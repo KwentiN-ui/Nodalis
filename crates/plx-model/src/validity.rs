@@ -384,9 +384,11 @@ impl FeModel {
                         .or_else(|| load_system_problem(self, load))
                         .or_else(|| match &load.kind {
                             LoadKind::WallLoads(walls) => match walls.file() {
+                                // The loads on the walls of the flow before it.
+                                None if self.flow_before(s) => None,
                                 None => Some(
-                                    "No Particle Flow step is linked to the Wall loads of the \
-                                     step"
+                                    "No Particle Flow step comes before the step or is linked \
+                                     to its Wall loads"
                                         .into(),
                                 ),
                                 Some(file) => (!file.is_file()).then(|| {

@@ -4,6 +4,7 @@
 //! of the result mesh, in the order of [`plx_mesh::FeMesh::coords`]; nodes without a value are
 //! `NaN`.
 
+pub mod chained;
 mod derived;
 pub mod display;
 pub use plx_model::equation;

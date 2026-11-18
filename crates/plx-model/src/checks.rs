@@ -144,7 +144,8 @@ pub enum Problem {
     /// A sensitivity step without the static or frequency step before it whose solution
     /// its design responses need.
     NoSensitivityBase,
-    /// A Particle Flow step with other active steps: it is computed alone.
+    /// A Particle Flow step after other active steps, or a second one: it comes first, and
+    /// only FE steps may follow it.
     ParticleFlowNotAlone,
     /// A part a Particle Flow step fills, or the material it is filled with, lacks what the
     /// particles need: a section, a density, elastic constants.
@@ -354,7 +355,7 @@ impl Problem {
             Problem::CoarseInfillWalls => "Mesh coarser than the infill walls",
             Problem::NoExpansion => "Temperature without thermal expansion",
             Problem::NoSensitivityBase => "No step for the sensitivities",
-            Problem::ParticleFlowNotAlone => "Particle Flow step not alone",
+            Problem::ParticleFlowNotAlone => "Particle Flow step not first",
             Problem::ParticleBodyIncomplete => "Part cannot be filled with particles",
             Problem::FlowBoundaryIncomplete => "Flow boundary condition cannot act",
             Problem::ParticleFlowIgnored => "Ignored by the Particle Flow step",
@@ -671,8 +672,9 @@ impl Problem {
                  the analysis runs, but the temperature has no effect."
             }
             Problem::ParticleFlowNotAlone => {
-                "A Particle Flow step is computed by the particle solver, alone: it does not \
-                 continue from the state of another step, and no step continues from it."
+                "A Particle Flow step is computed by the particle solver first: it does not \
+                 continue from the state of another step. FE steps after it start from the \
+                 unloaded model and can take the loads on its walls."
             }
             Problem::ParticleFlowIgnored => {
                 "The particles take gravity as their only load, and boundary conditions move \
@@ -1152,8 +1154,8 @@ impl Problem {
                  (steel: 1.2e-5 1/K)."
             }
             Problem::ParticleFlowNotAlone => {
-                "Deactivate the other steps, or put the Particle Flow step into an analysis of \
-                 its own."
+                "Deactivate the steps before it and any second Particle Flow step, or move them \
+                 after it."
             }
             Problem::ParticleFlowIgnored => {
                 "Delete or deactivate it in this step. To push the material, move a rigid \
@@ -1559,6 +1561,12 @@ impl FeModel {
         (self.steps.iter()).position(|s| s.active && matches!(s.kind, StepKind::ParticleFlow(_)))
     }
 
+    /// Whether an active Particle Flow step comes before step `step`: the step can take the
+    /// loads on its walls.
+    pub fn flow_before(&self, step: usize) -> bool {
+        self.particle_flow_step().is_some_and(|flow| flow < step)
+    }
+
     /// [`FeModel::check`] of a model with a Particle Flow step: alone among the active steps,
     /// and every part it fills has a section with a material the particles can take.
     fn check_particle_flow(&self, mesh: &FeMesh) -> Vec<Finding> {
@@ -1567,13 +1575,16 @@ impl FeModel {
             return findings;
         };
         for (s, step) in self.steps.iter().enumerate() {
-            if s != index && step.active {
+            let flow = matches!(step.kind, StepKind::ParticleFlow(_));
+            if s != index && step.active && (s < index || flow) {
                 findings.push(Finding::new(
                     ModelItem::Step(index),
                     Problem::ParticleFlowNotAlone,
                     format!(
-                        "{} is computed alone, but step {} is active too.",
-                        self.steps[index].name, step.name
+                        "{} comes first, but step {} is active {}.",
+                        self.steps[index].name,
+                        step.name,
+                        if flow { "too" } else { "before it" }
                     ),
                 ));
                 break;
@@ -4708,7 +4719,7 @@ mod tests {
         findings.iter().map(|f| (f.item, f.problem)).collect()
     }
 
-    /// A Particle Flow step is computed alone, and every part it fills needs a density.
+    /// A Particle Flow step comes first, and every part it fills needs a density.
     #[test]
     fn a_particle_flow_step_is_alone_and_fills_complete_parts() {
         let mesh = cubes(1, false);
@@ -4721,6 +4732,11 @@ mod tests {
             vec![(ModelItem::Step(1), Problem::ParticleFlowNotAlone)]
         );
         model.steps[0].active = false;
+        assert!(check(&model, &mesh).is_empty());
+        // FE steps may follow it.
+        let after = model.steps.remove(0);
+        model.steps.push(after);
+        model.steps[1].active = true;
         assert!(check(&model, &mesh).is_empty());
         model.materials[0].density = None;
         assert_eq!(
