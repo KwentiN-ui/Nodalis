@@ -2736,6 +2736,13 @@ impl Workbench {
     /// Acts on what the user picked in the tree or in a part's context menu in the 3D view.
     fn tree_response(&mut self, ctx: &egui::Context, view: TreeView, mut response: TreeResponse) {
         self.guard_linked(view, &mut response);
+        let parts = self.shown().map_or(0, |m| m.parts.len());
+        if let Some(isolated) = response.isolate.take() {
+            (response.visibility).extend((0..parts).map(|i| (i, isolated.contains(&i))));
+        }
+        if std::mem::take(&mut response.show_all_parts) {
+            response.visibility.extend((0..parts).map(|i| (i, true)));
+        }
         if !response.visibility.is_empty() {
             for (index, visible) in response.visibility {
                 if let Some(part) = self.shown_mut().and_then(|m| m.parts.get_mut(index)) {
@@ -5089,6 +5096,7 @@ impl Workbench {
                 info.own_mesh,
             ))
         });
+        let all_shown = (self.shown()).is_none_or(|m| m.parts.iter().all(|p| p.visible));
         let mut tree_response = TreeResponse::default();
         let mut command = None;
         let selected = self.tree.selected_parts(self.tree_view);
@@ -5105,11 +5113,18 @@ impl Workbench {
                     suppressed,
                     imported,
                     own_mesh,
+                    all_shown,
                     view,
                     &selected,
                     &compounds,
                     &mut tree_response,
                 );
+                ui.separator();
+            } else if !all_shown {
+                // Off the parts, the way back after Isolate or Hide.
+                if ui.button("Show All Parts").clicked() {
+                    tree_response.show_all_parts = true;
+                }
                 ui.separator();
             }
             command = crate::viewport::view_menu(ui, self.viewport.planar());

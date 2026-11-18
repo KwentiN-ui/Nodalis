@@ -389,6 +389,10 @@ fn same_items(a: &[TreeItem], b: &[TreeItem]) -> bool {
 #[derive(Default)]
 pub struct TreeResponse {
     pub visibility: Vec<(usize, bool)>,
+    /// Show only these parts and hide all others.
+    pub isolate: Option<Vec<usize>>,
+    /// Show every part again, such as after Isolate.
+    pub show_all_parts: bool,
     /// Colour contours of results parts turned on (`true`) or off.
     pub contours: Vec<(usize, bool)>,
     /// A result component was picked (field, component).
@@ -985,6 +989,9 @@ fn part_icon(part: &PartInfo) -> TreeIcon {
     }
 }
 
+const ISOLATE_TIP: &str = "Hides all other parts, so that only this part (or the selected \
+                           parts) is shown. Show All Parts brings the others back.";
+
 /// Context menu of a part, the same in the tree and in the 3D view. A part of the geometry
 /// is meshed from here. On one of several selected parts, hiding and
 /// deleting take them all.
@@ -997,6 +1004,7 @@ pub fn part_menu(
     suppressed: bool,
     imported: bool,
     own_mesh: bool,
+    all_shown: bool,
     view: TreeView,
     selected: &BTreeSet<usize>,
     compounds: &[(String, Vec<usize>)],
@@ -1063,6 +1071,16 @@ pub fn part_menu(
         } else {
             response.visibility.push((index, !visible));
         }
+    }
+    if ui.button("Isolate").on_hover_text(ISOLATE_TIP).clicked() {
+        response.isolate = Some(if selected.contains(&index) {
+            selected.iter().copied().collect()
+        } else {
+            vec![index]
+        });
+    }
+    if !all_shown && ui.button("Show All Parts").clicked() {
+        response.show_all_parts = true;
     }
     if view == TreeView::Results {
         // A part without colour contours is grey and not part of the legend range.
@@ -2048,6 +2066,7 @@ impl Tree<'_> {
         if self.hidden(&TreeItem::Part(index)) {
             return;
         }
+        let all_shown = model.parts.iter().all(|p| p.visible);
         let Some(part) = model.parts.get_mut(index) else {
             return;
         };
@@ -2075,6 +2094,7 @@ impl Tree<'_> {
                 part.suppressed,
                 part.imported,
                 part.own_mesh,
+                all_shown,
                 view,
                 &selected,
                 compounds,
