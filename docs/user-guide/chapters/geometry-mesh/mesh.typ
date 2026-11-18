@@ -12,6 +12,17 @@ with ties, contacts or node ties (@constraints).
 The output pane lists each part with its element count and size range. Afterwards Nodalis
 switches to the FE Model workspace.
 
+The Geometry workspace shows the mesh too: a part that is meshed has its element edges drawn
+over its faces, so one sees which parts are meshed and how without switching to the FE Model
+workspace. Parts without a mesh, suppressed parts and parts whose mesh is out of date
+show only their geometry. #ui("Edges Only") on the #ui("View") tab hides the
+element edges, #ui("Mesh Edges") shows them again (@view). The edges are made in the
+background the first time the workspace is shown after meshing, so a large model does not
+hold up the view.
+
+#screenshot("geometry-mesh-edges.png", [Geometry workspace: the meshed part shows its element
+  edges, the part without a mesh only its geometry])
+
 === Cancelling the meshing <cancel-meshing>
 
 Gmsh runs in a separate process, so a meshing that takes too long, for example because the

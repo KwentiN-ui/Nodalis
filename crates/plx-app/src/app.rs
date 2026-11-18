@@ -171,6 +171,8 @@ struct Workbench {
     /// The surfaces of the results scene being built on another thread; the scene shown
     /// stays until they are ready.
     scene_job: Option<SceneJob>,
+    /// The element edges drawn over the geometry being made on another thread.
+    mesh_overlay_job: Option<MeshOverlayJob>,
     /// Open dialog creating or editing an item of the FE model.
     editor: Option<Editor>,
     /// The step new boundary conditions, loads, outputs and defined fields go into, by name;
@@ -357,6 +359,7 @@ impl AnalysisWindow {
                 frame_changed: false,
                 frame_cache: Default::default(),
                 scene_job: None,
+                mesh_overlay_job: None,
                 editor: None,
                 active_step: None,
                 step_selection: None,
@@ -1196,6 +1199,13 @@ pub fn export_calculix_results(
 
 /// The surfaces of the parts of a results scene, built on another thread
 /// ([`crate::model::SceneBase`]).
+/// The element edges of the meshed parts drawn over the geometry, being made on another
+/// thread from what the key tells.
+struct MeshOverlayJob {
+    key: u64,
+    overlays: std::sync::mpsc::Receiver<Vec<Option<crate::model::MeshOverlay>>>,
+}
+
 struct SceneJob {
     meshes: std::sync::mpsc::Receiver<Vec<RenderMesh>>,
     /// Only the animation frame changed: the scenes of the other frames stay.
@@ -1945,6 +1955,7 @@ impl AnalysisWindow {
         self.workbench.linked_prompt_window(&ctx);
         self.workbench.update_explosion(&ctx);
         self.workbench.update_thick_shells();
+        self.workbench.update_mesh_overlay(&ctx);
         self.workbench.rebuild_if_results_changed();
         self.workbench.update_section();
         self.workbench.update_feature_overlay();
@@ -7921,6 +7932,59 @@ impl Workbench {
             .map(|(s, p)| (s.clone(), p.cloned()))
             .collect();
         self.results_changed = true;
+    }
+
+    /// Draws the element edges of the meshed parts over the geometry in the Geometry
+    /// workspace, so that it shows which parts are meshed and how. They are made on another
+    /// thread, only while the workspace is shown and when the mesh or the geometry display
+    /// changed; a part whose mesh is out of date gets none.
+    fn update_mesh_overlay(&mut self, ctx: &egui::Context) {
+        use std::sync::mpsc::TryRecvError;
+        if let Some(job) = &self.mesh_overlay_job {
+            match job.overlays.try_recv() {
+                Ok(overlays) => {
+                    let key = job.key;
+                    self.mesh_overlay_job = None;
+                    if let Some(view) = &mut self.geometry {
+                        view.set_mesh_overlay(key, overlays);
+                        self.results_changed |= self.tree_view == TreeView::Geometry;
+                    }
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.mesh_overlay_job = None,
+            }
+        }
+        if self.tree_view != TreeView::Geometry {
+            return;
+        }
+        let stale = (self.cached_status()).map_or_else(Vec::new, |s| s.stale_parts);
+        let (Some(model), Some(view)) = (&self.model, &self.geometry) else {
+            return;
+        };
+        let mut hash = plx_mesh::Fnv::new();
+        hash.add(&model.mesh_revision().to_le_bytes());
+        let mesh = model.mesh();
+        hash.add_debug(&(mesh.node_count(), mesh.element_count()));
+        hash.add_debug(&model.geometry.as_ref().map(|g| &g.compounds));
+        hash.add_debug(&stale);
+        let names: Vec<&str> = view.parts.iter().map(|p| p.name.as_str()).collect();
+        hash.add_debug(&names);
+        hash.add_debug(&view.origin().to_array());
+        let key = hash.finish();
+        let running = self.mesh_overlay_job.as_ref().map(|job| job.key);
+        if view.mesh_overlay_key() == Some(key) || running == Some(key) {
+            return;
+        }
+        let source = model.mesh_overlay_source(view, &stale);
+        let (sender, overlays) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("mesh overlay".into())
+            .spawn(move || {
+                let _ = sender.send(source.build());
+                ctx.request_repaint();
+            });
+        self.mesh_overlay_job = spawned.is_ok().then_some(MeshOverlayJob { key, overlays });
     }
 
     /// Rebuilds the scene after the result selection or deformation changed, once the

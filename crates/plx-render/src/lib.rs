@@ -12,7 +12,7 @@ mod shell;
 
 pub use beam::{BeamShape, beam_mesh};
 pub use camera::{Camera, StandardView};
-pub use fe::{mesh_wireframe, part_color, part_render_mesh, wireframe_edges};
+pub use fe::{MESH_EDGE_OPACITY, mesh_wireframe, part_color, part_render_mesh, wireframe_edges};
 pub use mesh::{Directions, NodeBlend, RenderMesh, Vertex};
 pub use renderer::{
     COLOR_FORMAT, ContourPalette, DisplayOptions, LicDisplay, LicSource, ViewportRenderer,
