@@ -696,10 +696,18 @@ components, the utilization of the largest stress of a region. Add it with
 A new block has no inputs, only an empty pin. Drag the pin of a number or a series to it, and
 it becomes the input #ui("a"); the next one #ui("b"), then #ui("c"), up to #ui("z"), as with
 the inputs of a group (@node-groups). Every input comes from its link: remove the link (right-click
-its pin) and the input goes. The inputs after it move up a letter, in the formula too, and
-where the formula used the removed input it now shows `?`, so it gives no result until you
-link a new input or change the formula. The #ui("Result") row gives the number or the series the formula computes; drag
-its pin on to any number of its kind, another Math or Formula block, a Plot or a Preview block.
+its pin) and the input waits for a new one. The formula stays as you typed it, and no other
+input changes its letter. Until a new link gives the input, the formula gives no result: the
+#ui("Result") row names the input that is not connected, and an input between linked ones
+shows #ui("not connected"). Drag the pin of a number to the empty pin, and it gives the
+first input that lost its link, so the formula works again; with none, it adds the next
+letter. The last inputs without a link go from the block. The #ui("Result") row gives the
+number or the series the formula computes; drag its pin on to any number of its kind, another
+Math or Formula block, a Plot or a Preview block.
+
+#screenshot("formula-unconnected-input.png", [Copy of Formula names b, which no link gives:
+  it gives no result and says so. In Sum the link of b was removed: b waits for a new link,
+  c keeps its letter, and a wire dropped on the empty pin gives b again])
 
 The block shows its formula read-only. Click it, or double-click the block, to edit it in its
 window: the formula, the result it gives as you type, the inputs with their kinds and where
