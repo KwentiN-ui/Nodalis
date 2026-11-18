@@ -19,6 +19,8 @@ pub(super) const SOCKET: &str = "Socket";
 /// The last element of the path of an empty pin, which makes a new socket, choice or
 /// column once a wire is dropped on it, as in Blender.
 pub(super) const OPEN: &str = "+";
+/// The path of the row between the outputs and the inputs of a group, which has no pin.
+pub(super) const GAP: &str = "Gap";
 /// Depth of nested groups followed at most, against a loop in a damaged file.
 const DEPTH: usize = 64;
 
@@ -35,6 +37,11 @@ pub(super) fn socket_of(path: &[String]) -> Option<u32> {
         [cell, id] if cell == SOCKET => id.parse().ok(),
         _ => None,
     }
+}
+
+/// Whether the path is that of the row between the outputs and the inputs of a group.
+pub(super) fn is_gap(path: &[String]) -> bool {
+    matches!(path, [cell] if cell == GAP)
 }
 
 /// Whether the path is that of an empty pin.
@@ -622,9 +629,11 @@ impl Tree for Vec<Node> {
                 }
                 socket.targets.retain(&valid);
             }
-            let used = |s: &GroupSocket| s.source.is_some() || !s.targets.is_empty();
-            group.inputs.retain(used);
-            group.outputs.retain(used);
+            // A socket goes as soon as no wire inside the group is at it any more, with the
+            // wires outside: an input without wires from the Group Input block, an output
+            // without the wire into the Group Output block.
+            group.inputs.retain(|s| !s.targets.is_empty());
+            group.outputs.retain(|s| s.source.is_some());
         }
     }
 
@@ -914,7 +923,7 @@ impl ProjectApp {
                 socket.name.clone(),
                 icon_of(&socket.kind),
                 format!(
-                    "{} of the group. Double-click to rename it.\n{tip}",
+                    "{} of the group. Double-click to rename it; right-click it, or inside the group its cross, to remove it.\n{tip}",
                     if input { "An input" } else { "An output" }
                 ),
             )
@@ -931,13 +940,22 @@ impl ProjectApp {
         };
         match &node.block {
             Block::Group(group) => {
+                // As in Blender, the outputs come first, then a gap, then the inputs.
                 let mut rows: Vec<Row> = (group.outputs.iter())
                     .map(|s| row(s, false, true, "Its wires go on from here."))
-                    .chain(
-                        (group.inputs.iter())
-                            .map(|s| row(s, true, false, "A wire here goes on inside.")),
-                    )
                     .collect();
+                if !group.outputs.is_empty() && !group.inputs.is_empty() {
+                    rows.push(socket_row(
+                        vec![GAP.to_owned()],
+                        String::new(),
+                        NodeIcon::Group,
+                        String::new(),
+                    ));
+                }
+                rows.extend(
+                    (group.inputs.iter())
+                        .map(|s| row(s, true, false, "A wire here goes on inside.")),
+                );
                 if rows.is_empty() {
                     rows.push(socket_row(
                         Vec::new(),
@@ -1165,6 +1183,8 @@ impl ProjectApp {
             }
             (None, None) => {}
         }
+        // A socket left without a wire inside goes, and with it the links through it.
+        self.nodes.tidy_sockets();
         self.route(before);
         // The wires between blocks right here, as without groups.
         if !any_grouped {
@@ -1651,6 +1671,54 @@ impl ProjectApp {
         }
     }
 
+    /// The pin a wire into the socket of the row `path` of the block `id` goes to: the
+    /// group's own pin for an input, that of its Group Output block for an output.
+    fn taking_pin(&self, id: u64, path: &[String]) -> Option<(u64, bool, u32, GroupPin)> {
+        let pin = GroupPin {
+            node: id,
+            path: path.to_vec(),
+        };
+        let (group, input, socket) = self.nodes.side_of(&pin)?.socket();
+        let node = if input {
+            group
+        } else {
+            self.nodes.ends(group).1?
+        };
+        let path = vec![SOCKET.to_owned(), socket.to_string()];
+        Some((group, input, socket, GroupPin { node, path }))
+    }
+
+    /// The blocks that lose what they take when the socket of the row `path` of the block
+    /// `id` goes.
+    pub(super) fn socket_takers(&self, id: u64, path: &[String]) -> Vec<u64> {
+        let Some((.., pin)) = self.taking_pin(id, path) else {
+            return Vec::new();
+        };
+        let mut takers: Vec<u64> = (self.nodes.resolve_targets(&pin, 0).into_iter())
+            .map(|p| p.node)
+            .collect();
+        takers.sort_unstable();
+        takers.dedup();
+        takers
+    }
+
+    /// Removes the input or output of a group that the row `path` of the block `id` is of:
+    /// from the group's block and its Group Input or Group Output block, with its wires and
+    /// the links that went through it.
+    pub(super) fn remove_socket(&mut self, id: u64, path: &[String]) {
+        let Some((group, input, socket, _)) = self.taking_pin(id, path) else {
+            return;
+        };
+        let before = self.nodes.routed();
+        if let Some(g) = self.nodes.group_mut(group) {
+            let sockets = if input { &mut g.inputs } else { &mut g.outputs };
+            sockets.retain(|s| s.id != socket);
+        }
+        // The wires at its pins are kept by the sockets of other groups too.
+        self.nodes.tidy_sockets();
+        self.route(before);
+    }
+
     /// The window to rename a socket of a group.
     pub(super) fn socket_name_window(&mut self, ctx: &egui::Context) {
         let Some((group, socket, mut name)) = self.rename_socket.take() else {
@@ -1931,6 +1999,21 @@ mod tests {
         nodes.tidy_sockets();
         assert!(nodes.group(10).unwrap().inputs.is_empty());
         assert_eq!(nodes.group(10).unwrap().outputs.len(), 1);
+    }
+
+    #[test]
+    fn a_socket_without_a_wire_inside_goes_with_its_wires_outside() {
+        let (mut nodes, links) = chain();
+        make_group(&mut nodes, &links, None, &[2], 10);
+        let (o, source) = {
+            let output = &nodes.group(10).unwrap().outputs[0];
+            (output.id, output.source.clone().unwrap())
+        };
+        assert!(!nodes.group(10).unwrap().outputs[0].targets.is_empty());
+        nodes.drop_wire(&source, &socket_pin(12, o));
+        nodes.tidy_sockets();
+        assert!(nodes.group(10).unwrap().outputs.is_empty());
+        assert_eq!(nodes.group(10).unwrap().inputs.len(), 1);
     }
 
     #[test]
