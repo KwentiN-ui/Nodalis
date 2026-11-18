@@ -246,6 +246,10 @@ trait Tree {
     /// The types of the rows of sockets of a block, by row path, for their colours.
     fn socket_kinds(&self, id: u64) -> HashMap<Vec<String>, Vec<String>>;
 
+    /// The type of a socket: that of the pin its wires reach inside the group, the block row
+    /// an input gives to or an output takes from; empty while no wire inside reaches one.
+    fn socket_kind(&self, group: u64, input: bool, socket: u32) -> Vec<String>;
+
     /// A new socket of the group made from the pin `like`: named after it, and of its type.
     fn new_socket(&mut self, group: u64, input: bool, like: &GroupPin) -> Option<u32>;
     /// Makes a group of blocks, see [`ProjectApp::group_blocks`].
@@ -541,8 +545,7 @@ impl Tree for Vec<Node> {
         match self.side_of(pin) {
             Some(side) => {
                 let (g, input, s) = side.socket();
-                self.socket(g, input, s)
-                    .map_or_else(Vec::new, |s| s.kind.clone())
+                self.socket_kind(g, input, s)
             }
             None => pin.path.clone(),
         }
@@ -656,6 +659,18 @@ impl Tree for Vec<Node> {
         }
     }
 
+    fn socket_kind(&self, group: u64, input: bool, socket: u32) -> Vec<String> {
+        let Some(socket) = self.socket(group, input, socket) else {
+            return Vec::new();
+        };
+        let inside = if input {
+            (socket.targets.iter()).find_map(|t| self.resolve_targets(t, 0).into_iter().next())
+        } else {
+            (socket.source.as_ref()).and_then(|s| self.resolve_source(s, 0))
+        };
+        inside.map_or_else(Vec::new, |pin| pin.path)
+    }
+
     fn socket_kinds(&self, id: u64) -> HashMap<Vec<String>, Vec<String>> {
         let group = match self.kind_of(id) {
             Some(Kind::Group) => self.group(id),
@@ -664,22 +679,27 @@ impl Tree for Vec<Node> {
             }
             _ => None,
         };
-        (group.into_iter())
-            .flat_map(|g| g.inputs.iter().chain(&g.outputs))
-            .map(|s| (vec![SOCKET.to_owned(), s.id.to_string()], s.kind.clone()))
-            .collect()
+        let Some(group) = group else {
+            return HashMap::new();
+        };
+        let sockets = |input: bool| {
+            let list = if input { &group.inputs } else { &group.outputs };
+            (list.iter()).map(move |s| {
+                let path = vec![SOCKET.to_owned(), s.id.to_string()];
+                (path, self.socket_kind(group.id, input, s.id))
+            })
+        };
+        sockets(true).chain(sockets(false)).collect()
     }
 
     fn new_socket(&mut self, group: u64, input: bool, like: &GroupPin) -> Option<u32> {
         let name = self.pin_name(like);
-        let kind = self.pin_kind(like);
         let group = self.group_mut(group)?;
         let id = free_socket(group);
         let name = free_name(group, input, &name);
         let socket = GroupSocket {
             id,
             name,
-            kind,
             source: None,
             targets: Vec::new(),
         };
@@ -736,7 +756,6 @@ impl Tree for Vec<Node> {
                     let socket = GroupSocket {
                         id,
                         name,
-                        kind: self.pin_kind(&wire.from),
                         source: Some(wire.from.clone()),
                         targets: Vec::new(),
                     };
@@ -933,19 +952,29 @@ impl ProjectApp {
     /// The rows of a group, its Group Input or its Group Output block: a row with a pin for
     /// each socket, and on the blocks inside an empty pin at the bottom for a new one.
     pub(super) fn group_rows(&self, node: &Node) -> Vec<Row> {
+        // The type of each socket is that of the block row its wires reach inside.
+        let kinds = self.nodes.socket_kinds(node.id);
         // A row of a socket, an input of the group or not, with its pin on the right or left.
-        let row = |socket: &GroupSocket, input: bool, output: bool, tip: &str| Row {
-            input: !output,
-            output,
-            ..socket_row(
-                vec![SOCKET.to_owned(), socket.id.to_string()],
-                socket.name.clone(),
-                icon_of(&socket.kind),
-                format!(
-                    "{} of the group. Double-click to rename it; right-click it, or inside the group its cross, to remove it.\n{tip}",
-                    if input { "An input" } else { "An output" }
-                ),
-            )
+        let row = |socket: &GroupSocket, input: bool, output: bool, tip: &str| {
+            let path = vec![SOCKET.to_owned(), socket.id.to_string()];
+            let kind = kinds.get(&path).cloned().unwrap_or_default();
+            let carries = match links::DataType::of(&kind) {
+                Some(data) => format!("It carries {}.", with_article(data.label())),
+                None => "It is not connected inside yet.".to_owned(),
+            };
+            Row {
+                input: !output,
+                output,
+                ..socket_row(
+                    path,
+                    socket.name.clone(),
+                    icon_of(&kind),
+                    format!(
+                        "{} of the group. Double-click to rename it; right-click it, or inside the group its cross, to remove it.\n{carries} {tip}",
+                        if input { "An input" } else { "An output" }
+                    ),
+                )
+            }
         };
         let open = |input: bool, tip: &str| Row {
             input,
@@ -1892,7 +1921,11 @@ mod tests {
             panic!("one input: {:?}", group.inputs);
         };
         assert_eq!(input.name, "x");
-        assert_eq!(input.kind, path(&["Value", "x"]));
+        // An input carries what the block inside takes, an output what it gives.
+        assert_eq!(
+            nodes.pin_kind(&socket_pin(10, input.id)),
+            path(&["Parameters", "a"])
+        );
         assert_eq!(input.source, Some(pin(1, &["Value", "x"])));
         assert_eq!(input.targets, vec![pin(2, &["Parameters", "a"])]);
         let [output] = &group.outputs[..] else {
@@ -1900,6 +1933,10 @@ mod tests {
         };
         assert_eq!(output.source, Some(pin(2, &["Value", "Result"])));
         assert_eq!(output.targets, vec![pin(3, &["Parameters", "a"])]);
+        assert_eq!(
+            nodes.pin_kind(&socket_pin(12, output.id)),
+            path(&["Value", "Result"])
+        );
         assert_ne!(input.id, output.id);
         let (i, o) = (input.id, output.id);
         // Outside, the wires run to and from the group's pins.
@@ -1947,6 +1984,15 @@ mod tests {
         assert_eq!(inner.inputs[0].source, Some(socket_pin(11, i)));
         assert_eq!(outer.outputs[0].source, Some(socket_pin(20, io)));
         assert_eq!(inner.outputs[0].targets, vec![socket_pin(12, o)]);
+        // The outer sockets carry the types of the block inside the inner group.
+        assert_eq!(
+            nodes.pin_kind(&socket_pin(10, i)),
+            path(&["Parameters", "a"])
+        );
+        assert_eq!(
+            nodes.pin_kind(&socket_pin(10, o)),
+            path(&["Value", "Result"])
+        );
         assert_eq!(
             wires(&nodes, &links, Some(10)),
             BTreeSet::from([
