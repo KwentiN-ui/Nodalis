@@ -70,6 +70,16 @@ the setup (open #ui("Setup") with the arrow in front of it: #ui("Materials"), #u
 #ui("Constraints") and so on) or a single item of a category (open the category: one material,
 one contact pair, one step). A linked category also passes on items added to it later.
 
+A category or an item of one can also be dropped on the closed #ui("Setup") row: each category
+holds its own kind of data, so the link goes to the category it belongs to, as if
+#ui("Setup") had been opened and the wire dropped there. While the wire is over the row, the
+tooltip says where it goes (#ui("Links to Setup > Materials")); a wire that does not fit is
+refused as on any other pin. While #ui("Setup") is closed, the links of its categories end at
+its row.
+
+#screenshot("setup-category-drop.png", [The materials of a materials block dropped on the closed
+  Setup row go to Setup > Materials])
+
 A linked #ui("Geometry") takes the geometry objects with the meshes they have
 (@linked-meshes): the parts are read-only, but the mesh setup on the Geometry workspace
 (#ui("Default Mesh Parameters ..."), the #ui("Mesh Setup") items) stays the target's own, and
