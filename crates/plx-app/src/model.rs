@@ -2616,6 +2616,12 @@ impl Model {
         self.origin
     }
 
+    /// Where the model is drawn from: its origin, in the units it is stored in. The camera
+    /// is carried between models by it, see `carried_camera`.
+    pub fn frame(&self) -> (DVec3, UnitSystem) {
+        (self.origin, self.stored_units())
+    }
+
     /// Draws the outline of an outlined part red and wide; a highlighted part whose faces turn
     /// red gets its line elements red and wide, as they have no faces to colour.
     fn highlight_outline(&self, part: usize, skin: &PartSkin, mesh: &mut RenderMesh) {

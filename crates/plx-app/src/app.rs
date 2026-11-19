@@ -136,8 +136,6 @@ struct Workbench {
     /// One of them is shown on the Results tab.
     results: Vec<Model>,
     current_result: usize,
-    /// Camera of the workspace not shown, so switching tabs keeps each view.
-    parked_camera: Option<plx_render::Camera>,
     tree: TreeState,
     /// Item whose properties window is open.
     dialog: Option<TreeItem>,
@@ -358,7 +356,6 @@ impl AnalysisWindow {
                 mesh_findings: Vec::new(),
                 results: Vec::new(),
                 current_result: 0,
-                parked_camera: None,
                 tree: TreeState::default(),
                 dialog: None,
                 part_name: Default::default(),
@@ -2048,6 +2045,25 @@ struct BoundWork(String, PathBuf, Result<PathBuf, String>);
 /// The global results of a submodel, read on a worker thread.
 type GlobalWork = Result<Box<model::GlobalModel>, String>;
 
+/// A camera looking at a model drawn relative to `from.0` in `from.1` units, made to look at
+/// the same place on one drawn relative to `to.0` in `to.1` units.
+fn carried_camera(
+    camera: &plx_render::Camera,
+    from: (glam::DVec3, UnitSystem),
+    to: (glam::DVec3, UnitSystem),
+) -> plx_render::Camera {
+    let factor = from.1.factor_to(plx_model::Quantity::Length, to.1);
+    let target = (camera.target.as_dvec3() + from.0) * factor - to.0;
+    plx_render::Camera {
+        target: target.as_vec3(),
+        distance: camera.distance * factor as f32,
+        rotation: camera.rotation,
+        scene_radius: camera.scene_radius * factor as f32,
+        // Found again for the scene drawn next.
+        drawn_bounds: None,
+    }
+}
+
 fn saved_camera(saved: plx_results::saved_view::SavedCamera) -> plx_render::Camera {
     plx_render::Camera {
         target: glam::Vec3::from_array(saved.target),
@@ -2137,6 +2153,8 @@ impl Workbench {
                 // Results opened while another workspace stays shown, e.g. an analysis opened
                 // from a Setup row of its block.
                 let mut results_hidden = false;
+                // The view the results take over when they bring no camera of their own.
+                let mut view_before = None;
                 if let Some(view) = &mut model.results {
                     let post = &self.settings.post;
                     let levels = view.color_scale.levels;
@@ -2235,6 +2253,8 @@ impl Workbench {
                         TreeView::Results,
                         TreeItem::Component(view.field, view.component),
                     ));
+                    view_before = (self.shown().map(Model::frame))
+                        .map(|f| (f, self.viewport.camera().clone()));
                     let shown = results_workspace(&mut self.pinned_view);
                     self.set_tree_view(shown);
                     results_hidden = self.tree_view != TreeView::Results;
@@ -2377,10 +2397,13 @@ impl Workbench {
                     }
                 }
                 if results_hidden {
-                    // The view keeps the workspace shown and its camera; the results take
-                    // theirs, in their own units, when the Results tab is chosen, or a fit
-                    // without a saved one.
-                    self.parked_camera = camera;
+                    // The view keeps the workspace shown; a camera saved with the results is
+                    // the shared one and carried over into it.
+                    let frames = (self.results.get(self.current_result).map(Model::frame))
+                        .zip(self.shown().map(Model::frame));
+                    if let (Some(camera), Some((from, to))) = (camera, frames) {
+                        self.viewport.set_camera(carried_camera(&camera, from, to));
+                    }
                     self.results_changed = true;
                     return;
                 }
@@ -2407,7 +2430,11 @@ impl Workbench {
                 }
                 self.results_changed = rebuild;
                 self.update_contour();
-                match camera {
+                // Results without a saved camera keep looking at what was in view before.
+                let carried = view_before
+                    .zip(self.shown().map(Model::frame))
+                    .map(|((from, camera), to)| carried_camera(&camera, from, to));
+                match camera.or(carried) {
                     Some(camera) => {
                         self.viewport.set_camera(camera);
                         self.view_command = None;
@@ -3554,45 +3581,47 @@ impl Workbench {
         self.history_tables.clear();
     }
 
-    /// Switches the tree tab. The Results tab is a workspace of its own: the
-    /// 3D view swaps between the FE model and the current results, each with its own camera.
+    /// Switches the tree tab. Every workspace shares the camera, so switching keeps the view:
+    /// each model draws relative to its own origin (the centre of its bounds) and results in
+    /// the units they show, so the camera is carried over to look at the same place.
     fn set_tree_view(&mut self, view: TreeView) {
         if self.tree_view == view {
             return;
         }
-        let was_results = self.tree_view == TreeView::Results;
-        if was_results == (view == TreeView::Results) {
-            // Geometry and FE model share the camera; the scene changes. Each model draws
-            // relative to its own origin (the centre of its bounds), so the camera target
-            // moves by the difference to keep looking at the same place.
-            let before = self.shown().map(Model::origin);
-            self.tree_view = view;
-            let after = self.shown().map(Model::origin);
-            if let (Some(before), Some(after)) = (before, after) {
-                self.viewport.shift_target((before - after).as_vec3());
+        let crossing = (self.tree_view == TreeView::Results) != (view == TreeView::Results);
+        if crossing {
+            // A fit still pending, e.g. right after loading, belongs to the workspace left.
+            if let Some(command) = self.view_command.take() {
+                let bounds = self.shown().and_then(Model::visible_bounds);
+                self.viewport.apply(command, bounds);
             }
-            if let Some(bounds) = self.shown().and_then(Model::visible_bounds) {
-                self.viewport.cover(bounds);
-            }
-            self.results_changed = true;
-            return;
+            self.dialog = None;
+            self.viewport.labels = Default::default();
         }
-        // A fit still pending, e.g. right after loading, belongs to the workspace left.
-        if let Some(command) = self.view_command.take() {
-            let bounds = self.shown().and_then(Model::visible_bounds);
-            self.viewport.apply(command, bounds);
-        }
+        let before = self.shown().map(Model::frame);
         self.tree_view = view;
-        self.dialog = None;
-        self.viewport.labels = Default::default();
-        match &mut self.parked_camera {
-            Some(camera) => self.viewport.swap_camera(camera),
-            None => {
-                let mut camera = plx_render::Camera::default();
-                self.viewport.swap_camera(&mut camera);
-                self.parked_camera = Some(camera);
-                self.view_command = Some(ViewCommand::Fit);
+        let after = self.shown().map(Model::frame);
+        match (before, after) {
+            (Some(before), Some(after)) => {
+                let camera = carried_camera(self.viewport.camera(), before, after);
+                self.viewport.set_camera(camera);
             }
+            // Nothing was shown to look at: the new workspace is fitted.
+            (None, Some(_)) if crossing => self.view_command = Some(ViewCommand::Fit),
+            _ => {}
+        }
+        if let Some(bounds) = self.shown().and_then(Model::visible_bounds) {
+            self.viewport.cover(bounds);
+        }
+        // An open section dialog goes on with its plane in the units of the model now shown.
+        if crossing
+            && let (Some((_, from)), Some((_, to))) = (before, after)
+            && let Some(dialog) = self.section_dialog.take()
+            && let Some(model) = self.shown()
+        {
+            let forward = self.viewport.camera().forward().as_dvec3();
+            let draft = dialog.draft.converted(from, to);
+            self.section_dialog = Some(SectionDialog::new(Some(draft), model, forward));
         }
         self.results_changed = true;
     }
@@ -4324,10 +4353,15 @@ impl Workbench {
     /// What the user defined on open results, with the camera of the results workspace.
     fn view_settings(&self, results: &Model) -> Option<plx_results::ResultsSettings> {
         let mut settings = results.results_settings()?;
-        // The results workspace's camera, in use or parked while another is shown.
-        let camera = match self.tree_view {
-            TreeView::Results => Some(self.viewport.camera()),
-            _ => self.parked_camera.as_ref(),
+        // The shared camera, as the results workspace sees it.
+        let camera = match (self.tree_view, self.shown()) {
+            (TreeView::Results, _) => Some(self.viewport.camera().clone()),
+            (_, Some(shown)) => Some(carried_camera(
+                self.viewport.camera(),
+                shown.frame(),
+                results.frame(),
+            )),
+            (_, None) => None,
         };
         settings.view.camera = camera.map(|c| plx_results::saved_view::SavedCamera {
             target: c.target.to_array(),
@@ -7269,7 +7303,10 @@ impl Workbench {
         }
         if let Some(model) = self.shown() {
             let forward = self.viewport.camera().forward().as_dvec3();
-            let dialog = SectionDialog::new(self.section.clone(), model, forward);
+            // The dialog edits the plane in the units the model in view is stored in.
+            let current = (self.section.as_ref())
+                .map(|s| s.converted(plx_model::STORED, model.stored_units()));
+            let dialog = SectionDialog::new(current, model, forward);
             self.section_dialog = Some(dialog);
         }
     }
@@ -7281,12 +7318,16 @@ impl Workbench {
         let Some(model) = self.shown() else {
             return;
         };
+        let units = model.stored_units();
         match dialog.show(ctx, model) {
             SectionResult::Open => {
                 self.section_dialog = Some(dialog);
                 return;
             }
-            SectionResult::Ok => self.section = Some(dialog.draft),
+            SectionResult::Ok => {
+                let draft = dialog.draft.converted(units, plx_model::STORED);
+                self.section = Some(draft);
+            }
             SectionResult::Disable => self.section = None,
         }
         self.viewport.preview = Default::default();
@@ -7649,12 +7690,16 @@ impl Workbench {
     /// Cuts the scene at the section plane being edited or shown, or at the plane of shown
     /// plane results, when it or the scene changed.
     fn update_section(&mut self) {
-        // Planes of features follow them.
+        // The section view is kept in the stored units of the FE model; the results, read
+        // into the units they show, are cut at the same place. Planes of features follow
+        // them, resolved on the model in view.
+        let units = self.shown().map_or(plx_model::STORED, Model::stored_units);
+        let mut current = (self.section.as_ref()).map(|s| s.converted(plx_model::STORED, units));
         if let Some(fe) = self.shown().map(|m| m.fe.clone()) {
             if let Some(dialog) = &mut self.section_dialog {
                 dialog.draft.resolve(&fe);
             }
-            if let Some(section) = &mut self.section {
+            if let Some(section) = &mut current {
                 section.resolve(&fe);
             }
         }
@@ -7673,9 +7718,9 @@ impl Workbench {
             (cut, true)
         });
         let section = (self.section_dialog.as_ref())
-            .map(|d| &d.draft)
-            .or(self.section.as_ref())
-            .map(|s| (s.clone(), false));
+            .map(|d| d.draft.clone())
+            .or(current)
+            .map(|s| (s, false));
         let visible = (self.shown())
             .map(|m| m.parts.iter().map(|p| p.visible).collect())
             .unwrap_or_default();

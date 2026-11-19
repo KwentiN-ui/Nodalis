@@ -66,7 +66,8 @@ The tree on the left shows the items of the workspace:
 / Results: the opened result files with their fields, history outputs, paths, planes and hot
   spots (@results).
 
-Geometry and FE Model share one camera, Results has its own. A model that has no mesh yet
+All workspaces share one camera: switching between them keeps the view, also when the results
+are shown in other units than the model. A model that has no mesh yet
 opens in the Geometry workspace, opening a result file switches to Results.
 
 === Working with tree items

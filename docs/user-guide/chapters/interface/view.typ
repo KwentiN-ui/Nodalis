@@ -163,6 +163,13 @@ tilt it. Changes are shown at once, as in every tool window (@tool-windows): #ui
 keeps the section, #ui("Off") removes it and closes the window. #menu("View", "Section Off")
 removes the section as well.
 
+The section is the same in every workspace: switching between FE Model and Results keeps the
+plane where it is, in the units each shows, so both cut the model at the same place. Results
+show the cut on the deformed shape.
+
+#screenshot("section-view-shared.png", [The same section at `x = 40 mm` in FE Model (left) and
+  Results (right), seen from the same camera])
+
 === Exploded view <exploded-view>
 
 #menu("View", "Exploded View") pulls the parts of an assembly apart for display. The mesh

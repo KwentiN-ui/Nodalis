@@ -110,6 +110,28 @@ impl SectionView {
         }
     }
 
+    /// The same plane with its lengths taken from `from` into `to` units: the section view
+    /// is kept in the stored units of the FE model and cuts the results, which are read into
+    /// the units they show, at the same place.
+    pub fn converted(&self, from: UnitSystem, to: UnitSystem) -> Self {
+        let factor = from.factor_to(Length, to);
+        let mut section = self.clone();
+        if factor == 1.0 {
+            return section;
+        }
+        match &mut section.definition {
+            PlaneDefinition::Principal { offset, .. } => *offset *= factor,
+            PlaneDefinition::PointNormal { point, .. } => *point *= factor,
+            PlaneDefinition::Feature { offset, frame, .. } => {
+                *offset *= factor;
+                if let Some((point, _)) = frame {
+                    *point *= factor;
+                }
+            }
+        }
+        section
+    }
+
     /// Takes the current plane feature the section refers to; returns whether the plane
     /// moved.
     pub fn resolve(&mut self, fe: &FeModel) -> bool {
@@ -761,6 +783,36 @@ mod tests {
         system.set_points([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
         assert!(section.resolve(&fe));
         assert!((section.anchor(center).z - 1.0).abs() < EPS);
+    }
+
+    #[test]
+    fn converted_sections_cut_at_the_same_place() {
+        let stored = plx_model::STORED;
+        let mm = UnitSystem::MmTonSC;
+        let principal = SectionView {
+            definition: PlaneDefinition::Principal {
+                plane: PrincipalPlane::Xy,
+                offset: 0.05,
+            },
+            flipped: true,
+            lighten: true,
+            uncut: BTreeSet::new(),
+        };
+        let shown = principal.converted(stored, mm);
+        let center = DVec3::new(10.0, 20.0, 30.0);
+        assert!((shown.anchor(center).z - 50.0).abs() < 1e-9);
+        assert_eq!(shown.normal(), principal.normal());
+        let back = shown.converted(mm, stored);
+        assert!((back.anchor(center).z - 0.05).abs() < 1e-12);
+        let through = SectionView {
+            definition: PlaneDefinition::PointNormal {
+                point: DVec3::new(0.001, 0.002, 0.003),
+                normal: DVec3::X,
+            },
+            ..principal
+        };
+        let point = through.converted(stored, mm).anchor(DVec3::ZERO);
+        assert!((point - DVec3::new(1.0, 2.0, 3.0)).length() < 1e-9);
     }
 
     #[test]
