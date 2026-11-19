@@ -52,6 +52,12 @@ pub struct ContactPointState {
     pub pressure: f64,
     /// Tangential slip accumulated so far.
     pub slip: [f64; 2],
+    /// The frictional shear traction (global components, in the tangent plane of the point),
+    /// which the next increment starts from: friction acts on the tangential motion of an
+    /// increment, not on the total displacement, whose projection on the tangent of a
+    /// curved or turned surface is no slip.
+    #[serde(default)]
+    pub shear: [f64; 3],
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

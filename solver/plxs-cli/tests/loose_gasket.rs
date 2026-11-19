@@ -51,7 +51,9 @@ fn run(job: &str, input: &str) -> (bool, String, Vec<Vec<f64>>, String) {
         .filter(|r| r.len() == 7)
         .collect();
     let dat = std::fs::read_to_string(dir.join(format!("{job}.dat"))).unwrap_or_default();
-    let _ = std::fs::remove_dir_all(&dir);
+    if std::env::var("PLXS_KEEP").is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     (output.status.success(), log, rows, dat)
 }
 
@@ -306,14 +308,19 @@ fn the_iterative_solver_lets_go_of_the_gasket_too() {
     );
 }
 
-/// Without the stabilization the loose gasket stops the step once the plate lifted off: the
-/// test above checks what the stabilization changes.
+/// Without the stabilization the weak springs alone hold the loose gasket once the plate
+/// lifted off, and they pull it back to where it started instead of leaving it where the
+/// plate dragged it (the test above checks what the stabilization changes). The step
+/// finishes: the points that let go of the groove with next to no force no longer count as
+/// a change of the contact status (it used to stop the step).
 #[test]
-fn a_gasket_on_weak_springs_alone_stops_once_the_plate_lifted_off() {
-    let (finished, _, rows, _) = run("gasket-weak", &gasket("", ""));
-    let reached = rows.last().map_or(0.0, |r| r[5]);
+fn a_gasket_on_weak_springs_alone_springs_back_once_the_plate_lifted_off() {
+    let (finished, log, rows, dat) = run("gasket-weak", &gasket("", ""));
+    assert!(finished, "the step did not finish:\n{log}");
+    assert_eq!(rows.last().unwrap()[5], 2.0, "{rows:?}");
+    let [x, y] = last_displacement(&dat);
     assert!(
-        !finished && reached > 1.4 && reached < 2.0,
-        "the step ended at {reached} (finished: {finished}): {rows:?}"
+        x.abs() < 1e-6 && y.abs() < 1e-6,
+        "the gasket moved by ({x}, {y})"
     );
 }

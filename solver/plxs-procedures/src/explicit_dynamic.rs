@@ -1381,6 +1381,8 @@ struct ExplicitContact {
     /// How far those nodes may move before the candidates are searched again.
     reach: f64,
     states: Vec<Vec<plxs_core::state::ContactPointState>>,
+    /// The displacements the states were taken at (friction measures the motion from them).
+    states_u: Vec<f64>,
     /// DOFs whose motion is prescribed: they count as infinitely heavy.
     fixed: Vec<bool>,
     /// The last evaluation (with the capped stiffness), for the outputs.
@@ -1416,6 +1418,7 @@ impl ExplicitContact {
             prepared,
             reach: 0.5 * ctx.contact.search_reach(),
             states: ctx.state.contact.clone(),
+            states_u: u.to_vec(),
             fixed,
             last: None,
             capped: 0,
@@ -1465,8 +1468,12 @@ impl ExplicitContact {
             coefficient: CONTACT_DAMPING * h,
             rate: 0.0,
         });
+        ctx.contact.increment_start = std::mem::take(&mut self.states_u);
         let mut evaluation = ctx.contact.evaluate(coords, u, &self.states, false);
         ctx.contact.damping = None;
+        self.states_u = std::mem::take(&mut ctx.contact.increment_start);
+        self.states_u.clear();
+        self.states_u.extend_from_slice(u);
         let mut springs = vec![0.0; n];
         let mut damping = vec![0.0; n];
         let limit = CONTACT_STIFFNESS / (h * h);
@@ -1606,6 +1613,7 @@ impl ExplicitContact {
                     gap: state.gap[k],
                     pressure: state.pressure[k],
                     slip: state.slip[k],
+                    shear: [0.0; 3],
                 });
                 k += 1;
             }
@@ -2493,6 +2501,7 @@ impl Procedure for ExplicitDynamic {
                                 if let (Some(c), Some(state)) = (contact.as_mut(), &reached.contact)
                                 {
                                     c.take_gpu_state(ctx, state);
+                                    c.states_u.clone_from(&reached.u);
                                 }
                                 let gpu_forces = contact.is_some().then(|| {
                                     (

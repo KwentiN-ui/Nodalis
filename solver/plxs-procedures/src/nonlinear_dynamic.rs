@@ -407,8 +407,16 @@ impl Procedure for NonlinearDynamic {
         let (contact_start, contact_normal_start, contact_energy_start, evaluation) = if has_contact
         {
             ctx.contact.prepare(&ctx.model.nodes.coordinates, &motion.u);
-            let evaluation =
-                evaluate_contact(ctx, &motion.u, &motion.v, &contact_states, false, 0.0, 0.0);
+            let evaluation = evaluate_contact(
+                ctx,
+                &motion.u,
+                &motion.v,
+                &contact_states,
+                &[],
+                false,
+                0.0,
+                0.0,
+            );
             contact_states = evaluation.states();
             let springs = contact_springs(&evaluation, n, 0.0, None);
             (springs.0, springs.2, springs.3, Some(evaluation))
@@ -863,11 +871,14 @@ fn contact_springs(
 
 /// The contact springs at `u` from the states `start`, damped with the velocities `v`
 /// (`damping` the coefficient as a time, `rate` = dv/du).
+/// `u_start` are the displacements of the states `start` (empty: `u`).
+#[allow(clippy::too_many_arguments)]
 fn evaluate_contact(
     ctx: &mut ProcedureContext<'_>,
     u: &[f64],
     v: &[f64],
     start: &[Vec<ContactPointState>],
+    u_start: &[f64],
     predictor: bool,
     damping: f64,
     rate: f64,
@@ -877,10 +888,13 @@ fn evaluate_contact(
         coefficient: damping,
         rate,
     });
+    ctx.contact.increment_start.clear();
+    ctx.contact.increment_start.extend_from_slice(u_start);
     let evaluation = ctx
         .contact
         .evaluate(&ctx.model.nodes.coordinates, u, start, predictor);
     ctx.contact.damping = None;
+    ctx.contact.increment_start.clear();
     evaluation
 }
 
@@ -1424,6 +1438,7 @@ fn attempt(
                 &u,
                 &v1,
                 &from.contact_states,
+                &m0.u,
                 iteration == 0,
                 CONTACT_DAMPING * dt,
                 gamma / (beta * dt),
