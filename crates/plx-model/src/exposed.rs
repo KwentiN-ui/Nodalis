@@ -177,9 +177,11 @@ pub enum Field {
     Width,
     WebThickness,
     FlangeThickness,
-    /// The second moments of area and the shear factor of a general profile.
+    /// The second moments of area, torsion constant and shear factor of a general profile
+    /// (the shear factor of a sketch too).
     I11,
     I22,
+    TorsionConstant,
     ShearFactor,
     /// The diameters, fill factor and bending stiffness of a rope.
     Diameter,
@@ -285,6 +287,7 @@ impl Field {
             Self::FlangeThickness => "tf",
             Self::I11 => "I11",
             Self::I22 => "I22",
+            Self::TorsionConstant => "J",
             Self::ShearFactor => "k",
             Self::Diameter => "d",
             Self::WireDiameter => "Wire diameter",
@@ -340,7 +343,7 @@ impl Field {
     pub const AXIS: [Self; 3] = [Self::AxisX, Self::AxisY, Self::AxisZ];
     pub const NORMAL: [Self; 3] = [Self::NormalX, Self::NormalY, Self::NormalZ];
     pub const SCALE: [Self; 3] = [Self::ScaleX, Self::ScaleY, Self::ScaleZ];
-    pub const ALL: [Self; 77] = [
+    pub const ALL: [Self; 78] = [
         Self::Value,
         Self::X,
         Self::Y,
@@ -373,6 +376,7 @@ impl Field {
         Self::FlangeThickness,
         Self::I11,
         Self::I22,
+        Self::TorsionConstant,
         Self::ShearFactor,
         Self::Diameter,
         Self::WireDiameter,

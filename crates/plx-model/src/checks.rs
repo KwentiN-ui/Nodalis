@@ -6423,6 +6423,7 @@ mod tests {
             i11: 5.0,
             i22: 5.0,
             k: 0.8,
+            torsion: 10.0,
         };
         assert_eq!(check(&model, &mesh), []);
         assert_eq!(

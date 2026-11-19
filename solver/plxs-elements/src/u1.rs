@@ -5,7 +5,8 @@
 //! taken from CalculiX 2.21 as a black box (cantilevers under end forces and moments, shear
 //! factor and element length varied; no CalculiX code was consulted):
 //!
-//! * axial `L / (E A)`, torsion `L / (G (I11 + I22))`;
+//! * axial `L / (E A)`, torsion `L / (G J)`, CalculiX's `J = I11 + I22` unless the section
+//!   gives its own;
 //! * bending with the deflection along the local 1-direction (stiffness `E I11`) and along
 //!   the 2-direction (`E I22`): end moment `L / (E I)`, coupling `L² / (2 E I)`, and under
 //!   an end force `L³ / (3 E I) + s (φ - 3) / (1 + φ)` with `s = L / (k G A)` and
@@ -26,6 +27,8 @@ pub struct U1Section {
     pub i11: f64,
     /// Second moment for bending with the deflection along the 2-direction.
     pub i22: f64,
+    /// Torsion constant `J` (torsion stiffness `G J`).
+    pub torsion: f64,
     /// Shear factor `k` (shear stiffness `k G A`).
     pub shear_factor: f64,
     pub young: f64,
@@ -107,7 +110,7 @@ pub fn stiffness(xa: [f64; 3], xb: [f64; 3], n1: [f64; 3], s: &U1Section) -> Opt
     ];
     let mut kq = [[0.0; 6]; 6];
     kq[0][0] = s.young * s.area / length;
-    kq[1][1] = g * (s.i11 + s.i22) / length;
+    kq[1][1] = g * s.torsion / length;
     for a in 0..2 {
         for b in 0..2 {
             kq[2 + a][2 + b] = k1[a][b];
@@ -141,6 +144,7 @@ mod tests {
             area: 952.0,
             i11: 1.25469333e5,
             i22: 1.55435733e6,
+            torsion: 1.25469333e5 + 1.55435733e6,
             shear_factor: 3.69747899e-1,
             young: 210000.0,
             poisson: 0.3,
@@ -218,5 +222,20 @@ mod tests {
         assert!((u[2] - w).abs() < 1e-12 * w.abs().max(1.0));
         let axial = tip([1000.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         assert!((axial[0] - 1000.0 * 100.0 / (s.young * s.area)).abs() < 1e-15);
+    }
+
+    /// The torsion stiffness is `G J / L` with the section's own `J`, not the polar moment.
+    #[test]
+    fn torsion_takes_the_torsion_constant() {
+        let s = U1Section {
+            torsion: 1234.0,
+            ..section()
+        };
+        let k = stiffness([0.0; 3], [100.0, 0.0, 0.0], [0.0, 0.0, 1.0], &s).unwrap();
+        let g = s.young / 2.6;
+        // The rotation about the axis at the second node.
+        let twist = k[9 * 12 + 9];
+        assert!((twist - g * 1234.0 / 100.0).abs() < 1e-9 * twist);
+        assert!((k[3 * 12 + 9] + twist).abs() < 1e-9 * twist);
     }
 }

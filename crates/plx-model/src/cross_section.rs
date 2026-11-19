@@ -63,13 +63,17 @@ pub enum BeamProfile {
     /// Angle with legs `h` along +2 and `b` along +1 from the corner, `t` thick.
     L { h: f64, b: f64, t: f64 },
     /// A profile given by its values alone: the area, the second moments of area about the
-    /// 1- and 2-axis through the centroid, and CalculiX's factor `k` of the shear and torsion
-    /// stiffness, see [`BeamProfile::data_line`].
+    /// 1- and 2-axis through the centroid, CalculiX's factor `k` of the shear stiffness
+    /// `k G A` and the torsion constant `J` of the torsion stiffness `G J`, see
+    /// [`BeamProfile::data_line`]. Projects of format 53 and older have no `J`; it reads as
+    /// 0, which the dialog shows as invalid until one is given.
     General {
         area: f64,
         i11: f64,
         i22: f64,
         k: f64,
+        #[serde(default)]
+        torsion: f64,
     },
     /// A profile sketched as polygons, see [`Sketch`].
     Sketch(Sketch),
@@ -115,17 +119,39 @@ impl RopeBending {
 }
 
 /// A profile drawn as closed polygons in the 1-2 plane: the outline first, then its holes.
-/// It lies with its centroid on the nodes, wherever it was drawn.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// It lies with its centroid on the nodes, wherever it was drawn. Its torsion constant follows
+/// from the polygons (see [`BeamProfile::torsion_constant`]); its shear factor is given.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Sketch {
     pub loops: Vec<Vec<[f64; 2]>>,
+    /// CalculiX's factor `k` of the shear stiffness `k G A`.
+    #[serde(default = "solid_shear_factor")]
+    pub shear_factor: f64,
+}
+
+/// The shear factor of a solid rectangle, `5 / 6`.
+fn solid_shear_factor() -> f64 {
+    5.0 / 6.0
+}
+
+impl Default for Sketch {
+    fn default() -> Self {
+        Self::EMPTY
+    }
 }
 
 impl Sketch {
-    /// The outlines of a profile as a sketch to edit: a round one as a polygon.
+    pub const EMPTY: Self = Self {
+        loops: Vec::new(),
+        shear_factor: 5.0 / 6.0,
+    };
+
+    /// The outlines of a profile as a sketch to edit: a round one as a polygon; with its
+    /// shear factor.
     pub fn of(profile: &BeamProfile) -> Self {
         Self {
             loops: profile.outlines().into_iter().map(|o| o.points).collect(),
+            shear_factor: profile.shear_factor(),
         }
     }
 
@@ -235,7 +261,7 @@ fn segments_meet(p: [f64; 2], q: [f64; 2], r: [f64; 2], t: [f64; 2]) -> bool {
 }
 
 /// Whether a point lies inside a polygon, by the crossings of a ray to +u.
-fn inside(point: [f64; 2], polygon: &[[f64; 2]]) -> bool {
+pub(crate) fn inside(point: [f64; 2], polygon: &[[f64; 2]]) -> bool {
     let n = polygon.len();
     let mut odd = false;
     for i in 0..n {
@@ -301,8 +327,9 @@ impl BeamProfile {
             i11: 1e-13,
             i22: 1e-13,
             k: 5.0 / 6.0,
+            torsion: 2e-13,
         },
-        BeamProfile::Sketch(Sketch { loops: Vec::new() }),
+        BeamProfile::Sketch(Sketch::EMPTY),
         BeamProfile::Rope {
             diameter: 1e-3,
             wire: 1e-3 / 16.0,
@@ -344,7 +371,7 @@ impl BeamProfile {
             BeamProfile::T { .. } => "T-Beam",
             BeamProfile::U { .. } => "Channel (U)",
             BeamProfile::L { .. } => "Angle (L)",
-            BeamProfile::General { .. } => "General (A, I)",
+            BeamProfile::General { .. } => "General (A, I, J)",
             BeamProfile::Sketch(_) => "Sketch",
             BeamProfile::Rope { .. } => "Rope",
         }
@@ -359,11 +386,12 @@ impl BeamProfile {
     /// SECTION`. A circle is given by its thickness in both directions, the diameter: a
     /// value of 4 puts the expanded nodes at radius 2. A pipe takes the radius itself.
     ///
-    /// A general profile gives `A, I11, I12, I22, k` about its principal axes, the
+    /// A general profile gives `A, I11, I12, I22, k, J` about its principal axes, the
     /// 1-direction turned by [`BeamProfile::principal_turn`]. CalculiX's `I11` is the integral
     /// of the coordinate in the 1-direction squared, so it stiffens bending in the
-    /// 1-direction (checked with CalculiX 2.21 and 2.23 against a rectangle). `k` scales both
-    /// the shear stiffness `k G A` and the torsion stiffness `k G (I11 + I22)`.
+    /// 1-direction (checked with CalculiX 2.21 and 2.23 against a rectangle). `k` is the
+    /// factor of the shear stiffness `k G A`; the torsion constant `J` of the torsion
+    /// stiffness `G J` is the solver's own sixth value (see [`BeamProfile::torsion_constant`]).
     pub fn data_line(&self) -> Vec<f64> {
         match *self {
             BeamProfile::Rect { a, b } => vec![a, b],
@@ -376,7 +404,14 @@ impl BeamProfile {
                 // Moments of u' = u cos + v sin and v' = v cos - u sin; i22 is that of u.
                 let uu = p.i22 * cos * cos + p.i11 * sin * sin + 2.0 * p.i12 * sin * cos;
                 let vv = p.i22 * sin * sin + p.i11 * cos * cos - 2.0 * p.i12 * sin * cos;
-                vec![p.area, uu, 0.0, vv, self.shear_factor()]
+                vec![
+                    p.area,
+                    uu,
+                    0.0,
+                    vv,
+                    self.shear_factor(),
+                    self.torsion_constant(),
+                ]
             }
         }
     }
@@ -414,12 +449,10 @@ impl BeamProfile {
             BeamProfile::T { h, tw, tf, .. } => share((h - tf) * tw),
             BeamProfile::L { h, t, .. } => share(h * t),
             BeamProfile::General { k, .. } => k,
+            BeamProfile::Sketch(ref sketch) => sketch.shear_factor,
             // Shear hardly matters for a slender rope; torsion is k G 2 I, small as I.
             BeamProfile::Rope { .. } => 5.0 / 6.0,
-            // A sketch may be anything; that of a solid section.
-            BeamProfile::Rect { .. } | BeamProfile::Circ { .. } | BeamProfile::Sketch(_) => {
-                5.0 / 6.0
-            }
+            BeamProfile::Rect { .. } | BeamProfile::Circ { .. } => 5.0 / 6.0,
             BeamProfile::Pipe { .. } | BeamProfile::Box { .. } => 0.5,
         }
     }
@@ -447,10 +480,16 @@ impl BeamProfile {
                 [h, b, tw, tf].into_iter().all(positive) && tf < h && tw <= b
             }
             BeamProfile::L { h, b, t } => [h, b, t].into_iter().all(positive) && t < h && t < b,
-            BeamProfile::General { area, i11, i22, k } => {
-                [area, i11, i22, k].into_iter().all(positive)
+            BeamProfile::General {
+                area,
+                i11,
+                i22,
+                k,
+                torsion,
+            } => [area, i11, i22, k, torsion].into_iter().all(positive),
+            BeamProfile::Sketch(ref sketch) => {
+                sketch.problem().is_none() && positive(sketch.shear_factor)
             }
-            BeamProfile::Sketch(ref sketch) => sketch.problem().is_none(),
             BeamProfile::Rope {
                 diameter,
                 wire,
@@ -512,7 +551,13 @@ impl BeamProfile {
                 length(Field::Width, "Leg in 1-direction (b)", b),
                 length(Field::Thickness, "Thickness (t)", t),
             ],
-            BeamProfile::General { area, i11, i22, k } => vec![
+            BeamProfile::General {
+                area,
+                i11,
+                i22,
+                k,
+                torsion,
+            } => vec![
                 Dimension {
                     field: Field::Area,
                     label: "Area (A)",
@@ -532,14 +577,25 @@ impl BeamProfile {
                     value: i22,
                 },
                 Dimension {
+                    field: Field::TorsionConstant,
+                    label: "Torsion constant (J)",
+                    quantity: Some(Quantity::SecondMomentOfArea),
+                    value: torsion,
+                },
+                Dimension {
                     field: Field::ShearFactor,
-                    label: "Shear and torsion factor (k)",
+                    label: "Shear factor (k)",
                     quantity: None,
                     value: k,
                 },
             ],
             // Its points are edited in the sketch, not exposed one by one.
-            BeamProfile::Sketch(_) => Vec::new(),
+            BeamProfile::Sketch(sketch) => vec![Dimension {
+                field: Field::ShearFactor,
+                label: "Shear factor (k)",
+                quantity: None,
+                value: &mut sketch.shear_factor,
+            }],
             BeamProfile::Rope {
                 diameter,
                 wire,
@@ -788,6 +844,48 @@ impl BeamProfile {
         }
     }
 
+    /// The torsion constant `J` of Saint-Venant torsion, the torsion stiffness being `G J`:
+    /// given for a general profile, exact for round ones, the polar moment of a rope (whose
+    /// wires slide), and solved over the outlines for all others (see [`crate::torsion`]),
+    /// which is exact for walls parallel to the 1- and 2-direction. The solve is kept for the
+    /// last few profiles asked for, as dialogs ask every frame.
+    pub fn torsion_constant(&self) -> f64 {
+        let pi = std::f64::consts::PI;
+        match *self {
+            BeamProfile::General { torsion, .. } => return torsion,
+            BeamProfile::Circ { radius } => return pi * radius.powi(4) / 2.0,
+            BeamProfile::Pipe { radius, thickness } => {
+                return pi * (radius.powi(4) - (radius - thickness).powi(4)) / 2.0;
+            }
+            BeamProfile::Rope { .. } => {
+                let p = self.properties();
+                return p.i11 + p.i22;
+            }
+            _ => {}
+        }
+        if !self.is_valid() {
+            return 0.0;
+        }
+        let loops: Vec<Vec<[f64; 2]>> = self.outlines().into_iter().map(|o| o.points).collect();
+        thread_local! {
+            static SOLVED: std::cell::RefCell<Vec<(Loops, f64)>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        if let Some(j) =
+            SOLVED.with_borrow(|solved| solved.iter().find(|(l, _)| *l == loops).map(|&(_, j)| j))
+        {
+            return j;
+        }
+        let j = crate::torsion::torsion_constant(&loops);
+        SOLVED.with_borrow_mut(|solved| {
+            if solved.len() >= 16 {
+                solved.remove(0);
+            }
+            solved.push((loops, j));
+        });
+        j
+    }
+
     /// Area, centroid and second moments of area of the profile, exact for round ones too.
     pub fn properties(&self) -> SectionProperties {
         match *self {
@@ -820,6 +918,9 @@ impl BeamProfile {
         }
     }
 }
+
+/// The polygons of a profile, the outline first.
+type Loops = Vec<Vec<[f64; 2]>>;
 
 /// The sides in the 1- and 2-direction of the rectangle with the second moments `i22` and
 /// `i11` for the area `area`: what a profile given by its values alone is drawn as.
@@ -1218,6 +1319,7 @@ mod tests {
             i11: 3.0,
             i22: 4.0,
             k: 0.5,
+            torsion: 5.0,
         };
         profile.scale(10.0);
         assert_eq!(
@@ -1227,12 +1329,69 @@ mod tests {
                 i11: 30000.0,
                 i22: 40000.0,
                 k: 0.5,
+                torsion: 50000.0,
             }
         );
         // Drawn as the rectangle of the same moments.
         let [a, b] = profile.size();
         assert!(close(a * a * a * b / 12.0, 40000.0 * a * b / 200.0));
-        assert_eq!(profile.data_line(), vec![200.0, 40000.0, 0.0, 30000.0, 0.5]);
+        assert_eq!(
+            profile.data_line(),
+            vec![200.0, 40000.0, 0.0, 30000.0, 0.5, 50000.0]
+        );
+        // Without its torsion constant, as read from an older project, it is invalid.
+        if let BeamProfile::General { torsion, .. } = &mut profile {
+            *torsion = 0.0;
+        }
+        assert!(!profile.is_valid());
+    }
+
+    #[test]
+    fn open_profiles_twist_far_softer_than_their_polar_moment() {
+        let (h, b, tw, tf) = (200.0, 100.0, 5.6, 8.5);
+        let profile = BeamProfile::I { h, b, tw, tf };
+        let p = profile.properties();
+        // The thin-walled sum of b t³ / 3 and the joints a little above it.
+        let thin = (2.0 * b * tf.powi(3) + (h - 2.0 * tf) * tw.powi(3)) / 3.0;
+        let j = profile.torsion_constant();
+        assert!(j > 0.95 * thin && j < 1.3 * thin, "{j} against {thin}");
+        assert!(j < 1e-2 * (p.i11 + p.i22));
+        assert_eq!(profile.data_line()[5], j);
+    }
+
+    #[test]
+    fn a_sketched_box_girder_has_bredts_torsion_and_its_own_shear_factor() {
+        // The girder of two flanges 240 by 10 over two webs 8 thick, 15 in from the
+        // flanges' edges, 630 high.
+        let outline = vec![
+            [0.0, 0.0],
+            [240.0, 0.0],
+            [240.0, 10.0],
+            [225.0, 10.0],
+            [225.0, 620.0],
+            [240.0, 620.0],
+            [240.0, 630.0],
+            [0.0, 630.0],
+            [0.0, 620.0],
+            [15.0, 620.0],
+            [15.0, 10.0],
+            [0.0, 10.0],
+        ];
+        let hole = vec![[23.0, 10.0], [217.0, 10.0], [217.0, 620.0], [23.0, 620.0]];
+        let mut profile = BeamProfile::Sketch(Sketch {
+            loops: vec![outline, hole],
+            shear_factor: 0.67,
+        });
+        assert!(profile.is_valid());
+        let p = profile.properties();
+        assert!(close(p.area, 14560.0));
+        let bredt = 4.0 * (202.0f64 * 620.0).powi(2) / (2.0 * 202.0 / 10.0 + 2.0 * 620.0 / 8.0);
+        let line = profile.data_line();
+        assert!(line[5] > bredt && line[5] < 1.03 * bredt, "{line:?}");
+        assert_eq!(line[4], 0.67);
+        // The shear factor is a dimension of the sketch, kept when made from it.
+        assert_eq!(profile.dimensions_mut().len(), 1);
+        assert_eq!(Sketch::of(&profile).shear_factor, 0.67);
     }
 
     #[test]
@@ -1264,6 +1423,7 @@ mod tests {
                 vec![[2.0, 2.0], [4.0, 2.0], [4.0, 4.0], [2.0, 4.0]],
                 vec![[6.0, 8.0], [8.0, 8.0], [8.0, 6.0], [6.0, 6.0]],
             ],
+            shear_factor: 5.0 / 6.0,
         }
     }
 
@@ -1327,6 +1487,7 @@ mod tests {
         assert!(sketch.problem().unwrap().contains("Hole 1"), "{sketch:?}");
         let crossing = Sketch {
             loops: vec![vec![[0.0, 0.0], [1.0, 1.0], [1.0, 0.0], [0.0, 1.0]]],
+            ..Sketch::EMPTY
         };
         assert!(crossing.problem().is_some());
         assert!(!BeamProfile::Sketch(crossing).is_valid());

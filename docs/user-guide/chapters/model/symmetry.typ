@@ -41,7 +41,7 @@ rotation about the normal stays free, so the beam bends in the plane.
 
 The half model holds only half of such a beam. With #ui("Halve their section") (on by
 default), Nodalis gives every beam element whose nodes all lie in the region half its section
-when it writes the input file: half the area, second moments of area and torsion stiffness,
+when it writes the input file: half the area, second moments of area and torsion constant,
 and so half the mass. The dialog says how many beam elements that are. Stresses stay those of
 the full beam; section forces and reactions are those of the half model. Loads on the beam are
 not halved: apply half of a point load such as the rope tension yourself, as for any load on

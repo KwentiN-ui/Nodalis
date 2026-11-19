@@ -2185,17 +2185,16 @@ fn beam_profile(profile: &BeamProfile) -> ir::section::BeamProfile {
             i11: at(1),
             i12: at(2),
             i22: at(3),
-            torsion: at(4),
-            shear_area_1: None,
-            shear_area_2: None,
+            shear_factor: at(4),
+            torsion: Some(at(5)),
             contact_radius: profile.contact_radius(),
         },
     }
 }
 
 /// Half a general profile: the beam on a symmetry plane, of which the model holds the half
-/// on one side. Area and second moments (and so the torsion stiffness and the mass) halve;
-/// the contact radius stays the rope's.
+/// on one side. Area, second moments and torsion constant (and so the mass) halve; the
+/// contact radius stays the rope's.
 fn halved_profile(profile: &ir::section::BeamProfile) -> ir::section::BeamProfile {
     use ir::section::BeamProfile as P;
     match profile.clone() {
@@ -2204,18 +2203,16 @@ fn halved_profile(profile: &ir::section::BeamProfile) -> ir::section::BeamProfil
             i11,
             i12,
             i22,
+            shear_factor,
             torsion,
-            shear_area_1,
-            shear_area_2,
             contact_radius,
         } => P::General {
             area: 0.5 * area,
             i11: 0.5 * i11,
             i12: 0.5 * i12,
             i22: 0.5 * i22,
-            torsion,
-            shear_area_1: shear_area_1.map(|a| 0.5 * a),
-            shear_area_2: shear_area_2.map(|a| 0.5 * a),
+            shear_factor,
+            torsion: torsion.map(|j| 0.5 * j),
             contact_radius,
         },
         other => other,

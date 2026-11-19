@@ -128,12 +128,16 @@ pub fn rows(ui: &mut Ui, sketch: &mut Sketch, units: UnitSystem) {
                 ui.colored_label(style::error(), problem);
             }
             // The centroid where it lies in the sketch.
-            None => cross_section::property_lines(
-                ui,
-                SectionProperties::of_loops(&sketch.loops),
-                plx_model::BeamProfile::Sketch(sketch.clone()).size(),
-                units,
-            ),
+            None => {
+                let profile = plx_model::BeamProfile::Sketch(sketch.clone());
+                cross_section::property_lines(
+                    ui,
+                    SectionProperties::of_loops(&sketch.loops),
+                    profile.size(),
+                    units,
+                );
+                cross_section::torsion_line(ui, &profile, units);
+            }
         }
     });
     ui.end_row();

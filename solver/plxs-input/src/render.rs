@@ -412,20 +412,12 @@ fn sections(out: &mut Out, model: &Model) {
                         i11,
                         i12,
                         i22,
+                        shear_factor,
                         torsion,
-                        shear_area_1,
-                        shear_area_2,
                         ..
                     } => {
-                        let mut values = vec![*area, *i11, *i12, *i22, *torsion];
-                        match (shear_area_1, shear_area_2) {
-                            (Some(a1), Some(a2)) => values.extend([*a1, *a2]),
-                            (Some(a1), None) => values.push(*a1),
-                            // The second shear area alone cannot be written; the first
-                            // is then CalculiX's default, the area.
-                            (None, Some(a2)) => values.extend([*area, *a2]),
-                            (None, None) => {}
-                        }
+                        let mut values = vec![*area, *i11, *i12, *i22, *shear_factor];
+                        values.extend(*torsion);
                         ("General", values)
                     }
                 };

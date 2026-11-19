@@ -48,10 +48,11 @@ Create one with #ui("Cross-Section") on the #ui("Material") tab of the ribbon.
     web thickness tw and flange thickness tf. The T has its flange at +2, the channel its web at
     -1.],
   [Angle (L)], [Legs h along +2 and b along +1 from the corner, thickness t.],
-  [General (A, I)], [A profile given by its values: area A, the second moments of area I11 and
-    I22 about the 1- and 2-axis through the centroid and the factor k of CalculiX described
-    below. It is drawn as the rectangle with the same moments. Switching another profile to
-    #ui("General") takes over its values.],
+  [General (A, I, J)], [A profile given by its values: area A, the second moments of area I11
+    and I22 about the 1- and 2-axis through the centroid, the torsion constant J and the shear
+    factor k described below. It is drawn as the rectangle with the same moments. Switching
+    another profile to #ui("General") takes over its values, J included. A general profile of an
+    older project has no J yet and shows "Invalid dimensions" until one is entered.],
   [Sketch], [A profile of your own drawn as polygons: an outline and any number of holes
     (@sketched-profiles).],
   [Rope], [A steel wire rope by its diameter, outer wire diameter, fill factor and bending
@@ -62,8 +63,8 @@ The sketch below the fields shows the profile with the 1-direction to the right 
 2-direction up, starting at the beam's nodes. The red dashed lines are the principal axes through
 the centroid (circle): #ui("I") has the largest second moment of area, #ui("II") the smallest.
 Below the sketch are the area A, the position of the centroid, the second moments of area I11
-(about the 1-axis) and I22 (about the 2-axis) and the principal moments with the angle of axis I
-from the 1-direction, in the units of the model.
+(about the 1-axis) and I22 (about the 2-axis), the principal moments with the angle of axis I
+from the 1-direction and the torsion constant J (@torsion-constant), in the units of the model.
 
 #screenshot("cross-section-dialog.png", [The cross-sections under Sections and the dialog of a box
 profile whose thicker wall at +1 moves the centroid in the 1-direction])
@@ -87,9 +88,12 @@ and second moments of area. So:
   beam under tension gets stiffer across (stress stiffening). The explicit Dynamic step, heat
   transfer and Visco steps are refused by the model check with "Step not possible with general
   beam profiles".
-- The shear stiffness is k G A with k the share of the area in the web (a leg of an angle), and
-  the torsion stiffness k G (I11 + I22). For open profiles the torsion is far too stiff, CalculiX
-  knows no warping.
+- The shear stiffness is k G A with k the share of the area in the web (a leg of an angle), the
+  value given for a general profile or a sketch. The torsion stiffness is G J with the torsion
+  constant J of the profile (@torsion-constant), the solver's own sixth value of the section;
+  CalculiX itself takes the polar moment I11 + I22, far too stiff for open profiles. Warping is
+  not modelled: an open profile whose ends are held against warping is stiffer in torsion
+  than G J.
 - The results draw the beams as lines with their profile swept along them, coloured by their
   results. The stress (S) of these beams is the normal stress N / A along the beam; the stress
   of the outer fibres is not known, since a general section has no shape (and the wires of a
@@ -139,7 +143,7 @@ Costello and Papailiou with the wires as round bars:
 
 The dialog shows both and the value used, also as a share of the solid bar. Measured values
 lie in between; a 19 mm rope 3x7 bends with about 1/15 of the solid bar (Bruski 2020). The
-torsion stiffness is k G 2 I with k = 5/6, small like the bending stiffness.
+torsion stiffness is G 2 I, small like the bending stiffness.
 
 A rope carries its load by tension: compute it with #ui("Nlgeom"), pretension it in a first
 step and deflect it in a later one. The rope then follows a beam under tension T, whose bending
@@ -178,8 +182,11 @@ The centroid and the principal axes follow every change, with the area and secon
 area below. The sketch needs no particular origin: the profile lies with its centroid on the
 beam's nodes, as all general profiles do (@general-profiles). Edges must not cross, and every
 hole must lie inside the outline and outside the other holes; otherwise the dialog names the
-problem, draws the polygons red and does not accept the cross-section. The shear factor k is
-5/6. A sketch has no dimensions to expose as parameters.
+problem, draws the polygons red and does not accept the cross-section. #ui("Shear factor (k)")
+above the sketch is the share of the area that carries shear, 5/6 for a solid section; for a
+welded girder take the area of the webs over the whole area, about 0.67 for the box girder
+below. It is the sketch's only number to expose as a parameter; the torsion constant follows
+from the polygons.
 
 #screenshot("cross-section-sketch.png", [A sketched girder: a trapezoid with a hole, its centroid
   above the middle of its height])
@@ -189,6 +196,26 @@ parameter study can vary the profile. Renaming a cross-section renames it in the
 that use it. In the project schematic the cross-sections are a category of the setup that other
 analyses can link to, like the materials, and a Cross-Sections block (@cross-sections-block)
 keeps them in one place for several analyses.
+
+==== Torsion constant <torsion-constant>
+
+The torsion constant J of Saint-Venant torsion gives the torsion stiffness G J of a general
+beam. Nodalis solves it over the outline of every profile but the general one, whose J is given:
+Prandtl's stress function on a fine grid of the profile, with one value inside each hole. The
+same solve covers solid sections, open thin walls (about the sum of b t³ / 3 of the walls) and
+closed cells (Bredt's 4 A² / ∮ ds / t, A the area inside the mid-line of the walls), so a
+sketched profile of several plates gets its J without a formula to choose. Walls parallel to the
+1- and 2-direction are exact; slanted and round edges are followed in small steps, within a few
+percent. Round profiles take the exact value, a rope the polar moment 2 I.
+
+A box girder of two flanges 240 × 10 mm over two webs 8 mm thick, set in 15 mm from the edges
+of the flanges and 630 mm high overall, has J = 3.25 × 10⁸ mm⁴: Bredt's formula over the
+mid-line gives 3.21 × 10⁸ mm⁴, and the polar moment, CalculiX's value, would be 2.7 times as
+stiff. An I-beam of the same flanges and one such web, open, has J of about 2.6 × 10⁵ mm⁴,
+less than a thousandth of its polar moment.
+
+#screenshot("cross-section-box-girder.png", [The box girder with overhanging flanges as a sketch:
+  outline and one hole, with its torsion constant below the sketch])
 
 === Beam section
 

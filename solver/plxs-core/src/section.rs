@@ -89,16 +89,16 @@ pub enum BeamProfile {
         t4: f64,
     },
     /// General values of a Timoshenko beam: area, second moments about the local axes
-    /// (`i11`, `i22`, product `i12`), torsion constant and the shear areas; what the U1
-    /// data lines carry.
+    /// (`i11`, `i22`, product `i12`), CalculiX's shear factor `k` (shear stiffness `k G A`)
+    /// and the torsion constant `J` (torsion stiffness `G J`), Nodalis's own sixth value;
+    /// without it the polar moment `i11 + i22`. What the U1 data lines carry.
     General {
         area: f64,
         i11: f64,
         i12: f64,
         i22: f64,
-        torsion: f64,
-        shear_area_1: Option<f64>,
-        shear_area_2: Option<f64>,
+        shear_factor: f64,
+        torsion: Option<f64>,
         /// `CONTACT RADIUS=` (own parameter): node-to-surface contact keeps the beam's axis
         /// this far from the master surface, the radius of a rope.
         #[serde(default)]
