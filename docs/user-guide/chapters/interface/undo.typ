@@ -19,7 +19,7 @@ The output pane notes each undo and redo.
 The last 100 changes can be undone, of which at most 10 that replaced the mesh, as each keeps a
 copy of the mesh. The history starts empty for each model opened or created.
 
-The CAD tools of the Geometry workspace (Defeature, Split by Plane, Split around Hole) change
+The CAD tools of the Geometry workspace (Defeature, Split by Plane, Split by Offset Circle) change
 the geometry's shapes through the operations of the Geometry tree; adding, changing or deleting
 an operation counts as one change, and undo brings back the shapes
 with the mesh and the selections as they were. These changes keep a copy of the mesh as well,

@@ -1,5 +1,5 @@
 //! Splits of the geometry with OpenCASCADE through Gmsh: parts and faces cut along a plane,
-//! and planar faces cut around holes into a ring and the rest, see
+//! and planar faces cut along a circle offset from a circular edge, see
 //! [`plx_model::CadOperationKind::SplitPlane`] and [`plx_model::CadOperationKind::HoleRing`].
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -262,17 +262,19 @@ pub(crate) fn split_by_plane(
     Ok(Split { places, compounds })
 }
 
-/// Splits the planar faces around the picked circular edges of holes into a ring of the
-/// width of `operation` and the rest, the solids and shells keeping all their other faces.
+/// Splits the planar faces the picked circular edges bound along circles of the same centre,
+/// offset from the edges by the offset of `operation`: outwards when it is positive, a ring
+/// around a hole; inwards when negative, a ring along the rim of a disc. The solids and shells
+/// keep all their other faces.
 pub(crate) fn split_around_holes(
     gmsh: &Gmsh,
     input: &Geometry,
     operation: &CadOperation,
     entities: &[CadEntity],
 ) -> Result<Split, GmshError> {
-    let width = operation.value;
-    if width <= 0.0 {
-        return Err(fail("The width of the ring must be greater than 0"));
+    let offset = operation.value;
+    if offset == 0.0 {
+        return Err(fail("The offset of the circle must not be 0"));
     }
     let parts = parts(gmsh, input)?;
     let owner_of_face = |face: i32| -> Result<Option<usize>, GmshError> {
@@ -287,14 +289,14 @@ pub(crate) fn split_around_holes(
     let mut rings: BTreeMap<usize, Vec<Ring>> = BTreeMap::new();
     for entity in entities {
         let CadEntity::Edge(edge) = *entity else {
-            return Err(fail("Split around Hole picks the circular edges of holes"));
+            return Err(fail("Split by Offset Circle picks circular edges"));
         };
         if !gmsh.entities(1)?.contains(&edge) {
             return Err(fail(format!("The geometry has no edge {edge}")));
         }
         // Circles may come as circles, ellipses of equal axes or splines: any edge whose
         // points lie on the circle through three of them.
-        let round = || fail("Split around Hole needs circular edges of holes");
+        let round = || fail("Split by Offset Circle needs circular edges");
         let (centre, radius, normal) = circle(gmsh, edge).map_err(|_| round())?;
         let (min, max) = gmsh.parameter_bounds(1, edge)?;
         let along: Vec<f64> = (0..=8)
@@ -325,12 +327,17 @@ pub(crate) fn split_around_holes(
             }
         }
         let face = face.ok_or_else(|| {
-            fail("A picked hole edge bounds no planar face at right angles to the hole")
+            fail("A picked circular edge bounds no planar face at right angles to its axis")
         })?;
         let owner = owner_of_face(face)?
-            .ok_or_else(|| fail("A picked hole edge lies on no part of the geometry"))?;
+            .ok_or_else(|| fail("A picked circular edge lies on no part of the geometry"))?;
         let list = rings.entry(owner).or_default();
-        let outer = radius + width;
+        let outer = radius + offset;
+        if outer <= 0.0 {
+            return Err(fail(format!(
+                "An offset of {offset} shrinks a circle of radius {radius} to nothing"
+            )));
+        }
         let same = list.iter().any(|(c, r, _)| {
             distance(*c, centre) < 1e-6 * radius && (r - outer).abs() < 1e-6 * outer
         });
@@ -339,7 +346,7 @@ pub(crate) fn split_around_holes(
         }
     }
     if rings.is_empty() {
-        return Err(fail("No hole edges picked"));
+        return Err(fail("No circular edges picked"));
     }
     let mut places = Vec::new();
     for (index, (shape, name)) in parts.iter().enumerate() {
@@ -348,6 +355,7 @@ pub(crate) fn split_around_holes(
             continue;
         };
         let objects: Vec<Entity> = shape.entities().collect();
+        let faces_before = gmsh.entities(2)?.len();
         let mut disks = Vec::with_capacity(list.len());
         for &(centre, outer, normal) in list {
             disks.push((2, gmsh.add_disk(centre, outer, normal)?));
@@ -357,6 +365,14 @@ pub(crate) fn split_around_holes(
                 "OpenCASCADE could not split the faces of {name}: {e}"
             ))
         })?;
+        // A circle that misses the face, one shrunk into a hole or grown beyond a rim, cuts
+        // nothing.
+        if gmsh.entities(2)?.len() <= faces_before {
+            return Err(fail(format!(
+                "The offset circle cuts no face of {name}: around a hole the offset must be \
+                 positive, along the outer rim of a face negative"
+            )));
+        }
         let made: Vec<Entity> = pieces.into_iter().flatten().collect();
         if made.len() != objects.len() && shape.dim == 3 {
             return Err(fail(format!(

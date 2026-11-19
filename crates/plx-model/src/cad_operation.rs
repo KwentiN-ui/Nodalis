@@ -1,7 +1,6 @@
 //! CAD operations on geometry: a fillet or a chamfer of picked edges, a planar face moved
-//! along its normal, parts and faces split along a plane or faces split around holes, which
-//! a block of the
-//! project schematic applies to the geometry linked to it, so that a parameter study can
+//! along its normal, parts and faces split along a plane or faces split along a circle offset
+//! from a circular edge, which a block of the project schematic applies to the geometry linked to it, so that a parameter study can
 //! vary a radius like any other number.
 
 use plx_mesh::{CadEntity, Fnv};
@@ -25,8 +24,10 @@ pub enum CadOperationKind {
     /// faces that share the cut edge; one side may be dropped. The plane is a plane of the
     /// global coordinate system or one of a picked planar face, shifted by an offset.
     SplitPlane,
-    /// Splits the planar face around a hole into a ring of a width and the rest, so that the
-    /// ring can be picked on its own: for loads and supports next to a hole.
+    /// Splits the planar face a circular edge bounds along a circle of the same centre,
+    /// offset from the edge: outwards when the offset is positive, a ring around a hole for
+    /// loads and supports next to it; inwards when it is negative, a ring along the rim of a
+    /// disc. Either way the ring can be picked on its own.
     HoleRing,
     /// Removes fillets and chamfers: the faces next to them grow until they meet again, so
     /// that a fillet of a STEP file can be replaced by one of a CAD operation that a study
@@ -51,7 +52,7 @@ impl CadOperationKind {
             Self::Chamfer => "Chamfer",
             Self::PushPull => "Push/Pull",
             Self::SplitPlane => "Split by Plane",
-            Self::HoleRing => "Split around Hole",
+            Self::HoleRing => "Split by Offset Circle",
             Self::Defeature => "Defeature",
         }
     }
@@ -66,8 +67,7 @@ impl CadOperationKind {
         match self {
             Self::Fillet => "Radius",
             Self::Chamfer => "Distance",
-            Self::PushPull | Self::SplitPlane => "Offset",
-            Self::HoleRing => "Width",
+            Self::PushPull | Self::SplitPlane | Self::HoleRing => "Offset",
             Self::Defeature => "Max Size",
         }
     }
@@ -77,8 +77,7 @@ impl CadOperationKind {
         match self {
             Self::Fillet => "radius",
             Self::Chamfer => "distance",
-            Self::PushPull | Self::SplitPlane => "offset",
-            Self::HoleRing => "width",
+            Self::PushPull | Self::SplitPlane | Self::HoleRing => "offset",
             Self::Defeature => "max_size",
         }
     }
@@ -102,7 +101,7 @@ impl CadOperationKind {
         match self {
             Self::Fillet | Self::Chamfer => "edges",
             Self::PushPull | Self::SplitPlane | Self::Defeature => "faces",
-            Self::HoleRing => "hole edges",
+            Self::HoleRing => "circular edges",
         }
     }
 
@@ -111,13 +110,13 @@ impl CadOperationKind {
         match self {
             Self::Fillet | Self::Chamfer => "edge",
             Self::PushPull | Self::SplitPlane | Self::Defeature => "face",
-            Self::HoleRing => "hole edge",
+            Self::HoleRing => "circular edge",
         }
     }
 
     /// Whether its length may be negative: an offset inwards.
     pub fn signed(self) -> bool {
-        matches!(self, Self::PushPull | Self::SplitPlane)
+        matches!(self, Self::PushPull | Self::SplitPlane | Self::HoleRing)
     }
 }
 

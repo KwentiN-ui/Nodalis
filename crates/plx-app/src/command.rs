@@ -956,8 +956,10 @@ fn build() -> Vec<Command> {
         ),
         (
             plx_model::CadOperationKind::HoleRing,
-            "Split\naround Hole",
-            "Splits the face around a hole into a ring of a width, a face of its own to pick.",
+            "Split by\nOffset Circle",
+            "Splits the face a circular edge bounds along a circle offset from it: outwards \
+             around a hole, inwards along the rim of a disc for a negative offset. The ring is \
+             a face of its own to pick.",
         ),
     ] {
         add(command(

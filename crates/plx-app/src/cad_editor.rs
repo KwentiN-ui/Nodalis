@@ -316,7 +316,7 @@ impl CadOperationEditor {
             Some(edge @ CadEntity::Edge(_)) => Some(edge),
             _ => crate::geometry_selection::edge_at(view, &hit).map(CadEntity::Edge),
         }?;
-        // The edges of holes are curved.
+        // Circular edges are curved.
         let straight = (self.input.signatures.iter()).any(|s| s.entity == edge && s.kind == "Line");
         (self.kind != CadOperationKind::HoleRing || !straight).then_some(edge)
     }
@@ -598,9 +598,10 @@ impl CadOperationEditor {
                          the tilt turns it about an axis through that point.",
                         self.split_scope()
                     ),
-                    CadOperationKind::HoleRing => "Click the circular edges of holes on planar \
-                        faces; each face gets a ring of the width around the hole, a face of \
-                        its own to pick. A click on a picked edge removes it."
+                    CadOperationKind::HoleRing => "Click circular edges on planar faces; each \
+                        face is split along a circle offset from the edge, a ring of its own to \
+                        pick: a positive offset goes outwards (around a hole), a negative one \
+                        inwards (along the rim of a disc). A click on a picked edge removes it."
                         .to_owned(),
                     CadOperationKind::Defeature if self.finding() => match &self.found {
                         Some((_, Err(why))) => format!("The faces could not be found: {why}"),

@@ -349,8 +349,8 @@ someone else gives its files back. Undo brings back the copy as it was.
 A CAD Operation block changes geometry before it is meshed: it rounds (#ui("Fillet")) or bevels
 (#ui("Chamfer")) picked edges of solids or corners of flat faces, moves picked planar faces
 (#ui("Push/Pull")), splits parts and faces along a plane (#ui("Split by Plane"),
-@split-by-plane), splits the face around a hole into a ring (#ui("Split around Hole"),
-@split-around-hole) or removes fillets and chamfers (#ui("Defeature"), @defeature), of the
+@split-by-plane), splits a face along a circle offset from a circular edge into a ring
+(#ui("Split by Offset Circle"), @split-offset-circle) or removes fillets and chamfers (#ui("Defeature"), @defeature), of the
 geometry linked to it and gives the changed geometry on.
 Add it with #menu("Modify", "CAD Operation") or from the picker, drag the
 #ui("Geometry") of a file block, of an analysis with imported geometry or of another CAD
@@ -462,18 +462,26 @@ runs through no part and both sides are kept, the block reports so.
 #screenshot("cad-split-shell.png", [An angle of sheet metal split by the XZ plane at 20 mm: two
   shells, parts of their own in the tree under the compound part SHELL-1])
 
-==== Split around Hole <split-around-hole>
+==== Split by Offset Circle <split-offset-circle>
 
-#ui("Split around Hole") cuts a ring around a hole into the planar face it goes through, as wide
-as the #ui("Width"): the ring is then a face of its own to pick, for a bearing load, a bolt
-head's contact area or a finer mesh next to the hole. Click the circular edges of the holes on
-the faces to split; a hole whose edge is two half circles needs only one of them, and several
-holes, also on top and bottom, are split in one go. A ring wider than the face is cut off at the
-face's edges. Edges that are no circles, and holes in curved faces, are refused with the reason.
-This works on solids and on shell parts alike; the parts keep their names.
+#ui("Split by Offset Circle") cuts the planar face a circular edge bounds along a circle of the
+same centre, offset from the edge by the #ui("Offset"): the ring between edge and circle is then
+a face of its own to pick. A positive offset makes the circle larger. On the edge of a hole that
+gives a ring around the hole, for a bearing load, a bolt head's contact area or a finer mesh
+next to the hole. A negative offset makes the circle smaller. On the outer rim of a disc that
+gives a ring along the rim, for a contact ring of a perforated plate or a support at its
+circumference. Click the circular edges on the faces to split; an edge of two half circles needs
+only one of them, and several edges, also on top and bottom, are split in one go. A ring wider
+than the face is cut off at the face's edges. Edges that are no circles, circles in curved
+faces, a negative offset larger than the radius and a circle that cuts no face (a negative
+offset on a hole) are refused with the reason. This works on solids and on shell parts alike;
+the parts keep their names.
 
-#screenshot("cad-hole-ring.png", [The upper edge of a hole picked and the preview: a ring of
-  8 mm around the hole is a face of its own])
+#screenshot("cad-hole-ring.png", [The front edge of the centre hole of a perforated disc picked
+  with an offset of 6 mm: the ring around the hole is a face of its own])
+
+#screenshot("cad-offset-circle-rim.png", [The outer rim of the disc picked with an offset of
+  -5 mm: the ring along the rim is a face of its own, for a contact ring])
 
 ==== Defeature <defeature>
 
