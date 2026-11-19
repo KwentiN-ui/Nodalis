@@ -1740,12 +1740,17 @@ fn displacement_rows(
     let formulation = remote.formulation(fe, model.mesh(), region, names.0, names.1);
     let point = matches!(formulation, Formulation::Point(_));
     ui.label("");
-    ui.add(
-        egui::Label::new(
-            egui::RichText::new(formulation_hint(remote, formulation, region, model)).weak(),
-        )
-        .wrap(),
-    );
+    let hint = egui::RichText::new(formulation_hint(remote, formulation, region, model));
+    // A rigid point Automatic picked stiffens the selection: easy to miss as a weak line.
+    let rigid = remote.behavior == Behavior::Automatic
+        && formulation == Formulation::Point(RemoteBehavior::Rigid)
+        && region.reference_point().is_none();
+    let hint = if rigid {
+        hint.color(ui.visuals().warn_fg_color)
+    } else {
+        hint.weak()
+    };
+    ui.add(egui::Label::new(hint).wrap());
     ui.end_row();
     system_row(ui, &mut remote.system, fe);
     // Location and pinball region belong to a point.
@@ -1962,8 +1967,14 @@ fn formulation_hint(
             "The point and the rigid body it drives are held.".to_string()
         }
         Formulation::Point(RemoteBehavior::Rigid) => {
-            "Rigid point at the centre: the selection keeps its shape and turns about it."
-                .to_string()
+            if displacement.behavior == Behavior::Automatic {
+                "Rigid point at the centre, as a rotation is free: the selection keeps its \
+                 shape and turns about it. Choose Each node to let it deform."
+                    .to_string()
+            } else {
+                "Rigid point at the centre: the selection keeps its shape and turns about it."
+                    .to_string()
+            }
         }
         Formulation::Point(RemoteBehavior::Deformable) => {
             "Point at the centre that moves with the mean of the selection, which deforms."

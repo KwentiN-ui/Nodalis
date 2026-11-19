@@ -88,13 +88,27 @@ turns about it. The line below #ui("Behavior") always says which of the two the 
 - when all nodes have rotations of their own (beams and shells): an edge of a shell held in
   `X` to `Z` with free rotations is a line hinge,
 - when all rotations are ticked and zero (`UR3` in plane models): a clamp, or a roller with
-  only `Z` ticked.
+  only `Z` ticked,
+- in a cylindrical coordinate system unless a rotation is turned: the directions change from
+  node to node, and the centre of a bore or an outer cylinder lies on the axis, where radial
+  and tangential mean nothing. Holding only #ui("Tangential") on the rim of a disc keeps it
+  from turning and leaves the rim free to deform.
+
+#screenshot("displacement-cylindrical-each-node.png", [The rim of a perforated disc held only
+  tangentially in a cylindrical system: #ui("Automatic") holds each node, and the cones in the
+  3D view sit at the nodes])
 
 Otherwise, for a face or edge of solids or 2D elements whose rotations are free or turned, it
 uses a #ui("Rigid") point at the centre. So a face with `X` to `Z` ticked and the rotations
 free is a hinge about its centre, and a face with only `Z` ticked and free rotations may also
 tilt. A rotation exposed as a parameter counts as turned, so a study never switches between the
-two. Setting a location or a pinball region asks for a point as well.
+two. Setting a location or a pinball region asks for a point as well. When #ui("Automatic")
+picks a rigid point, the line below #ui("Behavior") says so in the warning colour: choose
+#ui("Each node") for a selection that should deform.
+
+#screenshot("displacement-automatic-rigid-warning.png", [The same rim held only in global `Y`:
+  #ui("Automatic") picks a rigid point at the centre, drawn with lines to the rim, and says so
+  in the warning colour])
 
 The two behaviors of a point match those of Ansys:
 
