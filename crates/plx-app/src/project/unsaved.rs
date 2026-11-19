@@ -3,6 +3,10 @@
 //!
 //! The question offers Save, Discard and Cancel. Save goes on with what was asked once the
 //! file is written, also when a file has to be picked first for a project never saved.
+//!
+//! Leaving also stops what runs: solves, studies, Campbell sweeps and Check Model runs. While
+//! something runs it is asked first too, in the same question when changes are unsaved, else
+//! with Stop and Cancel.
 
 use std::path::PathBuf;
 
@@ -37,6 +41,8 @@ pub(super) struct Unsaved {
 enum Answer {
     Save,
     Discard,
+    /// Stop what runs and leave; asked when nothing is unsaved.
+    Stop,
     Cancel,
 }
 
@@ -45,6 +51,53 @@ impl ProjectApp {
     /// blocks of a project that was never saved.
     pub(super) fn has_unsaved_changes(&self) -> bool {
         self.edits_unsaved() || (self.path.is_none() && !self.nodes.is_empty())
+    }
+
+    /// The names of what runs in the project and stops when the project is left: analyses
+    /// solved or queued, studies, Campbell sweeps and Check Model runs of analysis windows.
+    pub(super) fn running_work(&self) -> Vec<String> {
+        let mut ids: Vec<u64> = (self.solves.iter().filter(|s| s.active()))
+            .map(|s| s.id)
+            .collect();
+        ids.extend(self.update_queue.iter().copied());
+        ids.extend(self.looping.as_ref().map(|run| run.id));
+        for node in &self.nodes {
+            let check = (node.as_analysis())
+                .and_then(|a| a.window.as_ref())
+                .is_some_and(|w| w.is_running());
+            let sweep = (node.as_campbell())
+                .and_then(|c| c.window.as_ref())
+                .is_some_and(|w| w.is_running());
+            if check || sweep {
+                ids.push(node.id);
+            }
+        }
+        let mut names = Vec::new();
+        for id in ids {
+            let name = self.name_of(id);
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        names
+    }
+
+    /// Stops all that [`ProjectApp::running_work`] lists.
+    fn stop_running_work(&mut self) {
+        self.forget_solves();
+        for node in &mut self.nodes {
+            if let Some(window) = (node.as_analysis_mut()).and_then(|a| a.window.as_mut()) {
+                window.stop_check();
+            }
+            if let Some(window) = (node.as_campbell_mut()).and_then(|c| c.window.as_mut()) {
+                window.cancel();
+            }
+        }
+    }
+
+    /// Whether leaving the project has to be asked: changes would be lost, or runs stopped.
+    fn must_ask(&self) -> bool {
+        self.has_unsaved_changes() || !self.running_work().is_empty()
     }
 
     /// File > New Project, after asking about unsaved changes.
@@ -60,12 +113,12 @@ impl ProjectApp {
         self.leave(ctx, Leave::Open(path));
     }
 
-    /// Does `leave` now, or asks first if the project has unsaved changes.
+    /// Does `leave` now, or asks first if the project has unsaved changes or something runs.
     fn leave(&mut self, ctx: &egui::Context, leave: Leave) {
         if self.unsaved.asking.is_some() || self.unsaved.after_save.is_some() {
             return;
         }
-        if self.has_unsaved_changes() {
+        if self.must_ask() {
             self.unsaved.asking = Some(leave);
         } else {
             self.leave_now(ctx, leave);
@@ -73,6 +126,14 @@ impl ProjectApp {
     }
 
     fn leave_now(&mut self, ctx: &egui::Context, leave: Leave) {
+        if !self.running_work().is_empty() {
+            let line = match leave {
+                Leave::Close => "Closing: the running solves are stopped",
+                Leave::New | Leave::Open(_) => "The running solves were stopped",
+            };
+            self.output.push(line.into());
+            self.stop_running_work();
+        }
         match leave {
             Leave::Close => {
                 self.unsaved.may_close = true;
@@ -83,7 +144,8 @@ impl ProjectApp {
         }
     }
 
-    /// Keeps the window open when it is closed with unsaved changes, and asks instead. Call it
+    /// Keeps the window open when it is closed with unsaved changes or while something runs,
+    /// and asks instead. Call it
     /// after [`ProjectApp::poll_saving`], which keeps it open while a save runs.
     pub(super) fn watch_close(&mut self, ctx: &egui::Context) {
         if !ctx.input(|i| i.viewport().close_requested()) || self.unsaved.may_close {
@@ -96,7 +158,7 @@ impl ProjectApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             return;
         }
-        if self.has_unsaved_changes() {
+        if self.must_ask() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             // Closing is what the user wants now, more than what was asked before.
             self.unsaved.asking = Some(Leave::Close);
@@ -120,6 +182,17 @@ impl ProjectApp {
         let Some(leave) = self.unsaved.asking.clone() else {
             return;
         };
+        let running = self.running_work();
+        if !self.has_unsaved_changes() {
+            if running.is_empty() {
+                // What was asked about has ended meanwhile: the solves finished.
+                self.unsaved.asking = None;
+                self.leave_now(ctx, leave);
+            } else {
+                self.ask_stop(ctx, leave, &running);
+            }
+            return;
+        }
         let name = self.project_name();
         let question = match self.path {
             Some(_) => format!("Save the changes to {name}?"),
@@ -134,14 +207,17 @@ impl ProjectApp {
             Some(_) => "Changes that are not saved are lost.",
             None => "The project was never saved and is lost.",
         };
-        let consequence = format!("{what} {lost}");
+        let consequence = match stopped(&running) {
+            Some(stopped) => format!("{what} {lost} {stopped}"),
+            None => format!("{what} {lost}"),
+        };
         let Some(answer) = ask(ctx, &question, &consequence) else {
             return;
         };
         self.unsaved.asking = None;
         match answer {
             Answer::Cancel => {}
-            Answer::Discard => self.leave_now(ctx, leave),
+            Answer::Discard | Answer::Stop => self.leave_now(ctx, leave),
             Answer::Save => {
                 self.save(false);
                 // Nothing saves when no file was picked or an analysis still loads: the
@@ -152,6 +228,80 @@ impl ProjectApp {
             }
         }
     }
+}
+
+impl ProjectApp {
+    /// Asks whether to stop what runs, `running`, for `leave`, when nothing is unsaved.
+    fn ask_stop(&mut self, ctx: &egui::Context, leave: Leave, running: &[String]) {
+        let question = match running.len() {
+            1 => "Stop the running solve?",
+            _ => "Stop the running solves?",
+        };
+        let what = match leave {
+            Leave::Close => "Nodalis closes.",
+            Leave::New => "A new project replaces this one.",
+            Leave::Open(_) => "Another project replaces this one.",
+        };
+        let stopped = stopped(running).unwrap_or_default();
+        let consequence = format!("{what} {stopped}");
+        let stop = match leave {
+            Leave::Close => "Stop and Close",
+            Leave::New => "Stop and Start New",
+            Leave::Open(_) => "Stop and Open",
+        };
+        let Some(answer) = ask_running(ctx, question, &consequence, stop) else {
+            return;
+        };
+        self.unsaved.asking = None;
+        if answer == Answer::Stop {
+            self.leave_now(ctx, leave);
+        }
+    }
+}
+
+/// What leaving stops, as a sentence: `None` when nothing runs.
+fn stopped(running: &[String]) -> Option<String> {
+    let names = match running {
+        [] => return None,
+        [one] => one.clone(),
+        [first @ .., last] => format!("{} and {last}", first.join(", ")),
+    };
+    let verb = if running.len() == 1 { "is" } else { "are" };
+    Some(format!(
+        "{names} {verb} still running and will be stopped: results not written yet are lost."
+    ))
+}
+
+/// The question about stopping what runs. Escape cancels; Enter does nothing, so that no
+/// solve is stopped by a key pressed by habit.
+fn ask_running(
+    ctx: &egui::Context,
+    question: &str,
+    consequence: &str,
+    stop: &str,
+) -> Option<Answer> {
+    let mut answer = None;
+    egui::Modal::new(crate::ids::window(ctx, "stop running solves")).show(ctx, |ui| {
+        ui.set_max_width(420.0);
+        ui.label(RichText::new(question).strong().size(15.0));
+        ui.add_space(4.0);
+        ui.label(consequence);
+        ui.add_space(10.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let stop = RichText::new(stop).color(egui::Color32::WHITE);
+            let stop = egui::Button::new(stop).fill(ui.visuals().error_fg_color);
+            if ui.add(stop).clicked() {
+                answer = Some(Answer::Stop);
+            }
+            if ui.button("Cancel").clicked() {
+                answer = Some(Answer::Cancel);
+            }
+        });
+    });
+    if answer.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        answer = Some(Answer::Cancel);
+    }
+    answer
 }
 
 /// The question over the whole window. Enter saves, Escape cancels.

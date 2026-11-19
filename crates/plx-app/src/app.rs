@@ -844,6 +844,13 @@ impl AnalysisWindow {
         (self.workbench.analysis.as_ref()).is_some_and(Analysis::is_running)
     }
 
+    /// Kills a Check Model run of the window, as when the project is left while it runs.
+    pub fn stop_check(&mut self) {
+        if let Some(analysis) = (self.workbench.analysis.as_mut()).filter(|a| a.is_running()) {
+            analysis.kill();
+        }
+    }
+
     /// What keeps the window from closing or its data from being taken: work on a worker
     /// thread that would be lost.
     pub fn busy(&self) -> Option<&'static str> {
