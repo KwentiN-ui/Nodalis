@@ -107,6 +107,11 @@ pub struct Convergence {
     /// The contact status (closed, open, sticking, sliding) still changed in the last
     /// iteration of the last attempt.
     pub contact_changing: bool,
+    /// A part kept moving by a sizeable share of its own size in every one of the last
+    /// iterations: it is held by nothing but contact (or not at all) along that motion.
+    /// The error's item names an element of the part.
+    #[serde(default)]
+    pub floating: bool,
 }
 
 /// Why an attempt at an increment was given up.

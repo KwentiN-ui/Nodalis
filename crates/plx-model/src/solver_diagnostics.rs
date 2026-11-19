@@ -146,6 +146,12 @@ pub fn diagnose_solver_check(
             DiagnosticCode::Numerical(failure) => {
                 let (problem, detail) = explain_failure(*failure, diagnostic, fe, has_contact);
                 findings.push(Finding::new(ModelItem::Analysis, problem, detail.clone()));
+                // The part the solver names (one that floats).
+                if let Some(ItemRef::Element(id)) = &diagnostic.item
+                    && let Some(part) = mesh.parts.iter().position(|p| p.elements.contains(id))
+                {
+                    findings.push(Finding::new(ModelItem::Part(part), problem, detail.clone()));
+                }
                 // The step it happened in, through the lowering's table.
                 let step = (diagnostic.step).and_then(|s| {
                     let index = (s as usize).checked_sub(1)?;
@@ -217,6 +223,16 @@ fn explain_failure(
                 Stop::MinimumIncrement => "the increment fell below the minimum",
                 Stop::FixedIncrement => "the increment size is fixed (Incrementation Direct)",
             };
+            if c.floating {
+                return (
+                    Problem::RigidBodyMotion,
+                    with(&format!(
+                        "A part is held only by contact, or not at all, along the motion the \
+                         solver names: give it a support or the contact it rests on \
+                         (e.g. a screw head on its seat); {stop}"
+                    )),
+                );
+            }
             if matches!(
                 c.cause,
                 Divergence::Temperatures | Divergence::ThermalContact
@@ -388,6 +404,7 @@ mod tests {
             stop: Stop::Cutbacks,
             contact,
             contact_changing,
+            floating: false,
         })
     }
 
@@ -442,6 +459,36 @@ mod tests {
         );
     }
 
+    /// A failed increment in which a part kept floating is a rigid body motion, at the
+    /// analysis and at the part the solver names by one of its elements.
+    #[test]
+    fn a_floating_part_is_named() {
+        let fe = FeModel::default();
+        let mut mesh = FeMesh::default();
+        mesh.parts.push(plx_mesh::Part::new("Block", vec![1, 2]));
+        mesh.parts.push(plx_mesh::Part::new("Screw", vec![3, 4]));
+        let Failure::NoConvergence(mut c) = convergence(true, false) else {
+            unreachable!()
+        };
+        c.floating = true;
+        let mut diagnostic = failed(Failure::NoConvergence(c), None);
+        diagnostic.item = Some(ItemRef::Element(3));
+        let found = diagnose_solver_check(&[diagnostic], &mesh, &fe, &Origins::default());
+        let items: Vec<(ModelItem, Problem)> = found.iter().map(|f| (f.item, f.problem)).collect();
+        assert_eq!(
+            items,
+            vec![
+                (ModelItem::Analysis, Problem::RigidBodyMotion),
+                (ModelItem::Part(1), Problem::RigidBodyMotion),
+            ]
+        );
+        assert!(
+            found[0].detail.contains("held only by contact"),
+            "{}",
+            found[0].detail
+        );
+    }
+
     /// Every kind of failure has its own explanation; only a failure inside the solver is
     /// the general solver error.
     #[test]
@@ -468,6 +515,7 @@ mod tests {
                     stop: Stop::MinimumIncrement,
                     contact: false,
                     contact_changing: false,
+                    floating: false,
                 }),
                 Problem::HeatNoConvergence,
             ),

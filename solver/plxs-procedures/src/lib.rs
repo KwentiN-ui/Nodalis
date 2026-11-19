@@ -53,6 +53,8 @@ pub enum StepOutcome {
         /// What failed, for Nodalis to explain it.
         failure: plxs_core::Failure,
         message: String,
+        /// The item of the model the failure points at (an element of a part that floats).
+        item: Option<plxs_core::diagnostic::ItemRef>,
     },
     Partial {
         increments: u32,

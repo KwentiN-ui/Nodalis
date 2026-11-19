@@ -457,10 +457,11 @@ fn run_continuing(
                 increment,
                 failure,
                 message,
+                item,
             } => {
                 write(&mut session)?;
                 // The step that did not converge is the one after those done.
-                return Err(Error::Numerical {
+                let error = Error::Numerical {
                     step: session.state().steps_done + 1,
                     increment,
                     failure,
@@ -470,6 +471,10 @@ fn run_continuing(
                         }
                         _ => message,
                     },
+                };
+                return Err(match item {
+                    Some(item) => error.concerning(item),
+                    None => error,
                 });
             }
             StepOutcome::Cancelled => {

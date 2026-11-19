@@ -19,7 +19,9 @@ use plxs_assembly::{
 };
 use plxs_constraints::{ConstraintSet, ReducedPattern};
 use plxs_core::step::{DefaultAmplitude, Incrementation, Procedure as ProcedureKind};
-use plxs_core::{Convergence, Divergence, Error, Progress, ProgressEvent, Result, Step, Stop};
+use plxs_core::{
+    Convergence, Divergence, Error, Model, Progress, ProgressEvent, Result, Step, Stop,
+};
 use plxs_linalg::SparseMatrix;
 use plxs_output::{CvgRow, StaRow};
 
@@ -122,6 +124,108 @@ fn weighted_residual(residual: &[f64], local: &[f64], scale: f64) -> f64 {
             }
         })
         .fold(0.0_f64, f64::max)
+}
+
+/// The node (dense index) that moved most in a correction `du` and its motion.
+fn largest_motion(du: &[f64], nodes: usize) -> (usize, [f64; 3]) {
+    let mut best = (0, [0.0; 3], -1.0);
+    for n in 0..nodes.min(du.len() / 3) {
+        let m = [du[3 * n], du[3 * n + 1], du[3 * n + 2]];
+        let size = m[0] * m[0] + m[1] * m[1] + m[2] * m[2];
+        if size > best.2 {
+            best = (n, m, size);
+        }
+    }
+    (best.0, best.1)
+}
+
+/// The share of the force the motion of an increment causes in a typical DOF below which
+/// forces are round-off (see the zero-flux test of [`NonlinearStatic`]).
+const ROUNDOFF_FORCE: f64 = 1e-10;
+
+/// A share of its own size by which a part must move in each of the last
+/// [`FLOATING_ITERATIONS`] corrections of a failed attempt to count as floating.
+const FLOATING_SHARE: f64 = 0.05;
+/// How many of the last corrections must move the part that far.
+const FLOATING_ITERATIONS: usize = 3;
+
+/// A part that floats: an element of it (user id) and what to say.
+struct Floating {
+    element: u32,
+    message: String,
+}
+
+/// The part that floated in a failed attempt: the node that moved most in each of its last
+/// [`FLOATING_ITERATIONS`] corrections belongs to one body (connected elements) and moved by
+/// at least [`FLOATING_SHARE`] of that body's size every time. A part held only by
+/// contact, with a gap or play along one direction (a screw whose head was not given a
+/// contact with its seat), jumps back and forth by millimetres while the residual force
+/// stays where it was: its stiffness along the motion is nothing but that of the springs
+/// within reach. Nodes that are no part of an element (reference nodes) are never one.
+fn floating_part(model: &Model, u: &[f64], jumps: &[(usize, [f64; 3])]) -> Option<Floating> {
+    if jumps.len() < FLOATING_ITERATIONS {
+        return None;
+    }
+    let last = &jumps[jumps.len() - FLOATING_ITERATIONS..];
+    let bodies = model.node_bodies();
+    let body = *bodies.get(last[0].0)?;
+    if last.iter().any(|(n, _)| bodies.get(*n) != Some(&body)) {
+        return None;
+    }
+    // The body's size: the diagonal of the box around its nodes of elements.
+    let mut in_element = vec![false; model.nodes.len()];
+    let mut element_of_body = None;
+    for element in &model.elements {
+        for &id in &element.nodes {
+            if let Some(i) = model.nodes.index(id) {
+                in_element[i as usize] = true;
+                if bodies[i as usize] == body && element_of_body.is_none() {
+                    element_of_body = Some(element.id);
+                }
+            }
+        }
+    }
+    let element = element_of_body?;
+    let (mut low, mut high) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    for (i, x) in model.nodes.coordinates.iter().enumerate() {
+        if bodies[i] != body || !in_element[i] {
+            continue;
+        }
+        for d in 0..3 {
+            let v = x[d] + u.get(3 * i + d).copied().unwrap_or(0.0);
+            low[d] = low[d].min(v);
+            high[d] = high[d].max(v);
+        }
+    }
+    let size = (0..3)
+        .map(|d| (high[d] - low[d]).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let norm = |m: &[f64; 3]| (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
+    if size.is_nan() || size <= 0.0 || last.iter().any(|(_, m)| norm(m) < FLOATING_SHARE * size) {
+        return None;
+    }
+    let (node, motion) = last
+        .iter()
+        .max_by(|a, b| norm(&a.1).total_cmp(&norm(&b.1)))
+        .copied()?;
+    let length = norm(&motion);
+    let direction = motion.map(|v| v / length);
+    let share = if length > 10.0 * size {
+        "more than ten times its size".to_string()
+    } else {
+        format!("{:.0} % of its size", 100.0 * length / size)
+    };
+    let id = model.nodes.ids.get(node).copied().unwrap_or_default();
+    Some(Floating {
+        element,
+        message: format!(
+            "a part (node {id}, element {element}) moved by up to {length:.3e} along \
+             ({:.2}, {:.2}, {:.2}) in each of the last {FLOATING_ITERATIONS} iterations, {share}: it is held only by contact, or not at all, in that direction \
+             (a missing support or contact)",
+            direction[0], direction[1], direction[2],
+        ),
+    })
 }
 
 /// Whether the residual still falls: the smallest of the last four iterations is below
@@ -300,6 +404,8 @@ impl Procedure for NonlinearStatic {
         // The pattern of `Tᵀ K T` and where each entry of `K` lands, kept over the Newton
         // iterations and increments while the matrix pattern and `T` stay.
         let mut reducer: Option<ReducedPattern> = None;
+        // The largest motion of a node in every correction of the last attempt.
+        let mut jumps: Vec<(usize, [f64; 3])> = Vec::new();
         // Contact: *MODEL CHANGE / *CHANGE FRICTION of the step, then a contact state per
         // slave point.
         for warning in ctx.contact.begin_step(step, ctx.state) {
@@ -358,9 +464,13 @@ impl Procedure for NonlinearStatic {
                         "more than INC={} increments are needed; increase INC on *STEP",
                         step.max_increments
                     ),
+                    item: None,
                 });
             }
             let mut attempt = 0u32;
+            // The first attempt of the increment that found a part floating: later, smaller
+            // attempts start from a part already thrown far off, in any direction.
+            let mut floated: Option<Floating> = None;
             // The planned size of an increment shortened to end on a frame, which the next
             // increment resumes.
             let mut planned: Option<f64>;
@@ -475,6 +585,7 @@ impl Procedure for NonlinearStatic {
                     &mut equations,
                     large_rotations.then_some((active.as_slice(), spc_end.dofs.as_slice())),
                     &mut reducer,
+                    &mut jumps,
                 )?;
                 match result {
                     Ok(converged) => break converged,
@@ -498,19 +609,33 @@ impl Procedure for NonlinearStatic {
                                 false,
                             ),
                         };
+                        if floated.is_none() {
+                            floated =
+                                floating_part(ctx.model, &ctx.state.displacements.values, &jumps);
+                        }
+                        let floating = &floated;
                         let failed = |stop| {
                             plxs_core::Failure::NoConvergence(Convergence {
                                 cause,
                                 stop,
                                 contact: has_contact,
                                 contact_changing,
+                                floating: floating.is_some(),
                             })
+                        };
+                        let (reason, item) = match floating {
+                            Some(floating) => (
+                                format!("{reason}; {}", floating.message),
+                                Some(plxs_core::diagnostic::ItemRef::Element(floating.element)),
+                            ),
+                            None => (reason, None),
                         };
                         if direct {
                             return Ok(StepOutcome::Diverged {
                                 increment,
                                 failure: failed(Stop::FixedIncrement),
                                 message: format!("{reason}; the increment size is fixed (DIRECT)"),
+                                item: item.clone(),
                             });
                         }
                         if attempt > controls.max_cutbacks {
@@ -521,6 +646,7 @@ impl Procedure for NonlinearStatic {
                                     "{reason}; more than {} cutbacks in one increment",
                                     controls.max_cutbacks
                                 ),
+                                item: item.clone(),
                             });
                         }
                         progress.event(ProgressEvent::Cutback {
@@ -537,6 +663,7 @@ impl Procedure for NonlinearStatic {
                                 message: format!(
                                     "{reason}; the increment size {dt:.3e} fell below the minimum {minimum:.3e}"
                                 ),
+                                item: item.clone(),
                             });
                         }
                     }
@@ -786,7 +913,9 @@ impl NonlinearStatic {
         equations: &mut Equations,
         large_rotations: Option<(&[bool], &[u32])>,
         reducer: &mut Option<ReducedPattern>,
+        jumps: &mut Vec<(usize, [f64; 3])>,
     ) -> Result<std::result::Result<Converged, Failure>> {
+        jumps.clear();
         let total_dofs = ctx.table.dofs.len();
         // Start from the converged displacements, u = T v + g_start. A change of the
         // prescribed values enters through the first iteration as a linear prediction,
@@ -808,6 +937,7 @@ impl NonlinearStatic {
         // The last iteration in which the contact status changed.
         let mut last_change: Option<u32> = None;
         let mut iteration = 0u32;
+        let mut stiffness = 0.0_f64;
         loop {
             let started = Instant::now();
             let mut output = assemble_nonlinear(
@@ -858,6 +988,21 @@ impl NonlinearStatic {
                 None
             };
             let contact_elements = closed_gaps + contact.as_ref().map_or(0, |e| e.active as u32);
+            // The typical stiffness of a DOF at the start of the increment (the median of
+            // the diagonal: prescribed DOFs may carry huge entries, and a part thrown off
+            // stiffens by its stresses): with the motion of the increment, the force below
+            // which a residual is round-off.
+            if iteration == 0 {
+                stiffness = {
+                    let mut diagonal: Vec<f64> = k.diagonal().iter().map(|v| v.abs()).collect();
+                    let middle = diagonal.len() / 2;
+                    if diagonal.is_empty() {
+                        0.0
+                    } else {
+                        *diagonal.select_nth_unstable_by(middle, f64::total_cmp).1
+                    }
+                };
+            }
             ctx.profile.add(Phase::Assembly, started);
             let gaps_changed = acting.as_ref().is_some_and(|a| *a != status);
             acting = Some(status);
@@ -935,8 +1080,18 @@ impl NonlinearStatic {
                     step_time,
                     increment_size: input.dt,
                 });
-                let zero_flux =
-                    scale <= controls.zero_flux * average_force.max(1e-300) || scale == 0.0;
+                // No force worth the name: zero next to the average force, or forces and
+                // residual at round-off next to the forces the motion of the increment
+                // would cause in a typical DOF. A part moved without strain (a screw
+                // turned in the play of its thread) leaves residuals of 1e-13 N, and the
+                // average force of such increments is no larger: measured against it they
+                // never converged. (A part thrown off by a load keeps a residual of the
+                // load's size, however far it moves.)
+                let roundoff = ROUNDOFF_FORCE * stiffness * du_max;
+
+                let zero_flux = scale <= controls.zero_flux * average_force.max(1e-300)
+                    || scale == 0.0
+                    || (scale <= roundoff && r_max <= roundoff);
                 let residual_limit = (!zero_flux).then(|| {
                     let tolerance = if iteration > controls.relaxed_after {
                         controls.residual_relaxed
@@ -1170,6 +1325,7 @@ impl NonlinearStatic {
             }
             previous_correction = last_correction;
             last_correction = du.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            jumps.push(largest_motion(&du, ctx.model.nodes.len()));
             if !last_correction.is_finite() {
                 return Ok(Err(Failure::Diverging(
                     Divergence::NotFinite,
