@@ -925,7 +925,24 @@ fn build() -> Vec<Command> {
         "",
         "Imports geometry (STEP, IGES, BREP) or a mesh (INP) into the analysis.",
     ));
+    // The CAD operations, each a tool of its own that adds it to the Geometry tree.
     for (kind, label, tip) in [
+        (
+            plx_model::CadOperationKind::Fillet,
+            "Fillet",
+            "Rounds picked edges with a radius.",
+        ),
+        (
+            plx_model::CadOperationKind::Chamfer,
+            "Chamfer",
+            "Bevels picked edges by a distance on both faces.",
+        ),
+        (
+            plx_model::CadOperationKind::PushPull,
+            "Push/Pull",
+            "Moves picked planar faces along their normal by an offset, outwards when it is \
+             positive.",
+        ),
         (
             plx_model::CadOperationKind::Defeature,
             "Defeature",
@@ -949,7 +966,7 @@ fn build() -> Vec<Command> {
             g,
             t,
             "Modify",
-            Node(NodeIcon::CadOperation),
+            Tool(Icon::CadOperation(kind)),
             "",
             tip,
         ));

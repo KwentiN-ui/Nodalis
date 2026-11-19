@@ -55,6 +55,10 @@ pub enum Icon {
     Sound,
     /// Half a cube with its cut face, for the section view.
     SectionView,
+    /// The tools of the CAD operations of the Geometry workspace, each with its own
+    /// picture: a rounded or bevelled corner, a face pulled out, a block cut by a plane, a
+    /// ring around a hole, a corner made sharp again.
+    CadOperation(plx_model::CadOperationKind),
     /// Three blocks of a stack pulled apart, for the exploded view.
     ExplodedView,
     /// A shape and its mirror image at a dashed plane: the result transformations.
@@ -444,6 +448,7 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
         Icon::FeatureEdges => cube(shapes, r, None, false),
         Icon::MeshEdges => cube(shapes, r, None, true),
         Icon::SectionView => section_cube(shapes, r),
+        Icon::CadOperation(kind) => cad_operation(shapes, kind, r),
         Icon::ExplodedView => exploded_blocks(shapes, r),
         Icon::Animate => {
             let green = Color32::from_rgb(40, 150, 60);
@@ -1080,6 +1085,152 @@ fn pipette(shapes: &mut Vec<Shape>, r: Rect) {
 /// Isometric unit cube; x to the lower right, z to the lower left, y up.
 /// The cube of the view icons cut in half, its section face in the accent colour inside the
 /// outline of the cutting plane.
+/// The icons of the CAD operations: a block seen from the side for those that change an
+/// edge or a face, a block cut in two for Split by Plane, a plate with a hole for Split
+/// around Hole. What the operation makes is in the accent colour.
+fn cad_operation(shapes: &mut Vec<Shape>, kind: plx_model::CadOperationKind, r: Rect) {
+    use plx_model::CadOperationKind as K;
+    let p = |x: f32, y: f32| pos2(r.left() + x, r.top() + y);
+    // The arc of the rounded corner at the top right, from the top face to the side face.
+    let arc = |radius: f32| -> Vec<Pos2> {
+        let centre = (14.0 - radius, 4.0 + radius);
+        (0..=8)
+            .map(|i| {
+                let a = std::f32::consts::FRAC_PI_2 * i as f32 / 8.0;
+                p(centre.0 + radius * a.sin(), centre.1 - radius * a.cos())
+            })
+            .collect()
+    };
+    match kind {
+        K::Fillet | K::Chamfer | K::Defeature => {
+            // The block: the top face from the left, the corner, the side face down.
+            let corner: Vec<Pos2> = match kind {
+                K::Fillet => arc(6.0),
+                K::Chamfer => vec![p(8.0, 4.0), p(14.0, 10.0)],
+                _ => vec![p(14.0, 4.0)],
+            };
+            if kind == K::Defeature {
+                // The corner the fillet took away, filled again: what the block leaves of
+                // the square shows.
+                polygon(
+                    shapes,
+                    vec![p(5.0, 4.0), p(14.0, 4.0), p(14.0, 13.0), p(5.0, 13.0)],
+                    ACCENT,
+                    Color32::TRANSPARENT,
+                );
+            }
+            let block_corner = if kind == K::Defeature {
+                arc(9.0)
+            } else {
+                corner.clone()
+            };
+            let around = |corner: &[Pos2]| {
+                let mut outline = vec![p(2.0, 14.0), p(2.0, 4.0)];
+                outline.extend(corner.iter().copied());
+                outline.push(p(14.0, 14.0));
+                outline
+            };
+            polygon(shapes, around(&block_corner), FACE, Color32::TRANSPARENT);
+            let mut outline = around(&corner);
+            outline.push(p(2.0, 14.0));
+            line(shapes, &outline, 1.0, OUTLINE);
+            if kind == K::Defeature {
+                // The fillet taken away, dashed, and the sharp corner again.
+                for pair in arc(9.0).windows(2) {
+                    shapes.extend(Shape::dashed_line(
+                        pair,
+                        Stroke::new(1.0, OUTLINE),
+                        1.5,
+                        1.0,
+                    ));
+                }
+            } else {
+                line(shapes, &corner, 2.0, ACCENT);
+            }
+        }
+        K::PushPull => {
+            // The block, and the prism its top face is pulled out by.
+            polygon(
+                shapes,
+                vec![p(2.0, 8.0), p(14.0, 8.0), p(14.0, 14.5), p(2.0, 14.5)],
+                FACE,
+                OUTLINE,
+            );
+            polygon(
+                shapes,
+                vec![p(5.0, 4.0), p(11.0, 4.0), p(11.0, 8.0), p(5.0, 8.0)],
+                ACCENT,
+                OUTLINE,
+            );
+            let red = Color32::from_rgb(210, 60, 40);
+            line(shapes, &[p(8.0, 6.5), p(8.0, 2.5)], 1.2, red);
+            polygon(
+                shapes,
+                vec![p(8.0, 0.5), p(6.3, 3.0), p(9.7, 3.0)],
+                red,
+                red,
+            );
+        }
+        K::SplitPlane => split_blocks(shapes, r),
+        K::HoleRing => {
+            // A plate seen from above, with the ring around its hole.
+            polygon(
+                shapes,
+                vec![p(1.5, 1.5), p(14.5, 1.5), p(14.5, 14.5), p(1.5, 14.5)],
+                FACE,
+                OUTLINE,
+            );
+            let centre = p(8.0, 8.0);
+            shapes.push(Shape::circle_filled(centre, 5.5, ACCENT));
+            shapes.push(Shape::circle_stroke(centre, 5.5, Stroke::new(1.0, OUTLINE)));
+            // The hole, dark as a look into it.
+            let hole = Color32::from_rgb(110, 110, 110);
+            shapes.push(Shape::circle_filled(centre, 2.8, hole));
+            shapes.push(Shape::circle_stroke(centre, 2.8, Stroke::new(1.0, OUTLINE)));
+        }
+    }
+}
+
+/// A block cut in two by a plane, the halves pulled apart and the cut faces in the accent
+/// colour: Split by Plane.
+fn split_blocks(shapes: &mut Vec<Shape>, r: Rect) {
+    let c = r.center() + vec2(0.0, 0.5);
+    let s = 6.0;
+    let project = |[x, y, z]: [f32; 3]| {
+        let (x, y, z) = (x - 0.5, y - 0.5, z - 0.5);
+        c + vec2((x - z) * 0.866 * s, ((x + z) * 0.5 - y) * s)
+    };
+    // The halves pulled apart along x, so that the cut face of the back one shows.
+    for (lo, hi, cut_face) in [(-0.3, 0.25, true), (0.75, 1.3, false)] {
+        let quad = |corners: [[f32; 3]; 4]| corners.map(project).to_vec();
+        let front = quad([
+            [lo, 0.0, 1.0],
+            [hi, 0.0, 1.0],
+            [hi, 1.0, 1.0],
+            [lo, 1.0, 1.0],
+        ]);
+        let top = quad([
+            [lo, 1.0, 0.0],
+            [hi, 1.0, 0.0],
+            [hi, 1.0, 1.0],
+            [lo, 1.0, 1.0],
+        ]);
+        let side = quad([
+            [hi, 0.0, 0.0],
+            [hi, 1.0, 0.0],
+            [hi, 1.0, 1.0],
+            [hi, 0.0, 1.0],
+        ]);
+        let side_fill = if cut_face { ACCENT } else { FACE };
+        for (points, fill) in [(front, FACE), (top, FACE), (side, side_fill)] {
+            polygon(shapes, points.clone(), fill, Color32::TRANSPARENT);
+            let mut closed = points.clone();
+            closed.push(points[0]);
+            line(shapes, &closed, 1.0, OUTLINE);
+        }
+    }
+}
+
 fn section_cube(shapes: &mut Vec<Shape>, r: Rect) {
     let c = r.center() + vec2(0.0, 0.5);
     let s = 6.2 * 1.25;
