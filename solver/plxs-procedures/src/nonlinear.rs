@@ -139,6 +139,10 @@ fn largest_motion(du: &[f64], nodes: usize) -> (usize, [f64; 3]) {
     (best.0, best.1)
 }
 
+/// The share of the force the motion of an increment causes in a typical DOF below which
+/// forces are round-off (see the zero-flux test of [`NonlinearStatic`]).
+const ROUNDOFF_FORCE: f64 = 1e-10;
+
 /// A share of its own size by which a part must move in each of the last
 /// [`FLOATING_ITERATIONS`] corrections of a failed attempt to count as floating.
 const FLOATING_SHARE: f64 = 0.05;
@@ -933,6 +937,7 @@ impl NonlinearStatic {
         // The last iteration in which the contact status changed.
         let mut last_change: Option<u32> = None;
         let mut iteration = 0u32;
+        let mut stiffness = 0.0_f64;
         loop {
             let started = Instant::now();
             let mut output = assemble_nonlinear(
@@ -983,6 +988,21 @@ impl NonlinearStatic {
                 None
             };
             let contact_elements = closed_gaps + contact.as_ref().map_or(0, |e| e.active as u32);
+            // The typical stiffness of a DOF at the start of the increment (the median of
+            // the diagonal: prescribed DOFs may carry huge entries, and a part thrown off
+            // stiffens by its stresses): with the motion of the increment, the force below
+            // which a residual is round-off.
+            if iteration == 0 {
+                stiffness = {
+                    let mut diagonal: Vec<f64> = k.diagonal().iter().map(|v| v.abs()).collect();
+                    let middle = diagonal.len() / 2;
+                    if diagonal.is_empty() {
+                        0.0
+                    } else {
+                        *diagonal.select_nth_unstable_by(middle, f64::total_cmp).1
+                    }
+                };
+            }
             ctx.profile.add(Phase::Assembly, started);
             let gaps_changed = acting.as_ref().is_some_and(|a| *a != status);
             acting = Some(status);
@@ -1060,8 +1080,18 @@ impl NonlinearStatic {
                     step_time,
                     increment_size: input.dt,
                 });
-                let zero_flux =
-                    scale <= controls.zero_flux * average_force.max(1e-300) || scale == 0.0;
+                // No force worth the name: zero next to the average force, or forces and
+                // residual at round-off next to the forces the motion of the increment
+                // would cause in a typical DOF. A part moved without strain (a screw
+                // turned in the play of its thread) leaves residuals of 1e-13 N, and the
+                // average force of such increments is no larger: measured against it they
+                // never converged. (A part thrown off by a load keeps a residual of the
+                // load's size, however far it moves.)
+                let roundoff = ROUNDOFF_FORCE * stiffness * du_max;
+
+                let zero_flux = scale <= controls.zero_flux * average_force.max(1e-300)
+                    || scale == 0.0
+                    || (scale <= roundoff && r_max <= roundoff);
                 let residual_limit = (!zero_flux).then(|| {
                     let tolerance = if iteration > controls.relaxed_after {
                         controls.residual_relaxed

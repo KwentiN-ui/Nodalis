@@ -269,6 +269,15 @@ turn far keep their friction all the way round, e.g. a screw turned in its threa
 turned in its bore over several turns. Points that open or close with next to no force (the
 edge of a part lifting off) do not hold up the iterations of an increment.
 
+A slave point touches the closest point of the master side. Where that point is an edge or
+the end of the master side, it never takes a face farther away that it lies behind instead:
+on a thread, a nut point at a crest no longer jumps to the far flank of the next tooth. A
+point that starts behind the master side by more than a quarter of the master's mesh size
+lies past an open end of it, e.g. a tapped hole that reaches past the tip of its screw, whose
+end face belongs to no contact. It touches nothing as long as it stays behind. A deeper
+interference fit needs an #ui("Offset"). Increments in which a part only moves, without
+strain, converge at once, e.g. a screw turned or pulled within the play of its thread.
+
 #screenshot("friction-turn.svg", [The friction moment of a screw tooth pressed by 2 kN onto a
   thread (pitch 1.5 mm, flank angle 30°, μ = 0.2) while it is turned by 200°: it stays at the
   value by hand. Friction measured on the total displacement instead faded once the screw had

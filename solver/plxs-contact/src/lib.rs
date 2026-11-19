@@ -44,6 +44,11 @@ use law::{FrictionLaw, Law};
 /// onto the edge with a small sideways offset.
 pub const BESIDE_TOLERANCE: f64 = 0.01;
 
+/// How deep (in typical master edge lengths) a point may start behind the master and still
+/// be an interference fit; deeper it lies behind an open end of the master surface (see
+/// [`Pair::kinematics`]).
+pub const INITIAL_BEHIND: f64 = 0.25;
+
 /// A point of the slave side a spring acts on: a slave node (node-to-face) or an integration
 /// point of a slave face (face-to-face).
 #[derive(Clone, Debug)]
@@ -1447,8 +1452,16 @@ impl Pair {
         };
         // First the face whose box lies nearest (a face the point projects into is mostly
         // that one); then only the faces whose box is nearer than the best distance so far
-        // need a projection. The choice does not depend on the order: a face the point
-        // projects into wins, among those the closest, among equally close the first.
+        // need a projection. The choice does not depend on the order: the closest face wins,
+        // among about equally close ones a face the point projects into, then the first.
+        //
+        // A face the point projects into does not win from farther away: on a zigzag
+        // surface (a thread, teeth) the point projects into the far flanks of the next
+        // teeth too, from behind their planes. A nut point beyond the end of a bolt's
+        // thread, its foot point clamped to the end of the root, took such a flank a
+        // millimetre away as overclosed by a millimetre; points beside a crest jumped to
+        // the far flank of the next tooth. The closest point of the master is the clamped
+        // one: an edge (see `kinematics`) or the border, beside which nothing touches.
         let mut nearest: Option<(f64, u32)> = None;
         for &f in candidates {
             let reach = box_distance(f);
@@ -1457,6 +1470,9 @@ impl Pair {
             }
         }
         let (_, first) = nearest?;
+        // Distances closer than this are equal: a point at a kink lies about equally close
+        // to both faces.
+        let tie = 1e-6 * self.typical;
         let mut best: Option<(f64, bool, u32, [f64; 2])> = None;
         let consider = |f: u32, best: &mut Option<(f64, bool, u32, [f64; 2])>| {
             let face = &self.master[f as usize];
@@ -1468,8 +1484,12 @@ impl Pair {
             let better = match best {
                 None => true,
                 Some((d, i, g, _)) => {
-                    (interior && !*i)
-                        || (interior == *i && (distance < *d || (distance == *d && f < *g)))
+                    if (distance - *d).abs() > tie {
+                        distance < *d
+                    } else {
+                        (interior && !*i)
+                            || (interior == *i && (distance < *d || (distance == *d && f < *g)))
+                    }
                 }
             };
             if better {
@@ -1481,8 +1501,8 @@ impl Pair {
             if f == first {
                 continue;
             }
-            if let Some((d, true, ..)) = best
-                && box_distance(f) > d
+            if let Some((d, ..)) = best
+                && box_distance(f) > d + tie
             {
                 continue;
             }
@@ -1707,7 +1727,14 @@ impl Pair {
                 // far beyond its end.
                 && (self.inner_edge(p, f, &fp.n) || point.offset > 0.0)
             {
-                let sign = along.signum();
+                // Inside the master only behind every face at that edge or corner. At a
+                // convex or concave edge a point in the wedge is in front of both faces or
+                // behind both; at a saddle (the run-out of a thread, its corners at the
+                // tip of a bolt) it lies behind some of them though it touches nothing, and
+                // the face that won the tie of equal distances made a nut point 3 mm off
+                // the tip of a bolt overclosed by 3 mm.
+                let inside = along < 0.0 && self.behind_all_at_edge(p, f, &fp.n, current, x);
+                let sign = if inside { -1.0 } else { 1.0 };
                 n = scale(r, sign / distance);
                 geometric_gap = sign * distance;
                 corner = Some(distance);
@@ -1716,6 +1743,18 @@ impl Pair {
         // A rope touches with its surface, the radius off its axis.
         geometric_gap -= point.offset;
         let initial_gap = self.initial[p].map_or(0.0, |(_, g)| g);
+        // A point that starts behind the master by more than an interference fit lies
+        // where the master surface is open: a nut thread reaching past the tip of its bolt,
+        // whose flanks end there with no face across the tip. Its points project into the
+        // last flanks from behind, a millimetre deep, and touch nothing as long as they stay
+        // behind (a `*CLEARANCE` takes the initial gap as intended instead).
+        if !tied
+            && self.clearance.is_none()
+            && initial_gap < -INITIAL_BEHIND * self.typical
+            && geometric_gap < 0.0
+        {
+            return Err((x, 0.0));
+        }
         let gap = match self.clearance {
             Some(c) => geometric_gap - initial_gap + c,
             None => geometric_gap,
@@ -1808,6 +1847,38 @@ impl Pair {
                     }
                 })
             })
+    }
+
+    /// Whether `x` lies behind every other candidate face of point `p` that shares the edge
+    /// or corner of face `f` its clamped foot point (shape function values `n`) lies on.
+    fn behind_all_at_edge(
+        &self,
+        p: usize,
+        f: u32,
+        n: &[f64],
+        current: &[[f64; 3]],
+        x: [f64; 3],
+    ) -> bool {
+        let face = &self.master[f as usize];
+        let edge: Vec<u32> = (face.nodes.iter().zip(n))
+            .filter(|(_, v)| v.abs() > 1e-9)
+            .map(|(&node, _)| node)
+            .collect();
+        let Some(candidates) = self.candidates.get(p) else {
+            return true;
+        };
+        candidates.iter().all(|&g| {
+            let other = &self.master[g as usize];
+            if g == f || !edge.iter().all(|node| other.nodes.contains(node)) {
+                return true;
+            }
+            let (_, fp) = other.project(current, x);
+            let mut r = sub(x, fp.x);
+            if other.planar.is_some() {
+                r[2] = 0.0;
+            }
+            dot(r, fp.normal) < 0.0
+        })
     }
 
     /// The spring of a point (or mortar node) from its kinematics: the pressure relation,
