@@ -131,9 +131,12 @@ The #ui("Screenshot") tile on the #ui("View") tab of the ribbon captures the 3D 
 
 #menu("View", "Section View") or #ui("Section View") on the ribbon cuts the model with a plane. Volume
 elements show their cut faces with mesh edges and, in the Results workspace, with the result
-colours.
+colours. Solids of the geometry in the Geometry workspace are filled where the plane cuts
+them, outlined by the cut of their faces.
 
 #screenshot("section-view.png", [Section view of a result])
+
+#screenshot("section-view-geometry.png", [Section view of a STEP solid: the cut is filled])
 
 #fields(
   [Base plane], [XY, YZ or XZ at the coordinate given in #ui("Position").],

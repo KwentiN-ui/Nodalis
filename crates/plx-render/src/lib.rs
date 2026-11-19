@@ -18,7 +18,8 @@ pub use renderer::{
     COLOR_FORMAT, ContourPalette, DisplayOptions, LicDisplay, LicSource, ViewportRenderer,
 };
 pub use section::{
-    ClipPlane, SectionCells, SectionValues, clip_plane, lighten, section_mesh, section_values,
+    ClipPlane, SectionCells, SectionValues, cap_mesh, clip_plane, lighten, section_mesh,
+    section_values,
 };
 pub use shell::{ShellThickness, thick_shell_mesh};
 pub use wgpu;

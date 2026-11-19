@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 bytemuck.workspace = true
+earcut = "0.4"
 glam.workspace = true
 plx-mesh.workspace = true
 plx-model.workspace = true
