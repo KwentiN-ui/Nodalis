@@ -357,8 +357,8 @@ impl Displacement {
     ///
     /// Automatically, the nodes are held directly when they have rotations of their own
     /// (beam and shell nodes), when the selection is a single node or a reference point,
-    /// in axisymmetric models, and when all rotations of the model space are held at zero.
-    /// A point at the centre is needed for a face or edge of solids that may turn or is
+    /// in axisymmetric models, when all rotations of the model space are held at zero, and
+    /// in a cylindrical system unless a rotation is turned. A point at the centre is needed for a face or edge of solids that may turn or is
     /// turned, and for a location or pinball region; it is rigid then.
     pub fn formulation(
         &self,
@@ -395,6 +395,15 @@ impl Displacement {
         });
         let still = rotations.iter().all(|&d| self.still(d));
         if still && !exposed {
+            return Formulation::Nodes;
+        }
+        // In a cylindrical system the directions change from node to node, and the centre
+        // of the selection usually lies on the axis, where they have no meaning: free
+        // rotations are just left free, only turning asks for a point.
+        let turned = rotations.iter().any(|&d| self.moves(d));
+        let cylindrical = (model.coordinate_system_or_global(self.system))
+            .is_some_and(|s| s.kind == crate::CoordinateSystemKind::Cylindrical);
+        if cylindrical && !turned && !exposed {
             return Formulation::Nodes;
         }
         let nodes = region.nodes(mesh);

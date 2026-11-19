@@ -6176,6 +6176,30 @@ mod tests {
     }
 
     #[test]
+    fn free_rotations_in_a_cylindrical_system_hold_each_node() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        let mut cylinder = crate::CoordinateSystem::new("Cylinder");
+        cylinder.kind = crate::CoordinateSystemKind::Cylindrical;
+        let id = cylinder.id;
+        model.coordinate_systems.push(cylinder);
+        // Only the tangential direction held: its direction changes over the face, a point
+        // on the axis has none.
+        let tangential = crate::Displacement {
+            system: Some(id),
+            ..crate::Displacement::new([None, Some(0.0), None, None, None, None])
+        };
+        model.steps[0].boundary_conditions[0].kind = BoundaryKind::Displacement(tangential.clone());
+        assert_eq!(model.formulation(&mesh, 0, 0), Some(Formulation::Nodes));
+        // A turned face still needs its point.
+        let mut turned = tangential;
+        turned.values[5] = Some(0.1);
+        model.steps[0].boundary_conditions[0].kind = BoundaryKind::Displacement(turned);
+        let rigid = Some(Formulation::Point(crate::RemoteBehavior::Rigid));
+        assert_eq!(model.formulation(&mesh, 0, 0), rigid);
+    }
+
+    #[test]
     fn rotations_on_solids_are_ignored() {
         let mesh = cubes(1, false);
         let mut model = model(&mesh);
