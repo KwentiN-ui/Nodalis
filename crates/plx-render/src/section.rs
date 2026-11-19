@@ -10,6 +10,9 @@ use crate::contour::NO_VALUE;
 use crate::fe::{FEATURE_EDGE_OPACITY, MESH_EDGE_OPACITY};
 use crate::mesh::{NodeBlend, RenderMesh, Vertex};
 
+mod cap;
+pub use cap::cap_mesh;
+
 /// The half-space kept by a section view: points with `normal · (p - point) >= 0` stay
 /// visible, the side the normal points away from is cut off.
 #[derive(Clone, Copy, Debug, PartialEq)]

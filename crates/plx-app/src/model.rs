@@ -14,8 +14,8 @@ use plx_model::SectionKind;
 use plx_model::{BeamOrientation, FeModel, Finding, Geometry, MeshCheck, UnitSystem};
 use plx_render::{
     BeamShape, ClipPlane, RenderMesh, SectionCells, SectionValues, ShellThickness, Vertex,
-    beam_mesh, lighten, mesh_wireframe, part_color, part_render_mesh, section_mesh, section_values,
-    thick_shell_mesh, wireframe_edges,
+    beam_mesh, cap_mesh, lighten, mesh_wireframe, part_color, part_render_mesh, section_mesh,
+    section_values, thick_shell_mesh, wireframe_edges,
 };
 
 use crate::exploded::{Assembly, Explosion, Parameters, PartShape};
@@ -2527,6 +2527,10 @@ impl Model {
                     return RenderMesh::default();
                 }
                 let color = color(info);
+                // A CAD solid is shown by its faces alone; the cut through them is filled.
+                if self.caps_solid(info) {
+                    return cap_mesh(cells, &coords, self.origin, point, normal, color);
+                }
                 let mut mesh = section_mesh(
                     cells,
                     &coords,
@@ -2553,6 +2557,10 @@ impl Model {
                     continue;
                 }
                 let color = color(info);
+                if self.caps_solid(info) {
+                    mesh.append(cap_mesh(cells, &moved, self.origin, point, normal, color));
+                    continue;
+                }
                 let scalars = scalars.as_deref();
                 let mut copy =
                     section_mesh(cells, &moved, self.origin, point, normal, color, scalars);
@@ -2565,6 +2573,12 @@ impl Model {
             }
         }
         meshes
+    }
+
+    /// Whether the section view fills the cut through a part as a cap of its closed
+    /// surface: a solid of the geometry display, drawn as the triangulated CAD faces.
+    fn caps_solid(&self, info: &PartInfo) -> bool {
+        self.is_geometry && info.dimension == Some(3)
     }
 
     /// The shown result values where a plane in model coordinates cuts the visible parts:
@@ -3743,6 +3757,55 @@ mod tests {
         assert!(!model.clipped(0, below));
         let faces = model.section_meshes(center, DVec3::Z, true);
         assert!(faces[0].triangles.is_empty() && faces[0].feature_edges.is_empty());
+    }
+
+    /// The plate with a hole (100 x 40 x 10) cut through its thickness: the cap of the
+    /// geometry display fills the plate around the hole, closed by the triangulated faces.
+    #[test]
+    fn section_of_geometry_solids_is_filled() {
+        if plx_mesher::self_test().is_err() {
+            eprintln!("Gmsh not available, test skipped");
+            return;
+        }
+        let view = load(&testdata("platte_mit_loch.step"), UnitSystem::Unitless)
+            .unwrap()
+            .geometry_view
+            .unwrap();
+        assert_eq!(view.parts[0].dimension, Some(3));
+        let area = |mesh: &RenderMesh| -> f64 {
+            (mesh.triangles.as_chunks::<3>().0.iter())
+                .map(|t| {
+                    let p = |k: usize| {
+                        DVec3::from(mesh.vertices[t[k] as usize].position.map(f64::from))
+                    };
+                    (p(1) - p(0)).cross(p(2) - p(0)).length() * 0.5
+                })
+                .sum()
+        };
+        // Through the thickness: the plate less the hole.
+        let points = view.mesh.coords().iter().map(|&p| DVec3::from(p));
+        let (min, max) = points.fold((DVec3::INFINITY, DVec3::NEG_INFINITY), |(lo, hi), p| {
+            (lo.min(p), hi.max(p))
+        });
+        let middle = (min + max) * 0.5;
+        let size = max - min;
+        let faces = view.section_meshes(middle, DVec3::Z, false);
+        let flat = area(&faces[0]);
+        assert!(
+            flat > 0.5 * size.x * size.y && flat < size.x * size.y,
+            "{flat}"
+        );
+        assert!(!faces[0].feature_edges.is_empty());
+        // Along the plate across the hole: two strips beside it, the full width less its
+        // diameter, so the hole's diameter follows from the two cuts.
+        let along = area(&view.section_meshes(middle, DVec3::Y, false)[0]);
+        let diameter = size.x - along / size.z;
+        let hole = std::f64::consts::PI * diameter * diameter / 4.0;
+        let expected = size.x * size.y - hole;
+        assert!(
+            (flat - expected).abs() < 1e-2 * expected,
+            "{flat} {expected}"
+        );
     }
 
     /// Times a click on a part of a large assembly and the redrawn scene with it
