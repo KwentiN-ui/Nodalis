@@ -972,9 +972,8 @@ impl Reader {
                     i11: v[1],
                     i12: v[2],
                     i22: v[3],
-                    torsion: v[4],
-                    shear_area_1: v.get(5).copied(),
-                    shear_area_2: v.get(6).copied(),
+                    shear_factor: v[4],
+                    torsion: v.get(5).copied(),
                     contact_radius: k.number("CONTACT RADIUS")?,
                 }
             }

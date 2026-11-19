@@ -5465,6 +5465,7 @@ fn sketched_profiles_are_written_for_user_element_u1() {
             vec![[0.0, 0.0], [50.0, 0.0], [50.0, 100.0], [0.0, 100.0]],
             vec![[5.0, 5.0], [45.0, 5.0], [45.0, 80.0], [5.0, 80.0]],
         ],
+        ..plx_model::Sketch::EMPTY
     });
     let mut model = line_model(
         &mesh,

@@ -63,6 +63,7 @@ mod solver_diagnostics;
 mod study;
 mod symmetry;
 mod tables;
+mod torsion;
 pub mod units;
 mod wall_loads;
 pub use tables::{StepTable, TableOwner};
@@ -250,8 +251,11 @@ use serde::{Deserialize, Serialize};
 /// step; older steps take the default side. Format 52 exposes the numbers of the mesh setup
 /// ([`ItemRef::MeshSetup`], [`ItemRef::DefaultMeshing`]); older formats read as they are.
 /// Format 53 adds the loads of the walls of a Particle Flow step that steps of other
-/// analyses take ([`LoadKind::WallLoads`]); older formats read as they are.
-pub const PROJECT_FORMAT: u32 = 53;
+/// analyses take ([`LoadKind::WallLoads`]); older formats read as they are. Format 54 adds
+/// the torsion constant of general profiles and the shear factor of sketched ones; older
+/// general profiles read without a torsion constant, which the dialog asks for, older
+/// sketches with the shear factor 5/6.
+pub const PROJECT_FORMAT: u32 = 54;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

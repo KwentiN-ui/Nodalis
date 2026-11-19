@@ -435,6 +435,7 @@ mod tests {
             area: 100.0,
             i11: 800.0,
             i22: 1200.0,
+            torsion: 2000.0,
             shear_factor: 5.0 / 6.0,
             young: 210000.0,
             poisson: 0.3,

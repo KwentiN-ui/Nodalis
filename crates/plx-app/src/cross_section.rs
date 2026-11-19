@@ -78,9 +78,10 @@ fn general_note(ui: &mut Ui, profile: &BeamProfile) {
     .on_hover_text(
         "The solver has beam sections of its own for rectangles, circles, pipes and boxes \
          only. Other profiles are written by their area and second moments of area about \
-         the principal axes, for the user element U1, which the solver computes as a \
-         corotational beam under large deformations (Nlgeom). Its torsion stiffness is \
-         k G (I11 + I22), and the results show no stresses on it.",
+         the principal axes, its torsion constant J and shear factor k, for the user \
+         element U1, which the solver computes as a corotational beam under large \
+         deformations (Nlgeom). Its torsion stiffness is G J and its shear stiffness \
+         k G A; the results show no stresses on it.",
     );
 }
 
@@ -129,6 +130,7 @@ fn scaled_like(kind: &BeamProfile, like: &BeamProfile) -> BeamProfile {
                 i11: p.i11,
                 i22: p.i22,
                 k: like.shear_factor(),
+                torsion: like.torsion_constant(),
             }
         }
         // The outline of the profile it was, to draw on from there.
@@ -394,6 +396,31 @@ fn properties(ui: &mut Ui, profile: &BeamProfile, units: UnitSystem) {
         return;
     }
     property_lines(ui, profile.properties(), profile.size(), units);
+    torsion_line(ui, profile, units);
+}
+
+/// The torsion constant of a profile as a line below [`property_lines`]; for a general
+/// profile it is one of its values, shown above.
+pub(crate) fn torsion_line(ui: &mut Ui, profile: &BeamProfile, units: UnitSystem) {
+    if matches!(profile, BeamProfile::General { .. }) {
+        return;
+    }
+    let length = plx_model::STORED.factor_to(Quantity::Length, units);
+    let shown = numeric::fit(profile.torsion_constant() * length.powi(4), |t| {
+        t.len() <= 9
+    });
+    ui.label(
+        egui::RichText::new(format!(
+            "Torsion constant J = {shown} {}^4",
+            units.unit(Quantity::Length)
+        ))
+        .small(),
+    )
+    .on_hover_text(
+        "Saint-Venant torsion, the torsion stiffness being G J: solved over the outline, \
+         exact for walls parallel to the 1- and 2-direction, closed cells and open walls \
+         alike; slanted and round edges are followed in small steps.",
+    );
 }
 
 /// The lines of [`properties`] for the values `p` of a profile of `size`.

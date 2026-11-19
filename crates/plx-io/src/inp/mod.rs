@@ -647,8 +647,9 @@ fn read_section(
                 },
                 "GENERAL" => {
                     // Nodalis's own comment names the profile and the normal it is drawn
-                    // with; otherwise the values: A, I11, I12, I22, k, whose I11 is the
-                    // moment of the 1-coordinate squared, see BeamProfile::data_line.
+                    // with; otherwise the values: A, I11, I12, I22, k and J (CalculiX's
+                    // I11 + I22 when not given), whose I11 is the moment of the
+                    // 1-coordinate squared, see BeamProfile::data_line.
                     if let Some((profile, normal)) = comment.and_then(general_profile) {
                         let beam = SectionKind::Beam(BeamSection {
                             cross_section: None,
@@ -662,6 +663,8 @@ fn read_section(
                         i11: first(3)?,
                         i22: first(1)?,
                         k: first(4).unwrap_or(1.0),
+                        torsion: first(5)
+                            .map_or_else(|| first(1).zip(first(3)).map(|(a, b)| a + b), Some)?,
                     }
                 }
                 _ => return None,
