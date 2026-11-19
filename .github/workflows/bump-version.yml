@@ -5,6 +5,11 @@ name: Bump version and release
 # Tag vX.Y.Z an und startet den Release-Workflow dafür. Kein PR, also auch kein Eintrag in
 # den Release Notes.
 #
+# Der Lauf setzt immer auf dem neuesten Stand des Default-Branches auf (auch bei "Re-run") und
+# pusht Release-Commit und Tag atomar; wurde in der Zwischenzeit gemergt, versucht er es auf dem
+# neuen Stand erneut. Steht die Version schon auf dem Branch, aber das Tag fehlt (abgebrochener
+# Lauf), wird nur das Tag nachgeholt: dafür einfach mit derselben Version neu starten.
+#
 # Ein mit GITHUB_TOKEN gepushtes Tag löst keine anderen Workflows aus (das gilt nicht für
 # workflow_dispatch). Deshalb startet der letzte Schritt release.yml ausdrücklich auf dem Tag;
 # dort ist github.ref dann refs/tags/vX.Y.Z, und die Jobs hängen ihre Dateien ans Release.
@@ -63,41 +68,63 @@ jobs:
             exit 1
           fi
 
-      - name: Version setzen
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          # Nur die Zeile version = "..." in [workspace.package]; alle Crates erben sie.
-          awk -v v="$VERSION" '
-            /^\[/ { in_pkg = ($0 == "[workspace.package]") }
-            in_pkg && /^version = / && !done { print "version = \"" v "\""; done = 1; next }
-            { print }
-            END { if (!done) exit 1 }
-          ' Cargo.toml > Cargo.toml.new
-          mv Cargo.toml.new Cargo.toml
-          # Nur die Workspace-Mitglieder in Cargo.lock nachziehen, keine Abhängigkeit aktualisieren.
-          cargo update --workspace
-          git diff --stat
-          # Die Lockfile darf sich nur in den version-Zeilen ändern.
-          if git diff -U0 Cargo.lock | grep -E '^[+-][^+-]' | grep -Ev '^[+-]version = '; then
-            echo "::error::Cargo.lock ändert mehr als Versionen."
-            exit 1
-          fi
-          git diff --quiet && { echo "::error::Keine Änderung, steht die Version schon so?"; exit 1; }
-          true
-
-      - name: Committen, taggen, pushen
+      - name: Version setzen, committen, taggen, pushen
         env:
           VERSION: ${{ inputs.version }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock
-          git commit -m "Release $VERSION"
-          git tag -a "v$VERSION" -m "v$VERSION"
-          git push origin "HEAD:refs/heads/$DEFAULT_BRANCH"
-          git push origin "refs/tags/v$VERSION"
+
+          # Immer auf dem neuesten Stand des Default-Branches aufsetzen, nicht auf dem Commit,
+          # mit dem der Lauf gestartet wurde: Wird während des Laufs ein PR gemergt (oder der Lauf
+          # per "Re-run" auf dem alten Commit wiederholt), wäre der Push sonst kein Fast-Forward.
+          # Branch und Tag gehen in einem atomaren Push raus, also beide oder keiner. Wird er
+          # abgelehnt, weil der Branch inzwischen weiter ist, beginnt alles neu auf dem neuen Stand.
+          for attempt in 1 2 3 4 5; do
+            git fetch --no-tags origin "refs/heads/$DEFAULT_BRANCH"
+            git checkout -q --detach FETCH_HEAD
+            git tag -d "v$VERSION" >/dev/null 2>&1 || true
+
+            # Nur die Zeile version = "..." in [workspace.package]; alle Crates erben sie.
+            awk -v v="$VERSION" '
+              /^\[/ { in_pkg = ($0 == "[workspace.package]") }
+              in_pkg && /^version = / && !done { print "version = \"" v "\""; done = 1; next }
+              { print }
+              END { if (!done) exit 1 }
+            ' Cargo.toml > Cargo.toml.new
+            mv Cargo.toml.new Cargo.toml
+            # Nur die Workspace-Mitglieder in Cargo.lock nachziehen, keine Abhängigkeit aktualisieren.
+            cargo update --workspace
+            git diff --stat
+            # Die Lockfile darf sich nur in den version-Zeilen ändern.
+            if git diff -U0 Cargo.lock | grep -E '^[+-][^+-]' | grep -Ev '^[+-]version = '; then
+              echo "::error::Cargo.lock ändert mehr als Versionen."
+              exit 1
+            fi
+
+            if git diff --quiet; then
+              # Die Version steht schon so auf dem Branch, z. B. weil ein früherer Lauf den
+              # Release-Commit gepusht hat, aber nicht das Tag. Dann nur das Tag nachholen.
+              echo "::notice::Version $VERSION steht schon auf $DEFAULT_BRANCH, es wird nur getaggt."
+              git tag -a "v$VERSION" -m "v$VERSION"
+              refs=("refs/tags/v$VERSION")
+            else
+              git add Cargo.toml Cargo.lock
+              git commit -q -m "Release $VERSION"
+              git tag -a "v$VERSION" -m "v$VERSION"
+              refs=("HEAD:refs/heads/$DEFAULT_BRANCH" "refs/tags/v$VERSION")
+            fi
+
+            if git push --atomic origin "${refs[@]}"; then
+              exit 0
+            fi
+            echo "::warning::Push abgelehnt (Versuch $attempt), neuer Anlauf auf dem aktuellen Stand."
+            git reset -q --hard
+            sleep $((attempt * 5))
+          done
+          echo "::error::Push nach 5 Versuchen nicht gelungen."
+          exit 1
 
       - name: Release-Workflow auf dem Tag starten
         env:
