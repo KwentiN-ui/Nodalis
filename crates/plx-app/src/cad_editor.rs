@@ -235,11 +235,10 @@ impl CadOperationEditor {
         } else {
             self.picks.clone()
         };
-        // The parts a split cuts are outlined, as when selected.
-        let outlined = self.split_part_indices();
+        // The parts a split cuts are not outlined: the others are hidden, so they are all
+        // that is shown.
         if let Some(view) = &mut self.view {
             view.highlight = crate::meshing::entities_highlight(view, &shown);
-            view.highlight.outlines.extend(outlined);
         }
         self.scene_due = true;
     }
@@ -932,6 +931,14 @@ impl CadOperationEditor {
             lo,
             hi,
         ))
+    }
+
+    /// Rounds the offset of a new split plane as when it is dragged, so that a plane through
+    /// the middle of the parts does not start at 24.9999999882413 mm.
+    pub fn round_offset(&mut self) {
+        if self.kind == CadOperationKind::SplitPlane {
+            self.value = self.rounded(self.value);
+        }
     }
 
     /// An offset of the split plane rounded to a thousandth of the size of what it cuts,

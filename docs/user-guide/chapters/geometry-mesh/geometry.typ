@@ -97,12 +97,17 @@ needed between them, and each face can still be picked on its own.
 
 === Modifying the geometry <geometry-modify>
 
-The #ui("Modify") group of the #ui("Geometry") tab changes the geometry of the analysis:
+The #ui("Modify") group of the #ui("Geometry") tab changes the geometry of the analysis, one
+tool for each operation of the CAD Operation block (@cad-operation-block): #ui("Fillet") rounds
+and #ui("Chamfer") bevels picked edges, #ui("Push/Pull") moves planar faces (@push-pull),
 #ui("Defeature") removes fillets and chamfers (@defeature), #ui("Split by Plane") splits parts
 along a plane (@split-by-plane) and #ui("Split around Hole") splits the face around a hole into a
 ring (@split-around-hole). Each opens the editor of the CAD Operation block with that operation
 chosen; the other operations of the block are offered there too. A split by plane starts from
 the YZ plane through the middle of the geometry, the other tools from a size of 3 mm.
+
+#screenshot("geometry-modify-tools.png", [The Modify group of the Geometry tab: a tool for each
+  CAD operation])
 
 #ui("OK") adds the operation to #ui("Operations") in the Geometry tree, named like
 #ui("Split by Plane-1"). The operations there are a pipeline from the geometry as imported or
@@ -126,14 +131,14 @@ and edges by where they lie, and the geometry has to be meshed again.
 
 #ui("Split by Plane") cuts only the parts selected in the tree when it is opened, compound parts
 selected standing for their members; with nothing selected it cuts every part the plane runs
-through. With parts selected, the editor shows only them, outlined in red, starts from the YZ
+through. With parts selected, the editor shows only them, starts from the YZ
 plane through their middle and draws the outline of the plane over them; the other parts stay as
 they are, even those the plane runs through or that lie wholly on a side that is not kept.
 The plane carries the manipulator of the section view (@section-view): drag the arrow to shift
 it, an arc to tilt it about a global axis in it (@split-by-plane).
 
 #screenshot("geometry-split-selected.png", [Split by Plane with SOLID-3 selected in the tree: the
-  editor shows only that bar, with the manipulator on the plane])
+  editor shows only that cylinder, not highlighted, with the manipulator on the plane])
 
 #screenshot("geometry-operations.png", [A split by plane under Operations in the Geometry tree:
   double-click to change it, Delete to take it back])

@@ -1,5 +1,6 @@
-//! The CAD tools of the Geometry workspace: Defeature, Split by Plane and Split around Hole,
-//! set up in the editor of the CAD Operation block. Each becomes an operation of the
+//! The CAD tools of the Geometry workspace: Fillet, Chamfer, Push/Pull, Defeature, Split by
+//! Plane and Split around Hole, set up in the editor of the CAD Operation block, each a tool
+//! of its own under Modify. Each becomes an operation of the
 //! Geometry tree ([`plx_model::Geometry::operations`]), a step of a pipeline from the shapes
 //! as imported or linked, as a CAD Operation block before the analysis would be: it can be
 //! changed or deleted later, and acts anew on new shapes a link brings. The selections on the
@@ -77,7 +78,7 @@ impl AnalysisWindow {
             parts,
             ..CadOperation::default()
         };
-        let editor = CadOperationEditor::new(
+        let mut editor = CadOperationEditor::new(
             0,
             kind.label(),
             geometry,
@@ -85,6 +86,7 @@ impl AnalysisWindow {
             model.fe.properties.units,
             false,
         );
+        editor.round_offset();
         let viewport = Viewport::new(w.viewport.render_state());
         w.cad_tool = Some((editor, viewport, None));
     }
