@@ -72,7 +72,11 @@ selection of the model.
 
 #fields(
   [Type], [#ui("Rectangular") or #ui("Cylindrical"). For a cylindrical system the z axis is the
-    cylinder axis and the directions are r, θ and z.],
+    cylinder axis and the directions are radial, tangential and axial. In the 3D view a
+    cylindrical system shows its axis (dashed behind the origin, with an arrow along the axial
+    direction), a ring about the axis with an arrow in the tangential direction and an arrow in
+    the radial direction where the angle is zero, so that it cannot be taken for a rectangular
+    one.],
   [Base system], [The system the definition is given in: #ui("Global") or another coordinate
     system of the features, for example a system on a hub and one turned against it by a few
     degrees. Coordinates and turns are taken along the x, y and z axes of the base, also when the
@@ -93,6 +97,9 @@ selection of the model.
 
 #screenshot("moving-coordinate-system.png", [A coordinate system bound to the end face of a
   lever; a second one is given in it by offset and rotation and moves with it])
+
+#screenshot("cylindrical-coordinate-system.png", [A cylindrical coordinate system in the bore of a
+  plate, its axis along global Z, beside the rectangular triad of the global origin])
 
 A moving system is marked everywhere it appears: the tree shows it with an orange turning arrow
 and #ui("(moving)") after its name, the 3D view with an orange ring about its origin, and the
