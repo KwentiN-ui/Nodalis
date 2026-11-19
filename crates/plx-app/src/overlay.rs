@@ -4,8 +4,8 @@
 //! can be dragged within the view.
 
 use egui::{
-    Align2, Color32, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
-    pos2, vec2,
+    Align, Align2, Color32, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui,
+    Vec2, pos2, vec2,
 };
 use glam::Vec3;
 use plx_render::Camera;
@@ -85,6 +85,9 @@ pub enum FeatureMark {
         /// The system moves with a selection of the model: drawn with a ring about its
         /// origin and its name marked.
         moving: bool,
+        /// A cylindrical system: drawn as its axis (the local z axis) with a ring about it
+        /// for the tangential and an arrow for the radial direction.
+        cylindrical: bool,
     },
     /// A plane as a rectangle on it, with its centre and unit normal.
     Plane {
@@ -750,23 +753,29 @@ fn draw_feature(painter: &Painter, camera: &Camera, rect: Rect, feature: &Featur
             name,
             selected,
             moving,
+            cylindrical,
         } => {
             let center = project(camera, rect, *origin);
             if !rect.contains(center) {
                 return;
             }
             let [x, y, z] = *axes;
-            arrows(
-                painter,
-                camera,
-                center,
-                30.0,
-                &[
-                    (x, "x", crate::style::lift(Color32::from_rgb(255, 0, 0))),
-                    (y, "y", crate::style::lift(Color32::from_rgb(0, 200, 0))),
-                    (z, "z", crate::style::lift(Color32::from_rgb(0, 0, 255))),
-                ],
-            );
+            let name_below = if *cylindrical {
+                Some(cylinder_gizmo(painter, camera, center, *axes))
+            } else {
+                arrows(
+                    painter,
+                    camera,
+                    center,
+                    30.0,
+                    &[
+                        (x, "x", crate::style::lift(Color32::from_rgb(255, 0, 0))),
+                        (y, "y", crate::style::lift(Color32::from_rgb(0, 200, 0))),
+                        (z, "z", crate::style::lift(Color32::from_rgb(0, 0, 255))),
+                    ],
+                );
+                None
+            };
             let color = if *selected {
                 SELECTED_FEATURE
             } else {
@@ -780,13 +789,13 @@ fn draw_feature(painter: &Painter, camera: &Camera, rect: Rect, feature: &Featur
             } else {
                 name.clone()
             };
-            painter.text(
-                center + vec2(-6.0, 6.0),
-                Align2::RIGHT_TOP,
-                label,
-                font(),
-                color,
-            );
+            // The name of a cylindrical system goes below it, clear of its long axis
+            // and its labels.
+            let (pos, align) = match name_below {
+                Some(bottom) => (pos2(center.x, bottom + 2.0), Align2::CENTER_TOP),
+                None => (center + vec2(-6.0, 6.0), Align2::RIGHT_TOP),
+            };
+            painter.text(pos, align, label, font(), color);
         }
         FeatureMark::Plane {
             corners,
@@ -847,6 +856,116 @@ fn triad(painter: &Painter, camera: &Camera, center: Pos2, length: f32, full: bo
     }
 }
 
+/// Screen points of a ring of `radius` points about the axis `z` through `center`, spanned
+/// by the local `x` and `y` axes, from angle `from` to `to` (radians, from x towards y).
+fn ring_points(
+    camera: &Camera,
+    center: Pos2,
+    [x, y]: [Vec3; 2],
+    radius: f32,
+    from: f32,
+    to: f32,
+) -> Vec<Pos2> {
+    let screen = |axis: Vec3| vec2(axis.dot(camera.right()), -axis.dot(camera.up()));
+    let (sx, sy) = (screen(x), screen(y));
+    let n = 48;
+    (0..=n)
+        .map(|i| {
+            let t = from + (to - from) * i as f32 / n as f32;
+            center + (sx * t.cos() + sy * t.sin()) * radius
+        })
+        .collect()
+}
+
+/// A cylindrical system: its axis as a line through the origin with an arrow along +z, a
+/// ring about the axis with an arrowhead in the tangential direction (from x towards y),
+/// and an arrow in the radial direction along x, where the angle is zero. Returns the lowest
+/// point it draws on, for the name below it.
+fn cylinder_gizmo(painter: &Painter, camera: &Camera, center: Pos2, axes: [Vec3; 3]) -> f32 {
+    let [x, y, z] = axes;
+    let screen = |axis: Vec3| vec2(axis.dot(camera.right()), -axis.dot(camera.up()));
+    let axial = crate::style::lift(Color32::from_rgb(0, 0, 255));
+    let radial = crate::style::lift(Color32::from_rgb(255, 0, 0));
+    let tangential = crate::style::lift(Color32::from_rgb(0, 200, 0));
+    const RADIUS: f32 = 32.0;
+    // The axis runs on through the origin to the back: dashed, as it is a line, not a
+    // direction.
+    let back = center - screen(z) * 48.0;
+    painter.add(egui::Shape::dashed_line(
+        &[center, back],
+        Stroke::new(1.5, axial),
+        4.0,
+        3.0,
+    ));
+    // The full ring, faint, under the arcs and arrows drawn on it.
+    let ring = ring_points(camera, center, [x, y], RADIUS, 0.0, std::f32::consts::TAU);
+    let faint =
+        Color32::from_rgba_unmultiplied(tangential.r(), tangential.g(), tangential.b(), 150);
+    let mut bottom = ring.iter().map(|p| p.y).fold(center.y, f32::max);
+    painter.add(egui::Shape::line(ring, Stroke::new(1.5, faint)));
+    // The tangential arc with its arrowhead, a quarter turn on from the radial arrow.
+    let start = 0.35_f32;
+    let end = std::f32::consts::FRAC_PI_2 + 0.35;
+    let arc = ring_points(camera, center, [x, y], RADIUS, start, end);
+    painter.add(egui::Shape::line(arc.clone(), Stroke::new(2.5, tangential)));
+    let tip_angle = end + 0.3;
+    let tip = center + (screen(x) * tip_angle.cos() + screen(y) * tip_angle.sin()) * RADIUS;
+    let base = *arc.last().unwrap();
+    let along = tip - base;
+    if along.length() > 1.0 {
+        let normal = along.normalized().rot90() * 3.5;
+        painter.add(egui::Shape::convex_polygon(
+            vec![tip, base + normal, base - normal],
+            tangential,
+            Stroke::NONE,
+        ));
+    }
+    // The tangential label sits outside the ring beside the arrowhead.
+    let mid = (start + end) / 2.0;
+    let out = screen(x) * mid.cos() + screen(y) * mid.sin();
+    let tangential_label =
+        (out.length() > 0.05).then(|| center + out * RADIUS + out.normalized() * 6.0);
+    arrows(painter, camera, center, RADIUS, &[(x, "radial", radial)]);
+    arrows(painter, camera, center, 56.0, &[(z, "axial", axial)]);
+    if let Some(pos) = tangential_label {
+        // Anchored on the side towards the ring, so the long word reaches away from it.
+        let side = |d: f32| match d {
+            d if d > 0.4 => Align::Min,
+            d if d < -0.4 => Align::Max,
+            _ => Align::Center,
+        };
+        let n = out.normalized();
+        label_at(painter, pos, Align2([side(n.x), side(n.y)]), "tangential");
+        bottom = bottom.max(pos.y + if n.y > 0.4 { 16.0 } else { 8.0 });
+    }
+    // The tips of the radial and axial arrows with their labels.
+    for (axis, length) in [(x, RADIUS), (z, 56.0)] {
+        let v = screen(axis);
+        bottom = bottom.max(center.y + v.y * length + v.y.signum() * 9.0 + 8.0);
+    }
+    bottom
+}
+
+/// A label of a gizmo direction, centred on `pos`.
+fn label(painter: &Painter, pos: Pos2, text: &str) {
+    label_at(painter, pos, Align2::CENTER_CENTER, text);
+}
+
+/// A label of a gizmo direction, outlined in the dark theme.
+fn label_at(painter: &Painter, pos: Pos2, align: Align2, text: &str) {
+    if crate::style::dark() {
+        for offset in [
+            vec2(1.0, 0.0),
+            vec2(-1.0, 0.0),
+            vec2(0.0, 1.0),
+            vec2(0.0, -1.0),
+        ] {
+            painter.text(pos + offset, align, text, font(), crate::style::window());
+        }
+    }
+    painter.text(pos, align, text, font(), crate::style::viewport_text());
+}
+
 /// Unit directions as arrows in screen space, drawn back to front.
 fn arrows(
     painter: &Painter,
@@ -863,7 +982,7 @@ fn arrows(
         depth(b.0).total_cmp(&depth(a.0))
     });
     let cone = length * 14.0 / 45.0;
-    for &&(axis, label, color) in &order {
+    for &&(axis, text, color) in &order {
         let v = screen(axis);
         let tip = center + v * length;
         let base = center + v * (length - cone);
@@ -876,31 +995,7 @@ fn arrows(
                 Stroke::NONE,
             ));
         }
-        let label_pos = center + v * length + v.normalized() * 9.0;
-        // The light labels of the dark theme get a dark outline, as they may lie on the model.
-        if crate::style::dark() {
-            for offset in [
-                vec2(1.0, 0.0),
-                vec2(-1.0, 0.0),
-                vec2(0.0, 1.0),
-                vec2(0.0, -1.0),
-            ] {
-                painter.text(
-                    label_pos + offset,
-                    Align2::CENTER_CENTER,
-                    label,
-                    font(),
-                    crate::style::window(),
-                );
-            }
-        }
-        painter.text(
-            label_pos,
-            Align2::CENTER_CENTER,
-            label,
-            font(),
-            crate::style::viewport_text(),
-        );
+        label(painter, center + v * length + v.normalized() * 9.0, text);
     }
 }
 

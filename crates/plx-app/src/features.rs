@@ -1269,6 +1269,7 @@ fn system_mark(
         name: system.name.clone(),
         selected,
         moving: attachment.is_some(),
+        cylindrical: frame.kind == plx_model::CoordinateSystemKind::Cylindrical,
     })
 }
 
