@@ -101,8 +101,9 @@ The #ui("Modify") group of the #ui("Geometry") tab changes the geometry of the a
 tool for each operation of the CAD Operation block (@cad-operation-block): #ui("Fillet") rounds
 and #ui("Chamfer") bevels picked edges, #ui("Push/Pull") moves planar faces (@push-pull),
 #ui("Defeature") removes fillets and chamfers (@defeature), #ui("Split by Plane") splits parts
-along a plane (@split-by-plane) and #ui("Split around Hole") splits the face around a hole into a
-ring (@split-around-hole). Each opens the editor of the CAD Operation block with that operation
+along a plane (@split-by-plane) and #ui("Split by Offset Circle") splits a face along a circle
+offset from a circular edge, a ring around a hole or along the rim of a disc
+(@split-offset-circle). Each opens the editor of the CAD Operation block with that operation
 chosen; the other operations of the block are offered there too. A split by plane starts from
 the YZ plane through the middle of the geometry, the other tools from a size of 3 mm.
 

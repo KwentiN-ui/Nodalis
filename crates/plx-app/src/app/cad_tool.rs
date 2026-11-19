@@ -1,5 +1,5 @@
 //! The CAD tools of the Geometry workspace: Fillet, Chamfer, Push/Pull, Defeature, Split by
-//! Plane and Split around Hole, set up in the editor of the CAD Operation block, each a tool
+//! Plane and Split by Offset Circle, set up in the editor of the CAD Operation block, each a tool
 //! of its own under Modify. Each becomes an operation of the
 //! Geometry tree ([`plx_model::Geometry::operations`]), a step of a pipeline from the shapes
 //! as imported or linked, as a CAD Operation block before the analysis would be: it can be

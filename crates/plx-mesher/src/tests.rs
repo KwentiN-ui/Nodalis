@@ -2811,7 +2811,7 @@ fn a_shell_of_several_faces_splits_into_two_shells() {
 }
 
 #[test]
-fn a_hole_gets_a_ring_face_of_its_width() {
+fn a_hole_gets_a_ring_face_of_its_offset() {
     use plx_model::CadOperationKind::HoleRing;
     if !gmsh_available() {
         return;
@@ -2883,6 +2883,60 @@ fn a_hole_in_a_shell_gets_a_ring_face() {
     let ring = std::f64::consts::PI * (7.0f64.powi(2) - 5.0f64.powi(2));
     assert!((areas[0] - ring).abs() < 1e-3, "{areas:?}");
     assert_eq!(generate_mesh(&ringed).unwrap().mesh.parts.len(), 1);
+}
+
+#[test]
+fn a_negative_offset_splits_a_ring_off_the_rim_of_a_disc() {
+    use plx_model::CadOperationKind::HoleRing;
+    if !gmsh_available() {
+        return;
+    }
+    let input = made_geometry(|gmsh| {
+        gmsh.add_cylinder([0.0; 3], [0.0, 0.0, 5.0], 20.0)?;
+        Ok(())
+    });
+    let top_faces = |g: &Geometry| {
+        (g.signatures.iter())
+            .filter(|s| s.entity.dim() == 2 && s.kind == "Plane")
+            .filter(|s| (s.centroid[2] - 5.0).abs() < 1e-6 && s.max[2] - s.min[2] < 1e-3)
+            .map(|s| s.size)
+            .collect::<Vec<_>>()
+    };
+    // The outer rim of the top face.
+    let rim = (input.signatures.iter())
+        .find(|s| s.entity.dim() == 1 && s.kind != "Line" && (s.centroid[2] - 5.0).abs() < 1e-6)
+        .unwrap()
+        .entity;
+    let ringed = apply_operation(&input, &split(HoleRing, -3.0), &[rim]).unwrap();
+    assert_eq!(part_names(&ringed).unwrap(), part_names(&input).unwrap());
+    let before = solid_volume(&input);
+    assert!((solid_volume(&ringed) - before).abs() < 1e-6 * before);
+    let mut areas = top_faces(&ringed);
+    areas.sort_by(f64::total_cmp);
+    assert_eq!(areas.len(), 2, "{areas:?}");
+    let ring = std::f64::consts::PI * (20.0f64.powi(2) - 17.0f64.powi(2));
+    let inner = std::f64::consts::PI * 17.0f64.powi(2);
+    assert!((areas[0] - ring).abs() < 1e-3, "{areas:?}");
+    assert!((areas[1] - inner).abs() < 1e-3, "{areas:?}");
+    assert_eq!(generate_mesh(&ringed).unwrap().mesh.parts.len(), 1);
+    // Shrunk past its centre, the circle is gone.
+    let error = apply_operation(&input, &split(HoleRing, -25.0), &[rim]).unwrap_err();
+    assert!(error.to_string().contains("to nothing"), "{error}");
+}
+
+#[test]
+fn a_negative_offset_inside_a_hole_cuts_nothing() {
+    use plx_model::CadOperationKind::HoleRing;
+    if !gmsh_available() {
+        return;
+    }
+    let input = plate_with_hole();
+    let edge = (input.signatures.iter())
+        .find(|s| s.entity.dim() == 1 && s.kind != "Line" && (s.centroid[2] - 5.0).abs() < 1e-6)
+        .unwrap()
+        .entity;
+    let error = apply_operation(&input, &split(HoleRing, -2.0), &[edge]).unwrap_err();
+    assert!(error.to_string().contains("cuts no face"), "{error}");
 }
 
 #[test]

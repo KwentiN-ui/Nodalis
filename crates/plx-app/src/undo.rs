@@ -8,8 +8,8 @@
 //! changes that replaced it; [`crate::model::Model::set_mesh`] hands the mesh it replaces to
 //! the history.
 //!
-//! Changes of the geometry's shapes by the CAD tools (Defeature, Split by Plane, Split around
-//! Hole) can be undone: [`before_shape_change`] keeps the geometry, the mesh and the FE model
+//! Changes of the geometry's shapes by the CAD tools (Defeature, Split by Plane, Split by
+//! Offset Circle) can be undone: [`before_shape_change`] keeps the geometry, the mesh and the FE model
 //! as they were. Other changes of the shapes (an import, deleted geometry parts, a new unit
 //! system) cannot be undone; the history starts anew after them.
 

@@ -1086,8 +1086,8 @@ fn pipette(shapes: &mut Vec<Shape>, r: Rect) {
 /// The cube of the view icons cut in half, its section face in the accent colour inside the
 /// outline of the cutting plane.
 /// The icons of the CAD operations: a block seen from the side for those that change an
-/// edge or a face, a block cut in two for Split by Plane, a plate with a hole for Split
-/// around Hole. What the operation makes is in the accent colour.
+/// edge or a face, a block cut in two for Split by Plane, a plate with a hole for Split by
+/// Offset Circle. What the operation makes is in the accent colour.
 fn cad_operation(shapes: &mut Vec<Shape>, kind: plx_model::CadOperationKind, r: Rect) {
     use plx_model::CadOperationKind as K;
     let p = |x: f32, y: f32| pos2(r.left() + x, r.top() + y);
