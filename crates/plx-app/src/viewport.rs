@@ -342,18 +342,9 @@ impl Viewport {
         self.camera.scene_radius = self.camera.scene_radius.max(reach * 0.5);
     }
 
-    /// Moves the point looked at, e.g. when the scene is drawn relative to another origin.
-    pub fn shift_target(&mut self, delta: Vec3) {
-        self.camera.target += delta;
-    }
-
-    /// Exchanges the camera, so the FE model and the results each keep their own view.
+    /// Replaces the camera, e.g. by one carried over from the workspace shown before.
     pub fn set_camera(&mut self, camera: Camera) {
         self.camera = camera;
-    }
-
-    pub fn swap_camera(&mut self, camera: &mut Camera) {
-        std::mem::swap(&mut self.camera, camera);
     }
 
     pub fn set_part_visible(&mut self, index: usize, visible: bool) {

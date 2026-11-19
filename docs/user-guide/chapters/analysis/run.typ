@@ -304,7 +304,7 @@ CalculiX GraphiX, PrePoMax or other programs that read them.
 What you defined on the kept results is saved with them and comes back as you left it: derived
 field and history outputs, transformations, hot spots, the reference points, coordinate systems
 and planes of the results, result paths and plane results, and the increment, field and component
-shown. The view comes back too: the camera of the Results workspace, #menu("View", "Mesh Edges"),
+shown. The view comes back too: the camera, #menu("View", "Mesh Edges"),
 the deformation and its factor, #ui("Show Undeformed"), the color levels, hidden parts, the
 annotations of the query tool and the plots of result paths. Nodalis takes all of this from the
 open result each time the project is saved.
