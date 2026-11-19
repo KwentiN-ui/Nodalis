@@ -304,14 +304,17 @@ impl CadOperationEditor {
             return self.corner_at(click);
         }
         let view = self.view.as_ref()?;
-        let hit = view.pick_click(click)?;
         if self.kind.picks(CadEntity::Face(0)) {
+            // The face under the pointer, also next to its edges: the edges of a narrow ring
+            // would otherwise take most clicks on it.
+            let hit = view.pick(click.origin, click.direction)?;
             let face = crate::geometry_selection::face_at(view, &hit).map(CadEntity::Face)?;
             // Fillets are curved.
             let planar =
                 (self.input.signatures.iter()).any(|s| s.entity == face && s.kind == "Plane");
             return (planar || self.kind == CadOperationKind::Defeature).then_some(face);
         }
+        let hit = view.pick_click(click)?;
         let edge = match crate::meshing::cad_pick(view, &hit, click.precision_at(hit.point)) {
             Some(edge @ CadEntity::Edge(_)) => Some(edge),
             _ => crate::geometry_selection::edge_at(view, &hit).map(CadEntity::Edge),
@@ -586,7 +589,8 @@ impl CadOperationEditor {
                 let hint = match self.kind {
                     CadOperationKind::PushPull => "Click the planar faces to move along their \
                         normal, outwards for a positive offset; a click on a picked face removes \
-                        it. Neighbours at right angles follow, sloped ones get a step."
+                        it. Neighbours at right angles follow, sloped ones get a step. Pick \
+                        all regions of a split face to move it as a whole."
                         .to_owned(),
                     CadOperationKind::SplitPlane if self.plane == SplitPlane::Face => format!(
                         "Click the planar face whose plane to cut along; the offset moves the \

@@ -405,6 +405,11 @@ pub(crate) fn plane_normal(gmsh: &Gmsh, face: i32) -> Result<[f64; 3], GmshError
 /// Moves the planar faces among `entities` along their outward normal by `offset`, inwards
 /// when it is negative: a prism on each face is fused with its solid or cut from it, see
 /// [`CadOperationKind::PushPull`]. Returns the solids made.
+///
+/// The faces of a solid that lie in one plane and face the same way move together, one
+/// prism each fused or cut in one go: a face split into regions, such as the end of a
+/// cylinder split into rings, moves as a whole. Such groups move one after the other, so
+/// that faces next to each other at an angle both move as a whole too.
 fn push_pull(
     gmsh: &Gmsh,
     entities: &[CadEntity],
@@ -424,48 +429,121 @@ fn push_pull(
     if let Some(face) = faces.iter().find(|f| !known.contains(f)) {
         return Err(fail(format!("The geometry has no face {face}")));
     }
-    // One face after the other, so that faces next to each other both move as a whole:
-    // the faces still to move are found again in each result by their signatures.
-    let mut pending: Vec<EntitySignature> = (signatures(gmsh)?.into_iter())
-        .filter(|s| faces.iter().any(|&f| s.entity == CadEntity::Face(f)))
+    let groups = coplanar_groups(gmsh, &faces)?;
+    // The faces still to move are found again in each result by their signatures; their
+    // outward normals are those of the geometry as given, as a face next to one moved
+    // already may have the solid on both sides near its edge.
+    let all = signatures(gmsh)?;
+    let mut pending: Vec<(Vec<EntitySignature>, [f64; 3])> = (groups.into_iter())
+        .map(|(group, normal)| {
+            let signatures = (group.iter())
+                .filter_map(|&f| all.iter().find(|s| s.entity == CadEntity::Face(f)))
+                .cloned()
+                .collect();
+            (signatures, normal)
+        })
         .collect();
     let mut made = Vec::new();
     while !pending.is_empty() {
-        let CadEntity::Face(face) = pending.remove(0).entity else {
-            continue;
-        };
-        made = move_face(gmsh, face, offset)?;
+        let (group, normal) = pending.remove(0);
+        let faces: Vec<i32> = (group.iter())
+            .filter_map(|s| match s.entity {
+                CadEntity::Face(tag) => Some(tag),
+                _ => None,
+            })
+            .collect();
+        made = move_faces(gmsh, &faces, normal, offset)?;
         if pending.is_empty() {
             break;
         }
         let now = signatures(gmsh)?;
-        let map = match_entities(&pending, &now);
-        pending = (pending.iter())
-            .map(|s| {
-                (map.get(&s.entity))
-                    .and_then(|new| now.iter().find(|n| n.entity == *new))
-                    .cloned()
-                    .ok_or_else(|| fail("A picked face was lost by moving another".into()))
-            })
-            .collect::<Result<_, _>>()?;
+        let old: Vec<EntitySignature> = pending.iter().flat_map(|(g, _)| g.clone()).collect();
+        let map = match_entities(&old, &now);
+        for (group, _) in &mut pending {
+            *group = (group.iter())
+                .map(|s| {
+                    (map.get(&s.entity))
+                        .and_then(|new| now.iter().find(|n| n.entity == *new))
+                        .cloned()
+                        .ok_or_else(|| fail("A picked face was lost by moving another".into()))
+                })
+                .collect::<Result<_, _>>()?;
+        }
     }
     Ok(made)
 }
 
-/// Moves one planar face, see [`push_pull`].
-fn move_face(gmsh: &Gmsh, face: i32, offset: f64) -> Result<Vec<(i32, i32)>, GmshError> {
+/// Faces that move together, with their outward normal.
+type FaceGroup = (Vec<i32>, [f64; 3]);
+
+/// The picked faces in groups that move together, each with its outward normal: the faces
+/// of one solid in one plane with the same outside.
+fn coplanar_groups(gmsh: &Gmsh, faces: &[i32]) -> Result<Vec<FaceGroup>, GmshError> {
     let fail = |message: String| GmshError::Other(message);
-    if gmsh.entity_type(2, face)? != "Plane" {
-        return Err(fail("Push/Pull moves planar faces only".into()));
+    let (lo, hi) = gmsh.bounding_box()?;
+    let tolerance = 1e-7 * distance(lo, hi).max(1e-9);
+    // (volume, outward normal, distance of the plane from the origin, faces)
+    let mut groups: Vec<(i32, [f64; 3], f64, Vec<i32>)> = Vec::new();
+    for &face in faces {
+        if gmsh.entity_type(2, face)? != "Plane" {
+            return Err(fail("Push/Pull moves planar faces only".into()));
+        }
+        let (solids, _) = gmsh.adjacencies(2, face)?;
+        let [volume] = solids[..] else {
+            return Err(fail(
+                "Push/Pull needs faces on the outside of one solid".into(),
+            ));
+        };
+        let normal = outward_normal(gmsh, face, volume)?;
+        let point = gmsh.closest_point(2, face, gmsh.center_of_mass(2, face)?)?;
+        let plane = (0..3).map(|k| normal[k] * point[k]).sum::<f64>();
+        let same = |(v, n, d, _): &&mut (i32, [f64; 3], f64, Vec<i32>)| {
+            *v == volume
+                && (0..3).map(|k| n[k] * normal[k]).sum::<f64>() > 1.0 - 1e-9
+                && (d - plane).abs() < tolerance
+        };
+        match groups.iter_mut().find(|g| same(g)) {
+            Some(group) => group.3.push(face),
+            None => groups.push((volume, normal, plane, vec![face])),
+        }
     }
-    let (solids, _) = gmsh.adjacencies(2, face)?;
-    let [volume] = solids[..] else {
-        return Err(fail(
-            "Push/Pull needs faces on the outside of one solid".into(),
-        ));
+    Ok(groups.into_iter().map(|(_, n, _, f)| (f, n)).collect())
+}
+
+/// Moves planar faces of one solid along `normal`, their outside, see [`push_pull`].
+fn move_faces(
+    gmsh: &Gmsh,
+    faces: &[i32],
+    normal: [f64; 3],
+    offset: f64,
+) -> Result<Vec<(i32, i32)>, GmshError> {
+    let fail = |message: String| GmshError::Other(message);
+    let mut volumes = BTreeSet::new();
+    for &face in faces {
+        let (solids, _) = gmsh.adjacencies(2, face)?;
+        let [volume] = solids[..] else {
+            return Err(fail(
+                "Push/Pull needs faces on the outside of one solid".into(),
+            ));
+        };
+        volumes.insert(volume);
+    }
+    let volume = match volumes.len() {
+        1 => volumes.into_iter().next().unwrap_or_default(),
+        _ => return Err(fail("A picked face was lost by moving another".into())),
     };
-    let normal = outward_normal(gmsh, face, volume)?;
-    let prisms: Vec<(i32, i32)> = (gmsh.extrude(&[(2, face)], normal.map(|n| n * offset))?)
+    let sheets: Vec<(i32, i32)> = faces.iter().map(|&f| (2, f)).collect();
+    let along = normal.map(|n| n * offset);
+    // The regions of a split face would become one face on the moved plane: copies of
+    // them moved there split it again.
+    let regions = if sheets.len() > 1 {
+        let copies = gmsh.copy(&sheets)?;
+        gmsh.translate(&copies, along)?;
+        copies
+    } else {
+        Vec::new()
+    };
+    let prisms: Vec<(i32, i32)> = (gmsh.extrude(&sheets, along)?)
         .into_iter()
         .filter(|&(dim, _)| dim == 3)
         .collect();
@@ -474,8 +552,18 @@ fn move_face(gmsh: &Gmsh, face: i32, offset: f64) -> Result<Vec<(i32, i32)>, Gms
     } else {
         Boolean::Cut
     };
-    gmsh.boolean(operation, &[(3, volume)], &prisms, true)
-        .map_err(|e| fail(format!("OpenCASCADE could not move the face: {e}")))
+    let made = gmsh
+        .boolean(operation, &[(3, volume)], &prisms, true)
+        .map_err(|e| fail(format!("OpenCASCADE could not move the face: {e}")))?;
+    if regions.is_empty() {
+        return Ok(made);
+    }
+    let pieces = crate::split::fragment_keeping(gmsh, &made, &regions).map_err(|e| {
+        fail(format!(
+            "OpenCASCADE could not split the moved face again: {e}"
+        ))
+    })?;
+    Ok(pieces.into_iter().flatten().collect())
 }
 
 /// The unit normal of a planar face pointing out of the solid it bounds.
