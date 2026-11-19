@@ -1501,7 +1501,6 @@ impl Pair {
     /// One integration point or slave node: its result and, when a spring exists, the
     /// element.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn evaluate_point(
         &self,
         p: usize,
