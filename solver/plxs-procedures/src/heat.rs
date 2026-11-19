@@ -364,6 +364,7 @@ impl<'h> HeatRun<'h> {
                             stop: Stop::MinimumIncrement,
                             contact: self.contact,
                             contact_changing: false,
+                            floating: false,
                         }),
                     };
                     return Err(Error::Numerical {
@@ -569,6 +570,7 @@ impl<'h> HeatRun<'h> {
                         stop: Stop::FixedIncrement,
                         contact: self.contact,
                         contact_changing: false,
+                        floating: false,
                     }),
                     message: format!(
                         "no convergence of the temperatures after {iteration} iterations (largest correction {correction:.4e})"
@@ -902,6 +904,7 @@ impl<'h> HeatRun<'h> {
                         stop: Stop::FixedIncrement,
                         contact: true,
                         contact_changing: !settled,
+                        floating: false,
                     }),
                     message: format!(
                         "no convergence of the contact after {iteration} iterations (largest correction {correction:.4e})"

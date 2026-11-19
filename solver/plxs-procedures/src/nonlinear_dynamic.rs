@@ -651,12 +651,14 @@ impl Procedure for NonlinearDynamic {
                             stop: Stop::Cutbacks,
                             contact: setup.has_contact,
                             contact_changing: failed.contact_changing,
+                            floating: false,
                         }),
                         message: format!(
                             "{}; no convergence even with the increment split into {} parts",
                             failed.reason,
                             parts << MAX_SPLITS
                         ),
+                        item: None,
                     });
                 }
                 if slowest > SLOW_ITERATIONS && parts < 1 << MAX_SPLITS {

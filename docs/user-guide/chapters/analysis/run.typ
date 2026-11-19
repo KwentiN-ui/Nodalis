@@ -371,6 +371,12 @@ the cause and the remedy:
   or the supports are then the more likely cause.
 - *Contact does not converge*: the same, while the contact status was still changing in the
   last iterations (points opening and closing again), with the remedies for contact.
+- *Rigid body motion possible* instead of either, when one part kept moving by at least
+  5 % of its own size in each of the last three iterations: it is held only by contact, or
+  not at all, along that motion, as a screw whose head was given no contact with its seat.
+  The message names a node and an element of the part and the direction it moved in, and
+  the part itself is marked in the #ui("Problems") tab and the model tree. Give it a support
+  or the contact it rests on.
 - *Temperatures do not converge* in a heat transfer step.
 - *More increments needed than allowed*: the step needs more increments than the
   #ui("Increment limit") set under #ui("Advanced settings") of the step (off by default).
