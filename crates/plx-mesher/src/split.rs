@@ -392,7 +392,7 @@ pub(crate) fn split_around_holes(
 /// Fragments the objects with the tools and removes what the tools alone gave, beyond the
 /// objects and their boundaries, with the edges and points it leaves loose; returns what
 /// each object became.
-fn fragment_keeping(
+pub(crate) fn fragment_keeping(
     gmsh: &Gmsh,
     objects: &[Entity],
     tools: &[Entity],

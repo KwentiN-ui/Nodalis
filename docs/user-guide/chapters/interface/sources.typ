@@ -418,6 +418,16 @@ edge, which #ui("Preview") shows. Change the main sizes first and round the edge
 a second CAD Operation block behind the first. Curved faces cannot be picked. Several picked
 faces move one after the other, so two faces that meet both move as a whole.
 
+A face split into regions, by #ui("Split by Plane") or #ui("Split by Offset Circle"), moves as a
+whole when all its regions are picked: the picked faces of a solid that lie in one plane move
+together, for example the end of a cylinder split into a disc and rings. Box select picks all
+regions at once. The moved face keeps its regions, so that they can still be picked for loads,
+supports or mesh sizes. A single region of a split face cannot be pulled out of it. Faces of
+different solids, such as the halves of a part split by a plane, each move with their own solid.
+
+#screenshot("cad-push-pull-split.png", [The end of a cylinder split into a disc and two rings by
+  Split by Offset Circle: all three regions picked, it moves as a whole])
+
 #screenshot("cad-push-pull.png", [The top face of a stepped bar picked to make it thicker])
 
 ==== Split by Plane <split-by-plane>

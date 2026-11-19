@@ -4216,3 +4216,84 @@ fn log_lines_tell_the_meshing_step() {
     assert_eq!(step("Info    : Meshing 2D..."), None);
     assert_eq!(step("Info    : 150 illegal tets "), None);
 }
+
+/// The end of a cylinder split into a disc and two rings, and split in halves by a plane:
+/// all its regions picked, it moves as a whole.
+#[test]
+fn push_pull_moves_a_split_face_as_a_whole() {
+    use plx_model::{
+        CadOperationKind::{HoleRing, PushPull, SplitPlane},
+        CoordinatePlane, SplitPlane as Plane,
+    };
+    if !gmsh_available() {
+        return;
+    }
+    let input = made_geometry(|gmsh| {
+        gmsh.add_cylinder([0.0; 3], [0.0, 0.0, 5.0], 20.0)?;
+        Ok(())
+    });
+    let rim = |g: &Geometry, radius: f64| {
+        (g.signatures.iter())
+            .find(|s| {
+                s.entity.dim() == 1
+                    && s.kind != "Line"
+                    && (s.centroid[2] - 5.0).abs() < 1e-6
+                    && (0.5 * (s.max[0] - s.min[0]) - radius).abs() < 1e-6
+            })
+            .unwrap()
+            .entity
+    };
+    let tops = |g: &Geometry| {
+        (g.signatures.iter())
+            .filter(|s| s.entity.dim() == 2 && s.kind == "Plane")
+            .filter(|s| (s.centroid[2] - 5.0).abs() < 1e-6 && s.max[2] - s.min[2] < 1e-3)
+            .map(|s| s.entity)
+            .collect::<Vec<_>>()
+    };
+    let once = apply_operation(&input, &split(HoleRing, -3.0), &[rim(&input, 20.0)]).unwrap();
+    let rings = apply_operation(&once, &split(HoleRing, -5.0), &[rim(&once, 17.0)]).unwrap();
+    let picked = tops(&rings);
+    assert_eq!(picked.len(), 3);
+    let area = std::f64::consts::PI * 20.0f64.powi(2);
+    let at = |g: &Geometry, z: f64| {
+        let mut areas: Vec<f64> = (g.signatures.iter())
+            .filter(|s| s.entity.dim() == 2 && s.kind == "Plane")
+            .filter(|s| (s.centroid[2] - z).abs() < 1e-6 && s.max[2] - s.min[2] < 1e-3)
+            .map(|s| s.size)
+            .collect();
+        areas.sort_by(f64::total_cmp);
+        areas
+    };
+    let mut before = at(&rings, 5.0);
+    let pulled = apply_cad_operation(&rings, PushPull, &picked, 4.0).unwrap();
+    assert!((solid_volume(&pulled) - 9.0 * area).abs() < 1e-6 * area);
+    // The regions stay apart on the moved face, the side stays one face.
+    let moved = at(&pulled, 9.0);
+    assert_eq!(moved.len(), 3, "{moved:?}");
+    before.sort_by(f64::total_cmp);
+    for (a, b) in moved.iter().zip(&before) {
+        assert!((a - b).abs() < 1e-6 * area, "{moved:?} {before:?}");
+    }
+    let sides = (pulled.signatures.iter()).filter(|s| s.kind == "Cylinder");
+    assert_eq!(sides.count(), 1);
+    assert_eq!(generate_mesh(&pulled).unwrap().mesh.parts.len(), 1);
+    let pushed = apply_cad_operation(&rings, PushPull, &picked, -2.0).unwrap();
+    assert!((solid_volume(&pushed) - 3.0 * area).abs() < 1e-6 * area);
+    assert_eq!(at(&pushed, 3.0).len(), 3);
+    assert_eq!(part_names(&pushed).unwrap(), part_names(&input).unwrap());
+    // Two solids, one part each half: each half of the end moves with its solid.
+    let halves = apply_operation(
+        &input,
+        &plx_model::CadOperation {
+            plane: Plane::Global(CoordinatePlane::Yz),
+            ..split(SplitPlane, 0.0)
+        },
+        &[],
+    )
+    .unwrap();
+    let picked = tops(&halves);
+    assert_eq!(picked.len(), 2);
+    let pulled = apply_cad_operation(&halves, PushPull, &picked, 4.0).unwrap();
+    assert!((solid_volume(&pulled) - 9.0 * area).abs() < 1e-6 * area);
+    assert_eq!(part_names(&pulled).unwrap(), part_names(&halves).unwrap());
+}
