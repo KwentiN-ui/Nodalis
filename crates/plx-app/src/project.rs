@@ -5661,6 +5661,9 @@ impl ProjectApp {
             solve.stop();
         }
         self.solves.clear();
+        // A study that runs ends with its runs: its blocks are gone with the project.
+        self.looping = None;
+        self.loops_due.clear();
         self.forced.clear();
         self.update_queue.clear();
         self.export_queue.clear();

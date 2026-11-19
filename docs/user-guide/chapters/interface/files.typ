@@ -48,6 +48,27 @@ Opening an analysis or looking at its results is no change. Undo and redo are ch
 own, so undoing every change still counts as unsaved. Switch on autosave in the settings to save
 by itself (@settings-saving); changes of the model can be undone (@undo).
 
+=== Leaving while a solve runs <leave-running>
+
+Leaving the project stops what still runs in it: analyses being solved or queued by
+#ui("Update Project"), studies, Campbell sweeps and Check Model runs. Results not yet written
+are lost. So Nodalis asks first, in the same cases as for unsaved changes (@unsaved-changes).
+When changes are unsaved as well, the question about them names the runs that are stopped, and
+#ui("Save") or #ui("Discard") stops them too. Otherwise the question offers:
+
+#fields(
+  [Stop and Close], [Stops the runs and closes Nodalis; for a new or another project the button
+    reads #ui("Stop and Start New") or #ui("Stop and Open"). #key("Enter") does not press it, so
+    no solve is stopped by habit.],
+  [Cancel], [Keeps the project open and the runs going (#key("Escape")).],
+)
+
+#screenshot("stop-running-solves.png", [The question before Nodalis closes while an analysis is
+  solved])
+
+If the runs end while the question is open, Nodalis goes on with what you asked, or asks about
+unsaved changes when there are any.
+
 === Saving in the background <save-background>
 
 Saving runs in the background: the windows stay usable while a large project is written, and
