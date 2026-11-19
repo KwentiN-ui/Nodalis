@@ -795,6 +795,8 @@ impl NonlinearStatic {
         // heavily distorted trial state.
         let mut u = ctx.state.displacements.values.clone();
         u.resize(total_dofs, 0.0);
+        // Friction measures the tangential motion from the converged state.
+        ctx.contact.increment_start.clone_from(&u);
         let delta_g: Vec<f64> = g_end.iter().zip(g_start).map(|(e, s)| e - s).collect();
         let mut pending_g = delta_g.iter().any(|d| *d != 0.0);
         let u_start: Vec<f64> = u.iter().zip(&delta_g).map(|(u, d)| u + d).collect();
@@ -848,7 +850,9 @@ impl NonlinearStatic {
                         output.dof_count[dof as usize] += 1;
                     }
                 }
-                status.extend(evaluation.status_key());
+                // A point counts as changed only with a force above half the residual the
+                // equilibrium may keep (on the average force of the step so far).
+                status.extend(evaluation.status_key_above(0.5 * controls.residual * average_force));
                 Some(evaluation)
             } else {
                 None

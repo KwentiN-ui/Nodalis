@@ -255,11 +255,21 @@ pub struct Evaluation {
 impl Evaluation {
     /// The status of every point, to tell a change of the contact set between iterations.
     pub fn status_key(&self) -> Vec<u8> {
+        self.status_key_above(0.0)
+    }
+
+    /// [`Self::status_key`] with the points whose contact force is at most `force` counted
+    /// as open: a point that opens or closes with a force below the residual the
+    /// equilibrium may keep changes nothing that counts, and the peeling edge of a part
+    /// lifting off (one point after another letting go with next to no pressure) held off
+    /// convergence until the iteration limit.
+    pub fn status_key_above(&self, force: f64) -> Vec<u8> {
         self.points
             .iter()
             .flatten()
             .map(|p| match (p.element, p.state.status) {
                 (false, _) => 0,
+                _ if force > 0.0 && geometry::norm(p.force) <= force => 0,
                 (true, ContactStatus::Open) => 1,
                 (true, ContactStatus::Stick) => 2,
                 (true, ContactStatus::Slip) => 3,
@@ -290,6 +300,10 @@ pub struct ContactModel {
     /// and point; missing entries are 1. The explicit integration lowers it where a
     /// penalty spring would be too stiff for its time step.
     pub stiffness_scale: Vec<Vec<f64>>,
+    /// The displacements at the start of the increment, from which friction measures the
+    /// tangential motion of the increment (set by the procedure before it evaluates the
+    /// springs); empty: the displacements evaluated are those of the start.
+    pub increment_start: Vec<f64>,
 }
 
 /// Young's modulus of the first material (CalculiX's reference for defaults).
@@ -1119,6 +1133,7 @@ impl ContactModel {
                             p,
                             &current,
                             u,
+                            &self.increment_start,
                             &previous,
                             predictor,
                             damping,
@@ -1130,6 +1145,7 @@ impl ContactModel {
                             p,
                             &current,
                             u,
+                            &self.increment_start,
                             &previous,
                             predictor,
                             damping,
@@ -1490,6 +1506,7 @@ impl Pair {
         p: usize,
         current: &[[f64; 3]],
         u: &[f64],
+        start: &[f64],
         previous: &ContactPointState,
         predictor: bool,
         damping: Option<&Damping>,
@@ -1497,7 +1514,7 @@ impl Pair {
         boxes: Option<&[Bounds]>,
     ) -> (PointResult, Option<ContactElement>) {
         match self.kinematics(p, current, u, boxes) {
-            Ok(kin) => self.respond(&kin, previous, predictor, damping, stiffness),
+            Ok(kin) => self.respond(&kin, u, start, previous, predictor, damping, stiffness),
             Err((x, gap)) => (self.open_result(x, gap, self.points[p].area), None),
         }
     }
@@ -1513,6 +1530,7 @@ impl Pair {
         k: usize,
         current: &[[f64; 3]],
         u: &[f64],
+        start: &[f64],
         previous: &ContactPointState,
         predictor: bool,
         damping: Option<&Damping>,
@@ -1586,7 +1604,7 @@ impl Pair {
             cutoff,
             corner: None,
         };
-        self.respond(&kin, previous, predictor, damping, stiffness)
+        self.respond(&kin, u, start, previous, predictor, damping, stiffness)
     }
 
     /// The result of a point without a spring.
@@ -1597,6 +1615,7 @@ impl Pair {
                 gap,
                 pressure: 0.0,
                 slip: [0.0; 2],
+                shear: [0.0; 3],
             },
             normal: [0.0; 3],
             tangents: [[0.0; 3]; 2],
@@ -1795,9 +1814,12 @@ impl Pair {
     /// friction with return mapping, the element.
     /// The spring of a point from its kinematics; a factor multiplies the stiffness of the
     /// relation (`stiffness`: pressure and its slope, the stick stiffness and the energies).
+    #[allow(clippy::too_many_arguments)]
     fn respond(
         &self,
         kin: &Kinematics,
+        u: &[f64],
+        start: &[f64],
         previous: &ContactPointState,
         predictor: bool,
         damping: Option<&Damping>,
@@ -1863,6 +1885,45 @@ impl Pair {
             if planar { 0.0 } else { dot(relative, t2) },
         ];
 
+        // The trial shear of a sticking spring: the shear the increment started with, turned
+        // into the tangent plane of now (its size kept), plus the stick stiffness times the
+        // tangential relative motion of this increment. Measured from the total
+        // displacement instead (`tangential - slip`, in the basis of whichever master face
+        // the point lies on), friction saw no slip on a turned part: the projection of a
+        // displacement along an arc on the tangent of now is the chord's, `r sin φ`, which
+        // stops growing at a quarter turn (a screw turned by 90° lost half its friction
+        // torque), and the basis jumps between master faces of differently oriented
+        // tangents (tetrahedra) turned the stored slip in an arbitrary direction.
+        // Without the displacements of the start (`ContactModel::increment_start` empty) the
+        // springs are evaluated where the increment started.
+        let stick_trial = |lambda: f64| -> [f64; 2] {
+            let mut increment = [0.0; 3];
+            if !start.is_empty() {
+                for (&node, &c) in kin.nodes.iter().zip(&kin.coefficients) {
+                    let i = node as usize * 3;
+                    for d in 0..3 {
+                        increment[d] += c * (u[i + d] - start[i + d]);
+                    }
+                }
+            }
+            let old = previous.shear;
+            let along = sub(old, scale(n, dot(old, n)));
+            let (size, turned) = (geometry::norm(old), geometry::norm(along));
+            let carried = if turned > 0.0 {
+                scale(along, size / turned)
+            } else {
+                [0.0; 3]
+            };
+            [
+                dot(carried, t1) + lambda * dot(increment, t1),
+                if planar {
+                    0.0
+                } else {
+                    dot(carried, t2) + lambda * dot(increment, t2)
+                },
+            ]
+        };
+
         // Friction: return mapping on the regularised Coulomb law.
         let mut shear = [0.0; 2];
         let mut slip = previous.slip;
@@ -1876,17 +1937,20 @@ impl Pair {
             // reports shear at nodes with a negative CPRESS), bounded by μ |p|.
             Some(friction) if tied || pressure > 0.0 || (node_to_face && pressure < 0.0) => {
                 let lambda = stiffness * friction.stick;
-                let trial = [
-                    lambda * (tangential[0] - slip[0]),
-                    lambda * (tangential[1] - slip[1]),
-                ];
+                let trial = stick_trial(lambda);
                 let size = (trial[0] * trial[0] + trial[1] * trial[1]).sqrt();
                 let limit = if tied {
                     f64::INFINITY
                 } else {
                     friction.mu * pressure.abs()
                 };
-                if size <= limit || size == 0.0 {
+                // A point that slid in the increment before slides on in the predictor: at
+                // the start of the increment its shear is exactly at the limit, and with the
+                // stick stiffness its friction would hold the parts against the motion the
+                // increment prescribes (a turned screw), whose first correction then bends
+                // and presses them far beyond the solution.
+                let slides_on = predictor && previous.status == ContactStatus::Slip;
+                if (size <= limit && !slides_on) || size == 0.0 {
                     shear = trial;
                     tangent = [[lambda, 0.0], [0.0, lambda]];
                     tangential_energy = 0.5 * size * size / lambda;
@@ -1936,6 +2000,11 @@ impl Pair {
             tangent[1][0] = 0.0;
             tangent[1][1] = 0.0;
         }
+        let shear_vector = [
+            shear[0] * t1[0] + shear[1] * t2[0],
+            shear[0] * t1[1] + shear[1] * t2[1],
+            shear[0] * t1[2] + shear[1] * t2[2],
+        ];
         // CalculiX reports no slip for frictionless contact, except for mortar contact.
         let reported_tangential = if self.friction.is_some() || self.mortar {
             tangential
@@ -2078,6 +2147,7 @@ impl Pair {
                 gap,
                 pressure,
                 slip,
+                shear: shear_vector,
             },
             normal: n,
             tangents: [t1, t2],

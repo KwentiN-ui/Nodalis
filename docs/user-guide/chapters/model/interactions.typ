@@ -263,6 +263,17 @@ shows the derived value in brackets; choosing something else overrides it for th
   meshed pin and its hole with 0.5 of play: #ui("Auto") ties the sides as they are, as moving
   the pin's nodes across the gap would turn 124 of its elements inside out])
 
+Friction acts on the sliding of each increment: a point that starts touching sticks from
+there, a point that slid in the increment before slides on into the next one, and parts that
+turn far keep their friction all the way round, e.g. a screw turned in its thread or a pin
+turned in its bore over several turns. Points that open or close with next to no force (the
+edge of a part lifting off) do not hold up the iterations of an increment.
+
+#screenshot("friction-turn.svg", [The friction moment of a screw tooth pressed by 2 kN onto a
+  thread (pitch 1.5 mm, flank angle 30°, μ = 0.2) while it is turned by 200°: it stays at the
+  value by hand. Friction measured on the total displacement instead faded once the screw had
+  turned by a few tens of degrees and acted against the motion beyond half a turn])
+
 #ui("No Separation") is written without contact iterations: one equation per slave node within
 the tolerance holds it to the master side normal to the surface, while it slides freely along
 it. The equations stay linear, so the region needs no contact pair and no stiffness, but they

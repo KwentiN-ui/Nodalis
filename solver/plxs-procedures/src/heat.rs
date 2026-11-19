@@ -271,6 +271,7 @@ impl<'h> HeatRun<'h> {
                 } else {
                     let u = displacements(ctx);
                     ctx.contact.prepare(&model.nodes.coordinates, &u);
+                    ctx.contact.increment_start.clear();
                     let evaluation = ctx.contact.evaluate(
                         &model.nodes.coordinates,
                         &u,
@@ -797,6 +798,8 @@ impl<'h> HeatRun<'h> {
         table.require_elastic()?;
         let coords = &model.nodes.coordinates;
         let mut u = displacements(ctx);
+        // Friction measures the motion from the displacements of the converged state.
+        ctx.contact.increment_start.clone_from(&u);
         let blocks = ctx.contact.prepare(coords, &u);
         let pattern = crate::contact::cached_pattern(table, &blocks, &mut ctx.contact_pattern);
         let mut k = SparseMatrix::zeros(pattern);
