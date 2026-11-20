@@ -134,11 +134,12 @@ pub fn merge_geometries(inputs: &[Geometry]) -> Result<MergedGeometry, GmshError
             .cloned()
             .unwrap_or_else(|| name.to_owned())
     };
-    let compounds = (inputs.iter().enumerate())
+    let compounds: Vec<CompoundPart> = (inputs.iter().enumerate())
         .flat_map(|(input, g)| g.compounds.iter().map(move |c| (input, c)))
         .map(|(input, c)| CompoundPart {
+            id: c.id,
             name: rename(input, &c.name),
-            parts: c.parts.iter().map(|p| rename(input, p)).collect(),
+            parts: c.parts.clone(),
         })
         .collect();
     let mut sources: Vec<&str> = Vec::new();
@@ -177,6 +178,12 @@ pub fn merge_geometries(inputs: &[Geometry]) -> Result<MergedGeometry, GmshError
         input: None,
     };
     geometry.ensure_ids();
+    // The members keep their ids; those of parts that went leave the compounds.
+    let known: Vec<plx_model::Id> = geometry.ids.iter().map(|p| p.id).collect();
+    for compound in &mut geometry.compounds {
+        compound.parts.retain(|p| known.contains(p));
+    }
+    geometry.compounds.retain(|c| !c.parts.is_empty());
     Ok(MergedGeometry {
         geometry,
         tags,

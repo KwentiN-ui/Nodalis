@@ -19,7 +19,39 @@ fn lower(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Lowered, Lower
     validated(lower_unvalidated(mesh, model, heading)?)
 }
 use crate::frd::{FrdImport, read_frd};
-use crate::inp::{read_inp, read_inp_str};
+
+/// [`crate::inp::read_inp`] with the parts of the ids [`part_named`] gives them.
+fn read_inp(path: &std::path::Path) -> Result<crate::inp::InpImport, crate::inp::InpError> {
+    let mut import = crate::inp::read_inp(path)?;
+    stamp(&mut import.mesh);
+    Ok(import)
+}
+
+/// [`crate::inp::read_inp_str`] with the parts of the ids [`part_named`] gives them.
+fn read_inp_str(
+    text: &str,
+    base_dir: Option<&std::path::Path>,
+) -> Result<crate::inp::InpImport, crate::inp::InpError> {
+    let mut import = crate::inp::read_inp_str(text, base_dir)?;
+    stamp(&mut import.mesh);
+    Ok(import)
+}
+
+/// The id of the test parts called `name`, in any case, the same for all of them: a test
+/// refers to a part by its name, also before the mesh is made.
+fn part_named(name: &str) -> plx_model::Id {
+    named(&format!("part:{}", name.to_ascii_uppercase()))
+}
+
+/// Gives the parts and bodies of `mesh` the ids [`part_named`] gives their names.
+fn stamp(mesh: &mut FeMesh) {
+    for part in &mut mesh.parts {
+        part.id = part_named(&part.name);
+        for body in &mut part.bodies {
+            body.id = part_named(&body.name);
+        }
+    }
+}
 
 /// The id of the test items called `name`, the same for all of them: a test refers to an
 /// item by its name, also before the item is made.
@@ -88,7 +120,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
             orientation: None,
             name: "Section-1".into(),
             material: Some(named("Steel")),
-            region: Region::Parts(vec!["EALL".into()]),
+            region: Region::Parts(mesh.ids_of(&["EALL"])),
             thickness: 1.0,
             kind: SectionKind::Solid,
         }],
@@ -471,6 +503,7 @@ fn linear_rectangle(width: f64, height: f64, nx: u32, ny: u32, triangles: bool) 
         }
     }
     let mut part = plx_mesh::Part {
+        id: part_named("PLATE"),
         bodies: Vec::new(),
         name: "PLATE".into(),
         elements: Vec::new(),
@@ -536,7 +569,7 @@ fn membrane_strip(type_name: &str) -> (FeMesh, FeModel) {
         thickness: 2.0,
         offset: 0.0,
     };
-    model.set_element_type("PLATE", type_name);
+    model.set_element_type(mesh.ids_of(&["PLATE"])[0], type_name);
     (mesh, model)
 }
 
@@ -1679,7 +1712,7 @@ fn solver_carries_pressure_on_a_pretensioned_membrane() {
         thickness,
         offset: 0.0,
     };
-    model.set_element_type("PLATE", "M3D4");
+    model.set_element_type(mesh.ids_of(&["PLATE"])[0], "M3D4");
     // Step 1 stretches the flat strip, which has no lateral stiffness yet; step 2 adds the
     // pressure.
     let mut stretch_step = model.steps[0].clone();
@@ -1835,6 +1868,7 @@ fn tet_bar() -> FeMesh {
     let id = |i: i64, j: i64, k: i64| (((i * (2 * ny + 1) + j) * (2 * ny + 1) + k) + 1) as u32;
     let mut used = std::collections::BTreeSet::new();
     let mut part = plx_mesh::Part {
+        id: part_named("EALL"),
         bodies: Vec::new(),
         name: "EALL".into(),
         elements: Vec::new(),
@@ -3208,6 +3242,7 @@ fn rectangle(x0: f64, width: f64, height: f64, nx: u32, ny: u32) -> FeMesh {
         }
     }
     let mut part = plx_mesh::Part {
+        id: part_named("PLATE"),
         bodies: Vec::new(),
         name: "PLATE".into(),
         elements: Vec::new(),
@@ -3317,7 +3352,7 @@ fn plane_model(
             orientation: None,
             name: "Section-1".into(),
             material: Some(named("Steel")),
-            region: Region::Parts(vec!["PLATE".into()]),
+            region: Region::Parts(vec![part_named("PLATE")]),
             thickness,
             kind: SectionKind::Solid,
         }],
@@ -3486,6 +3521,7 @@ fn plane_patch(shape: plx_mesh::ElementShape, x0: f64) -> PlanePatch {
         }
     }
     let mut part = plx_mesh::Part {
+        id: part_named("PLATE"),
         bodies: Vec::new(),
         name: "PLATE".into(),
         elements: Vec::new(),
@@ -3577,7 +3613,7 @@ fn solver_runs_every_plane_element_type() {
                 system: None,
                 follower: false,
             });
-            assert!(model.set_element_type("PLATE", chosen));
+            assert!(model.set_element_type(mesh.ids_of(&["PLATE"])[0], chosen));
             let written = space.element_type(chosen, shape);
             let text = write_inp(&mesh, &model, "").unwrap();
             let block = format!("*Element, Type={written}, Elset=PLATE\n");
@@ -3697,6 +3733,7 @@ fn two_blocks(gap: f64) -> (FeMesh, Faces, Faces) {
         }
         let name = if block == 0 { "LOWER" } else { "UPPER" };
         mesh.parts.push(plx_mesh::Part {
+            id: part_named(name),
             bodies: Vec::new(),
             name: name.into(),
             elements,
@@ -3753,7 +3790,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         orientation: None,
         name: "Section-1".into(),
         material: Some(named("Steel")),
-        region: Region::Parts(vec!["LOWER".into(), "UPPER".into()]),
+        region: Region::Parts(mesh.ids_of(&["LOWER", "UPPER"])),
         thickness: 1.0,
         kind: SectionKind::Solid,
     });
@@ -4334,6 +4371,7 @@ fn solver_carries_the_load_across_a_contact_in_2d() {
         mesh.add_element(element).unwrap();
     }
     mesh.parts.push(plx_mesh::Part {
+        id: part_named("UPPER"),
         bodies: Vec::new(),
         name: "UPPER".into(),
         elements: (101..=104).collect(),
@@ -4357,7 +4395,7 @@ fn solver_carries_the_load_across_a_contact_in_2d() {
         LoadKind::Pressure(pressure),
         Region::Faces(upper_top),
     );
-    model.sections[0].region = Region::Parts(vec!["PLATE".into(), "UPPER".into()]);
+    model.sections[0].region = Region::Parts(mesh.ids_of(&["PLATE", "UPPER"]));
     model.surface_interactions.push(SurfaceInteraction {
         id: named("Surface_Interaction-1"),
         name: "Surface_Interaction-1".into(),
@@ -4446,6 +4484,7 @@ fn blocks(na: u32, nb: u32) -> Blocks {
             }
         }
         mesh.parts.push(Part {
+            id: part_named(name),
             bodies: Vec::new(),
             name: name.into(),
             elements,
@@ -4517,7 +4556,7 @@ fn blocks_model(
             orientation: None,
             name: "Section-1".into(),
             material: Some(named("Steel")),
-            region: Region::Parts(vec!["A".into(), "B".into()]),
+            region: Region::Parts(vec![part_named("A"), part_named("B")]),
             thickness: 1.0,
             kind: SectionKind::Solid,
         }],
@@ -5111,6 +5150,7 @@ fn line_chain(n: u32, axis: usize, length: f64, quadratic: bool) -> FeMesh {
         elements.push(e + 1);
     }
     mesh.parts.push(Part {
+        id: part_named("BEAM"),
         bodies: Vec::new(),
         name: "BEAM".into(),
         elements,
@@ -5170,7 +5210,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
             orientation: None,
             name: "Beam-1".into(),
             material: Some(named("Steel")),
-            region: Region::Parts(vec!["BEAM".into()]),
+            region: Region::Parts(mesh.ids_of(&["BEAM"])),
             thickness: 1.0,
             kind,
         }],
@@ -5381,7 +5421,7 @@ fn rope_on_symmetry_plane(halve_beams: bool, force: f64) -> (FeMesh, FeModel) {
         .boundary_conditions
         .push(BoundaryCondition::new(
             "Symmetry-1",
-            Region::Parts(vec!["BEAM".into()]),
+            Region::Parts(mesh.ids_of(&["BEAM"])),
             // The nodes are on a line, which leaves the plane open: the normal is entered.
             BoundaryKind::Symmetry {
                 normal: Some([0.0, 0.0, 1.0]),
@@ -5635,6 +5675,7 @@ fn two_chains(n: u32, quadratic: bool) -> FeMesh {
         elements.push(101 + e);
     }
     mesh.parts.push(Part {
+        id: part_named("BEAM2"),
         bodies: Vec::new(),
         name: "BEAM2".into(),
         elements,
@@ -5646,7 +5687,7 @@ fn two_chains(n: u32, quadratic: bool) -> FeMesh {
 fn tied_chains(n: u32, quadratic: bool, kind: SectionKind, load: LoadKind) -> (FeMesh, FeModel) {
     let mesh = two_chains(n, quadratic);
     let mut model = line_model(&mesh, kind, load);
-    model.sections[0].region = Region::Parts(vec!["BEAM".into(), "BEAM2".into()]);
+    model.sections[0].region = Region::Parts(mesh.ids_of(&["BEAM", "BEAM2"]));
     let middle = n * if quadratic { 2 } else { 1 } + 1;
     model.node_ties.push(NodeTie {
         region: Region::Nodes(vec![middle, 101]),
@@ -6240,7 +6281,7 @@ fn writes_heat_transfer_keywords() {
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
-        region: Region::Parts(vec!["EALL".into()]),
+        region: Region::Parts(mesh.ids_of(&["EALL"])),
         kind: plx_model::InitialConditionKind::Temperature(20.0),
     });
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -6290,7 +6331,7 @@ fn a_total_heat_flow_is_spread_over_faces_and_volumes() {
             heat_load("Tip-1", Region::Surface("TIP".into()), LoadKind::flux(2.0)),
             heat_load(
                 "Body-1",
-                Region::Parts(vec!["EALL".into()]),
+                Region::Parts(vec![part_named("EALL")]),
                 LoadKind::flux(5.0),
             ),
         ],
@@ -6379,7 +6420,7 @@ fn a_defined_temperature_is_written() {
     model.steps[0].defined_fields = vec![
         defined_temperature(
             "Defined_Temperature-1",
-            Region::Parts(vec!["EALL".into()]),
+            Region::Parts(mesh.ids_of(&["EALL"])),
             120.0,
         ),
         temperature_from_file("Defined_Temperature-2", "/results/heat run.frd", 2),
@@ -6425,7 +6466,7 @@ fn a_step_takes_only_its_own_defined_temperatures() {
         Vec::new(),
         Vec::new(),
     );
-    let all = Region::Parts(vec!["EALL".into()]);
+    let all = Region::Parts(mesh.ids_of(&["EALL"]));
     model.steps[0].defined_fields = vec![defined_temperature("Hot", all.clone(), 120.0)];
     let mut warm = model.steps[0].clone();
     warm.name = "Warm".into();
@@ -6510,13 +6551,13 @@ fn solver_sets_temperatures_back_in_a_step_without_them() {
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
-        region: Region::Parts(vec!["EALL".into()]),
+        region: Region::Parts(mesh.ids_of(&["EALL"])),
         kind: plx_model::InitialConditionKind::Temperature(20.0),
     });
     model.steps[0].boundary_conditions = free_expansion_supports(&mesh);
     model.steps[0].defined_fields = vec![defined_temperature(
         "Hot",
-        Region::Parts(vec!["EALL".into()]),
+        Region::Parts(mesh.ids_of(&["EALL"])),
         120.0,
     )];
     let tip = nodes_at(&mesh, 0, 100.0);
@@ -6568,7 +6609,7 @@ fn solver_strains_the_bar_by_the_temperatures_of_a_result_file() {
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
-        region: Region::Parts(vec!["EALL".into()]),
+        region: Region::Parts(mesh.ids_of(&["EALL"])),
         kind: plx_model::InitialConditionKind::Temperature(20.0),
     });
     model.steps[0].boundary_conditions = free_expansion_supports(&mesh);
@@ -6603,7 +6644,7 @@ fn solver_conducts_body_heat() {
     let (area, _) = bar_section_and_length(&mesh);
     model.steps[0].loads = vec![heat_load(
         "Flux-1",
-        Region::Parts(vec!["EALL".into()]),
+        Region::Parts(mesh.ids_of(&["EALL"])),
         LoadKind::flux(body * area * length),
     )];
     let Some(frd) = run_solver("koerperwaerme", &write_inp(&mesh, &model, "").unwrap()) else {
@@ -6673,7 +6714,7 @@ fn solver_cools_the_bar_by_radiation() {
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
-        region: Region::Parts(vec!["EALL".into()]),
+        region: Region::Parts(mesh.ids_of(&["EALL"])),
         kind: plx_model::InitialConditionKind::Temperature(hot),
     });
     let Some(frd) = run_solver("strahlung", &write_inp(&mesh, &model, "").unwrap()) else {
@@ -6760,7 +6801,7 @@ fn solver_warms_the_bar_transiently() {
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
-        region: Region::Parts(vec!["EALL".into()]),
+        region: Region::Parts(mesh.ids_of(&["EALL"])),
         kind: plx_model::InitialConditionKind::Temperature(0.0),
     });
     let Some(frd) = run_solver("instationaer", &write_inp(&mesh, &model, "").unwrap()) else {
@@ -6848,7 +6889,7 @@ fn expand_bar(kind: StepKind, name: &str) -> String {
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
-        region: Region::Parts(vec!["EALL".into()]),
+        region: Region::Parts(mesh.ids_of(&["EALL"])),
         kind: plx_model::InitialConditionKind::Temperature(20.0),
     });
     let inp = write_inp(&mesh, &model, "").unwrap();
@@ -7294,7 +7335,7 @@ fn history_outputs_become_print_keywords_with_their_sets() {
     let mut nodes = HistoryOutput::node("NH_Output-1", Region::Nodes(vec![99]));
     nodes.totals = Totals::Yes;
     model.put_history_output(0, nodes);
-    let mut elements = HistoryOutput::element("EH_Output-1", Region::Parts(vec!["EALL".into()]));
+    let mut elements = HistoryOutput::element("EH_Output-1", Region::Parts(mesh.ids_of(&["EALL"])));
     elements.variables = vec!["S".into(), "EVOL".into()];
     model.put_history_output(0, elements);
     let mut off = HistoryOutput::node("NH_Output-2", Region::NodeSet("FIX".into()));
@@ -7350,7 +7391,7 @@ fn solver_prints_the_history_outputs_into_the_dat_file() {
         0,
         HistoryOutput::node("NH_Output-2", Region::Nodes(vec![99])),
     );
-    let mut volume = HistoryOutput::element("EH_Output-1", Region::Parts(vec!["EALL".into()]));
+    let mut volume = HistoryOutput::element("EH_Output-1", Region::Parts(mesh.ids_of(&["EALL"])));
     volume.variables = vec!["S".into(), "EVOL".into()];
     volume.totals = Totals::Yes;
     model.put_history_output(0, volume);
@@ -7455,7 +7496,7 @@ fn coasting_cantilever(kind: plx_model::InitialConditionKind) -> (FeMesh, FeMode
         distribution: None,
         name: "Initial_Velocity-1".into(),
         active: true,
-        region: Region::Parts(vec!["EALL".into()]),
+        region: Region::Parts(mesh.ids_of(&["EALL"])),
         kind,
     });
     (mesh, model)
@@ -7529,7 +7570,7 @@ fn body_load(kind: LoadKind) -> Load {
         name: "Body-1".into(),
         active: true,
         visible: true,
-        region: Region::Parts(vec!["EALL".into()]),
+        region: Region::Parts(vec![part_named("EALL")]),
         kind,
         amplitude: None,
         factor_amplitude: None,
@@ -8388,11 +8429,11 @@ fn solver_runs_the_element_types_chosen_for_a_part() {
     cases.push((plane(ModelSpace::PlaneStrain), "PLATE", "CPE8R"));
     // Chosen in plane stress, written for the axisymmetric model the model became.
     let (mesh, mut model) = plane(ModelSpace::PlaneStress);
-    model.set_element_type("PLATE", "CPS8R");
+    model.set_element_type(mesh.ids_of(&["PLATE"])[0], "CPS8R");
     model.properties.space = ModelSpace::Axisymmetric;
     cases.push(((mesh, model), "PLATE", "CAX8R"));
     for ((mesh, mut model), part, type_name) in cases {
-        model.set_element_type(part, type_name);
+        model.set_element_type(mesh.ids_of(&[part])[0], type_name);
         let text = write_inp(&mesh, &model, "").unwrap();
         let block = format!("*Element, Type={type_name}, Elset={part}\n");
         assert!(text.contains(&block), "{block:?} missing in\n{text}");
@@ -9123,6 +9164,7 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
         ("PLATE", vec![201, 202, 203, 204]),
     ] {
         mesh.parts.push(plx_mesh::Part {
+            id: part_named(name),
             bodies: Vec::new(),
             name: name.into(),
             elements,
@@ -9191,7 +9233,7 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
             orientation: None,
             name: name.into(),
             material: Some(named("Steel")),
-            region: Region::Parts(vec![part.into()]),
+            region: Region::Parts(mesh.ids_of(&[&part])),
             thickness: 1.0,
             kind,
         });
@@ -9267,6 +9309,7 @@ fn block_on_membrane(strip_is_master: bool) -> (FeMesh, FeModel) {
         ("BLOCK", (101..=109).collect()),
     ] {
         mesh.parts.push(plx_mesh::Part {
+            id: part_named(name),
             bodies: Vec::new(),
             name: name.into(),
             elements,
@@ -9344,7 +9387,7 @@ fn block_on_membrane(strip_is_master: bool) -> (FeMesh, FeModel) {
             orientation: None,
             name: name.into(),
             material: Some(named("Steel")),
-            region: Region::Parts(vec![part.into()]),
+            region: Region::Parts(mesh.ids_of(&[&part])),
             thickness: 1.0,
             kind,
         });
@@ -9442,7 +9485,7 @@ fn solver_bends_a_box_of_a_mesh_block_held_and_loaded_on_its_sides() {
         follower: false,
     };
     let (_, mut model) = cantilever(load);
-    model.sections[0].region = Region::Parts(vec!["BOX".into()]);
+    model.sections[0].region = Region::Parts(mesh.ids_of(&["BOX"]));
     model.steps[0].boundary_conditions[0].region = Region::NodeSet("X-".into());
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Surface, Name=Z+, Type=Element\n"), "{text}");
@@ -9479,7 +9522,7 @@ fn solver_bends_a_rectangle_of_a_mesh_block_held_and_loaded_on_its_edges() {
         LoadKind::Pressure(1.0),
         Region::Surface("Y+".into()),
     );
-    model.sections[0].region = Region::Parts(vec!["RECTANGLE".into()]);
+    model.sections[0].region = Region::Parts(mesh.ids_of(&["RECTANGLE"]));
     model.steps[0].boundary_conditions.push(BoundaryCondition {
         id: plx_model::Id::new(),
         distribution: None,
@@ -10257,7 +10300,7 @@ fn contact_regions_take_the_formulation_of_the_pairs_defined_by_hand() {
 fn findings_on_what_a_region_becomes_belong_to_the_region() {
     use plx_model::{ContactBehavior, MeshCheck, ModelItem, Problem};
     let (mesh, mut model) = blocks_joined_by_region(0.0, ContactBehavior::Bonded);
-    model.contact_regions[0].side_b = Region::Parts(vec!["GONE".into()]);
+    model.contact_regions[0].side_b = Region::Parts(mesh.ids_of(&["GONE"]));
     let check = MeshCheck::new(&mesh, model.properties.space);
     let missing: Vec<ModelItem> = (model.check(&mesh, &check).into_iter())
         .filter(|f| f.problem == Problem::MissingReference)
@@ -10363,7 +10406,7 @@ fn a_detection_finds_the_touching_blocks_and_keeps_regions_the_user_changed() {
     // Parts left out of the detection are not searched.
     model.contact_regions.clear();
     model.contact_detections[0].tolerance = None;
-    model.contact_detections[0].scope = plx_model::PartFilter::parts(["LOWER"]);
+    model.contact_detections[0].scope = plx_model::PartFilter::parts(mesh.ids_of(&["LOWER"]));
     let report = model
         .detect_contacts(
             0,
@@ -10411,7 +10454,7 @@ fn detection_rules_give_the_pairs_their_type_and_the_lower_detection_wins() {
     let counts = model.rule_counts(&model.contact_detections[0], &mesh, &context);
     assert_eq!(counts, [1, 0]);
     // A rule matching neither side leaves the pair to the type of all other pairs.
-    model.contact_detections[0].rules[0].side_a = PartFilter::parts(["NOPE"]);
+    model.contact_detections[0].rules[0].side_a = PartFilter::parts(mesh.ids_of(&["NOPE"]));
     let report = model
         .detect_contacts(
             0,
@@ -10425,8 +10468,8 @@ fn detection_rules_give_the_pairs_their_type_and_the_lower_detection_wins() {
     assert_eq!(model.contact_regions[0].behavior, ContactBehavior::Bonded);
     // An excluding rule leaves the pair out.
     model.contact_detections[0].rules[0] = ContactRule {
-        side_a: PartFilter::parts(["LOWER"]),
-        side_b: PartFilter::parts(["UPPER"]),
+        side_a: PartFilter::parts(mesh.ids_of(&["LOWER"])),
+        side_b: PartFilter::parts(mesh.ids_of(&["UPPER"])),
         action: RuleAction::Exclude,
     };
     let report = model
@@ -10503,12 +10546,18 @@ fn detection_rules_give_the_pairs_their_type_and_the_lower_detection_wins() {
     model.part_groups.clear();
     model.forget_in_filters(group);
     assert!(model.contact_detections[0].scope.is_all());
-    // Renaming a part follows into the filters.
-    model.contact_detections[0].scope = PartFilter::parts(["LOWER"]);
-    model.rename_part("LOWER", "BASE");
+    // A renamed part stays in the filters, which name it by id.
+    let lower = mesh.ids_of(&["LOWER"]);
+    model.contact_detections[0].scope = PartFilter::parts(lower.clone());
+    let mut mesh = mesh;
+    let index = mesh.part_index(lower[0]).unwrap();
+    mesh.rename_part(index, "BASE");
+    let context = model.part_context(&mesh, &plx_model::LeftOut::nothing());
+    let index = mesh.part_index(lower[0]).unwrap();
+    assert!(model.contact_detections[0].scope.matches(index, &context));
     assert_eq!(
-        model.contact_detections[0].scope,
-        PartFilter::parts(["BASE"])
+        model.contact_detections[0].scope.describe(&model, &context),
+        "BASE"
     );
 }
 
@@ -10823,7 +10872,7 @@ fn solver_conducts_heat_across_contact_regions_in_coupled_steps() {
         distribution: None,
         name: "Initial-1".into(),
         active: true,
-        region: Region::Parts(vec!["LOWER".into(), "UPPER".into()]),
+        region: Region::Parts(mesh.ids_of(&["LOWER", "UPPER"])),
         kind: plx_model::InitialConditionKind::Temperature(50.0),
     });
     let resolved = model.resolve_contacts(&mesh);
@@ -11213,12 +11262,12 @@ fn solver_strains_the_bar_by_a_distributed_temperature() {
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
-        region: Region::Parts(vec!["EALL".into()]),
+        region: Region::Parts(mesh.ids_of(&["EALL"])),
         kind: plx_model::InitialConditionKind::Temperature(20.0),
     });
     let mut field = defined_temperature(
         "Defined_Temperature-1",
-        Region::Parts(vec!["EALL".into()]),
+        Region::Parts(mesh.ids_of(&["EALL"])),
         120.0,
     );
     field.distribution = Some(named("Gradient"));
@@ -11494,7 +11543,7 @@ fn shank_sectors(preload: f64, sectors: usize, head: usize) -> (FeMesh, FeModel)
         ends(0),
         ends(along)
     );
-    let mesh = crate::inp::read_inp_str(&text, None).unwrap().mesh;
+    let mesh = read_inp_str(&text, None).unwrap().mesh;
     let (_, mut model) = cantilever(tip_force());
     let step = &mut model.steps[0];
     step.loads.clear();
@@ -12604,6 +12653,7 @@ fn rope_over_block() -> (FeMesh, FeModel) {
     })
     .unwrap();
     mesh.parts.push(Part {
+        id: part_named("SHEAVE"),
         bodies: Vec::new(),
         name: "SHEAVE".into(),
         elements: vec![101],
@@ -12644,7 +12694,7 @@ fn a_rope_slave_is_a_node_surface() {
         ..ContactPair::new("Contact_Pair-1", Some(named("Surface_Interaction-1")))
     };
     pair.master = Region::Faces(vec![(101, 2)]);
-    pair.slave = Region::Parts(vec!["BEAM".into()]);
+    pair.slave = Region::Parts(mesh.ids_of(&["BEAM"]));
     pair.method = ContactMethod::NodeToSurface;
     model.contact_pairs.push(pair);
     let analysis = lowered(&mesh, &model);
@@ -12685,7 +12735,7 @@ fn a_detection_finds_a_rope_lying_on_a_surface() {
     let region = &model.contact_regions[0];
     // A bonded detection finds the rope as frictionless contact: it slides over a sheave.
     assert_eq!(region.behavior, plx_model::ContactBehavior::Frictionless);
-    assert_eq!(region.side_b, Region::Parts(vec!["BEAM".into()]));
+    assert_eq!(region.side_b, Region::Parts(mesh.ids_of(&["BEAM"])));
     assert!(region.side_a.faces(&mesh).contains(&(101, 2)), "{region:?}");
     let resolved = model.resolve_contact(region, &mesh);
     assert!(
@@ -12819,6 +12869,7 @@ fn solver_carries_the_load_across_the_bodies_of_a_compound_part() {
     let (mut mesh, _, _) = two_blocks(0.0);
     let bodies: Vec<plx_mesh::Body> = (mesh.parts.drain(..))
         .map(|p| plx_mesh::Body {
+            id: part_named(&p.name),
             name: p.name,
             elements: p.elements,
         })
@@ -12830,7 +12881,7 @@ fn solver_carries_the_load_across_the_bodies_of_a_compound_part() {
     part.bodies = bodies;
     mesh.parts.push(part);
     let mut model = stacked_blocks(&mesh);
-    model.sections[0].region = Region::Parts(vec!["BLOCK".into()]);
+    model.sections[0].region = Region::Parts(mesh.ids_of(&["BLOCK"]));
     let text = write_inp(&mesh, &model, "").unwrap();
     assert_eq!(text.matches("*Tie,").count(), 1, "{text}");
     let findings = model.check(
@@ -12865,6 +12916,7 @@ fn solver_bends_a_shell_plate_of_two_bodies_like_one() {
         mesh.set_node(id + offset, c);
     }
     let mut bodies = vec![plx_mesh::Body {
+        id: part_named("LEFT"),
         name: "LEFT".into(),
         elements: mesh.parts[0].elements.clone(),
     }];
@@ -12879,6 +12931,7 @@ fn solver_bends_a_shell_plate_of_two_bodies_like_one() {
         elements.push(element.id + offset);
     }
     bodies.push(plx_mesh::Body {
+        id: part_named("RIGHT"),
         name: "RIGHT".into(),
         elements,
     });
@@ -12982,9 +13035,9 @@ fn bolt_with_thread(shortening: f64) -> (FeMesh, FeModel) {
         foot.join(", "),
         top.join(", ")
     );
-    let mesh = crate::inp::read_inp_str(&text, None).unwrap().mesh;
+    let mesh = read_inp_str(&text, None).unwrap().mesh;
     let (_, mut model) = cantilever(tip_force());
-    model.sections[0].region = Region::Parts(vec!["BOLT".into(), "NUT".into()]);
+    model.sections[0].region = Region::Parts(mesh.ids_of(&["BOLT", "NUT"]));
     let step = &mut model.steps[0];
     step.loads.clear();
     step.boundary_conditions[0].region = Region::NodeSet("FOOT".into());
@@ -13174,9 +13227,9 @@ fn bolt_through_tapped_ring(shortening: f64) -> (FeMesh, FeModel) {
         foot.join(",\n"),
         rim.join(",\n")
     );
-    let mesh = crate::inp::read_inp_str(&text, None).unwrap().mesh;
+    let mesh = read_inp_str(&text, None).unwrap().mesh;
     let (_, mut model) = cantilever(tip_force());
-    model.sections[0].region = Region::Parts(vec!["SCREW".into(), "NUT".into()]);
+    model.sections[0].region = Region::Parts(mesh.ids_of(&["SCREW", "NUT"]));
     let step = &mut model.steps[0];
     step.loads.clear();
     step.boundary_conditions[0].region = Region::NodeSet("FOOT".into());
@@ -13521,7 +13574,7 @@ fn a_rope_on_a_symmetry_plane_touches_the_block_not_its_cut_face() {
         orientation: None,
         name: "Block".into(),
         material,
-        region: Region::Parts(vec!["SHEAVE".into()]),
+        region: Region::Parts(mesh.ids_of(&["SHEAVE"])),
         thickness: 1.0,
         kind: SectionKind::Solid,
     });
@@ -13541,7 +13594,7 @@ fn a_rope_on_a_symmetry_plane_touches_the_block_not_its_cut_face() {
         ..ContactPair::new("Contact_Pair-1", Some(named("Surface_Interaction-1")))
     };
     pair.master = Region::Faces(vec![(101, 2), (101, 3)]);
-    pair.slave = Region::Parts(vec!["BEAM".into()]);
+    pair.slave = Region::Parts(mesh.ids_of(&["BEAM"]));
     pair.method = ContactMethod::NodeToSurface;
     model.contact_pairs.push(pair);
     let step = &mut model.steps[0];
@@ -13549,7 +13602,7 @@ fn a_rope_on_a_symmetry_plane_touches_the_block_not_its_cut_face() {
         ("Symmetry-1", Region::Faces(vec![(101, 3)]), None),
         (
             "Symmetry-2",
-            Region::Parts(vec!["BEAM".into()]),
+            Region::Parts(mesh.ids_of(&["BEAM"])),
             Some([0.0, 0.0, 1.0]),
         ),
     ] {

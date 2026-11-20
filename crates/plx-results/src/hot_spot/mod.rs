@@ -659,6 +659,7 @@ mod tests {
             }
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "PLATE".into(),
             elements,

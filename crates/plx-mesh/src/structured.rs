@@ -183,6 +183,7 @@ fn structured(
         }
     }
     mesh.parts.push(Part {
+        id: Default::default(),
         bodies: Vec::new(),
         name: part.to_uppercase(),
         elements,

@@ -249,10 +249,12 @@ mod tests {
         let mut part = Part::new("COMPOUND-1", vec![1, 2]);
         part.bodies = vec![
             Body {
+                id: Default::default(),
                 name: "SOLID-1".into(),
                 elements: vec![1],
             },
             Body {
+                id: Default::default(),
                 name: "SOLID-2".into(),
                 elements: vec![2],
             },

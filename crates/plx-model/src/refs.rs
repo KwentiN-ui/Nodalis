@@ -376,7 +376,7 @@ mod tests {
         model.reference_points[0].name = "Top".into();
 
         let region = model.history_outputs[0].kind.region().unwrap();
-        assert_eq!(region.describe(&model), "Top");
+        assert_eq!(region.describe(&model, &plx_mesh::FeMesh::default()), "Top");
         assert_eq!(
             model.reference_point(id).map(|r| r.name.as_str()),
             Some("Top")

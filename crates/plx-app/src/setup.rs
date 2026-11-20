@@ -252,7 +252,7 @@ impl RegionDraft {
         match region {
             Region::Parts(parts) => {
                 draft.source = Source::Parts;
-                draft.parts = PartPicks::from_names(parts.iter().cloned());
+                draft.parts = PartPicks::from_ids(parts, mesh);
             }
             Region::Nodes(nodes) => draft.nodes = History::from_items(nodes.iter().copied()),
             Region::Faces(faces)
@@ -346,7 +346,7 @@ impl RegionDraft {
                 }
                 Target::Lines => Region::Edges(self.edges.items().into_iter().collect()),
             },
-            Source::Parts => Region::Parts(self.parts.names().into_iter().collect()),
+            Source::Parts => Region::Parts(self.parts.ids().into_iter().collect()),
             Source::NodeSet => Region::NodeSet(self.set.clone()),
             Source::ElementSet => Region::ElementSet(self.set.clone()),
             Source::Surface => Region::Surface(self.set.clone()),
@@ -1336,9 +1336,9 @@ pub fn shown_faces(
 pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
     let mut highlight = Highlight::default();
     match region {
-        Region::Parts(names) => {
-            highlight.parts = (model.parts.iter().enumerate())
-                .filter(|(_, p)| names.contains(&p.name))
+        Region::Parts(ids) => {
+            highlight.parts = (model.mesh().parts.iter().enumerate())
+                .filter(|(_, p)| ids.contains(&p.id))
                 .map(|(i, _)| i)
                 .collect();
         }
@@ -2372,7 +2372,7 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
 
 /// The parts of the walls of the Particle Flow step of `fe`: those of its rigid bodies and
 /// those a boundary condition of the step holds in shape.
-fn flow_wall_parts(fe: &FeModel, mesh: &FeMesh) -> Vec<String> {
+fn flow_wall_parts(fe: &FeModel, mesh: &FeMesh) -> Vec<plx_model::Id> {
     let Some(flow) = fe.particle_flow_step() else {
         return Vec::new();
     };
@@ -2392,7 +2392,7 @@ fn flow_wall_parts(fe: &FeModel, mesh: &FeMesh) -> Vec<String> {
         .collect();
     (mesh.parts.iter())
         .filter(|p| p.elements.iter().any(|e| elements.contains(e)))
-        .map(|p| p.name.clone())
+        .map(|p| p.id)
         .collect()
 }
 
@@ -5384,9 +5384,9 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
 /// tree.
 pub fn acting_on_parts(model: &Model, parts: &BTreeSet<usize>) -> BTreeSet<TreeItem> {
     let mesh = &model.mesh();
-    let names: HashSet<&str> = (parts.iter())
+    let ids: HashSet<plx_model::Id> = (parts.iter())
         .filter_map(|&p| mesh.parts.get(p))
-        .map(|p| p.name.as_str())
+        .map(|p| p.id)
         .collect();
     let elements: HashSet<ElementId> = (parts.iter())
         .filter_map(|&p| mesh.parts.get(p))
@@ -5394,7 +5394,7 @@ pub fn acting_on_parts(model: &Model, parts: &BTreeSet<usize>) -> BTreeSet<TreeI
         .collect();
     let fe = &model.fe;
     let on_parts = |region: &Region| match region {
-        Region::Parts(regions) => regions.iter().any(|n| names.contains(n.as_str())),
+        Region::Parts(regions) => regions.iter().any(|n| ids.contains(n)),
         Region::RemotePoint(_) => false,
         _ => {
             let mut ids = region.elements(mesh);
@@ -8778,7 +8778,7 @@ mod tests {
     #[test]
     fn a_region_with_a_selection_starts_locked() {
         let mesh = FeMesh::default();
-        let region = Region::Parts(["A".to_string()].into_iter().collect());
+        let region = Region::Parts(vec![crate::test_ids::named("A")]);
         let draft = RegionDraft::from_region(&region, SOLID_SOURCES, Target::Faces, &mesh);
         assert!(draft.locked && !draft.picks());
         let empty = RegionDraft::new(SOLID_SOURCES, Target::Faces);
@@ -9159,7 +9159,7 @@ mod tests {
             let draft = RegionDraft::from_region(&region, NODE_SOURCES, target, &mesh);
             assert_eq!(draft.region(), region);
         }
-        let parts = Region::Parts(vec!["A".into(), "B".into()]);
+        let parts = Region::Parts(mesh.ids_of(&["A", "B"]));
         let draft = RegionDraft::from_region(&parts, ELEMENT_SOURCES, Target::Faces, &mesh);
         assert_eq!(draft.region(), parts);
         // Element regions list whole parts first; picked faces still reopen as a selection.
@@ -9511,13 +9511,16 @@ mod tests {
         assert!(editor.validate(&fe).is_err(), "empty region");
         if let Draft::InitialCondition(_, region) = &mut editor.draft {
             region.source = Source::Parts;
-            region.parts = PartPicks::from_names(["A".to_string()]);
+            region.parts = PartPicks::from_parts([(crate::test_ids::named("A"), "A".into())]);
         }
         assert_eq!(editor.validate(&fe), Ok(()));
         editor.apply(&mut fe);
         let condition = &fe.initial_conditions[0];
         assert_eq!(condition.name, "Temperature-1");
-        assert_eq!(condition.region, Region::Parts(vec!["A".into()]));
+        assert_eq!(
+            condition.region,
+            Region::Parts(vec![crate::test_ids::named("A")])
+        );
         assert_eq!(condition.kind, InitialConditionKind::Temperature(20.0));
         let item = TreeItem::InitialCondition(0);
         assert!(toggle_active(&mut fe, &item));
@@ -9722,8 +9725,8 @@ mod tests {
             "Contact_Pair-1",
             Some(crate::test_ids::named("Interaction-1")),
         );
-        pair.master = Region::Parts(vec!["PLATTE".into()]);
-        pair.slave = Region::Parts(vec!["STUETZEN".into()]);
+        pair.master = Region::Parts(model.mesh().ids_of(&["PLATTE"]));
+        pair.slave = Region::Parts(model.mesh().ids_of(&["STUETZEN"]));
         model.fe.contact_pairs.push(pair);
 
         let acting = |parts: &[usize]| acting_on_parts(&model, &parts.iter().copied().collect());
@@ -9753,7 +9756,7 @@ mod tests {
             orientation: None,
             name: name.into(),
             material,
-            region: Region::Parts(vec!["A".into()]),
+            region: Region::Parts(vec![crate::test_ids::named("A")]),
             thickness: 1.0,
             kind: SectionKind::Solid,
         };
@@ -9776,6 +9779,7 @@ mod tests {
         let mesh = plx_io::inp::read_inp(&path).unwrap().mesh;
         let mut model = Model::new(&path, mesh);
         let part = model.mesh().parts[0].name.clone();
+        let part_id = model.mesh().parts[0].id;
 
         // A new element set of the whole part.
         let mut editor = Editor::create_set(SetKind::Elements, &model.fe, model.mesh());
@@ -9784,7 +9788,7 @@ mod tests {
         };
         assert_eq!(set.name, "Element_Set-1");
         region.source = Source::Parts;
-        region.parts = PartPicks::from_names([part.clone()]);
+        region.parts = PartPicks::from_ids(&[part_id], model.mesh());
         assert_eq!(editor.validate(&model.fe), Ok(()));
         assert_eq!(editor.validate_set(&model), Ok(()));
         // An element set must not take a part's name.

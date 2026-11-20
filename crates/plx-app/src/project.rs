@@ -7968,7 +7968,7 @@ impl ProjectApp {
                 }
             }
             Payload::Results(global, file) => {
-                links::apply_results(data.fe, link, global, file);
+                links::apply_results(data.fe, data.mesh, link, global, file);
             }
             Payload::Chain { .. } | Payload::Bundle { .. } => {}
         }
@@ -10001,6 +10001,7 @@ fn take_refine_input(nodes: &mut [Node], links: &[Link], id: u64) {
                     .filter(|(name, _)| copy.origins.is_cad(name))
                     .map(|(name, _)| name.to_owned())
                     .collect();
+                let cad = plx_model::body_ids(&copy.mesh, &cad);
                 copy.mesh.remove_bodies(&cad);
                 copy.origins.reconcile(&copy.mesh);
                 refine.model.data_mut().take_mesh(copy);
@@ -14849,6 +14850,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(plx_mesh::Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "A".into(),
             elements: vec![1],
@@ -14856,7 +14858,7 @@ mod tests {
         let mut model = plx_model::FeModel::default();
         let shift = plx_model::MeshOperation {
             name: "Transform-1".into(),
-            parts: vec!["A".into()],
+            parts: mesh.ids_of(&["A"]),
             kind: plx_model::MeshOperationKind::Transform(plx_mesh::MeshTransform::Translate([
                 0.0, 1.0, 0.0,
             ])),

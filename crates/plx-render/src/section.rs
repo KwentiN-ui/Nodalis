@@ -458,6 +458,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "CUBES".into(),
             elements: (1..=n).collect(),

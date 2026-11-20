@@ -177,6 +177,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "Solid".into(),
             elements: vec![1],
@@ -193,7 +194,7 @@ mod tests {
                 MeshSet::new(
                     "All",
                     SetKind::Elements,
-                    Region::Parts(vec!["Solid".into()]),
+                    Region::Parts(mesh.ids_of(&["Solid"])),
                 ),
                 MeshSet::new("Bottom", SetKind::Surface, Region::Faces(vec![(1, 1)])),
             ],

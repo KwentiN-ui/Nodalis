@@ -353,6 +353,7 @@ mod tests {
     fn tube() -> (FeMesh, Part) {
         let mut mesh = FeMesh::default();
         let mut part = Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "TUBE".into(),
             elements: Vec::new(),

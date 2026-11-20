@@ -139,7 +139,11 @@ impl GeometryDisplay {
         let kept: Vec<bool> = (self.mesh.parts.iter())
             .map(|p| !deleted.iter().any(|d| p.name.eq_ignore_ascii_case(d)))
             .collect();
-        self.mesh.remove_parts(deleted);
+        let gone: Vec<plx_model::Id> = (self.mesh.parts.iter().zip(&kept))
+            .filter(|(_, kept)| !**kept)
+            .map(|(p, _)| p.id)
+            .collect();
+        self.mesh.remove_parts(&gone);
         let mut entities = std::mem::take(&mut self.entities);
         for element in self.mesh.elements() {
             let entity = entities.get_mut(usize::try_from(element.id).ok()?.checked_sub(1)?)?;
@@ -1391,10 +1395,13 @@ pub fn generate_part_mesh_matching(
     matching: &[PeriodicFaces],
 ) -> Result<GeneratedMesh, GmshError> {
     // Gmsh's own errors do not know the part; the message names it.
-    part_mesh(geometry, part, matching).map_err(|error| match error {
+    let mut generated = part_mesh(geometry, part, matching).map_err(|error| match error {
         GmshError::Call(message) => GmshError::Other(format!("{part}: Gmsh: {message}")),
         other => other,
-    })
+    })?;
+    // The mesh of a part is the part to what refers to it: it has the part's id.
+    geometry.stamp_ids(&mut generated.mesh);
+    Ok(generated)
 }
 
 fn part_mesh(
@@ -1653,7 +1660,7 @@ fn shell_compound(
     };
     let shapes = parts(gmsh, geometry)?;
     let mut members = Vec::new();
-    for member in &geometry.compounds[compound].parts {
+    for member in &geometry.member_names(compound) {
         if geometry.is_suppressed(member) {
             continue;
         }
@@ -1818,6 +1825,7 @@ fn shell_mesh(
     let mut mesh = FeMesh::default();
     for (name, shell) in members {
         let mut part_elements = Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: name.clone(),
             elements: Vec::new(),
@@ -1980,6 +1988,7 @@ fn line_part_mesh(
     };
     let mut mesh = FeMesh::default();
     let mut part_elements = Part {
+        id: Default::default(),
         bodies: Vec::new(),
         name: part.to_string(),
         elements: Vec::new(),
@@ -2343,7 +2352,9 @@ fn generate_faces(
     }
 }
 
-/// Puts a newly meshed part into a mesh in place of the part of the same name. The other
+/// Puts a newly meshed part into a mesh in place of the part of the same id, else of the
+/// same name, whose id it takes then ([`Part::id`]): to what refers to it, it is the same
+/// part meshed anew. The other
 /// parts keep their node and element numbers; the new part is numbered after the highest
 /// numbers the mesh had, so that nothing that referred to the old part points into the new
 /// one.
@@ -2353,11 +2364,18 @@ pub fn merge_part(mesh: &FeMesh, part_mesh: FeMesh) -> FeMesh {
 
 /// [`merge_part`] for the meshes of several parts at once, in their order: one pass over the
 /// mesh however many parts come, where merging them one by one copies the mesh for each.
-pub fn merge_parts(mesh: &FeMesh, part_meshes: Vec<FeMesh>) -> FeMesh {
-    let replaced: Vec<String> = (part_meshes.iter())
-        .flat_map(|m| m.parts.iter().map(|p| p.name.clone()))
+pub fn merge_parts(mesh: &FeMesh, mut part_meshes: Vec<FeMesh>) -> FeMesh {
+    for part in part_meshes.iter_mut().flat_map(|m| m.parts.iter_mut()) {
+        if mesh.part(part.id).is_none()
+            && let Some(id) = mesh.part_id(&part.name)
+        {
+            part.id = id;
+        }
+    }
+    let replaced: Vec<plx_model::Id> = (part_meshes.iter())
+        .flat_map(|m| m.parts.iter().map(|p| p.id))
         .collect();
-    let is_replaced = |p: &Part| replaced.iter().any(|r| r.eq_ignore_ascii_case(&p.name));
+    let is_replaced = |p: &Part| replaced.contains(&p.id);
     let removed: BTreeSet<ElementId> = (mesh.parts.iter())
         .filter(|p| is_replaced(p))
         .flat_map(|p| p.elements.iter().copied())
@@ -2414,9 +2432,7 @@ pub fn merge_parts(mesh: &FeMesh, part_meshes: Vec<FeMesh>) -> FeMesh {
     for part in &mesh.parts {
         if !is_replaced(part) {
             merged.parts.push(part.clone());
-        } else if let Some(index) =
-            (new_parts.iter()).position(|p| p.name.eq_ignore_ascii_case(&part.name))
-        {
+        } else if let Some(index) = (new_parts.iter()).position(|p| p.id == part.id) {
             merged.parts.push(new_parts.remove(index));
         }
     }
@@ -2460,13 +2476,13 @@ pub fn merge_parts(mesh: &FeMesh, part_meshes: Vec<FeMesh>) -> FeMesh {
 /// Deletes a part of a mesh with its elements and the nodes no other part uses.
 /// Sets and surfaces lose them too; the other parts keep their
 /// numbers.
-pub fn delete_mesh_part(mesh: &FeMesh, part: &str) -> FeMesh {
-    delete_mesh_parts(mesh, &[part.to_owned()])
+pub fn delete_mesh_part(mesh: &FeMesh, part: plx_model::Id) -> FeMesh {
+    delete_mesh_parts(mesh, &[part])
 }
 
 /// [`delete_mesh_part`] for several parts at once, as selected together: the mesh is built
 /// anew once rather than once per part.
-pub fn delete_mesh_parts(mesh: &FeMesh, parts: &[String]) -> FeMesh {
+pub fn delete_mesh_parts(mesh: &FeMesh, parts: &[plx_model::Id]) -> FeMesh {
     let mut smaller = mesh.clone();
     smaller.remove_parts(parts);
     smaller
@@ -2650,6 +2666,7 @@ fn solid_mesh(gmsh: &Gmsh, order: i32, volumes: &[(i32, String)]) -> Result<FeMe
     for (volume, name) in volumes {
         let (_, nodes) = gmsh.elements(gmsh_type, *volume)?;
         let mut part = Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: name.clone(),
             elements: Vec::with_capacity(nodes.len() / shape.node_count()),
@@ -2955,6 +2972,7 @@ fn display_mesh(
     };
     for (name, dimension, faces, own_edges) in groups {
         let mut part = Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name,
             elements: Vec::new(),
@@ -2978,6 +2996,9 @@ fn display_mesh(
             part_dimensions.push(dimension);
         }
     }
+    // The parts are those of the geometry, by their ids: what picks them on the display,
+    // such as a part filter, picks their meshes.
+    geometry.stamp_ids(&mut mesh);
     Ok(GeometryDisplay {
         mesh,
         entities,

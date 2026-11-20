@@ -241,6 +241,7 @@ mod tests {
             elements.push(id);
         }
         Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: format!("BOX{first}"),
             elements,

@@ -1368,6 +1368,7 @@ mod tests {
             })
             .unwrap();
             mesh.parts.push(Part {
+                id: Default::default(),
                 bodies: Vec::new(),
                 name: format!("PART-{}", b + 1),
                 elements: vec![b as u32 + 1],
@@ -1457,6 +1458,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "BEAM".into(),
             elements: (1..=4).collect(),
@@ -1483,6 +1485,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "DISC".into(),
             elements: (101..101 + n).collect(),
@@ -1608,6 +1611,7 @@ mod tests {
             }
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: name.into(),
             elements,
@@ -1641,6 +1645,7 @@ mod tests {
             }
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: name.into(),
             elements,

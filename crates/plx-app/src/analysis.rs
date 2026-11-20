@@ -880,6 +880,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(plx_mesh::Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "Solid-1".into(),
             elements: vec![1, 2, 3],
@@ -928,7 +929,7 @@ mod tests {
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("S235")),
-                region: Region::Parts(vec!["Solid-1".into()]),
+                region: Region::Parts(model.mesh().ids_of(&["Solid-1"])),
                 thickness: 1.0,
                 kind: plx_model::SectionKind::Solid,
             }],
@@ -1023,6 +1024,7 @@ mod tests {
         model.edit_mesh(|mesh, _| {
             mesh.parts[0].elements = vec![1, 2];
             mesh.parts.push(plx_mesh::Part {
+                id: Default::default(),
                 bodies: Vec::new(),
                 name: "Solid-2".into(),
                 elements: vec![3],

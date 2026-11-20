@@ -975,7 +975,7 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
 
 /// The oldest format that can still be opened. While Nodalis is being designed, a new
 /// format is not converted: older projects are refused.
-pub const FIRST_PROJECT_FORMAT: u32 = 45;
+pub const FIRST_PROJECT_FORMAT: u32 = 55;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
@@ -1316,6 +1316,7 @@ mod tests {
             }
         }
         mesh.parts.push(plx_mesh::Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: name.into(),
             elements,
@@ -1386,9 +1387,10 @@ mod tests {
                 ..Default::default()
             });
         }
-        let names: Vec<String> = mesh.parts.iter().map(|p| p.name.clone()).collect();
-        let (pads, metal): (Vec<String>, Vec<String>) =
-            names.into_iter().partition(|n| n.starts_with("Pad"));
+        let (pads, metal): (Vec<&plx_mesh::Part>, Vec<&plx_mesh::Part>) =
+            mesh.parts.iter().partition(|p| p.name.starts_with("Pad"));
+        let ids = |parts: Vec<&plx_mesh::Part>| parts.iter().map(|p| p.id).collect::<Vec<_>>();
+        let (pads, metal) = (ids(pads), ids(metal));
         for (name, material, parts) in [("Steel", steel, metal), ("Rubber", rubber, pads)] {
             model.sections.push(plx_model::Section {
                 orientation: None,
@@ -1407,7 +1409,7 @@ mod tests {
             ..PartGroup::new(name)
         };
         let groups = [
-            group("Housing", PartTerm::Part("Base".into())),
+            group("Housing", PartTerm::Part(mesh.ids_of(&["Base"])[0])),
             group("Plates", PartTerm::Pattern("Plate*".into())),
             group("Bolts", PartTerm::Pattern("Bolt*".into())),
             group("Pads", PartTerm::Material(rubber)),
@@ -1514,7 +1516,7 @@ mod tests {
             orientation: None,
             name: "Solid_Section-1".into(),
             material: Some(steel),
-            region: Region::Parts(vec!["Base".into(), "Block".into(), "Cap".into()]),
+            region: Region::Parts(mesh.ids_of(&["Base", "Block", "Cap"])),
             thickness: 1.0,
             kind: plx_model::SectionKind::Solid,
         });
@@ -1625,7 +1627,7 @@ mod tests {
             orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
-            region: Region::Parts(vec!["Column".into()]),
+            region: Region::Parts(mesh.ids_of(&["Column"])),
             thickness: 1.0,
             kind: plx_model::SectionKind::Solid,
         });
@@ -1697,7 +1699,7 @@ mod tests {
         model.sections.push(plx_model::Section {
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
-            region: Region::Parts(vec!["Lever".into()]),
+            region: Region::Parts(mesh.ids_of(&["Lever"])),
             thickness: 1.0,
             kind: plx_model::SectionKind::Solid,
             orientation: None,
@@ -1784,7 +1786,7 @@ mod tests {
             orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
-            region: Region::Parts(vec!["Beam".into()]),
+            region: Region::Parts(mesh.ids_of(&["Beam"])),
             thickness: 1.0,
             kind: plx_model::SectionKind::Solid,
         });
@@ -1855,7 +1857,7 @@ mod tests {
             orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
-            region: Region::Parts(vec!["Beam".into()]),
+            region: Region::Parts(mesh.ids_of(&["Beam"])),
             thickness: 1.0,
             kind: plx_model::SectionKind::Solid,
         });
@@ -2124,7 +2126,7 @@ mod tests {
             orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
-            region: Region::Parts(vec!["Pad".into()]),
+            region: Region::Parts(mesh.ids_of(&["Pad"])),
             thickness: 1.0,
             kind: plx_model::SectionKind::Solid,
         });
@@ -2253,12 +2255,12 @@ mod tests {
                 Region::Nodes(vec![1]),
             )],
             element_types: vec![plx_model::PartElementType {
-                part: "EALL".into(),
+                part: plx_model::Id::new(),
                 type_name: "C3D20".into(),
             }],
             mesh_operations: vec![plx_model::MeshOperation {
                 name: "Transform-1".into(),
-                parts: vec!["EALL".into()],
+                parts: vec![plx_model::Id::new()],
                 kind: plx_model::MeshOperationKind::Transform(plx_mesh::MeshTransform::Rotate {
                     point: [1.0, 2.0, 3.0],
                     axis: [0.0, 0.0, 1.0],
@@ -2301,7 +2303,7 @@ mod tests {
                 ..ContactPair::new("Contact_Pair-1", Some(interaction))
             }],
             contact_regions: vec![plx_model::ContactRegion {
-                side_a: Region::Parts(vec!["A".into()]),
+                side_a: Region::Parts(mesh.ids_of(&["A"])),
                 side_b: Region::Faces(vec![(1, 2)]),
                 settings: plx_model::ContactSettings {
                     normal_stiffness: Some(plx_model::Stiffness::Factor(20.0)),
@@ -2320,14 +2322,14 @@ mod tests {
             part_groups: vec![plx_model::PartGroup {
                 filter: plx_model::PartFilter {
                     include: vec![plx_model::PartTerm::Pattern("A*".into())],
-                    exclude: vec![plx_model::PartTerm::Part("B".into())],
+                    exclude: vec![plx_model::PartTerm::Part(plx_model::Id::new())],
                 },
                 ..plx_model::PartGroup::new("Group A")
             }],
             contact_detections: vec![plx_model::ContactDetection {
-                scope: plx_model::PartFilter::parts(["A"]),
+                scope: plx_model::PartFilter::parts(mesh.ids_of(&["A"])),
                 rules: vec![plx_model::ContactRule {
-                    side_a: plx_model::PartFilter::parts(["A"]),
+                    side_a: plx_model::PartFilter::parts(mesh.ids_of(&["A"])),
                     side_b: plx_model::PartFilter::all(),
                     action: plx_model::RuleAction::Exclude,
                 }],
@@ -2351,7 +2353,7 @@ mod tests {
                 distribution: None,
                 name: "Initial_Temperature-1".into(),
                 active: true,
-                region: Region::Parts(vec!["A".into()]),
+                region: Region::Parts(mesh.ids_of(&["A"])),
                 kind: plx_model::InitialConditionKind::Temperature(20.0),
             }],
         };

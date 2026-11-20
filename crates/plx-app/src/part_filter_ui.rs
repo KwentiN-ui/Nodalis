@@ -24,14 +24,15 @@ pub fn cached_context(
     format!("{left_out:?}").hash(&mut hasher);
     mesh.elements().len().hash(&mut hasher);
     for part in &mesh.parts {
+        part.id.hash(&mut hasher);
         part.name.hash(&mut hasher);
         part.elements.len().hash(&mut hasher);
     }
     for section in &fe.sections {
         section.material.hash(&mut hasher);
         format!("{:?}", std::mem::discriminant(&section.region)).hash(&mut hasher);
-        if let plx_model::Region::Parts(names) = &section.region {
-            names.hash(&mut hasher);
+        if let plx_model::Region::Parts(ids) = &section.region {
+            ids.hash(&mut hasher);
         }
     }
     format!("{:?}", fe.part_groups).hash(&mut hasher);
@@ -62,7 +63,7 @@ pub fn filter_editor(
     let mut changed = false;
     ui.vertical(|ui| {
         ui.horizontal_wrapped(|ui| {
-            changed |= terms(ui, fe, &mut filter.include);
+            changed |= terms(ui, fe, context, &mut filter.include);
             if filter.include.is_empty() {
                 ui.label(all);
             }
@@ -75,7 +76,7 @@ pub fn filter_editor(
                 &mut filter.include,
             );
             ui.weak("except");
-            changed |= terms(ui, fe, &mut filter.exclude);
+            changed |= terms(ui, fe, context, &mut filter.exclude);
             changed |= add_menu(
                 ui,
                 &format!("{id} exclude"),
@@ -116,11 +117,11 @@ pub fn filter_editor(
 }
 
 /// The terms as small buttons; clicking one removes it.
-fn terms(ui: &mut Ui, fe: &FeModel, terms: &mut Vec<PartTerm>) -> bool {
+fn terms(ui: &mut Ui, fe: &FeModel, context: &PartContext, terms: &mut Vec<PartTerm>) -> bool {
     let mut remove = None;
     for (i, term) in terms.iter().enumerate() {
         if ui
-            .add(egui::Button::new(term.describe(fe)).small())
+            .add(egui::Button::new(term.describe(fe, context)).small())
             .on_hover_text("Click to remove.")
             .clicked()
         {
@@ -159,9 +160,9 @@ fn add_menu(
         ui.data_mut(|d| d.insert_temp(text_id, text.clone()));
         let pattern = text.trim();
         if !pattern.is_empty() {
-            let matching: Vec<&str> = (context.names.iter())
-                .filter(|n| plx_model::name_matches(pattern, n))
-                .map(|n| n.as_str())
+            let matching: Vec<(plx_model::Id, &str)> = (context.ids.iter().zip(&context.names))
+                .filter(|(_, n)| plx_model::name_matches(pattern, n))
+                .map(|(&id, n)| (id, n.as_str()))
                 .collect();
             ui.weak(format!("{} parts match", matching.len()));
             let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -174,15 +175,15 @@ fn add_menu(
                 .max_height(220.0)
                 .id_salt((id, "parts"))
                 .show(ui, |ui| {
-                    for name in matching.iter().take(500) {
+                    for (id, name) in matching.iter().take(500) {
                         if ui.selectable_label(false, *name).clicked() {
-                            added = Some(PartTerm::Part(name.to_string()));
+                            added = Some(PartTerm::Part(*id));
                         }
                     }
                 });
         }
         ui.separator();
-        let picked = selected_part_names(ui.ctx());
+        let picked = selected_parts(ui.ctx());
         if ui
             .add_enabled(
                 !picked.is_empty(),
@@ -195,8 +196,8 @@ fn add_menu(
             .clicked()
         {
             let mut changed = false;
-            for name in picked {
-                let term = PartTerm::Part(name);
+            for id in picked {
+                let term = PartTerm::Part(id);
                 if !terms.contains(&term) {
                     terms.push(term);
                     changed = true;
@@ -244,12 +245,12 @@ fn selected_parts_id() -> egui::Id {
     egui::Id::new("part filter selected parts")
 }
 
-/// Tells the filter menus the names of the parts selected in the 3D view or the tree.
-pub fn set_selected_part_names(ctx: &egui::Context, names: Vec<String>) {
-    ctx.data_mut(|d| d.insert_temp(selected_parts_id(), names));
+/// Tells the filter menus the ids of the parts selected in the 3D view or the tree.
+pub fn set_selected_parts(ctx: &egui::Context, ids: Vec<plx_model::Id>) {
+    ctx.data_mut(|d| d.insert_temp(selected_parts_id(), ids));
 }
 
-fn selected_part_names(ctx: &egui::Context) -> Vec<String> {
+fn selected_parts(ctx: &egui::Context) -> Vec<plx_model::Id> {
     ctx.data(|d| d.get_temp(selected_parts_id()))
         .unwrap_or_default()
 }

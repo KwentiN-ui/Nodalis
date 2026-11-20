@@ -577,12 +577,13 @@ impl QueryWindow {
                 faces: face_corners(model, &selected_faces(model, &region)),
             },
             QueryKind::Part => {
-                let Region::Parts(names) = region else {
+                let Region::Parts(ids) = region else {
                     return None;
                 };
                 Annotation::Parts(
-                    (0..model.parts.len())
-                        .filter(|&p| names.contains(&model.parts[p].name))
+                    (model.mesh().parts.iter().enumerate())
+                        .filter(|(_, p)| ids.contains(&p.id))
+                        .map(|(i, _)| i)
                         .collect(),
                 )
             }

@@ -36,10 +36,10 @@ pub struct Surface {
 /// the geometry or a surface, the skin of whole parts.
 pub fn region_faces(mesh: &FeMesh, region: &Region) -> Vec<(ElementId, u8)> {
     match region {
-        Region::Parts(names) => {
+        Region::Parts(ids) => {
             let elements = mesh.elements();
             let mut faces = Vec::new();
-            for part in mesh.parts.iter().filter(|p| names.contains(&p.name)) {
+            for part in mesh.parts.iter().filter(|p| ids.contains(&p.id)) {
                 let skin = plx_mesh::extract_part_skin(mesh, part, 30.0);
                 for face in &skin.faces {
                     let element = &elements[face.element];
@@ -410,7 +410,7 @@ mod tests {
             let mesh = block(n, 0.1);
             let loads = top_loads(cell, 0.1, 1000.0);
             let load = plx_model::WallLoads::default();
-            let region = Region::Parts(vec!["Plate".into()]);
+            let region = Region::Parts(mesh.ids_of(&["Plate"]));
             let out = nodal_forces(&mesh, &region, &load, &loads).unwrap();
             let mapped = &out[0].1;
             assert_eq!(mapped.missed, 0, "{n}");
@@ -455,7 +455,7 @@ mod tests {
         frame.forces.push([0.0, 0.0, 2.0]);
         let mut loads = WallLoads::new(0.01, Space::Solid, vec![("Blade".into(), vec![])]);
         loads.push(1.0, &[frame]);
-        let region = Region::Parts(vec!["Plate".into()]);
+        let region = Region::Parts(mesh.ids_of(&["Plate"]));
         let out = nodal_forces(&mesh, &region, &Default::default(), &loads).unwrap();
         for (node, f) in &out[0].1.forces {
             let z = mesh.node(*node).unwrap()[2];

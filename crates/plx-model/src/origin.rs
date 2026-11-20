@@ -52,6 +52,27 @@ pub fn bodies(part: &plx_mesh::Part) -> Vec<&str> {
     }
 }
 
+/// The ids of the geometry objects `names` of `mesh`: parts of one body and bodies of
+/// compound parts, see [`bodies`].
+pub fn body_ids(mesh: &FeMesh, names: &[String]) -> Vec<crate::Id> {
+    let named = |name: &str| names.iter().any(|n| n.eq_ignore_ascii_case(name));
+    let mut ids = Vec::new();
+    for part in &mesh.parts {
+        if part.bodies.is_empty() {
+            if named(&part.name) {
+                ids.push(part.id);
+            }
+            continue;
+        }
+        ids.extend(
+            (part.bodies.iter())
+                .filter(|b| named(&b.name))
+                .map(|b| b.id),
+        );
+    }
+    ids
+}
+
 impl PartOrigins {
     /// The origins of the parts of `mesh`, all of them imported meshes.
     pub fn imported(mesh: &FeMesh) -> Self {
@@ -280,16 +301,16 @@ pub fn drop_orphans(
     if orphans.is_empty() {
         return orphans;
     }
-    let gone: Vec<String> = (mesh.parts.iter())
+    let gone: Vec<crate::Id> = (mesh.parts.iter())
         .filter(|p| {
             bodies(p)
                 .iter()
                 .all(|b| orphans.iter().any(|o| o.eq_ignore_ascii_case(b)))
         })
-        .map(|p| p.name.clone())
+        .map(|p| p.id)
         .collect();
     let full = mesh.clone();
-    mesh.remove_bodies(&orphans);
+    mesh.remove_bodies(&body_ids(mesh, &orphans));
     // The items on them alone, e.g. contacts with them, go with them.
     fe.drop_items_left_empty(&full, mesh);
     fe.remove_parts_from_regions(&gone);
@@ -462,13 +483,16 @@ pub fn active_model<'a>(
         })
         .map(|p| p.name.clone())
         .collect();
+    let left_out_ids: Vec<crate::Id> = (left_out.iter())
+        .filter_map(|name| mesh.part_id(name))
+        .collect();
     let mut smaller = mesh.clone();
-    smaller.remove_bodies(&suppressed);
+    smaller.remove_bodies(&body_ids(mesh, &suppressed));
     let mut fe = fe.clone();
     // An item on suppressed objects alone, e.g. a contact found with a suppressed part
     // before it was suppressed, goes with them; one on others too keeps those.
     fe.drop_items_left_empty(mesh, &smaller);
-    fe.remove_parts_from_regions(&left_out);
+    fe.remove_parts_from_regions(&left_out_ids);
     Active {
         mesh: Cow::Owned(smaller),
         fe: Cow::Owned(fe),
@@ -528,6 +552,7 @@ mod tests {
         let mut compound = mesh(&["A", "B"]);
         let bodies = (compound.parts.drain(..))
             .map(|p| plx_mesh::Body {
+                id: Default::default(),
                 name: p.name,
                 elements: p.elements,
             })
@@ -548,6 +573,7 @@ mod tests {
         let mut compound = mesh(&["A", "B"]);
         let bodies = (compound.parts.drain(..))
             .map(|p| plx_mesh::Body {
+                id: Default::default(),
                 name: p.name,
                 elements: p.elements,
             })
@@ -608,7 +634,7 @@ mod tests {
         fe.mesh_sets.push(crate::MeshSet::new(
             "BOTH",
             crate::SetKind::Elements,
-            crate::Region::Parts(vec!["SOLID-1".into(), "PART-1".into()]),
+            crate::Region::Parts(mesh.ids_of(&["SOLID-1", "PART-1"])),
         ));
         let mut geometry = crate::Geometry {
             source: String::new(),
@@ -696,7 +722,7 @@ mod tests {
         );
         let context = fe.part_context(&mesh, &left_out);
         let named = crate::PartFilter {
-            include: vec![crate::PartTerm::Part("PART-3".into())],
+            include: vec![crate::PartTerm::Part(mesh.parts[2].id)],
             exclude: Vec::new(),
         };
         assert_eq!(named.searched(&context, &[true; 3]), [false; 3]);
@@ -811,13 +837,18 @@ mod tests {
             part_names: ["A", "B", "C", "D", "E"].map(String::from).to_vec(),
             refinement: 1.0,
             signatures: Vec::new(),
-            compounds: vec![crate::CompoundPart {
-                name: "JOINED".into(),
-                parts: vec!["D".into(), "E".into()],
-            }],
+            compounds: vec![crate::CompoundPart::new(
+                "JOINED",
+                vec![crate::named("D"), crate::named("E")],
+            )],
             suppressed: vec!["C".into()],
             own_meshes: Vec::new(),
-            ids: Vec::new(),
+            ids: ["A", "B", "C", "D", "E"]
+                .map(|name| crate::PartId {
+                    name: name.into(),
+                    id: crate::named(name),
+                })
+                .to_vec(),
             from_link: false,
             operations: Vec::new(),
             input: None,

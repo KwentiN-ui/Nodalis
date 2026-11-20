@@ -572,6 +572,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "CUBE".into(),
             elements: vec![1],
@@ -631,7 +632,7 @@ mod tests {
         let volume = HistoryOutput {
             name: "Size-1".into(),
             kind: HistoryOutputKind::ElementSize {
-                region: Region::Parts(vec!["CUBE".into()]),
+                region: Region::Parts(mesh.ids_of(&["CUBE"])),
                 kind: SizeKind::Volume,
             },
         };

@@ -2909,16 +2909,16 @@ impl FeModel {
                 ),
             ));
         }
-        let whole: HashSet<&str> = (self.sections.iter())
+        let whole: HashSet<crate::Id> = (self.sections.iter())
             .filter_map(|s| match &s.region {
-                crate::Region::Parts(names) => Some(names.iter().map(String::as_str)),
+                crate::Region::Parts(ids) => Some(ids.iter().copied()),
                 _ => None,
             })
             .flatten()
             .collect();
         let mut covered: Option<HashSet<ElementId>> = None;
         for (i, part) in mesh.parts.iter().enumerate() {
-            if whole.contains(part.name.as_str()) || part.elements.is_empty() {
+            if whole.contains(&part.id) || part.elements.is_empty() {
                 continue;
             }
             // Element sets and faces are resolved only when a part is not covered as a whole.
@@ -2993,7 +2993,7 @@ impl FeModel {
                 findings.push(Finding::new(
                     ModelItem::BoundaryCondition(s, i),
                     Problem::NoRigidBody,
-                    format!("{}: {}", bc.name, bc.region.describe(self)),
+                    format!("{}: {}", bc.name, bc.region.describe(self, mesh)),
                 ));
             }
         }
@@ -3026,7 +3026,7 @@ impl FeModel {
                 findings.push(Finding::new(
                     ModelItem::Load(s, i),
                     Problem::NoRigidBody,
-                    format!("{}: {}", load.name, load.region.describe(self)),
+                    format!("{}: {}", load.name, load.region.describe(self, mesh)),
                 ));
             }
         }
@@ -3038,7 +3038,7 @@ impl FeModel {
                 findings.push(Finding::new(
                     ModelItem::HistoryOutput(s, i),
                     Problem::NoRigidBody,
-                    format!("{}: {}", output.name, region.describe(self)),
+                    format!("{}: {}", output.name, region.describe(self, mesh)),
                 ));
             }
         }
@@ -4685,6 +4685,7 @@ mod tests {
             })
             .unwrap();
             mesh.parts.push(Part {
+                id: Default::default(),
                 bodies: Vec::new(),
                 name: format!("PART-{}", c + 1),
                 elements: vec![c + 1],
@@ -4741,7 +4742,7 @@ mod tests {
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(steel_id),
-                region: Region::Parts(mesh.parts.iter().map(|p| p.name.clone()).collect()),
+                region: Region::Parts(mesh.part_ids()),
                 thickness: 1.0,
                 kind: Default::default(),
             }],
@@ -4798,7 +4799,7 @@ mod tests {
             flow.kind
                 .supports_load(&LoadKind::Gravity([0.0, 0.0, -9.81]))
         );
-        let region = Region::Parts(vec![mesh.parts[0].name.clone()]);
+        let region = Region::Parts(vec![mesh.parts[0].id]);
         flow.loads.push(Load::new(
             "Gravity",
             region.clone(),
@@ -5118,6 +5119,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "SECTOR".into(),
             elements: vec![1],
@@ -5673,7 +5675,7 @@ mod tests {
             name: "Gravity-1".into(),
             active: true,
             visible: true,
-            region: Region::Parts(mesh.parts.iter().map(|p| p.name.clone()).collect()),
+            region: Region::Parts(mesh.part_ids()),
             kind: LoadKind::Gravity([0.0, 0.0, -9.81]),
             amplitude: None,
             factor_amplitude: None,
@@ -5701,8 +5703,8 @@ mod tests {
         );
         assert_eq!(found[0].severity(), Severity::Error);
         // Disjoint parts are fine.
-        model.sections[0].region = Region::Parts(vec!["PART-1".into()]);
-        model.sections[1].region = Region::Parts(vec!["PART-2".into()]);
+        model.sections[0].region = Region::Parts(mesh.ids_of(&["PART-1"]));
+        model.sections[1].region = Region::Parts(mesh.ids_of(&["PART-2"]));
         assert_eq!(problems(&check(&model, &mesh)), []);
     }
 
@@ -5711,7 +5713,7 @@ mod tests {
         let mesh = cubes(2, true);
         let mut model = model(&mesh);
         model.materials[0].elastic = None;
-        model.sections[0].region = Region::Parts(vec!["PART-1".into()]);
+        model.sections[0].region = Region::Parts(mesh.ids_of(&["PART-1"]));
         assert_eq!(
             problems(&check(&model, &mesh)),
             [
@@ -6062,7 +6064,7 @@ mod tests {
     fn a_defined_temperature_is_a_load_and_needs_thermal_expansion() {
         let mesh = cubes(1, false);
         let mut model = model(&mesh);
-        let parts: Vec<String> = mesh.parts.iter().map(|p| p.name.clone()).collect();
+        let parts = mesh.part_ids();
         model.steps[0].loads.clear();
         model.initial_conditions.push(crate::InitialCondition {
             distribution: None,
@@ -6099,7 +6101,7 @@ mod tests {
         // A thermal step solves for the temperatures and takes no defined field.
         model.steps[0].kind = StepKind::CoupledTempDisp(Default::default());
         model.materials[0].conductivity = Some(50.0);
-        model.steps[0].defined_fields[0].region = Region::Parts(vec!["Nowhere".into()]);
+        model.steps[0].defined_fields[0].region = Region::Parts(mesh.ids_of(&["Nowhere"]));
         assert!(
             check(&model, &mesh)
                 .iter()
@@ -6251,6 +6253,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "PART-1".into(),
             elements: vec![1],
@@ -6290,6 +6293,7 @@ mod tests {
                 .unwrap();
             }
             mesh.parts.push(Part {
+                id: crate::named("BEAM"),
                 bodies: Vec::new(),
                 name: "BEAM".into(),
                 elements: vec![1, 2],
@@ -6327,6 +6331,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "BEAM".into(),
             elements: vec![1, 2],
@@ -6399,6 +6404,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "BEAM".into(),
             elements: vec![1, 2],
@@ -6481,6 +6487,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "BEAM".into(),
             elements: vec![1, 2],
@@ -6583,6 +6590,7 @@ mod tests {
                 id += 1;
             }
             mesh.parts.push(Part {
+                id: Default::default(),
                 bodies: Vec::new(),
                 name: format!("LINE-{}", b + 1),
                 elements: part,

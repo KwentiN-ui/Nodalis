@@ -561,6 +561,7 @@ pub fn from_source(solved: &SolverResults, source: Arc<dyn ArraySource>) -> Solv
         match parts.iter_mut().find(|p| p.name == name) {
             Some(part) => part.elements.extend(elements),
             None => parts.push(Part {
+                id: Default::default(),
                 bodies: Vec::new(),
                 name,
                 elements,
