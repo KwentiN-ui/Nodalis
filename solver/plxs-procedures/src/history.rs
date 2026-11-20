@@ -1,26 +1,26 @@
-//! History output (`.dat`): `*NODE PRINT` (U, RF with TOTALS) and `*EL PRINT` (S, E at the
-//! integration points) of an increment, as blocks with CalculiX's headings.
+//! History output: the node prints (U, V, RF with totals; NT, RFL) and element prints (S,
+//! E, PEEQ, ENER, HFL at the integration points, EVOL) of an increment, as history blocks.
 
-use plxs_core::results::HistoryBlock;
+use plxs_core::results::{HistoryBlock, HistoryQuantity, HistorySource};
 use plxs_core::state::IntegrationPointField;
 use plxs_core::step::{HistoryOutput, Step, Totals};
 use plxs_core::{Model, Results};
 
 use plxs_assembly::ElementTable;
 
-/// Appends one of the tables an eigenvalue step prints (see `plxs_output::EigenTable`):
-/// `quantity` is the table's name, rows are keyed by mode (0 for a total row).
+/// Appends one of the tables an eigenvalue step has: rows are keyed by mode (0 for a total
+/// row).
 pub fn write_table(
     results: &mut Results,
     step_number: u32,
-    quantity: &str,
+    quantity: HistoryQuantity,
     rows: Vec<(u32, Vec<f64>)>,
 ) {
     results.history.push(HistoryBlock {
         step: step_number,
         increment: 0,
-        quantity: quantity.to_string(),
-        set: String::new(),
+        quantity,
+        source: HistorySource::Step,
         time: 0.0,
         rows,
     });
@@ -84,8 +84,7 @@ pub fn write_history_with_velocities(
         request.set.is_some()
             && request
                 .variables
-                .iter()
-                .any(|v| v.trim().eq_ignore_ascii_case("ENER"))
+                .contains(&plxs_core::step::OutputVariable::StrainEnergyDensity)
     });
     let energy = wants_energy.then(|| crate::fields::internal_energy_density(stresses, strains));
     // The Nodalis writer puts `*EL PRINT` before `*NODE PRINT`, and CalculiX prints the
@@ -97,42 +96,34 @@ pub fn write_history_with_velocities(
         let Some(found) = model.sets.element_sets.get(handle.index()) else {
             continue;
         };
-        let (set, elements) = (found.name.as_str(), &found.elements);
+        let (set, elements) = (HistorySource::Elements(handle), &found.elements);
         for variable in &request.variables {
-            if variable.trim().eq_ignore_ascii_case("EVOL") {
+            if *variable == plxs_core::step::OutputVariable::ElementVolume {
                 write_volumes(
                     results,
                     model,
                     table,
                     request,
                     (step_number, increment, time),
-                    set,
+                    set.clone(),
                     elements,
                 );
                 continue;
             }
-            let (quantity, field, reorder): (&str, &IntegrationPointField, bool) =
-                match variable.trim().to_ascii_uppercase().as_str() {
-                    "S" => (
-                        "stresses (elem, integ.pnt.,sxx,syy,szz,sxy,sxz,syz)",
-                        stresses,
-                        true,
-                    ),
-                    "E" => (
-                        "strains (elem, integ.pnt.,exx,eyy,ezz,exy,exz,eyz)",
-                        strains,
-                        true,
-                    ),
-                    "PEEQ" => match &peeq {
-                        Some(p) => ("equivalent plastic strain (elem, integ.pnt.,pe)", p, false),
+            let (quantity, field, reorder): (HistoryQuantity, &IntegrationPointField, bool) =
+                match variable {
+                    plxs_core::step::OutputVariable::Stresses => {
+                        (HistoryQuantity::Stresses, stresses, true)
+                    }
+                    plxs_core::step::OutputVariable::Strains => {
+                        (HistoryQuantity::Strains, strains, true)
+                    }
+                    plxs_core::step::OutputVariable::EquivalentPlasticStrain => match &peeq {
+                        Some(p) => (HistoryQuantity::EquivalentPlasticStrain, p, false),
                         None => continue,
                     },
-                    "ENER" => match &energy {
-                        Some(e) => (
-                            "internal energy density (elem, integ.pnt.,energy)",
-                            e,
-                            false,
-                        ),
+                    plxs_core::step::OutputVariable::StrainEnergyDensity => match &energy {
+                        Some(e) => (HistoryQuantity::InternalEnergyDensity, e, false),
                         None => continue,
                     },
                     _ => continue,
@@ -141,8 +132,8 @@ pub fn write_history_with_velocities(
             results.history.push(HistoryBlock {
                 step: step_number,
                 increment,
-                quantity: quantity.to_string(),
-                set: set.to_string(),
+                quantity,
+                source: set.clone(),
                 time,
                 rows,
             });
@@ -162,7 +153,7 @@ pub fn write_history_with_velocities(
         let Some(found) = model.sets.node_sets.get(handle.index()) else {
             continue;
         };
-        let (set, nodes) = (found.name.as_str(), &found.nodes);
+        let nodes = &found.nodes;
         let rows_of = |values: &[f64]| -> Vec<(u32, Vec<f64>)> {
             nodes
                 .iter()
@@ -175,42 +166,50 @@ pub fn write_history_with_velocities(
         let totals = |rows: &[(u32, Vec<f64>)]| -> Vec<f64> {
             (0..3).map(|k| rows.iter().map(|r| r.1[k]).sum()).collect()
         };
+        // The rotation nodes of reference points turn: their values are rotations and
+        // moments.
+        let [displacements, velocities_of, forces_of, total_force] = if request.rotations {
+            use HistoryQuantity as Q;
+            [
+                Q::Rotations,
+                Q::AngularVelocities,
+                Q::Moments,
+                Q::TotalMoment,
+            ]
+        } else {
+            use HistoryQuantity as Q;
+            [Q::Displacements, Q::Velocities, Q::Forces, Q::TotalForce]
+        };
         for variable in &request.variables {
-            let block = |quantity: &str, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
+            let block = |quantity, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
                 step: step_number,
                 increment,
-                quantity: quantity.to_string(),
-                set: set.to_string(),
+                quantity,
+                source: HistorySource::Nodes(handle),
                 time,
                 rows,
             };
-            match variable.trim().to_ascii_uppercase().as_str() {
-                "U" => {
+            match variable {
+                plxs_core::step::OutputVariable::Displacements => {
                     if request.totals != Totals::Only {
-                        results
-                            .history
-                            .push(block("displacements (vx,vy,vz)", rows_of(u)));
+                        results.history.push(block(displacements, rows_of(u)));
                     }
                 }
-                "V" => {
+                plxs_core::step::OutputVariable::Velocities => {
                     if let Some(v) = &velocities
                         && request.totals != Totals::Only
                     {
-                        results
-                            .history
-                            .push(block("velocities (vx,vy,vz)", rows_of(v)));
+                        results.history.push(block(velocities_of, rows_of(v)));
                     }
                 }
-                "RF" => {
+                plxs_core::step::OutputVariable::ReactionForces => {
                     let rows = rows_of(forces);
                     let sum = totals(&rows);
                     if request.totals != Totals::Only {
-                        results.history.push(block("forces (fx,fy,fz)", rows));
+                        results.history.push(block(forces_of, rows));
                     }
                     if request.totals != Totals::No {
-                        results
-                            .history
-                            .push(block("total force (fx,fy,fz)", vec![(0, sum)]));
+                        results.history.push(block(total_force, vec![(0, sum)]));
                     }
                 }
                 _ => {}
@@ -227,7 +226,7 @@ fn write_volumes(
     table: &ElementTable,
     request: &HistoryOutput,
     (step, increment, time): (u32, u32, f64),
-    set: &str,
+    source: HistorySource,
     elements: &[u32],
 ) {
     let rows: Vec<(u32, Vec<f64>)> = elements
@@ -239,23 +238,19 @@ fn write_volumes(
         })
         .collect();
     let total: f64 = rows.iter().map(|r| r.1[0]).sum();
-    let block = |quantity: &str, rows| HistoryBlock {
+    let block = |quantity, rows| HistoryBlock {
         step,
         increment,
-        quantity: quantity.to_string(),
-        set: set.to_string(),
+        quantity,
+        source: source.clone(),
         time,
         rows,
     };
     if request.totals != Totals::Only {
-        results
-            .history
-            .push(block("volume (element, volume)", rows));
+        results.history.push(block(HistoryQuantity::Volume, rows));
     }
     if request.totals != Totals::No {
-        results
-            .history
-            .push(block("total volume", vec![(0, vec![total])]));
+        (results.history).push(block(HistoryQuantity::TotalVolume, vec![(0, vec![total])]));
     }
 }
 
@@ -294,8 +289,7 @@ fn integration_point_rows(
 pub fn wants_heat_flux(step: &Step) -> bool {
     step.outputs.el_print.iter().any(|r| {
         r.variables
-            .iter()
-            .any(|v| v.trim().eq_ignore_ascii_case("HFL"))
+            .contains(&plxs_core::step::OutputVariable::HeatFlux)
     })
 }
 
@@ -315,11 +309,11 @@ pub fn write_thermal_history(
     heat_generation: &[f64],
     flux: Option<&IntegrationPointField>,
 ) {
-    let block = |quantity: &str, set: &str, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
+    let block = |quantity, source, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
         step: step_number,
         increment,
-        quantity: quantity.to_string(),
-        set: set.to_string(),
+        quantity,
+        source,
         time,
         rows,
     };
@@ -330,7 +324,7 @@ pub fn write_thermal_history(
         let Some(found) = model.sets.node_sets.get(handle.index()) else {
             continue;
         };
-        let (set, nodes) = (found.name.as_str(), &found.nodes);
+        let (set, nodes) = (HistorySource::Nodes(handle), &found.nodes);
         let rows_of = |values: &[f64]| -> Vec<(u32, Vec<f64>)> {
             nodes
                 .iter()
@@ -338,22 +332,22 @@ pub fn write_thermal_history(
                 .collect()
         };
         for variable in &request.variables {
-            match variable.trim().to_ascii_uppercase().as_str() {
-                "NT" if request.totals != Totals::Only => {
-                    results
-                        .history
-                        .push(block("temperatures", set, rows_of(temperatures)));
+            match variable {
+                plxs_core::step::OutputVariable::Temperatures if request.totals != Totals::Only => {
+                    let rows = rows_of(temperatures);
+                    (results.history).push(block(HistoryQuantity::Temperatures, set.clone(), rows));
                 }
-                "RFL" => {
+                plxs_core::step::OutputVariable::ReactionHeatFlows => {
                     let rows = rows_of(heat_generation);
                     let sum: f64 = rows.iter().map(|r| r.1[0]).sum();
                     if request.totals != Totals::Only {
-                        results.history.push(block("heat generation", set, rows));
+                        let quantity = HistoryQuantity::HeatGeneration;
+                        results.history.push(block(quantity, set.clone(), rows));
                     }
                     if request.totals != Totals::No {
                         results.history.push(block(
-                            "total heat generation",
-                            set,
+                            HistoryQuantity::TotalHeatGeneration,
+                            set.clone(),
                             vec![(0, vec![sum])],
                         ));
                     }
@@ -372,11 +366,10 @@ pub fn write_thermal_history(
         let Some(found) = model.sets.element_sets.get(handle.index()) else {
             continue;
         };
-        let (set, elements) = (found.name.as_str(), &found.elements);
+        let elements = &found.elements;
         if !request
             .variables
-            .iter()
-            .any(|v| v.trim().eq_ignore_ascii_case("HFL"))
+            .contains(&plxs_core::step::OutputVariable::HeatFlux)
         {
             continue;
         }
@@ -384,8 +377,7 @@ pub fn write_thermal_history(
             .into_iter()
             .map(|(id, v)| (id, v[..4].to_vec()))
             .collect();
-        results
-            .history
-            .push(block("heat flux (elem, integ.pnt.,qx,qy,qz)", set, rows));
+        let source = HistorySource::Elements(handle);
+        (results.history).push(block(HistoryQuantity::HeatFlux, source, rows));
     }
 }

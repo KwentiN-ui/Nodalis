@@ -633,6 +633,10 @@ impl BackgroundSolve {
             );
             let mut shown = std::collections::HashSet::new();
             for finding in &findings {
+                // What does not explain the failure is told as a warning below.
+                if !plx_model::explains_failure(finding, &findings) {
+                    continue;
+                }
                 if shown.insert((finding.problem, finding.detail.clone())) {
                     self.after.push(format!(
                         "Cause: {}: {}. {}",

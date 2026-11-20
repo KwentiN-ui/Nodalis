@@ -477,15 +477,17 @@ fn write_block(
         width = trailer_width
     )?;
     let components = field.components.len();
-    let (declared, trailer) = match field.name.as_str() {
-        "DISP" | "FORC" | "VELO" | "ACCE" | "FLUX" | "NORM" | "DISPI" | "FORCI" => {
+    use plxs_core::results::FieldQuantity as Q;
+    let (declared, trailer) = match field.key() {
+        (Q::Displacements | Q::Forces, _)
+        | (Q::Velocities | Q::Accelerations | Q::HeatFlux | Q::DesignNormals, false) => {
             (components + 1, true)
         }
         _ => (components, false),
     };
-    writeln!(out, " -4  {:<8}{:>5}{:>5}", field.name, declared, 1)?;
+    writeln!(out, " -4  {:<8}{:>5}{:>5}", field.frd_name(), declared, 1)?;
     for (k, name) in field.components.iter().enumerate() {
-        let (kind, c1, c2) = component_flags(&field.name, components, k);
+        let (kind, c1, c2) = component_flags(field.key(), components, k);
         writeln!(out, " -5  {:<8}{:>5}{:>5}{:>5}{:>5}", name, 1, kind, c1, c2)?;
     }
     if trailer {
@@ -515,21 +517,26 @@ fn write_block(
 
 /// The type and index columns of a `-5` line: vectors (`1 2 k 0`), tensors (`1 4 i j`),
 /// scalars (`1 1 0 0`).
-fn component_flags(field: &str, components: usize, k: usize) -> (u8, u8, u8) {
+fn component_flags(
+    field: (plxs_core::results::FieldQuantity, bool),
+    components: usize,
+    k: usize,
+) -> (u8, u8, u8) {
+    use plxs_core::results::FieldQuantity as Q;
     // Contact results are six scalars.
-    if field == "CONTACT" {
+    if field == (Q::Contact, false) {
         return (1, 0, 0);
     }
     // Magnitudes and phases of complex displacements (MAG1..3, PHA1..3).
-    if field == "PDISP" {
+    if field == (Q::DisplacementPhase, false) {
         return (12, k as u8 + 1, 0);
     }
-    if field == "PSTRESS" {
+    if field == (Q::StressPhase, false) {
         const IJ: [(u8, u8); 6] = [(1, 1), (2, 2), (3, 3), (1, 2), (2, 3), (3, 1)];
         return (14, IJ[k % 6].0, IJ[k % 6].1);
     }
     // Displacements and forces with rotations (U1 nodes): a vector and three scalars.
-    if matches!(field, "DISP" | "FORC") && components == 6 {
+    if matches!(field, (Q::Displacements | Q::Forces, false)) && components == 6 {
         return if k < 3 {
             (2, k as u8 + 1, 0)
         } else {
@@ -544,15 +551,6 @@ fn component_flags(field: &str, components: usize, k: usize) -> (u8, u8, u8) {
         }
         _ => (1, 0, 0),
     }
-}
-
-/// The name of the imaginary part of a field in the `.frd`: `I` appended (`DISPI`), in
-/// place of the last letter when the name has the eight letters the format allows
-/// (`TOSTRAIN` becomes `TOSTRAII`), as CalculiX names them.
-pub fn imaginary_field_name(name: &str) -> String {
-    let mut out: String = name.chars().take(7).collect();
-    out.push('I');
-    out
 }
 
 /// The sectors of a cyclic symmetric model written to the `.frd` (`NGRAPH`): sector `j`
@@ -632,14 +630,16 @@ impl Sectors {
         let fields = &increment.fields;
         let mut out: Vec<ResultField> = Vec::with_capacity(fields.len());
         for (index, field) in fields.iter().enumerate() {
-            let partner = |name: &str| fields.iter().position(|f| f.name == name);
+            let part = |imaginary: bool| {
+                (fields.iter())
+                    .position(|f| f.quantity == field.quantity && f.imaginary == imaginary)
+            };
             // (real part, imaginary part, this field is the imaginary one)
-            let real_of = fields
-                .iter()
-                .position(|f| f.name != field.name && imaginary_field_name(&f.name) == field.name);
+            let real_of = if field.imaginary { part(false) } else { None };
             let (real, imaginary, is_imaginary) = match (increment.nodal_diameter, real_of) {
                 (Some(_), Some(r)) => (r, Some(index), true),
-                (Some(_), None) => (index, partner(&imaginary_field_name(&field.name)), false),
+                (Some(_), None) if field.imaginary => (index, None, false),
+                (Some(_), None) => (index, part(true), false),
                 (None, _) => (index, None, false),
             };
             let mut expanded = field.clone();

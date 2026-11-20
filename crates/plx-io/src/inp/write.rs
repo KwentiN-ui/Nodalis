@@ -24,6 +24,7 @@ use plx_model::{
 use plxs_core as ir;
 use plxs_core::mesh::{ElementRef, NodeRef};
 use plxs_core::normalized_name;
+use plxs_core::step::OutputVariable;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum WriteError {
@@ -5494,33 +5495,34 @@ fn buckle_step(settings: &BuckleStep) -> ir::Step {
     step
 }
 
-/// The variables of an output request as the solver compares them.
-fn variables<'a>(variables: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+/// The variables of an output request the solver knows; it would print nothing for others.
+fn variables<'a>(variables: impl IntoIterator<Item = &'a str>) -> Vec<OutputVariable> {
     (variables.into_iter())
-        .map(|v| v.trim().to_ascii_uppercase())
+        .filter_map(OutputVariable::from_code)
         .collect()
 }
 
 /// The solver's variables of a result of a step: of the nodes, of the elements and of the
 /// contacts.
-fn field_variables(result: FieldResult) -> [&'static [&'static str]; 3] {
+fn field_variables(result: FieldResult) -> [&'static [OutputVariable]; 3] {
+    use OutputVariable as V;
     match result {
-        FieldResult::Displacements => [&["U"], &[], &[]],
-        FieldResult::ReactionForces => [&["RF"], &[], &[]],
-        FieldResult::Velocities => [&["V"], &[], &[]],
-        FieldResult::Accelerations => [&["A"], &[], &[]],
-        FieldResult::Temperatures => [&["NT"], &[], &[]],
-        FieldResult::ReactionHeatFlows => [&["RFL"], &[], &[]],
-        FieldResult::Sensitivities => [&["SEN"], &[], &[]],
-        FieldResult::Stresses => [&[], &["S"], &[]],
-        FieldResult::Strains => [&[], &["E"], &[]],
-        FieldResult::PlasticStrain => [&[], &["PEEQ"], &[]],
-        FieldResult::StrainEnergy => [&[], &["ENER"], &[]],
-        FieldResult::HeatFlux => [&[], &["HFL"], &[]],
-        FieldResult::StressError => [&[], &["ERR"], &[]],
-        FieldResult::Contact => [&[], &[], &["CDIS", "CSTR"]],
-        FieldResult::ContactEnergy => [&[], &[], &["CELS"]],
-        FieldResult::AmplitudePhase => [&["PU"], &["PHS"], &[]],
+        FieldResult::Displacements => [&[V::Displacements], &[], &[]],
+        FieldResult::ReactionForces => [&[V::ReactionForces], &[], &[]],
+        FieldResult::Velocities => [&[V::Velocities], &[], &[]],
+        FieldResult::Accelerations => [&[V::Accelerations], &[], &[]],
+        FieldResult::Temperatures => [&[V::Temperatures], &[], &[]],
+        FieldResult::ReactionHeatFlows => [&[V::ReactionHeatFlows], &[], &[]],
+        FieldResult::Sensitivities => [&[V::Sensitivities], &[], &[]],
+        FieldResult::Stresses => [&[], &[V::Stresses], &[]],
+        FieldResult::Strains => [&[], &[V::Strains], &[]],
+        FieldResult::PlasticStrain => [&[], &[V::EquivalentPlasticStrain], &[]],
+        FieldResult::StrainEnergy => [&[], &[V::StrainEnergyDensity], &[]],
+        FieldResult::HeatFlux => [&[], &[V::HeatFlux], &[]],
+        FieldResult::StressError => [&[], &[V::StressError], &[]],
+        FieldResult::Contact => [&[], &[], &[V::ContactDisplacements, V::ContactStresses]],
+        FieldResult::ContactEnergy => [&[], &[], &[V::ContactEnergy]],
+        FieldResult::AmplitudePhase => [&[V::DisplacementPhase], &[V::StressPhase], &[]],
     }
 }
 
@@ -5528,26 +5530,47 @@ fn field_variables(result: FieldResult) -> [&'static [&'static str]; 3] {
 /// and the additional results of the model's field output, every `every`-th increment.
 /// The solver takes the variables of the nodes, the elements and the contacts apart.
 fn field_outputs(model: &FeModel, step: &Step, every: u32) -> ir::step::Outputs {
+    use OutputVariable as V;
     // The order the solver's variables are listed in.
-    const ORDER: [&[&str]; 3] = [
-        &["RF", "U", "PU", "V", "A", "NT", "RFL", "SEN"],
-        &["S", "PHS", "E", "PEEQ", "ENER", "HFL", "ERR"],
-        &["CDIS", "CSTR", "CELS"],
+    const ORDER: [&[OutputVariable]; 3] = [
+        &[
+            V::ReactionForces,
+            V::Displacements,
+            V::DisplacementPhase,
+            V::Velocities,
+            V::Accelerations,
+            V::Temperatures,
+            V::ReactionHeatFlows,
+            V::Sensitivities,
+        ],
+        &[
+            V::Stresses,
+            V::StressPhase,
+            V::Strains,
+            V::EquivalentPlasticStrain,
+            V::StrainEnergyDensity,
+            V::HeatFlux,
+            V::StressError,
+        ],
+        &[
+            V::ContactDisplacements,
+            V::ContactStresses,
+            V::ContactEnergy,
+        ],
     ];
     let results = model.field_results(step);
-    let mut names: [Vec<String>; 3] = Default::default();
+    let mut names: [Vec<OutputVariable>; 3] = Default::default();
     for (kind, order) in ORDER.iter().enumerate() {
-        names[kind] = (order.iter())
+        names[kind] = (order.iter().copied())
             .filter(|v| (results.iter()).any(|&r| field_variables(r)[kind].contains(v)))
-            .map(|v| v.to_string())
             .collect();
     }
     // The error estimate of the stresses is written with them unless it is switched off.
     if results.contains(&FieldResult::Stresses) && !results.contains(&FieldResult::StressError) {
-        names[1].push("NOE".into());
+        names[1].push(V::NoStressError);
     }
     let [node, element, contact] = names;
-    let request = |variables: Vec<String>, contact: bool| ir::step::FieldOutput {
+    let request = |variables: Vec<OutputVariable>, contact: bool| ir::step::FieldOutput {
         variables,
         frequency: every,
         nset: None,
@@ -5603,6 +5626,7 @@ fn node_print(
         global: true,
         time_points: None,
         surfaces: None,
+        rotations: false,
     }
 }
 
@@ -5787,7 +5811,9 @@ fn point_output(
         let set = sets.free_name("Internal_Rotation", &name(&output.name));
         sets.node_sets.push((set.clone(), vec![rotation]));
         let set = Some(ir::step::HistorySet::Nodes(sets.node_id(&set)));
-        (outputs.node_print).push(node_print(set, &turning, output.totals));
+        let mut rotations = node_print(set, &turning, output.totals);
+        rotations.rotations = true;
+        outputs.node_print.push(rotations);
     }
     Ok(outputs)
 }

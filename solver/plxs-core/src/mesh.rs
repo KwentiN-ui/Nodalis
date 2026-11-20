@@ -100,6 +100,31 @@ pub struct NamedSurface {
 }
 
 impl Sets {
+    /// The sets and surfaces with their labels only, no members: what results keep to name
+    /// the sets their history is of.
+    pub fn labels(&self) -> Sets {
+        Sets {
+            node_sets: (self.node_sets.iter())
+                .map(|s| NodeSet {
+                    name: s.name.clone(),
+                    nodes: Vec::new(),
+                })
+                .collect(),
+            element_sets: (self.element_sets.iter())
+                .map(|s| ElementSet {
+                    name: s.name.clone(),
+                    elements: Vec::new(),
+                })
+                .collect(),
+            surfaces: (self.surfaces.iter())
+                .map(|s| NamedSurface {
+                    name: s.name.clone(),
+                    surface: Surface::Node(Vec::new()),
+                })
+                .collect(),
+        }
+    }
+
     /// The members of a node set, none for a handle out of range.
     pub fn nodes(&self, id: crate::NodeSetId) -> &[NodeId] {
         self.node_sets.get(id.index()).map_or(&[], |s| &s.nodes)
