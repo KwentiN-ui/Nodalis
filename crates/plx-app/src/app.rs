@@ -2505,7 +2505,14 @@ impl Workbench {
             crate::output_news::OutputNews::title(unread).into(),
         ];
         let mut clicked = crate::style::status_tabs(ui, &titles, shown);
-        if let Some(line) = newest
+        // A solve running while its monitor is out of view says so here, as the news of the
+        // output would.
+        let running = (shown != Some(1)).then(|| self.running_status()).flatten();
+        if let Some(status) = running {
+            if crate::run_status::show(ui, &status) {
+                clicked = Some(1);
+            }
+        } else if let Some(line) = newest
             && crate::output_news::OutputNews::line(ui, line)
         {
             clicked = Some(2);
@@ -2521,6 +2528,25 @@ impl Workbench {
                 crate::layout::fold_output(&ctx, false);
             }
         }
+    }
+
+    /// The project's solve of the analysis or its Check Model, while it runs.
+    fn running_status(&self) -> Option<crate::run_status::RunStatus> {
+        if let Some(run) = self.project_run.as_ref().filter(|r| r.active) {
+            return Some(crate::run_status::RunStatus {
+                name: self.analysis_name.clone(),
+                state: run.state.to_owned(),
+                seconds: run.seconds,
+                progress: run.progress.clone(),
+            });
+        }
+        let analysis = self.analysis.as_ref().filter(|a| a.is_running())?;
+        Some(crate::run_status::RunStatus {
+            name: format!("{} (model check)", analysis.name()),
+            state: "running".to_owned(),
+            seconds: analysis.seconds(),
+            progress: analysis.progress(),
+        })
     }
 
     fn output(&mut self, ui: &mut egui::Ui, pane: egui::Frame) {
