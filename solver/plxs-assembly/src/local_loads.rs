@@ -32,7 +32,7 @@ pub fn rotate_concentrated_loads(
         let factor = amplitude_factor(model, step, load.amplitude, time, total, period);
         let ids: Vec<u32> = match &load.region {
             NodeRef::Node(id) => vec![*id],
-            NodeRef::Set(name) => model.sets.node_sets.get(name).cloned().unwrap_or_default(),
+            NodeRef::Set(set) => model.sets.nodes(*set).to_vec(),
         };
         let d = load.dof as usize - 1;
         for id in ids {

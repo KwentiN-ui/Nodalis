@@ -8528,7 +8528,7 @@ fn a_moving_load_writes_a_step_per_position() {
     for step in &analysis.steps {
         let loads = &step.loads.concentrated;
         let tip = (loads.iter())
-            .filter(|l| matches!(&l.region, NodeRef::Set(s) if s.ends_with("FORCE-1")));
+            .filter(|l| matches!(&l.region, NodeRef::Set(s) if analysis.model.sets.node_set_name(*s).ends_with("FORCE-1")));
         assert_eq!(tip.map(|l| l.value).collect::<Vec<_>>(), [-100.0]);
         let wheel = (loads.iter()).filter(|l| matches!(l.region, NodeRef::Node(_)));
         let total: f64 = wheel.map(|l| l.value).sum();
@@ -12385,7 +12385,7 @@ fn each_degree_of_freedom_follows_its_own_table() {
     }
     let boundaries = &analysis.steps[0].boundaries;
     let moved: Vec<_> = (boundaries.iter())
-        .filter(|b| b.region != NodeRef::Set("FIX".into()))
+        .filter(|b| b.region != NodeRef::Set(analysis.model.sets.node_set_named("FIX").unwrap()))
         .map(|b| (b.first_dof, b.last_dof, b.value, b.amplitude))
         .collect();
     let id = |name| Some(amplitude_named(&analysis, name).0);
@@ -12710,10 +12710,10 @@ fn a_rope_slave_is_a_node_surface() {
     let slave = &analysis.model.contact.pairs[0].slave;
     assert!(
         matches!(
-            analysis.model.sets.surfaces.get(slave),
+            analysis.model.sets.surface(*slave),
             Some(plxs_core::mesh::Surface::Node(_))
         ),
-        "{slave}"
+        "{slave:?}"
     );
     model.contact_pairs[0].method = ContactMethod::SurfaceToSurface;
     assert!(matches!(
@@ -12761,7 +12761,7 @@ fn a_detection_finds_a_rope_lying_on_a_surface() {
     let pair = &analysis.model.contact.pairs[0];
     assert_eq!(pair.kind, plxs_core::contact::ContactKind::NodeToSurface);
     assert!(matches!(
-        analysis.model.sets.surfaces.get(&pair.slave),
+        analysis.model.sets.surface(pair.slave),
         Some(plxs_core::mesh::Surface::Node(_))
     ));
     // A rope beside the block is not found.
@@ -13736,9 +13736,9 @@ fn a_rope_on_a_symmetry_plane_touches_the_block_not_its_cut_face() {
     ));
     let analysis = lowered(&mesh, &model);
     let master = &analysis.model.contact.pairs[0].master;
-    let Some(plxs_core::mesh::Surface::Element(faces)) = analysis.model.sets.surfaces.get(master)
+    let Some(plxs_core::mesh::Surface::Element(faces)) = analysis.model.sets.surface(*master)
     else {
-        panic!("{master}");
+        panic!("{master:?}");
     };
     assert_eq!(faces.len(), 1, "{faces:?}");
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -13811,8 +13811,8 @@ fn a_point_mass_couples_its_region_and_sits_on_its_point() {
             .all(|(a, b)| (a - b).abs() < 1e-12),
         "{tensor:?}"
     );
-    let elset = mass.elset.as_ref().unwrap();
-    let carriers = &analysis.model.sets.element_sets[elset];
+    let elset = analysis.model.sets.element_set_name(mass.elset.unwrap());
+    let carriers = analysis.model.sets.elements(mass.elset.unwrap());
     // The tip layer of elements, one of the 40 along the beam.
     assert!(!carriers.is_empty() && carriers.len() < 10, "{carriers:?}");
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -13826,7 +13826,15 @@ fn a_point_mass_couples_its_region_and_sits_on_its_point() {
     );
     // The analysis reads back the same.
     let read = plxs_input::read_inp_str(&text, None).unwrap().analysis;
-    assert_eq!(read.model.point_masses, analysis.model.point_masses);
+    let masses = |a: &plxs_core::Analysis| -> Vec<_> {
+        let set = |s: Option<plxs_core::ElementSetId>| {
+            s.map(|s| a.model.sets.element_set_name(s).to_string())
+        };
+        (a.model.point_masses.iter())
+            .map(|m| (m.node, m.mass, m.inertia, set(m.elset), set(m.name)))
+            .collect()
+    };
+    assert_eq!(masses(&read), masses(&analysis));
 }
 
 /// A point mass on a reference point a rigid body couples rides on that body: no coupling

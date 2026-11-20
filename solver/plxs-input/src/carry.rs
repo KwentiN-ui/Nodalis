@@ -39,14 +39,17 @@ use plxs_core::step::{
 fn nodes_of(sets: &Sets, region: &NodeRef) -> Option<Vec<NodeId>> {
     match region {
         NodeRef::Node(id) => Some(vec![*id]),
-        NodeRef::Set(name) => sets.node_sets.get(name).cloned(),
+        NodeRef::Set(set) => sets.node_sets.get(set.index()).map(|s| s.nodes.clone()),
     }
 }
 
 fn elements_of(sets: &Sets, region: &ElementRef) -> Option<Vec<ElementId>> {
     match region {
         ElementRef::Element(id) => Some(vec![*id]),
-        ElementRef::Set(name) => sets.element_sets.get(name).cloned(),
+        // A set without elements: the name of point masses.
+        ElementRef::Set(set) => (sets.element_sets.get(set.index()))
+            .map(|s| s.elements.clone())
+            .filter(|elements| !elements.is_empty()),
     }
 }
 
@@ -268,7 +271,7 @@ pub(crate) fn replace_distributed(
             "*WARNING in *DLOAD: the CENTRIF load on {} has another point or axis than the \
              one carried over from an earlier step on {dropped} element(s); like CalculiX the \
              carried one is kept there and the new one ignored (use OP=NEW to replace it)",
-            region_name(&load.region)
+            region_name(sets, &load.region)
         ));
         if dropped < elements.len() {
             for element in elements {
@@ -342,10 +345,10 @@ fn key_id(k: Key, keys: &mut Vec<Key>) -> KeyId {
     }
 }
 
-fn region_name(region: &ElementRef) -> String {
+fn region_name(sets: &Sets, region: &ElementRef) -> String {
     match region {
         ElementRef::Element(id) => format!("element {id}"),
-        ElementRef::Set(name) => format!("set {name}"),
+        ElementRef::Set(set) => format!("set {}", sets.element_set_name(*set)),
     }
 }
 

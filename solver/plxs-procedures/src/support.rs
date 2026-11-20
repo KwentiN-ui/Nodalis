@@ -87,8 +87,8 @@ pub fn history_blocks(
     }
     let mut out = Vec::new();
     for support in &model.contact.compression_only {
-        if let Some((slave, master)) = &request.surfaces
-            && !(master.is_empty() && slave.eq_ignore_ascii_case(&support.surface))
+        if let Some((slave, master)) = request.surfaces
+            && !(master.is_none() && slave == support.surface)
         {
             continue;
         }
@@ -142,7 +142,8 @@ pub fn history_blocks(
             increment,
             quantity: format!(
                 "statistics for slave set {}, master set {}",
-                support.surface, GROUND
+                model.sets.surface_name(support.surface),
+                GROUND
             ),
             set: String::new(),
             time,

@@ -524,7 +524,7 @@ impl SubmodelValues {
             };
             let ids = match &boundary.region {
                 NodeRef::Node(id) => vec![*id],
-                NodeRef::Set(name) => model.sets.node_sets.get(name).cloned().unwrap_or_default(),
+                NodeRef::Set(set) => model.sets.nodes(*set).to_vec(),
             };
             let nodes: Vec<u32> = ids.iter().filter_map(|&id| model.nodes.index(id)).collect();
             let points: Vec<[f64; 3]> = nodes

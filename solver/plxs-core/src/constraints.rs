@@ -45,8 +45,8 @@ pub struct RigidBody {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RigidBodyNodes {
-    NodeSet(String),
-    ElementSet(String),
+    NodeSet(crate::NodeSetId),
+    ElementSet(crate::ElementSetId),
 }
 
 /// `*JOINT` (no CalculiX keyword): a kinematic joint between two points, each the
@@ -73,9 +73,10 @@ pub struct Joint {
 /// tolerance are projected and coupled by multi-point constraints).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Tie {
+    /// Label for messages and the input file.
     pub name: String,
-    pub slave: String,
-    pub master: String,
+    pub slave: crate::SurfaceId,
+    pub master: crate::SurfaceId,
     pub position_tolerance: Option<f64>,
     /// `ADJUST=NO` leaves the slave nodes where they are instead of moving them on to the
     /// master surface.
@@ -92,11 +93,11 @@ pub struct Tie {
 pub struct CyclicSymmetryModel {
     pub sectors: u32,
     pub ngraph: u32,
-    pub tie: String,
+    pub tie: crate::TieId,
     /// Two points on the axis of symmetry.
     pub axis: [[f64; 3]; 2],
     /// `ELSET`, when the sector is only part of the model.
-    pub elset: Option<String>,
+    pub elset: Option<crate::ElementSetId>,
     /// `CHECK=NO`.
     pub check: bool,
 }
@@ -106,7 +107,7 @@ pub struct CyclicSymmetryModel {
 /// points lie on the axis).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Transform {
-    pub nset: String,
+    pub nset: crate::NodeSetId,
     pub kind: TransformKind,
     pub a: [f64; 3],
     pub b: [f64; 3],
@@ -124,7 +125,7 @@ pub enum TransformKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Submodel {
     pub input: String,
-    pub node_sets: Vec<String>,
+    pub node_sets: Vec<crate::NodeSetId>,
     /// `GLOBAL ELSET`: the elements of the global model to interpolate in.
-    pub global_elset: Option<String>,
+    pub global_elset: Option<crate::ElementSetId>,
 }

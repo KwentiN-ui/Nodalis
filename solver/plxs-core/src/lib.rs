@@ -12,9 +12,8 @@
 //!   indices ([`Nodes::index`], [`Model::element_index`]) and writes the ids out again.
 //! - Everything is `Clone + Serialize + Deserialize` so that models, states and results can be
 //!   handed between nodes of the Nodalis graph and stored for a restart.
-//! - Materials, orientations, amplitudes and interactions are referred to by typed handles
-//!   ([`handle`]), their names are labels only. Names of sets and surfaces are still stored
-//!   as CalculiX reads them: upper case ([`normalized_name`]).
+//! - Materials, orientations, amplitudes, interactions, sets, surfaces and ties are referred
+//!   to by typed handles ([`handle`]); their names are labels only.
 //! - The IR covers the whole CalculiX inventory Nodalis writes (concept section 1) and the
 //!   plxs extensions beyond it. Changing it is a PR of its own.
 //! - A step holds what is in force during it: the `OP=NEW` semantics of CalculiX are resolved
@@ -48,7 +47,10 @@ pub use contact::{Contact, ContactPair, SurfaceBehavior, SurfaceInteraction};
 pub use diagnostic::{Diagnostic, DiagnosticCode, ItemRef, Severity};
 pub use element::{Element, ElementFamily, ElementType};
 pub use error::{Convergence, Divergence, Error, Failure, Result, Stop};
-pub use handle::{AmplitudeId, InteractionId, MaterialId, OrientationId};
+pub use handle::{
+    AmplitudeId, ElementSetId, InteractionId, MaterialId, NodeSetId, OrientationId, SurfaceId,
+    TieId,
+};
 pub use material::Material;
 pub use mesh::{ElementId, NodeId, Nodes, Sets, Surface, SurfaceFace};
 pub use model::{Analysis, InitialConditions, Model, PhysicalConstants, PointMass};

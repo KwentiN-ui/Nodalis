@@ -98,7 +98,7 @@ pub(crate) fn initial_values(
     for (region, dof, value) in entries {
         let nodes: Vec<u32> = match region {
             NodeRef::Node(id) => vec![*id],
-            NodeRef::Set(name) => model.sets.node_sets.get(name).cloned().unwrap_or_default(),
+            NodeRef::Set(set) => model.sets.nodes(*set).to_vec(),
         };
         if !(1..=6).contains(dof) {
             continue;
@@ -422,7 +422,7 @@ impl DynamicProcedure {
         });
         let mut f_prev = f0;
         // Energies of the whole model, when a history output asks for them.
-        let energy_requests = energy_requests(step);
+        let energy_requests = energy_requests(ctx.model, step);
         let (mut external_work, mut dissipation) = (0.0, 0.0);
         let mut stresses = ctx.table.layout.field(6);
         let mut strains = ctx.table.layout.field(6);
@@ -703,14 +703,15 @@ pub(crate) struct Energies {
 
 /// The variables (`ALLIE`, `ALLKE`, `ALLWK`, `ALLVD`) of each `*EL PRINT` of the step that
 /// asks for energies of the model, with its set.
-pub(crate) fn energy_requests(step: &Step) -> Vec<(String, Vec<String>)> {
+pub(crate) fn energy_requests(model: &plxs_core::Model, step: &Step) -> Vec<(String, Vec<String>)> {
     (step.outputs.el_print.iter())
         .filter_map(|request| {
             let variables: Vec<String> = (request.variables.iter())
                 .map(|v| v.trim().to_ascii_uppercase())
                 .filter(|v| ["ALLIE", "ALLKE", "ALLWK", "ALLVD"].contains(&v.as_str()))
                 .collect();
-            (!variables.is_empty()).then(|| (request.set.clone().unwrap_or_default(), variables))
+            let set = (request.set).map_or("", |set| model.sets.history_set_name(set));
+            (!variables.is_empty()).then(|| (set.to_string(), variables))
         })
         .collect()
 }

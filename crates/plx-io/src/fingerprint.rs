@@ -3,10 +3,11 @@
 //! counts. Renaming an item, hiding it, a deactivated item that adds nothing, or items only
 //! used to look at results change nothing, so the results stay up to date.
 //!
-//! Names do not count either. Every name of the analysis (sets, surfaces, materials,
-//! amplitudes, interactions, ties, steps) is replaced by what it stands for: a set by its
-//! members, a material by its values. A set nothing refers to does not count at all, so the
-//! extra sets an analysis writes for the analyses continuing from it change nothing.
+//! Names do not count either. Every name of the analysis (materials, amplitudes,
+//! interactions, ties, steps) is replaced by what it stands for: a material by its values.
+//! Sets and surfaces count by their members where they are referred to; a set nothing
+//! refers to does not count at all, so the extra sets an analysis writes for the analyses
+//! continuing from it change nothing.
 //!
 //! Each step gets the fingerprint of the model and the steps up to it: the solver computes
 //! them one after the other, so a change in step 2 leaves the results of step 1 up to date.
@@ -41,6 +42,19 @@ pub fn fingerprints(lowered: &Lowered, fe: &FeModel) -> Fingerprints {
     let mut model = Fnv::new();
     mesh(&mut model, &analysis.model);
     let m = &analysis.model;
+    model.add_str(&referenced_sets(
+        m,
+        &(
+            &m.materials,
+            &m.sections,
+            &m.constraints,
+            &m.contact,
+            &m.amplitudes,
+            &m.initial,
+            &m.design_variables,
+            &m.point_masses,
+        ),
+    ));
     for part in [
         names.value(&m.materials),
         names.value(&m.sections),
@@ -79,6 +93,7 @@ pub fn fingerprints(lowered: &Lowered, fe: &FeModel) -> Fingerprints {
         let mut next = Fnv::new();
         next.add(&hash.to_le_bytes());
         next.add_str(&names.value(&unnamed).to_string());
+        next.add_str(&referenced_sets(m, &unnamed));
         hash = next.finish();
         after.push(hash);
     }
@@ -151,34 +166,46 @@ fn mesh(hash: &mut Fnv, model: &ir::Model) {
     }
 }
 
+/// The members of the sets and surfaces `value` refers to, in the order of their handles.
+fn referenced_sets(model: &ir::Model, value: &impl serde::Serialize) -> String {
+    let members = |prefix: &str, ids: &[u32]| {
+        let mut ids = ids.to_vec();
+        ids.sort_unstable();
+        ids.dedup();
+        let mut hash = Fnv::new();
+        for id in ids {
+            hash.add(&id.to_le_bytes());
+        }
+        format!("{prefix}{:016x}", hash.finish())
+    };
+    let sets = &model.sets;
+    let mut out = String::new();
+    for (kind, index) in ir::handle::referenced(value) {
+        let i = index as usize;
+        let canonical = match kind {
+            "NodeSetId" => sets.node_sets.get(i).map(|s| members("N", &s.nodes)),
+            "ElementSetId" => (sets.element_sets.get(i)).map(|s| members("E", &s.elements)),
+            "SurfaceId" => sets.surfaces.get(i).map(|s| {
+                let mut hash = Fnv::new();
+                hash.add_debug(&s.surface);
+                format!("S{:016x}", hash.finish())
+            }),
+            _ => None,
+        };
+        if let Some(canonical) = canonical {
+            out.push_str(&format!("{kind}{index}={canonical};"));
+        }
+    }
+    out
+}
+
 /// What each name of the analysis stands for.
 struct Names(HashMap<String, String>);
 
 impl Names {
     fn of(model: &ir::Model) -> Self {
         let mut names = Names(HashMap::new());
-        let members = |prefix: &str, ids: &[u32]| {
-            let mut ids = ids.to_vec();
-            ids.sort_unstable();
-            ids.dedup();
-            let mut hash = Fnv::new();
-            for id in ids {
-                hash.add(&id.to_le_bytes());
-            }
-            format!("{prefix}{:016x}", hash.finish())
-        };
-        for (name, ids) in &model.sets.node_sets {
-            names.add(name, members("N", ids));
-        }
-        for (name, ids) in &model.sets.element_sets {
-            names.add(name, members("E", ids));
-        }
-        for (name, surface) in &model.sets.surfaces {
-            let mut hash = Fnv::new();
-            hash.add_debug(surface);
-            names.add(name, format!("S{:016x}", hash.finish()));
-        }
-        // Then what refers to sets and surfaces itself, by its definition without its name.
+        // What has a name of its own, by its definition without its name.
         let by_value = |prefix: &str, name: &str, value: Value| {
             let mut hash = Fnv::new();
             hash.add_str(&blank(value, name).to_string());
@@ -203,8 +230,7 @@ impl Names {
         names
     }
 
-    /// Adds what `name` stands for; a name of a node set and an element set both stands for
-    /// both.
+    /// Adds what `name` stands for; a name of two kinds of items stands for both.
     fn add(&mut self, name: &str, canonical: String) {
         self.0
             .entry(name.to_owned())

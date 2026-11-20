@@ -94,7 +94,7 @@ pub fn particle_mesh(model: &ParticleModel, first: &ParticleFrame) -> Model {
             ..Default::default()
         });
         mesh.sections.push(plxs_core::section::Section {
-            elset: body.name.clone(),
+            elset: mesh.sets.add_element_set(body.name.clone(), []),
             kind: plxs_core::section::SectionKind::Solid {
                 material,
                 thickness: None,
@@ -127,7 +127,7 @@ pub fn particle_mesh(model: &ParticleModel, first: &ParticleFrame) -> Model {
             ..Default::default()
         });
         mesh.sections.push(plxs_core::section::Section {
-            elset: wall.name.clone(),
+            elset: mesh.sets.add_element_set(wall.name.clone(), []),
             kind: plxs_core::section::SectionKind::Membrane {
                 material,
                 thickness: 0.0,

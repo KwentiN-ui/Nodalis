@@ -75,10 +75,19 @@ pub fn chain(
     let sections = model.sections.len() as u32;
     // The flow's materials follow the FE steps' ones.
     let material_offset = model.materials.len() as u32;
+    // And the sections' element sets the FE ones, with the elements renumbered.
+    let set_offset = model.sets.element_sets.len() as u32;
+    for mut set in flow.model.sets.element_sets {
+        for element in &mut set.elements {
+            *element += element_offset;
+        }
+        model.sets.element_sets.push(set);
+    }
     for mut section in flow.model.sections {
         if let Some(material) = material_of(&mut section.kind) {
             material.0 += material_offset;
         }
+        section.elset.0 += set_offset;
         model.sections.push(section);
     }
     model.materials.append(&mut flow.model.materials);
@@ -181,7 +190,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(Section {
-            elset: material.into(),
+            elset: model.sets.add_element_set(material, []),
             kind: SectionKind::Solid {
                 material: plxs_core::MaterialId(0),
                 thickness: None,

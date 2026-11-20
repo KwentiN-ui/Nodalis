@@ -78,11 +78,11 @@ pub struct PointMass {
     /// and CENTRIF) on this element set, the set of the elements that carry it. `None`:
     /// in those on every set.
     #[serde(default)]
-    pub elset: Option<String>,
-    /// `NAME=`: a gravity or centrifugal load (`*DLOAD`) on this name pulls the masses of
-    /// the name alone, without any elements.
+    pub elset: Option<crate::ElementSetId>,
+    /// `NAME=`: a gravity or centrifugal load (`*DLOAD`) on this set pulls the masses of
+    /// the name alone, without any elements. The set holds no elements.
     #[serde(default)]
-    pub name: Option<String>,
+    pub name: Option<crate::ElementSetId>,
 }
 
 impl PointMass {
@@ -143,7 +143,7 @@ impl Model {
     pub fn nodes_of(&self, region: &NodeRef) -> Vec<NodeId> {
         match region {
             NodeRef::Node(id) => vec![*id],
-            NodeRef::Set(name) => self.sets.node_sets.get(name).cloned().unwrap_or_default(),
+            NodeRef::Set(set) => self.sets.nodes(*set).to_vec(),
         }
     }
 
@@ -298,12 +298,7 @@ impl Model {
     pub fn elements_of(&self, region: &crate::mesh::ElementRef) -> Vec<ElementId> {
         match region {
             crate::mesh::ElementRef::Element(id) => vec![*id],
-            crate::mesh::ElementRef::Set(name) => self
-                .sets
-                .element_sets
-                .get(name)
-                .cloned()
-                .unwrap_or_default(),
+            crate::mesh::ElementRef::Set(set) => self.sets.elements(*set).to_vec(),
         }
     }
 }
@@ -329,7 +324,7 @@ pub struct PhysicalConstants {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DesignVariables {
-    pub nset: String,
+    pub nset: crate::NodeSetId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

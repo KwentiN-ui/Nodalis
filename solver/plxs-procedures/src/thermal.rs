@@ -40,7 +40,7 @@ pub fn initial_temperatures(model: &Model) -> Vec<f64> {
 fn nodes_of(model: &Model, region: &NodeRef) -> Vec<u32> {
     match region {
         NodeRef::Node(id) => vec![*id],
-        NodeRef::Set(name) => model.sets.node_sets.get(name).cloned().unwrap_or_default(),
+        NodeRef::Set(set) => model.sets.nodes(*set).to_vec(),
     }
 }
 

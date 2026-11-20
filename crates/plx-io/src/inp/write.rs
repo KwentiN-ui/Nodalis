@@ -7,7 +7,7 @@
 //! resolved ([`plxs_input::steps`]), as the solver reads an input file. An input file is
 //! the analysis rendered as text ([`plxs_input::render`]), for the export only.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
@@ -482,12 +482,58 @@ fn ir_name(name: &str) -> String {
     normalized_name(name)
 }
 
-fn node_set_ref(set: &str) -> NodeRef {
-    NodeRef::Set(ir_name(set))
+/// The handles of the sets and surfaces by their names in the lowering: the names are
+/// unique there (see [`Sets::free_name`]), the solver model refers to the sets by these
+/// handles and keeps the names as labels. The members follow when the model is built.
+#[derive(Default)]
+struct Handles {
+    node_sets: Vec<String>,
+    element_sets: Vec<String>,
+    surfaces: Vec<String>,
+    index: HashMap<(u8, String), u32>,
 }
 
-fn element_set_ref(set: &str) -> ElementRef {
-    ElementRef::Set(ir_name(set))
+impl Handles {
+    fn slot(&mut self, kind: u8, name: &str) -> u32 {
+        if let Some(&i) = self.index.get(&(kind, name.to_string())) {
+            return i;
+        }
+        let names = match kind {
+            0 => &mut self.node_sets,
+            1 => &mut self.element_sets,
+            _ => &mut self.surfaces,
+        };
+        names.push(name.to_string());
+        let i = names.len() as u32 - 1;
+        self.index.insert((kind, name.to_string()), i);
+        i
+    }
+
+    fn node_set(&mut self, name: &str) -> ir::NodeSetId {
+        ir::NodeSetId(self.slot(0, name))
+    }
+
+    fn element_set(&mut self, name: &str) -> ir::ElementSetId {
+        ir::ElementSetId(self.slot(1, name))
+    }
+
+    fn surface(&mut self, name: &str) -> ir::SurfaceId {
+        ir::SurfaceId(self.slot(2, name))
+    }
+
+    /// Empty sets and surfaces in `out` up to the handles given so far, labelled by their
+    /// names.
+    fn fill(&self, out: &mut ir::mesh::Sets) {
+        for name in &self.node_sets[out.node_sets.len()..] {
+            out.add_node_set(ir_name(name), []);
+        }
+        for name in &self.element_sets[out.element_sets.len()..] {
+            out.add_element_set(ir_name(name), []);
+        }
+        for name in &self.surfaces[out.surfaces.len()..] {
+            out.add_surface(ir_name(name), ir::mesh::Surface::Node(Vec::new()));
+        }
+    }
 }
 
 /// The name a step gets: its own, as the title comment before `*STEP` gives it, or the
@@ -678,13 +724,13 @@ fn lower_model_named(
     constraints.extend(
         (generated.equations.iter()).map(|terms| ConstraintItem::Equation(equation(terms))),
     );
-    sections.extend(generated.sections.iter().map(generated_section));
+    sections.extend((generated.sections.iter()).map(|g| generated_section(&mut sets, g)));
     materials.extend(generated.material.as_deref().map(gap_material));
     // The boundary condition holding the ground nodes of the gaps, in every mechanical step.
     let extra_boundary = (generated.boundary.as_ref()).map(|(set, dofs)| Card::Boundary {
         op_new: false,
         items: (1..=*dofs as u8)
-            .map(|dof| boundary(node_set_ref(set), dof, dof, Some(0.0), None))
+            .map(|dof| boundary(sets.node_ref(set), dof, dof, Some(0.0), None))
             .collect(),
     });
     let young = if model.surface_interactions.is_empty() {
@@ -734,49 +780,67 @@ fn lower_model_named(
         .unwrap_or_default()
         .trim()
         .to_string();
-    ir_model.constraints.submodel = submodel(model, &sets.submodel_sets)?;
+    ir_model.constraints.submodel = submodel(model, &mut sets.handles, &sets.submodel_sets)?;
     for (id, &coords) in mesh.node_ids().iter().zip(mesh.coords()) {
         ir_model.nodes.insert(*id, coords);
     }
     for &(id, coords) in &generated.nodes {
         ir_model.nodes.insert(id, coords);
     }
-    elements(&mut ir_model, mesh, space, &lines)?;
+    let mut handles = std::mem::take(&mut sets.handles);
+    elements(&mut ir_model, &mut handles, mesh, space, &lines)?;
     for block in &generated.elements {
-        generated_elements(&mut ir_model, block);
+        generated_elements(&mut ir_model, &mut handles, block);
     }
+    // Every set and surface of the lowering, also the ones nothing refers to (the export
+    // writes them).
+    for (name, _) in &sets.node_sets {
+        handles.node_set(name);
+    }
+    for (name, _) in &sets.element_sets {
+        handles.element_set(name);
+    }
+    for (name, _) in &sets.surfaces {
+        handles.surface(name);
+    }
+    handles.fill(&mut ir_model.sets);
     for (name, ids) in &sets.node_sets {
-        ir_model.sets.add_nodes(&ir_name(name), ids.iter().copied());
+        let set = handles.node_set(name);
+        ir_model.sets.add_nodes(set, ids.iter().copied());
     }
     for (name, members) in &sets.element_sets {
         let ids = match members {
             Members::Ids(ids) => ids.clone(),
             Members::Parts(parts) => (parts.iter())
-                .flat_map(|p| ir_model.sets.element_sets.get(&ir_name(p)).cloned())
-                .flatten()
+                .flat_map(|p| ir_model.sets.elements(handles.element_set(p)).to_vec())
                 .collect(),
         };
-        ir_model.sets.add_elements(&ir_name(name), ids);
+        let set = handles.element_set(name);
+        ir_model.sets.add_elements(set, ids);
     }
+    handles.fill(&mut ir_model.sets);
     for (name, surface) in &sets.surfaces {
         let surface = match surface {
             Surface::Faces(faces) => ir::mesh::Surface::Element(
                 (faces.iter())
                     .flat_map(|(set, face)| {
-                        let members = ir_model.sets.element_sets.get(&ir_name(set));
-                        (members.into_iter().flatten()).map(|&element| ir::mesh::SurfaceFace {
+                        let members = ir_model.sets.elements(handles.element_set(set));
+                        (members.iter()).map(|&element| ir::mesh::SurfaceFace {
                             element,
                             face: *face,
                         })
                     })
                     .collect(),
             ),
-            Surface::Nodes(set) => ir::mesh::Surface::Node(
-                (ir_model.sets.node_sets.get(&ir_name(set)).cloned()).unwrap_or_default(),
-            ),
+            Surface::Nodes(set) => {
+                ir::mesh::Surface::Node(ir_model.sets.nodes(handles.node_set(set)).to_vec())
+            }
         };
-        ir_model.sets.surfaces.insert(ir_name(name), surface);
+        handles.fill(&mut ir_model.sets);
+        let id = handles.surface(name);
+        ir_model.sets.surfaces[id.index()].surface = surface;
     }
+    sets.handles = handles;
     ir_model.physical = physical_constants(model);
     // Nodes held in different systems take a system of their own, defined last so that
     // it wins over those of the boundary conditions' sets.
@@ -789,13 +853,13 @@ fn lower_model_named(
     }
     for (axes, nodes) in node_frames {
         let set = sets.free_name("Internal_Selection", "Node_System");
-        ir_model
-            .sets
-            .add_nodes(&ir_name(&set), nodes.iter().copied());
+        let id = sets.node_id(&set);
+        sets.handles.fill(&mut ir_model.sets);
+        ir_model.sets.add_nodes(id, nodes.iter().copied());
         sets.transforms
             .push((set, Transform::Rectangular(axes[0], axes[1])));
     }
-    ir_model.constraints.transforms = transforms(&sets.transforms);
+    ir_model.constraints.transforms = transforms(&mut sets.handles, &sets.transforms);
     ir_model.materials = materials;
     ir_model.sections = sections;
     ir_model.orientations = orientations;
@@ -828,9 +892,12 @@ fn lower_model_named(
             }
             ConstraintItem::PointMass(mass) => point_masses.push(mass),
             ConstraintItem::Tie(tie, cyclic) => {
+                // The cyclic symmetry refers to its tie.
+                let id = ir::TieId::at(constraint_list.ties.len());
                 constraint_list.ties.push(tie);
-                if cyclic.is_some() {
-                    constraint_list.cyclic_symmetry = cyclic;
+                if let Some(mut cyclic) = cyclic {
+                    cyclic.tie = id;
+                    constraint_list.cyclic_symmetry = Some(cyclic);
                 }
             }
         }
@@ -938,7 +1005,10 @@ enum Transform {
 
 /// The local coordinate system of each node set that a skewed symmetry plane or a
 /// displacement in a coordinate system of its own holds.
-fn transforms(transforms: &[(String, Transform)]) -> Vec<ir::constraints::Transform> {
+fn transforms(
+    handles: &mut Handles,
+    transforms: &[(String, Transform)],
+) -> Vec<ir::constraints::Transform> {
     (transforms.iter())
         .map(|(set, transform)| {
             let (kind, a, b) = match *transform {
@@ -946,7 +1016,7 @@ fn transforms(transforms: &[(String, Transform)]) -> Vec<ir::constraints::Transf
                 Transform::Cylindrical(a, b) => (ir::constraints::TransformKind::Cylindrical, a, b),
             };
             ir::constraints::Transform {
-                nset: ir_name(set),
+                nset: handles.node_set(set),
                 kind,
                 a,
                 b,
@@ -960,6 +1030,7 @@ fn transforms(transforms: &[(String, Transform)]) -> Vec<ir::constraints::Transf
 /// analysis and the export put it.
 fn submodel(
     model: &FeModel,
+    handles: &mut Handles,
     node_sets: &[(String, String)],
 ) -> Result<Option<ir::constraints::Submodel>, WriteError> {
     let Some((_, first)) = node_sets.first() else {
@@ -972,7 +1043,9 @@ fn submodel(
         })?;
     Ok(Some(ir::constraints::Submodel {
         input: input.to_string_lossy().into_owned(),
-        node_sets: node_sets.iter().map(|(set, _)| ir_name(set)).collect(),
+        node_sets: (node_sets.iter())
+            .map(|(set, _)| handles.node_set(set))
+            .collect(),
         global_elset: None,
     }))
 }
@@ -1067,6 +1140,7 @@ impl LineElements {
 /// elements the type of their beam or truss section.
 fn elements(
     out: &mut ir::Model,
+    handles: &mut Handles,
     mesh: &FeMesh,
     space: ModelSpace,
     lines: &LineElements,
@@ -1103,7 +1177,9 @@ fn elements(
             });
         }
         if let Some(set) = set {
-            out.sets.add_elements(&ir_name(set), ids);
+            let set = handles.element_set(set);
+            handles.fill(&mut out.sets);
+            out.sets.add_elements(set, ids);
         }
     }
     Ok(())
@@ -1118,7 +1194,11 @@ fn element_type(item: &str, type_name: &str) -> Result<ir::element::ElementType,
 }
 
 /// The spring and gap elements of constraints.
-fn generated_elements(out: &mut ir::Model, block: &constraints::ElementBlock) {
+fn generated_elements(
+    out: &mut ir::Model,
+    handles: &mut Handles,
+    block: &constraints::ElementBlock,
+) {
     let kind = element_type(block.kind, block.kind).expect("a spring or gap type");
     for (id, nodes) in &block.elements {
         out.insert_element(ir::element::Element {
@@ -1130,7 +1210,9 @@ fn generated_elements(out: &mut ir::Model, block: &constraints::ElementBlock) {
     }
     if let Some(set) = &block.elset {
         let ids = block.elements.iter().map(|(id, _)| *id);
-        out.sets.add_elements(&ir_name(set), ids);
+        let set = handles.element_set(set);
+        handles.fill(&mut out.sets);
+        out.sets.add_elements(set, ids);
     }
 }
 
@@ -1208,6 +1290,8 @@ struct Sets<'a> {
     /// Reference points fixed to the world ([`FeModel::point_grounded`]): their nodes in
     /// `reference_nodes` are held in every mechanical step where no displacement moves them.
     grounded: Vec<Id>,
+    /// The handles of the sets and surfaces by name.
+    handles: Handles,
 }
 
 /// The nodes CalculiX's `*Rigid body` adds for a reference point: the reference node takes
@@ -1252,6 +1336,7 @@ impl<'a> Sets<'a> {
             node_frames: BTreeMap::new(),
             dofs: dofs::Dofs::default(),
             grounded: Vec::new(),
+            handles: Handles::default(),
         };
         for (name, ids) in &mesh.node_sets {
             sets.node_sets.push((name.clone(), ids.clone()));
@@ -1287,6 +1372,33 @@ impl<'a> Sets<'a> {
             }
         }
         sets
+    }
+
+    /// The node set `name` as the solver model refers to it.
+    fn node_id(&mut self, name: &str) -> ir::NodeSetId {
+        self.handles.node_set(name)
+    }
+
+    fn element_id(&mut self, name: &str) -> ir::ElementSetId {
+        self.handles.element_set(name)
+    }
+
+    fn surface_id(&mut self, name: &str) -> ir::SurfaceId {
+        self.handles.surface(name)
+    }
+
+    /// The node set of a region as the solver model refers to it.
+    fn region_ref(&mut self, item: &str, region: &Region) -> Result<NodeRef, WriteError> {
+        let set = self.node_set(item, region)?;
+        Ok(self.node_ref(&set))
+    }
+
+    fn node_ref(&mut self, name: &str) -> NodeRef {
+        NodeRef::Set(self.node_id(name))
+    }
+
+    fn element_ref(&mut self, name: &str) -> ElementRef {
+        ElementRef::Set(self.element_id(name))
     }
 
     /// `name` itself if it is free, otherwise the next free `<name>-<n>`.
@@ -1959,13 +2071,13 @@ fn initial_conditions(
                     }
                     None => {
                         let set = sets.node_set(&condition.name, &condition.region)?;
-                        out.temperatures.push((node_set_ref(&set), t));
+                        out.temperatures.push((sets.node_ref(&set), t));
                     }
                 }
             }
             InitialConditionKind::Velocity(v) => {
                 let set = sets.node_set(&condition.name, &condition.region)?;
-                velocities(&mut out, node_set_ref(&set), v);
+                velocities(&mut out, sets.node_ref(&set), v);
             }
             InitialConditionKind::AngularVelocity { .. } => {
                 let nodes = condition.region.nodes(sets.mesh);
@@ -2039,7 +2151,7 @@ fn sections(
                     ir::OrientationId::at(orientations.len() - 1)
                 });
                 out.push(IrSection {
-                    elset: ir_name(&set),
+                    elset: sets.element_id(&set),
                     kind: Kind::Solid {
                         material,
                         thickness,
@@ -2122,7 +2234,7 @@ fn sections(
                     };
                     materials.push(printed);
                     out.push(IrSection {
-                        elset: ir_name(&set),
+                        elset: sets.element_id(&set),
                         kind: Kind::Solid {
                             material: ir::MaterialId::at(materials.len() - 1),
                             thickness: None,
@@ -2134,7 +2246,7 @@ fn sections(
             SectionKind::Truss { area } => {
                 let set = sets.element_set(&section.name, &section.region)?;
                 out.push(IrSection {
-                    elset: ir_name(&set),
+                    elset: sets.element_id(&set),
                     kind: Kind::Solid {
                         material,
                         orientation: None,
@@ -2145,7 +2257,7 @@ fn sections(
             &SectionKind::Shell { thickness, offset } => {
                 let set = sets.element_set(&section.name, &section.region)?;
                 out.push(IrSection {
-                    elset: ir_name(&set),
+                    elset: sets.element_id(&set),
                     kind: Kind::Shell {
                         material,
                         thickness,
@@ -2157,7 +2269,7 @@ fn sections(
             &SectionKind::Membrane { thickness, offset } => {
                 let set = sets.element_set(&section.name, &section.region)?;
                 out.push(IrSection {
-                    elset: ir_name(&set),
+                    elset: sets.element_id(&set),
                     kind: Kind::Membrane {
                         material,
                         thickness,
@@ -2181,7 +2293,7 @@ fn sections(
                         comments.push((ir_name(&set), profile_comment(&profile, drawn)));
                     }
                     out.push(IrSection {
-                        elset: ir_name(&set),
+                        elset: sets.element_id(&set),
                         kind: Kind::Beam {
                             material,
                             profile: if half {
@@ -2275,7 +2387,10 @@ fn halved_profile(profile: &ir::section::BeamProfile) -> ir::section::BeamProfil
 }
 
 /// The section of generated spring and gap elements.
-fn generated_section(section: &constraints::GeneratedSection) -> ir::section::Section {
+fn generated_section(
+    sets: &mut Sets,
+    section: &constraints::GeneratedSection,
+) -> ir::section::Section {
     use ir::section::{Gap, SectionKind as Kind, Spring, SpringStiffness};
     match section {
         constraints::GeneratedSection::Spring {
@@ -2284,7 +2399,7 @@ fn generated_section(section: &constraints::GeneratedSection) -> ir::section::Se
             stiffness,
             stabilize,
         } => ir::section::Section {
-            elset: ir_name(elset),
+            elset: sets.element_id(elset),
             kind: Kind::Spring(Spring {
                 dof1: dofs[0],
                 dof2: *dofs.get(1).unwrap_or(&dofs[0]),
@@ -2300,7 +2415,7 @@ fn generated_section(section: &constraints::GeneratedSection) -> ir::section::Se
             properties,
             ..
         } => ir::section::Section {
-            elset: ir_name(elset),
+            elset: sets.element_id(elset),
             kind: Kind::Gap(Gap {
                 clearance: *clearance,
                 direction: *direction,
@@ -2498,7 +2613,7 @@ fn constraints(
             let set = sets.free_name("Internal_Selection", &name(&mass.name));
             sets.element_sets
                 .push((set.clone(), Members::Ids(elements)));
-            ir_name(&set)
+            sets.element_id(&set)
         });
         let label = name(&nodes.name);
         let named = match sets.point_mass_names.get(&mass.reference_point) {
@@ -2515,7 +2630,7 @@ fn constraints(
             mass: mass.mass,
             inertia,
             elset,
-            name: Some(ir_name(&named)),
+            name: Some(sets.element_id(&named)),
         }));
         owners.push(Some(ModelItem::Constraint(index)));
     }
@@ -2897,7 +3012,8 @@ fn tie(sets: &mut Sets, tie: &Tie) -> Result<ConstraintItem, WriteError> {
                 } else {
                     1
                 },
-                tie: tie_name.clone(),
+                // Set when the tie takes its place.
+                tie: ir::TieId(u32::MAX),
                 axis: [[x, y, z], [x + dx, y + dy, z + dz]],
                 elset: None,
                 check: true,
@@ -2908,8 +3024,8 @@ fn tie(sets: &mut Sets, tie: &Tie) -> Result<ConstraintItem, WriteError> {
     Ok(ConstraintItem::Tie(
         ir::constraints::Tie {
             name: tie_name,
-            slave: ir_name(&slave),
-            master: ir_name(&master),
+            slave: sets.surface_id(&slave),
+            master: sets.surface_id(&master),
             position_tolerance: tie.position_tolerance,
             adjust: tie.adjust,
             cyclic_symmetry: tie.cyclic.is_some(),
@@ -3285,13 +3401,13 @@ fn contact_pairs(
             kind,
             small_sliding: pair.method == ContactMethod::NodeToSurface && pair.small_sliding,
             adjust: (pair.adjust).then(|| c::Adjust::Distance(pair.adjustment_size.unwrap_or(0.0))),
-            slave: ir_name(&slave),
-            master: ir_name(&master),
+            slave: sets.surface_id(&slave),
+            master: sets.surface_id(&master),
         });
         if let Some(value) = pair.clearance {
             clearances.push(c::Clearance {
-                master: ir_name(&master),
-                slave: ir_name(&slave),
+                master: sets.surface_id(&master),
+                slave: sets.surface_id(&slave),
                 value,
             });
         }
@@ -3498,7 +3614,7 @@ fn complex_frequency_blocks(
     let rotation = Card::Dload {
         op_new: false,
         items: vec![dload(
-            element_set_ref(&set),
+            sets.element_ref(&set),
             ir::step::DistributedLoadKind::Centrifugal {
                 omega_squared: settings.speed * settings.speed,
                 point,
@@ -3696,7 +3812,7 @@ fn rigid_body(
         sets.node_set(item, &Region::Nodes(kept))?
     };
     items.push(ConstraintItem::RigidBody(ir::constraints::RigidBody {
-        nodes: ir::constraints::RigidBodyNodes::NodeSet(ir_name(&set)),
+        nodes: ir::constraints::RigidBodyNodes::NodeSet(sets.node_id(&set)),
         reference_node: reference,
         rotation_node: rotation,
     }));
@@ -3852,9 +3968,7 @@ fn follower(
             ir::step::Follower::Rotation(sets.reference_nodes(&load.name, point)?.rotation)
         }
         (None, Some(set)) => ir::step::Follower::Nodes(set.clone()),
-        (None, None) => {
-            ir::step::Follower::Nodes(node_set_ref(&sets.node_set(&load.name, &load.region)?))
-        }
+        (None, None) => ir::step::Follower::Nodes(sets.region_ref(&load.name, &load.region)?),
     }))
 }
 
@@ -3870,7 +3984,7 @@ fn moving_system_follower(
     };
     let name = model.system_name(system);
     let set = sets.node_set(&name, region)?;
-    Ok(Some(ir::step::Follower::Nodes(node_set_ref(&set))))
+    Ok(Some(ir::step::Follower::Nodes(sets.node_ref(&set))))
 }
 
 fn set_follower(items: &mut [ir::step::ConcentratedLoad], follower: Option<ir::step::Follower>) {
@@ -4058,7 +4172,7 @@ fn step_block<'f>(
     {
         ir_step.nlgeom = true;
     }
-    ir_step.contact_changes = contact_changes(step, model, pair_surfaces);
+    ir_step.contact_changes = contact_changes(sets, step, model, pair_surfaces);
     // A modal step keeps the supports of the frequency step that stored the modes;
     // The solver refuses new ones ("in a modal dynamic step new SPCs are not allowed"), and
     // the reset would make the same supports new. Giving them again is accepted.
@@ -4203,7 +4317,7 @@ fn step_block<'f>(
                 sets.node_set(&bc.name, &region)?
             }
         };
-        let target = node_set_ref(&set);
+        let target = sets.node_ref(&set);
         // The rotations of a rigid body are the displacements of its rotation node.
         let rotation_node = match bc.region.reference_point() {
             Some(point) => Some(sets.reference_nodes(&bc.name, point)?.rotation),
@@ -4430,7 +4544,7 @@ fn step_block<'f>(
                         let nodes = sets.reference_nodes(&load.name, point)?;
                         (NodeRef::Node(nodes.rotation), 1)
                     }
-                    None => (node_set_ref(&sets.node_set(&load.name, &load.region)?), 4),
+                    None => (sets.region_ref(&load.name, &load.region)?, 4),
                 };
                 let (moment, component_amplitudes) = load_components(
                     step,
@@ -4540,7 +4654,7 @@ fn step_block<'f>(
                                 face,
                                 value: pressure,
                             };
-                            items.push(dload(element_set_ref(&set), kind, &amplitude));
+                            items.push(dload(sets.element_ref(&set), kind, &amplitude));
                         }
                     }
                 }
@@ -4615,7 +4729,7 @@ fn step_block<'f>(
                         Some(_) => 1,
                         None => load.region.nodes(sets.mesh).len(),
                     };
-                    let target = node_set_ref(&sets.node_set(&load.name, &load.region)?);
+                    let target = sets.region_ref(&load.name, &load.region)?;
                     region_set = Some(target.clone());
                     for (target, position) in component_positions(model, sets, load, &target)? {
                         let force = global_components(model, load, position, force)?;
@@ -4674,7 +4788,7 @@ fn step_block<'f>(
                     };
                     let set = sets.node_set(&load.name, &load.region)?;
                     vec![ir::step::ConcentratedFlux {
-                        region: node_set_ref(&set),
+                        region: sets.node_ref(&set),
                         value: flux / count as f64,
                         amplitude,
                     }]
@@ -4708,7 +4822,7 @@ fn step_block<'f>(
             LoadKind::Film { sink, coefficient } => {
                 let items = (sets.face_sets(&load.name, &load.region)?.into_iter())
                     .map(|(set, face)| ir::step::Film {
-                        region: element_set_ref(&set),
+                        region: sets.element_ref(&set),
                         face,
                         sink_temperature: sink,
                         coefficient,
@@ -4724,7 +4838,7 @@ fn step_block<'f>(
             LoadKind::Radiation { sink, emissivity } => {
                 let items = (sets.face_sets(&load.name, &load.region)?.into_iter())
                     .map(|(set, face)| ir::step::Radiate {
-                        region: element_set_ref(&set),
+                        region: sets.element_ref(&set),
                         face,
                         cavity: false,
                         sink_temperature: sink,
@@ -4754,7 +4868,7 @@ fn step_block<'f>(
                 };
                 vec![Card::Dload {
                     op_new: false,
-                    items: vec![dload(element_set_ref(&set), kind, &amplitude)],
+                    items: vec![dload(sets.element_ref(&set), kind, &amplitude)],
                 }]
             }
             // Centrifugal load: the square of the rotational speed, a point on
@@ -4774,7 +4888,7 @@ fn step_block<'f>(
                 };
                 vec![Card::Dload {
                     op_new: false,
-                    items: vec![dload(element_set_ref(&set), kind, &amplitude)],
+                    items: vec![dload(sets.element_ref(&set), kind, &amplitude)],
                 }]
             }
         };
@@ -4793,7 +4907,8 @@ fn step_block<'f>(
     // The force of a bolt is the reaction of its pre-tension node, also while it is locked,
     // and its shortening the node's displacement: shown under the name of the load.
     for load in step.loads.iter().filter(|l| l.active) {
-        if let Some(set) = sets.pre_tension_sets.get(&load.name) {
+        if let Some(set) = sets.pre_tension_sets.get(&load.name).cloned() {
+            let set = Some(ir::step::HistorySet::Nodes(sets.node_id(&set)));
             rest.push(Card::NodePrint(node_print(set, &["RF", "U"], Totals::No)));
         }
     }
@@ -4810,6 +4925,7 @@ fn step_block<'f>(
 /// stick slope of the interaction. Changes of pairs not lowered, deactivated or unknown,
 /// are left out.
 fn contact_changes(
+    sets: &mut Sets,
     step: &Step,
     model: &FeModel,
     pair_surfaces: &PairSurfaces,
@@ -4822,8 +4938,8 @@ fn contact_changes(
         if let Some(add) = change.active {
             changes.push(ir::step::ContactChange::ContactPair {
                 add,
-                slave: ir_name(slave),
-                master: ir_name(master),
+                slave: sets.surface_id(slave),
+                master: sets.surface_id(master),
             });
         }
         let pair = model.contact_pair(change.region);
@@ -4899,7 +5015,7 @@ fn defined_fields(
                     }
                     None => {
                         let set = sets.node_set(&field.name, &field.region)?;
-                        vec![(node_set_ref(&set), *t)]
+                        vec![(sets.node_ref(&set), *t)]
                     }
                 };
                 ir::step::DefinedField {
@@ -5147,7 +5263,8 @@ fn sensitivity_step(
     let responses = settings.responses();
     let elements = if responses.iter().any(|r| *r != "EIGENFREQUENCY") {
         let parts = sets.mesh.part_ids();
-        Some(ir_name(&sets.element_set(step, &Region::Parts(parts))?))
+        let set = sets.element_set(step, &Region::Parts(parts))?;
+        Some(sets.element_id(&set))
     } else {
         None
     };
@@ -5155,7 +5272,7 @@ fn sensitivity_step(
         .map(|response| ir::step::DesignResponse {
             name: ir_name(response),
             kind: ir_name(response),
-            elset: elements.clone(),
+            elset: elements,
             data: Vec::new(),
         })
         .collect();
@@ -5185,7 +5302,7 @@ fn design_variables(
     };
     let set = sets.node_set(&format!("{name}_Design"), region)?;
     Ok(Some(ir::model::DesignVariables {
-        nset: ir_name(&set),
+        nset: sets.node_id(&set),
     }))
 }
 
@@ -5547,9 +5664,13 @@ fn totals(totals: Totals) -> ir::step::Totals {
 }
 
 /// A nodal history output of a node set.
-fn node_print(set: &str, names: &[&str], totals_of: Totals) -> ir::step::HistoryOutput {
+fn node_print(
+    set: Option<ir::step::HistorySet>,
+    names: &[&str],
+    totals_of: Totals,
+) -> ir::step::HistoryOutput {
     ir::step::HistoryOutput {
-        set: Some(ir_name(set)),
+        set,
         variables: variables(names.iter().copied()),
         frequency: 1,
         totals: totals(totals_of),
@@ -5577,26 +5698,24 @@ fn history_output(
         }
         HistoryKind::Node { region } => {
             let set = sets.node_set(&output.name, region)?;
-            Card::NodePrint(node_print(&set, &names, output.totals))
+            let set = Some(ir::step::HistorySet::Nodes(sets.node_id(&set)));
+            Card::NodePrint(node_print(set, &names, output.totals))
         }
         HistoryKind::Energies => {
             // Sums over the whole model, printed under a set of all elements.
             let parts = sets.mesh.part_ids();
             let set = sets.element_set(&output.name, &Region::Parts(parts))?;
-            let mut request = node_print(&set, &names, Totals::Only);
-            request.set = Some(ir_name(&set));
-            Card::ElPrint(request)
+            let set = Some(ir::step::HistorySet::Elements(sets.element_id(&set)));
+            Card::ElPrint(node_print(set, &names, Totals::Only))
         }
         HistoryKind::Element { region } => {
             let set = sets.element_set(&output.name, region)?;
-            let mut request = node_print(&set, &names, output.totals);
-            request.set = Some(ir_name(&set));
-            Card::ElPrint(request)
+            let set = Some(ir::step::HistorySet::Elements(sets.element_id(&set)));
+            Card::ElPrint(node_print(set, &names, output.totals))
         }
         HistoryKind::Contact { pair } => {
             // Contact forces are summed over the slave surface of the pair.
-            let mut request = node_print("", &names, output.totals);
-            request.set = None;
+            let mut request = node_print(None, &names, output.totals);
             if output.variables.iter().any(|v| v == "CF") {
                 let (master, slave) =
                     (pair.and_then(|p| pair_surfaces.get(&p))).ok_or_else(|| {
@@ -5605,12 +5724,8 @@ fn history_output(
                             pair: pair.map_or_else(|| "(none)".into(), |p| p.to_string()),
                         }
                     })?;
-                let master = if master.is_empty() {
-                    String::new()
-                } else {
-                    ir_name(master)
-                };
-                request.surfaces = Some((ir_name(slave), master));
+                let master = (!master.is_empty()).then(|| sets.surface_id(master));
+                request.surfaces = Some((sets.surface_id(slave), master));
             }
             Card::ContactPrint(request)
         }
@@ -5703,14 +5818,20 @@ fn point_output(
     }
     let set = sets.free_name("Internal_Selection", &name(&output.name));
     sets.node_sets.push((set.clone(), vec![reference]));
-    let mut cards = vec![Card::NodePrint(node_print(&set, &printed, output.totals))];
+    let printed_set = Some(ir::step::HistorySet::Nodes(sets.node_id(&set)));
+    let mut cards = vec![Card::NodePrint(node_print(
+        printed_set,
+        &printed,
+        output.totals,
+    ))];
     let turning: Vec<&str> = (printed.iter().copied())
         .filter(|v| ["RF", "U", "V"].contains(v))
         .collect();
     if !turning.is_empty() {
         let set = sets.free_name("Internal_Rotation", &name(&output.name));
         sets.node_sets.push((set.clone(), vec![rotation]));
-        cards.push(Card::NodePrint(node_print(&set, &turning, output.totals)));
+        let set = Some(ir::step::HistorySet::Nodes(sets.node_id(&set)));
+        cards.push(Card::NodePrint(node_print(set, &turning, output.totals)));
     }
     Ok(cards)
 }

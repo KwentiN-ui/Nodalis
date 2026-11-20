@@ -2150,7 +2150,7 @@ impl Procedure for ExplicitDynamic {
         let carried_nodal = carried
             .as_ref()
             .map(|e| nodal_average_scalar(ctx.table, ctx.model, e));
-        let requests = energy_requests(step);
+        let requests = energy_requests(ctx.model, step);
 
         // Under NLGEOM the shortest distances in the elements watch the time step: the
         // frequencies are computed again when one has changed by 5 %, or after
