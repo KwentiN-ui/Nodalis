@@ -62,6 +62,8 @@ pub enum JobStatus {
     FailedWithResults,
     Failed,
     Killed,
+    /// Stopped by the user, who kept the results of the increments done until then.
+    StoppedWithResults,
 }
 
 /// One line of the `.sta` file: the last increment the solver finished.
@@ -143,6 +145,13 @@ pub struct Run {
     awake: Option<awake::Guard>,
     /// How the run converges, as it goes on.
     convergence: monitor::LiveLog,
+    /// The increments the solver finished, as it goes on.
+    increments_done: Arc<std::sync::atomic::AtomicU32>,
+    /// Whether a stopped run's results are dropped: they are unless the run was stopped
+    /// with [`Run::stop_keeping_results`].
+    discard: Arc<std::sync::atomic::AtomicBool>,
+    /// Stopped with [`Run::stop_keeping_results`]: the run writes what it has, then ends.
+    stopping: bool,
 }
 
 /// An analysis lowered from the model for the solver, which validates it first.
@@ -487,6 +496,10 @@ impl Run {
         let results_file = work_dir.join(format!("{name}.{}", plx_results::solver::EXTENSION));
         let diagnostics = Arc::new(Mutex::new(None));
         let found = Arc::clone(&diagnostics);
+        let increments_done = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let done = Arc::clone(&increments_done);
+        let discard = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let dropping = Arc::clone(&discard);
         let handle = std::thread::Builder::new()
             .name(format!("plxs {name}"))
             .spawn(move || {
@@ -494,6 +507,9 @@ impl Run {
                 // How the increments went, kept with the results.
                 let mut track = Convergence::default();
                 let mut progress = |event: ProgressEvent| {
+                    if let ProgressEvent::IncrementDone { .. } = event {
+                        done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     track.event(&event);
                     log.lock().event(&event);
                     for line in plxs_session::format_event(&event) {
@@ -537,10 +553,13 @@ impl Run {
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     job.run(&input_path, &options, &mut progress, &mut kept)
                 }));
-                // The results so far, also of a step that did not converge; a stopped run's are
+                // The results so far, also of a step that did not converge; a killed run's are
                 // discarded (nobody waits for them, and a new run of the same name may
-                // already be writing its own file).
-                if let Some(kept) = kept.filter(|_| !options.cancel.is_cancelled()) {
+                // already be writing its own file). A run stopped keeping its results is
+                // waited for and writes them.
+                let dropped = options.cancel.is_cancelled()
+                    && dropping.load(std::sync::atomic::Ordering::Acquire);
+                if let Some(kept) = kept.filter(|_| !dropped) {
                     let mut results = SolverResults::new(&kept.model, kept.results, VERSION);
                     results.steps = records;
                     let failed = !matches!(run, Ok(Ok(plxs_session::JobOutcome::Finished)));
@@ -646,6 +665,9 @@ impl Run {
             profile,
             awake: Some(awake::Guard::new()),
             convergence,
+            increments_done,
+            discard,
+            stopping: false,
         })
     }
 
@@ -710,12 +732,40 @@ impl Run {
     /// caller (the GUI) never blocks on a long factorization.
     pub fn kill(&mut self) {
         if self.status == JobStatus::Running {
+            self.discard
+                .store(true, std::sync::atomic::Ordering::Release);
             self.cancel.cancel();
             // Detached: the thread holds only shared buffers, which outlive the run.
             self.handle.take();
             self.status = JobStatus::Killed;
             self.awake = None;
         }
+    }
+
+    /// Stops the solver and keeps what it computed: the increments done until now are
+    /// written as results, those of a step stopped halfway marked as not finished. The run
+    /// goes on running until the solver sees the stop (as for [`Run::kill`]) and has
+    /// written them; it then ends as [`JobStatus::StoppedWithResults`], or
+    /// [`JobStatus::Killed`] when there was nothing to write.
+    pub fn stop_keeping_results(&mut self) {
+        if self.status == JobStatus::Running && !self.stopping {
+            self.discard
+                .store(false, std::sync::atomic::Ordering::Release);
+            self.stopping = true;
+            self.cancel.cancel();
+        }
+    }
+
+    /// Whether the run was stopped with [`Run::stop_keeping_results`] and writes its results.
+    pub fn is_stopping(&self) -> bool {
+        self.stopping && self.status == JobStatus::Running
+    }
+
+    /// The increments the solver finished so far: a stopped run with some has results to
+    /// keep.
+    pub fn increments_done(&self) -> u32 {
+        self.increments_done
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Output lines written since the last call.
@@ -786,6 +836,7 @@ impl Run {
             return;
         }
         self.status = match (finished, results) {
+            (Finished::Cancelled, true) if self.stopping => JobStatus::StoppedWithResults,
             (Finished::Cancelled, _) => JobStatus::Killed,
             (Finished::Done, true) => JobStatus::Completed,
             (Finished::Done, false) => JobStatus::Failed,
@@ -1170,6 +1221,38 @@ S
         // What the stopped run computed is discarded.
         assert!(run.solver_results().is_none());
         assert!(run.results().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stop_keeping_results_writes_the_increments_done() {
+        let dir = std::env::temp_dir().join(format!("plx-solve-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Many fixed increments, so that the stop comes in the middle of the step.
+        let input = large_cube(6).replace(
+            "*STEP\n*STATIC\n",
+            "*STEP, NLGEOM, INC=100000\n*STATIC, DIRECT\n0.0001, 1\n",
+        );
+        let mut run = Run::start(1, &dir, "Keep", &input).unwrap();
+        let started = std::time::Instant::now();
+        while run.increments_done() < 2 {
+            assert_eq!(run.poll(), JobStatus::Running, "{:?}", run.new_output());
+            assert!(started.elapsed().as_secs() < 300, "no increment done");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        run.stop_keeping_results();
+        assert!(run.is_stopping());
+        let status = run.wait();
+        let output = run.new_output();
+        assert_eq!(status, JobStatus::StoppedWithResults, "{output:#?}");
+        assert!(!run.is_stopping());
+        let results = run.solver_results().expect("results kept");
+        // Without frames asked for, the fields of every increment done are written.
+        let done = results.results.increments.len();
+        assert!((2..10_000).contains(&done), "{done} increments");
+        // The step stopped halfway is marked as not finished.
+        assert_eq!(results.unconverged_step, Some(1));
+        assert!(run.results().is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

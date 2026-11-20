@@ -226,6 +226,10 @@ impl Run {
             profile: plxs_session::ProfileSink::default(),
             awake: None,
             convergence: monitor::LiveLog::new(monitor::ConvergenceLog::new(Vec::new())),
+            // A stopped particle run keeps nothing.
+            increments_done: Default::default(),
+            discard: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            stopping: false,
         })
     }
 
@@ -618,6 +622,10 @@ impl Run {
             profile: plxs_session::ProfileSink::default(),
             awake: Some(crate::awake::Guard::new()),
             convergence,
+            // A stopped particle run keeps nothing.
+            increments_done: Default::default(),
+            discard: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            stopping: false,
         })
     }
 }
