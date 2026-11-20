@@ -23,7 +23,7 @@
 //! within [`AUTOMATIC_MAX_ITERATIONS`] (an indefinite tangent near a limit point, a
 //! mechanism held only by contact, a badly conditioned model) goes direct.
 
-use plxs_core::step::{EquationSolver, SolverMode};
+use plxs_core::step::SolverMode;
 use plxs_core::{Error, Progress, ProgressEvent, Result};
 use std::sync::Arc;
 
@@ -125,8 +125,8 @@ pub struct Equations {
 }
 
 impl Equations {
-    pub fn new(choice: EquationSolver) -> Self {
-        let mode = choice.mode();
+    pub fn new(choice: SolverMode) -> Self {
+        let mode = choice;
         Self {
             mode,
             iterative: match mode {
@@ -937,7 +937,7 @@ mod tests {
     #[test]
     fn a_kept_factor_solves_the_current_matrix() {
         let n = 200;
-        let mut equations = Equations::new(EquationSolver::Spooles).keeping_factors();
+        let mut equations = Equations::new(SolverMode::Direct).keeping_factors();
         let mut direct = LdltSolver::new(1);
         let (kept, relative) = solve_keeping(&mut equations, &mut direct, &chain(n, 2.0));
         assert!(!kept && relative < 1e-9);
@@ -954,7 +954,7 @@ mod tests {
     #[test]
     fn an_indefinite_matrix_is_factorized_instead_of_iterated_on_a_kept_factor() {
         let n = 50;
-        let mut equations = Equations::new(EquationSolver::Spooles).keeping_factors();
+        let mut equations = Equations::new(SolverMode::Direct).keeping_factors();
         let mut direct = LdltSolver::new(1);
         solve_keeping(&mut equations, &mut direct, &chain(n, 2.0));
         // Conjugate gradients stop at the negative curvature; the factorization of the
@@ -969,17 +969,17 @@ mod tests {
     #[test]
     fn automatic_is_iterative_for_large_systems_of_translations() {
         let k = chain(200, 1.0);
-        let mut equations = Equations::new(EquationSolver::Default);
+        let mut equations = Equations::new(SolverMode::Automatic);
         equations.set_automatic_limits(10, 1 << 30);
         let x = solve(&mut equations, &k);
         assert!(equations.is_iterative());
-        let mut direct = Equations::new(EquationSolver::Pastix);
+        let mut direct = Equations::new(SolverMode::Direct);
         let reference = solve(&mut direct, &k);
         for (a, b) in x.iter().zip(&reference) {
             assert!((a - b).abs() <= 1e-8 * b.abs().max(1.0));
         }
         // Small systems do not even estimate.
-        let mut equations = Equations::new(EquationSolver::Default);
+        let mut equations = Equations::new(SolverMode::Automatic);
         equations.set_automatic_limits(1000, 0);
         solve(&mut equations, &k);
         assert!(!equations.is_iterative());
@@ -988,12 +988,12 @@ mod tests {
     #[test]
     fn automatic_is_direct_while_the_factor_fits_when_direct_is_preferred() {
         let k = chain(200, 1.0);
-        let mut equations = Equations::new(EquationSolver::Default).preferring_direct();
+        let mut equations = Equations::new(SolverMode::Automatic).preferring_direct();
         equations.set_automatic_limits(10, 1 << 30);
         solve(&mut equations, &k);
         assert!(!equations.is_iterative());
         // Unless the factor does not fit.
-        let mut equations = Equations::new(EquationSolver::Default).preferring_direct();
+        let mut equations = Equations::new(SolverMode::Automatic).preferring_direct();
         equations.set_automatic_limits(10, 100);
         solve(&mut equations, &k);
         assert!(equations.is_iterative());
@@ -1005,17 +1005,17 @@ mod tests {
         let k = chain(200, 1.0);
         let mut model = plxs_core::Model::default();
         model.expanded_structure = true;
-        let mut equations = Equations::new(EquationSolver::Default).for_model(&model);
+        let mut equations = Equations::new(SolverMode::Automatic).for_model(&model);
         equations.set_automatic_limits(10, 1 << 30);
         solve(&mut equations, &k);
         assert!(!equations.is_iterative());
-        let mut equations = Equations::new(EquationSolver::Default).for_model(&model);
+        let mut equations = Equations::new(SolverMode::Automatic).for_model(&model);
         equations.set_automatic_limits(10, 100);
         solve(&mut equations, &k);
         assert!(equations.is_iterative());
         // A solid model goes iterative.
         let mut equations =
-            Equations::new(EquationSolver::Default).for_model(&plxs_core::Model::default());
+            Equations::new(SolverMode::Automatic).for_model(&plxs_core::Model::default());
         equations.set_automatic_limits(10, 1 << 30);
         solve(&mut equations, &k);
         assert!(equations.is_iterative());
@@ -1026,7 +1026,7 @@ mod tests {
         // Six unknowns per node (shells, beams): the memory decides, and it fits.
         let n = 198;
         let k = chain(n, 1.0);
-        let mut equations = Equations::new(EquationSolver::Default);
+        let mut equations = Equations::new(SolverMode::Automatic);
         equations.set_automatic_limits(10, 1 << 30);
         let mut direct = LdltSolver::new(1);
         let unknowns = || {
@@ -1043,11 +1043,11 @@ mod tests {
     #[test]
     fn automatic_goes_iterative_when_the_factor_does_not_fit() {
         let k = chain(200, 1.0);
-        let mut equations = Equations::new(EquationSolver::Default);
+        let mut equations = Equations::new(SolverMode::Automatic);
         equations.set_automatic_limits(10, 100);
         let x = solve(&mut equations, &k);
         assert!(equations.is_iterative());
-        let mut direct = Equations::new(EquationSolver::Pastix);
+        let mut direct = Equations::new(SolverMode::Direct);
         let reference = solve(&mut direct, &k);
         for (a, b) in x.iter().zip(&reference) {
             assert!((a - b).abs() <= 1e-8 * b.abs().max(1.0));
@@ -1058,12 +1058,12 @@ mod tests {
     fn automatic_falls_back_to_direct_on_an_indefinite_matrix() {
         // Positive diagonal (the preconditioner builds), but indefinite: CG breaks down.
         let k = chain(200, 0.2);
-        let mut equations = Equations::new(EquationSolver::Default);
+        let mut equations = Equations::new(SolverMode::Automatic);
         equations.set_automatic_limits(10, 1 << 30);
         solve(&mut equations, &k);
         assert!(!equations.is_iterative());
         // Unless the factor does not fit: then the failure says so.
-        let mut equations = Equations::new(EquationSolver::Default);
+        let mut equations = Equations::new(SolverMode::Automatic);
         equations.set_automatic_limits(10, 100);
         let mut direct = LdltSolver::new(1);
         equations
@@ -1076,7 +1076,7 @@ mod tests {
         assert!(error.to_string().contains("does not fit"), "{error}");
         assert!(equations.is_iterative());
         // Asked for explicitly, the iterative solver reports the failure.
-        let mut iterative = Equations::new(EquationSolver::IterativeCholesky);
+        let mut iterative = Equations::new(SolverMode::Iterative);
         let mut direct = LdltSolver::new(1);
         iterative
             .prepare(&mut direct, &k, coordinates(200), true, &mut NoProgress)
@@ -1095,7 +1095,7 @@ mod tests {
         // model): the inner iteration stops at a few digits, GMRES gets all of them.
         let n = 400;
         let k = chain(n, 1.0);
-        let mut equations = Equations::new(EquationSolver::Default);
+        let mut equations = Equations::new(SolverMode::Automatic);
         equations.set_automatic_limits(10, 100);
         let mut direct = LdltSolver::new(1);
         equations
@@ -1180,8 +1180,8 @@ mod tests {
             assert!(!equations.is_iterative());
             direct.factor_nonzeros().unwrap()
         };
-        let taken_over = factor(Equations::new(EquationSolver::Default));
-        let direct = factor(Equations::new(EquationSolver::Pastix));
+        let taken_over = factor(Equations::new(SolverMode::Automatic));
+        let direct = factor(Equations::new(SolverMode::Direct));
         assert_eq!(taken_over, direct);
     }
 }

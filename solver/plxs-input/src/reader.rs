@@ -27,11 +27,11 @@ use plxs_core::section::{BeamProfile, Gap, Section, SectionKind, Spring, SpringS
 use plxs_core::step::{
     Boundary, Buckle, ComplexFrequency, ConcentratedFlux, ConcentratedLoad, ContactChange,
     Controls, CyclicModes, DampingRatio, DefaultAmplitude, DefinedField, DefinedFieldKind,
-    DesignResponse, DistributedFlux, DistributedLoad, DistributedLoadKind, Dynamic, EquationSolver,
-    ExplicitControls, FieldOutput, Film, Filter, FluxKind, Follower, Frequency, HeatTransfer,
-    HistoryOutput, HistorySet, Incrementation, Integration, ModalDamping, ModalDynamics,
-    OutputDimension, Procedure, Radiate, Rayleigh, RestartWrite, Sensitivity, Static,
-    SteadyStateDynamics, Step, Totals, Visco,
+    DesignResponse, DesignResponseKind, DistributedFlux, DistributedLoad, DistributedLoadKind,
+    Dynamic, ExplicitControls, FieldOutput, Film, Filter, FluxKind, Follower, Frequency,
+    HeatTransfer, HistoryOutput, HistorySet, Incrementation, Integration, ModalDamping,
+    ModalDynamics, OutputDimension, Procedure, Radiate, Rayleigh, RestartWrite, Sensitivity,
+    SolverMode, Static, SteadyStateDynamics, Step, Totals, Visco,
 };
 use plxs_core::{Error, normalized_name};
 
@@ -2435,24 +2435,28 @@ impl Reader {
 
     fn design_response(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
         k.check_parameters(&["NAME"])?;
-        let name = k.value("NAME").map(normalized_name).unwrap_or_default();
         let Some(d) = data.first() else {
             return Err(k.error("the response is needed"));
         };
         let f = d.fields();
-        let kind = normalized_name(f[0]);
+        let kind = match normalized_name(f[0]).as_str() {
+            "MASS" => DesignResponseKind::Mass,
+            "STRAINENERGY" => DesignResponseKind::StrainEnergy,
+            "EIGENFREQUENCY" => DesignResponseKind::Eigenfrequency,
+            other => {
+                return Err(data_error(
+                    k,
+                    d,
+                    format!(
+                        "the response {other} is not supported (MASS, STRAINENERGY and \
+                         EIGENFREQUENCY are)"
+                    ),
+                ));
+            }
+        };
         let elset =
             (f.get(1).filter(|s| !s.is_empty())).map(|set| self.element_set_ref(set, &k.name, ""));
-        let mut values = Vec::new();
-        for v in f.iter().skip(2) {
-            values.push(parse_number(k, d, v)?);
-        }
-        self.current_sensitivity(k)?.responses.push(DesignResponse {
-            name,
-            kind,
-            elset,
-            data: values,
-        });
+        (self.current_sensitivity(k)?.responses).push(DesignResponse { kind, elset });
         Ok(())
     }
 
@@ -2463,12 +2467,14 @@ impl Reader {
             "EDGE PRESERVATION",
             "DIRECTION WEIGHTING",
         ])?;
-        let kind = k.value("TYPE").unwrap_or("LINEAR").to_string();
+        if let Some(kind) = k.value("TYPE").filter(|t| *t != "LINEAR") {
+            return Err(k.error(format!("TYPE={kind} is not supported (only LINEAR)")));
+        }
         let Some(d) = data.first() else {
             return Err(k.error("the radius is needed"));
         };
         let radius = numbers(k, d)?.first().copied().unwrap_or(0.0);
-        self.current_sensitivity(k)?.filter = Some(Filter { kind, radius });
+        self.current_sensitivity(k)?.filter = Some(Filter { radius });
         Ok(())
     }
 
@@ -2658,8 +2664,14 @@ impl Reader {
                         point: [values[1], values[2], values[3]],
                         axis: [values[4], values[5], values[6]],
                     }
+                } else if label == "P" {
+                    DistributedLoadKind::ShellPressure { value: values[0] }
                 } else {
-                    DistributedLoadKind::Other { label, values }
+                    return Err(data_error(
+                        k,
+                        d,
+                        format!("the load label {label} is not supported"),
+                    ));
                 };
             new.push(DistributedLoad {
                 region: self.element_ref(f[0], &k.name),
@@ -3142,14 +3154,11 @@ fn parse_face_label(k: &Keyword, d: &Data<'_>, text: &str, prefix: char) -> Resu
         .ok_or_else(|| data_error(k, d, format!("{text} is not a face label")))
 }
 
-fn solver(k: &Keyword) -> Result<EquationSolver, Error> {
+fn solver(k: &Keyword) -> Result<SolverMode, Error> {
     Ok(match k.value("SOLVER") {
-        None => EquationSolver::Default,
-        Some("SPOOLES") => EquationSolver::Spooles,
-        Some("PASTIX") => EquationSolver::Pastix,
-        Some("PARDISO") => EquationSolver::Pardiso,
-        Some("ITERATIVESCALING") => EquationSolver::IterativeScaling,
-        Some("ITERATIVECHOLESKY") => EquationSolver::IterativeCholesky,
+        None => SolverMode::Automatic,
+        Some("SPOOLES" | "PASTIX" | "PARDISO") => SolverMode::Direct,
+        Some("ITERATIVESCALING" | "ITERATIVECHOLESKY") => SolverMode::Iterative,
         Some(other) => return Err(k.error(format!("SOLVER={other} is not supported"))),
     })
 }

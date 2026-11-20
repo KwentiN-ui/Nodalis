@@ -111,8 +111,14 @@ killed. A step it cannot compute yet is reported when the analysis runs (@model-
 #fields(
   [Library], [Path to the Gmsh library (`libgmsh.so` or `gmsh-4.15.dll`). Empty means: next to
     the program, then the system path. A changed library is loaded after a restart.],
+  [Meshing processes], [The most Gmsh processes that mesh the parts of an assembly at the same
+    time (@parallel-meshing). #ui("Automatic") (default) takes one per processor core; with it
+    off, the number is entered. Each process needs memory of its own: set fewer if the memory
+    runs out while a large assembly is meshed. It applies to the next meshing.],
   [Test Gmsh], [Loads Gmsh and meshes a cube.],
 )
+
+#screenshot("settings-gmsh.png", [The Gmsh page of the settings])
 
 === Updates
 

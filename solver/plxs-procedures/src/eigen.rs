@@ -30,7 +30,7 @@ use plxs_assembly::{
 use plxs_constraints::{ConstraintSet, ModelConstraints};
 use plxs_core::results::{IncrementKind, ModeKind, ResultsIncrement};
 use plxs_core::state::{IntegrationPointField, NodalField, StoredModes};
-use plxs_core::step::{EquationSolver, Procedure as ProcedureKind, SolverMode};
+use plxs_core::step::{Procedure as ProcedureKind, SolverMode};
 use plxs_core::{Error, Failure, Model, Progress, ProgressEvent, Result, Step};
 use plxs_linalg::Unknowns;
 use plxs_linalg::{LanczosOptions, ShiftInvertLanczos, SparseMatrix};
@@ -260,7 +260,7 @@ pub(crate) fn lanczos_modes(
     count: usize,
     lower: Option<f64>,
     upper: Option<f64>,
-    solver: EquationSolver,
+    solver: SolverMode,
     unknowns: Unknowns,
     progress: &mut dyn Progress,
 ) -> Result<plxs_linalg::EigenPairs> {
@@ -375,13 +375,13 @@ pub(crate) fn lanczos_modes(
 /// failure.
 fn with_eigen_solver<T>(
     lanczos: &mut ShiftInvertLanczos,
-    solver: EquationSolver,
+    solver: SolverMode,
     k: &SparseMatrix,
     definite: bool,
     progress: &mut dyn Progress,
     mut solve: impl FnMut(&mut ShiftInvertLanczos, &mut dyn Progress) -> Result<T>,
 ) -> Result<T> {
-    let iterative = match solver.mode() {
+    let iterative = match solver {
         SolverMode::Direct => false,
         SolverMode::Iterative if !definite => {
             progress.event(ProgressEvent::Warning(
@@ -401,7 +401,7 @@ fn with_eigen_solver<T>(
     lanczos.set_iterative(iterative);
     match solve(lanczos, progress) {
         Err(error @ Error::Numerical { .. })
-            if solver.mode() == SolverMode::Automatic
+            if solver == SolverMode::Automatic
                 && (iterative || (definite && plxs_linalg::is_out_of_memory(&error))) =>
         {
             let message = match &error {

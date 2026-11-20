@@ -32,7 +32,7 @@ use plx_model::{
     UnitSystem,
 };
 
-use gmsh::{Gmsh, with_gmsh};
+use gmsh::{Gmsh, with_gmsh, with_kept_shapes};
 pub use gmsh::{
     GmshError, LibraryInfo, library_path, loaded_library, log_to_terminal, meshing_step,
     set_library_path,
@@ -1416,117 +1416,128 @@ fn part_mesh(
         )));
     }
     let file = TempFile::with_contents("brep", &geometry.brep)?;
-    with_gmsh(|gmsh| {
-        // The sweeps tried in turn, for a part whose meshing parameters ask for hexahedra
-        // or whose extrude mesh names no source faces. Each attempt may take the solid out
-        // of the model, so each reads the geometry anew.
-        let chosen = geometry.extrusion(part);
-        let automatic = chosen.is_none() && geometry.finds_hexahedra(part);
-        let found = plx_model::ExtrudeMesh {
-            parts: vec![part.to_string()],
-            ..Default::default()
-        };
-        let unsourced = chosen.filter(|extrude| extrude.faces.is_empty());
-        let mut refused = Vec::new();
-        if let Some(extrude) = unsourced.or(automatic.then_some(&found)) {
-            for way in [Sweep::Stacked, Sweep::Extruded, Sweep::Revolved] {
-                if way == Sweep::Revolved && !automatic {
-                    continue;
-                }
-                let Some(volume) = solid_alone(gmsh, geometry, &file.0, part)? else {
-                    gmsh.clear()?;
-                    break;
-                };
-                let result = match way {
-                    Sweep::Stacked => {
-                        stacked::stacked_part_mesh(gmsh, geometry, part, volume, extrude, matching)?
-                    }
-                    Sweep::Extruded => {
-                        extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude, matching)?
-                    }
-                    Sweep::Revolved => revolve::revolve_part_mesh(gmsh, geometry, part, volume)?,
-                };
-                match result {
-                    Ok(mesh) => return Ok(mesh),
-                    Err(reason) => {
-                        // An extrude mesh is refused by what it was last tried as.
-                        if unsourced.is_some() && way == Sweep::Extruded {
-                            return Err(GmshError::Other(reason));
-                        }
-                        // The stack and the body of revolution say what stands against
-                        // them; the plain extrusion is a stack of one.
-                        if way != Sweep::Extruded {
-                            refused.push(reason);
-                        }
-                        gmsh.clear()?;
-                    }
-                }
-            }
-        }
-        gmsh.import_shapes(&file.0)?;
-        let volumes = gmsh.entities(3)?;
-        let Some(shape) = (parts(gmsh, geometry)?.into_iter())
-            .find(|(_, n)| n == part)
-            .map(|(shape, _)| shape)
-        else {
-            return Err(GmshError::Other(format!("The geometry has no part {part}")));
-        };
-        let volume = match shape.dim {
-            3 => shape.tags[0],
-            2 => {
-                if let Some(members) = shell_compound(gmsh, geometry, part)? {
-                    if let Some(mesh) = shell_compound_mesh(gmsh, geometry, &members, &file.0)? {
-                        return Ok(mesh);
-                    }
-                    // Not joined: each shell is meshed alone and tied to the others.
-                    gmsh.clear()?;
-                    gmsh.import_shapes(&file.0)?;
-                }
-                return shell_part_mesh(gmsh, geometry, part, &shape.tags, &file.0);
-            }
-            _ => return line_part_mesh(gmsh, geometry, part, &shape.tags),
-        };
-        // The other solids go, so that only this one is meshed.
-        let others: Vec<(i32, i32)> = (volumes.iter())
-            .filter(|&&v| v != volume)
-            .map(|&v| (3, v))
-            .collect();
-        if !others.is_empty() {
-            gmsh.remove(&others)?;
-        }
-        if let Some(extrude) = chosen {
-            return extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude, matching)?
-                .map_err(GmshError::Other);
-        }
-        let mut options = MeshOptions::of_part(geometry, part);
-        // Recombined boundary faces would make Gmsh fill the solid with pyramids next to
-        // them, which neither the solver nor the tetrahedra read here take: solids get
-        // triangles on their faces whatever the quad-dominated option says.
-        options.quads = false;
-        options.apply(gmsh)?;
-        let faces: BTreeSet<i32> = gmsh.adjacencies(3, volume)?.1.into_iter().collect();
-        size_fields(gmsh, &local_sizes(gmsh, geometry, &faces)?, 1.0)?;
-        let rotations = periodic::rotations(gmsh, matching)?;
-        let faces_list: Vec<i32> = faces.iter().copied().collect();
-        periodic::match_rotated(gmsh, 2, &faces_list, &rotations)?;
-        let flat = generate_solid(gmsh, &options, part, volume)?;
-        let order = options.order;
-        let mesh = solid_mesh(gmsh, order, &[(volume, part.to_string())])?;
-        let mut warnings = gmsh.warnings()?;
-        warnings.extend(flat);
-        // Why the part got tetrahedra although hexahedra were asked for.
-        if !refused.is_empty() {
-            let prefix = format!("{part}: ");
-            let reasons: Vec<&str> = (refused.iter())
-                .map(|reason| reason.strip_prefix(&prefix).unwrap_or(reason))
-                .collect();
-            warnings.push(format!(
-                "{part}: meshed with tetrahedra ({})",
-                reasons.join("; ")
-            ));
-        }
-        Ok(GeneratedMesh { mesh, warnings })
+    // The shapes stay in Gmsh from one part of the geometry to the next.
+    with_kept_shapes(shapes_number(&geometry.brep), |gmsh| {
+        part_mesh_in(gmsh, geometry, part, matching, &file.0)
     })
+}
+
+/// [`part_mesh`] in a Gmsh that may hold the shapes of `file`, the geometry's, already.
+fn part_mesh_in(
+    gmsh: &Gmsh,
+    geometry: &Geometry,
+    part: &str,
+    matching: &[PeriodicFaces],
+    file: &Path,
+) -> Result<GeneratedMesh, GmshError> {
+    gmsh.read_untouched(file)?;
+    let Some(shape) = (parts(gmsh, geometry)?.into_iter())
+        .find(|(_, n)| n == part)
+        .map(|(shape, _)| shape)
+    else {
+        return Err(GmshError::Other(format!("The geometry has no part {part}")));
+    };
+    // A solid is meshed in a model of its own, see [`SolidAlone`].
+    let solid = match shape.dim {
+        3 => Some(SolidAlone::of(gmsh, file, shape.tags[0])?),
+        _ => None,
+    };
+    // The sweeps tried in turn, for a part whose meshing parameters ask for hexahedra
+    // or whose extrude mesh names no source faces. Each attempt may take the solid out
+    // of the model, so each reads it anew.
+    let chosen = geometry.extrusion(part);
+    let automatic = chosen.is_none() && geometry.finds_hexahedra(part);
+    let found = plx_model::ExtrudeMesh {
+        parts: vec![part.to_string()],
+        ..Default::default()
+    };
+    let unsourced = chosen.filter(|extrude| extrude.faces.is_empty());
+    let mut refused = Vec::new();
+    if let Some(extrude) = unsourced.or(automatic.then_some(&found)) {
+        for way in [Sweep::Stacked, Sweep::Extruded, Sweep::Revolved] {
+            if way == Sweep::Revolved && !automatic {
+                continue;
+            }
+            let Some(solid) = &solid else {
+                break;
+            };
+            let volume = solid.read(gmsh)?;
+            let result = match way {
+                Sweep::Stacked => {
+                    stacked::stacked_part_mesh(gmsh, geometry, part, volume, extrude, matching)?
+                }
+                Sweep::Extruded => {
+                    extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude, matching)?
+                }
+                Sweep::Revolved => revolve::revolve_part_mesh(gmsh, geometry, part, volume)?,
+            };
+            match result {
+                Ok(mesh) => return Ok(mesh),
+                Err(reason) => {
+                    // An extrude mesh is refused by what it was last tried as.
+                    if unsourced.is_some() && way == Sweep::Extruded {
+                        return Err(GmshError::Other(reason));
+                    }
+                    // The stack and the body of revolution say what stands against
+                    // them; the plain extrusion is a stack of one.
+                    if way != Sweep::Extruded {
+                        refused.push(reason);
+                    }
+                }
+            }
+        }
+    }
+    let volume = match (&solid, shape.dim) {
+        // The solid alone, so that only it is meshed.
+        (Some(solid), _) => solid.read(gmsh)?,
+        (None, 2) => {
+            gmsh.read_untouched(file)?;
+            if let Some(members) = shell_compound(gmsh, geometry, part)? {
+                if let Some(mesh) = shell_compound_mesh(gmsh, geometry, &members, file)? {
+                    return Ok(mesh);
+                }
+                // Not joined: each shell is meshed alone and tied to the others.
+                gmsh.read_untouched(file)?;
+            }
+            return shell_part_mesh(gmsh, geometry, part, &shape.tags, file);
+        }
+        (None, _) => {
+            gmsh.read_untouched(file)?;
+            return line_part_mesh(gmsh, geometry, part, &shape.tags);
+        }
+    };
+    if let Some(extrude) = chosen {
+        return extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude, matching)?
+            .map_err(GmshError::Other);
+    }
+    let mut options = MeshOptions::of_part(geometry, part);
+    // Recombined boundary faces would make Gmsh fill the solid with pyramids next to
+    // them, which neither the solver nor the tetrahedra read here take: solids get
+    // triangles on their faces whatever the quad-dominated option says.
+    options.quads = false;
+    options.apply(gmsh)?;
+    let faces: BTreeSet<i32> = gmsh.adjacencies(3, volume)?.1.into_iter().collect();
+    size_fields(gmsh, &local_sizes(gmsh, geometry, &faces)?, 1.0)?;
+    let rotations = periodic::rotations(gmsh, matching)?;
+    let faces_list: Vec<i32> = faces.iter().copied().collect();
+    periodic::match_rotated(gmsh, 2, &faces_list, &rotations)?;
+    let flat = generate_solid(gmsh, &options, part, volume)?;
+    let order = options.order;
+    let mesh = solid_mesh(gmsh, order, &[(volume, part.to_string())])?;
+    let mut warnings = gmsh.warnings()?;
+    warnings.extend(flat);
+    // Why the part got tetrahedra although hexahedra were asked for.
+    if !refused.is_empty() {
+        let prefix = format!("{part}: ");
+        let reasons: Vec<&str> = (refused.iter())
+            .map(|reason| reason.strip_prefix(&prefix).unwrap_or(reason))
+            .collect();
+        warnings.push(format!(
+            "{part}: meshed with tetrahedra ({})",
+            reasons.join("; ")
+        ));
+    }
+    Ok(GeneratedMesh { mesh, warnings })
 }
 
 /// What the warning about flat tetrahedra says, see [`is_flat_warning`].
@@ -1595,28 +1606,135 @@ enum Sweep {
     Revolved,
 }
 
-/// Reads the geometry and leaves only the part's solid; `None` if the part is no solid.
-fn solid_alone(
-    gmsh: &Gmsh,
-    geometry: &Geometry,
-    file: &Path,
-    part: &str,
-) -> Result<Option<i32>, GmshError> {
-    gmsh.import_shapes(file)?;
-    let Some((Shape { dim: 3, tags }, _)) =
-        (parts(gmsh, geometry)?.into_iter()).find(|(_, n)| n == part)
-    else {
-        return Ok(None);
-    };
-    let volume = tags[0];
-    let others: Vec<(i32, i32)> = (gmsh.entities(3)?.into_iter())
-        .filter(|&v| v != volume)
-        .map(|v| (3, v))
-        .collect();
-    if !others.is_empty() {
-        gmsh.remove(&others)?;
+/// One solid of the geometry on its own in Gmsh, for meshing it.
+///
+/// The shapes of the whole geometry stay in Gmsh's model as they were read. The solid is
+/// written out of them to a file of its own and read into a second model, where its faces,
+/// edges and vertices get the tags they have among all shapes: local mesh sizes, the faces
+/// of cyclic symmetries and the mesh's record of where the faces lie go by these tags. Gmsh
+/// numbers what it reads in the order of the shapes, so the tags of a solid follow each
+/// other, and reading it with the count started at its first tags gives them again. Its
+/// model has nothing but the solid, as the sweeps and the mesher expect, and is small:
+/// what they do there costs the time of one part, not of the assembly.
+///
+/// Reading the whole geometry anew and removing all other solids, as before, takes about
+/// two seconds per part in an assembly of ninety; this takes hundredths. It is still done
+/// that way where the tags do not come out the same, see [`SolidAlone::of`].
+enum SolidAlone {
+    /// The solid's shapes in a file, with its tag and the first tag of its vertices, edges
+    /// and faces.
+    Written {
+        file: TempFile,
+        volume: i32,
+        first: [i32; 4],
+    },
+    /// The file of all shapes, from which the other solids are removed.
+    Removed { all: PathBuf, volume: i32 },
+}
+
+impl SolidAlone {
+    /// Writes the solid `volume` of the shapes read into `gmsh` from `all`, and checks
+    /// that it comes back with its tags: the same faces, edges and vertices, each where it
+    /// was. If not (their tags do not follow each other, as when solids share faces, or
+    /// OpenCASCADE writes them in another order), the solid is left alone the slow way.
+    fn of(gmsh: &Gmsh, all: &Path, volume: i32) -> Result<Self, GmshError> {
+        let slow = || Self::Removed {
+            all: all.to_path_buf(),
+            volume,
+        };
+        // The solid with what bounds it, down to the vertices.
+        let mut own = BTreeSet::from([(3, volume)]);
+        let mut open = vec![(3, volume)];
+        while let Some((dim, tag)) = open.pop() {
+            if dim == 0 {
+                continue;
+            }
+            for below in gmsh.adjacencies(dim, tag)?.1 {
+                if own.insert((dim - 1, below.abs())) {
+                    open.push((dim - 1, below.abs()));
+                }
+            }
+        }
+        let mut first = [volume; 4];
+        for dim in 0..3 {
+            let tags: Vec<i32> = (own.iter())
+                .filter(|&&(d, _)| d == dim)
+                .map(|&(_, tag)| tag)
+                .collect();
+            let (Some(&lowest), Some(&highest)) = (tags.first(), tags.last()) else {
+                return Ok(slow());
+            };
+            if i64::from(highest) - i64::from(lowest) + 1 != tags.len() as i64 {
+                return Ok(slow());
+            }
+            first[dim as usize] = lowest;
+        }
+        let mut boxes = Vec::with_capacity(own.len());
+        for &(dim, tag) in &own {
+            boxes.push(gmsh.entity_bounding_box(dim, tag)?);
+        }
+        let file = TempFile::new("brep");
+        gmsh.write_shapes_of(&[(3, volume)], &file.0)?;
+        gmsh.open_part_model(&file.0, first)?;
+        let read: BTreeSet<(i32, i32)> = gmsh.all_entities()?.into_iter().collect();
+        let mut same = read == own;
+        if same {
+            let (lo, hi) = gmsh.entity_bounding_box(3, volume)?;
+            let tolerance = 1e-6 * distance(lo, hi).max(f64::MIN_POSITIVE);
+            for (&(dim, tag), was) in own.iter().zip(&boxes) {
+                let is = gmsh.entity_bounding_box(dim, tag)?;
+                if distance(is.0, was.0) > tolerance || distance(is.1, was.1) > tolerance {
+                    same = false;
+                    break;
+                }
+            }
+        }
+        gmsh.close_part_model()?;
+        Ok(if same {
+            Self::Written {
+                file,
+                volume,
+                first,
+            }
+        } else {
+            slow()
+        })
     }
-    Ok(Some(volume))
+
+    /// Makes the current model hold the solid as it was read and nothing else, and returns
+    /// its tag.
+    fn read(&self, gmsh: &Gmsh) -> Result<i32, GmshError> {
+        match self {
+            Self::Written {
+                file,
+                volume,
+                first,
+            } => {
+                gmsh.open_part_model(&file.0, *first)?;
+                Ok(*volume)
+            }
+            Self::Removed { all, volume } => {
+                gmsh.clear()?;
+                gmsh.import_shapes(all)?;
+                let others: Vec<(i32, i32)> = (gmsh.entities(3)?.into_iter())
+                    .filter(|v| v != volume)
+                    .map(|v| (3, v))
+                    .collect();
+                if !others.is_empty() {
+                    gmsh.remove(&others)?;
+                }
+                Ok(*volume)
+            }
+        }
+    }
+}
+
+/// A number that stands for the shapes of a BREP file, for [`with_kept_shapes`].
+fn shapes_number(brep: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    brep.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Meshes the faces of a shell outside the solids with triangles, or mostly quadrilaterals if

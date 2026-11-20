@@ -209,7 +209,7 @@ impl DynamicProcedure {
         scheme: Scheme,
         rayleigh: plxs_core::step::Rayleigh,
         increments: &plxs_core::step::Incrementation,
-        solver: plxs_core::step::EquationSolver,
+        solver: plxs_core::step::SolverMode,
         damping_ratio: Option<plxs_core::step::DampingRatio>,
     ) -> Result<StepOutcome> {
         let n = ctx.table.dofs.len();
@@ -765,7 +765,7 @@ pub(crate) fn fit_damping(
     k: &SparseMatrix,
     m: &SparseMatrix,
     damping: plxs_core::step::DampingRatio,
-    solver: plxs_core::step::EquationSolver,
+    solver: plxs_core::step::SolverMode,
     progress: &mut dyn Progress,
 ) -> Result<plxs_core::step::Rayleigh> {
     let upper = damping.upper;

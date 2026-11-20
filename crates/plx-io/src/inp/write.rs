@@ -3,9 +3,9 @@
 //!
 //! Regions the user picked in the GUI become node sets, element sets and surfaces named
 //! as internal selections (`Internal_Selection-1_Fixed-1`), so the user never
-//! defines sets by hand. The steps are assembled with CalculiX's carry-over between them
-//! resolved ([`plxs_input::steps`]), as the solver reads an input file. An input file is
-//! the analysis rendered as text ([`plxs_input::render`]), for the export only.
+//! defines sets by hand. Every step holds what is in force during it; a step takes over
+//! from the steps before only what [`TakesOver`] says. An input file is the analysis
+//! rendered as text ([`plxs_input::render`]), for the export only.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -24,7 +24,6 @@ use plx_model::{
 use plxs_core as ir;
 use plxs_core::mesh::{ElementRef, NodeRef};
 use plxs_core::normalized_name;
-use plxs_input::steps::{Assembler, Card};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum WriteError {
@@ -360,18 +359,98 @@ pub fn write_deformed_mesh_inp(
     write_inp_whole(&deformed, &FeModel::default(), heading)
 }
 
-/// One `*STEP` of the analysis before the carry-over between the steps: its settings and
-/// its cards in the order of the input file.
+/// Boundary conditions, loads, defined fields and outputs of a step, as its items give
+/// them.
+#[derive(Clone, Debug, Default)]
+struct Content {
+    boundaries: Vec<ir::step::Boundary>,
+    loads: ir::step::Loads,
+    fields: Vec<ir::step::DefinedField>,
+    outputs: ir::step::Outputs,
+}
+
+impl Content {
+    fn boundaries(items: Vec<ir::step::Boundary>) -> Self {
+        Self {
+            boundaries: items,
+            ..Self::default()
+        }
+    }
+
+    fn cloads(items: Vec<ir::step::ConcentratedLoad>) -> Self {
+        let mut content = Self::default();
+        content.loads.concentrated = items;
+        content
+    }
+
+    fn dloads(items: Vec<ir::step::DistributedLoad>) -> Self {
+        let mut content = Self::default();
+        content.loads.distributed = items;
+        content
+    }
+
+    fn cfluxes(items: Vec<ir::step::ConcentratedFlux>) -> Self {
+        let mut content = Self::default();
+        content.loads.concentrated_flux = items;
+        content
+    }
+
+    fn films(items: Vec<ir::step::Film>) -> Self {
+        let mut content = Self::default();
+        content.loads.films = items;
+        content
+    }
+
+    fn radiations(items: Vec<ir::step::Radiate>) -> Self {
+        let mut content = Self::default();
+        content.loads.radiations = items;
+        content
+    }
+
+    /// Adds `other` after what the step has.
+    fn add(&mut self, other: Content) {
+        self.boundaries.extend(other.boundaries);
+        self.loads.append(other.loads);
+        self.fields.extend(other.fields);
+        self.outputs.append(other.outputs);
+    }
+
+    /// The step `step` with this content.
+    fn into_step(self, mut step: ir::Step) -> ir::Step {
+        step.boundaries = self.boundaries;
+        step.loads = self.loads;
+        step.fields = self.fields;
+        step.outputs = self.outputs;
+        step
+    }
+}
+
+/// What a step takes over from the steps before it, its own items added: the boundary
+/// conditions of the step before, the loads and defined fields of the last step before
+/// that was no perturbation (see [`ir::Step::handed_on`]). Everything else a step holds is
+/// its own.
+#[derive(Clone, Copy, Debug, Default)]
+struct TakesOver {
+    /// A step on stored eigenmodes keeps the supports they were computed with, and a
+    /// sensitivity step those of the state it differentiates.
+    boundaries: bool,
+    /// A step without loads of its own (frequency, sensitivity) acts about the loads of
+    /// the state before it: the centrifugal loads soften the stiffness, the sensitivity
+    /// differentiates them.
+    loads: bool,
+    /// A step without defined temperatures of its own keeps those before it.
+    fields: bool,
+}
+
+/// One step of the analysis: its settings with everything of its own, and what it takes
+/// over from the steps before.
 #[derive(Clone, Debug)]
 struct StepBlock {
-    /// The settings; boundaries, loads, fields and outputs come from the cards.
     step: ir::Step,
     /// Whether the step keeps its name; the blocks of a step with moving loads are named
     /// by their number, `Step-n`, as a step without a name.
     named: bool,
-    /// The cards of its boundary conditions, then those of everything after them.
-    boundaries: Vec<Card>,
-    cards: Vec<Card>,
+    takes_over: TakesOver,
     /// A step that only prepares the next one, such as the preload and the eigenmodes
     /// of a complex frequency step; its results are not kept.
     preparation: bool,
@@ -380,9 +459,6 @@ struct StepBlock {
 /// Everything of the analysis but the assembly of the steps.
 struct Built {
     model: ir::Model,
-    /// The cards before the first step: the boundary conditions of a first step that works
-    /// on stored modes (see [`boundaries_before_stored_modes`]).
-    model_cards: Vec<Card>,
     /// The blocks of each step of the model; none for a deactivated step.
     steps: Vec<Vec<StepBlock>>,
     resolved_overlaps: Vec<String>,
@@ -397,14 +473,11 @@ impl Built {
     /// The analysis with the steps `written` takes, by their index in the model.
     fn assemble(self, written: impl Fn(usize) -> bool) -> Lowered {
         let model = self.model;
-        let mut assembler = Assembler::new();
-        for card in self.model_cards {
-            // Boundaries outside of a step belong to the first one.
-            let _ = assembler.apply(&model, card);
-        }
-        let mut steps = Vec::new();
+        let mut steps: Vec<ir::Step> = Vec::new();
         let mut origins = self.origins;
         let mut preparation_steps = Vec::new();
+        // What the steps so far hand on to the next one.
+        let mut handed = ir::step::HandedOn::default();
         // The steps written are those of the model, in order; the others are of the
         // analyses that continue from it.
         let mut model_step = 0;
@@ -419,53 +492,36 @@ impl Built {
                 if !block.named {
                     step.name = format!("Step-{}", steps.len() + 1);
                 }
-                assembler.begin(step);
-                // A step prints the history outputs it lists and writes the results of its
-                // own, none carried over from the steps before: the model keeps one output
-                // that each step lists or not, and an eigenvalue step writes its modes only.
-                let prints = |kind: fn(&Card) -> bool| block.cards.iter().any(kind);
-                let node = prints(|c| matches!(c, Card::NodePrint(_)));
-                let element = prints(|c| matches!(c, Card::ElPrint(_)));
-                let contact = prints(|c| matches!(c, Card::ContactPrint(_)));
-                let node_file = prints(|c| matches!(c, Card::NodeFile(_)));
-                let element_file = prints(|c| matches!(c, Card::ElFile(_)));
-                let contact_file = prints(|c| matches!(c, Card::ContactFile(_)));
-                for card in block.boundaries.into_iter().chain(block.cards) {
-                    let _ = assembler.apply(&model, card);
+                let takes_over = block.takes_over;
+                if takes_over.boundaries {
+                    let own = std::mem::take(&mut step.boundaries);
+                    step.boundaries = handed.boundaries.clone();
+                    step.boundaries.extend(own);
                 }
-                let first = steps.len();
-                steps.extend(assembler.end(&model).map(|mut step| {
-                    let outputs = &mut step.outputs;
-                    for (own, list) in [
-                        (node, &mut outputs.node_print),
-                        (element, &mut outputs.el_print),
-                        (contact, &mut outputs.contact_print),
-                    ] {
-                        if !own {
-                            list.clear();
-                        }
+                if takes_over.loads {
+                    let own = std::mem::take(&mut step.loads);
+                    step.loads = handed.loads.clone();
+                    // The rotation of the step replaces the one before.
+                    if own.distributed.iter().any(|l| l.kind.is_centrifugal()) {
+                        (step.loads.distributed).retain(|l| !l.kind.is_centrifugal());
                     }
-                    for (own, list) in [
-                        (node_file, &mut outputs.node_file),
-                        (element_file, &mut outputs.el_file),
-                        (contact_file, &mut outputs.contact_file),
-                    ] {
-                        if !own {
-                            list.clear();
-                        }
-                    }
-                    step
-                }));
-                for step in first..steps.len() {
-                    origins.insert(ir::ItemRef::Step(step), ModelItem::Step(origin));
-                    if block.preparation {
-                        preparation_steps.push(step);
-                    }
+                    step.loads.append(own);
                 }
+                if takes_over.fields {
+                    let own = std::mem::take(&mut step.fields);
+                    step.fields = handed.fields.clone();
+                    step.fields.extend(own);
+                }
+                handed.follow(&model, &step);
+                origins.insert(ir::ItemRef::Step(steps.len()), ModelItem::Step(origin));
+                if block.preparation {
+                    preparation_steps.push(steps.len());
+                }
+                steps.push(step);
             }
         }
         Lowered {
-            warnings: assembler.take_warnings(),
+            warnings: Vec::new(),
             analysis: ir::Analysis { model, steps },
             resolved_overlaps: self.resolved_overlaps,
             shortened_names: self.shortened_names,
@@ -732,11 +788,12 @@ fn lower_model_named(
     sections.extend((generated.sections.iter()).map(|g| generated_section(&mut sets, g)));
     materials.extend(generated.material.as_deref().map(gap_material));
     // The boundary condition holding the ground nodes of the gaps, in every mechanical step.
-    let extra_boundary = (generated.boundary.as_ref()).map(|(set, dofs)| Card::Boundary {
-        op_new: false,
-        items: (1..=*dofs as u8)
-            .map(|dof| boundary(sets.node_ref(set), dof, dof, Some(0.0), None))
-            .collect(),
+    let extra_boundary = (generated.boundary.as_ref()).map(|(set, dofs)| {
+        Content::boundaries(
+            (1..=*dofs as u8)
+                .map(|dof| boundary(sets.node_ref(set), dof, dof, Some(0.0), None))
+                .collect(),
+        )
     });
     let young = if model.surface_interactions.is_empty() {
         Default::default()
@@ -755,8 +812,7 @@ fn lower_model_named(
     let initial_conditions = initial_conditions(&mut sets, model)?;
     let design_variables = design_variables(&mut sets, model)?;
     let (amplitudes, amplitude_ids) = amplitudes(model)?;
-    let flux_kinds = FluxKinds::of(model);
-    let mut steps = (model.steps.iter().enumerate())
+    let steps = (model.steps.iter().enumerate())
         .map(|(s, step)| {
             let context = StepContext {
                 cyclic: (model.ties.iter()).any(|t| t.active && t.cyclic.is_some()),
@@ -764,7 +820,6 @@ fn lower_model_named(
                 extra_boundary: extra_boundary.as_ref(),
                 space,
                 lines: &lines,
-                flux_kinds,
                 amplitudes: &amplitude_ids,
                 pair_surfaces: &pair_surfaces,
                 model,
@@ -954,13 +1009,11 @@ fn lower_model_named(
     ir_model.amplitudes = amplitudes;
     ir_model.initial = initial_conditions;
     ir_model.design_variables = design_variables;
-    let model_cards = boundaries_before_stored_modes(model, &mut steps).unwrap_or_default();
     let resolved_overlaps = (sets.dofs.comments())
         .map(|comments| resolved_overlaps(&comments))
         .unwrap_or_default();
     Ok(Built {
         model: ir_model,
-        model_cards,
         steps,
         resolved_overlaps,
         shortened_names: sets.shortened.clone(),
@@ -980,23 +1033,6 @@ enum ConstraintItem {
         ir::constraints::Tie,
         Option<ir::constraints::CyclicSymmetryModel>,
     ),
-}
-
-/// The boundary conditions of a first step that works on the eigenmodes of another
-/// analysis, taken out of the step: the solver allows no new boundary conditions in a modal
-/// dynamics or steady state dynamics step, so they go into the model definition, where the
-/// run that stored the eigenmodes had them before its frequency step.
-fn boundaries_before_stored_modes(
-    model: &FeModel,
-    steps: &mut [Vec<StepBlock>],
-) -> Option<Vec<Card>> {
-    model.properties.stored_modes.as_ref()?;
-    let first = model.steps.iter().position(|s| s.active)?;
-    if !model.steps[first].kind.uses_stored_modes() {
-        return None;
-    }
-    let block = steps.get_mut(first)?.first_mut()?;
-    Some(std::mem::take(&mut block.boundaries))
 }
 
 /// A local coordinate system of a node set.
@@ -3428,10 +3464,9 @@ fn contact_pairs(
 
 /// What the steps share: the model's settings and the items lowered before them.
 struct StepContext<'a> {
-    extra_boundary: Option<&'a Card>,
+    extra_boundary: Option<&'a Content>,
     space: ModelSpace,
     lines: &'a LineElements,
-    flux_kinds: FluxKinds,
     amplitudes: &'a AmplitudeIds,
     pair_surfaces: &'a PairSurfaces,
     /// The model, for the coordinate systems of moving loads.
@@ -3497,22 +3532,23 @@ fn lower_step(
             for (index, _, frames) in &moving {
                 let load = &step.loads[*index];
                 let frame = &frames[position.min(frames.len() - 1)];
-                let cards = moving_load_cards(load, frame, context)?;
-                if let Some((_, slot)) = (parts.loads.iter_mut()).find(|(i, _)| *i == Some(*index))
-                {
-                    *slot = cards;
+                let forces = moving_load(load, frame, context)?;
+                if let Some((_, slot)) = (parts.loads.iter_mut()).find(|(i, _)| i == index) {
+                    *slot = forces;
                 }
             }
         }
         let mut ir_step = parts.step;
         ir_step.name = title.clone().unwrap_or_default();
-        let mut cards: Vec<Card> = parts.loads.into_iter().flat_map(|(_, c)| c).collect();
-        cards.extend(parts.rest);
+        let mut content = parts.boundaries;
+        for (_, load) in parts.loads {
+            content.add(load);
+        }
+        content.add(parts.rest);
         blocks.push(StepBlock {
-            step: ir_step,
+            step: content.into_step(ir_step),
             named: title.is_some(),
-            boundaries: parts.boundaries,
-            cards,
+            takes_over: parts.takes_over,
             preparation: false,
         });
     }
@@ -3543,12 +3579,16 @@ fn lower_step(
         };
         let mut eigenmodes = frequency_step(&modes, context.cyclic);
         eigenmodes.name = format!("{} Eigenmodes", dynamic.step.name);
+        eigenmodes.boundaries = dynamic.step.boundaries.clone();
         return Ok(vec![
             StepBlock {
                 step: eigenmodes,
                 named: dynamic.named,
-                boundaries: dynamic.boundaries.clone(),
-                cards: Vec::new(),
+                takes_over: TakesOver {
+                    boundaries: false,
+                    loads: true,
+                    fields: true,
+                },
                 preparation: true,
             },
             dynamic,
@@ -3574,17 +3614,16 @@ fn lower_step(
         response.step.isolation.closes = true;
         // The step keeps the supports of its eigenmodes (new ones are refused there), so
         // the eigenmode step starts them anew.
-        let mut boundaries = vec![Card::Boundary {
-            op_new: true,
-            items: Vec::new(),
-        }];
-        boundaries.extend(response.boundaries.iter().cloned());
+        eigenmodes.boundaries = response.step.boundaries.clone();
         return Ok(vec![
             StepBlock {
                 step: eigenmodes,
                 named: response.named,
-                boundaries,
-                cards: Vec::new(),
+                takes_over: TakesOver {
+                    boundaries: false,
+                    loads: true,
+                    fields: true,
+                },
                 preparation: true,
             },
             response,
@@ -3621,48 +3660,38 @@ fn complex_frequency_blocks(
         settings.region.clone()
     };
     let set = sets.element_set(&format!("{}_Rotation", step.name), &region)?;
-    let rotation = Card::Dload {
-        op_new: false,
-        items: vec![dload(
-            sets.element_ref(&set),
-            ir::step::DistributedLoadKind::Centrifugal {
-                omega_squared: settings.speed * settings.speed,
-                point,
-                axis,
-            },
-            &None,
-        )],
-    };
-    // Named after the step, so that they do not take the name of another one.
-    let helper = |mut ir_step: ir::Step, purpose: &str, cards: Vec<Card>| {
+    let rotation = vec![dload(
+        sets.element_ref(&set),
+        ir::step::DistributedLoadKind::Centrifugal {
+            omega_squared: settings.speed * settings.speed,
+            point,
+            axis,
+        },
+        &None,
+    )];
+    let unloaded = !settings.base.is_preloaded();
+    // Named after the step, so that they do not take the name of another one. With the
+    // rotation the step loads the model: about the unloaded model the rotation is the only
+    // load, otherwise it replaces the rotation of the loads the steps before left. Without,
+    // the step takes the loads over.
+    let helper = |mut ir_step: ir::Step, purpose: &str, rotation: Option<Vec<_>>| {
         ir_step.name = format!("{} {purpose}", complex.step.name);
+        ir_step.boundaries = complex.step.boundaries.clone();
+        let loads = rotation.is_none() || !unloaded;
+        ir_step.loads.distributed = rotation.unwrap_or_default();
         StepBlock {
             step: ir_step,
             named: complex.named,
-            boundaries: complex.boundaries.clone(),
-            cards,
+            takes_over: TakesOver {
+                boundaries: false,
+                loads,
+                fields: true,
+            },
             preparation: true,
         }
     };
     let mut blocks = Vec::with_capacity(3);
-    let unloaded = !settings.base.is_preloaded();
-    // About the unloaded model the rotation is the only load; otherwise it adds to the
-    // loads the steps before left.
-    let mut first_cards = if unloaded {
-        vec![
-            Card::Cload {
-                op_new: true,
-                items: Vec::new(),
-            },
-            Card::Dload {
-                op_new: true,
-                items: Vec::new(),
-            },
-        ]
-    } else {
-        Vec::new()
-    };
-    first_cards.push(rotation);
+    let mut rotation = Some(rotation);
     if settings.stiffening {
         // The frequency step after it factorizes the same stiffness anyway, so the
         // automatic choice solves the preload directly as well: the multigrid of the
@@ -3679,7 +3708,7 @@ fn complex_frequency_blocks(
         blocks.push(helper(
             static_step(&preload, false),
             "Preload",
-            std::mem::take(&mut first_cards),
+            rotation.take(),
         ));
     }
     let preloaded = settings.stiffening || settings.base.is_preloaded();
@@ -3697,7 +3726,7 @@ fn complex_frequency_blocks(
     blocks.push(helper(
         frequency_step(&modes, context.cyclic),
         "Eigenmodes",
-        first_cards,
+        rotation,
     ));
     let mut complex = complex;
     complex.step.perturbation = preloaded;
@@ -4079,15 +4108,15 @@ fn displacement_boundaries(
     out
 }
 
-/// The cards of a moving load at one position: its nodal forces as concentrated loads;
-/// none while all wheels are off the region.
-fn moving_load_cards(
+/// A moving load at one position: its nodal forces as concentrated loads; none while all
+/// wheels are off the region.
+fn moving_load(
     load: &plx_model::Load,
     frame: &MovingFrame,
     context: &StepContext,
-) -> Result<Vec<Card>, WriteError> {
+) -> Result<Content, WriteError> {
     if frame.forces.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Content::default());
     }
     let dofs = if context.space.is_2d() { 2 } else { 3 };
     let amplitude = amplitude_parameter(context.amplitudes, &load.name, &load.amplitude)?;
@@ -4099,20 +4128,19 @@ fn moving_load_cards(
             }
         }
     }
-    Ok(vec![Card::Cload {
-        op_new: false,
-        items,
-    }])
+    Ok(Content::cloads(items))
 }
 
-/// A step before its moving loads are placed: its settings, the cards of its boundary
-/// conditions, those of each load (by the load's index) and those after the loads.
+/// A step before its moving loads are placed: its settings, what it takes over from the
+/// steps before, its boundary conditions, each load (by the load's index) and what comes
+/// after the loads.
 #[derive(Clone)]
 struct StepParts {
     step: ir::Step,
-    boundaries: Vec<Card>,
-    loads: Vec<(Option<usize>, Vec<Card>)>,
-    rest: Vec<Card>,
+    takes_over: TakesOver,
+    boundaries: Content,
+    loads: Vec<(usize, Content)>,
+    rest: Content,
 }
 
 /// A step and everything in it, with the moving loads at the positions `moving` gives by
@@ -4127,7 +4155,6 @@ fn step_block<'f>(
         extra_boundary,
         space,
         lines,
-        flux_kinds,
         amplitudes,
         pair_surfaces,
         cyclic,
@@ -4183,17 +4210,14 @@ fn step_block<'f>(
         ir_step.nlgeom = true;
     }
     ir_step.contact_changes = contact_changes(sets, step, model, pair_surfaces);
-    // A modal step keeps the supports of the frequency step that stored the modes;
-    // The solver refuses new ones ("in a modal dynamic step new SPCs are not allowed"), and
-    // the reset would make the same supports new. Giving them again is accepted.
-    let mut boundaries = if step.kind.uses_stored_modes() || step.kind.keeps_previous_boundaries() {
-        Vec::new()
-    } else {
-        vec![Card::Boundary {
-            op_new: true,
-            items: Vec::new(),
-        }]
+    // A modal step keeps the supports of the frequency step that stored the modes: the
+    // solver refuses new ones ("in a modal dynamic step new SPCs are not allowed"), and
+    // giving them again is accepted.
+    let mut takes_over = TakesOver {
+        boundaries: step.kind.uses_stored_modes() || step.kind.keeps_previous_boundaries(),
+        ..TakesOver::default()
     };
+    let mut boundaries = Content::default();
     for bc in &step.boundary_conditions {
         // A step leaves out what it cannot take, like a deactivated item: displacements in
         // a heat transfer step, temperatures in a static one.
@@ -4221,16 +4245,13 @@ fn step_block<'f>(
             let held = remote.held(space).map(|v| v.map(|_| ()));
             let held = std::array::from_fn(|d| held[d].and(values[d]));
             let (reference, rotation) = (NodeRef::Node(reference), NodeRef::Node(rotation));
-            boundaries.push(Card::Boundary {
-                op_new: false,
-                items: displacement_boundaries(
-                    &reference,
-                    Some(&rotation),
-                    &held,
-                    6,
-                    &dof_amplitudes,
-                ),
-            });
+            boundaries.add(Content::boundaries(displacement_boundaries(
+                &reference,
+                Some(&rotation),
+                &held,
+                6,
+                &dof_amplitudes,
+            )));
             continue;
         }
         // Truss nodes have no rotations either; the solver fails when they are fixed.
@@ -4285,10 +4306,7 @@ fn step_block<'f>(
                             &node_amplitudes,
                         ));
                     }
-                    boundaries.push(Card::Boundary {
-                        op_new: false,
-                        items,
-                    });
+                    boundaries.add(Content::boundaries(items));
                     if rest.is_empty() {
                         continue;
                     }
@@ -4311,10 +4329,7 @@ fn step_block<'f>(
                     items.push(boundary(node, 11, 11, Some(value), amplitude));
                 }
             }
-            boundaries.push(Card::Boundary {
-                op_new: false,
-                items,
-            });
+            boundaries.add(Content::boundaries(items));
             continue;
         } else if cyclic_slaves.is_empty() {
             sets.node_set(&bc.name, &region)?
@@ -4438,52 +4453,18 @@ fn step_block<'f>(
                 }
             }
         }
-        boundaries.push(Card::Boundary {
-            op_new: false,
-            items,
-        });
+        boundaries.add(Content::boundaries(items));
     }
     // Boundary conditions that constraints need.
     if step.kind.is_mechanical() {
-        boundaries.extend(extra_boundary.cloned());
-        boundaries.extend(grounded_boundaries(sets, step, space));
+        boundaries.add(extra_boundary.cloned().unwrap_or_default());
+        boundaries.add(grounded_boundaries(sets, step, space).unwrap_or_default());
     }
-    let mut loads: Vec<(Option<usize>, Vec<Card>)> = Vec::new();
-    // A step resets the loads it takes; one that takes no loads gets none,
-    // not even the reset. Distributed fluxes, films and radiation are reset only when the
-    // model has them.
+    let mut loads: Vec<(usize, Content)> = Vec::new();
+    // A step that takes no loads keeps those of the state it starts from.
     let kind = &step.kind;
-    let mechanical_loads = kind.supports_load(&LoadKind::Pressure(0.0));
-    let mut resets = Vec::new();
-    if mechanical_loads {
-        resets.push(Card::Cload {
-            op_new: true,
-            items: Vec::new(),
-        });
-        resets.push(Card::Dload {
-            op_new: true,
-            items: Vec::new(),
-        });
-    }
-    if kind.supports_load(&LoadKind::flux(0.0)) {
-        resets.push(Card::Cflux {
-            op_new: true,
-            items: Vec::new(),
-        });
-    }
-    if kind.is_thermal() && flux_kinds.film {
-        resets.push(Card::Film {
-            op_new: true,
-            items: Vec::new(),
-        });
-    }
-    if kind.is_thermal() && flux_kinds.radiation {
-        resets.push(Card::Radiate {
-            op_new: true,
-            items: Vec::new(),
-        });
-    }
-    loads.push((None, resets));
+    takes_over.loads =
+        !kind.supports_load(&LoadKind::Pressure(0.0)) && !kind.supports_load(&LoadKind::flux(0.0));
     let step_loads: &[_] = if kind.supports_loads() {
         &step.loads
     } else {
@@ -4505,7 +4486,7 @@ fn step_block<'f>(
             }
             _ => None,
         };
-        let cards = match load.kind {
+        let content = match load.kind {
             LoadKind::WallLoads(ref walls) => {
                 let invalid = |reason: String| WriteError::InvalidLoad {
                     item: load.name.clone(),
@@ -4536,14 +4517,11 @@ fn step_block<'f>(
                         "no face of the region lies near the walls of the Particle Flow run".into(),
                     ));
                 }
-                vec![Card::Cload {
-                    op_new: false,
-                    items,
-                }]
+                Content::cloads(items)
             }
             LoadKind::Moving(_) => {
                 let frame = moving(index).cloned().unwrap_or_default();
-                loads.push((Some(index), moving_load_cards(load, &frame, context)?));
+                loads.push((index, moving_load(load, &frame, context)?));
                 continue;
             }
             LoadKind::Moment(moment) => {
@@ -4578,10 +4556,7 @@ fn step_block<'f>(
                 }
                 let set = load.region.reference_point().is_none().then_some(&target);
                 set_follower(&mut items, follower(model, sets, load, set)?);
-                vec![Card::Cload {
-                    op_new: false,
-                    items,
-                }]
+                Content::cloads(items)
             }
             LoadKind::RemoteForce(ref remote) => {
                 // The force acts on the reference node of the point, the moment on its
@@ -4633,10 +4608,7 @@ fn step_block<'f>(
                     &mut items,
                     moving_system_follower(model, sets, remote.system)?,
                 );
-                vec![Card::Cload {
-                    op_new: false,
-                    items,
-                }]
+                Content::cloads(items)
             }
             LoadKind::Pressure(pressure) => {
                 use ir::step::DistributedLoadKind::Pressure;
@@ -4668,10 +4640,7 @@ fn step_block<'f>(
                         }
                     }
                 }
-                vec![Card::Dload {
-                    op_new: false,
-                    items,
-                }]
+                Content::dloads(items)
             }
             LoadKind::PreTension {
                 value,
@@ -4691,20 +4660,11 @@ fn step_block<'f>(
                         boundary(node, 1, 1, None, None)
                     };
                     item.fixed = true;
-                    vec![Card::Boundary {
-                        op_new: false,
-                        items: vec![item],
-                    }]
+                    Content::boundaries(vec![item])
                 } else if by_displacement {
-                    vec![Card::Boundary {
-                        op_new: false,
-                        items: vec![boundary(node, 1, 1, Some(value), amplitude)],
-                    }]
+                    Content::boundaries(vec![boundary(node, 1, 1, Some(value), amplitude)])
                 } else {
-                    vec![Card::Cload {
-                        op_new: false,
-                        items: vec![cload(node, 1, value, &amplitude)],
-                    }]
+                    Content::cloads(vec![cload(node, 1, value, &amplitude)])
                 }
             }
             // An excitation is a force times its signal.
@@ -4776,10 +4736,7 @@ fn step_block<'f>(
                     &mut items,
                     follower(model, sets, load, region_set.as_ref())?,
                 );
-                vec![Card::Cload {
-                    op_new: false,
-                    items,
-                }]
+                Content::cloads(items)
             }
             LoadKind::Flux {
                 value: flux,
@@ -4825,10 +4782,7 @@ fn step_block<'f>(
                         })
                         .collect()
                 };
-                vec![Card::Cflux {
-                    op_new: false,
-                    items,
-                }]
+                Content::cfluxes(items)
             }
             LoadKind::Film { sink, coefficient } => {
                 let items = (sets.face_sets(&load.name, &load.region)?.into_iter())
@@ -4841,10 +4795,7 @@ fn step_block<'f>(
                         film_amplitude: factor_amplitude,
                     })
                     .collect();
-                vec![Card::Film {
-                    op_new: false,
-                    items,
-                }]
+                Content::films(items)
             }
             LoadKind::Radiation { sink, emissivity } => {
                 let items = (sets.face_sets(&load.name, &load.region)?.into_iter())
@@ -4858,10 +4809,7 @@ fn step_block<'f>(
                         radiation_amplitude: factor_amplitude,
                     })
                     .collect();
-                vec![Card::Radiate {
-                    op_new: false,
-                    items,
-                }]
+                Content::radiations(items)
             }
             // Gravity: the size of the acceleration and its direction.
             LoadKind::Gravity(_) | LoadKind::StandardGravity(_) => {
@@ -4877,10 +4825,7 @@ fn step_block<'f>(
                     magnitude: size,
                     direction,
                 };
-                vec![Card::Dload {
-                    op_new: false,
-                    items: vec![dload(sets.element_ref(&set), kind, &amplitude)],
-                }]
+                Content::dloads(vec![dload(sets.element_ref(&set), kind, &amplitude)])
             }
             // Centrifugal load: the square of the rotational speed, a point on
             // the axis and the axis direction.
@@ -4897,15 +4842,16 @@ fn step_block<'f>(
                     point,
                     axis: direction,
                 };
-                vec![Card::Dload {
-                    op_new: false,
-                    items: vec![dload(sets.element_ref(&set), kind, &amplitude)],
-                }]
+                Content::dloads(vec![dload(sets.element_ref(&set), kind, &amplitude)])
             }
         };
-        loads.push((Some(index), cards));
+        loads.push((index, content));
     }
-    let mut rest = defined_fields(sets, step, amplitudes, model)?;
+    let mut rest = Content::default();
+    match defined_fields(sets, step, amplitudes, model)? {
+        Some(fields) => rest.fields = fields,
+        None => takes_over.fields = true,
+    }
     // Only the time integration computes the energies.
     let dynamic = matches!(step.kind, StepKind::Dynamic(_));
     // The outputs of the model the step lists are written into it as its own.
@@ -4913,19 +4859,20 @@ fn step_block<'f>(
         .filter_map(|&id| model.history_output(id))
         .filter(|o| o.active && (dynamic || o.kind != HistoryKind::Energies))
     {
-        rest.extend(history_output(sets, output, pair_surfaces)?);
+        (rest.outputs).append(history_output(sets, output, pair_surfaces)?);
     }
     // The force of a bolt is the reaction of its pre-tension node, also while it is locked,
     // and its shortening the node's displacement: shown under the name of the load.
     for load in step.loads.iter().filter(|l| l.active) {
         if let Some(set) = sets.pre_tension_sets.get(&load.name).cloned() {
             let set = Some(ir::step::HistorySet::Nodes(sets.node_id(&set)));
-            rest.push(Card::NodePrint(node_print(set, &["RF", "U"], Totals::No)));
+            (rest.outputs.node_print).push(node_print(set, &["RF", "U"], Totals::No));
         }
     }
-    rest.extend(field_outputs(model, step, frame_every));
+    rest.outputs.append(field_outputs(model, step, frame_every));
     Ok(StepParts {
         step: ir_step,
+        takes_over,
         boundaries,
         loads,
         rest,
@@ -4980,19 +4927,19 @@ fn contact_changes(
 
 /// The defined temperatures of a step: on
 /// the node set with the value, or from the result file of a previous analysis and the step
-/// to read. CalculiX 2.21 takes the file name with its extension and looks for it next to
-/// the input file; `BStep` is the only step parameter it knows.
+/// to read; `None` for a step that keeps those before it. CalculiX 2.21 takes the file
+/// name with its extension and looks for it next to the input file; `BStep` is the only
+/// step parameter it knows.
 fn defined_fields(
     sets: &mut Sets,
     step: &Step,
     amplitudes: &AmplitudeIds,
     model: &FeModel,
-) -> Result<Vec<Card>, WriteError> {
-    let mut cards = Vec::new();
+) -> Result<Option<Vec<ir::step::DefinedField>>, WriteError> {
     // A thermal step solves for the temperatures; it leaves the fields out like
     // deactivated ones.
     if !step.kind.supports_defined_fields() {
-        return Ok(cards);
+        return Ok(None);
     }
     // What a step shows is what acts: its own temperatures replace those of the steps
     // before, and a step that passes its state on without temperatures of its own sets
@@ -5002,15 +4949,12 @@ fn defined_fields(
     if let Some(index) = index
         && model.temperature_source(index, step).is_some()
     {
-        cards.push(Card::Temperature {
-            op_new: true,
-            field: ir::step::DefinedField {
-                kind: ir::step::DefinedFieldKind::Temperature(Vec::new()),
-                amplitude: None,
-            },
-        });
-        return Ok(cards);
+        return Ok(Some(vec![ir::step::DefinedField {
+            kind: ir::step::DefinedFieldKind::Temperature(Vec::new()),
+            amplitude: None,
+        }]));
     }
+    let mut fields = Vec::new();
     for field in step.defined_fields.iter().filter(|f| f.active) {
         let field = match &field.kind {
             DefinedFieldKind::Temperature(t) => {
@@ -5054,12 +4998,9 @@ fn defined_fields(
                 }
             }
         };
-        cards.push(Card::Temperature {
-            op_new: cards.is_empty(),
-            field,
-        });
+        fields.push(field);
     }
-    Ok(cards)
+    Ok((!fields.is_empty()).then_some(fields))
 }
 
 /// Equivalent nodal forces of a total force spread evenly over element faces, the way
@@ -5196,35 +5137,13 @@ fn polygon_area(corners: &[[f64; 3]]) -> f64 {
     0.5 * (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt()
 }
 
-/// Which kinds of heat loads the model has in any step: films and radiation are reset only
-/// then.
-#[derive(Clone, Copy, Debug, Default)]
-struct FluxKinds {
-    film: bool,
-    radiation: bool,
-}
-
-impl FluxKinds {
-    fn of(model: &FeModel) -> Self {
-        let mut kinds = Self::default();
-        for load in model.steps.iter().flat_map(|s| &s.loads) {
-            match load.kind {
-                LoadKind::Film { .. } => kinds.film = true,
-                LoadKind::Radiation { .. } => kinds.radiation = true,
-                _ => {}
-            }
-        }
-        kinds
-    }
-}
-
 /// The equation solver a step asks for.
-fn equation_solver(choice: plx_model::LinearSolverChoice) -> ir::step::EquationSolver {
-    use ir::step::EquationSolver as S;
+fn equation_solver(choice: plx_model::LinearSolverChoice) -> ir::step::SolverMode {
+    use ir::step::SolverMode as S;
     match choice {
-        plx_model::LinearSolverChoice::Automatic => S::Default,
-        plx_model::LinearSolverChoice::Direct => S::Pastix,
-        plx_model::LinearSolverChoice::Iterative => S::IterativeCholesky,
+        plx_model::LinearSolverChoice::Automatic => S::Automatic,
+        plx_model::LinearSolverChoice::Direct => S::Direct,
+        plx_model::LinearSolverChoice::Iterative => S::Iterative,
     }
 }
 
@@ -5272,7 +5191,8 @@ fn sensitivity_step(
     settings: &SensitivityStep,
 ) -> Result<ir::Step, WriteError> {
     let responses = settings.responses();
-    let elements = if responses.iter().any(|r| *r != "EIGENFREQUENCY") {
+    let elements = if (responses.iter()).any(|r| *r != ir::step::DesignResponseKind::Eigenfrequency)
+    {
         let parts = sets.mesh.part_ids();
         let set = sets.element_set(step, &Region::Parts(parts))?;
         Some(sets.element_id(&set))
@@ -5280,21 +5200,16 @@ fn sensitivity_step(
         None
     };
     let responses = (responses.iter())
-        .map(|response| ir::step::DesignResponse {
-            name: ir_name(response),
-            kind: ir_name(response),
+        .map(|&response| ir::step::DesignResponse {
+            kind: response,
             elset: elements,
-            data: Vec::new(),
         })
         .collect();
     Ok(new_step(ir::step::Procedure::Sensitivity(
         ir::step::Sensitivity {
             nlgeom: false,
             responses,
-            filter: (settings.filter_radius).map(|radius| ir::step::Filter {
-                kind: "LINEAR".into(),
-                radius,
-            }),
+            filter: (settings.filter_radius).map(|radius| ir::step::Filter { radius }),
         },
     )))
 }
@@ -5391,7 +5306,7 @@ fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::St
         };
         let mut ir_step = new_step(ir::step::Procedure::ModalDynamics(
             ir::step::ModalDynamics {
-                solver: ir::step::EquationSolver::Default,
+                solver: ir::step::SolverMode::Automatic,
                 steady_state: false,
                 increment: integration.increment,
                 period: settings.duration,
@@ -5405,7 +5320,7 @@ fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::St
     if let DynamicMethod::Explicit = settings.method {
         // The solver finds the time step from the mesh; the increments are the frames.
         let mut ir_step = new_step(ir::step::Procedure::Dynamic(ir::step::Dynamic {
-            solver: ir::step::EquationSolver::Default,
+            solver: ir::step::SolverMode::Automatic,
             alpha: None,
             integration: ir::step::Integration::Explicit(ir::step::ExplicitControls {
                 mass_scaling: settings.mass_scaling,
@@ -5469,7 +5384,7 @@ fn dynamic_step(settings: &DynamicStep, model: &FeModel, step: &Step) -> (ir::St
 fn steady_state_dynamics_step(settings: &SteadyStateDynamicsStep) -> ir::Step {
     new_step(ir::step::Procedure::SteadyStateDynamics(
         ir::step::SteadyStateDynamics {
-            solver: ir::step::EquationSolver::Default,
+            solver: ir::step::SolverMode::Automatic,
             harmonic: settings.harmonic,
             lower: settings.lower_frequency,
             upper: settings.upper_frequency,
@@ -5612,7 +5527,7 @@ fn field_variables(result: FieldResult) -> [&'static [&'static str]; 3] {
 /// The field output requests of a step: what the step writes by its kind and by the model,
 /// and the additional results of the model's field output, every `every`-th increment.
 /// The solver takes the variables of the nodes, the elements and the contacts apart.
-fn field_outputs(model: &FeModel, step: &Step, every: u32) -> Vec<Card> {
+fn field_outputs(model: &FeModel, step: &Step, every: u32) -> ir::step::Outputs {
     // The order the solver's variables are listed in.
     const ORDER: [&[&str]; 3] = [
         &["RF", "U", "PU", "V", "A", "NT", "RFL", "SEN"],
@@ -5652,17 +5567,17 @@ fn field_outputs(model: &FeModel, step: &Step, every: u32) -> Vec<Card> {
         section_forces: false,
         time_points: None,
     };
-    let mut cards = Vec::new();
+    let mut outputs = ir::step::Outputs::default();
     if !node.is_empty() {
-        cards.push(Card::NodeFile(request(node, false)));
+        outputs.node_file.push(request(node, false));
     }
     if !element.is_empty() {
-        cards.push(Card::ElFile(request(element, false)));
+        outputs.el_file.push(request(element, false));
     }
     if !contact.is_empty() {
-        cards.push(Card::ContactFile(request(contact, true)));
+        outputs.contact_file.push(request(contact, true));
     }
-    cards
+    outputs
 }
 
 /// The totals of a history output.
@@ -5727,16 +5642,17 @@ fn history_output(
     sets: &mut Sets,
     output: &HistoryOutput,
     pair_surfaces: &PairSurfaces,
-) -> Result<Vec<Card>, WriteError> {
+) -> Result<ir::step::Outputs, WriteError> {
     if output.variables.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ir::step::Outputs::default());
     }
     let names: Vec<&str> = output
         .variables
         .iter()
         .map(|&v| history_variable(v))
         .collect();
-    let card = match &output.kind {
+    let mut outputs = ir::step::Outputs::default();
+    match &output.kind {
         HistoryKind::Node {
             region: region @ (Region::ReferencePoint(_) | Region::RemotePoint(_)),
         } => {
@@ -5745,19 +5661,19 @@ fn history_output(
         HistoryKind::Node { region } => {
             let set = sets.node_set(&output.name, region)?;
             let set = Some(ir::step::HistorySet::Nodes(sets.node_id(&set)));
-            Card::NodePrint(node_print(set, &names, output.totals))
+            (outputs.node_print).push(node_print(set, &names, output.totals));
         }
         HistoryKind::Energies => {
             // Sums over the whole model, printed under a set of all elements.
             let parts = sets.mesh.part_ids();
             let set = sets.element_set(&output.name, &Region::Parts(parts))?;
             let set = Some(ir::step::HistorySet::Elements(sets.element_id(&set)));
-            Card::ElPrint(node_print(set, &names, Totals::Only))
+            (outputs.el_print).push(node_print(set, &names, Totals::Only));
         }
         HistoryKind::Element { region } => {
             let set = sets.element_set(&output.name, region)?;
             let set = Some(ir::step::HistorySet::Elements(sets.element_id(&set)));
-            Card::ElPrint(node_print(set, &names, output.totals))
+            (outputs.el_print).push(node_print(set, &names, output.totals));
         }
         HistoryKind::Contact { pair } => {
             // Contact forces are summed over the slave surface of the pair.
@@ -5773,16 +5689,16 @@ fn history_output(
                 let master = (!master.is_empty()).then(|| sets.surface_id(master));
                 request.surfaces = Some((sets.surface_id(slave), master));
             }
-            Card::ContactPrint(request)
+            outputs.contact_print.push(request);
         }
-    };
-    Ok(vec![card])
+    }
+    Ok(outputs)
 }
 
 /// Holds the reference points fixed to the world in a mechanical step: every degree of
 /// freedom at zero that no displacement of the step on the point moves, the rotations as
 /// the displacements of the rotation node.
-fn grounded_boundaries(sets: &Sets, step: &Step, space: ModelSpace) -> Option<Card> {
+fn grounded_boundaries(sets: &Sets, step: &Step, space: ModelSpace) -> Option<Content> {
     let mut items = Vec::new();
     for id in &sets.grounded {
         let nodes = &sets.reference_nodes[id];
@@ -5808,10 +5724,7 @@ fn grounded_boundaries(sets: &Sets, step: &Step, space: ModelSpace) -> Option<Ca
             &[const { None }; 6],
         ));
     }
-    (!items.is_empty()).then_some(Card::Boundary {
-        op_new: false,
-        items,
-    })
+    (!items.is_empty()).then_some(Content::boundaries(items))
 }
 
 /// Reference and rotation node of a reference point or the point of a remote displacement,
@@ -5852,7 +5765,7 @@ fn point_output(
     sets: &mut Sets,
     output: &HistoryOutput,
     region: &Region,
-) -> Result<Vec<Card>, WriteError> {
+) -> Result<ir::step::Outputs, WriteError> {
     let ([reference, rotation], behavior) = point_nodes(sets, &output.name, region)?;
     let reactions = behavior == RemoteBehavior::Rigid;
     let printed: Vec<&str> = (output.variables.iter())
@@ -5860,16 +5773,13 @@ fn point_output(
         .map(|&v| history_variable(v))
         .collect();
     if printed.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ir::step::Outputs::default());
     }
     let set = sets.free_name("Internal_Selection", &name(&output.name));
     sets.node_sets.push((set.clone(), vec![reference]));
     let printed_set = Some(ir::step::HistorySet::Nodes(sets.node_id(&set)));
-    let mut cards = vec![Card::NodePrint(node_print(
-        printed_set,
-        &printed,
-        output.totals,
-    ))];
+    let mut outputs = ir::step::Outputs::default();
+    (outputs.node_print).push(node_print(printed_set, &printed, output.totals));
     let turning: Vec<&str> = (printed.iter().copied())
         .filter(|v| ["RF", "U", "V"].contains(v))
         .collect();
@@ -5877,9 +5787,9 @@ fn point_output(
         let set = sets.free_name("Internal_Rotation", &name(&output.name));
         sets.node_sets.push((set.clone(), vec![rotation]));
         let set = Some(ir::step::HistorySet::Nodes(sets.node_id(&set)));
-        cards.push(Card::NodePrint(node_print(set, &turning, output.totals)));
+        (outputs.node_print).push(node_print(set, &turning, output.totals));
     }
-    Ok(cards)
+    Ok(outputs)
 }
 
 /// Length and direction of a vector; `None` for the zero vector.

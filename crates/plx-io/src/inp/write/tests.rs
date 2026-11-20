@@ -7726,6 +7726,45 @@ fn rotor_analysis(speed: f64) -> (FeMesh, FeModel) {
     (mesh, model)
 }
 
+/// About the state before it a complex frequency step turns at its own speed: its rotation
+/// replaces the centrifugal load of the step before, the other loads stay, and the
+/// eigenmodes and the complex modes take the preload over.
+#[test]
+fn a_preloaded_complex_frequency_step_replaces_the_rotation_before() {
+    let mut spin = body_load(LoadKind::Centrifugal {
+        point: [0.0, 5.0, 5.0],
+        axis: [1.0, 0.0, 0.0],
+        speed: 50.0,
+    });
+    spin.name = "Spin-1".into();
+    let (mesh, mut model) = cantilever(tip_force());
+    model.steps[0].loads.push(spin);
+    let (_, rotor) = rotor_analysis(100.0);
+    let mut complex = rotor.steps[0].clone();
+    complex.boundary_conditions = model.steps[0].boundary_conditions.clone();
+    let StepKind::ComplexFrequency(settings) = &mut complex.kind else {
+        unreachable!()
+    };
+    settings.base = plx_model::Base::PreviousState;
+    model.steps.push(complex);
+    let lowered = lower(&mesh, &model, "").unwrap();
+    let steps = &lowered.analysis.steps;
+    // Load, the preload, the eigenmodes and the complex modes of Rotor.
+    assert_eq!(steps.len(), 4);
+    for step in &steps[1..] {
+        let speeds: Vec<f64> = (step.loads.distributed.iter())
+            .filter_map(|l| match l.kind {
+                ir::step::DistributedLoadKind::Centrifugal { omega_squared, .. } => {
+                    Some(omega_squared)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(speeds, [100.0 * 100.0], "{}", step.name);
+        assert_eq!(step.loads.concentrated, steps[0].loads.concentrated);
+    }
+}
+
 /// A complex frequency step between two static steps: the solver gets it as an isolated
 /// group, about the unloaded model (loads of the steps before reset) or about the state
 /// before it, and leaves the state as it found it.
@@ -8663,9 +8702,9 @@ fn a_sensitivity_step_writes_design_variables_and_responses() {
     let step = &text[text.find("** Step-2").unwrap()..];
     for line in [
         "*Step, Inc=100, Amplitude=Ramp\n*Sensitivity\n",
-        "*Design response, Name=MASS\nMASS, INTERNAL_SELECTION-1_STEP-2\n",
-        "*Design response, Name=STRAINENERGY\nSTRAINENERGY, INTERNAL_SELECTION-1_STEP-2\n",
-        "*Filter, Type=LINEAR\n15\n",
+        "*Design response\nMASS, INTERNAL_SELECTION-1_STEP-2\n",
+        "*Design response\nSTRAINENERGY, INTERNAL_SELECTION-1_STEP-2\n",
+        "*Filter, Type=Linear\n15\n",
         "*Node file\nSEN\n",
     ] {
         assert!(step.contains(line), "missing {line:?} in\n{step}");
@@ -8681,7 +8720,7 @@ fn a_sensitivity_step_writes_design_variables_and_responses() {
     ) = (false, false, true);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
-        text.contains("*Design response, Name=EIGENFREQUENCY\nEIGENFREQUENCY\n"),
+        text.contains("*Design response\nEIGENFREQUENCY\n"),
         "{text}"
     );
 }

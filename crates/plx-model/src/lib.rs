@@ -1106,18 +1106,6 @@ impl LinearSolverChoice {
             LinearSolverChoice::Iterative => "Iterative",
         }
     }
-
-    /// The value of `SOLVER=` in the input file. Automatic leaves the choice to the solver
-    /// (the solver takes its default); Direct names PaStiX, which the Nodalis solver reads as
-    /// its direct solver; Iterative asks for conjugate gradients with an incomplete
-    /// Cholesky preconditioner, which CalculiX and the Nodalis solver both have.
-    pub fn keyword(self) -> Option<&'static str> {
-        match self {
-            LinearSolverChoice::Automatic => None,
-            LinearSolverChoice::Direct => Some("PaStiX"),
-            LinearSolverChoice::Iterative => Some("Iterative Cholesky"),
-        }
-    }
 }
 
 /// Settings of a static step (also the increments of heat transfer and visco steps): how
@@ -1983,17 +1971,18 @@ impl Default for SensitivityStep {
 }
 
 impl SensitivityStep {
-    /// The design responses as CalculiX names them (`*DESIGN RESPONSE`).
-    pub fn responses(&self) -> Vec<&'static str> {
+    /// The design responses the solver differentiates.
+    pub fn responses(&self) -> Vec<plxs_core::step::DesignResponseKind> {
+        use plxs_core::step::DesignResponseKind as Kind;
         let mut responses = Vec::new();
         if self.eigenfrequency {
-            responses.push("EIGENFREQUENCY");
+            responses.push(Kind::Eigenfrequency);
         }
         if self.mass {
-            responses.push("MASS");
+            responses.push(Kind::Mass);
         }
         if self.strain_energy {
-            responses.push("STRAINENERGY");
+            responses.push(Kind::StrainEnergy);
         }
         responses
     }
