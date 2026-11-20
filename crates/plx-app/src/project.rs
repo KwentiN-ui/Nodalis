@@ -14964,10 +14964,7 @@ mod tests {
             item: step.loads[0].id,
         };
         model.steps.push(step);
-        let force = plx_model::ValuePath::new(
-            item,
-            plx_model::Field::Y,
-        );
+        let force = plx_model::ValuePath::new(item, plx_model::Field::Y);
         let key = model.expose(force.clone());
         let data = ProjectAnalysis {
             model,
@@ -15777,7 +15774,7 @@ mod tests {
             plx_model::Field::MaxElementSize,
         );
         let mut model = plx_model::FeModel::default();
-        let key = model.expose(path.clone());
+        let key = model.expose_in(Some(&geometry), path.clone());
         let input = |g: &plx_model::Geometry| {
             plx_model::fingerprint::mesh_input(g, &[], Default::default(), "PART_1")
         };

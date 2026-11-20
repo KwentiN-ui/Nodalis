@@ -592,7 +592,7 @@ mod tests {
             fe.exposable(&item),
             [Field::Variable(1), Field::Variable(key)]
         );
-        let path = ValuePath::new(item.clone(), Field::Variable(key));
+        let path = ValuePath::new(item, Field::Variable(key));
         let exposed = fe.expose(path.clone());
         assert_eq!(fe.exposed(exposed).unwrap().name, "Wedge h");
         assert!(fe.set_value(&path, 250.0));

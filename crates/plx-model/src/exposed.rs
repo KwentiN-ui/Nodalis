@@ -737,9 +737,7 @@ impl Geometry {
     pub fn exposable(&self, item: &ItemRef) -> Vec<Field> {
         let mut copy = self.setup_only();
         (Field::ALL.into_iter())
-            .filter(|&field| {
-                meshing_slot_mut(&mut copy, &ValuePath::new(item.clone(), field)).is_some()
-            })
+            .filter(|&field| meshing_slot_mut(&mut copy, &ValuePath::new(*item, field)).is_some())
             .collect()
     }
 
@@ -1055,7 +1053,7 @@ impl FeModel {
             .flat_map(|d| d.variables.iter().map(|v| Field::Variable(v.key)))
             .collect::<Vec<_>>();
         (Field::ALL.into_iter().chain(variables))
-            .filter(|&field| slot_mut(&mut fe, &ValuePath::new(item.clone(), field)).is_some())
+            .filter(|&field| slot_mut(&mut fe, &ValuePath::new(*item, field)).is_some())
             .collect()
     }
 
@@ -1118,7 +1116,7 @@ mod tests {
         };
         let item = ItemRef::Material(fe.materials[0].id);
         assert_eq!(fe.exposable(&item), vec![Field::Viscosity]);
-        let path = ValuePath::new(item.clone(), Field::Viscosity);
+        let path = ValuePath::new(item, Field::Viscosity);
         assert_eq!(
             fe.value_kind(&path),
             Some(ValueKind::Quantity(Quantity::Viscosity))
@@ -1270,7 +1268,7 @@ mod tests {
         for field in [Field::Y, Field::RotationX, Field::Pinball] {
             assert!(!exposable.contains(&field), "{field:?}");
         }
-        let path = |field| ValuePath::new(item.clone(), field);
+        let path = |field| ValuePath::new(item, field);
         assert_eq!(fe.value_at(&path(Field::X)), Some(0.5));
         assert!(fe.set_value(&path(Field::LocationY), 4.0));
         assert_eq!(fe.value_at(&path(Field::LocationY)), Some(4.0));
@@ -1313,7 +1311,7 @@ mod tests {
         assert_eq!(mesh.node(2), Some([1.5, 0.0, 0.0]));
         let item = ItemRef::MeshOperation(id);
         assert_eq!(fe.exposable(&item), Field::VECTOR);
-        let x = ValuePath::new(item.clone(), Field::X);
+        let x = ValuePath::new(item, Field::X);
         assert_eq!(fe.value_at(&x), Some(0.5));
         assert_eq!(fe.value_kind(&x), Some(ValueKind::LENGTH));
         // The mesh moves by the new distance, not by the sum.
@@ -1328,7 +1326,7 @@ mod tests {
         });
         fe.set_mesh_operations(&mut mesh, vec![scale]);
         assert_eq!(mesh.node(2), Some([2.0, 0.0, 0.0]));
-        let factor = ValuePath::new(item.clone(), Field::ScaleX);
+        let factor = ValuePath::new(item, Field::ScaleX);
         assert_eq!(fe.value_kind(&factor), Some(ValueKind::Factor));
         assert!(!fe.set_value_meshed(&mut mesh, &factor, 0.0));
         assert_eq!(fe.value_at(&factor), Some(2.0));
@@ -1409,7 +1407,7 @@ mod tests {
         );
         assert_eq!(geometry.exposable(&ItemRef::DefaultMeshing).len(), 8);
 
-        let max = ValuePath::new(item.clone(), Field::MaxElementSize);
+        let max = ValuePath::new(item, Field::MaxElementSize);
         let kind = ValueKind::Quantity(Quantity::Length);
         assert_eq!(geometry.value_at(&max), Some(0.03));
         assert_eq!(geometry.value_kind(&max), Some(kind));

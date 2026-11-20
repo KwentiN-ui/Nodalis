@@ -7414,7 +7414,9 @@ fn contact_forces_need_an_active_contact_pair() {
     // Without contact forces no surfaces are needed.
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Contact print\nCDIS, CSTR\n"), "{text}");
-    output.variables.push(plx_model::HistoryVariable::of_code("CF").unwrap());
+    output
+        .variables
+        .push(plx_model::HistoryVariable::of_code("CF").unwrap());
     model.history_outputs[0] = output;
     assert_eq!(
         write_inp(&mesh, &model, ""),

@@ -458,7 +458,12 @@ mod tests {
     fn variables_keep_their_order() {
         let mut output = HistoryOutput::node("NH_Output-1", Region::Nodes(vec![1]));
         use HistoryVariable as V;
-        output.variables = vec![V::Displacements, V::Stresses, V::ReactionForces, V::Displacements];
+        output.variables = vec![
+            V::Displacements,
+            V::Stresses,
+            V::ReactionForces,
+            V::Displacements,
+        ];
         output.normalize_variables();
         assert_eq!(output.variables, [V::ReactionForces, V::Displacements]);
     }
