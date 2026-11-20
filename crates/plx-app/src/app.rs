@@ -3289,20 +3289,13 @@ impl Workbench {
             return;
         };
         let action = dialog.show(ctx, model);
-        let plot_name = dialog.plot_name(&model.hot_spots.definitions);
+        let plot_id = dialog.plot_id();
         if dialog.take_plot_toggle() {
-            match model
-                .path_plots
-                .iter()
-                .position(|p| p.is_hot_spot(&plot_name))
-            {
+            match model.path_plots.iter().position(|p| p.is_hot_spot(plot_id)) {
                 Some(index) => {
                     model.path_plots.remove(index);
                 }
-                None => {
-                    model.path_plots.push(PathPlot::hot_spot(plot_name.clone()));
-                    dialog.set_plot_key(plot_name.clone());
-                }
+                None => model.path_plots.push(PathPlot::hot_spot(plot_id)),
             }
         }
         let (hot_spot, next) = match action {
@@ -3310,19 +3303,13 @@ impl Workbench {
             DialogAction::Cancel => {
                 // The plot of a hot spot that was not created goes with it.
                 if dialog.edit.is_none() {
-                    model.path_plots.retain(|p| !p.is_hot_spot(&plot_name));
+                    model.path_plots.retain(|p| !p.is_hot_spot(plot_id));
                 }
                 self.hot_spot_dialog = None;
                 return;
             }
             DialogAction::Ok { output, next } => (output, next),
         };
-        // The plot follows a renamed hot spot.
-        for plot in model.path_plots.iter_mut() {
-            if plot.is_hot_spot(&plot_name) {
-                plot.path = hot_spot.name.clone();
-            }
-        }
         let definitions = &mut model.hot_spots.definitions;
         let verb = match dialog.edit.filter(|&i| i < definitions.len()) {
             Some(index) => {
@@ -7404,29 +7391,20 @@ impl Workbench {
         };
         let cut = self.plane_values.as_ref();
         let result = dialog.show(ctx, model, cut);
-        let plot_name = dialog.plot_name(&model.fe);
+        let plot_path = dialog.plot_path();
         if dialog.take_plot_toggle()
-            && let Some(name) = plot_name.clone()
+            && let Some(path) = plot_path
         {
-            match model.path_plots.iter().position(|p| p.is_path(&name)) {
+            match model.path_plots.iter().position(|p| p.is_path(path)) {
                 Some(index) => {
                     model.path_plots.remove(index);
                 }
-                None => {
-                    model.path_plots.push(PathPlot::new(name.clone()));
-                    dialog.set_plot_key(name);
-                }
+                None => model.path_plots.push(PathPlot::new(path)),
             }
         }
         match result {
             FeatureResult::Open => self.feature_dialog = Some(dialog),
             FeatureResult::Ok => {
-                // The plot follows a renamed path.
-                if let (Some(old), Some(path)) = (plot_name, dialog.path_draft()) {
-                    for plot in model.path_plots.iter_mut().filter(|p| p.is_path(&old)) {
-                        plot.path = path.name.clone();
-                    }
-                }
                 let results = dialog.results;
                 let before = model.fe.shared_features();
                 let split = model.split();
@@ -7438,8 +7416,8 @@ impl Workbench {
             }
             FeatureResult::Cancel => {
                 // The plot of a path that was not created goes with it.
-                if let Some(old) = plot_name.filter(|_| dialog.creates()) {
-                    model.path_plots.retain(|p| !p.is_path(&old));
+                if let Some(path) = plot_path.filter(|_| dialog.creates()) {
+                    model.path_plots.retain(|p| !p.is_path(path));
                 }
                 self.viewport.preview = Default::default();
             }
@@ -7513,23 +7491,26 @@ impl Workbench {
             self.viewport.path_plots.clear();
             return;
         };
-        let edited = dialog.and_then(|d| Some((d.plot_name(&model.fe)?, d.path_draft()?.clone())));
-        let path = |fe: &plx_model::FeModel, name: &str| match &edited {
-            Some((edited, draft)) if edited == name => Some(draft.clone()),
-            _ => fe.result_paths.iter().find(|p| p.name == name).cloned(),
+        let edited = dialog.and_then(|d| d.path_draft().cloned());
+        let path = |fe: &plx_model::FeModel, of: Option<plx_model::Id>| match &edited {
+            Some(draft) if Some(draft.id.any()) == of => Some(draft.clone()),
+            _ => fe
+                .result_paths
+                .iter()
+                .find(|p| Some(p.id.any()) == of)
+                .cloned(),
         };
-        let edited_hot_spot = (self.hot_spot_dialog.as_ref())
-            .map(|d| (d.plot_name(&model.hot_spots.definitions), d.hot_spot()));
-        let hot_spot =
-            |definitions: &[plx_results::hot_spot::HotSpot], name: &str| match &edited_hot_spot {
-                Some((edited, draft)) if edited == name => Some(draft.clone()),
-                _ => definitions.iter().find(|h| h.name == name).cloned(),
-            };
+        let edited_hot_spot = self.hot_spot_dialog.as_ref().map(|d| d.hot_spot());
+        let hot_spot = |definitions: &[plx_results::hot_spot::HotSpot],
+                        of: Option<plx_model::Id>| match &edited_hot_spot {
+            Some(draft) if Some(draft.id) == of => Some(draft.clone()),
+            _ => definitions.iter().find(|h| Some(h.id) == of).cloned(),
+        };
         let mut plots = std::mem::take(&mut model.path_plots);
         plots.retain(|plot| match plot.kind {
-            path_plot::PlotKind::Path => path(&model.fe, &plot.path).is_some(),
+            path_plot::PlotKind::Path => path(&model.fe, plot.of).is_some(),
             path_plot::PlotKind::HotSpot => {
-                hot_spot(&model.hot_spots.definitions, &plot.path).is_some()
+                hot_spot(&model.hot_spots.definitions, plot.of).is_some()
             }
             path_plot::PlotKind::Table => true,
         });
@@ -7542,11 +7523,11 @@ impl Workbench {
         let boxes = (plots.iter_mut().enumerate())
             .filter_map(|(index, plot)| match plot.kind {
                 path_plot::PlotKind::Path => {
-                    let path = path(&model.fe, &plot.path)?;
+                    let path = path(&model.fe, plot.of)?;
                     plot.plot_box(index, model, &path)
                 }
                 path_plot::PlotKind::HotSpot => {
-                    let hot_spot = hot_spot(&model.hot_spots.definitions, &plot.path)?;
+                    let hot_spot = hot_spot(&model.hot_spots.definitions, plot.of)?;
                     plot.hot_spot_box(index, model, &hot_spot)
                 }
                 path_plot::PlotKind::Table => plot.table_box(index),

@@ -8,8 +8,8 @@ use plxs_core::mesh::Sets;
 use plxs_core::results::{HistoryBlock, HistoryQuantity, HistorySource, Results};
 
 use super::{
-    ALL_CONTACT_ELEMENTS, Collector, DatImport, Ids, KINDS, Kind, ROTATION_KINDS, contact_set_name,
-    cyclic_mode, name_rotations_after_point, repair_set_name,
+    ALL_CONTACT_ELEMENTS, Collector, DatImport, Ids, KINDS, Kind, ROTATION_KINDS, SetKey,
+    contact_set_name, cyclic_mode, name_rotations_after_point, repair_set_name,
 };
 
 /// The history sets of `results`; `sets` names the sets the blocks are of.
@@ -22,7 +22,6 @@ pub fn import_blocks(results: &Results, sets: &Sets) -> DatImport {
         offset: 0,
         cyclic_modes: 0,
         rotation_sets: Vec::new(),
-        origins: HashMap::new(),
         unknown: Vec::new(),
     };
     for block in &results.history {
@@ -35,11 +34,8 @@ pub fn import_blocks(results: &Results, sets: &Sets) -> DatImport {
             import.unknown.join(", ")
         ));
     }
-    let (rotation_sets, origins) = (import.rotation_sets, import.origins);
+    let rotation_sets = import.rotation_sets;
     let mut sets = import.data.finish();
-    for set in &mut sets {
-        set.output = origins.get(&set.name).copied().map(plx_model::Id::from_raw);
-    }
     for set in sets.iter_mut().filter(|s| rotation_sets.contains(&s.name)) {
         name_rotations_after_point(set);
     }
@@ -59,8 +55,6 @@ struct Import<'a> {
     cyclic_modes: u32,
     /// Sets with the values of the rotation node of a point.
     rotation_sets: Vec<String>,
-    /// The history output each set was printed for.
-    origins: HashMap<String, u64>,
     unknown: Vec<String>,
 }
 
@@ -273,8 +267,7 @@ impl Import<'_> {
         let master = master.map_or("GROUND".to_string(), |m| {
             self.shown(self.sets.surface_name(m))
         });
-        let set = contact_set_name(&slave, &master);
-        self.origin(&set, block);
+        let set = key(contact_set_name(&slave, &master), block);
         let rows: Vec<&Vec<f64>> = block.rows.iter().map(|r| &r.1).take(4).collect();
         if rows.len() < 4 || rows[0].len() < 6 || rows[1].len() < 6 || rows[2].len() < 3 {
             return;
@@ -336,7 +329,7 @@ impl Import<'_> {
         {
             self.rotation_sets.push(set.clone());
         }
-        self.origin(&set, block);
+        let set = key(set, block);
         let row = self.data.row(block.step, block.increment, block.time);
         // The built-in solver leaves the trailing out-of-plane values of a 2D model out (the
         // z value, the shear stresses xz and yz).
@@ -372,13 +365,6 @@ impl Import<'_> {
         }
     }
 
-    /// Notes the history output the block was printed for as that of its set.
-    fn origin(&mut self, set: &str, block: &HistoryBlock) {
-        if let Some(origin) = block.origin {
-            self.origins.entry(set.to_string()).or_insert(origin);
-        }
-    }
-
     fn skip(&mut self, block: &HistoryBlock) {
         let name = format!("{:?}", block.quantity);
         if !self.unknown.contains(&name) {
@@ -388,8 +374,18 @@ impl Import<'_> {
 }
 
 /// The set of the tables of a step.
-fn step_set(block: &HistoryBlock) -> String {
-    format!("STEP_{}", block.step)
+fn step_set(block: &HistoryBlock) -> SetKey {
+    SetKey::Step(block.step)
+}
+
+/// The set of the values of `block`, printed for the set named `name`: that of the history
+/// output the block was printed for, so that two outputs of the same set or name stay
+/// apart.
+fn key(name: String, block: &HistoryBlock) -> SetKey {
+    match block.origin {
+        Some(origin) => SetKey::Output(origin, name),
+        None => SetKey::Named(name),
+    }
 }
 
 fn is_contact(quantity: HistoryQuantity) -> bool {
@@ -511,6 +507,54 @@ mod tests {
         let output_of = |name: &str| import.sets.iter().find(|s| s.name == name).unwrap().output;
         assert_eq!(output_of("TIP"), Some(output));
         assert_eq!(output_of("STEP_1"), None);
+    }
+
+    #[test]
+    fn two_history_outputs_of_one_set_stay_apart() {
+        let (first, second) = (plx_model::Id::new(), plx_model::Id::new());
+        let printed = |origin: plx_model::Id, value: f64| {
+            let mut b = block(
+                HistoryQuantity::Displacements,
+                HistorySource::Named("TIP".into()),
+                vec![(7, vec![value, 0.0, 0.0])],
+            );
+            b.origin = Some(origin.raw());
+            b
+        };
+        let results = Results {
+            history: vec![printed(first, 1.0), printed(second, 2.0)],
+            ..Results::default()
+        };
+        let import = import_blocks(&results, &Sets::default());
+        let of = |id: plx_model::Id| import.sets.iter().find(|s| s.output == Some(id)).unwrap();
+        let ux = |set: &plx_results::history_output::HistorySet| {
+            set.fields[0].components[0].entries[0].values[0]
+        };
+        assert_eq!(import.sets.len(), 2);
+        assert_eq!((ux(of(first)), ux(of(second))), (1.0, 2.0));
+    }
+
+    #[test]
+    fn the_tables_of_a_step_are_not_a_set_of_that_name() {
+        let mut user = block(
+            HistoryQuantity::Displacements,
+            HistorySource::Named("STEP_1".into()),
+            vec![(7, vec![1.0, 2.0, 3.0])],
+        );
+        user.origin = Some(plx_model::Id::<plx_model::HistoryOutput>::new().raw());
+        let table = block(
+            HistoryQuantity::BucklingFactors,
+            HistorySource::Step,
+            vec![(1, vec![4.5])],
+        );
+        let results = Results {
+            history: vec![user, table],
+            ..Results::default()
+        };
+        let import = import_blocks(&results, &Sets::default());
+        assert_eq!(import.sets.len(), 2);
+        let tables = import.sets.iter().find(|s| s.step == Some(1)).unwrap();
+        assert_eq!(tables.fields[0].name, "BUCKLING_FACTOR_OUTPUT");
     }
 
     #[test]

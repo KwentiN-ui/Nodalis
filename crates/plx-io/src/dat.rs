@@ -250,9 +250,46 @@ struct Collector {
     sets: Vec<SetData>,
 }
 
-#[derive(Default)]
+/// What a history set is the values of: the tables of a step, a history output of the
+/// project (by its raw id, and the set it was printed for), or a set by its name only (the
+/// text of a `.dat` file names no history output).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SetKey {
+    Step(u32),
+    Output(u64, String),
+    Named(String),
+}
+
+impl SetKey {
+    /// The name the set is shown under.
+    fn name(&self) -> String {
+        match self {
+            SetKey::Step(step) => format!("STEP_{step}"),
+            SetKey::Output(_, name) | SetKey::Named(name) => name.clone(),
+        }
+    }
+}
+
+impl From<&SetKey> for SetKey {
+    fn from(key: &SetKey) -> Self {
+        key.clone()
+    }
+}
+
+impl From<&String> for SetKey {
+    fn from(name: &String) -> Self {
+        SetKey::Named(name.clone())
+    }
+}
+
+impl From<&str> for SetKey {
+    fn from(name: &str) -> Self {
+        SetKey::Named(name.to_owned())
+    }
+}
+
 struct SetData {
-    name: String,
+    key: SetKey,
     /// Rows of this set, in the order of the file.
     rows: Vec<usize>,
     fields: Vec<(String, Components)>,
@@ -287,13 +324,23 @@ impl Collector {
         self.rows.len() - 1
     }
 
-    fn add(&mut self, set: &str, field: &str, component: &str, entry: &str, row: usize, v: f64) {
-        let set = match self.sets.iter().position(|s| s.name == set) {
+    fn add(
+        &mut self,
+        set: impl Into<SetKey>,
+        field: &str,
+        component: &str,
+        entry: &str,
+        row: usize,
+        v: f64,
+    ) {
+        let key = set.into();
+        let set = match self.sets.iter().position(|s| s.key == key) {
             Some(i) => &mut self.sets[i],
             None => {
                 self.sets.push(SetData {
-                    name: set.to_string(),
-                    ..SetData::default()
+                    key,
+                    rows: Vec::new(),
+                    fields: Vec::new(),
                 });
                 self.sets.last_mut().unwrap()
             }
@@ -366,9 +413,15 @@ impl Collector {
                             .collect(),
                     })
                     .collect();
+                let (output, step) = match set.key {
+                    SetKey::Output(origin, _) => (Some(plx_model::Id::from_raw(origin)), None),
+                    SetKey::Step(step) => (None, Some(step)),
+                    SetKey::Named(_) => (None, None),
+                };
                 let mut set = HistorySet {
-                    output: None,
-                    name: set.name,
+                    output,
+                    step,
+                    name: set.key.name(),
                     rows: order.iter().map(|&r| rows[r]).collect(),
                     fields,
                 };
@@ -434,7 +487,7 @@ pub fn parse_dat(text: &str) -> DatImport {
         }
         if trimmed == "E I G E N V A L U E   O U T P U T" {
             let table = table_after(&lines, &mut i);
-            let set = format!("STEP_{step}");
+            let set = SetKey::Step(step);
             offset = cyclic_modes;
             for values in &table {
                 // Nodal diameter, mode, eigenvalue, omega, frequency, imaginary part.
@@ -479,7 +532,7 @@ pub fn parse_dat(text: &str) -> DatImport {
         }
         // The whirl of each complex mode: F (forward, with the rotation) or B (backward).
         if trimmed == "E I G E N M O D E   T U R N I N G   D I R E C T I O N" {
-            let set = format!("STEP_{step}");
+            let set = SetKey::Step(step);
             while i < lines.len() {
                 let line = lines[i].trim();
                 i += 1;
@@ -526,7 +579,7 @@ pub fn parse_dat(text: &str) -> DatImport {
         // A buckle step lists its buckling factors by mode.
         if trimmed == "B U C K L I N G   F A C T O R   O U T P U T" {
             let table = table_after(&lines, &mut i);
-            let set = format!("STEP_{step}");
+            let set = SetKey::Step(step);
             for values in table.iter().filter(|v| v.len() == 2) {
                 let m = values[0] as u32;
                 let row = data.row(step, m, values[1]);
@@ -540,7 +593,7 @@ pub fn parse_dat(text: &str) -> DatImport {
         if trimmed.starts_with("D E S I G N   R E S P O N S E")
             && trimmed.ends_with("I N F O R M A T I O N")
         {
-            let set = format!("STEP_{step}");
+            let set = SetKey::Step(step);
             let row = data.row(step, 1, 0.0);
             while i < lines.len() {
                 let line = lines[i].trim();
@@ -573,7 +626,7 @@ pub fn parse_dat(text: &str) -> DatImport {
         ];
         if let Some((_, field)) = modal.iter().find(|(key, _)| trimmed == *key) {
             let table = table_after(&lines, &mut i);
-            let set = format!("STEP_{step}");
+            let set = SetKey::Step(step);
             for values in table.iter().filter(|v| v.len() == 7) {
                 let m = values[0] as u32;
                 let m = if cyclic_modes > 0 {

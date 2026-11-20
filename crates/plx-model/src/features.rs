@@ -256,6 +256,8 @@ pub struct ResultPlane {
 /// Nothing of it goes into the input file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResultPath {
+    /// The internal identity plots refer to; the user sees only the name.
+    pub id: Id<ResultPath>,
     pub name: String,
     pub start: PointRef,
     pub end: PointRef,
@@ -265,6 +267,7 @@ pub struct ResultPath {
 impl ResultPath {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: Id::new(),
             name: name.into(),
             start: PointRef::Coordinates([0.0; 3]),
             end: PointRef::Coordinates([1.0, 0.0, 0.0]),
