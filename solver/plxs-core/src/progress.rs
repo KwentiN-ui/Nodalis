@@ -1,6 +1,5 @@
 //! Progress events a session reports while it computes. The command line prints them in
-//! CalculiX's wording (Nodalis's monitor reads that text), Nodalis will consume them
-//! directly in phase 2.
+//! CalculiX's wording; Nodalis consumes the events directly (`plx_solve::monitor`).
 
 use std::cell::RefCell;
 use std::sync::Arc;

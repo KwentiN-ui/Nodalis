@@ -1,5 +1,5 @@
 //! Results of a run in memory: what the `.frd` and `.dat` writers serialize and what
-//! Nodalis will read directly in phase 2.
+//! Nodalis reads directly (`plx_results::from_solver`).
 
 use serde::{Deserialize, Serialize};
 

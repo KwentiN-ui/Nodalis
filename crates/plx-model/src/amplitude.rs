@@ -1,5 +1,5 @@
 //! Amplitudes: time curves that scale boundary conditions and loads, tabular
-//! amplitudes. A boundary condition or load refers to one by name; without one CalculiX
+//! amplitudes. A boundary condition or load refers to one by id; without one the solver
 //! ramps the value linearly over a static step and applies it at once in a heat transfer
 //! step.
 

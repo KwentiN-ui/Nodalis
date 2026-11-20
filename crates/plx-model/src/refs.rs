@@ -13,10 +13,6 @@ impl FeModel {
         self.amplitudes.iter().find(|a| a.id == id)
     }
 
-    pub fn amplitude_named(&self, name: &str) -> Option<&Amplitude> {
-        self.amplitudes.iter().find(|a| a.name == name)
-    }
-
     pub fn distribution(&self, id: Id) -> Option<&Distribution> {
         self.distributions.iter().find(|d| d.id == id)
     }
@@ -37,16 +33,8 @@ impl FeModel {
         self.materials.iter().find(|m| m.id == id)
     }
 
-    pub fn material_named(&self, name: &str) -> Option<&Material> {
-        self.materials.iter().find(|m| m.name == name)
-    }
-
     pub fn surface_interaction(&self, id: Id) -> Option<&SurfaceInteraction> {
         self.surface_interactions.iter().find(|i| i.id == id)
-    }
-
-    pub fn surface_interaction_named(&self, name: &str) -> Option<&SurfaceInteraction> {
-        self.surface_interactions.iter().find(|i| i.name == name)
     }
 
     pub fn contact_pair(&self, id: Id) -> Option<&ContactPair> {
@@ -63,10 +51,6 @@ impl FeModel {
 
     pub fn bolt(&self, id: Id) -> Option<&Bolt> {
         self.bolts.iter().find(|b| b.id == id)
-    }
-
-    pub fn bolt_named(&self, name: &str) -> Option<&Bolt> {
-        self.bolts.iter().find(|b| b.name == name)
     }
 
     /// The first boundary condition with the id, of any step: the steps hold their own copies

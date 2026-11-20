@@ -82,6 +82,8 @@ fn length(a: Point) -> f64 {
 /// A piece of the master side: a triangle, or a segment for the edges of 2D elements and
 /// shells. `normal` points out of the material where it is known.
 struct Piece {
+    /// The face it is a piece of, by index in the faces of the master side.
+    face: usize,
     points: Vec<Point>,
     normal: Option<Point>,
     min: Point,
@@ -190,7 +192,7 @@ fn box_distance(p: Point, min: Point, max: Point) -> f64 {
 impl Master {
     fn new(mesh: &FeMesh, faces: &[(ElementId, u8)]) -> Self {
         let mut pieces = Vec::new();
-        for &(element_id, face) in faces {
+        for (index, &(element_id, face)) in faces.iter().enumerate() {
             let Some(element) = mesh.element(element_id) else {
                 continue;
             };
@@ -243,6 +245,7 @@ impl Master {
                     }
                 }
                 pieces.push(Piece {
+                    face: index,
                     points,
                     normal,
                     min,
@@ -270,6 +273,11 @@ impl Master {
     /// The signed distance of `p` to the nearest piece within `radius`, if any, and the
     /// closest point of that piece.
     fn closest(&self, p: Point, radius: f64) -> Option<(f64, Point)> {
+        self.closest_piece(p, radius).map(|(d, q, _)| (d, q))
+    }
+
+    /// [`Self::closest`], and the index of the piece.
+    fn closest_piece(&self, p: Point, radius: f64) -> Option<(f64, Point, usize)> {
         if self.tree.is_empty() || box_distance(p, self.min, self.max) > radius {
             return None;
         }
@@ -303,7 +311,7 @@ impl Master {
                 }
             }
         }
-        best.map(|(d, q, _)| (d, q))
+        best
     }
 }
 
@@ -520,6 +528,69 @@ fn check(
         ContactStatus::FarOpen
     };
     Some(check)
+}
+
+/// The nearest of the faces of a [`FaceSearch`] to a point.
+pub(crate) struct Nearest {
+    /// The face, by its index in the faces searched.
+    pub face: usize,
+    /// The closest point of the face, flat between its corners.
+    pub point: Point,
+    pub distance: f64,
+    /// Whether the point lies in the material of the solid element of the face.
+    pub inside: bool,
+    /// How far the point lies beside the face rather than above or below it: the part of
+    /// the way to the closest point along the face, 0 above its inside.
+    pub lateral: f64,
+    /// The longest edge of the triangle of the face the point is nearest to.
+    pub size: f64,
+}
+
+/// Element faces prepared for finding the nearest to many points. The faces are flat
+/// between their corners, as the contact check takes them.
+pub(crate) struct FaceSearch(Master);
+
+impl FaceSearch {
+    pub(crate) fn new(mesh: &FeMesh, faces: &[(ElementId, u8)]) -> Self {
+        Self(Master::new(mesh, faces))
+    }
+
+    /// The nearest face to `p` within `radius`.
+    pub(crate) fn nearest(&self, p: Point, radius: f64) -> Option<Nearest> {
+        let (d, point, i) = self.0.closest_piece(p, radius)?;
+        let piece = &self.0.pieces[i];
+        let way = sub(p, point);
+        let edge = |a: Point, b: Point| length(sub(b, a));
+        let (lateral, size) = match piece.points[..] {
+            [a, b] => {
+                let size = edge(a, b);
+                (
+                    dot(way, sub(b, a)).abs() / size.max(f64::MIN_POSITIVE),
+                    size,
+                )
+            }
+            [a, b, c] => {
+                let (u, v) = (sub(b, a), sub(c, a));
+                let n = [
+                    u[1] * v[2] - u[2] * v[1],
+                    u[2] * v[0] - u[0] * v[2],
+                    u[0] * v[1] - u[1] * v[0],
+                ];
+                let normal = dot(way, n) / length(n).max(f64::MIN_POSITIVE);
+                let lateral = (dot(way, way) - normal * normal).max(0.0).sqrt();
+                (lateral, edge(a, b).max(edge(b, c)).max(edge(c, a)))
+            }
+            _ => (0.0, 0.0),
+        };
+        Some(Nearest {
+            face: piece.face,
+            point,
+            distance: d.abs(),
+            inside: d < 0.0,
+            lateral,
+            size,
+        })
+    }
 }
 
 /// The distance of each point to the nearest of the faces, infinite where there is none.

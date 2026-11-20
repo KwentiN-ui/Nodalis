@@ -278,6 +278,32 @@ impl Controls {
     }
 }
 
+/// Writes the fields of the last increment done, `unwritten` (its number, step time, total
+/// time and constraint forces) when it ended between two frames, from the state it left:
+/// a stopped run's results end where it stopped.
+fn write_unwritten(
+    ctx: &mut ProcedureContext<'_>,
+    step: &Step,
+    unwritten: Option<(u32, f64, f64, Vec<f64>)>,
+) -> Result<()> {
+    let Some((increment, step_time, total, forces)) = unwritten else {
+        return Ok(());
+    };
+    let u = ctx.state.displacements.values.clone();
+    write_increment(
+        ctx,
+        step,
+        increment,
+        step_time,
+        total,
+        &u,
+        &forces,
+        &ctx.state.stresses.clone(),
+        &ctx.state.strains.clone(),
+        Some(&ctx.state.material.clone()),
+    )
+}
+
 /// Why an attempt at an increment failed.
 enum Failure {
     /// The residual grew in two consecutive iterations, the iteration limit was hit or the
@@ -451,8 +477,12 @@ impl Procedure for NonlinearStatic {
         } else {
             plxs_assembly::FollowerLoads::default()
         };
+        // The last increment done whose fields were not written (it ended between two
+        // frames): a stopped run writes it, so that its results end where it stopped.
+        let mut unwritten: Option<(u32, f64, f64, Vec<f64>)> = None;
         while time < period * (1.0 - 1e-12) {
             if ctx.cancel.is_cancelled() {
+                write_unwritten(ctx, step, unwritten.take())?;
                 return Ok(StepOutcome::Cancelled);
             }
             increment += 1;
@@ -586,7 +616,16 @@ impl Procedure for NonlinearStatic {
                     large_rotations.then_some((active.as_slice(), spc_end.dofs.as_slice())),
                     &mut reducer,
                     &mut jumps,
-                )?;
+                );
+                // Stopped inside the attempt (a factorization, an iterative solve): the
+                // increments done so far stay as they were.
+                let result = match result {
+                    Err(plxs_core::Error::Cancelled) => {
+                        write_unwritten(ctx, step, unwritten.take())?;
+                        return Ok(StepOutcome::Cancelled);
+                    }
+                    result => result?,
+                };
                 match result {
                     Ok(converged) => break converged,
                     Err(failure) => {
@@ -723,6 +762,9 @@ impl Procedure for NonlinearStatic {
                     &ctx.state.strains.clone(),
                     Some(&ctx.state.material.clone()),
                 )?;
+                unwritten = None;
+            } else {
+                unwritten = Some((increment, step_time, total, forces.clone()));
             }
             crate::history::write_history(
                 ctx.results,

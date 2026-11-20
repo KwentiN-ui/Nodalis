@@ -59,12 +59,14 @@ mod remote_force;
 mod section;
 mod signature;
 mod solver_diagnostics;
+mod step_settings;
 mod study;
 mod symmetry;
 mod tables;
 mod torsion;
 pub mod units;
 mod wall_loads;
+pub use step_settings::StepSettings;
 pub use tables::{StepTable, TableOwner};
 mod validity;
 
@@ -118,10 +120,7 @@ pub use exposed::{Exposed, Field, ItemRef, ValuePath};
 pub use features::{
     GLOBAL, Plane, PlaneSource, PointDefinition, PointRef, ReferencePoint, ResultPath, ResultPlane,
 };
-pub use field::{
-    FieldOutput, OutputDimension, OutputKind, output_variable_description, output_variable_field,
-    output_variable_label,
-};
+pub use field::{FieldOutput, FieldResult, OutputDimension, output_variable_description};
 pub use geometry::{
     Algorithm2d, Algorithm3d, CompoundPart, ExtrudeLayers, ExtrudeMesh, Geometry,
     GeometryOperation, MeshSetupItem, MeshSetupKind, MeshingParameters, PartId, PeriodicFaces,
@@ -253,11 +252,14 @@ use serde::{Deserialize, Serialize};
 /// analyses take ([`LoadKind::WallLoads`]); older formats read as they are. Format 54 adds
 /// the torsion constant of general profiles and the shear factor of sketched ones; older
 /// general profiles read without a torsion constant, which the dialog asks for, older
-/// sketches with the shear factor 5/6. Format 55 gives the parts of the mesh ids
-/// ([`plx_mesh::Part::id`]) and has everything refer to them by id instead of by name: regions
-/// of whole parts, element types, part filters, mesh operations and compound parts, so that
-/// renaming a part keeps every reference to it; older projects are refused.
-pub const PROJECT_FORMAT: u32 = 55;
+/// sketches with the shear factor 5/6. Format 55 replaces the field outputs of the steps
+/// with one of the analysis ([`FeModel::field_output`]) that holds only what goes beyond
+/// the results every step writes; the field outputs of older steps are dropped.
+/// Format 56 gives the parts of the mesh ids ([`plx_mesh::Part::id`]) and has everything
+/// refer to them by id instead of by name: regions of whole parts, element types, part
+/// filters, mesh operations and compound parts, so that renaming a part keeps every
+/// reference to it; older projects are refused.
+pub const PROJECT_FORMAT: u32 = 56;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -267,7 +269,7 @@ pub struct FeModel {
     pub properties: ModelProperties,
     pub materials: Vec<Material>,
     pub sections: Vec<Section>,
-    /// Profiles of beams, which beam sections pick by name.
+    /// Profiles of beams, which beam sections pick by id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cross_sections: Vec<CrossSection>,
     /// Springs, supports and ties.
@@ -300,21 +302,24 @@ pub struct FeModel {
     /// and ties they stand for ([`FeModel::lower_bolts`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bolts: Vec<Bolt>,
-    /// Time curves boundary conditions and loads refer to by name.
+    /// Time curves boundary conditions and loads refer to by id.
     #[serde(default)]
     pub amplitudes: Vec<Amplitude>,
-    /// Factors over the model that pressures and temperatures refer to by name.
+    /// Factors over the model that pressures and temperatures refer to by id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub distributions: Vec<Distribution>,
     /// State of the model before the first step, such as its initial temperature.
     #[serde(default)]
     pub initial_conditions: Vec<InitialCondition>,
     pub steps: Vec<Step>,
+    /// What the steps write for the Results beyond the standard results of their kinds.
+    #[serde(default, skip_serializing_if = "FieldOutput::is_standard")]
+    pub field_output: FieldOutput,
     /// Values printed into the `.dat` file, each once for the model; the steps list those
     /// they print ([`Step::history_outputs`]).
     #[serde(default)]
     pub history_outputs: Vec<HistoryOutput>,
-    /// The features: points and coordinate systems other items refer to by name.
+    /// The features: points and coordinate systems other items refer to by id.
     #[serde(default)]
     pub reference_points: Vec<ReferencePoint>,
     #[serde(default)]
@@ -937,7 +942,6 @@ pub struct Step {
     pub kind: StepKind,
     pub boundary_conditions: Vec<BoundaryCondition>,
     pub loads: Vec<Load>,
-    pub field_outputs: Vec<FieldOutput>,
     /// The history outputs of the model the step prints, by id, in their order.
     #[serde(default)]
     pub history_outputs: Vec<Id>,
@@ -1057,13 +1061,6 @@ impl StepKind {
         }
     }
 
-    pub fn design_region_mut(&mut self) -> Option<&mut Region> {
-        match self {
-            StepKind::Sensitivity(settings) => Some(&mut settings.design_region),
-            _ => None,
-        }
-    }
-
     /// Whether the step keeps the supports of the step before it. A sensitivity step
     /// evaluates that step's solution, so it takes no boundary conditions of its own.
     pub fn keeps_previous_boundaries(&self) -> bool {
@@ -1077,7 +1074,7 @@ impl StepKind {
 
     /// Whether the step is an eigenvalue problem (frequency, complex frequency or
     /// buckling): its results are the mode shapes with their eigenvalues, kept once and
-    /// normalized, and it takes no field outputs.
+    /// normalized.
     pub fn computes_eigenmodes(&self) -> bool {
         matches!(
             self,
@@ -2147,16 +2144,15 @@ impl SensitivityStep {
 }
 
 impl Step {
-    /// A sensitivity step: its node output holds the sensitivities (`SEN`).
+    /// A sensitivity step.
     pub fn new_sensitivity(name: impl Into<String>) -> Self {
         Self {
             kind: StepKind::Sensitivity(SensitivityStep::default()),
-            field_outputs: FieldOutput::sensitivity_defaults(),
             ..Self::new_static(name)
         }
     }
 
-    /// A complex frequency step; its results are the mode shapes, without field outputs.
+    /// A complex frequency step; its results are the mode shapes.
     pub fn new_complex_frequency(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -2165,22 +2161,20 @@ impl Step {
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
             history_outputs: Vec::new(),
-            field_outputs: Vec::new(),
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
             bolt_changes: Vec::new(),
         }
     }
 
-    /// A visco step with the static step's field outputs and the creep strain (`PEEQ`).
+    /// A visco step.
     pub fn new_visco(name: impl Into<String>) -> Self {
         let mut step = Self::new_static(name);
         step.kind = StepKind::Visco(ViscoStep::default());
-        step.field_outputs = FieldOutput::visco_defaults();
         step
     }
 
-    /// A static step with the default field outputs.
+    /// A static step.
     pub fn new_static(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -2192,11 +2186,10 @@ impl Step {
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
             bolt_changes: Vec::new(),
-            field_outputs: FieldOutput::defaults(),
         }
     }
 
-    /// A frequency step; its results are the mode shapes, without field outputs.
+    /// A frequency step; its results are the mode shapes.
     pub fn new_frequency(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -2208,11 +2201,10 @@ impl Step {
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
             bolt_changes: Vec::new(),
-            field_outputs: Vec::new(),
         }
     }
 
-    /// A buckle step; its results are the mode shapes, without field outputs.
+    /// A buckle step; its results are the mode shapes.
     pub fn new_buckle(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -2224,11 +2216,10 @@ impl Step {
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
             bolt_changes: Vec::new(),
-            field_outputs: Vec::new(),
         }
     }
 
-    /// A heat transfer step with the default field outputs.
+    /// A heat transfer step.
     pub fn new_heat_transfer(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -2240,11 +2231,10 @@ impl Step {
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
             bolt_changes: Vec::new(),
-            field_outputs: FieldOutput::heat_transfer_defaults(),
         }
     }
 
-    /// A dynamic step with the default field outputs.
+    /// A dynamic step.
     pub fn new_dynamic(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -2253,24 +2243,22 @@ impl Step {
             boundary_conditions: Vec::new(),
             loads: Vec::new(),
             history_outputs: Vec::new(),
-            field_outputs: FieldOutput::dynamic_defaults(),
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
             bolt_changes: Vec::new(),
         }
     }
 
-    /// A steady state dynamics step with the default field outputs.
+    /// A steady state dynamics step.
     pub fn new_steady_state_dynamics(name: impl Into<String>) -> Self {
         Self {
             kind: StepKind::SteadyStateDynamics(SteadyStateDynamicsStep::default()),
-            field_outputs: FieldOutput::defaults(),
             history_outputs: Vec::new(),
             ..Self::new_dynamic(name)
         }
     }
 
-    /// A coupled temperature-displacement step with the default field outputs.
+    /// A coupled temperature-displacement step.
     pub fn new_coupled(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -2282,7 +2270,6 @@ impl Step {
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
             bolt_changes: Vec::new(),
-            field_outputs: FieldOutput::coupled_defaults(),
         }
     }
 }
@@ -2945,18 +2932,18 @@ mod tests {
     }
 
     #[test]
-    fn eigenvalue_steps_start_without_field_outputs() {
+    fn eigenvalue_steps_write_their_modes_only() {
         for step in [
             Step::new_frequency("F"),
             Step::new_buckle("B"),
             Step::new_complex_frequency("C"),
         ] {
             assert!(step.kind.computes_eigenmodes());
-            assert!(step.field_outputs.is_empty(), "{}", step.name);
+            assert!(step.kind.standard_results().is_empty(), "{}", step.name);
         }
         let static_step = Step::new_static("S");
         assert!(!static_step.kind.computes_eigenmodes());
-        assert_eq!(static_step.field_outputs.len(), 2);
+        assert_eq!(static_step.kind.standard_results().len(), 4);
     }
 
     #[test]

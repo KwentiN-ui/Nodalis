@@ -301,7 +301,7 @@ impl Reader {
             "*SENSITIVITY" => self.sensitivity(k)?,
             "*DESIGNRESPONSE" => self.design_response(k, data)?,
             "*FILTER" => self.filter(k, data)?,
-            "*OBJECTIVE" => self.objective(k, data)?,
+            "*OBJECTIVE" => self.objective(k)?,
             "*CONTROLS" => self.controls(k, data)?,
             "*BOUNDARY" => self.boundary(k, data)?,
             "*CLOAD" => self.cload(k, data)?,
@@ -2165,7 +2165,6 @@ impl Reader {
             nlgeom: k.has("NLGEOM"),
             responses: Vec::new(),
             filter: None,
-            objectives: Vec::new(),
         });
         self.procedure(k, procedure)
     }
@@ -2218,18 +2217,11 @@ impl Reader {
         Ok(())
     }
 
-    fn objective(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
+    /// `*OBJECTIVE` of older CalculiX inputs: accepted and ignored, the sensitivities are
+    /// computed for every `*DESIGN RESPONSE`.
+    fn objective(&mut self, k: &Keyword) -> Result<(), Error> {
         k.check_parameters(&["TARGET"])?;
-        let names: Vec<String> = data
-            .iter()
-            .flat_map(|d| {
-                d.fields()
-                    .into_iter()
-                    .map(normalized_name)
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        self.current_sensitivity(k)?.objectives.extend(names);
+        self.current_sensitivity(k)?;
         Ok(())
     }
 

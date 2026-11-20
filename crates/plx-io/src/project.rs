@@ -110,7 +110,6 @@ pub enum ProjectNode {
     /// A plot of the numbers linked to it, drawn in the block.
     Plot(PlotBlock),
     /// What is linked to it, drawn in the block: a mesh, a number or a series.
-    #[serde(alias = "MeshPreview")]
     Preview(Preview),
     /// Blocks put together into one, which opens into a schematic of its own, like a node
     /// group of Blender.
@@ -975,7 +974,7 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
 
 /// The oldest format that can still be opened. While Nodalis is being designed, a new
 /// format is not converted: older projects are refused.
-pub const FIRST_PROJECT_FORMAT: u32 = 55;
+pub const FIRST_PROJECT_FORMAT: u32 = 56;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
@@ -1747,10 +1746,108 @@ mod tests {
         );
         load.system = Some(system);
         step.loads.push(load);
-        // The node output also shows the displacements in the moving system.
-        step.field_outputs[0].system = Some(system);
+        // The results also show the displacements in the moving system.
+        model.field_output.system = Some(system);
         model.steps.push(step);
         let project = single(None, &mesh, &model, None);
+        save_project(std::path::Path::new(&path), &project).unwrap();
+    }
+
+    /// Writes a project of a global block and a submodel of its upper half whose cut face
+    /// follows the global results, for the user guide's screenshot of the submodel boundary
+    /// condition: `PLX_SUBMODEL_DEMO=path cargo test submodel_demo -- --ignored`.
+    #[test]
+    #[ignore]
+    fn submodel_demo_project() {
+        let Some(path) = std::env::var_os("PLX_SUBMODEL_DEMO") else {
+            return;
+        };
+        let block = |size: [f64; 3], origin: [f64; 3], n: [u32; 3]| {
+            let mut mesh = FeMesh::default();
+            let faces = add_block(&mut mesh, "Block", 1, origin, size, n);
+            let mut model = FeModel::default();
+            model.materials.push(Material {
+                name: "Steel".into(),
+                elastic: Some(plx_model::Elastic {
+                    young: 2.1e11,
+                    poisson: 0.3,
+                }),
+                ..Default::default()
+            });
+            model.sections.push(plx_model::Section {
+                name: "Solid_Section-1".into(),
+                material: model.materials.last().map(|m| m.id),
+                region: Region::Parts(mesh.ids_of(&["Block"])),
+                thickness: 1.0,
+                kind: plx_model::SectionKind::Solid,
+                orientation: None,
+            });
+            (mesh, model, faces)
+        };
+        let boundary = |name: &str, region, kind| plx_model::BoundaryCondition {
+            id: plx_model::Id::new(),
+            distribution: None,
+            name: name.into(),
+            active: true,
+            visible: true,
+            region,
+            kind,
+            amplitude: None,
+        };
+        let force = |faces| {
+            plx_model::Load::new(
+                "Force-1",
+                Region::Faces(faces),
+                plx_model::LoadKind::Force {
+                    value: [1000.0, 0.0, 0.0],
+                    each_node: false,
+                },
+            )
+        };
+        let (global_mesh, mut global, [bottom, top]) =
+            block([0.02, 0.02, 0.1], [0.0; 3], [2, 2, 10]);
+        let mut step = plx_model::Step::new_static("Step-1");
+        let fixed = plx_model::BoundaryKind::displacement([Some(0.0); 6]);
+        (step.boundary_conditions).push(boundary("Fixed-1", Region::Faces(bottom), fixed));
+        step.loads.push(force(top));
+        global.steps.push(step);
+        let (sub_mesh, mut sub, [cut, top]) =
+            block([0.02, 0.02, 0.05], [0.0, 0.0, 0.05], [2, 2, 5]);
+        sub.properties.kind = plx_model::ModelKind::Submodel;
+        let mut step = plx_model::Step::new_static("Step-1");
+        let follow = plx_model::BoundaryKind::Submodel {
+            step: 1,
+            dofs: [true, true, true, false, false, false],
+        };
+        (step.boundary_conditions).push(boundary("Submodel-1", Region::Faces(cut), follow));
+        step.loads.push(force(top));
+        sub.steps.push(step);
+        let analysis = |id, name: &str, x, mesh: &FeMesh, model: &FeModel| {
+            ProjectNode::Analysis(Box::new(ProjectAnalysis {
+                id,
+                name: name.into(),
+                position: [x, 20.0],
+                mesh: mesh.clone(),
+                model: model.clone(),
+                ..Default::default()
+            }))
+        };
+        let project = Project {
+            nodes: vec![
+                analysis(1, "Global", 20.0, &global_mesh, &global),
+                analysis(2, "Submodel", 320.0, &sub_mesh, &sub),
+            ],
+            links: vec![Link {
+                source: 1,
+                target: 2,
+                item: vec!["Results".into(), "Step-1".into()],
+                slot: ["Setup", "Steps", "Step-1", "Global results"]
+                    .map(Into::into)
+                    .to_vec(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
         save_project(std::path::Path::new(&path), &project).unwrap();
     }
 
@@ -2200,6 +2297,11 @@ mod tests {
         let [rp, plane, interaction, region, detection] = [(); 5].map(|_| plx_model::Id::new());
         let model = FeModel {
             bolts: Vec::new(),
+            field_output: plx_model::FieldOutput {
+                additional: vec![plx_model::FieldResult::StrainEnergy],
+                system: None,
+                dimension: plx_model::OutputDimension::TwoD,
+            },
             history_outputs: Vec::new(),
             cross_sections: Vec::new(),
             distributions: Vec::new(),

@@ -13,13 +13,13 @@ use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
     Active, Amplitude, AmplitudeTime, BeamProfile, BeamSection, BoundaryKind, BuckleStep,
     ComplexFrequencyStep, Constraint, ContactMethod, ContactPair, ContactScale, Damping,
-    DefinedFieldKind, DynamicMethod, DynamicStep, FeModel, FieldOutput, Formulation, FrequencyStep,
+    DefinedFieldKind, DynamicMethod, DynamicStep, FeModel, FieldResult, Formulation, FrequencyStep,
     GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Id, IncrementPlan,
     InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModelItem, ModelSpace,
-    MovingFrame, NodeTie, Origins, OutputDimension, OutputKind, Quantity, RayleighFit, Region,
-    RemoteBehavior, RemoteDof, Sampler, Section, SectionKind, SectorDisplay, SensitivityStep,
-    StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction,
-    TableOwner, Tie, Totals, UnitSystem, ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
+    MovingFrame, NodeTie, Origins, OutputDimension, Quantity, RayleighFit, Region, RemoteBehavior,
+    RemoteDof, Sampler, Section, SectionKind, SectorDisplay, SensitivityStep, StaticStep,
+    SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, TableOwner, Tie,
+    Totals, UnitSystem, ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
 };
 use plxs_core as ir;
 use plxs_core::mesh::{ElementRef, NodeRef};
@@ -420,12 +420,16 @@ impl Built {
                     step.name = format!("Step-{}", steps.len() + 1);
                 }
                 assembler.begin(step);
-                // A step prints the history outputs it lists, none carried over from the
-                // steps before: the model keeps one output that each step lists or not.
+                // A step prints the history outputs it lists and writes the results of its
+                // own, none carried over from the steps before: the model keeps one output
+                // that each step lists or not, and an eigenvalue step writes its modes only.
                 let prints = |kind: fn(&Card) -> bool| block.cards.iter().any(kind);
                 let node = prints(|c| matches!(c, Card::NodePrint(_)));
                 let element = prints(|c| matches!(c, Card::ElPrint(_)));
                 let contact = prints(|c| matches!(c, Card::ContactPrint(_)));
+                let node_file = prints(|c| matches!(c, Card::NodeFile(_)));
+                let element_file = prints(|c| matches!(c, Card::ElFile(_)));
+                let contact_file = prints(|c| matches!(c, Card::ContactFile(_)));
                 for card in block.boundaries.into_iter().chain(block.cards) {
                     let _ = assembler.apply(&model, card);
                 }
@@ -436,6 +440,15 @@ impl Built {
                         (node, &mut outputs.node_print),
                         (element, &mut outputs.el_print),
                         (contact, &mut outputs.contact_print),
+                    ] {
+                        if !own {
+                            list.clear();
+                        }
+                    }
+                    for (own, list) in [
+                        (node_file, &mut outputs.node_file),
+                        (element_file, &mut outputs.el_file),
+                        (contact_file, &mut outputs.contact_file),
                     ] {
                         if !own {
                             list.clear();
@@ -2822,7 +2835,8 @@ fn tie(sets: &mut Sets, tie: &Tie) -> Result<ConstraintItem, WriteError> {
             .collect();
         let originals = originals.into_iter().collect();
         sets.node_surface(&tie.name, "Slave", &Region::Nodes(originals))?
-    } else if membrane_edges(sets.mesh, slave_region) {
+    } else if membrane_edges(sets.mesh, slave_region) || matches!(slave_region, Region::Nodes(_)) {
+        // Picked nodes: of the bodies of a compound part those that lie on the master.
         sets.node_surface(&tie.name, "Slave", slave_region)?
     } else {
         sets.surface(&tie.name, "Slave", slave_region)?
@@ -4732,17 +4746,7 @@ fn step_block<'f>(
             rest.push(Card::NodePrint(node_print(set, &["RF", "U"], Totals::No)));
         }
     }
-    // The solver writes all results of the step in one form: the node outputs follow the
-    // element outputs.
-    let dimension = (step.field_outputs.iter())
-        .filter(|o| o.active && o.kind == OutputKind::Element)
-        .map(|o| o.dimension)
-        .find(|&d| d != OutputDimension::Default)
-        .unwrap_or_default();
-    rest.extend(
-        (step.field_outputs.iter())
-            .filter_map(|output| field_output(output, dimension, frame_every)),
-    );
+    rest.extend(field_outputs(model, step, frame_every));
     Ok(StepParts {
         step: ir_step,
         boundaries,
@@ -5112,7 +5116,6 @@ fn sensitivity_step(
                 kind: "LINEAR".into(),
                 radius,
             }),
-            objectives: Vec::new(),
         },
     )))
 }
@@ -5404,51 +5407,83 @@ fn variables<'a>(variables: impl IntoIterator<Item = &'a str>) -> Vec<String> {
         .collect()
 }
 
-/// The field output request of a field output; none without variables. Node outputs take the form
-/// `dimension` of the step's element outputs.
-fn field_output(output: &FieldOutput, dimension: OutputDimension, every: u32) -> Option<Card> {
-    if !output.active || output.variables.is_empty() {
-        return None;
+/// The solver's variables of a result of a step: of the nodes, of the elements and of the
+/// contacts.
+fn field_variables(result: FieldResult) -> [&'static [&'static str]; 3] {
+    match result {
+        FieldResult::Displacements => [&["U"], &[], &[]],
+        FieldResult::ReactionForces => [&["RF"], &[], &[]],
+        FieldResult::Velocities => [&["V"], &[], &[]],
+        FieldResult::Accelerations => [&["A"], &[], &[]],
+        FieldResult::Temperatures => [&["NT"], &[], &[]],
+        FieldResult::ReactionHeatFlows => [&["RFL"], &[], &[]],
+        FieldResult::Sensitivities => [&["SEN"], &[], &[]],
+        FieldResult::Stresses => [&[], &["S"], &[]],
+        FieldResult::Strains => [&[], &["E"], &[]],
+        FieldResult::PlasticStrain => [&[], &["PEEQ"], &[]],
+        FieldResult::StrainEnergy => [&[], &["ENER"], &[]],
+        FieldResult::HeatFlux => [&[], &["HFL"], &[]],
+        FieldResult::StressError => [&[], &["ERR"], &[]],
+        FieldResult::Contact => [&[], &[], &["CDIS", "CSTR"]],
+        FieldResult::ContactEnergy => [&[], &[], &["CELS"]],
+        FieldResult::AmplitudePhase => [&["PU"], &["PHS"], &[]],
     }
-    let mut names = variables(output.variables.iter().map(String::as_str));
-    if output.kind == OutputKind::Element {
-        // Nodalis adds nodal extrapolation of stresses unless error estimators are
-        // requested.
-        let has = |v: &str| output.variables.iter().any(|x| x == v);
-        if has("S") && !has("ERR") && !has("HER") && !has("ZZS") {
-            names.push("NOE".into());
-        }
+}
+
+/// The field output requests of a step: what the step writes by its kind and by the model,
+/// and the additional results of the model's field output, every `every`-th increment.
+/// The solver takes the variables of the nodes, the elements and the contacts apart.
+fn field_outputs(model: &FeModel, step: &Step, every: u32) -> Vec<Card> {
+    // The order the solver's variables are listed in.
+    const ORDER: [&[&str]; 3] = [
+        &["RF", "U", "PU", "V", "A", "NT", "RFL", "SEN"],
+        &["S", "PHS", "E", "PEEQ", "ENER", "HFL", "ERR"],
+        &["CDIS", "CSTR", "CELS"],
+    ];
+    let results = model.field_results(step);
+    let mut names: [Vec<String>; 3] = Default::default();
+    for (kind, order) in ORDER.iter().enumerate() {
+        names[kind] = (order.iter())
+            .filter(|v| (results.iter()).any(|&r| field_variables(r)[kind].contains(v)))
+            .map(|v| v.to_string())
+            .collect();
     }
-    let contact = output.kind == OutputKind::Contact;
-    let dimension = match output.kind {
-        OutputKind::Element => output.dimension,
-        _ => dimension,
-    };
-    let request = ir::step::FieldOutput {
-        variables: names,
+    // The error estimate of the stresses is written with them unless it is switched off.
+    if results.contains(&FieldResult::Stresses) && !results.contains(&FieldResult::StressError) {
+        names[1].push("NOE".into());
+    }
+    let [node, element, contact] = names;
+    let request = |variables: Vec<String>, contact: bool| ir::step::FieldOutput {
+        variables,
         frequency: every,
         nset: None,
-        last_iterations: output.last_iterations,
-        contact_elements: output.contact_elements,
-        // CalculiX's default writes shells and beams as the solids it expands them to; at
+        last_iterations: false,
+        contact_elements: false,
+        // By default shells and beams are written as the solids they are expanded to; at
         // the shell nodes (2D) the stresses are those of the mid-surface, without bending.
-        output: match dimension {
+        output: match model.field_output.dimension {
             _ if contact => ir::step::OutputDimension::Expanded,
             OutputDimension::Default => ir::step::OutputDimension::Expanded,
             OutputDimension::TwoD => ir::step::OutputDimension::TwoD,
             OutputDimension::ThreeD => ir::step::OutputDimension::ThreeD,
         },
-        // A field output's coordinate system is applied to the results when they are
+        // The field output's coordinate system is applied to the results when they are
         // shown, so that it may move; the solver writes global results.
         global: true,
         section_forces: false,
         time_points: None,
     };
-    Some(match output.kind {
-        OutputKind::Node => Card::NodeFile(request),
-        OutputKind::Element => Card::ElFile(request),
-        OutputKind::Contact => Card::ContactFile(request),
-    })
+    let mut cards = Vec::new();
+    if !node.is_empty() {
+        cards.push(Card::NodeFile(request(node, false)));
+    }
+    if !element.is_empty() {
+        cards.push(Card::ElFile(request(element, false)));
+    }
+    if !contact.is_empty() {
+        cards.push(Card::ContactFile(request(contact, true)));
+    }
+    cards
 }
 
 /// The totals of a history output.

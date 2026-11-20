@@ -12,7 +12,34 @@ use plx_model::{
 
 use super::*;
 // The tests lower whole models: nothing of them is suppressed.
-use super::{lower_whole as lower_unvalidated, write_inp_whole as write_inp};
+use super::{lower_whole as lower_unvalidated, write_inp_whole};
+
+/// [`super::write_inp_whole`] with field outputs in the eigenvalue steps. Nodalis keeps the
+/// modes of these steps as shapes and writes no fields for them; the tests read the modes
+/// from the results file, and the solver corpus compares what CalculiX writes for them.
+fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String, WriteError> {
+    let text = write_inp_whole(mesh, model, heading)?;
+    let mut out = String::with_capacity(text.len());
+    let mut node = None;
+    for line in text.split_inclusive('\n') {
+        let keyword = line.trim_end().to_ascii_lowercase();
+        if keyword.starts_with("*step") {
+            node = None;
+        } else if keyword.starts_with("*frequency") {
+            node = Some("U");
+        } else if keyword.starts_with("*complex frequency") {
+            node = Some("U, PU");
+        } else if keyword.starts_with("*buckle") {
+            node = Some("RF, U");
+        } else if keyword.starts_with("*end step")
+            && let Some(node) = node.take()
+        {
+            out += &format!("*Node file\n{node}\n*El file\nS, E, NOE\n");
+        }
+        out += line;
+    }
+    Ok(out)
+}
 
 /// [`super::lower`] of a whole model.
 fn lower(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Lowered, LowerError> {
@@ -172,47 +199,73 @@ fn writes_mesh_and_analysis_that_read_back() {
 }
 
 #[test]
-fn field_outputs_are_written_with_their_options() {
+fn steps_write_their_standard_results_and_the_additional_ones() {
     let (mesh, mut model) = cantilever(tip_force());
-    let outputs = &mut model.steps[0].field_outputs;
-    outputs[0].last_iterations = true;
-    // The solver writes global results; the system is applied when they are shown.
-    outputs[0].system = Some(plx_model::Id::new());
-    outputs[1].contact_elements = true;
-    outputs[1].dimension = OutputDimension::ThreeD;
-    outputs[1].variables = vec!["S".into(), "ERR".into()];
-    outputs.push(FieldOutput::new(
-        "CF_Output-1",
-        OutputKind::Contact,
-        &["CDIS", "CSTR"],
-    ));
-    let mut off = FieldOutput::new("NF_Output-1", OutputKind::Node, &["V"]);
-    off.active = false;
-    outputs.push(off);
+    // Nothing is asked for: the step writes what a static step always writes.
+    assert!(model.field_output.is_standard());
     let text = write_inp(&mesh, &model, "").unwrap();
-    // The node output follows the element output's form; the deactivated one is left out.
+    assert!(
+        text.contains("*Node file\nRF, U\n*El file\nS, E, NOE\n*End step\n"),
+        "{text}"
+    );
+    // The solver writes global results; the system is applied when they are shown.
+    model.field_output.system = Some(plx_model::Id::new());
+    model.field_output.dimension = OutputDimension::ThreeD;
+    model.field_output.additional = vec![
+        FieldResult::StrainEnergy,
+        FieldResult::StressError,
+        // Of a harmonic response only: a static step leaves it out.
+        FieldResult::AmplitudePhase,
+    ];
+    // A material that yields adds the plastic strain.
+    model.materials[0].plastic = Some(Default::default());
+    let text = write_inp(&mesh, &model, "").unwrap();
     assert!(
         text.contains(
-            "*Node file, Last iterations, Output=3D\nRF, U\n\
-             *El file, Contact elements, Output=3D\nS, ERR\n\
-             *Contact file\nCDIS, CSTR\n*End step\n"
+            "*Node file, Output=3D\nRF, U\n\
+             *El file, Output=3D\nS, E, PEEQ, ENER, ERR\n*End step\n"
         ),
         "{text}"
     );
 }
 
 #[test]
-fn solver_accepts_the_options_of_field_outputs() {
+fn steps_write_their_own_results_only() {
     let (mesh, mut model) = cantilever(tip_force());
-    let outputs = &mut model.steps[0].field_outputs;
-    outputs[0].last_iterations = true;
-    outputs[1].dimension = OutputDimension::ThreeD;
-    outputs[1].variables.push("ERR".into());
+    let mut frequency = Step::new_frequency("Step-2");
+    frequency.boundary_conditions = model.steps[0].boundary_conditions.clone();
+    let mut heat = Step::new_heat_transfer("Step-3");
+    heat.boundary_conditions = model.steps[0].boundary_conditions.clone();
+    model.materials[0].conductivity = Some(50.0);
+    model.steps.extend([frequency, heat]);
+    let lowered = lower(&mesh, &model, "").unwrap();
+    let steps = &lowered.analysis.steps;
+    let variables = |step: usize| -> Vec<&str> {
+        let outputs = &steps[step].outputs;
+        (outputs.node_file.iter())
+            .chain(&outputs.el_file)
+            .chain(&outputs.contact_file)
+            .flat_map(|o| o.variables.iter().map(String::as_str))
+            .collect()
+    };
+    assert_eq!(variables(0), ["RF", "U", "S", "E", "NOE"]);
+    // The eigenvalue step keeps its modes and takes nothing over from the step before.
+    assert!(variables(1).is_empty());
+    assert_eq!(variables(2), ["NT", "RFL", "HFL"]);
+}
+
+#[test]
+fn solver_writes_the_additional_results() {
+    let (mesh, mut model) = cantilever(tip_force());
+    model.field_output.dimension = OutputDimension::ThreeD;
+    model.field_output.additional = vec![FieldResult::StrainEnergy, FieldResult::StressError];
     let Some(frd) = run_solver("feldausgabe", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
     assert!(node_value(&frd, "DISP", "U3", 99) < 0.0);
-    assert!(frd.increments.last().unwrap().field("ERROR").is_some());
+    let last = frd.increments.last().unwrap();
+    assert!(last.field("ERROR").is_some());
+    assert!(last.field("ENER").is_some());
 }
 
 #[test]
@@ -320,20 +373,6 @@ fn empty_regions_and_unknown_materials_are_errors() {
 }
 
 /// Runs the solver on the input file and reads the results.
-/// The field outputs eigenvalue steps had before Nodalis kept their modes as shapes only:
-/// the solver corpus compares what CalculiX writes for them, so the fixtures keep asking.
-fn ccx_eigen_outputs(kind: &StepKind) -> Vec<FieldOutput> {
-    let node: &[&str] = match kind {
-        StepKind::Frequency(_) => &["U"],
-        StepKind::ComplexFrequency(_) => &["U", "PU"],
-        _ => &["RF", "U"],
-    };
-    vec![
-        FieldOutput::new("NF-Output-1", OutputKind::Node, node),
-        FieldOutput::new("EF-Output-1", OutputKind::Element, &["S", "E"]),
-    ]
-}
-
 fn run_solver(name: &str, text: &str) -> Option<FrdImport> {
     dump_fixture(name, text);
     let dir = run_dir(name)?;
@@ -1480,9 +1519,6 @@ fn solver_yields_the_bar_pulled_beyond_its_yield_stress() {
         }
     };
     model.steps[0].boundary_conditions = vec![hold(0), hold(1), hold(2)];
-    model.steps[0].field_outputs[1]
-        .variables
-        .push("PEEQ".into());
     let Some(frd) = run_solver("plastisch", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
@@ -1573,11 +1609,7 @@ fn a_shell_section_is_written() {
     assert!(text.contains("*El file\nS, E, NOE\n"), "{text}");
     // Asked for 2D, the node outputs follow the element outputs.
     let mut two_d = model.clone();
-    for output in &mut two_d.steps[0].field_outputs {
-        if output.kind == OutputKind::Element {
-            output.dimension = OutputDimension::TwoD;
-        }
-    }
+    two_d.field_output.dimension = OutputDimension::TwoD;
     let text = write_inp(&mesh, &two_d, "").unwrap();
     assert!(text.contains("*Node file, Output=2D\nRF, U\n"), "{text}");
     assert!(text.contains("*El file, Output=2D\nS, E, NOE\n"), "{text}");
@@ -2242,7 +2274,6 @@ fn run_dat(name: &str, text: &str) -> Option<String> {
 fn frequency_analysis() -> (FeMesh, FeModel) {
     let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
     let mut step = Step::new_frequency("Step-2");
-    step.field_outputs = ccx_eigen_outputs(&step.kind);
     step.boundary_conditions = model.steps[0].boundary_conditions.clone();
     // A load left in a frequency step must not reach CalculiX.
     step.loads = model.steps[0].loads.clone();
@@ -2324,7 +2355,6 @@ fn dynamic_cantilever(
 ) -> (FeMesh, FeModel) {
     let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
     let step = &mut model.steps[0];
-    step.field_outputs = FieldOutput::dynamic_defaults();
     step.kind = StepKind::Dynamic(DynamicStep {
         duration,
         frames: (duration / increment).round() as u32,
@@ -2602,7 +2632,6 @@ fn solver_runs_short_dynamic_steps() {
     let mut preload = Step::new_static("Preload");
     preload.boundary_conditions = release.boundary_conditions.clone();
     preload.loads.push(tip_force());
-    preload.field_outputs = release.field_outputs.clone();
     model.steps = vec![preload, release];
     let frd = run_solver("statisch-dynamisch", &write_inp(&mesh, &model, "").unwrap()).unwrap();
     let tip = frd.mesh.node_index(99).unwrap();
@@ -2754,7 +2783,6 @@ fn modal_cantilever(damping: Option<ModalDamping>) -> (FeMesh, FeModel) {
     let mut force = model.steps[0].loads[0].clone();
     force.amplitude = Some(named("Stepped"));
     let mut frequency = Step::new_frequency("Step-1");
-    frequency.field_outputs = ccx_eigen_outputs(&frequency.kind);
     frequency.boundary_conditions = supports.clone();
     let StepKind::Frequency(settings) = &mut frequency.kind else {
         unreachable!()
@@ -2820,7 +2848,6 @@ fn buckle_analysis() -> (FeMesh, FeModel) {
         },
     );
     let mut step = Step::new_buckle("Step-1");
-    step.field_outputs = ccx_eigen_outputs(&step.kind);
     step.boundary_conditions = model.steps[0].boundary_conditions.clone();
     step.loads = model.steps[0].loads.clone();
     model.steps = vec![step];
@@ -2923,14 +2950,11 @@ fn solver_runs_short_modal_steps() {
         beta: 2e-6,
     });
     let (mesh, mut model) = modal_cantilever(Some(damping));
-    let node = |variables: &[&str]| FieldOutput::new("NF-Output-1", OutputKind::Node, variables);
-    let element =
-        |variables: &[&str]| FieldOutput::new("EF-Output-1", OutputKind::Element, variables);
+    model.field_output.additional = vec![FieldResult::AmplitudePhase];
     let StepKind::Frequency(settings) = &mut model.steps[0].kind else {
         unreachable!()
     };
     settings.num_frequencies = 4;
-    model.steps[0].field_outputs = vec![node(&["U"])];
     let StepKind::Dynamic(settings) = &mut model.steps[1].kind else {
         unreachable!()
     };
@@ -2940,14 +2964,12 @@ fn solver_runs_short_modal_steps() {
         modes: 4,
         base: plx_model::Base::Unloaded,
     };
-    model.steps[1].field_outputs = vec![node(&["U", "V"]), element(&["S"])];
     let StepKind::SteadyStateDynamics(settings) = &mut model.steps[2].kind else {
         unreachable!()
     };
     settings.data_points = 3;
     settings.bias = 2.0;
     settings.modes = 4;
-    model.steps[2].field_outputs = vec![node(&["U", "PU"]), element(&["S", "PHS"])];
     let Some(frd) = run_solver("modal-kurz", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
     };
@@ -5075,12 +5097,6 @@ fn solver_reports_the_pressure_of_a_compression_only_support() {
     assert!(
         (model.contact_pair_choices().iter()).any(|(id, _)| *id == named("Compression_Only-1"))
     );
-    let step = &mut model.steps[0];
-    step.field_outputs.push(FieldOutput::new(
-        "CF_Output-1",
-        OutputKind::Contact,
-        &["CDIS", "CSTR"],
-    ));
     let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Compression_Only-1")));
     output.variables = vec!["CF".into()];
     model.put_history_output(0, output);
@@ -6167,10 +6183,6 @@ fn thermal_bar(kind: StepKind, bcs: Vec<BoundaryCondition>, loads: Vec<Load>) ->
         zero_temperature: 20.0,
     });
     let step = &mut model.steps[0];
-    step.field_outputs = match kind {
-        StepKind::HeatTransfer(_) => FieldOutput::heat_transfer_defaults(),
-        _ => FieldOutput::coupled_defaults(),
-    };
     step.kind = kind;
     step.boundary_conditions = bcs;
     step.loads = loads;
@@ -6925,7 +6937,6 @@ fn solver_cools_a_plane_strip_by_convection() {
     model.materials[0].conductivity = Some(CONDUCTIVITY);
     let step = &mut model.steps[0];
     step.kind = steady();
-    step.field_outputs = FieldOutput::heat_transfer_defaults();
     step.boundary_conditions = vec![temperature(
         "Temperature-1",
         Region::Nodes(nodes_at(&mesh, 0, 0.0)),
@@ -7674,7 +7685,6 @@ fn rotor_analysis(speed: f64) -> (FeMesh, FeModel) {
         speed,
         ..ComplexFrequencyStep::default()
     });
-    step.field_outputs = ccx_eigen_outputs(&step.kind);
     (mesh, model)
 }
 
@@ -7851,10 +7861,11 @@ fn a_complex_frequency_step_is_solved_as_preload_eigenmodes_and_complex_modes() 
         "** Rotor +",
         "*Step, Perturbation, Inc=100, Amplitude=Ramp\n*Complex frequency, Coriolis\n4\n",
         "\nFIX, 1, 6, 0\n",
-        "*Node file\nU, PU\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in\n{text}");
     }
+    // The step keeps its modes; neither it nor what prepares it writes fields.
+    assert!(!text.contains("*Node file"), "{text}");
     assert_eq!(text.matches(rotation).count(), 3, "{text}");
 
     // Without stress stiffening: the eigenmodes at standstill, no preload, no perturbation.
@@ -8710,7 +8721,6 @@ fn solver_filters_the_sensitivities() {
 fn solver_computes_the_sensitivities_of_the_eigenfrequencies() {
     let (mesh, mut model) = cantilever(tip_force());
     let mut frequency = Step::new_frequency("Step-1");
-    frequency.field_outputs = ccx_eigen_outputs(&frequency.kind);
     frequency.boundary_conditions = model.steps[0].boundary_conditions.clone();
     let StepKind::Frequency(settings) = &mut frequency.kind else {
         unreachable!()
@@ -8818,7 +8828,6 @@ fn solver_creeps_the_bar_by_nortons_law() {
         }
     };
     model.steps[0].boundary_conditions = vec![hold(0), hold(1), hold(2)];
-    model.steps[0].field_outputs = FieldOutput::visco_defaults();
     // The static step loads the bar at once; the visco step keeps the load for 1000 s.
     let mut step = Step::new_visco("Step-2");
     step.boundary_conditions = model.steps[0].boundary_conditions.clone();
@@ -8941,7 +8950,6 @@ fn disk(sectors: u32, full: bool) -> (FeMesh, FeModel, Faces, Faces) {
     let mesh = read_inp_str(&text, None).unwrap().mesh;
     let mut model = cantilever(tip_force()).1;
     let mut step = Step::new_frequency("Step-1");
-    step.field_outputs = ccx_eigen_outputs(&step.kind);
     step.boundary_conditions = model.steps[0].boundary_conditions.clone();
     model.steps = vec![step];
     (mesh, model, left, right)
@@ -10853,7 +10861,6 @@ fn solver_conducts_heat_across_contact_regions_in_coupled_steps() {
     material.specific_heat = Some(SPECIFIC_HEAT);
     let step = &mut model.steps[0];
     step.kind = StepKind::CoupledTempDisp(HeatTransferStep::default());
-    step.field_outputs = FieldOutput::coupled_defaults();
     step.boundary_conditions.extend([
         temperature("Hot", Region::Nodes((1..=9).collect()), 100.0),
         temperature("Cold", Region::Nodes((110..=118).collect()), 0.0),
@@ -11776,9 +11783,6 @@ fn uniaxial_bar(hardening: Hardening, stress: f64) -> (FeMesh, FeModel) {
         }
     };
     model.steps[0].boundary_conditions = vec![hold(0), hold(1), hold(2)];
-    model.steps[0].field_outputs[1]
-        .variables
-        .push("PEEQ".into());
     (mesh, model)
 }
 
@@ -11807,9 +11811,7 @@ fn solver_hardens_kinematically_in_tension() {
 #[test]
 fn solver_prints_the_plastic_strain_and_energy_of_the_bar() {
     let (mesh, mut model) = uniaxial_bar(Hardening::Isotropic, 300.0);
-    model.steps[0].field_outputs[1]
-        .variables
-        .push("ENER".into());
+    model.field_output.additional = vec![FieldResult::StrainEnergy];
     let mut elements =
         HistoryOutput::element("EH_Output-1", Region::ElementSet("TIP_ELEMENTS".into()));
     elements.variables = vec!["S".into(), "PEEQ".into(), "ENER".into()];
@@ -11833,12 +11835,11 @@ fn solver_prints_the_plastic_strain_and_energy_of_the_bar() {
 /// logarithmic plastic strain, so the solution follows from the logarithmic strain
 /// `ln(1.02)`. CalculiX reproduces the stress to 0.02 %, the plastic strain only to 0.4 %
 /// (its finite-strain plasticity differs in second order; see docs/solver/SCHNITTSTELLEN.md),
-/// so the fixture leaves the plastic strain out of the field output.
+/// so the fixture of the solver corpus was made without the plastic strain.
 #[test]
 fn solver_stretches_the_bar_plastically_with_nlgeom() {
     let (mesh, mut model) = uniaxial_bar(Hardening::Isotropic, 0.0);
     model.steps[0].loads.clear();
-    model.steps[0].field_outputs[1].variables.pop();
     model.steps[0].kind = StepKind::Static(StaticStep {
         nlgeom: true,
         control: plx_model::IncrementControl {
@@ -12903,6 +12904,103 @@ fn solver_carries_the_load_across_the_bodies_of_a_compound_part() {
     );
 }
 
+/// A block of C3D8 between the planes `xs`, `ys` and `zs`, numbered on from the mesh's
+/// nodes and elements; returns its elements.
+fn hex_block(mesh: &mut FeMesh, xs: &[f64], ys: &[f64], zs: &[f64]) -> Vec<ElementId> {
+    let first = mesh.node_ids().iter().copied().max().unwrap_or(0) + 1;
+    let (nx, ny) = (xs.len() as u32, ys.len() as u32);
+    let node = |i: u32, j: u32, k: u32| first + i + nx * (j + ny * k);
+    for (k, &z) in zs.iter().enumerate() {
+        for (j, &y) in ys.iter().enumerate() {
+            for (i, &x) in xs.iter().enumerate() {
+                mesh.set_node(node(i as u32, j as u32, k as u32), [x, y, z]);
+            }
+        }
+    }
+    let mut id = mesh.elements().iter().map(|e| e.id).max().unwrap_or(0);
+    let mut elements = Vec::new();
+    for k in 0..zs.len() as u32 - 1 {
+        for j in 0..ny - 1 {
+            for i in 0..nx - 1 {
+                id += 1;
+                let mut nodes = Vec::new();
+                for k in [k, k + 1] {
+                    nodes.extend([node(i, j, k), node(i + 1, j, k), node(i + 1, j + 1, k)]);
+                    nodes.push(node(i, j + 1, k));
+                }
+                mesh.add_element(plx_mesh::Element {
+                    id,
+                    type_name: "C3D8".into(),
+                    shape: plx_mesh::ElementShape::Hex8,
+                    nodes,
+                })
+                .unwrap();
+                elements.push(id);
+            }
+        }
+    }
+    elements
+}
+
+/// A plate on a block as the bodies of one compound part, the plate reaching beyond the
+/// block: the wide elements of the plate above the border of the block lie on it with their
+/// centres, their outer nodes far beyond it. Only the nodes on the block are tied, and the
+/// solver has no node to leave out as too far away.
+#[test]
+fn solver_ties_only_the_nodes_of_a_compound_body_that_lie_on_the_other() {
+    let mut mesh = FeMesh::default();
+    let lower = hex_block(&mut mesh, &[0.0, 4.0], &[0.0, 4.0], &[-4.0, 0.0]);
+    let mut xs = vec![1.0, 3.0, 4.9];
+    xs.extend((0..=20).map(|i| 5.0 + 0.1 * f64::from(i)));
+    let ys: Vec<f64> = (0..=4).map(f64::from).collect();
+    let upper = hex_block(&mut mesh, &xs, &ys, &[0.0, 0.5]);
+    let top: Vec<(ElementId, u8)> = upper.iter().map(|&e| (e, 2)).collect();
+    let mut part = plx_mesh::Part::new("BLOCK", [lower.clone(), upper.clone()].concat());
+    part.bodies = vec![
+        plx_mesh::Body {
+            id: Default::default(),
+            name: "LOWER".into(),
+            elements: lower,
+        },
+        plx_mesh::Body {
+            id: Default::default(),
+            name: "UPPER".into(),
+            elements: upper,
+        },
+    ];
+    mesh.parts.push(part);
+    let mut model = stacked_blocks(&mesh);
+    model.sections[0].region = Region::Parts(mesh.ids_of(&["BLOCK"]));
+    let bottom: Vec<NodeId> = (mesh.node_ids().iter().zip(mesh.coords()))
+        .filter(|(_, c)| c[2] == -4.0)
+        .map(|(&id, _)| id)
+        .collect();
+    model.steps[0].boundary_conditions[0].region = Region::Nodes(bottom.clone());
+    model.steps[0].loads[0].region = Region::Faces(top);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("*Tie,").count(), 1, "{text}");
+    // The slave side is the 10 nodes of the plate at x = 1 and 3.
+    assert!(
+        text.contains("*Surface, Name=INTERNAL_SELECTION-1_BLOCK_LOWER_TO_UPPER_SLAVE, Type=Node"),
+        "{text}"
+    );
+    let Some(dir) = run_dir("compound-beyond") else {
+        return;
+    };
+    let (log, finished) = solve_in(&dir, "compound-beyond", &text);
+    assert!(finished, "{}", log.join("\n"));
+    assert!(
+        !log.iter().any(|l| l.contains("too far away")),
+        "{}",
+        log.join("\n")
+    );
+    let frd = read_frd(&dir.join("compound-beyond.frd")).unwrap();
+    remove_run_dir(&dir);
+    // The pressure of 10 on the plate of 6 x 4.
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!((reaction - 240.0).abs() < 0.1, "{reaction}");
+}
+
 /// The shell plate cut in two at x = 50, as a shell split by a plane: two bodies of one
 /// compound part with nodes of their own along the cut, tied edge to edge. It bends as the
 /// whole plate does.
@@ -13768,7 +13866,6 @@ fn solver_swings_and_weighs_a_cantilever_with_a_tip_mass() {
     model.steps[0]
         .loads
         .push(body_load(LoadKind::Gravity([0.0, 0.0, -9810.0])));
-    model.steps[0].field_outputs = ccx_eigen_outputs(&StepKind::Static(Default::default()));
     let text = write_inp(&mesh, &model, "").unwrap();
     let Some(frd) = run_solver("point_mass_tip", &text) else {
         return;
@@ -13821,7 +13918,6 @@ fn solver_pulls_a_point_mass_alone_by_gravity_on_its_point() {
     gravity.region = Region::ReferencePoint(named("RP-1"));
     assert_eq!(model.point_masses_pulled(&gravity.region, &mesh).len(), 1);
     model.steps[0].loads.push(gravity.clone());
-    model.steps[0].field_outputs = ccx_eigen_outputs(&StepKind::Static(Default::default()));
     assert!(
         model.invalid_items(&mesh).is_empty(),
         "{:?}",
@@ -13952,7 +14048,6 @@ fn solver_swings_a_plane_strip_with_a_tip_mass_and_its_inertia_about_z() {
         let mut model = plane_model(ModelSpace::PlaneStress, 1.0, vec![fixed], load, tip.clone());
         model.materials[0].density = Some(7.85e-9);
         let mut step = Step::new_frequency("Step-2");
-        step.field_outputs = ccx_eigen_outputs(&step.kind);
         step.boundary_conditions = model.steps[0].boundary_conditions.clone();
         model.steps.push(step);
         model.reference_points.push(ReferencePoint {

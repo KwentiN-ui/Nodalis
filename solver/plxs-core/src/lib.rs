@@ -2,7 +2,7 @@
 //! every other solver crate works on, and nothing else.
 //!
 //! The IR is the contract between the crates of `solver/`: `plxs-input` fills it from a
-//! CalculiX input file, Nodalis itself will fill it directly from its model in phase 2, and
+//! CalculiX input file, Nodalis fills it directly from its model (`plx_io::inp::lower`), and
 //! the elements, constraints, contact, procedures and output crates read it. It holds **data,
 //! validation and errors only**; no element matrix, no solver and no file format lives here.
 //!
@@ -14,9 +14,8 @@
 //!   handed between nodes of the Nodalis graph and stored for a restart.
 //! - Names of sets, surfaces, materials, interactions and amplitudes are stored as CalculiX
 //!   reads them: upper case ([`normalized_name`]).
-//! - The IR covers the whole CalculiX inventory Nodalis writes (concept section 1), also what
-//!   is computed only in later milestones, so that the shape of the data does not change while
-//!   the crates fill up. Changing it is a PR of its own.
+//! - The IR covers the whole CalculiX inventory Nodalis writes (concept section 1) and the
+//!   plxs extensions beyond it. Changing it is a PR of its own.
 //! - A step holds what is in force during it: the `OP=NEW` semantics of CalculiX are resolved
 //!   by the reader, procedures never look at earlier steps.
 //!

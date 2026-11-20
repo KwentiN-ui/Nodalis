@@ -841,16 +841,10 @@ impl Model {
         self.path_plots = (view.path_plots.iter())
             .map(crate::path_plot::PathPlot::from_saved)
             .collect();
-        let plain: Vec<usize> = if settings.plain_part_ids.is_empty()
-            && settings.mesh == Some(self.mesh.fingerprint())
-        {
-            settings.plain_parts.clone()
-        } else {
-            (self.mesh.parts.iter().enumerate())
-                .filter(|(_, part)| settings.plain_part_ids.contains(&part.id))
-                .map(|(index, _)| index)
-                .collect()
-        };
+        let plain: Vec<usize> = (self.mesh.parts.iter().enumerate())
+            .filter(|(_, part)| settings.plain_part_ids.contains(&part.id))
+            .map(|(index, _)| index)
+            .collect();
         self.set_contours(&plain, false);
         // History outputs of hot spots need their values first.
         let reports = crate::hot_spots::evaluate(self);
@@ -4410,9 +4404,9 @@ mod tests {
         assert!(regions.iter().all(|&r| (1..=6).contains(&r)));
     }
 
-    /// Meshes the plate with a hole, sets up a tension test and checks CalculiX's stress.
+    /// Meshes the plate with a hole, sets up a tension test and checks the solver's stress.
     #[test]
-    fn generated_meshes_solve_with_calculix() {
+    fn generated_meshes_solve() {
         if !gmsh_available() {
             eprintln!("Gmsh missing, test skipped");
             return;
@@ -4478,14 +4472,15 @@ mod tests {
             ..FeModel::default()
         };
         let inp = plx_io::inp::write_inp(&model.active(), "Platte").unwrap();
-        let dir = std::env::temp_dir().join(format!("nodalis-ccx-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-plate-solve-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("platte.inp"), inp).unwrap();
         plxs_session::run_input_file(&dir, "platte").unwrap_or_else(|e| panic!("{e}"));
         let results = read_frd(&dir.join("platte.frd")).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         // A strain of 0.1 / 100 gives about 210 MPa in the net section away from the hole;
-        // the hole raises the peak, CalculiX's extrapolation keeps it below a few times that.
+        // the hole raises the peak, the extrapolation to the nodes keeps it below a few times
+        // that.
         let stress = results.increments.last().unwrap().field("STRESS").unwrap();
         let sxx = &stress.component("S11").unwrap().values;
         let max = sxx.get().iter().copied().fold(f32::MIN, f32::max);
@@ -5090,7 +5085,6 @@ S
                 mode_deformation: Some(plx_results::saved_view::SavedDeformation::Automatic(2.0)),
                 mode_amplitude: Some(4.0),
                 show_undeformed: Some(false),
-                levels: Some(12),
                 color_scale: Some(plx_model::ColorScale {
                     spectrum: plx_model::ColorSpectrum::CoolWarm,
                     levels: 12,
@@ -5141,18 +5135,6 @@ S
             ("SCALED", "VALUE")
         );
         assert_eq!(model.results_settings(), Some(settings.clone()));
-        // Projects saved before part names were kept name parts by index, which only fit
-        // results of the same mesh.
-        let mut legacy = settings;
-        legacy.plain_part_ids.clear();
-        legacy.plain_parts = vec![0];
-        legacy.mesh = Some(model.mesh.fingerprint() ^ 1);
-        model.set_contours(&[0], true);
-        model.restore_results_settings(&legacy, Vec::new());
-        assert!(model.parts[0].contours);
-        legacy.mesh = Some(model.mesh.fingerprint());
-        model.restore_results_settings(&legacy, Vec::new());
-        assert!(!model.parts[0].contours);
         // Hidden parts leave the legend range like parts without contours.
         model.parts[0].visible = true;
         model.set_contours(&[0], true);

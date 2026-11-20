@@ -1572,7 +1572,8 @@ fn build() -> Vec<Command> {
         "Output",
         Tree(TreeIcon::FieldOutput),
         "",
-        "Results written over the whole model in the last step.",
+        "Results the steps write beyond their standard ones, the coordinate system they are \
+         shown in and the form of shells and beams.",
     ));
     add(command(
         C::HistoryOutput,

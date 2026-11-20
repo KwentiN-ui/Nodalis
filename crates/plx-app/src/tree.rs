@@ -68,7 +68,8 @@ pub enum TreeItem {
     StepGroup(usize, &'static str),
     BoundaryCondition(usize, usize),
     Load(usize, usize),
-    FieldOutput(usize, usize),
+    /// The field output of the analysis, shown where it goes beyond the standard results.
+    FieldOutput,
     /// A history output of a step, by step and index.
     HistoryOutput(usize, usize),
     /// A defined field of a step, by step and index.
@@ -541,7 +542,6 @@ fn can_deactivate(item: &TreeItem) -> bool {
         TreeItem::Step(_)
             | TreeItem::BoundaryCondition(..)
             | TreeItem::Load(..)
-            | TreeItem::FieldOutput(..)
             | TreeItem::HistoryOutput(..)
             | TreeItem::DefinedField(..)
             | TreeItem::Constraint(_)
@@ -574,6 +574,31 @@ pub fn paint_handover_arrow(painter: &egui::Painter, rect: egui::Rect) {
         [egui::pos2(x1, y1), egui::pos2(x1 - head, y1 + head)],
         stroke,
     );
+}
+
+/// The sign of the solution settings under a step: a stopwatch, for the time and
+/// increments the step runs through.
+pub fn paint_step_settings(painter: &egui::Painter, rect: egui::Rect) {
+    let color = crate::style::adapt(Color32::from_rgb(110, 140, 170));
+    let stroke = egui::Stroke::new(1.4, color);
+    let r = rect.width() * 0.3;
+    let c = egui::pos2(rect.center().x, rect.center().y + rect.height() * 0.06);
+    painter.circle_stroke(c, r, stroke);
+    // The crown on top.
+    let top = c.y - r;
+    painter.line_segment(
+        [egui::pos2(c.x, top), egui::pos2(c.x, top - r * 0.35)],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(c.x - r * 0.3, top - r * 0.4),
+            egui::pos2(c.x + r * 0.3, top - r * 0.4),
+        ],
+        stroke,
+    );
+    // The hand.
+    painter.line_segment([c, egui::pos2(c.x + r * 0.45, c.y - r * 0.55)], stroke);
 }
 
 /// Warning sign next to an item with findings; a click explains them.
@@ -736,7 +761,6 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group("Initial Conditions") => Some(NewItem::InitialCondition),
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
-        TreeItem::StepGroup(step, "Field Outputs") => Some(NewItem::FieldOutput(step)),
         TreeItem::StepGroup(step, "History Outputs") => Some(NewItem::HistoryOutput(step)),
         TreeItem::StepGroup(step, "Defined Fields") => Some(NewItem::DefinedField(step)),
         TreeItem::Group(HOT_SPOTS) => Some(NewItem::ResultHotSpot),
@@ -834,7 +858,7 @@ fn is_fe_item(item: &TreeItem) -> bool {
             | TreeItem::Step(_)
             | TreeItem::BoundaryCondition(..)
             | TreeItem::Load(..)
-            | TreeItem::FieldOutput(..)
+            | TreeItem::FieldOutput
             | TreeItem::HistoryOutput(..)
             | TreeItem::DefinedField(..)
     )
@@ -1635,13 +1659,6 @@ impl Tree<'_> {
                              the .dat file at every increment of the step.",
                             |step| NewItem::ContactHistoryOutput(step, contact),
                         );
-                        self.step_item_menu(
-                            ui,
-                            "Create Contact Field Output",
-                            "Writes the contact pressure, slip and gap of all contacts into the \
-                             .frd file; a step that writes them already opens its output.",
-                            NewItem::ContactFieldOutput,
-                        );
                         separator(ui);
                     }
                     if self.master_slave.contains(&item) {
@@ -1716,9 +1733,7 @@ impl Tree<'_> {
                 Some(glyph) => TreeIcon::StepType(*glyph),
                 None => TreeIcon::Step,
             },
-            TreeItem::StepGroup(_, "Field Outputs") | TreeItem::FieldOutputs => {
-                TreeIcon::FieldOutput
-            }
+            TreeItem::FieldOutput | TreeItem::FieldOutputs => TreeIcon::FieldOutput,
             TreeItem::StepGroup(_, "History Outputs") | TreeItem::Group("History Outputs") => {
                 TreeIcon::HistoryOutput
             }
@@ -1841,6 +1856,37 @@ impl Tree<'_> {
     /// ([`plx_model::Handover::summary`]), a note rather than an item. A double click opens
     /// the step, whose dialog shows the whole handover.
     fn handover_row(&mut self, ui: &mut Ui, step: usize, handover: &plx_model::Handover) {
+        let hover = format!(
+            "{}\nPasses on: {}\nDouble-click: open the step.",
+            handover.summary(),
+            handover.passes_on
+        );
+        self.note_row(ui, step, paint_handover_arrow, handover.summary(), hover);
+    }
+
+    /// The second row under a step: what decides how its solution runs, such as its
+    /// duration, frames and increments ([`plx_model::StepSettings`]); the details on hover.
+    fn settings_row(&mut self, ui: &mut Ui, step: usize, settings: &plx_model::StepSettings) {
+        if settings.line.is_empty() {
+            return;
+        }
+        let hover = format!(
+            "{}\nDouble-click: open the step.",
+            settings.details.join("\n")
+        );
+        self.note_row(ui, step, paint_step_settings, settings.line.clone(), hover);
+    }
+
+    /// A note under a step in gray italics, after a painted sign; a double click opens the
+    /// step.
+    fn note_row(
+        &mut self,
+        ui: &mut Ui,
+        step: usize,
+        sign: fn(&egui::Painter, egui::Rect),
+        text: String,
+        hover: String,
+    ) {
         let item = TreeItem::Step(step);
         if self.hidden(&item) {
             return;
@@ -1852,21 +1898,17 @@ impl Tree<'_> {
             let (rect, _) =
                 ui.allocate_exact_size(Vec2::splat(tree_icons::SIZE), egui::Sense::hover());
             if ui.is_rect_visible(rect) {
-                paint_handover_arrow(ui.painter(), rect);
+                sign(ui.painter(), rect);
             }
             ui.add_space(3.0);
-            let text = egui::RichText::new(handover.summary()).italics().weak();
+            let text = egui::RichText::new(text).italics().weak();
             let response = ui
                 .add(
                     egui::Label::new(text)
                         .selectable(false)
                         .sense(egui::Sense::click()),
                 )
-                .on_hover_text(format!(
-                    "{}\nPasses on: {}\nDouble-click: open the step.",
-                    handover.summary(),
-                    handover.passes_on
-                ));
+                .on_hover_text(hover);
             if response.double_clicked() {
                 self.response.open = Some(item);
             }
@@ -2688,6 +2730,11 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
         if !exposed.is_empty() {
             tree.container(ui, EXPOSED, exposed);
         }
+        // The steps write the results of their kinds without an item for them: the field
+        // output only shows where it adds to them.
+        if !fe.field_output.is_standard() {
+            tree.leaf(ui, TreeItem::FieldOutput, "Field Output");
+        }
         let steps = TreeItem::Group("Steps");
         tree.step_count = fe.steps.len();
         tree.step_types = fe.steps.iter().map(|s| StepGlyph::from(&s.kind)).collect();
@@ -2725,9 +2772,6 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 for (i, load) in step.loads.iter().enumerate() {
                     tree.symbols.insert(TreeItem::Load(s, i), load.visible);
                 }
-                for (i, _) in (step.field_outputs.iter().enumerate()).filter(|(_, f)| !f.active) {
-                    tree.inactive.insert(TreeItem::FieldOutput(s, i));
-                }
                 for (i, &id) in step.history_outputs.iter().enumerate() {
                     if fe.history_output(id).is_some_and(|h| !h.active) {
                         tree.inactive.insert(TreeItem::HistoryOutput(s, i));
@@ -2757,13 +2801,7 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 let handover = fe.step_handover(s);
                 tree.branch(ui, TreeItem::Step(s), &label, true, |tree, ui| {
                     tree.handover_row(ui, s, &handover);
-                    // An eigenvalue step leaves out the field outputs it has (from a
-                    // project of an earlier version): the solver keeps its mode shapes.
-                    let outputs = (step.field_outputs.iter().enumerate())
-                        .filter(|_| !step.kind.computes_eigenmodes())
-                        .map(|(i, f)| (TreeItem::FieldOutput(s, i), f.name.as_str()))
-                        .collect();
-                    tree.step_container(ui, s, "Field Outputs", outputs);
+                    tree.settings_row(ui, s, &fe.step_settings(s));
                     let outputs = (step.history_outputs.iter().enumerate())
                         .filter_map(|(i, &id)| Some((i, fe.history_output(id)?)))
                         .map(|(i, h)| (TreeItem::HistoryOutput(s, i), h.name.as_str()))

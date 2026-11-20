@@ -1766,8 +1766,8 @@ mod tests {
         faces
     }
 
-    /// The largest displacement against `component` CalculiX computes, if ccx is installed.
-    fn settlement(model: &Model, component: &str) -> Option<f32> {
+    /// The largest displacement against `component` the solver computes.
+    fn settlement(model: &Model, component: &str) -> f32 {
         let inp = plx_io::inp::write_inp(&model.active(), "Block").unwrap();
         let dir = std::env::temp_dir().join(format!(
             "nodalis-geometry-detection-{}-{}",
@@ -1781,7 +1781,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         let disp = results.increments.last().unwrap().field("DISP").unwrap();
         let values = &disp.component(component).unwrap().values;
-        Some(-values.get().iter().copied().fold(f32::MAX, f32::min))
+        -values.get().iter().copied().fold(f32::MAX, f32::min)
     }
 
     /// A block 10 x 10 x 10 standing on a plate 40 x 40 x 5, two solids that only touch.
@@ -1912,14 +1912,13 @@ mod tests {
         assert!(fine > 2 * coarse, "{coarse} -> {fine}");
         let fine_settlement = settlement(&model, "U3");
 
-        if let (Some(coarse), Some(fine)) = (coarse_settlement, fine_settlement) {
-            // 100 MPa on the block compress it by 0.0048 mm; the plate gives a little more.
-            let block = 100.0 / 210000.0 * 10.0;
-            for value in [coarse, fine] {
-                assert!(value > block && value < 3.0 * block, "{value} vs. {block}");
-            }
-            assert!((fine - coarse).abs() < 0.05 * fine, "{coarse} -> {fine}");
+        let (coarse, fine) = (coarse_settlement, fine_settlement);
+        // 100 MPa on the block compress it by 0.0048 mm; the plate gives a little more.
+        let block = 100.0 / 210000.0 * 10.0;
+        for value in [coarse, fine] {
+            assert!(value > block && value < 3.0 * block, "{value} vs. {block}");
         }
+        assert!((fine - coarse).abs() < 0.05 * fine, "{coarse} -> {fine}");
 
         // Suppressed once meshed, the block keeps its mesh for when it is unsuppressed, but
         // it takes part in nothing: the solver gets neither the region found with it, which
@@ -2081,11 +2080,10 @@ mod tests {
                     .all(|&n| model.mesh().node(n).unwrap()[1].abs() < 1e-6)
             );
         }
-        if let Some(value) = settlement(&model, "U2") {
-            // The ends of the beam, 15 mm beyond the block, bend down by q L^4 / 8 E I =
-            // 0.029 mm as cantilevers; shear and the block add some. Untied, the beam would
-            // float and CalculiX fail.
-            assert!(value > 0.029 && value < 0.1, "{value}");
-        }
+        let value = settlement(&model, "U2");
+        // The ends of the beam, 15 mm beyond the block, bend down by q L^4 / 8 E I = 0.029 mm
+        // as cantilevers; shear and the block add some. Untied, the beam would float and the
+        // solver fail.
+        assert!(value > 0.029 && value < 0.1, "{value}");
     }
 }
