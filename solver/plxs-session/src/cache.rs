@@ -73,9 +73,11 @@ impl StepCache {
             &model.restart_read,
         );
         named.referenced(&mut h, definitions);
-        file(&mut h, model.stored_modes_file.as_deref());
-        if let Some(submodel) = &model.constraints.submodel {
-            file(&mut h, Some(&work_dir.join(&submodel.input)));
+        // Values given with the analysis count with it; a file named counts by its content.
+        part(&mut h, &model.stored_modes);
+        file(&mut h, (model.stored_modes.as_ref()).and_then(|s| s.path()));
+        if let Some(path) = (model.constraints.submodel.as_ref()).and_then(|s| s.global.path()) {
+            file(&mut h, Some(&work_dir.join(path)));
         }
         let mut key = h.finish();
         let mut keys = Vec::with_capacity(analysis.steps.len());
@@ -84,8 +86,10 @@ impl StepCache {
             h.write_u64(key);
             named.referenced(&mut h, step);
             for field in &step.fields {
-                if let DefinedFieldKind::TemperatureFile { file: name, .. } = &field.kind {
-                    file(&mut h, Some(&work_dir.join(name)));
+                if let DefinedFieldKind::TemperatureFrom { source, .. } = &field.kind
+                    && let Some(path) = source.path()
+                {
+                    file(&mut h, Some(&work_dir.join(path)));
                 }
             }
             key = h.finish();

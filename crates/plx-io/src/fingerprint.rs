@@ -12,6 +12,7 @@
 //! Each step gets the fingerprint of the model and the steps up to it: the solver computes
 //! them one after the other, so a change in step 2 leaves the results of step 1 up to date.
 
+use plx_model::ResultsFile;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -70,12 +71,12 @@ pub fn fingerprints(lowered: &Lowered, fe: &FeModel) -> Fingerprints {
     }
     let properties = &fe.properties;
     for file in [
-        properties.global_results.as_deref(),
-        properties.stored_modes.as_deref(),
         properties
-            .initial_temperatures
+            .global_results
             .as_ref()
-            .map(|(f, _)| f.as_path()),
+            .and_then(ResultsFile::path),
+        properties.stored_modes.as_ref().and_then(ResultsFile::path),
+        (properties.initial_temperatures.as_ref()).and_then(|(f, _)| f.path()),
     ] {
         model.add_str(&file.map(short).unwrap_or_default());
     }
@@ -118,7 +119,7 @@ pub fn fingerprints(lowered: &Lowered, fe: &FeModel) -> Fingerprints {
             if let plx_model::DefinedFieldKind::TemperatureFromFile { file, step } = &field.kind {
                 let mut next = Fnv::new();
                 next.add(&files.to_le_bytes());
-                next.add_str(&short(file));
+                next.add_str(&file.path().map(short).unwrap_or_default());
                 next.add(&step.to_le_bytes());
                 files = next.finish();
             }

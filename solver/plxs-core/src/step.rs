@@ -762,9 +762,10 @@ pub struct DefinedField {
 pub enum DefinedFieldKind {
     /// Values per node or set.
     Temperature(Vec<(NodeRef, f64)>),
-    /// `FILE=<x>.frd, BSTEP=, ESTEP=`: temperatures from a result file.
-    TemperatureFile {
-        file: String,
+    /// The temperatures at the end of step `bstep` (default 1) of another analysis: from the
+    /// result file `FILE=<x>.frd`, or the temperatures themselves.
+    TemperatureFrom {
+        source: crate::handover::Source<crate::handover::NodalTemperatures>,
         bstep: Option<u32>,
         estep: Option<u32>,
         binc: Option<u32>,

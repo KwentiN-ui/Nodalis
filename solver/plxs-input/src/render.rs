@@ -28,6 +28,10 @@ use plxs_core::step::{
 };
 use plxs_core::{Analysis, Model, Step};
 
+/// The file named for results an analysis was given as values ([`plxs_core::handover::Source::Loaded`]):
+/// there is none, so whoever exports such an analysis gives it a file of its own instead.
+pub const LOADED: &str = "(results given as values)";
+
 /// The text of an input file that reads back as `analysis`.
 pub fn render(analysis: &Analysis) -> String {
     render_with_parts(analysis, &[])
@@ -44,7 +48,12 @@ pub fn render_with_parts(analysis: &Analysis, parts: &[String]) -> String {
     };
     heading(&mut out, model);
     if let Some(submodel) = &model.constraints.submodel {
-        let mut header = format!("*Submodel, Type=Node, Input=\"{}\"", submodel.input);
+        // Results given as values have no file to name: the export names one instead.
+        let input = match submodel.global.path() {
+            Some(path) => path.display().to_string(),
+            None => LOADED.to_string(),
+        };
+        let mut header = format!("*Submodel, Type=Node, Input=\"{input}\"");
         if let Some(elset) = submodel.global_elset {
             let _ = write!(header, ", Global elset={}", out.labels.element_set(elset));
         }
@@ -1586,13 +1595,14 @@ fn fields(out: &mut Out, step: &Step) {
                     let _ = writeln!(out.text, "{region}, {}", number(*value));
                 }
             }
-            DefinedFieldKind::TemperatureFile {
-                file,
+            DefinedFieldKind::TemperatureFrom {
+                source,
                 bstep,
                 estep,
                 binc,
                 einc,
             } => {
+                let file = (source.path()).map_or(LOADED.to_string(), |p| p.display().to_string());
                 let mut header = format!("*Temperature{new}{amplitude}, File=\"{file}\"");
                 for (name, value) in [
                     ("Bstep", bstep),

@@ -56,6 +56,7 @@ mod refs;
 mod region;
 mod remote;
 mod remote_force;
+mod results_file;
 mod section;
 mod signature;
 mod solver_diagnostics;
@@ -153,6 +154,7 @@ pub use remote::{
     Behavior, Displacement, Formulation, RemoteBehavior, RemoteDof, RemotePoint, expanded_nodes,
 };
 pub use remote_force::RemoteForce;
+pub use results_file::ResultsFile;
 pub use section::{
     BeamOrientation, BeamSection, Section, SectionKind, line_tangent, membrane_type, unit_thickness,
 };
@@ -164,7 +166,7 @@ pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, LengthUnit, Quantity, STORE
 pub use validity::{Invalid, ModelItem};
 pub use wall_loads::{WallLoadTime, WallLoads};
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use plx_mesh::{CadEntity, NodeId};
 use serde::{Deserialize, Serialize};
@@ -175,7 +177,11 @@ use serde::{Deserialize, Serialize};
 /// Format 57: every item of the model has an internal id ([`Id`]) and every reference
 /// between items, exposed parameters and Measure blocks included, is by id; history
 /// variables are typed ([`HistoryVariable`]).
-pub const PROJECT_FORMAT: u32 = 57;
+///
+/// Format 58: the results another analysis hands a model (global results of a submodel,
+/// eigenmodes, initial temperatures, temperature fields, wall loads) are kept by the
+/// analysis they come from ([`ResultsFile::Linked`]), not by the path of a result file.
+pub const PROJECT_FORMAT: u32 = 58;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2649,7 +2655,7 @@ pub enum DefinedFieldKind {
     /// same mesh wrote it (`*TEMPERATURE, FILE=`); the step counts from 1. The solver reads
     /// the file from the working directory of the analysis, so the file is copied there
     /// when the analysis starts.
-    TemperatureFromFile { file: PathBuf, step: u32 },
+    TemperatureFromFile { file: crate::ResultsFile, step: u32 },
 }
 
 impl DefinedFieldKind {
@@ -2672,7 +2678,7 @@ impl FeModel {
             .filter(|s| s.kind.supports_defined_fields())
             .flat_map(|s| s.defined_fields.iter().filter(|f| f.active))
             .filter_map(|f| match &f.kind {
-                DefinedFieldKind::TemperatureFromFile { file, .. } => Some(file.as_path()),
+                DefinedFieldKind::TemperatureFromFile { file, .. } => file.path(),
                 DefinedFieldKind::Temperature(_) => None,
             })
             .collect();

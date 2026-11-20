@@ -37,11 +37,11 @@ pub struct Model {
     pub design_variables: Option<DesignVariables>,
     /// `*RESTART, READ`: continue from the state after step `step` of the previous run.
     pub restart_read: Option<RestartRead>,
-    /// The `.eig` file of the job next to its input file, when there is one: the modes of an
-    /// earlier run for modal steps without a frequency step of their own (as CalculiX reads
-    /// `<job>.eig`).
+    /// The modes of an earlier run for modal steps without a frequency step of their own:
+    /// the `.eig` file next to an input file (as CalculiX reads `<job>.eig`), or the modes
+    /// themselves.
     #[serde(skip)]
-    pub stored_modes_file: Option<std::path::PathBuf>,
+    pub stored_modes: Option<crate::handover::Source<crate::handover::NodalModes>>,
     /// The fibres of expanded shells: the nodes through the thickness of every shell node
     /// (bottom, middle, top; the ones the elements use), for the selective mass scaling of
     /// explicit steps. Set by the expansion, empty otherwise.
@@ -342,7 +342,7 @@ pub struct Analysis {
 impl Analysis {
     /// Whether a modal step (modal dynamics, steady state dynamics, complex frequency) uses
     /// modes that no `*FREQUENCY, STORAGE=YES` step before it computes: the modes of an
-    /// earlier run, [`Model::stored_modes_file`].
+    /// earlier run, [`Model::stored_modes`].
     pub fn needs_stored_modes(&self) -> bool {
         use crate::step::Procedure;
         let mut stored = false;

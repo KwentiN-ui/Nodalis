@@ -1075,7 +1075,7 @@ fn submodel(
             item: first.clone(),
         })?;
     Ok(Some(ir::constraints::Submodel {
-        input: input.to_string_lossy().into_owned(),
+        global: ir::handover::Source::Path(input.into()),
         node_sets: (node_sets.iter())
             .map(|(set, _)| handles.node_set(set))
             .collect(),
@@ -4972,16 +4972,16 @@ fn defined_fields(
                 }
             }
             DefinedFieldKind::TemperatureFromFile { file, step } => {
-                let name = file.file_name().map(|n| n.to_string_lossy());
+                let name = (file.path().and_then(|p| p.file_name())).map(|n| n.to_string_lossy());
                 let Some(name) = name.filter(|n| !n.is_empty() && !n.contains(',')) else {
                     return Err(WriteError::InvalidResultFile {
                         item: field.name.clone(),
-                        file: file.display().to_string(),
+                        file: file.label(),
                     });
                 };
                 ir::step::DefinedField {
-                    kind: ir::step::DefinedFieldKind::TemperatureFile {
-                        file: name.into_owned(),
+                    kind: ir::step::DefinedFieldKind::TemperatureFrom {
+                        source: ir::handover::Source::Path(name.into_owned().into()),
                         bstep: Some(*step),
                         estep: None,
                         binc: None,

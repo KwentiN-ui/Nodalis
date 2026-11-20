@@ -68,11 +68,15 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         let parts: Vec<_> = path.components().rev().take(2).collect();
         parts.into_iter().rev().collect()
     };
-    properties.global_results = properties.global_results.as_deref().map(short);
+    // Linked or picked, the results count by the file the run reads.
+    let shortened = |file: &crate::ResultsFile| {
+        crate::ResultsFile::File(file.path().map(short).unwrap_or_default())
+    };
+    properties.global_results = properties.global_results.as_ref().map(shortened);
     // So do the files of other analyses' results the model starts from.
-    properties.stored_modes = properties.stored_modes.as_deref().map(short);
+    properties.stored_modes = properties.stored_modes.as_ref().map(shortened);
     if let Some((file, _)) = &mut properties.initial_temperatures {
-        *file = short(file);
+        *file = shortened(file);
     }
     hash.add_debug(&properties);
     hash.add_debug(materials);
@@ -110,12 +114,12 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
     let mut steps = steps[..count.min(steps.len())].to_vec();
     for field in steps.iter_mut().flat_map(|s| s.defined_fields.iter_mut()) {
         if let crate::DefinedFieldKind::TemperatureFromFile { file, .. } = &mut field.kind {
-            *file = short(file);
+            *file = shortened(file);
         }
     }
     for load in steps.iter_mut().flat_map(|s| s.loads.iter_mut()) {
         if let crate::LoadKind::WallLoads(walls) = &mut load.kind {
-            walls.file = short(&walls.file);
+            walls.file = shortened(&walls.file);
         }
     }
     hash.add_debug(&steps);

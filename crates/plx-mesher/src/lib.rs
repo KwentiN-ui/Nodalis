@@ -2319,6 +2319,12 @@ fn distance_sampling(gmsh: &Gmsh, local: &LocalSize) -> Result<f64, GmshError> {
 /// to minutes beyond.
 const QUASI_STRUCTURED_LIMIT: f64 = 20_000.0;
 
+/// Faces bounded by more edges than this, such as gears or plates with many holes, are left
+/// to Frontal-Delaunay as well: the quasi-structured algorithm's topology optimization
+/// (cavity remeshing) takes minutes on them (six on a spur gear face of 352 edges, 30 s on a
+/// plate with 100 holes) and gained nothing on the gear.
+const QUASI_STRUCTURED_EDGES: usize = 100;
+
 /// A quadrilateral whose scaled Jacobian is below this at a corner is badly distorted; a
 /// square has 1, a quadrilateral folded over 0 or less.
 const DISTORTED_QUAD: f64 = 0.1;
@@ -2418,6 +2424,19 @@ fn generate_faces(
             notes.push(format!(
                 "A face would get about {largest:.0} quadrilaterals, too many for the \
                  quasi-structured algorithm: Frontal-Delaunay is used and recombined instead."
+            ));
+        }
+        let mut edges = 0;
+        for &face in faces {
+            edges = edges.max(gmsh.adjacencies(2, face)?.1.len());
+        }
+        if options.algorithms.0 == Algorithm2d::QuasiStructuredQuad
+            && edges > QUASI_STRUCTURED_EDGES
+        {
+            options.algorithms.0 = Algorithm2d::FrontalDelaunay;
+            notes.push(format!(
+                "A face has {edges} edges, too many for the quasi-structured algorithm: \
+                 Frontal-Delaunay is used and recombined instead."
             ));
         }
     }
@@ -2741,6 +2760,10 @@ impl MeshOptions {
             // other shapes; the sizes come from the parameters and size fields only.
             ("Mesh.MeshSizeFromPoints", 0.0),
             ("Mesh.MeshSizeExtendFromBoundary", 1.0),
+            // Gmsh integrates the sizes along a curve to 1e-9 by default, which takes seconds
+            // on a few hundred B-spline curves with curvature sizes (gear teeth); 1e-6 moves
+            // the nodes by a thousandth of the smallest element at most.
+            ("Mesh.LcIntegrationPrecision", 1e-6),
             ("Mesh.ElementOrder", f64::from(self.order)),
             (
                 "Mesh.SecondOrderLinear",
