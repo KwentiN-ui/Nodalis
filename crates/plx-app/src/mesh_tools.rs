@@ -126,7 +126,7 @@ pub struct MeshToolDialog {
     /// Name of the mesh operation.
     name: String,
     /// The parts the mesh operation changes, by id.
-    parts: Vec<plx_model::Id>,
+    parts: Vec<plx_model::PartRef>,
     transform: TransformDraft,
     tolerance: f64,
     first_node: u32,
@@ -373,7 +373,7 @@ impl MeshToolDialog {
                 }
                 // The parts in the order of the mesh; bodies of compound parts it names
                 // since they were joined stay.
-                let parts: Vec<plx_model::Id> = (model.mesh().parts.iter())
+                let parts: Vec<plx_model::PartRef> = (model.mesh().parts.iter())
                     .flat_map(|p| std::iter::once(p.id).chain(p.bodies.iter().map(|b| b.id)))
                     .filter(|p| self.parts.contains(p))
                     .collect();
@@ -450,7 +450,7 @@ impl MeshToolDialog {
 
 /// A check box per mesh part; parts the list names that the mesh no longer has stay
 /// listed, so that they can be taken out.
-fn parts_list(ui: &mut Ui, parts: &mut Vec<plx_model::Id>, model: &Model) {
+fn parts_list(ui: &mut Ui, parts: &mut Vec<plx_model::PartRef>, model: &Model) {
     let mesh = model.mesh();
     let mut ids = mesh.part_ids();
     ids.extend(

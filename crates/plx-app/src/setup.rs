@@ -2460,7 +2460,7 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
 
 /// The parts of the walls of the Particle Flow step of `fe`: those of its rigid bodies and
 /// those a boundary condition of the step holds in shape.
-fn flow_wall_parts(fe: &FeModel, mesh: &FeMesh) -> Vec<plx_model::Id> {
+fn flow_wall_parts(fe: &FeModel, mesh: &FeMesh) -> Vec<plx_model::PartRef> {
     let Some(flow) = fe.particle_flow_step() else {
         return Vec::new();
     };
@@ -3096,9 +3096,9 @@ impl Editor {
     }
 
     /// The name of the step this dialog creates, if it creates one.
-    pub fn new_step(&self) -> Option<String> {
+    pub fn new_step(&self) -> Option<plx_model::Id<Step>> {
         match &self.draft {
-            Draft::Step(step, _) if self.index.is_none() => Some(step.name.clone()),
+            Draft::Step(step, _) if self.index.is_none() => Some(step.id),
             _ => None,
         }
     }
@@ -5450,7 +5450,7 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
 /// tree.
 pub fn acting_on_parts(model: &Model, parts: &BTreeSet<usize>) -> BTreeSet<TreeItem> {
     let mesh = &model.mesh();
-    let ids: HashSet<plx_model::Id> = (parts.iter())
+    let ids: HashSet<plx_model::PartRef> = (parts.iter())
         .filter_map(|&p| mesh.parts.get(p))
         .map(|p| p.id)
         .collect();

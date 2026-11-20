@@ -17,8 +17,6 @@ use std::collections::BTreeMap;
 use plx_mesh::FeMesh;
 use serde::{Deserialize, Serialize};
 
-use crate::Id;
-
 /// Where the mesh of a geometry object comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PartOrigin {
@@ -45,7 +43,7 @@ pub enum PartOrigin {
 /// [module](self).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct PartOrigins(BTreeMap<Id, PartOrigin>);
+pub struct PartOrigins(BTreeMap<crate::PartRef, PartOrigin>);
 
 /// The names of the geometry objects a part of the mesh is the mesh of: the bodies of a
 /// compound part, else the part itself.
@@ -58,7 +56,7 @@ pub fn bodies(part: &plx_mesh::Part) -> Vec<&str> {
 }
 
 /// The ids of the geometry objects a part of the mesh is the mesh of, as [`bodies`].
-pub fn objects(part: &plx_mesh::Part) -> Vec<Id> {
+pub fn objects(part: &plx_mesh::Part) -> Vec<crate::PartRef> {
     if part.bodies.is_empty() {
         vec![part.id]
     } else {
@@ -67,14 +65,14 @@ pub fn objects(part: &plx_mesh::Part) -> Vec<Id> {
 }
 
 /// The geometry objects of `mesh` with their names, as [`bodies`] and [`objects`].
-pub fn named_objects(mesh: &FeMesh) -> Vec<(Id, &str)> {
+pub fn named_objects(mesh: &FeMesh) -> Vec<(crate::PartRef, &str)> {
     (mesh.parts.iter())
         .flat_map(|part| objects(part).into_iter().zip(bodies(part)))
         .collect()
 }
 
 /// The id of the geometry object `name` of `mesh`, see [`named_objects`].
-pub fn object_id(mesh: &FeMesh, name: &str) -> Option<Id> {
+pub fn object_id(mesh: &FeMesh, name: &str) -> Option<crate::PartRef> {
     (named_objects(mesh).into_iter())
         .find(|(_, n)| n.eq_ignore_ascii_case(name))
         .map(|(id, _)| id)
@@ -82,7 +80,7 @@ pub fn object_id(mesh: &FeMesh, name: &str) -> Option<Id> {
 
 /// The ids of the geometry objects `names` of `mesh`: parts of one body and bodies of
 /// compound parts, see [`bodies`].
-pub fn body_ids(mesh: &FeMesh, names: &[String]) -> Vec<Id> {
+pub fn body_ids(mesh: &FeMesh, names: &[String]) -> Vec<crate::PartRef> {
     (named_objects(mesh).into_iter())
         .filter(|(_, name)| names.iter().any(|n| n.eq_ignore_ascii_case(name)))
         .map(|(id, _)| id)
@@ -98,13 +96,13 @@ impl PartOrigins {
     }
 
     /// The origin of the geometry object `id`.
-    pub fn get(&self, id: Id) -> Option<PartOrigin> {
+    pub fn get(&self, id: crate::PartRef) -> Option<PartOrigin> {
         self.0.get(&id).copied()
     }
 
     /// The fingerprint of the meshing inputs the part `id` of the geometry was meshed
     /// from; `None` for a linked or imported mesh.
-    pub fn made_from(&self, id: Id) -> Option<u64> {
+    pub fn made_from(&self, id: crate::PartRef) -> Option<u64> {
         match self.get(id)? {
             PartOrigin::Meshed(input) => Some(input),
             _ => None,
@@ -112,12 +110,12 @@ impl PartOrigins {
     }
 
     /// Whether `id` is an imported mesh, a geometry object without CAD shapes.
-    pub fn is_imported(&self, id: Id) -> bool {
+    pub fn is_imported(&self, id: crate::PartRef) -> bool {
         matches!(self.get(id), Some(PartOrigin::Imported { .. }))
     }
 
     /// Whether `id` is the mesh of a part of the CAD geometry.
-    pub fn is_cad(&self, id: Id) -> bool {
+    pub fn is_cad(&self, id: crate::PartRef) -> bool {
         matches!(
             self.get(id),
             Some(PartOrigin::Meshed(_) | PartOrigin::Linked)
@@ -125,7 +123,7 @@ impl PartOrigins {
     }
 
     /// Whether the imported mesh `id` is suppressed.
-    pub fn is_suppressed(&self, id: Id) -> bool {
+    pub fn is_suppressed(&self, id: crate::PartRef) -> bool {
         matches!(
             self.get(id),
             Some(PartOrigin::Imported {
@@ -136,26 +134,26 @@ impl PartOrigins {
     }
 
     /// The ids of the imported meshes, in order.
-    pub fn imported_ids(&self) -> impl Iterator<Item = Id> + '_ {
+    pub fn imported_ids(&self) -> impl Iterator<Item = crate::PartRef> + '_ {
         (self.0.iter())
             .filter(|(_, o)| matches!(o, PartOrigin::Imported { .. }))
             .map(|(k, _)| *k)
     }
 
     /// Sets the origin of `id`, e.g. of a part of a mesh being put together.
-    pub fn insert(&mut self, id: Id, origin: PartOrigin) {
+    pub fn insert(&mut self, id: crate::PartRef, origin: PartOrigin) {
         self.0.insert(id, origin);
     }
 
     /// Notes that the part `id` of the geometry was meshed from inputs with the
     /// fingerprint `input`.
-    pub fn set_meshed(&mut self, id: Id, input: u64) {
+    pub fn set_meshed(&mut self, id: crate::PartRef, input: u64) {
         self.0.insert(id, PartOrigin::Meshed(input));
     }
 
     /// The fingerprints of the parts meshed from the geometry, to follow a change of the
     /// meshing inputs that leaves their meshes as they are.
-    pub fn made_from_mut(&mut self) -> impl Iterator<Item = (Id, &mut u64)> {
+    pub fn made_from_mut(&mut self) -> impl Iterator<Item = (crate::PartRef, &mut u64)> {
         (self.0.iter_mut()).filter_map(|(k, o)| match o {
             PartOrigin::Meshed(input) => Some((*k, input)),
             _ => None,
@@ -164,7 +162,7 @@ impl PartOrigins {
 
     /// Suppresses the imported meshes among `ids`, or unsuppresses them; true if that
     /// changed anything. Ids of other objects are left alone.
-    pub fn set_suppressed(&mut self, ids: &[Id], suppressed: bool) -> bool {
+    pub fn set_suppressed(&mut self, ids: &[crate::PartRef], suppressed: bool) -> bool {
         let mut changed = false;
         for (key, origin) in &mut self.0 {
             if let PartOrigin::Imported { suppressed: s, .. } = origin
@@ -199,7 +197,7 @@ impl PartOrigins {
     }
 
     /// Whether a link brings the mesh of `id`.
-    pub fn is_linked(&self, id: Id) -> bool {
+    pub fn is_linked(&self, id: crate::PartRef) -> bool {
         matches!(
             self.get(id),
             Some(PartOrigin::Linked | PartOrigin::Imported { linked: true, .. })
@@ -209,8 +207,8 @@ impl PartOrigins {
     /// Keeps the origins complete for `mesh`: a part (or body of a compound part) without a
     /// recorded origin is an imported mesh, and the origins of objects without a mesh go.
     /// Returns the ids of the parts that became imported meshes.
-    pub fn reconcile(&mut self, mesh: &FeMesh) -> Vec<Id> {
-        let mut present: BTreeMap<Id, PartOrigin> = BTreeMap::new();
+    pub fn reconcile(&mut self, mesh: &FeMesh) -> Vec<crate::PartRef> {
+        let mut present: BTreeMap<crate::PartRef, PartOrigin> = BTreeMap::new();
         let mut added = Vec::new();
         for part in &mesh.parts {
             for body in objects(part) {
@@ -252,13 +250,13 @@ impl PartOrigins {
 
     /// Whether every part of `mesh` has its origin and no origin is without its part.
     pub fn complete_for(&self, mesh: &FeMesh) -> bool {
-        let ids: Vec<Id> = mesh.parts.iter().flat_map(objects).collect();
+        let ids: Vec<crate::PartRef> = mesh.parts.iter().flat_map(objects).collect();
         ids.len() == self.0.len() && ids.iter().all(|id| self.0.contains_key(id))
     }
 
     /// Moves the origins of the objects whose ids changed, as (old, new), to their new ids,
     /// see [`crate::Geometry::adopt_ids`].
-    pub fn rekey(&mut self, changed: &[(Id, Id)]) {
+    pub fn rekey(&mut self, changed: &[(crate::PartRef, crate::PartRef)]) {
         for (old, new) in changed {
             if let Some(origin) = self.0.remove(old) {
                 self.0.insert(*new, origin);
@@ -270,7 +268,7 @@ impl PartOrigins {
         self.0.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (Id, PartOrigin)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (crate::PartRef, PartOrigin)> + '_ {
         self.0.iter().map(|(k, o)| (*k, *o))
     }
 }
@@ -279,8 +277,8 @@ impl PartOrigins {
 /// that cut a part into new ones or a deleted part, by id: deleting a part of the geometry
 /// deletes its mesh. Unknown while the parts of the geometry are not known
 /// ([`crate::Geometry::known_parts`]).
-pub fn orphans(geometry: Option<&crate::Geometry>, origins: &PartOrigins) -> Vec<Id> {
-    let known = |id: Id| match geometry {
+pub fn orphans(geometry: Option<&crate::Geometry>, origins: &PartOrigins) -> Vec<crate::PartRef> {
+    let known = |id: crate::PartRef| match geometry {
         None => false,
         Some(g) => g.known_parts().is_empty() || g.part_name(id).is_some(),
     };
@@ -307,7 +305,7 @@ pub fn drop_orphans(
         .filter(|(id, _)| orphans.contains(id))
         .map(|(_, name)| name.to_owned())
         .collect();
-    let gone: Vec<Id> = (mesh.parts.iter())
+    let gone: Vec<crate::PartRef> = (mesh.parts.iter())
         .filter(|p| objects(p).iter().all(|b| orphans.contains(b)))
         .map(|p| p.id)
         .collect();
@@ -353,7 +351,11 @@ pub fn unmeshed_parts(
 
 /// Whether the geometry object `id` is suppressed: a part of `geometry` suppressed there,
 /// or an imported mesh suppressed in `origins`.
-pub fn is_suppressed(id: Id, geometry: Option<&crate::Geometry>, origins: &PartOrigins) -> bool {
+pub fn is_suppressed(
+    id: crate::PartRef,
+    geometry: Option<&crate::Geometry>,
+    origins: &PartOrigins,
+) -> bool {
     origins.is_suppressed(id) || geometry.is_some_and(|g| g.suppressed.contains(&id))
 }
 
@@ -363,7 +365,7 @@ pub fn suppressed_bodies(
     mesh: &FeMesh,
     geometry: Option<&crate::Geometry>,
     origins: &PartOrigins,
-) -> Vec<Id> {
+) -> Vec<crate::PartRef> {
     (mesh.parts.iter().flat_map(objects))
         .filter(|&body| is_suppressed(body, geometry, origins))
         .collect()
@@ -419,7 +421,7 @@ pub struct Active<'a> {
     fe: Cow<'a, crate::FeModel>,
     /// The parts of the mesh left out, whole; bodies of compound parts are left out of
     /// their part.
-    left_out: Vec<String>,
+    left_out: Vec<crate::PartRef>,
 }
 
 impl<'a> Active<'a> {
@@ -450,8 +452,8 @@ impl<'a> Active<'a> {
         }
     }
 
-    /// The parts of the mesh left out whole, by name.
-    pub fn left_out(&self) -> &[String] {
+    /// The parts of the mesh left out whole, by id.
+    pub fn left_out(&self) -> &[crate::PartRef] {
         &self.left_out
     }
 
@@ -482,17 +484,14 @@ pub fn active_model<'a>(
         };
     }
     let gone = |p: &&plx_mesh::Part| objects(p).iter().all(|b| suppressed.contains(b));
-    let left_out: Vec<String> = (mesh.parts.iter().filter(gone))
-        .map(|p| p.name.clone())
-        .collect();
-    let left_out_ids: Vec<Id> = mesh.parts.iter().filter(gone).map(|p| p.id).collect();
+    let left_out: Vec<crate::PartRef> = mesh.parts.iter().filter(gone).map(|p| p.id).collect();
     let mut smaller = mesh.clone();
     smaller.remove_bodies(&suppressed);
     let mut fe = fe.clone();
     // An item on suppressed objects alone, e.g. a contact found with a suppressed part
     // before it was suppressed, goes with them; one on others too keeps those.
     fe.drop_items_left_empty(mesh, &smaller);
-    fe.remove_parts_from_regions(&left_out_ids);
+    fe.remove_parts_from_regions(&left_out);
     Active {
         mesh: Cow::Owned(smaller),
         fe: Cow::Owned(fe),
@@ -609,7 +608,7 @@ mod tests {
         assert_eq!(solved.mesh.node_count(), 4);
         geometry.suppressed.push(named("B"));
         let solved = active_model(&compound, &fe, Some(&geometry), &origins);
-        assert_eq!(solved.left_out, ["C"]);
+        assert_eq!(solved.left_out, [compound.parts[0].id]);
         assert!(solved.mesh.parts.is_empty());
     }
 
@@ -658,7 +657,7 @@ mod tests {
         geometry.suppressed.push(named("SOLID-1"));
         origins.set_suppressed(&[named("PART-1")], true);
         let solved = active_model(&mesh, &fe, Some(&geometry), &origins);
-        assert_eq!(solved.left_out, ["SOLID-1", "PART-1"]);
+        assert_eq!(solved.left_out, [named("SOLID-1"), named("PART-1")]);
         assert_eq!(solved.mesh.element_count(), 0);
         assert_eq!(
             solved.fe.mesh_sets[0].region,
@@ -666,7 +665,7 @@ mod tests {
         );
         origins.set_suppressed(&[named("PART-1")], false);
         let solved = active_model(&mesh, &fe, Some(&geometry), &origins);
-        assert_eq!(solved.left_out, ["SOLID-1"]);
+        assert_eq!(solved.left_out, [named("SOLID-1")]);
         assert_eq!(solved.mesh.parts[0].name, "PART-1");
         assert_eq!(solved.mesh.node_count(), 4);
     }
@@ -701,7 +700,7 @@ mod tests {
         fe.steps.push(step);
         origins.set_suppressed(&[named("PART-3")], true);
         let solved = active_model(&mesh, &fe, None, &origins);
-        assert_eq!(solved.left_out(), ["PART-3"]);
+        assert_eq!(solved.left_out(), [named("PART-3")]);
         let names = |fe: &crate::FeModel| -> Vec<String> {
             (fe.contact_regions.iter().map(|c| c.name.clone()))
                 .chain(

@@ -7,6 +7,10 @@ use crate::element::{ElementFamily, ElementShape, FaceTopology};
 use crate::fast_map::FastMap;
 pub use plx_core::Id;
 
+/// The id of a part of the mesh, which is also that of the part of the geometry it is the
+/// mesh of, of a compound part, or of a body of one: see [`Part::id`].
+pub type PartRef = Id<Part>;
+
 pub type NodeId = u32;
 pub type ElementId = u32;
 
@@ -77,7 +81,7 @@ pub struct Part {
     /// input, so renaming a part keeps every reference to it. The mesh of a part of the
     /// geometry has the geometry part's id, a compound part the compound's, so that a part
     /// meshed anew is still the same part; an imported mesh gets a new one.
-    pub id: Id,
+    pub id: PartRef,
     pub name: String,
     pub elements: Vec<ElementId>,
     /// The bodies of a compound part: the meshes of the parts of the geometry it joins,
@@ -98,7 +102,7 @@ impl Part {
     }
 
     /// The part of the id `id`, see [`Self::id`].
-    pub fn with_id(id: Id, name: impl Into<String>, elements: Vec<ElementId>) -> Self {
+    pub fn with_id(id: PartRef, name: impl Into<String>, elements: Vec<ElementId>) -> Self {
         Self {
             id,
             ..Self::new(name, elements)
@@ -106,7 +110,7 @@ impl Part {
     }
 
     /// Whether the part is, or has a body, of the id `id`.
-    pub fn holds(&self, id: Id) -> bool {
+    pub fn holds(&self, id: PartRef) -> bool {
         self.id == id || self.bodies.iter().any(|b| b.id == id)
     }
 
@@ -120,7 +124,7 @@ impl Part {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Body {
     /// The id of the part of the geometry it is the mesh of, see [`Part::id`].
-    pub id: Id,
+    pub id: PartRef,
     pub name: String,
     pub elements: Vec<ElementId>,
 }
@@ -630,10 +634,10 @@ impl FeMesh {
         let mut added = Vec::new();
         // The parts keep their ids, unless this mesh has them already, as when the same
         // file is read twice: the copy is another part then.
-        let mut ids: BTreeSet<Id> = (self.parts.iter())
+        let mut ids: BTreeSet<PartRef> = (self.parts.iter())
             .flat_map(|p| std::iter::once(p.id).chain(p.bodies.iter().map(|b| b.id)))
             .collect();
-        let mut own = |id: Id| if ids.insert(id) { id } else { Id::new() };
+        let mut own = |id: PartRef| if ids.insert(id) { id } else { Id::new() };
         for part in other.parts {
             let name = fresh(&part.name);
             renamed.insert(part.name.clone(), name.clone());
@@ -681,17 +685,17 @@ impl FeMesh {
     }
 
     /// The part of the id `id`.
-    pub fn part(&self, id: Id) -> Option<&Part> {
+    pub fn part(&self, id: PartRef) -> Option<&Part> {
         self.parts.iter().find(|p| p.id == id)
     }
 
     /// The index of the part of the id `id`.
-    pub fn part_index(&self, id: Id) -> Option<usize> {
+    pub fn part_index(&self, id: PartRef) -> Option<usize> {
         self.parts.iter().position(|p| p.id == id)
     }
 
     /// The name of the part or body of the id `id`.
-    pub fn part_name(&self, id: Id) -> Option<&str> {
+    pub fn part_name(&self, id: PartRef) -> Option<&str> {
         (self.parts.iter()).find_map(|p| {
             if p.id == id {
                 return Some(p.name.as_str());
@@ -704,7 +708,7 @@ impl FeMesh {
 
     /// The id of the part named `name`, in any case: for what comes by name from outside,
     /// such as an input file or the user.
-    pub fn part_id(&self, name: &str) -> Option<Id> {
+    pub fn part_id(&self, name: &str) -> Option<PartRef> {
         (self.parts.iter())
             .find(|p| p.name.eq_ignore_ascii_case(name))
             .map(|p| p.id)
@@ -715,7 +719,7 @@ impl FeMesh {
     /// a mesh read anew from a file, which knows its parts only by name, keeps them the
     /// same parts to what refers to them.
     pub fn adopt_ids(&mut self, before: &FeMesh) {
-        let all = |mesh: &FeMesh| -> Vec<(Id, String)> {
+        let all = |mesh: &FeMesh| -> Vec<(PartRef, String)> {
             (mesh.parts.iter())
                 .flat_map(|p| {
                     std::iter::once((p.id, p.name.clone()))
@@ -724,9 +728,9 @@ impl FeMesh {
                 .collect()
         };
         let (old, new) = (all(before), all(self));
-        let known = |id: Id, list: &[(Id, String)]| list.iter().any(|(i, _)| *i == id);
+        let known = |id: PartRef, list: &[(PartRef, String)]| list.iter().any(|(i, _)| *i == id);
         let mut taken = BTreeSet::new();
-        let mut adopt = |id: &mut Id, name: &str| {
+        let mut adopt = |id: &mut PartRef, name: &str| {
             if known(*id, &old) {
                 return;
             }
@@ -748,14 +752,14 @@ impl FeMesh {
 
     /// The ids of the parts named `names`, in any case, as an input file or the user names
     /// them; a name of no part gets an id of no part.
-    pub fn ids_of(&self, names: &[impl AsRef<str>]) -> Vec<Id> {
+    pub fn ids_of(&self, names: &[impl AsRef<str>]) -> Vec<PartRef> {
         (names.iter())
             .map(|name| self.part_id(name.as_ref()).unwrap_or_default())
             .collect()
     }
 
     /// The ids of the parts.
-    pub fn part_ids(&self) -> Vec<Id> {
+    pub fn part_ids(&self) -> Vec<PartRef> {
         self.parts.iter().map(|p| p.id).collect()
     }
 
@@ -771,7 +775,7 @@ impl FeMesh {
     /// Removes the parts of the ids `ids` with their elements and the nodes no other
     /// element uses; sets, surfaces and the CAD map lose them too. The rest keep their
     /// numbers. In place, as a large mesh takes long to copy.
-    pub fn remove_parts(&mut self, ids: &[Id]) {
+    pub fn remove_parts(&mut self, ids: &[PartRef]) {
         let gone = |p: &Part| ids.contains(&p.id);
         let mut removed = vec![false; self.elements.len()];
         for part in self.parts.iter().filter(|p| gone(p)) {
@@ -789,8 +793,8 @@ impl FeMesh {
     /// and bodies of compound parts, each with its elements and the nodes no other element
     /// uses. A compound part left without bodies goes. Sets, surfaces and the CAD map lose
     /// them too; the rest keep their numbers.
-    pub fn remove_bodies(&mut self, objects: &[Id]) {
-        let named = |id: Id| objects.contains(&id);
+    pub fn remove_bodies(&mut self, objects: &[PartRef]) {
+        let named = |id: PartRef| objects.contains(&id);
         let mut ids: BTreeSet<ElementId> = BTreeSet::new();
         for part in &mut self.parts {
             if part.bodies.is_empty() {
@@ -912,7 +916,7 @@ impl FeMesh {
     /// Merges parts into the first of them (by index), as the Merge of mesh parts:
     /// the others' elements join it and their element sets of the same name join its set.
     /// Returns the id kept and the ids that went.
-    pub fn merge_parts(&mut self, indices: &[usize]) -> Option<(Id, Vec<Id>)> {
+    pub fn merge_parts(&mut self, indices: &[usize]) -> Option<(PartRef, Vec<PartRef>)> {
         let mut indices = indices.to_vec();
         indices.sort_unstable();
         indices.dedup();
@@ -1024,7 +1028,7 @@ impl FeMesh {
     /// Joins parts into compound parts: of each `(id, name, members)`, the parts of the
     /// member ids become the bodies of one part `name` of the id `id`, in the place of the
     /// first of them. Members without a part are left out; a compound with none is not made.
-    pub fn compose_compounds(&mut self, compounds: &[(Id, String, Vec<Id>)]) {
+    pub fn compose_compounds(&mut self, compounds: &[(PartRef, String, Vec<PartRef>)]) {
         for (id, name, members) in compounds {
             let is_member = |p: &Part| members.contains(&p.id);
             let Some(first) = self

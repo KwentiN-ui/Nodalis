@@ -1194,7 +1194,7 @@ impl Model {
         let mut display = self.into_geometry_display();
         if !shown.is_empty() {
             // They come last: the nodes and elements of the geometry keep their places.
-            let gone: Vec<plx_model::Id> = (display.mesh.parts.iter())
+            let gone: Vec<plx_model::PartRef> = (display.mesh.parts.iter())
                 .filter(|p| shown.iter().any(|s| s.eq_ignore_ascii_case(&p.name)))
                 .map(|p| p.id)
                 .collect();
@@ -1502,7 +1502,7 @@ impl Model {
 
     /// The id of the geometry object `name`: a part or body of the mesh, else a part of
     /// the geometry without a mesh, see [`plx_model::PartOrigins`].
-    pub fn object_id(&self, name: impl AsRef<str>) -> Option<plx_model::Id> {
+    pub fn object_id(&self, name: impl AsRef<str>) -> Option<plx_model::PartRef> {
         let name = name.as_ref();
         (plx_model::object_id(&self.mesh, name)).or_else(|| self.geometry.as_ref()?.part_id(name))
     }

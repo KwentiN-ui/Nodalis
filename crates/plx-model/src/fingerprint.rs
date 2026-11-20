@@ -232,7 +232,7 @@ pub fn mesh_input(
     hash.add_str(&geometry.brep);
     // The parts by id, in the order they bind to the solids, so that renaming a part
     // leaves its mesh up to date.
-    let order: Vec<Option<crate::Id>> = (geometry.part_names.iter())
+    let order: Vec<Option<crate::PartRef>> = (geometry.part_names.iter())
         .map(|name| geometry.part_id(name))
         .collect();
     hash.add_debug(&order);
@@ -257,7 +257,7 @@ pub fn mesh_input(
     // meet: joining a part into a compound, taking it out or changing the compound's
     // members leaves its mesh out of date. Without a compound the input stays what it was.
     if let Some(compound) = geometry.compound_of(part) {
-        let mut members: Vec<crate::Id> = (geometry.compounds[compound].parts.iter())
+        let mut members: Vec<crate::PartRef> = (geometry.compounds[compound].parts.iter())
             .filter(|&&p| !geometry.suppressed.contains(&p))
             .copied()
             .collect();

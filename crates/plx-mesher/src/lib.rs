@@ -139,7 +139,7 @@ impl GeometryDisplay {
         let kept: Vec<bool> = (self.mesh.parts.iter())
             .map(|p| !deleted.iter().any(|d| p.name.eq_ignore_ascii_case(d)))
             .collect();
-        let gone: Vec<plx_model::Id> = (self.mesh.parts.iter().zip(&kept))
+        let gone: Vec<plx_model::PartRef> = (self.mesh.parts.iter().zip(&kept))
             .filter(|(_, kept)| !**kept)
             .map(|(p, _)| p.id)
             .collect();
@@ -2537,7 +2537,7 @@ pub fn merge_parts(mesh: &FeMesh, mut part_meshes: Vec<FeMesh>) -> FeMesh {
             part.id = id;
         }
     }
-    let replaced: Vec<plx_model::Id> = (part_meshes.iter())
+    let replaced: Vec<plx_model::PartRef> = (part_meshes.iter())
         .flat_map(|m| m.parts.iter().map(|p| p.id))
         .collect();
     let is_replaced = |p: &Part| replaced.contains(&p.id);
@@ -2642,13 +2642,13 @@ pub fn merge_parts(mesh: &FeMesh, mut part_meshes: Vec<FeMesh>) -> FeMesh {
 /// Deletes a part of a mesh with its elements and the nodes no other part uses.
 /// Sets and surfaces lose them too; the other parts keep their
 /// numbers.
-pub fn delete_mesh_part(mesh: &FeMesh, part: plx_model::Id) -> FeMesh {
+pub fn delete_mesh_part(mesh: &FeMesh, part: plx_model::PartRef) -> FeMesh {
     delete_mesh_parts(mesh, &[part])
 }
 
 /// [`delete_mesh_part`] for several parts at once, as selected together: the mesh is built
 /// anew once rather than once per part.
-pub fn delete_mesh_parts(mesh: &FeMesh, parts: &[plx_model::Id]) -> FeMesh {
+pub fn delete_mesh_parts(mesh: &FeMesh, parts: &[plx_model::PartRef]) -> FeMesh {
     let mut smaller = mesh.clone();
     smaller.remove_parts(parts);
     smaller

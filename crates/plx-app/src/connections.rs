@@ -217,7 +217,7 @@ pub fn detect(
             // mesh needs nothing of it.
             let mut fe = std::mem::take(&mut model.fe);
             let active = model.active();
-            let visible = visible_by_name(model, active.mesh());
+            let visible = visible_parts(model, active.mesh());
             let nothing = plx_model::LeftOut::nothing();
             fe.detect_line_ends(index, active.mesh(), &visible, &nothing, &mut report);
             drop(active);
@@ -241,7 +241,7 @@ pub fn detect(
                     .collect();
                 &skins
             };
-            let visible = visible_by_name(model, mesh);
+            let visible = visible_parts(model, mesh);
             let nothing = plx_model::LeftOut::nothing();
             let report = fe.detect_contacts(index, mesh, skins, &visible, &nothing);
             drop(active);
@@ -252,11 +252,11 @@ pub fn detect(
 }
 
 /// Whether each part of `mesh`, the solved part of the model's mesh, is shown in the model.
-fn visible_by_name(model: &Model, mesh: &plx_mesh::FeMesh) -> Vec<bool> {
+fn visible_parts(model: &Model, mesh: &plx_mesh::FeMesh) -> Vec<bool> {
     (mesh.parts.iter())
         .map(|part| {
             (model.mesh().parts.iter().zip(&model.parts))
-                .find(|(p, _)| p.name == part.name)
+                .find(|(p, _)| p.id == part.id)
                 .is_none_or(|(_, info)| info.visible)
         })
         .collect()
@@ -1926,8 +1926,9 @@ mod tests {
         // would have nothing on one side, nor the pressure on it alone.
         let block = names[1].clone();
         (model.geometry.as_mut().unwrap()).set_suppressed(std::slice::from_ref(&block), true);
+        let block_id = model.mesh().part_id(&block).unwrap();
         let active = model.active();
-        assert_eq!(active.left_out(), std::slice::from_ref(&block));
+        assert_eq!(active.left_out(), [block_id]);
         assert!(active.fe().contact_regions.is_empty());
         assert!(active.fe().steps[0].loads.is_empty());
         assert_eq!(active.fe().steps[0].boundary_conditions.len(), 1);

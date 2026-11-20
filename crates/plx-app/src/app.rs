@@ -81,7 +81,7 @@ pub enum Request {
     Unlink(Vec<String>),
     /// The geometry objects deleted in the analysis, by id with their names: the links that
     /// brought them no longer do, so that they do not come back.
-    Deleted(Vec<(plx_model::Id, String)>),
+    Deleted(Vec<(plx_model::PartRef, String)>),
     /// Open the Campbell block of this analysis, made and linked first if it has none.
     Campbell,
     /// Close the analysis shown in the project window: its data goes back to the project.
@@ -181,9 +181,9 @@ struct Workbench {
     mesh_overlay_job: Option<MeshOverlayJob>,
     /// Open dialog creating or editing an item of the FE model.
     editor: Option<Editor>,
-    /// The step new boundary conditions, loads, outputs and defined fields go into, by name;
-    /// `None` or a name no longer there means the last step.
-    active_step: Option<String>,
+    /// The step new boundary conditions, loads, outputs and defined fields go into, by id;
+    /// `None` or a step no longer there means the last step.
+    active_step: Option<plx_model::Id<plx_model::Step>>,
     /// The selection the active step last followed, so that it follows only a new one.
     step_selection: Option<TreeItem>,
     /// The open editors of the properties panel, the newest last; only one stays open.
@@ -1547,9 +1547,10 @@ pub(crate) fn apply_compounds(model: &mut Model, before: &[plx_model::CompoundPa
     }
     let after = geometry.compounds.clone();
     let members = geometry.compound_members();
-    let before_members: Vec<(plx_model::Id, String, Vec<plx_model::Id>)> = (before.iter())
-        .map(|c| (c.id, c.name.clone(), c.parts.clone()))
-        .collect();
+    let before_members: Vec<(plx_model::PartRef, String, Vec<plx_model::PartRef>)> = (before
+        .iter())
+    .map(|c| (c.id, c.name.clone(), c.parts.clone()))
+    .collect();
     model.edit_mesh(|mesh, fe| {
         // The mesh operations name what they moved, see below.
         let operations = fe.mesh_operations.clone();
@@ -3437,18 +3438,18 @@ impl Workbench {
     /// tree, else the last step.
     pub(crate) fn active_step(&self) -> Option<usize> {
         let steps = &self.setup_model()?.fe.steps;
-        (self.active_step.as_ref())
-            .and_then(|name| steps.iter().position(|s| &s.name == name))
+        (self.active_step)
+            .and_then(|id| steps.iter().position(|s| s.id == id))
             .or_else(|| steps.len().checked_sub(1))
     }
 
     /// Makes step `index` the active one.
     pub(crate) fn set_active_step(&mut self, index: usize) {
-        let name = (self.setup_model())
+        let id = (self.setup_model())
             .and_then(|m| m.fe.steps.get(index))
-            .map(|s| s.name.clone());
-        if name.is_some() {
-            self.active_step = name;
+            .map(|s| s.id);
+        if id.is_some() {
+            self.active_step = id;
         }
     }
 
@@ -6197,7 +6198,7 @@ impl Workbench {
             return;
         }
         let name = names.join(", ");
-        let deleted: Vec<(plx_model::Id, String)> = (names.iter())
+        let deleted: Vec<(plx_model::PartRef, String)> = (names.iter())
             .filter_map(|n| Some((model.object_id(n)?, n.clone())))
             .collect();
         let cad: Vec<String> = (names.iter())
@@ -6221,7 +6222,7 @@ impl Workbench {
         }
         // The parts of the FE model that go whole: the selections that picked them simply
         // lose them.
-        let gone: Vec<plx_model::Id> = (model.mesh().parts.iter())
+        let gone: Vec<plx_model::PartRef> = (model.mesh().parts.iter())
             .filter(|p| {
                 plx_model::part_bodies(p)
                     .iter()
@@ -6845,9 +6846,10 @@ impl Workbench {
         editor.set_global_sources(&self.incoming.global_sources);
         // A contact detection searches the geometry, if there is one to search; its derived
         // tolerance is worked out again only when the parts searched change.
-        let picked: Vec<plx_model::Id> = (self.tree.selected_parts(TreeView::FeModel).into_iter())
-            .filter_map(|p| model.mesh().parts.get(p).map(|p| p.id))
-            .collect();
+        let picked: Vec<plx_model::PartRef> =
+            (self.tree.selected_parts(TreeView::FeModel).into_iter())
+                .filter_map(|p| model.mesh().parts.get(p).map(|p| p.id))
+                .collect();
         crate::part_filter_ui::set_selected_parts(ctx, picked);
         let scope = (editor.detection_filter()).and_then(|filter| {
             let display = crate::connections::detection_display(model, self.geometry.as_ref())?;

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub enum Region {
     /// Whole parts by id, see [`plx_mesh::Part::id`]: renaming a part keeps the region on
     /// it.
-    Parts(Vec<crate::Id>),
+    Parts(Vec<crate::PartRef>),
     /// Picked nodes.
     Nodes(Vec<NodeId>),
     /// Picked element faces as (element, CalculiX face number 1..6).
@@ -248,7 +248,7 @@ impl Region {
 
 /// E.g. "2 faces, 1 edge".
 /// The names of the parts `ids` of `mesh`, "(deleted)" for a part it does not have.
-pub fn part_names(mesh: &FeMesh, ids: &[crate::Id]) -> Vec<String> {
+pub fn part_names(mesh: &FeMesh, ids: &[crate::PartRef]) -> Vec<String> {
     (ids.iter())
         .map(|&id| mesh.part_name(id).unwrap_or("(deleted)").to_owned())
         .collect()

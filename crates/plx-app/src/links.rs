@@ -187,7 +187,7 @@ impl MeshCopy {
         if changed.is_empty() {
             return;
         }
-        let new = |id: &mut plx_model::Id| {
+        let new = |id: &mut plx_model::PartRef| {
             if let Some((_, new)) = changed.iter().find(|(old, _)| old == id) {
                 *id = *new;
             }
@@ -226,7 +226,7 @@ impl MeshCopy {
 
     /// The copy without the geometry objects `ids`, which the target leaves out, see
     /// [`left_out`]: their shapes, numbered anew by Gmsh as on deleting them, and their meshes.
-    pub fn leave_out(&mut self, ids: &[plx_model::Id]) -> Result<(), String> {
+    pub fn leave_out(&mut self, ids: &[plx_model::PartRef]) -> Result<(), String> {
         if ids.is_empty() {
             return Ok(());
         }
@@ -300,7 +300,7 @@ pub fn merge_meshes(
     };
     let (mut parts_used, mut sets_used, mut ops_used) =
         (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
-    let mut ids_used: BTreeSet<plx_model::Id> = BTreeSet::new();
+    let mut ids_used: BTreeSet<plx_model::PartRef> = BTreeSet::new();
     let mut renamings = Vec::with_capacity(copies.len());
     let (mut node_offset, mut element_offset) = (0, 0);
     for (index, copy) in copies.into_iter().enumerate() {
@@ -318,7 +318,7 @@ pub fn merge_meshes(
         // when two links bring the same block: the second copy is other parts then.
         // A part of the merged geometry takes the id the geometry gave it there, so that its
         // origin stays on it.
-        let mut ids: BTreeMap<plx_model::Id, plx_model::Id> = BTreeMap::new();
+        let mut ids: BTreeMap<plx_model::PartRef, plx_model::PartRef> = BTreeMap::new();
         for part in &copy.mesh.parts {
             let objects = (std::iter::once((part.id, &part.name)))
                 .chain(part.bodies.iter().map(|b| (b.id, &b.name)));
@@ -338,7 +338,7 @@ pub fn merge_meshes(
                 ids.insert(id, new);
             }
         }
-        let part = |id: &plx_model::Id| ids.get(id).copied().unwrap_or(*id);
+        let part = |id: &plx_model::PartRef| ids.get(id).copied().unwrap_or(*id);
         let mut sets: BTreeMap<String, String> = BTreeMap::new();
         let names = (copy.mesh.node_sets.keys())
             .chain(copy.mesh.element_sets.keys())
@@ -560,7 +560,7 @@ pub fn output_path(link: &Link) -> Vec<String> {
 
 /// The geometry objects that a Geometry link of a whole source no longer brings, by id: the
 /// target deleted them, see [`MeshCopy::leave_out`].
-pub fn left_out(link: &Link) -> Vec<plx_model::Id> {
+pub fn left_out(link: &Link) -> Vec<plx_model::PartRef> {
     match link.item.as_slice() {
         [cell] if cell == GEOMETRY => (link.excluded.iter())
             .filter_map(|key| key.parse().ok())
@@ -571,8 +571,8 @@ pub fn left_out(link: &Link) -> Vec<plx_model::Id> {
 
 /// The geometry objects the source of a Geometry link has, by id: its parts of the CAD
 /// geometry and its meshes without shapes.
-pub fn objects(data: Data) -> Vec<plx_model::Id> {
-    let mut ids: Vec<plx_model::Id> = (data.geometry.iter())
+pub fn objects(data: Data) -> Vec<plx_model::PartRef> {
+    let mut ids: Vec<plx_model::PartRef> = (data.geometry.iter())
         .flat_map(|g| g.part_names.iter().filter_map(|n| g.part_id(n)))
         .collect();
     for id in data.mesh.parts.iter().flat_map(plx_model::part_objects) {
@@ -1143,7 +1143,7 @@ fn apply_wall_loads(
         };
     }
     // The parts of the walls: by id, or by name in a mesh of the analysis's own.
-    let mut parts: Vec<plx_model::Id> = Vec::new();
+    let mut parts: Vec<plx_model::PartRef> = Vec::new();
     if let Some(Ok(loads)) = file.path().map(plx_results::wall_loads::WallLoads::read) {
         for wall in &loads.walls {
             let found = (wall.parts.iter()).filter_map(|(id, name)| {
@@ -1317,8 +1317,9 @@ pub fn take_geometry(
                 if !compounds.is_empty() {
                     // Compounds the new shapes bring of parts in none of the own ones stay
                     // too, such as the pieces of a split.
-                    let joined =
-                        |part: &plx_model::Id| (compounds.iter()).any(|c| c.parts.contains(part));
+                    let joined = |part: &plx_model::PartRef| {
+                        (compounds.iter()).any(|c| c.parts.contains(part))
+                    };
                     let brought: Vec<_> = (taken.compounds.drain(..))
                         .filter(|c| {
                             (compounds.iter())
@@ -1443,13 +1444,13 @@ pub fn take_objects(
     let mut linked = incoming_origins.linked(origins);
     // An analysis whose operations change the shapes meshes them itself.
     let changed = geometry.is_some_and(|g| !g.operations.is_empty());
-    let cad_mesh = |b: plx_model::Id| {
+    let cad_mesh = |b: plx_model::PartRef| {
         matches!(
             incoming_origins.get(b),
             Some(PartOrigin::Meshed(_) | PartOrigin::Linked)
         )
     };
-    let own: Vec<plx_model::Id> = (incoming.parts.iter().flat_map(plx_model::part_objects))
+    let own: Vec<plx_model::PartRef> = (incoming.parts.iter().flat_map(plx_model::part_objects))
         .filter(|&b| {
             geometry.is_some_and(|g| g.own_meshes.contains(&b)) || (changed && cad_mesh(b))
         })
@@ -1471,14 +1472,14 @@ pub fn take_objects(
     }
     // Of what it had, its own meshes of parts still there that the link brings none of, and
     // the meshes it imported itself.
-    let brought = |id: plx_model::Id| linked.get(id).is_some();
-    let known = |id: plx_model::Id| geometry.is_some_and(|g| g.part_name(id).is_some());
-    let keep = |id: plx_model::Id| match origins.get(id) {
+    let brought = |id: plx_model::PartRef| linked.get(id).is_some();
+    let known = |id: plx_model::PartRef| geometry.is_some_and(|g| g.part_name(id).is_some());
+    let keep = |id: plx_model::PartRef| match origins.get(id) {
         Some(PartOrigin::Meshed(_)) => known(id) && !brought(id),
         Some(PartOrigin::Imported { linked: false, .. }) => !brought(id),
         _ => false,
     };
-    let dropped: Vec<plx_model::Id> = (mesh.parts.iter().flat_map(plx_model::part_objects))
+    let dropped: Vec<plx_model::PartRef> = (mesh.parts.iter().flat_map(plx_model::part_objects))
         .filter(|&b| !keep(b))
         .collect();
     let mut kept = mesh.clone();
@@ -1496,7 +1497,7 @@ pub fn take_objects(
     } else {
         // The link's mesh keeps its numbers, so that results of the same mesh fit; the own
         // meshes keep theirs where the link's mesh leaves them free.
-        let old: Vec<plx_model::Id> = kept
+        let old: Vec<plx_model::PartRef> = kept
             .parts
             .iter()
             .flat_map(plx_model::part_objects)
@@ -1505,7 +1506,7 @@ pub fn take_objects(
         let first = both.parts.len();
         both.append_keeping(kept);
         // A part the link brings too takes another id in the mesh put together.
-        let new: Vec<plx_model::Id> = both.parts[first..]
+        let new: Vec<plx_model::PartRef> = both.parts[first..]
             .iter()
             .flat_map(plx_model::part_objects)
             .collect();
@@ -2327,7 +2328,7 @@ mod tests {
     }
 
     /// The id of the geometry object `name` of `mesh`.
-    fn oid(mesh: &FeMesh, name: &str) -> plx_model::Id {
+    fn oid(mesh: &FeMesh, name: &str) -> plx_model::PartRef {
         plx_model::object_id(mesh, name).unwrap()
     }
 

@@ -947,7 +947,7 @@ mod tests {
         let mut geometry = model.geometry.clone().unwrap();
         geometry.meshing.max_size = 20.0;
         model.set_mesh(plx_mesher::generate_mesh(&geometry).unwrap().mesh);
-        let lines: Vec<plx_model::Id> = model.mesh().part_ids();
+        let lines: Vec<plx_model::PartRef> = model.mesh().part_ids();
         let names: Vec<String> = model.mesh().parts.iter().map(|p| p.name.clone()).collect();
         assert_eq!(lines.len(), 1, "{lines:?}");
 

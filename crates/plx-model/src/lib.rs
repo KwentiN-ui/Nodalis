@@ -147,6 +147,7 @@ pub use parameter::{Parameter, ValueKind};
 pub use part_filter::{PartContext, PartFilter, PartGroup, PartTerm, name_matches};
 pub use plot::{PlotKind, histogram};
 pub use plx_core::Id;
+pub use plx_mesh::PartRef;
 pub use primitive::{MAX_PRIMITIVE_ELEMENTS, MeshPrimitive, Param, ParamSlot, ParamValue};
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities, part_names};
@@ -497,7 +498,7 @@ impl FeModel {
     /// joined into a compound part or a dissolved compound part into the parts it joined:
     /// what was on the part `old` is on each of them. Renaming a part needs nothing of
     /// this, since everything refers to it by id.
-    pub fn replace_part(&mut self, old: Id, new: &[Id]) {
+    pub fn replace_part(&mut self, old: crate::PartRef, new: &[crate::PartRef]) {
         if new == [old] {
             return;
         }
@@ -550,7 +551,7 @@ impl FeModel {
 
     /// Parts deleted from the mesh leave the regions that picked them: the region keeps
     /// the other parts, and nothing is reported for the deleted ones.
-    pub fn remove_parts_from_regions(&mut self, deleted: &[Id]) {
+    pub fn remove_parts_from_regions(&mut self, deleted: &[crate::PartRef]) {
         let drop = |region: &mut Region| {
             if let Region::Parts(ids) = region {
                 ids.retain(|id| !deleted.contains(id));
@@ -603,7 +604,7 @@ impl FeModel {
     }
 
     /// Regions on the part `old` are on the parts `new`.
-    fn replace_part_in_regions(&mut self, old: Id, new: &[Id]) {
+    fn replace_part_in_regions(&mut self, old: crate::PartRef, new: &[crate::PartRef]) {
         let replace = |region: &mut Region| {
             if let Region::Parts(ids) = region
                 && let Some(at) = ids.iter().position(|&n| n == old)

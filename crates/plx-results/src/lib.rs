@@ -50,7 +50,7 @@ pub struct ResultsSettings {
     pub result_planes: Vec<plx_model::ResultPlane>,
     /// Parts shown without colour contours, by id ([`plx_mesh::Part::id`]): results of
     /// another run may have other parts, or the same ones in another order.
-    pub plain_part_ids: Vec<plx_model::Id>,
+    pub plain_part_ids: Vec<plx_model::PartRef>,
     /// The increment shown, by index.
     pub increment: usize,
     /// The field and component shown, by name.

@@ -469,7 +469,7 @@ impl ItemOwned {
                 put(&mut step.loads, l, |o| o.id == l.id)
             }
             Item::Field(f) if step.kind.supports_defined_fields() => {
-                put(&mut step.defined_fields, f, |o| o.name == f.name)
+                put(&mut step.defined_fields, f, |o| o.id == f.id)
             }
             // The step lists the output of the model; nothing is copied.
             Item::History(h) if step.kind.supports_history_output(&h.kind) => {
