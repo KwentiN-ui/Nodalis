@@ -841,16 +841,10 @@ impl Model {
         self.path_plots = (view.path_plots.iter())
             .map(crate::path_plot::PathPlot::from_saved)
             .collect();
-        let plain: Vec<usize> = if settings.plain_part_names.is_empty()
-            && settings.mesh == Some(self.mesh.fingerprint())
-        {
-            settings.plain_parts.clone()
-        } else {
-            (self.parts.iter().enumerate())
-                .filter(|(_, part)| settings.plain_part_names.contains(&part.name))
-                .map(|(index, _)| index)
-                .collect()
-        };
+        let plain: Vec<usize> = (self.parts.iter().enumerate())
+            .filter(|(_, part)| settings.plain_part_names.contains(&part.name))
+            .map(|(index, _)| index)
+            .collect();
         self.set_contours(&plain, false);
         // History outputs of hot spots need their values first.
         let reports = crate::hot_spots::evaluate(self);
@@ -5066,7 +5060,6 @@ S
                 mode_deformation: Some(plx_results::saved_view::SavedDeformation::Automatic(2.0)),
                 mode_amplitude: Some(4.0),
                 show_undeformed: Some(false),
-                levels: Some(12),
                 color_scale: Some(plx_model::ColorScale {
                     spectrum: plx_model::ColorSpectrum::CoolWarm,
                     levels: 12,
@@ -5117,18 +5110,6 @@ S
             ("SCALED", "VALUE")
         );
         assert_eq!(model.results_settings(), Some(settings.clone()));
-        // Projects saved before part names were kept name parts by index, which only fit
-        // results of the same mesh.
-        let mut legacy = settings;
-        legacy.plain_part_names.clear();
-        legacy.plain_parts = vec![0];
-        legacy.mesh = Some(model.mesh.fingerprint() ^ 1);
-        model.set_contours(&[0], true);
-        model.restore_results_settings(&legacy, Vec::new());
-        assert!(model.parts[0].contours);
-        legacy.mesh = Some(model.mesh.fingerprint());
-        model.restore_results_settings(&legacy, Vec::new());
-        assert!(!model.parts[0].contours);
         // Hidden parts leave the legend range like parts without contours.
         model.parts[0].visible = true;
         model.set_contours(&[0], true);

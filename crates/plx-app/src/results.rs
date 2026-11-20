@@ -481,7 +481,6 @@ impl ResultsView {
                 mode_deformation: Some(self.mode_deformation.into()),
                 mode_amplitude: Some(self.mode_amplitude),
                 show_undeformed: Some(self.show_undeformed),
-                levels: Some(self.color_scale.levels),
                 color_scale: Some(self.color_scale.clone()),
                 vector_display: Some(self.vector_display.clone()),
                 ..Default::default()
@@ -522,9 +521,8 @@ impl ResultsView {
         if let Some(display) = &view.vector_display {
             self.vector_display = display.clone();
         }
-        match &view.color_scale {
-            Some(scale) => self.color_scale = scale.clone(),
-            None => self.color_scale.levels = view.levels.unwrap_or(self.color_scale.levels),
+        if let Some(scale) = &view.color_scale {
+            self.color_scale = scale.clone();
         }
         warnings
     }

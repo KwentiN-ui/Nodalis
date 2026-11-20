@@ -14,7 +14,6 @@ pub struct Geometry {
     /// The shapes as an OpenCASCADE BREP file.
     pub brep: String,
     /// Meshing parameters of the parts that no Meshing Parameters item covers.
-    #[serde(alias = "mesh_setup")]
     pub meshing: MeshingParameters,
     /// The mesh setup items.
     #[serde(default)]
@@ -481,7 +480,6 @@ pub struct MeshingParameters {
     /// Solids that are straight extrusions or bodies of revolution get a swept mesh of
     /// hexahedra, with the defaults of the Extrude Mesh item for extrusions; the others stay
     /// tetrahedra.
-    #[serde(alias = "extrude_where_possible")]
     pub hexahedra_where_possible: bool,
 }
 
@@ -942,13 +940,5 @@ mod tests {
         geometry.mesh_items.push(tet);
         assert!(geometry.extrusion("A").is_none());
         assert!(geometry.extrusion("B").is_some());
-    }
-
-    #[test]
-    fn projects_of_the_first_geometry_version_still_read() {
-        let text = r#"(source: "a.step", brep: "", mesh_setup: (max_size: 3.0))"#;
-        let geometry: Geometry = ron::from_str(text).unwrap();
-        assert_eq!(geometry.meshing.max_size, 3.0);
-        assert!(geometry.mesh_items.is_empty());
     }
 }
