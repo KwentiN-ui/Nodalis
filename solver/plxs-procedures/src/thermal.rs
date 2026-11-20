@@ -155,7 +155,7 @@ impl StepTemperatures {
             .zip(&self.start)
             .map(|((&value, field), &from)| {
                 let amplitude = field
-                    .and_then(|f| step.fields[f].amplitude.as_deref())
+                    .and_then(|f| step.fields[f].amplitude)
                     .and_then(|name| model.amplitude(name));
                 match amplitude {
                     Some(a) => value * a.value(if a.total_time { total } else { time }),

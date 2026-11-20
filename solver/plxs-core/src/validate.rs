@@ -1,9 +1,7 @@
 //! Validation of an analysis: every reference (set, surface, material, interaction,
 //! amplitude, node, element) points at something defined, every element has a section, and
 //! the sections are assigned to the elements. The reader calls it once the input is read;
-//! Nodalis will call it on a model it built itself.
-
-use std::collections::{BTreeSet, HashSet};
+//! Nodalis calls it on the model it lowers.
 
 use crate::contact::ContactKind;
 use crate::diagnostic::ItemRef;
@@ -100,7 +98,6 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
     }
 
     // Sections: materials and element sets, then the assignment.
-    let material_names: HashSet<&str> = model.materials.iter().map(|m| m.name.as_str()).collect();
     let mut assignment: Vec<Option<u32>> = vec![None; model.elements.len()];
     let mut before_section = errors.len();
     for (index, section) in model.sections.iter().enumerate() {
@@ -119,9 +116,13 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
             SectionKind::Gap(_) => "*GAP",
         };
         if let Some(material) = section.kind.material()
-            && !material_names.contains(material)
+            && model.material(material).is_none()
         {
-            errors.push(Error::undefined(keyword, "material", material));
+            errors.push(Error::undefined(
+                keyword,
+                "material",
+                format!("#{}", material.0),
+            ));
         }
         let Some(elements) = model.sets.element_sets.get(&section.elset) else {
             errors.push(Error::undefined(keyword, "element set", &section.elset));
@@ -279,16 +280,18 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
     }
 
     // Contact.
-    let interaction_names: HashSet<&str> = (model.contact.interactions.iter())
-        .map(|i| i.name.as_str())
-        .collect();
     for (index, pair) in model.contact.pairs.iter().enumerate() {
         let before = errors.len();
-        if !interaction_names.contains(pair.interaction.as_str()) {
+        if model
+            .contact
+            .interactions
+            .get(pair.interaction.index())
+            .is_none()
+        {
             errors.push(Error::undefined(
                 "*CONTACT PAIR",
                 "surface interaction",
-                &pair.interaction,
+                format!("#{}", pair.interaction.0),
             ));
         }
         for surface in [&pair.slave, &pair.master] {
@@ -367,13 +370,11 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
     }
 
     // Steps.
-    let amplitude_names: BTreeSet<&str> =
-        model.amplitudes.iter().map(|a| a.name.as_str()).collect();
-    let amplitude = |errors: &mut Vec<Error>, keyword: &str, name: &Option<String>| {
-        if let Some(name) = name
-            && !amplitude_names.contains(name.as_str())
+    let amplitude = |errors: &mut Vec<Error>, keyword: &str, id: &Option<crate::AmplitudeId>| {
+        if let Some(id) = id
+            && model.amplitude(*id).is_none()
         {
-            errors.push(Error::undefined(keyword, "amplitude", name));
+            errors.push(Error::undefined(keyword, "amplitude", format!("#{}", id.0)));
         }
     };
     let stored_modes_before = |steps: &[crate::Step], index: usize| {
@@ -501,11 +502,16 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                     }
                 }
                 ContactChange::Friction { interaction, .. } => {
-                    if !interaction_names.contains(interaction.as_str()) {
+                    if model
+                        .contact
+                        .interactions
+                        .get(interaction.index())
+                        .is_none()
+                    {
                         errors.push(Error::undefined(
                             "*CHANGE FRICTION",
                             "surface interaction",
-                            interaction,
+                            format!("#{}", interaction.0),
                         ));
                     }
                 }
@@ -632,7 +638,7 @@ mod tests {
         model.sections.push(Section {
             elset: "EALL".into(),
             kind: SectionKind::Solid {
-                material: "STEEL".into(),
+                material: crate::MaterialId(0),
                 thickness: None,
                 orientation: None,
             },
@@ -654,7 +660,7 @@ mod tests {
     fn missing_references_are_reported_with_their_keyword() {
         let mut analysis = small_analysis();
         analysis.model.sections[0].kind = SectionKind::Solid {
-            material: "RUBBER".into(),
+            material: crate::MaterialId(7),
             thickness: None,
             orientation: None,
         };
@@ -663,7 +669,7 @@ mod tests {
             first_dof: 1,
             last_dof: 3,
             value: None,
-            amplitude: Some("A1".into()),
+            amplitude: Some(crate::AmplitudeId(3)),
             fixed: false,
             submodel_step: None,
             load_case: None,
@@ -673,9 +679,9 @@ mod tests {
         assert_eq!(
             texts,
             [
-                "*ERROR in *SOLID SECTION: material RUBBER has not been defined",
+                "*ERROR in *SOLID SECTION: material #7 has not been defined",
                 "*ERROR in *BOUNDARY: node set NOWHERE (step Step-1) has not been defined",
-                "*ERROR in *BOUNDARY: amplitude A1 has not been defined",
+                "*ERROR in *BOUNDARY: amplitude #3 has not been defined",
             ]
         );
     }
@@ -684,7 +690,7 @@ mod tests {
     fn errors_name_the_item_they_are_about() {
         let mut analysis = small_analysis();
         analysis.model.sections[0].kind = SectionKind::Solid {
-            material: "RUBBER".into(),
+            material: crate::MaterialId(7),
             thickness: None,
             orientation: None,
         };

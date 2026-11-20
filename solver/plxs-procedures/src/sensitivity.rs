@@ -661,7 +661,7 @@ fn element_loads(ctx: &ProcedureContext<'_>, step: &Step) -> Result<Vec<Vec<Elem
     let mut loads: Vec<Vec<ElementLoad>> = (0..table.entries.len()).map(|_| Vec::new()).collect();
     let total = ctx.state.total_time;
     for load in &step.loads.distributed {
-        let factor = amplitude_factor(model, step, load.amplitude.as_deref(), 1.0, total, 1.0);
+        let factor = amplitude_factor(model, step, load.amplitude, 1.0, total, 1.0);
         let elements: Vec<u32> = match &load.region {
             ElementRef::Element(id) => vec![*id],
             ElementRef::Set(name) => model

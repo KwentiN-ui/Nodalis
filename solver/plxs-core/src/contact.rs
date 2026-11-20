@@ -15,7 +15,7 @@ pub struct Contact {
 /// `*SURFACE INTERACTION` with its `*SURFACE BEHAVIOR`, `*FRICTION` and `*GAP CONDUCTANCE`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SurfaceInteraction {
-    /// Upper case name.
+    /// Label (the name of the input), not used to refer to it.
     pub name: String,
     pub behavior: Option<SurfaceBehavior>,
     pub friction: Option<Friction>,
@@ -62,7 +62,7 @@ pub enum GapConductance {
 /// `*CONTACT PAIR`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContactPair {
-    pub interaction: String,
+    pub interaction: crate::InteractionId,
     pub kind: ContactKind,
     pub small_sliding: bool,
     /// `ADJUST=<value>` moves slave nodes within the distance on to the master surface,

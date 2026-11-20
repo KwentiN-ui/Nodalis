@@ -102,14 +102,14 @@ impl Step {
             )
             .chain(self.fields.iter().map(|f| &f.amplitude))
             .flatten();
-        let mut seen: Vec<&str> = Vec::new();
+        let mut seen: Vec<crate::AmplitudeId> = Vec::new();
         let mut times = Vec::new();
-        for name in names {
-            if seen.contains(&name.as_str()) {
+        for &id in names {
+            if seen.contains(&id) {
                 continue;
             }
-            seen.push(name);
-            let Some(amplitude) = model.amplitude(name) else {
+            seen.push(id);
+            let Some(amplitude) = model.amplitude(id) else {
                 continue;
             };
             let offset = if amplitude.total_time {
@@ -532,7 +532,7 @@ pub struct Boundary {
     pub last_dof: u8,
     /// Prescribed value; `None` means zero (homogeneous).
     pub value: Option<f64>,
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
     /// `FIXED`: the node keeps the value it had at the end of the previous step; a value
     /// (times its amplitude) is added to it. CalculiX ignores the value.
     pub fixed: bool,
@@ -558,7 +558,7 @@ pub struct ConcentratedLoad {
     pub region: NodeRef,
     pub dof: u8,
     pub value: f64,
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
     pub load_case: Option<u8>,
     /// `SECTOR=` of cyclic symmetry models.
     pub sector: Option<u32>,
@@ -584,7 +584,7 @@ pub enum Follower {
 pub struct DistributedLoad {
     pub region: ElementRef,
     pub kind: DistributedLoadKind,
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
     pub load_case: Option<u8>,
     pub sector: Option<u32>,
 }
@@ -611,7 +611,7 @@ pub enum DistributedLoadKind {
 pub struct ConcentratedFlux {
     pub region: NodeRef,
     pub value: f64,
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
 }
 
 /// `*DFLUX`: heat flux on a face (`S<n>`) or per volume (`BF`).
@@ -620,7 +620,7 @@ pub struct DistributedFlux {
     pub region: ElementRef,
     pub kind: FluxKind,
     pub value: f64,
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -637,9 +637,9 @@ pub struct Film {
     pub sink_temperature: f64,
     pub coefficient: f64,
     /// Amplitude of the sink temperature.
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
     /// `FILM AMPLITUDE`: amplitude of the coefficient.
-    pub film_amplitude: Option<String>,
+    pub film_amplitude: Option<crate::AmplitudeId>,
 }
 
 /// `*RADIATE`: radiation from a face to the environment (`R<n>`) or a cavity (`R<n>CR`).
@@ -650,16 +650,16 @@ pub struct Radiate {
     pub cavity: bool,
     pub sink_temperature: f64,
     pub emissivity: f64,
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
     /// `RADIATION AMPLITUDE`: amplitude of the emissivity.
-    pub radiation_amplitude: Option<String>,
+    pub radiation_amplitude: Option<crate::AmplitudeId>,
 }
 
 /// `*TEMPERATURE`: temperatures of nodes as a load (thermal strain) in mechanical steps.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DefinedField {
     pub kind: DefinedFieldKind,
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -689,7 +689,7 @@ pub enum ContactChange {
     Elements { add: bool, elset: String },
     /// `*CHANGE FRICTION, INTERACTION=` with the new `*FRICTION` values.
     Friction {
-        interaction: String,
+        interaction: crate::InteractionId,
         friction: crate::contact::Friction,
     },
 }
@@ -802,17 +802,17 @@ mod amplitude_time_tests {
             table("UNUSED", false, vec![(0.25, 0.0)]),
         ];
         let mut step = Step::new("Step-1", Procedure::NoAnalysis);
-        let boundary = |amplitude: &str| Boundary {
+        let boundary = |amplitude: u32| Boundary {
             region: NodeRef::Node(1),
             first_dof: 1,
             last_dof: 1,
             value: Some(1.0),
-            amplitude: Some(amplitude.into()),
+            amplitude: Some(crate::AmplitudeId(amplitude)),
             fixed: false,
             submodel_step: None,
             load_case: None,
         };
-        step.boundaries = vec![boundary("A"), boundary("B"), boundary("A")];
+        step.boundaries = vec![boundary(0), boundary(1), boundary(0)];
         assert_eq!(step.amplitude_times(&model, 2.0, 2.0), [0.5, 1.0, 1.25]);
     }
 }

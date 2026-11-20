@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
-    Active, Amplitude, AmplitudeTime, BeamProfile, BeamSection, BoundaryKind, BuckleStep,
+    Active, AmplitudeTime, BeamProfile, BeamSection, BoundaryKind, BuckleStep,
     ComplexFrequencyStep, Constraint, ContactMethod, ContactPair, ContactScale, Damping,
     DefinedFieldKind, DynamicMethod, DynamicStep, FeModel, FieldResult, Formulation, FrequencyStep,
     GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Id, IncrementPlan,
@@ -660,10 +660,15 @@ fn lower_model_named(
     // sets follow. The constraints come in their order of precedence for the dependent
     // degrees of freedom (see [`dofs`]): rigid bodies and remote points, pre-tension cuts,
     // node ties, last springs and contact regions.
-    let mut materials = materials(model);
+    let (mut materials, material_ids) = materials(model);
     let mut orientations = Vec::new();
-    let (mut sections, profile_comments, section_owners) =
-        sections(&mut sets, model, &mut materials, &mut orientations)?;
+    let (mut sections, profile_comments, section_owners) = sections(
+        &mut sets,
+        model,
+        &material_ids,
+        &mut materials,
+        &mut orientations,
+    )?;
     let mut generated = constraints::Generated::default();
     let (mut constraints, mut constraint_owners) =
         constraints(&mut sets, model, &mut generated, lowering)?;
@@ -698,7 +703,7 @@ fn lower_model_named(
     }
     let initial_conditions = initial_conditions(&mut sets, model)?;
     let design_variables = design_variables(&mut sets, model)?;
-    let amplitudes = amplitudes(model)?;
+    let (amplitudes, amplitude_ids) = amplitudes(model)?;
     let flux_kinds = FluxKinds::of(model);
     let mut steps = (model.steps.iter().enumerate())
         .map(|(s, step)| {
@@ -709,7 +714,7 @@ fn lower_model_named(
                 space,
                 lines: &lines,
                 flux_kinds,
-                amplitudes: &model.amplitudes,
+                amplitudes: &amplitude_ids,
                 pair_surfaces: &pair_surfaces,
                 model,
             };
@@ -843,19 +848,23 @@ fn lower_model_named(
         }
     }
     for (i, material) in original.materials.iter().enumerate() {
-        let item = ir::ItemRef::Material(ir_name(&name(&material.name)));
-        origins.insert(item, ModelItem::Material(i));
+        if let Some(&id) = material_ids.get(&material.id) {
+            origins.insert(ir::ItemRef::Material(id), ModelItem::Material(i));
+        }
     }
     for (i, amplitude) in original.amplitudes.iter().enumerate() {
-        let item = ir::ItemRef::Amplitude(ir_name(&name(&amplitude.name)));
-        origins.insert(item, ModelItem::Amplitude(i));
+        if let Some(&id) = amplitude_ids.ids.get(&AmplitudeKey::User(amplitude.id)) {
+            origins.insert(ir::ItemRef::Amplitude(id), ModelItem::Amplitude(i));
+        }
     }
     for (s, step) in original.steps.iter().enumerate().filter(|(_, s)| s.active) {
         for table in step.tables() {
-            let (item, label) = table_owner(step, &table);
-            let amplitude = ir::ItemRef::Amplitude(table_amplitude(&step.name, item, label));
+            let (_, item, label) = table_owner(step, &table);
+            let Some(amplitude) = amplitude_ids.table(&step.name, item, label) else {
+                continue;
+            };
             origins.insert(
-                amplitude,
+                ir::ItemRef::Amplitude(amplitude),
                 match table.owner {
                     TableOwner::BoundaryCondition(i) => ModelItem::BoundaryCondition(s, i),
                     TableOwner::Load(i) => ModelItem::Load(s, i),
@@ -1488,12 +1497,20 @@ fn constant(value: f64) -> Vec<ir::material::TemperatureValue> {
     vec![ir::material::TemperatureValue::constant(value)]
 }
 
-fn materials(model: &FeModel) -> Vec<ir::material::Material> {
+/// The materials of the model, each with its handle: two materials stay two, whatever
+/// their names.
+fn materials(
+    model: &FeModel,
+) -> (
+    Vec<ir::material::Material>,
+    std::collections::HashMap<Id, ir::MaterialId>,
+) {
     use ir::material as m;
     let mut materials: Vec<m::Material> = Vec::new();
+    let mut ids = std::collections::HashMap::new();
     for material in &model.materials {
         let mut out = m::Material {
-            name: ir_name(&name(&material.name)),
+            name: material.name.clone(),
             ..Default::default()
         };
         out.density = (material.density).map(|rho| m::Density {
@@ -1553,42 +1570,17 @@ fn materials(model: &FeModel) -> Vec<ir::material::Material> {
         });
         out.conductivity = (material.conductivity).map(|k| m::Conductivity { rows: constant(k) });
         out.specific_heat = (material.specific_heat).map(|c| m::SpecificHeat { rows: constant(c) });
-        add_material(&mut materials, out);
+        ids.insert(material.id, ir::MaterialId::at(materials.len()));
+        materials.push(out);
     }
-    materials
-}
-
-/// Adds a material; one of the same name, which the solver does not tell apart from it,
-/// takes its properties.
-fn add_material(materials: &mut Vec<ir::material::Material>, material: ir::material::Material) {
-    let Some(known) = materials.iter_mut().find(|m| m.name == material.name) else {
-        materials.push(material);
-        return;
-    };
-    macro_rules! take {
-        ($($field:ident),*) => {
-            $(if material.$field.is_some() {
-                known.$field = material.$field;
-            })*
-        };
-    }
-    take!(
-        elastic,
-        anisotropic,
-        plastic,
-        creep,
-        expansion,
-        conductivity,
-        specific_heat,
-        density
-    );
+    (materials, ids)
 }
 
 /// The dummy plastic material that makes the solver solve gaps nonlinearly.
 fn gap_material(name: &str) -> ir::material::Material {
     use ir::material as m;
     m::Material {
-        name: ir_name(name),
+        name: name.to_owned(),
         density: Some(m::Density {
             rows: constant(1.0),
         }),
@@ -1621,8 +1613,11 @@ fn physical_constants(model: &FeModel) -> ir::PhysicalConstants {
 }
 
 /// The amplitudes.
-fn amplitudes(model: &FeModel) -> Result<Vec<ir::amplitude::Amplitude>, WriteError> {
+fn amplitudes(
+    model: &FeModel,
+) -> Result<(Vec<ir::amplitude::Amplitude>, AmplitudeIds), WriteError> {
     let mut amplitudes = Vec::new();
+    let mut ids = AmplitudeIds::default();
     for amplitude in &model.amplitudes {
         if let Some(reason) = amplitude.points_problem() {
             return Err(WriteError::InvalidAmplitude {
@@ -1630,38 +1625,41 @@ fn amplitudes(model: &FeModel) -> Result<Vec<ir::amplitude::Amplitude>, WriteErr
                 reason,
             });
         }
-        amplitudes.push(ir::amplitude::Amplitude {
-            name: ir_name(&name(&amplitude.name)),
+        let ir_amplitude = ir::amplitude::Amplitude {
+            name: amplitude.name.clone(),
             total_time: amplitude.time_span == AmplitudeTime::Total,
             shift_x: amplitude.shift_time,
             shift_y: amplitude.shift_amplitude,
             points: amplitude.points.iter().map(|&[t, a]| (t, a)).collect(),
             signal: None,
-        });
+        };
+        ids.add(
+            &mut amplitudes,
+            AmplitudeKey::User(amplitude.id),
+            ir_amplitude,
+        );
     }
     // Each time table of a component is an amplitude of its own, in step time, that a value
     // of 1 follows.
     for step in model.steps.iter().filter(|s| s.active) {
         for table in step.tables() {
-            let (item, label) = table_owner(step, &table);
+            let (item, item_id, label) = table_owner(step, &table);
             if let Some(reason) = table.table.points_problem() {
                 return Err(WriteError::InvalidAmplitude {
                     item: item.to_owned(),
                     reason,
                 });
             }
-            let name = table_amplitude(&step.name, item, label);
-            if amplitudes.iter().any(|a| a.name == name) {
-                continue;
-            }
-            amplitudes.push(ir::amplitude::Amplitude {
-                name,
+            let amplitude = ir::amplitude::Amplitude {
+                name: format!("{}_{item}_{label}", step.name),
                 total_time: false,
                 shift_x: 0.0,
                 shift_y: 0.0,
                 points: table.table.points.iter().map(|&[t, v]| (t, v)).collect(),
                 signal: None,
-            });
+            };
+            let key = AmplitudeKey::Table(step.name.clone(), item_id, label);
+            ids.add(&mut amplitudes, key, amplitude);
         }
         // Wall loads over time: an amplitude per frame of the run, 1 at its time and 0 at
         // the frames before and after, so that the loads go linearly from frame to frame.
@@ -1690,14 +1688,16 @@ fn amplitudes(model: &FeModel) -> Result<Vec<ir::amplitude::Amplitude>, WriteErr
                 if let Some(&next) = times.get(k + 1) {
                     points.push((next, 0.0));
                 }
-                amplitudes.push(ir::amplitude::Amplitude {
-                    name: wall_amplitude(&step.name, &load.name, k),
+                let amplitude = ir::amplitude::Amplitude {
+                    name: format!("{}_{}_{k}", step.name, load.name),
                     total_time: false,
                     shift_x: 0.0,
                     shift_y: 0.0,
                     points,
                     signal: None,
-                });
+                };
+                let key = AmplitudeKey::Walls(step.name.clone(), load.id, k);
+                ids.add(&mut amplitudes, key, amplitude);
             }
         }
         // The signal of each excitation is an amplitude of its own, in step time, that the
@@ -1715,17 +1715,19 @@ fn amplitudes(model: &FeModel) -> Result<Vec<ir::amplitude::Amplitude>, WriteErr
                     reason,
                 });
             }
-            amplitudes.push(ir::amplitude::Amplitude {
-                name: signal_amplitude(&step.name, &load.name),
+            let amplitude = ir::amplitude::Amplitude {
+                name: format!("{}_{}", step.name, load.name),
                 total_time: false,
                 shift_x: 0.0,
                 shift_y: 0.0,
                 points: Vec::new(),
                 signal: Some(excitation.signal.to_ir(dynamic.duration)),
-            });
+            };
+            let key = AmplitudeKey::Signal(step.name.clone(), load.id);
+            ids.add(&mut amplitudes, key, amplitude);
         }
     }
-    Ok(amplitudes)
+    Ok((amplitudes, ids))
 }
 
 /// The labels of the degrees of freedom of a displacement and the components of a load,
@@ -1734,11 +1736,12 @@ const DOF_TABLE_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
 const FORCE_TABLE_LABELS: [&str; 3] = ["F1", "F2", "F3"];
 const MOMENT_TABLE_LABELS: [&str; 3] = ["M1", "M2", "M3"];
 
-/// The name of the item a table belongs to and the label of its component.
-fn table_owner<'a>(step: &'a Step, table: &plx_model::StepTable) -> (&'a str, &'static str) {
+/// The name and id of the item a table belongs to and the label of its component.
+fn table_owner<'a>(step: &'a Step, table: &plx_model::StepTable) -> (&'a str, Id, &'static str) {
     match table.owner {
         TableOwner::BoundaryCondition(i) => (
             &step.boundary_conditions[i].name,
+            step.boundary_conditions[i].id,
             DOF_TABLE_LABELS[table.component],
         ),
         TableOwner::Load(i) => {
@@ -1748,25 +1751,62 @@ fn table_owner<'a>(step: &'a Step, table: &plx_model::StepTable) -> (&'a str, &'
                 LoadKind::Pressure(_) => "P",
                 _ => FORCE_TABLE_LABELS[table.component],
             };
-            (&load.name, label)
+            (&load.name, load.id, label)
         }
     }
 }
 
-/// The name of the amplitude of the table of component `label` of item `item` in a step,
-/// as the solver compares it.
-fn table_amplitude(step: &str, item: &str, label: &str) -> String {
-    ir_name(&name(&format!("Table~{step}~{item}~{label}")))
+/// What an amplitude of the analysis stands for: one of the model, or one the lowering
+/// makes for an item of a step (the step by its name, unique in the model; the item by its
+/// id, which a copied step shares with its source).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum AmplitudeKey {
+    User(Id),
+    /// The time table of component `label` of a boundary condition or load.
+    Table(String, Id, &'static str),
+    /// Frame `frame` of wall loads.
+    Walls(String, Id, usize),
+    /// The signal of an excitation.
+    Signal(String, Id),
 }
 
-/// The name of the amplitude of frame `frame` of the wall loads `item` in a step.
-fn wall_amplitude(step: &str, item: &str, frame: usize) -> String {
-    ir_name(&name(&format!("Walls~{step}~{item}~{frame}")))
+/// The handles of the amplitudes of the analysis.
+#[derive(Default)]
+struct AmplitudeIds {
+    ids: std::collections::HashMap<AmplitudeKey, ir::AmplitudeId>,
 }
 
-/// The name of the amplitude of the signal of excitation `item` in a step.
-fn signal_amplitude(step: &str, item: &str) -> String {
-    ir_name(&name(&format!("Signal~{step}~{item}")))
+impl AmplitudeIds {
+    /// Adds `amplitude` for `key` to `list`; a key given before keeps its amplitude.
+    fn add(
+        &mut self,
+        list: &mut Vec<ir::amplitude::Amplitude>,
+        key: AmplitudeKey,
+        amplitude: ir::amplitude::Amplitude,
+    ) -> ir::AmplitudeId {
+        *self.ids.entry(key).or_insert_with(|| {
+            list.push(amplitude);
+            ir::AmplitudeId::at(list.len() - 1)
+        })
+    }
+
+    /// The amplitude of the table of component `label` of item `item` in step `step`.
+    fn table(&self, step: &str, item: Id, label: &'static str) -> Option<ir::AmplitudeId> {
+        let key = AmplitudeKey::Table(step.to_owned(), item, label);
+        self.ids.get(&key).copied()
+    }
+
+    /// The amplitude of frame `frame` of the wall loads `item` in step `step`.
+    fn walls(&self, step: &str, item: Id, frame: usize) -> Option<ir::AmplitudeId> {
+        let key = AmplitudeKey::Walls(step.to_owned(), item, frame);
+        self.ids.get(&key).copied()
+    }
+
+    /// The amplitude of the signal of excitation `item` in step `step`.
+    fn signal(&self, step: &str, item: Id) -> Option<ir::AmplitudeId> {
+        let key = AmplitudeKey::Signal(step.to_owned(), item);
+        self.ids.get(&key).copied()
+    }
 }
 
 /// The values a displacement holds and the amplitude each follows: a degree of freedom with
@@ -1776,15 +1816,16 @@ fn displacement_values(
     step: &Step,
     bc: &plx_model::BoundaryCondition,
     displacement: &plx_model::Displacement,
-    amplitude: &Option<String>,
-) -> ([Option<f64>; 6], [Option<String>; 6]) {
+    amplitude: &Option<ir::AmplitudeId>,
+    amplitudes: &AmplitudeIds,
+) -> ([Option<f64>; 6], [Option<ir::AmplitudeId>; 6]) {
     let values = std::array::from_fn(|d| match displacement.table(d) {
         Some(_) => Some(1.0),
         None => displacement.values[d],
     });
     let amplitudes = std::array::from_fn(|d| match displacement.table(d) {
-        Some(_) => Some(table_amplitude(&step.name, &bc.name, DOF_TABLE_LABELS[d])),
-        None => amplitude.clone(),
+        Some(_) => amplitudes.table(&step.name, bc.id, DOF_TABLE_LABELS[d]),
+        None => *amplitude,
     });
     (values, amplitudes)
 }
@@ -1795,37 +1836,37 @@ fn load_components<const N: usize>(
     step: &Step,
     load: &plx_model::Load,
     values: [f64; N],
-    labels: [&str; N],
-    amplitude: &Option<String>,
-) -> ([f64; N], [Option<String>; N]) {
+    labels: [&'static str; N],
+    amplitude: &Option<ir::AmplitudeId>,
+    amplitudes: &AmplitudeIds,
+) -> ([f64; N], [Option<ir::AmplitudeId>; N]) {
     let values = std::array::from_fn(|c| match load.table(c) {
         Some(_) => 1.0,
         None => values[c],
     });
     let amplitudes = std::array::from_fn(|c| match load.table(c) {
-        Some(_) => Some(table_amplitude(&step.name, &load.name, labels[c])),
-        None => amplitude.clone(),
+        Some(_) => amplitudes.table(&step.name, load.id, labels[c]),
+        None => *amplitude,
     });
     (values, amplitudes)
 }
 
-/// The amplitude a boundary condition or load refers to, by its name in the analysis;
-/// `None` without one.
+/// The amplitude a boundary condition or load refers to; `None` without one.
 fn amplitude_parameter(
-    amplitudes: &[Amplitude],
+    amplitudes: &AmplitudeIds,
     item: &str,
     reference: &Option<Id>,
-) -> Result<Option<String>, WriteError> {
+) -> Result<Option<ir::AmplitudeId>, WriteError> {
     let Some(reference) = reference else {
         return Ok(None);
     };
-    let Some(amplitude) = amplitudes.iter().find(|a| a.id == *reference) else {
+    let Some(&amplitude) = amplitudes.ids.get(&AmplitudeKey::User(*reference)) else {
         return Err(WriteError::UnknownAmplitude {
             item: item.to_owned(),
             amplitude: reference.to_string(),
         });
     };
-    Ok(Some(ir_name(&name(&amplitude.name))))
+    Ok(Some(amplitude))
 }
 
 /// The distribution an item scales its value by, ready to sample; `None` without one.
@@ -1955,6 +1996,7 @@ fn symmetry_nodes(mesh: &FeMesh, model: &FeModel) -> std::collections::HashSet<N
 fn sections(
     sets: &mut Sets,
     model: &FeModel,
+    material_ids: &std::collections::HashMap<Id, ir::MaterialId>,
     materials: &mut Vec<ir::material::Material>,
     orientations: &mut Vec<ir::section::Orientation>,
 ) -> Result<SectionsAndProfiles, WriteError> {
@@ -1971,7 +2013,7 @@ fn sections(
             });
         };
         let base = material;
-        let material = ir_name(&name(&material.name));
+        let material = material_ids[&material.id];
         let axes = (model.section_axes(section)).map_err(|reason| WriteError::InvalidSection {
             item: section.name.clone(),
             reason,
@@ -1984,13 +2026,12 @@ fn sections(
                     (model.properties.space.has_thickness()).then_some(section.thickness);
                 // The axes of an anisotropic material.
                 let orientation = axes.filter(|_| base.anisotropic.is_some()).map(|axes| {
-                    let name = ir_name(&format!("ORIENTATION_{set}"));
                     orientations.push(ir::section::Orientation {
-                        name: name.clone(),
+                        name: format!("ORIENTATION_{set}"),
                         a: axes[0],
                         b: axes[1],
                     });
-                    name
+                    ir::OrientationId::at(orientations.len() - 1)
                 });
                 out.push(IrSection {
                     elset: ir_name(&set),
@@ -2047,10 +2088,7 @@ fn sections(
                     Some(core) => core.density,
                     None => base.density.map(|rho| rho * infill.density),
                 };
-                let template = (materials.iter())
-                    .find(|m| m.name == material)
-                    .cloned()
-                    .unwrap_or_default();
+                let template = materials[material.index()].clone();
                 for (level, ids) in levels {
                     let share = level as f64 / infill::LEVELS as f64;
                     let mut d = [[0.0; 6]; 6];
@@ -2064,9 +2102,8 @@ fn sections(
                         &format!("{}_Wall{level}", name(&section.name)),
                     );
                     sets.element_sets.push((set.clone(), Members::Ids(ids)));
-                    let material_name = ir_name(&format!("Infill_{set}"));
                     let mut printed = template.clone();
-                    printed.name = material_name.clone();
+                    printed.name = format!("Infill_{set}");
                     printed.elastic = None;
                     printed.anisotropic = Some(
                         plx_model::Anisotropic::General(Box::new(plx_model::anisotropic_upper(&d)))
@@ -2082,7 +2119,7 @@ fn sections(
                     out.push(IrSection {
                         elset: ir_name(&set),
                         kind: Kind::Solid {
-                            material: material_name,
+                            material: ir::MaterialId::at(materials.len() - 1),
                             thickness: None,
                             orientation: None,
                         },
@@ -2141,7 +2178,7 @@ fn sections(
                     out.push(IrSection {
                         elset: ir_name(&set),
                         kind: Kind::Beam {
-                            material: material.clone(),
+                            material,
                             profile: if half {
                                 halved_profile(&ir_profile)
                             } else {
@@ -3094,6 +3131,14 @@ impl InteractionDefaults {
     }
 }
 
+/// The handle of a surface interaction of `model`: the analysis has the model's
+/// interactions in their order.
+fn interaction_id(model: &FeModel, interaction: &SurfaceInteraction) -> ir::InteractionId {
+    (model.surface_interactions.iter())
+        .position(|i| i.id == interaction.id)
+        .map_or(ir::InteractionId(u32::MAX), ir::InteractionId::at)
+}
+
 /// A surface interaction, with the defaults filled
 /// in.
 fn interaction(
@@ -3102,7 +3147,7 @@ fn interaction(
 ) -> ir::contact::SurfaceInteraction {
     use ir::contact as c;
     let mut out = c::SurfaceInteraction {
-        name: ir_name(&name(&interaction.name)),
+        name: interaction.name.clone(),
         behavior: None,
         friction: None,
         gap_conductance: None,
@@ -3231,7 +3276,7 @@ fn contact_pairs(
             }
         };
         pairs.push(c::ContactPair {
-            interaction: ir_name(&name(&interaction.name)),
+            interaction: interaction_id(model, interaction),
             kind,
             small_sliding: pair.method == ContactMethod::NodeToSurface && pair.small_sliding,
             adjust: (pair.adjust).then(|| c::Adjust::Distance(pair.adjustment_size.unwrap_or(0.0))),
@@ -3256,7 +3301,7 @@ struct StepContext<'a> {
     space: ModelSpace,
     lines: &'a LineElements,
     flux_kinds: FluxKinds,
-    amplitudes: &'a [Amplitude],
+    amplitudes: &'a AmplitudeIds,
     pair_surfaces: &'a PairSurfaces,
     /// The model, for the coordinate systems of moving loads.
     model: &'a FeModel,
@@ -3720,7 +3765,7 @@ fn boundary(
     first: u8,
     last: u8,
     value: Option<f64>,
-    amplitude: Option<String>,
+    amplitude: Option<ir::AmplitudeId>,
 ) -> ir::step::Boundary {
     ir::step::Boundary {
         region,
@@ -3833,13 +3878,13 @@ fn cload(
     region: NodeRef,
     dof: u8,
     value: f64,
-    amplitude: &Option<String>,
+    amplitude: &Option<ir::AmplitudeId>,
 ) -> ir::step::ConcentratedLoad {
     ir::step::ConcentratedLoad {
         region,
         dof,
         value,
-        amplitude: amplitude.clone(),
+        amplitude: *amplitude,
         load_case: None,
         sector: None,
         follower: None,
@@ -3850,12 +3895,12 @@ fn cload(
 fn dload(
     region: ElementRef,
     kind: ir::step::DistributedLoadKind,
-    amplitude: &Option<String>,
+    amplitude: &Option<ir::AmplitudeId>,
 ) -> ir::step::DistributedLoad {
     ir::step::DistributedLoad {
         region,
         kind,
-        amplitude: amplitude.clone(),
+        amplitude: *amplitude,
         load_case: None,
         sector: None,
     }
@@ -3869,7 +3914,7 @@ fn displacement_boundaries(
     rotation: Option<&NodeRef>,
     values: &[Option<f64>; 6],
     dofs: usize,
-    amplitudes: &[Option<String>; 6],
+    amplitudes: &[Option<ir::AmplitudeId>; 6],
 ) -> Vec<ir::step::Boundary> {
     // Each held degree of freedom as (target, its number there, value, amplitude).
     let held = (1..)
@@ -3883,7 +3928,7 @@ fn displacement_boundaries(
             })
         });
     let mut out = Vec::new();
-    let mut run: Option<(&NodeRef, u8, u8, f64, &Option<String>)> = None;
+    let mut run: Option<(&NodeRef, u8, u8, f64, &Option<ir::AmplitudeId>)> = None;
     for (target, dof, value, amplitude) in held {
         match &mut run {
             Some((t, _, last, v, a))
@@ -3893,14 +3938,14 @@ fn displacement_boundaries(
             }
             _ => {
                 if let Some((t, first, last, v, a)) = run {
-                    out.push(boundary(t.clone(), first, last, Some(v), a.clone()));
+                    out.push(boundary(t.clone(), first, last, Some(v), *a));
                 }
                 run = Some((target, dof, dof, value, amplitude));
             }
         }
     }
     if let Some((t, first, last, v, a)) = run {
-        out.push(boundary(t.clone(), first, last, Some(v), a.clone()));
+        out.push(boundary(t.clone(), first, last, Some(v), *a));
     }
     out
 }
@@ -4042,7 +4087,8 @@ fn step_block<'f>(
             let amplitude = amplitude_parameter(amplitudes, &bc.name, &bc.amplitude)?;
             // The translations are those of the reference node, the rotations the
             // displacements of the rotation node.
-            let (values, dof_amplitudes) = displacement_values(step, bc, remote, &amplitude);
+            let (values, dof_amplitudes) =
+                displacement_values(step, bc, remote, &amplitude, amplitudes);
             let held = remote.held(space).map(|v| v.map(|_| ()));
             let held = std::array::from_fn(|d| held[d].and(values[d]));
             let (reference, rotation) = (NodeRef::Node(reference), NodeRef::Node(rotation));
@@ -4089,9 +4135,9 @@ fn step_block<'f>(
                     let amplitude = amplitude_parameter(amplitudes, &bc.name, &reference)?;
                     let dof_amplitudes = match &bc.kind {
                         BoundaryKind::Displacement(displacement) => {
-                            displacement_values(step, bc, displacement, &amplitude).1
+                            displacement_values(step, bc, displacement, &amplitude, amplitudes).1
                         }
-                        _ => std::array::from_fn(|_| amplitude.clone()),
+                        _ => std::array::from_fn(|_| amplitude),
                     };
                     let mut items = Vec::new();
                     for node in own {
@@ -4100,9 +4146,8 @@ fn step_block<'f>(
                             .at_node(point, &sets.node_frames[&node])
                             .map_err(invalid)?;
                         let values = at.map(|v| v.map(|(value, _)| value));
-                        let node_amplitudes = std::array::from_fn(|j| {
-                            at[j].and_then(|(_, d)| dof_amplitudes[d].clone())
-                        });
+                        let node_amplitudes =
+                            std::array::from_fn(|j| at[j].and_then(|(_, d)| dof_amplitudes[d]));
                         items.extend(displacement_boundaries(
                             &NodeRef::Node(node),
                             None,
@@ -4134,7 +4179,7 @@ fn step_block<'f>(
             if let BoundaryKind::Temperature(t) = bc.kind {
                 let units = model.properties.units;
                 for (node, value) in distributed_nodes(sets.mesh, &nodes, t, sampler, units) {
-                    items.push(boundary(node, 11, 11, Some(value), amplitude.clone()));
+                    items.push(boundary(node, 11, 11, Some(value), amplitude));
                 }
             }
             boundaries.push(Card::Boundary {
@@ -4166,7 +4211,7 @@ fn step_block<'f>(
         match bc.kind {
             BoundaryKind::Displacement(ref displacement) => {
                 let (values, dof_amplitudes) =
-                    displacement_values(step, bc, displacement, &amplitude);
+                    displacement_values(step, bc, displacement, &amplitude, amplitudes);
                 // A coordinate system of its own turns the directions of the nodes.
                 if displacement.system.is_some() && rotation_node.is_none() {
                     let system = (model.coordinate_system_or_global(displacement.system))
@@ -4260,13 +4305,7 @@ fn step_block<'f>(
                 }
                 for dof in symmetry_dofs(axis, dofs) {
                     let dof = dof as u8 + 1;
-                    items.push(boundary(
-                        target.clone(),
-                        dof,
-                        dof,
-                        Some(0.0),
-                        amplitude.clone(),
-                    ));
+                    items.push(boundary(target.clone(), dof, dof, Some(0.0), amplitude));
                 }
             }
         }
@@ -4327,7 +4366,7 @@ fn step_block<'f>(
         }
         // An excitation follows its signal instead of an amplitude.
         let amplitude = match load.kind {
-            LoadKind::Excitation(_) => Some(signal_amplitude(&step.name, &load.name)),
+            LoadKind::Excitation(_) => amplitudes.signal(&step.name, load.id),
             _ => amplitude_parameter(amplitudes, &load.name, &load.amplitude)?,
         };
         // The second amplitude of a film scales its coefficient, of radiation the emissivity.
@@ -4352,8 +4391,8 @@ fn step_block<'f>(
                 let mut items = Vec::new();
                 for (k, (time, mapped)) in sets_of_forces.into_iter().enumerate() {
                     let amplitude = match time {
-                        Some(_) => Some(wall_amplitude(&step.name, &load.name, k)),
-                        None => amplitude.clone(),
+                        Some(_) => amplitudes.walls(&step.name, load.id, k),
+                        None => amplitude,
                     };
                     for (node, force) in mapped.forces {
                         for (dof, value) in (1..).zip(force).take(dofs) {
@@ -4388,8 +4427,14 @@ fn step_block<'f>(
                     }
                     None => (node_set_ref(&sets.node_set(&load.name, &load.region)?), 4),
                 };
-                let (moment, component_amplitudes) =
-                    load_components(step, load, moment, MOMENT_TABLE_LABELS, &amplitude);
+                let (moment, component_amplitudes) = load_components(
+                    step,
+                    load,
+                    moment,
+                    MOMENT_TABLE_LABELS,
+                    &amplitude,
+                    amplitudes,
+                );
                 // In a system of its own, at every node in the directions there.
                 let positions = component_positions(model, sets, load, &target)?;
                 let mut items = Vec::new();
@@ -4467,7 +4512,7 @@ fn step_block<'f>(
             LoadKind::Pressure(pressure) => {
                 use ir::step::DistributedLoadKind::Pressure;
                 let ([pressure], [amplitude]) =
-                    load_components(step, load, [pressure], ["P"], &amplitude);
+                    load_components(step, load, [pressure], ["P"], &amplitude, amplitudes);
                 let mut items = Vec::new();
                 match distribution(model, &load.name, &load.distribution)? {
                     // Every face takes the pressure scaled at its center.
@@ -4546,8 +4591,14 @@ fn step_block<'f>(
                 let faces = load.region.faces(sets.mesh);
                 let edges = load.region.edges(sets.mesh);
                 let axisymmetric = space == ModelSpace::Axisymmetric;
-                let (force, component_amplitudes) =
-                    load_components(step, load, force, FORCE_TABLE_LABELS, &amplitude);
+                let (force, component_amplitudes) = load_components(
+                    step,
+                    load,
+                    force,
+                    FORCE_TABLE_LABELS,
+                    &amplitude,
+                    amplitudes,
+                );
                 let mut items = Vec::new();
                 let mut region_set = None;
                 // On points the nodes share the force equally, a reference point takes it
@@ -4640,7 +4691,7 @@ fn step_block<'f>(
                         .map(|(node, value)| ir::step::ConcentratedFlux {
                             region: NodeRef::Node(node),
                             value: value[0],
-                            amplitude: amplitude.clone(),
+                            amplitude,
                         })
                         .collect()
                 };
@@ -4656,8 +4707,8 @@ fn step_block<'f>(
                         face,
                         sink_temperature: sink,
                         coefficient,
-                        amplitude: amplitude.clone(),
-                        film_amplitude: factor_amplitude.clone(),
+                        amplitude,
+                        film_amplitude: factor_amplitude,
                     })
                     .collect();
                 vec![Card::Film {
@@ -4673,8 +4724,8 @@ fn step_block<'f>(
                         cavity: false,
                         sink_temperature: sink,
                         emissivity,
-                        amplitude: amplitude.clone(),
-                        radiation_amplitude: factor_amplitude.clone(),
+                        amplitude,
+                        radiation_amplitude: factor_amplitude,
                     })
                     .collect();
                 vec![Card::Radiate {
@@ -4784,7 +4835,7 @@ fn contact_changes(
                 .and_then(|m| m.small_strain_elastic())
                 .map(|e| e.young / 2.0);
             changes.push(ir::step::ContactChange::Friction {
-                interaction: ir_name(&name(&interaction.name)),
+                interaction: interaction_id(model, interaction),
                 friction: ir::contact::Friction {
                     coefficient: mu,
                     stick_slope: friction.stick_slope.or(default),
@@ -4802,7 +4853,7 @@ fn contact_changes(
 fn defined_fields(
     sets: &mut Sets,
     step: &Step,
-    amplitudes: &[Amplitude],
+    amplitudes: &AmplitudeIds,
     model: &FeModel,
 ) -> Result<Vec<Card>, WriteError> {
     let mut cards = Vec::new();

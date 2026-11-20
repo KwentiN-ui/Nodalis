@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 
+use plxs_core::{AmplitudeId, InteractionId, MaterialId, OrientationId};
+
 use plxs_core::amplitude::{Amplitude, Signal};
 use plxs_core::constraints::{
     CyclicSymmetryModel, Equation, EquationTerm, Joint, RigidBody, RigidBodyNodes, Submodel, Tie,
@@ -130,6 +132,76 @@ pub(crate) struct Reader {
     /// dynamic procedures apply their loads at once (CalculiX's default `STEP` for them).
     step_amplitude_given: bool,
     last_comment: Option<String>,
+    /// The names the input refers to materials, orientations, amplitudes and interactions
+    /// by, resolved to handles as they are read.
+    names: Names,
+}
+
+/// What a name can stand for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Kind {
+    Material,
+    Orientation,
+    Amplitude,
+    Interaction,
+}
+
+impl Kind {
+    fn what(self) -> &'static str {
+        match self {
+            Kind::Material => "material",
+            Kind::Orientation => "orientation",
+            Kind::Amplitude => "amplitude",
+            Kind::Interaction => "surface interaction",
+        }
+    }
+}
+
+/// The handles of the names of the input. A name used before its definition gets its slot
+/// at once (a placeholder the definition fills); a name never defined is an error once the
+/// input is read.
+#[derive(Default)]
+struct Names {
+    slots: std::collections::HashMap<(Kind, String), u32>,
+    defined: HashSet<(Kind, u32)>,
+    /// The first use of every name, with its keyword and what it says beside the name
+    /// (the step of a boundary condition), for the error of a name never defined.
+    uses: Vec<(Kind, u32, String, String)>,
+}
+
+impl Names {
+    /// The names of the items of `model`, all defined (a continued run).
+    fn of(model: &plxs_core::Model) -> Self {
+        let mut names = Self::default();
+        let mut add = |kind, labels: &mut dyn Iterator<Item = &String>| {
+            for (i, name) in labels.enumerate() {
+                names.slots.insert((kind, name.clone()), i as u32);
+                names.defined.insert((kind, i as u32));
+            }
+        };
+        add(Kind::Material, &mut model.materials.iter().map(|m| &m.name));
+        add(
+            Kind::Orientation,
+            &mut model.orientations.iter().map(|o| &o.name),
+        );
+        add(
+            Kind::Amplitude,
+            &mut model.amplitudes.iter().map(|a| &a.name),
+        );
+        add(
+            Kind::Interaction,
+            &mut model.contact.interactions.iter().map(|i| &i.name),
+        );
+        names
+    }
+
+    /// The errors of the names used but never defined.
+    fn undefined(&self) -> Vec<Error> {
+        (self.uses.iter())
+            .filter(|(kind, index, ..)| !self.defined.contains(&(*kind, *index)))
+            .map(|(kind, _, keyword, name)| Error::undefined(keyword, kind.what(), name))
+            .collect()
+    }
 }
 
 impl Reader {
@@ -144,6 +216,7 @@ impl Reader {
             procedure_seen: false,
             step_amplitude_given: false,
             last_comment: None,
+            names: Names::default(),
         }
     }
 
@@ -156,10 +229,12 @@ impl Reader {
         reader.reading.analysis.model.rebuild_indices();
         let analysis = &reader.reading.analysis;
         reader.steps = Assembler::continuing(&analysis.model, &analysis.steps);
+        reader.names = Names::of(&analysis.model);
         reader
     }
 
-    pub(crate) fn read(mut self, lines: &[Line]) -> Result<Reading, Error> {
+    /// The analysis of the input, with the errors of the names it uses but never defines.
+    pub(crate) fn read(mut self, lines: &[Line]) -> Result<(Reading, Vec<Error>), Error> {
         let mut i = 0;
         while i < lines.len() {
             match &lines[i] {
@@ -208,11 +283,93 @@ impl Reader {
                 format!("step {} has no *END STEP", step.name),
             ));
         }
-        Ok(self.reading)
+        let undefined = self.names.undefined();
+        Ok((self.reading, undefined))
     }
 
     fn model(&mut self) -> &mut plxs_core::Model {
         &mut self.reading.analysis.model
+    }
+
+    /// The slot of `name` of `kind`, made (as a placeholder) when the name is new;
+    /// `keyword` and `context` name the use for the error of a name never defined.
+    fn slot(&mut self, kind: Kind, name: String, keyword: &str, context: &str) -> u32 {
+        if let Some(&index) = self.names.slots.get(&(kind, name.clone())) {
+            return index;
+        }
+        let model = &mut self.reading.analysis.model;
+        let index = match kind {
+            Kind::Material => {
+                model.materials.push(Material {
+                    name: name.clone(),
+                    ..Default::default()
+                });
+                model.materials.len()
+            }
+            Kind::Orientation => {
+                model.orientations.push(plxs_core::section::Orientation {
+                    name: name.clone(),
+                    a: [0.0; 3],
+                    b: [0.0; 3],
+                });
+                model.orientations.len()
+            }
+            Kind::Amplitude => {
+                model.amplitudes.push(Amplitude {
+                    name: name.clone(),
+                    total_time: false,
+                    shift_x: 0.0,
+                    shift_y: 0.0,
+                    points: Vec::new(),
+                    signal: None,
+                });
+                model.amplitudes.len()
+            }
+            Kind::Interaction => {
+                model.contact.interactions.push(SurfaceInteraction {
+                    name: name.clone(),
+                    behavior: None,
+                    friction: None,
+                    gap_conductance: None,
+                });
+                model.contact.interactions.len()
+            }
+        } as u32
+            - 1;
+        self.names.slots.insert((kind, name.clone()), index);
+        let label = if context.is_empty() {
+            name
+        } else {
+            format!("{name} ({context})")
+        };
+        (self.names.uses).push((kind, index, keyword.to_string(), label));
+        index
+    }
+
+    /// The slot of the definition of `name` of `kind`.
+    fn define(&mut self, kind: Kind, name: String, keyword: &str) -> u32 {
+        let index = self.slot(kind, name, keyword, "");
+        self.names.defined.insert((kind, index));
+        index
+    }
+
+    fn material_ref(&mut self, name: String, keyword: &str) -> MaterialId {
+        MaterialId(self.slot(Kind::Material, name, keyword, ""))
+    }
+
+    fn orientation_ref(&mut self, name: Option<String>, keyword: &str) -> Option<OrientationId> {
+        name.map(|name| OrientationId(self.slot(Kind::Orientation, name, keyword, "")))
+    }
+
+    fn interaction_ref(&mut self, name: String, keyword: &str) -> InteractionId {
+        InteractionId(self.slot(Kind::Interaction, name, keyword, ""))
+    }
+
+    /// The amplitude named by the parameter `parameter` of `k`, if any.
+    fn amplitude_ref(&mut self, k: &Keyword, parameter: &str) -> Option<AmplitudeId> {
+        let name = k.value(parameter).map(normalized_name)?;
+        let keyword = k.name.clone();
+        Some(AmplitudeId(self.slot(Kind::Amplitude, name, &keyword, "")))
     }
 
     fn warn(&mut self, message: impl Into<String>) {
@@ -545,17 +702,7 @@ impl Reader {
         let Some(name) = k.value("NAME").map(normalized_name) else {
             return Err(k.error("no NAME given"));
         };
-        let model = self.model();
-        let index = match model.materials.iter().position(|m| m.name == name) {
-            Some(i) => i,
-            None => {
-                model.materials.push(Material {
-                    name,
-                    ..Default::default()
-                });
-                model.materials.len() - 1
-            }
-        };
+        let index = self.define(Kind::Material, name, "*MATERIAL") as usize;
         self.material = Some(index);
         Ok(())
     }
@@ -803,34 +950,34 @@ impl Reader {
             return Err(k.error("the coordinates of the points a and b are needed"));
         }
         let orientation = plxs_core::section::Orientation {
-            name,
+            name: name.clone(),
             a: [values[0], values[1], values[2]],
             b: [values[3], values[4], values[5]],
         };
         if orientation.axes().is_none() {
             return Err(k.error("the points a and b must not be parallel or zero"));
         }
-        let model = self.model();
-        model.orientations.retain(|o| o.name != orientation.name);
-        model.orientations.push(orientation);
+        let index = self.define(Kind::Orientation, name, "*ORIENTATION") as usize;
+        self.model().orientations[index] = orientation;
         Ok(())
     }
 
     // ----- Sections ---------------------------------------------------------------------
 
-    fn section_names(&self, k: &Keyword) -> Result<(String, String), Error> {
+    fn section_names(&mut self, k: &Keyword) -> Result<(String, MaterialId), Error> {
         let Some(elset) = k.value("ELSET").map(normalized_name) else {
             return Err(k.error("no ELSET given"));
         };
         let Some(material) = k.value("MATERIAL").map(normalized_name) else {
             return Err(k.error("no MATERIAL given"));
         };
-        Ok((elset, material))
+        Ok((elset, self.material_ref(material, &k.name)))
     }
 
     fn solid_section(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
         k.check_parameters(&["ELSET", "MATERIAL", "ORIENTATION"])?;
         let orientation = k.value("ORIENTATION").map(normalized_name);
+        let orientation = self.orientation_ref(orientation, &k.name);
         let (elset, material) = self.section_names(k)?;
         let thickness = match data.first() {
             Some(d) => numbers(k, d)?.first().copied(),
@@ -1398,19 +1545,7 @@ impl Reader {
         let Some(name) = k.value("NAME").map(normalized_name) else {
             return Err(k.error("no NAME given"));
         };
-        let contact = &mut self.model().contact;
-        let index = match contact.interactions.iter().position(|i| i.name == name) {
-            Some(i) => i,
-            None => {
-                contact.interactions.push(SurfaceInteraction {
-                    name,
-                    behavior: None,
-                    friction: None,
-                    gap_conductance: None,
-                });
-                contact.interactions.len() - 1
-            }
-        };
+        let index = self.define(Kind::Interaction, name, "*SURFACE INTERACTION") as usize;
         self.interaction = Some(index);
         self.friction_target = FrictionTarget::Interaction(index);
         Ok(())
@@ -1541,6 +1676,7 @@ impl Reader {
         let Some(interaction) = k.value("INTERACTION").map(normalized_name) else {
             return Err(k.error("INTERACTION is needed"));
         };
+        let interaction = self.interaction_ref(interaction, &k.name);
         let kind = match k.value("TYPE").unwrap_or("NODETOSURFACE") {
             "NODETOSURFACE" => ContactKind::NodeToSurface,
             "SURFACETOSURFACE" => ContactKind::SurfaceToSurface,
@@ -1637,14 +1773,15 @@ impl Reader {
             }
             values.chunks(2).map(|p| (p[0], p[1])).collect()
         };
-        self.model().amplitudes.push(Amplitude {
+        let index = self.define(Kind::Amplitude, name.clone(), "*AMPLITUDE") as usize;
+        self.model().amplitudes[index] = Amplitude {
             name,
             total_time: k.value("TIME") == Some("TOTALTIME"),
             shift_x: k.number("SHIFTX")?.unwrap_or(0.0),
             shift_y: k.number("SHIFTY")?.unwrap_or(0.0),
             points,
             signal,
-        });
+        };
         Ok(())
     }
 
@@ -2259,7 +2396,7 @@ impl Reader {
         if k.has("MASS FLOW") || k.has("USER") || k.has("TIME DELAY") {
             return Err(k.error("MASS FLOW, USER and TIME DELAY are not supported"));
         }
-        let amplitude = k.value("AMPLITUDE").map(normalized_name);
+        let amplitude = self.amplitude_ref(k, "AMPLITUDE");
         let fixed = k.has("FIXED");
         let submodel_step = if k.has("SUBMODEL") {
             Some(k.integer("STEP")?.unwrap_or(1))
@@ -2287,7 +2424,7 @@ impl Reader {
                 first_dof,
                 last_dof: last_dof.max(first_dof),
                 value,
-                amplitude: amplitude.clone(),
+                amplitude,
                 fixed,
                 submodel_step,
                 load_case,
@@ -2326,7 +2463,7 @@ impl Reader {
             }
             (None, None) => None,
         };
-        let amplitude = k.value("AMPLITUDE").map(normalized_name);
+        let amplitude = self.amplitude_ref(k, "AMPLITUDE");
         let load_case = k.integer("LOAD CASE")?.map(|c| c as u8);
         let sector = k.integer("SECTOR")?;
         let mut new = Vec::new();
@@ -2343,7 +2480,7 @@ impl Reader {
                 region: node_ref(f[0]),
                 dof: parse_number(k, d, f[1])? as u8,
                 value: parse_number(k, d, f[2])?,
-                amplitude: amplitude.clone(),
+                amplitude,
                 load_case,
                 sector,
                 follower: follower.clone(),
@@ -2358,7 +2495,7 @@ impl Reader {
         if k.has("TIME DELAY") {
             return Err(k.error("TIME DELAY is not supported"));
         }
-        let amplitude = k.value("AMPLITUDE").map(normalized_name);
+        let amplitude = self.amplitude_ref(k, "AMPLITUDE");
         let load_case = k.integer("LOAD CASE")?.map(|c| c as u8);
         let sector = k.integer("SECTOR")?;
         let mut new = Vec::new();
@@ -2409,7 +2546,7 @@ impl Reader {
             new.push(DistributedLoad {
                 region: element_ref(f[0]),
                 kind,
-                amplitude: amplitude.clone(),
+                amplitude,
                 load_case,
                 sector,
             });
@@ -2420,7 +2557,7 @@ impl Reader {
 
     fn cflux(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
         k.check_parameters(&["OP", "AMPLITUDE", "TIME DELAY", "USER"])?;
-        let amplitude = k.value("AMPLITUDE").map(normalized_name);
+        let amplitude = self.amplitude_ref(k, "AMPLITUDE");
         let mut new = Vec::new();
         for d in data {
             let f = d.fields();
@@ -2430,7 +2567,7 @@ impl Reader {
             new.push(ConcentratedFlux {
                 region: node_ref(f[0]),
                 value: parse_number(k, d, f[2])?,
-                amplitude: amplitude.clone(),
+                amplitude,
             });
         }
         let op_new = k.value("OP") == Some("NEW");
@@ -2439,7 +2576,7 @@ impl Reader {
 
     fn dflux(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
         k.check_parameters(&["OP", "AMPLITUDE", "TIME DELAY"])?;
-        let amplitude = k.value("AMPLITUDE").map(normalized_name);
+        let amplitude = self.amplitude_ref(k, "AMPLITUDE");
         let mut new = Vec::new();
         for d in data {
             let f = d.fields();
@@ -2458,7 +2595,7 @@ impl Reader {
                 region: element_ref(f[0]),
                 kind,
                 value: parse_number(k, d, f[2])?,
-                amplitude: amplitude.clone(),
+                amplitude,
             });
         }
         let op_new = k.value("OP") == Some("NEW");
@@ -2473,8 +2610,8 @@ impl Reader {
             "TIME DELAY",
             "FILM TIME DELAY",
         ])?;
-        let amplitude = k.value("AMPLITUDE").map(normalized_name);
-        let film_amplitude = k.value("FILM AMPLITUDE").map(normalized_name);
+        let amplitude = self.amplitude_ref(k, "AMPLITUDE");
+        let film_amplitude = self.amplitude_ref(k, "FILM AMPLITUDE");
         let mut new = Vec::new();
         for d in data {
             let f = d.fields();
@@ -2491,8 +2628,8 @@ impl Reader {
                 face,
                 sink_temperature: parse_number(k, d, f[2])?,
                 coefficient: parse_number(k, d, f[3])?,
-                amplitude: amplitude.clone(),
-                film_amplitude: film_amplitude.clone(),
+                amplitude,
+                film_amplitude,
             });
         }
         let op_new = k.value("OP") == Some("NEW");
@@ -2512,8 +2649,8 @@ impl Reader {
         if k.has("ENVNODE") {
             return Err(k.error("ENVNODE is not supported"));
         }
-        let amplitude = k.value("AMPLITUDE").map(normalized_name);
-        let radiation_amplitude = k.value("RADIATION AMPLITUDE").map(normalized_name);
+        let amplitude = self.amplitude_ref(k, "AMPLITUDE");
+        let radiation_amplitude = self.amplitude_ref(k, "RADIATION AMPLITUDE");
         let mut new = Vec::new();
         for d in data {
             let f = d.fields();
@@ -2533,8 +2670,8 @@ impl Reader {
                 cavity,
                 sink_temperature: parse_number(k, d, f[2])?,
                 emissivity: parse_number(k, d, f[3])?,
-                amplitude: amplitude.clone(),
-                radiation_amplitude: radiation_amplitude.clone(),
+                amplitude,
+                radiation_amplitude,
             });
         }
         let op_new = k.value("OP") == Some("NEW");
@@ -2553,7 +2690,7 @@ impl Reader {
             "TIME DELAY",
             "USER",
         ])?;
-        let amplitude = k.value("AMPLITUDE").map(normalized_name);
+        let amplitude = self.amplitude_ref(k, "AMPLITUDE");
         let kind = match k.value("FILE") {
             Some(file) => DefinedFieldKind::TemperatureFile {
                 file: file.to_string(),
@@ -2621,6 +2758,7 @@ impl Reader {
         let Some(interaction) = k.value("INTERACTION").map(normalized_name) else {
             return Err(k.error("INTERACTION is needed"));
         };
+        let interaction = self.interaction_ref(interaction, &k.name);
         let step = self.current_step(k)?;
         step.contact_changes.push(ContactChange::Friction {
             interaction,

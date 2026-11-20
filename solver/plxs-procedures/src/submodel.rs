@@ -597,14 +597,7 @@ impl SubmodelValues {
             if boundary.submodel_step.is_none() {
                 continue;
             }
-            let factor = amplitude_factor(
-                model,
-                step,
-                boundary.amplitude.as_deref(),
-                time,
-                total,
-                period,
-            );
+            let factor = amplitude_factor(model, step, boundary.amplitude, time, total, period);
             for (&(b, node), u) in &self.values {
                 if b != index {
                     continue;

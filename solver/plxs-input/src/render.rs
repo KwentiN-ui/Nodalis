@@ -37,8 +37,11 @@ pub fn render(analysis: &Analysis) -> String {
 /// names (`*ELEMENT, ELSET=`), as far as the order of the elements allows: a mesh reader
 /// makes parts of them. The names are written as given, in any case.
 pub fn render_with_parts(analysis: &Analysis, parts: &[String]) -> String {
-    let mut out = Out::default();
     let model = &analysis.model;
+    let mut out = Out {
+        text: String::new(),
+        labels: std::rc::Rc::new(Labels::of(model)),
+    };
     heading(&mut out, model);
     if let Some(submodel) = &model.constraints.submodel {
         let mut header = format!("*Submodel, Type=Node, Input=\"{}\"", submodel.input);
@@ -70,9 +73,93 @@ pub fn render_with_parts(analysis: &Analysis, parts: &[String]) -> String {
     out.text
 }
 
-#[derive(Default)]
 struct Out {
     text: String,
+    /// The names the items get in the text.
+    labels: std::rc::Rc<Labels>,
+}
+
+/// The names of the materials, orientations, amplitudes and interactions in the text: their
+/// labels as an input file allows them (letters, digits, `_` and `-`, at most 80
+/// characters, upper case), made unique within their kind, so that two items with similar
+/// labels stay two items when the text is read back.
+#[derive(Default)]
+struct Labels {
+    materials: Vec<String>,
+    orientations: Vec<String>,
+    amplitudes: Vec<String>,
+    interactions: Vec<String>,
+}
+
+impl Labels {
+    fn of(model: &Model) -> Self {
+        fn unique<'a>(prefix: &str, labels: impl Iterator<Item = &'a str>) -> Vec<String> {
+            let mut used = std::collections::HashSet::new();
+            labels
+                .enumerate()
+                .map(|(i, label)| {
+                    let mut name: String = (label.trim().chars())
+                        .map(|c| match c {
+                            c if c.is_ascii_alphanumeric() || c == '-' || c == '_' => {
+                                c.to_ascii_uppercase()
+                            }
+                            _ => '_',
+                        })
+                        .take(70)
+                        .collect();
+                    if name.is_empty() {
+                        name = format!("{prefix}-{}", i + 1);
+                    }
+                    let mut candidate = name.clone();
+                    let mut n = 2;
+                    while !used.insert(candidate.clone()) {
+                        candidate = format!("{name}-{n}");
+                        n += 1;
+                    }
+                    candidate
+                })
+                .collect()
+        }
+        Self {
+            materials: unique("MATERIAL", model.materials.iter().map(|m| m.name.as_str())),
+            orientations: unique(
+                "ORIENTATION",
+                model.orientations.iter().map(|o| o.name.as_str()),
+            ),
+            amplitudes: unique(
+                "AMPLITUDE",
+                model.amplitudes.iter().map(|a| a.name.as_str()),
+            ),
+            interactions: unique(
+                "INTERACTION",
+                (model.contact.interactions.iter()).map(|i| i.name.as_str()),
+            ),
+        }
+    }
+
+    fn material(&self, id: plxs_core::MaterialId) -> &str {
+        self.materials
+            .get(id.index())
+            .map_or("UNDEFINED", String::as_str)
+    }
+
+    fn orientation(&self, id: plxs_core::OrientationId) -> &str {
+        self.orientations
+            .get(id.index())
+            .map_or("UNDEFINED", String::as_str)
+    }
+
+    fn amplitude(&self, id: plxs_core::AmplitudeId) -> &str {
+        self.amplitudes
+            .get(id.index())
+            .map_or("UNDEFINED", String::as_str)
+    }
+
+    fn interaction(&self, id: plxs_core::InteractionId) -> &str {
+        self.interactions
+            .get(id.index())
+            .map_or("UNDEFINED", String::as_str)
+    }
 }
 
 impl Out {
@@ -259,8 +346,9 @@ fn table(out: &mut Out, rows: &[TemperatureValue]) {
 }
 
 fn materials(out: &mut Out, model: &Model) {
-    for material in &model.materials {
-        out.keyword(&format!("*Material, Name={}", material.name));
+    let labels = out.labels.clone();
+    for (material, name) in model.materials.iter().zip(&labels.materials) {
+        out.keyword(&format!("*Material, Name={name}"));
         if let Some(elastic) = &material.elastic {
             out.keyword("*Elastic");
             for row in &elastic.rows {
@@ -332,17 +420,16 @@ fn materials(out: &mut Out, model: &Model) {
 }
 
 fn orientations(out: &mut Out, model: &Model) {
-    for orientation in &model.orientations {
-        out.keyword(&format!(
-            "*Orientation, Name={}, System=Rectangular",
-            orientation.name
-        ));
+    let labels = out.labels.clone();
+    for (orientation, name) in model.orientations.iter().zip(&labels.orientations) {
+        out.keyword(&format!("*Orientation, Name={name}, System=Rectangular"));
         let [a, b] = [orientation.a, orientation.b];
         out.numbers(&[a[0], a[1], a[2], b[0], b[1], b[2]]);
     }
 }
 
 fn sections(out: &mut Out, model: &Model) {
+    let labels = out.labels.clone();
     for section in &model.sections {
         let elset = &section.elset;
         match &section.kind {
@@ -351,9 +438,12 @@ fn sections(out: &mut Out, model: &Model) {
                 thickness,
                 orientation,
             } => {
-                let mut header = format!("*Solid section, Elset={elset}, Material={material}");
+                let mut header = format!(
+                    "*Solid section, Elset={elset}, Material={}",
+                    labels.material(*material)
+                );
                 if let Some(orientation) = orientation {
-                    let _ = write!(header, ", Orientation={orientation}");
+                    let _ = write!(header, ", Orientation={}", labels.orientation(*orientation));
                 }
                 out.keyword(&header);
                 if let Some(thickness) = thickness {
@@ -366,7 +456,10 @@ fn sections(out: &mut Out, model: &Model) {
                 offset,
                 nodal_thickness,
             } => {
-                let mut header = format!("*Shell section, Elset={elset}, Material={material}");
+                let mut header = format!(
+                    "*Shell section, Elset={elset}, Material={}",
+                    labels.material(*material)
+                );
                 if *offset != 0.0 {
                     let _ = write!(header, ", Offset={}", number(*offset));
                 }
@@ -381,7 +474,10 @@ fn sections(out: &mut Out, model: &Model) {
                 thickness,
                 offset,
             } => {
-                let mut header = format!("*Membrane section, Elset={elset}, Material={material}");
+                let mut header = format!(
+                    "*Membrane section, Elset={elset}, Material={}",
+                    labels.material(*material)
+                );
                 if *offset != 0.0 {
                     let _ = write!(header, ", Offset={}", number(*offset));
                 }
@@ -421,8 +517,10 @@ fn sections(out: &mut Out, model: &Model) {
                         ("General", values)
                     }
                 };
-                let mut header =
-                    format!("*Beam section, Elset={elset}, Material={material}, Section={name}");
+                let mut header = format!(
+                    "*Beam section, Elset={elset}, Material={}, Section={name}",
+                    labels.material(*material)
+                );
                 if *offset1 != 0.0 {
                     let _ = write!(header, ", Offset1={}", number(*offset1));
                 }
@@ -616,8 +714,9 @@ fn constraints(out: &mut Out, model: &Model) {
 
 fn contact(out: &mut Out, model: &Model) {
     let contact = &model.contact;
-    for interaction in &contact.interactions {
-        out.keyword(&format!("*Surface interaction, Name={}", interaction.name));
+    let labels = out.labels.clone();
+    for (interaction, name) in contact.interactions.iter().zip(&labels.interactions) {
+        out.keyword(&format!("*Surface interaction, Name={name}"));
         match &interaction.behavior {
             None => {}
             Some(SurfaceBehavior::Hard) => {
@@ -676,7 +775,7 @@ fn contact(out: &mut Out, model: &Model) {
         };
         let mut header = format!(
             "*Contact pair, Interaction={}, Type={kind}",
-            pair.interaction
+            labels.interaction(pair.interaction)
         );
         if pair.small_sliding {
             header.push_str(", Small sliding");
@@ -725,8 +824,9 @@ fn friction_line(out: &mut Out, friction: &plxs_core::contact::Friction) {
 }
 
 fn amplitudes(out: &mut Out, model: &Model) {
-    for amplitude in &model.amplitudes {
-        let mut header = format!("*Amplitude, Name={}", amplitude.name);
+    let labels = out.labels.clone();
+    for (amplitude, name) in model.amplitudes.iter().zip(&labels.amplitudes) {
+        let mut header = format!("*Amplitude, Name={name}");
         if amplitude.total_time {
             header.push_str(", Time=Total time");
         }
@@ -1169,8 +1269,12 @@ fn boundaries(out: &mut Out, step: &Step, op_new: bool) {
     let mut current: Option<String> = None;
     for boundary in &step.boundaries {
         let mut parameters = String::new();
-        if let Some(amplitude) = &boundary.amplitude {
-            let _ = write!(parameters, ", Amplitude={amplitude}");
+        if let Some(amplitude) = boundary.amplitude {
+            let _ = write!(
+                parameters,
+                ", Amplitude={}",
+                out.labels.amplitude(amplitude)
+            );
         }
         if boundary.fixed {
             parameters.push_str(", Fixed");
@@ -1234,10 +1338,13 @@ fn cards<T>(
     }
 }
 
-fn amplitude_parameter(name: &str, amplitude: &Option<String>) -> String {
+fn amplitude_parameter(
+    labels: &Labels,
+    name: &str,
+    amplitude: &Option<plxs_core::AmplitudeId>,
+) -> String {
     amplitude
-        .as_ref()
-        .map(|a| format!(", {name}={a}"))
+        .map(|a| format!(", {name}={}", labels.amplitude(a)))
         .unwrap_or_default()
 }
 
@@ -1253,13 +1360,14 @@ fn case_and_sector(load_case: Option<u8>, sector: Option<u32>) -> String {
 }
 
 fn loads(out: &mut Out, loads: &Loads, carried: &Loads) {
+    let labels = out.labels.clone();
     cards(
         out,
         "*Cload",
         &loads.concentrated,
         !carried.concentrated.is_empty(),
         |l| {
-            amplitude_parameter("Amplitude", &l.amplitude)
+            amplitude_parameter(&labels, "Amplitude", &l.amplitude)
                 + &case_and_sector(l.load_case, l.sector)
                 + &match &l.follower {
                     None => String::new(),
@@ -1275,7 +1383,8 @@ fn loads(out: &mut Out, loads: &Loads, carried: &Loads) {
         &loads.distributed,
         !carried.distributed.is_empty(),
         |l| {
-            amplitude_parameter("Amplitude", &l.amplitude) + &case_and_sector(l.load_case, l.sector)
+            amplitude_parameter(&labels, "Amplitude", &l.amplitude)
+                + &case_and_sector(l.load_case, l.sector)
         },
         |l| {
             let values: Vec<String> = match &l.kind {
@@ -1309,7 +1418,7 @@ fn loads(out: &mut Out, loads: &Loads, carried: &Loads) {
         "*Cflux",
         &loads.concentrated_flux,
         !carried.concentrated_flux.is_empty(),
-        |l| amplitude_parameter("Amplitude", &l.amplitude),
+        |l| amplitude_parameter(&labels, "Amplitude", &l.amplitude),
         |l| format!("{}, 11, {}", l.region, number(l.value)),
     );
     cards(
@@ -1317,7 +1426,7 @@ fn loads(out: &mut Out, loads: &Loads, carried: &Loads) {
         "*Dflux",
         &loads.distributed_flux,
         !carried.distributed_flux.is_empty(),
-        |l| amplitude_parameter("Amplitude", &l.amplitude),
+        |l| amplitude_parameter(&labels, "Amplitude", &l.amplitude),
         |l| {
             let label = match l.kind {
                 FluxKind::Face(face) => format!("S{face}"),
@@ -1332,8 +1441,8 @@ fn loads(out: &mut Out, loads: &Loads, carried: &Loads) {
         &loads.films,
         !carried.films.is_empty(),
         |l| {
-            amplitude_parameter("Amplitude", &l.amplitude)
-                + &amplitude_parameter("Film amplitude", &l.film_amplitude)
+            amplitude_parameter(&labels, "Amplitude", &l.amplitude)
+                + &amplitude_parameter(&labels, "Film amplitude", &l.film_amplitude)
         },
         |l| {
             format!(
@@ -1351,8 +1460,8 @@ fn loads(out: &mut Out, loads: &Loads, carried: &Loads) {
         &loads.radiations,
         !carried.radiations.is_empty(),
         |l| {
-            amplitude_parameter("Amplitude", &l.amplitude)
-                + &amplitude_parameter("Radiation amplitude", &l.radiation_amplitude)
+            amplitude_parameter(&labels, "Amplitude", &l.amplitude)
+                + &amplitude_parameter(&labels, "Radiation amplitude", &l.radiation_amplitude)
         },
         |l| {
             let cavity = if l.cavity { "CR" } else { "" };
@@ -1372,9 +1481,10 @@ fn fields(out: &mut Out, step: &Step) {
         // Nothing to say "no fields" with: an empty card would be a field without values.
         return;
     }
+    let labels = out.labels.clone();
     for (i, field) in step.fields.iter().enumerate() {
         let new = if i == 0 { ", op=New" } else { "" };
-        let amplitude = amplitude_parameter("Amplitude", &field.amplitude);
+        let amplitude = amplitude_parameter(&labels, "Amplitude", &field.amplitude);
         match &field.kind {
             DefinedFieldKind::Temperature(values) => {
                 out.keyword(&format!("*Temperature{new}{amplitude}"));
@@ -1425,6 +1535,7 @@ fn contact_change(out: &mut Out, change: &ContactChange) {
             interaction,
             friction,
         } => {
+            let interaction = out.labels.interaction(*interaction).to_owned();
             out.keyword(&format!("*Change friction, Interaction={interaction}"));
             out.keyword("*Friction");
             friction_line(out, friction);

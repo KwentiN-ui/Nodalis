@@ -362,9 +362,11 @@ pub(crate) fn freeze_step_amplitudes(
 ) {
     // The factor of a step-time amplitude at the end of the step, `None` for no amplitude,
     // a total-time one or an unknown name (left to the validation).
-    let factor = |amplitude: &Option<String>| -> Option<f64> {
-        let a = model.amplitude(amplitude.as_deref()?)?;
-        (!a.total_time).then(|| a.value(step_time))
+    let factor = |amplitude: &Option<plxs_core::AmplitudeId>| -> Option<f64> {
+        let a = model.amplitude((*amplitude)?)?;
+        // A placeholder of an amplitude not defined (yet) has no curve.
+        let defined = !a.points.is_empty() || a.signal.is_some();
+        (defined && !a.total_time).then(|| a.value(step_time))
     };
     for boundary in boundaries.iter_mut() {
         if let Some(f) = factor(&boundary.amplitude) {
