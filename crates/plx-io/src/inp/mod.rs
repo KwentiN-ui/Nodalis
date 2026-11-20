@@ -178,6 +178,16 @@ impl Reader {
             self.finish(&block, last)?;
         }
         self.report();
+        // A section on the element set of a part is on the part, by id: renaming the part
+        // keeps it there.
+        let mesh = &self.import.mesh;
+        for section in &mut self.import.sections {
+            if let Region::ElementSet(set) = &section.region
+                && let Some(part) = mesh.part_of_set(set)
+            {
+                section.region = Region::Parts(vec![part.id]);
+            }
+        }
         Ok(self.import)
     }
 

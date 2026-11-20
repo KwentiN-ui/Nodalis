@@ -540,20 +540,6 @@ impl FeModel {
         }
     }
 
-    /// Follows a renamed element set, such as the one an input file defines for a part and
-    /// that is renamed with it: regions on it keep pointing at it.
-    pub fn rename_element_set(&mut self, old: &str, new: &str) {
-        let rename = |region: &mut Region| {
-            if let Region::ElementSet(name) = region
-                && name == old
-            {
-                *name = new.to_owned();
-            }
-        };
-        self.regions_mut().for_each(rename);
-        (self.initial_conditions.iter_mut()).for_each(|i| rename(&mut i.region));
-    }
-
     /// Parts deleted from the mesh leave the regions that picked them: the region keeps
     /// the other parts, and nothing is reported for the deleted ones.
     pub fn remove_parts_from_regions(&mut self, deleted: &[crate::PartRef]) {
@@ -2882,12 +2868,12 @@ mod tests {
         model.steps.push(step);
         // Merged into C.
         model.replace_part(a, &[c]);
-        model.rename_element_set("A", "C");
         assert_eq!(model.sections[0].region, Region::Parts(vec![c, b]));
         let step = &model.steps[0];
+        // The sets of the file keep their names.
         assert_eq!(
             step.boundary_conditions[0].region,
-            Region::ElementSet("C".into())
+            Region::ElementSet("A".into())
         );
         assert_eq!(step.loads[0].region, Region::Surface("A".into()));
         // A part merged into another leaves no duplicate.

@@ -197,7 +197,11 @@ impl SetKind {
     pub fn names(self, mesh: &FeMesh) -> Vec<&str> {
         match self {
             SetKind::Nodes => mesh.node_sets.keys().map(String::as_str).collect(),
-            SetKind::Elements => mesh.element_sets.keys().map(String::as_str).collect(),
+            // The set an input file defines for a part is the part: it is picked as one.
+            SetKind::Elements => (mesh.element_sets.keys())
+                .filter(|name| mesh.part_of_set(name).is_none())
+                .map(String::as_str)
+                .collect(),
             SetKind::Surface => mesh.surfaces.keys().map(String::as_str).collect(),
         }
     }
@@ -213,6 +217,20 @@ impl SetKind {
 }
 
 impl FeMesh {
+    /// The part whose own element set, as an input file defines one for each part, is the
+    /// element set of this name: of the part's name, holding just its elements.
+    pub fn part_of_set(&self, name: &str) -> Option<&Part> {
+        let members = self.element_sets.get(name)?;
+        let part = (self.parts.iter()).find(|p| p.name.eq_ignore_ascii_case(name))?;
+        let sorted = |ids: &[ElementId]| {
+            let mut ids = ids.to_vec();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        (sorted(members) == sorted(&part.elements)).then_some(part)
+    }
+
     /// The kind and name of the set the user-defined set of the id wrote into the mesh.
     pub fn user_set(&self, id: Id) -> Option<(SetKind, &str)> {
         (self.user_sets.get(&id)).map(|(kind, name)| (*kind, name.as_str()))
