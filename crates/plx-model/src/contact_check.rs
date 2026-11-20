@@ -82,6 +82,8 @@ fn length(a: Point) -> f64 {
 /// A piece of the master side: a triangle, or a segment for the edges of 2D elements and
 /// shells. `normal` points out of the material where it is known.
 struct Piece {
+    /// The face it is a piece of, by index in the faces of the master side.
+    face: usize,
     points: Vec<Point>,
     normal: Option<Point>,
     min: Point,
@@ -190,7 +192,7 @@ fn box_distance(p: Point, min: Point, max: Point) -> f64 {
 impl Master {
     fn new(mesh: &FeMesh, faces: &[(ElementId, u8)]) -> Self {
         let mut pieces = Vec::new();
-        for &(element_id, face) in faces {
+        for (index, &(element_id, face)) in faces.iter().enumerate() {
             let Some(element) = mesh.element(element_id) else {
                 continue;
             };
@@ -243,6 +245,7 @@ impl Master {
                     }
                 }
                 pieces.push(Piece {
+                    face: index,
                     points,
                     normal,
                     min,
@@ -270,6 +273,11 @@ impl Master {
     /// The signed distance of `p` to the nearest piece within `radius`, if any, and the
     /// closest point of that piece.
     fn closest(&self, p: Point, radius: f64) -> Option<(f64, Point)> {
+        self.closest_piece(p, radius).map(|(d, q, _)| (d, q))
+    }
+
+    /// [`Self::closest`], and the index of the piece.
+    fn closest_piece(&self, p: Point, radius: f64) -> Option<(f64, Point, usize)> {
         if self.tree.is_empty() || box_distance(p, self.min, self.max) > radius {
             return None;
         }
@@ -303,7 +311,7 @@ impl Master {
                 }
             }
         }
-        best.map(|(d, q, _)| (d, q))
+        best
     }
 }
 
@@ -520,6 +528,23 @@ fn check(
         ContactStatus::FarOpen
     };
     Some(check)
+}
+
+/// Of each point the nearest of the faces within `radius`, by its index in `faces`, and the
+/// distance to it; `None` where no face is that near. The faces are flat between their
+/// corners, as the contact check takes them.
+pub(crate) fn nearest_faces(
+    mesh: &FeMesh,
+    faces: &[(ElementId, u8)],
+    points: &[Point],
+    radius: f64,
+) -> Vec<Option<(usize, f64)>> {
+    let master = Master::new(mesh, faces);
+    (points.iter())
+        .map(|&p| {
+            (master.closest_piece(p, radius)).map(|(d, _, i)| (master.pieces[i].face, d.abs()))
+        })
+        .collect()
 }
 
 /// The distance of each point to the nearest of the faces, infinite where there is none.
