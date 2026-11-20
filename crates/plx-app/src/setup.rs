@@ -2159,7 +2159,7 @@ fn submodel_rows(
     ui: &mut egui::Ui,
     dofs: &mut [bool; 6],
     two_d: bool,
-    step: &str,
+    step: (&str, &str),
     sources: &[crate::links::GlobalSource],
 ) {
     // Nodes of 2D models only move in the x-y plane.
@@ -2197,15 +2197,15 @@ struct Line {
     tone: Tone,
 }
 
-/// The rows that tell where the displacements of a submodel boundary condition in `step`
-/// come from, with their labels, and what keeps them from being read.
+/// The rows that tell where the displacements of a submodel boundary condition in `step`, its
+/// key and name, come from, with their labels, and what keeps them from being read.
 fn submodel_source_lines(
-    step: &str,
+    (key, step): (&str, &str),
     sources: &[crate::links::GlobalSource],
 ) -> Vec<(&'static str, Line)> {
     let line = |tone, text: String| Line { text, tone };
     let mut lines = Vec::new();
-    let Some(source) = sources.iter().find(|s| s.step == step) else {
+    let Some(source) = sources.iter().find(|s| s.step == key) else {
         let text = format!(
             "Nothing linked: in the project window, drag the results of a step of the global \
              analysis to the Global results row of {step}."
@@ -3690,8 +3690,10 @@ impl Editor {
                     displacement_rows(ui, displacement, &region.region(), item, model, units);
                 }
                 if let BoundaryKind::Submodel { dofs, .. } = &mut bc.kind {
-                    let name = model.fe.steps.get(*step).map_or("", |s| s.name.as_str());
-                    submodel_rows(ui, dofs, two_d, name, &self.global_sources);
+                    let step = model.fe.steps.get(*step);
+                    let key = step.map(|s| crate::links::key(s.id)).unwrap_or_default();
+                    let name = step.map_or("", |s| s.name.as_str());
+                    submodel_rows(ui, dofs, two_d, (&key, name), &self.global_sources);
                 }
                 if let BoundaryKind::Symmetry {
                     normal,
@@ -8784,16 +8786,19 @@ mod tests {
         };
         let tones = |lines: &[(&str, Line)]| lines.iter().map(|(_, l)| l.tone).collect::<Vec<_>>();
         // Nothing linked to the step.
-        let lines = submodel_source_lines("Step-1", &[]);
+        let lines = submodel_source_lines(("Step-1", "Step-1"), &[]);
         assert_eq!(tones(&lines), [Tone::Error]);
         assert!(lines[0].1.text.contains("Global results row of Step-1"));
         let good = [source("Step-1", "Global", Some(true))];
-        let lines = submodel_source_lines("Step-1", &good);
+        let lines = submodel_source_lines(("Step-1", "Step-1"), &good);
         assert_eq!(lines[0].1.text, "Load of Global");
         assert_eq!(tones(&lines), [Tone::Plain, Tone::Weak]);
         assert!(lines[1].1.text.contains("end of Load"));
         // Mode shapes.
-        let lines = submodel_source_lines("Step-1", &[source("Step-1", "Global", Some(false))]);
+        let lines = submodel_source_lines(
+            ("Step-1", "Step-1"),
+            &[source("Step-1", "Global", Some(false))],
+        );
         assert_eq!(tones(&lines), [Tone::Plain, Tone::Error]);
         // Two global analyses.
         let both = [
@@ -8801,7 +8806,7 @@ mod tests {
             source("Step-2", "Other", Some(true)),
             source("Step-3", "Other", Some(true)),
         ];
-        let lines = submodel_source_lines("Step-1", &both);
+        let lines = submodel_source_lines(("Step-1", "Step-1"), &both);
         assert_eq!(tones(&lines), [Tone::Plain, Tone::Weak, Tone::Error]);
         assert!(
             lines[2]

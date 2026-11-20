@@ -61,6 +61,17 @@ impl std::fmt::Display for Id {
     }
 }
 
+impl std::str::FromStr for Id {
+    type Err = ();
+
+    /// Reads an id as [`Id`]'s `Display` writes it, `#` and the number in hex, e.g. from a
+    /// path of the project schematic that names an item.
+    fn from_str(text: &str) -> Result<Self, ()> {
+        let hex = text.strip_prefix('#').ok_or(())?;
+        u64::from_str_radix(hex, 16).map(Self).map_err(|_| ())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,5 +88,7 @@ mod tests {
         let id = Id::new();
         let text = ron::to_string(&id).unwrap();
         assert_eq!(ron::from_str::<Id>(&text).unwrap(), id);
+        assert_eq!(id.to_string().parse(), Ok(id));
+        assert!("Step-1".parse::<Id>().is_err());
     }
 }

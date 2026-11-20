@@ -5,12 +5,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ValueKind;
+use crate::{Id, ValueKind};
 
 /// A column of the table: an input the study gives through a value link, or an output it
-/// reads. Links name the column by `name`.
+/// reads. Links name the column by its id, so that renaming it keeps them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StudyColumn {
+    pub id: Id,
     pub name: String,
     /// The kind of number of an input, taken from the first parameter it was linked to;
     /// `None` for outputs, which show the units of their source.
@@ -158,13 +159,14 @@ impl StudyTable {
         self.points.get(self.current)
     }
 
-    /// The index of the input column `name`.
-    pub fn input(&self, name: &str) -> Option<usize> {
-        self.inputs.iter().position(|c| c.name == name)
+    /// The index of the input column whose id is written as `key`, as links name it.
+    pub fn input(&self, key: &str) -> Option<usize> {
+        self.inputs.iter().position(|c| c.id.to_string() == key)
     }
 
-    pub fn output(&self, name: &str) -> Option<usize> {
-        self.outputs.iter().position(|c| c.name == name)
+    /// The index of the output column whose id is written as `key`.
+    pub fn output(&self, key: &str) -> Option<usize> {
+        self.outputs.iter().position(|c| c.id.to_string() == key)
     }
 
     /// `base`, or `base (2)` and up when a column has the name already.
@@ -185,11 +187,12 @@ impl StudyTable {
     }
 
     /// Adds an input column of `kind`; every point gives it `value`, the value of what it
-    /// was linked to, and a table without points gets its current point. Returns the name.
-    pub fn add_input(&mut self, name: &str, kind: Option<ValueKind>, value: f64) -> String {
-        let name = self.unique_name(name);
+    /// was linked to, and a table without points gets its current point. Returns its id.
+    pub fn add_input(&mut self, name: &str, kind: Option<ValueKind>, value: f64) -> Id {
+        let id = Id::new();
         self.inputs.push(StudyColumn {
-            name: name.clone(),
+            id,
+            name: self.unique_name(name),
             kind,
         });
         if self.points.is_empty() {
@@ -200,14 +203,16 @@ impl StudyTable {
             point.inputs.push(value);
             point.reset();
         }
-        name
+        id
     }
 
-    /// Adds an output column; the points solved before have no value for it yet.
-    pub fn add_output(&mut self, name: &str) -> String {
-        let name = self.unique_name(name);
+    /// Adds an output column; the points solved before have no value for it yet. Returns
+    /// its id.
+    pub fn add_output(&mut self, name: &str) -> Id {
+        let id = Id::new();
         self.outputs.push(StudyColumn {
-            name: name.clone(),
+            id,
+            name: self.unique_name(name),
             kind: None,
         });
         if self.points.is_empty() {
@@ -220,7 +225,7 @@ impl StudyTable {
         for point in &mut self.points {
             point.outputs.resize(self.outputs.len(), None);
         }
-        name
+        id
     }
 
     pub fn remove_input(&mut self, column: usize) {
@@ -430,9 +435,10 @@ mod tests {
     fn columns_take_values_and_points_go_out_of_date() {
         let mut table = StudyTable::default();
         let force = table.add_input("Force-1 Y", Some(ValueKind::Factor), 2.0);
-        assert_eq!(force, "Force-1 Y");
+        assert_eq!(table.input(&force.to_string()), Some(0));
         assert_eq!(table.points.len(), 1);
-        assert_eq!(table.add_input("Force-1 Y", None, 1.0), "Force-1 Y (2)");
+        table.add_input("Force-1 Y", None, 1.0);
+        assert_eq!(table.inputs[1].name, "Force-1 Y (2)");
         table.add_output("Stress");
         table.add_point();
         assert_eq!(table.points[1].inputs, [2.0, 1.0]);

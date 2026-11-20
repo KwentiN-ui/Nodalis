@@ -392,10 +392,10 @@ impl ProjectApp {
     /// column of a study, that of the number the column reads.
     pub(super) fn given_kind(&self, source: u64, item: &[String]) -> Option<ValueKind> {
         let study = (self.nodes.iter().find(|n| n.id == source)).and_then(Node::as_study);
-        if let (Some(study), [_, name]) = (study, item)
-            && study.table.input(name).is_none()
+        if let (Some(study), [_, key]) = (study, item)
+            && study.table.input(key).is_none()
         {
-            let link = self.output_link(source, name)?;
+            let link = self.output_link(source, key)?;
             return value_kind(&self.nodes, link.source, &link.item);
         }
         value_kind(&self.nodes, source, item)
@@ -404,10 +404,15 @@ impl ProjectApp {
     /// What a plot or preview calls the number or series `item` of the block `source`: the
     /// name of the block, of a column for a study.
     pub(super) fn given_label(&self, source: u64, item: &[String]) -> String {
-        let study =
-            (self.nodes.iter().find(|n| n.id == source)).is_some_and(|n| n.as_study().is_some());
+        let study = (self.nodes.iter().find(|n| n.id == source)).and_then(Node::as_study);
+        let column = |key: &str| {
+            let table = &study?.table;
+            (table.inputs.iter().chain(&table.outputs))
+                .find(|c| links::key(c.id) == key)
+                .map(|c| c.name.clone())
+        };
         match item {
-            [_, name] if study => name.clone(),
+            [_, key] if study.is_some() => column(key).unwrap_or_else(|| key.clone()),
             _ => self.name_of(source),
         }
     }

@@ -2754,7 +2754,7 @@ impl Workbench {
             if let Some((path, source)) = linked {
                 refused = Some(format!(
                     "{} comes from {source}: change it there, or unlink it first.",
-                    crate::links::label(&path)
+                    crate::links::label(this.model.as_ref().map(|m| &m.fe), &path)
                 ));
                 true
             } else {
@@ -2836,7 +2836,7 @@ impl Workbench {
                 ui.label(format!(
                     "{} comes from the analysis {source}. Change it there, or unlink it: this \
                      analysis then keeps its own copy.",
-                    crate::links::label(path)
+                    crate::links::label(self.model.as_ref().map(|m| &m.fe), path)
                 ));
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {

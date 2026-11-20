@@ -619,6 +619,11 @@ mod tests {
         }
     }
 
+    /// The key of the first step of the analysis of the node.
+    fn buckle_step(node: &Node) -> String {
+        links::key(node.link_data().unwrap().fe.steps[0].id)
+    }
+
     /// The state of block 2 once its wants are found.
     fn state(nodes: &mut [Node], links: &[Link]) -> CellState {
         refresh_wants(nodes, links);
@@ -656,7 +661,8 @@ mod tests {
         assert!(!pending(&mut nodes, &links));
         assert_eq!(stale_meshes(&nodes, &links, 3), ["Deformed Mesh"]);
         // The results of a step go to the Step Result row, from an analysis only.
-        let results = vec![links::RESULTS.to_owned(), "Step-1".to_owned()];
+        let step = buckle_step(&nodes[0]);
+        let results = vec![links::RESULTS.to_owned(), step];
         let slot = vec![links::STEP_RESULT.to_owned()];
         assert!(links::compatible(&results, &slot));
         assert!(!links::compatible(&[links::GEOMETRY.to_owned()], &slot));

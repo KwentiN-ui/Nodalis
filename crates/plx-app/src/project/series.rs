@@ -24,8 +24,9 @@ fn gives_series_at(nodes: &[Node], links: &[Link], id: u64, item: &[String], dep
     };
     // A column of a parameter study gives its values at all points.
     if let Some(study) = node.as_study() {
-        return matches!(item, [cell, name] if cell == links::VALUE
-            && study.table.inputs.iter().chain(&study.table.outputs).any(|c| &c.name == name));
+        return matches!(item, [cell, key] if cell == links::VALUE
+            && (study.table.inputs.iter().chain(&study.table.outputs))
+                .any(|c| links::key(c.id) == *key));
     }
     if let Some(measure) = node.as_measure() {
         return match item {
@@ -295,20 +296,20 @@ pub(super) fn shown_series(series: &[f64], kind: Option<ValueKind>, units: UnitS
 /// order of the table: the inputs as given, the outputs as they came out, not a number where
 /// a point gave none, so that the values of two columns stay paired point by point.
 pub(super) fn study_values(table: &plx_model::StudyTable, item: &[String]) -> Option<Vec<f64>> {
-    let [cell, name] = item else {
+    let [cell, key] = item else {
         return None;
     };
     if cell != links::VALUE {
         return None;
     }
-    if let Some(column) = table.input(name) {
+    if let Some(column) = table.input(key) {
         return Some(
             (table.points.iter())
                 .map(|p| p.inputs.get(column).copied().unwrap_or(f64::NAN))
                 .collect(),
         );
     }
-    let column = table.outputs.iter().position(|c| &c.name == name)?;
+    let column = table.output(key)?;
     Some(
         (table.points.iter())
             .map(|p| p.outputs.get(column).copied().flatten().unwrap_or(f64::NAN))

@@ -123,7 +123,9 @@ Tree items are renamed in the #ui("Name") field of their dialog. Mesh parts are 
 digits, `_` and `-`, up to 80 characters. Renaming never breaks a reference: items refer to each
 other by an internal identity that the name does not change. A history output stays on its
 reference point, a load keeps its amplitude, a section its material, a contact pair its
-interaction, a boundary condition its set, whatever they are renamed to. Items that refer to a
+interaction, a boundary condition its set, whatever they are renamed to. The links of the
+project schematic name what they carry the same way: a renamed step, setup item, parameter or
+column of a parameter study keeps its wires. Items that refer to a
 renamed mesh part follow the new name. Geometry parts cannot be renamed, because the mesh setup refers to them by name.
 
 === What acts on a part <acting>

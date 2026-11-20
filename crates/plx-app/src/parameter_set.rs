@@ -7,9 +7,8 @@ use crate::numeric;
 
 pub enum ParameterSetResult {
     Open,
-    /// Closed with OK: the parameters, each with the name it had before, if it had one, so
-    /// that links follow a renamed parameter; and the unit system values are shown in.
-    Ok(Vec<(Option<String>, Parameter)>),
+    /// Closed with OK: the parameters. Links go by their ids, so a renamed one keeps its.
+    Ok(Vec<Parameter>),
     Cancel,
 }
 
@@ -17,7 +16,7 @@ pub struct ParameterSetEditor {
     /// The block edited.
     pub id: u64,
     name: String,
-    rows: Vec<(Option<String>, Parameter)>,
+    rows: Vec<Parameter>,
     /// The unit system of the project, which the values are shown and typed in.
     units: UnitSystem,
 }
@@ -27,9 +26,7 @@ impl ParameterSetEditor {
         Self {
             id,
             name: name.to_owned(),
-            rows: (parameters.iter())
-                .map(|p| (Some(p.name.clone()), p.clone()))
-                .collect(),
+            rows: parameters.to_vec(),
             units,
         }
     }
@@ -40,12 +37,12 @@ impl ParameterSetEditor {
 
     /// Why the parameters cannot be kept: a name missing or given twice.
     fn problem(&self) -> Option<String> {
-        for (i, (_, parameter)) in self.rows.iter().enumerate() {
+        for (i, parameter) in self.rows.iter().enumerate() {
             let name = parameter.name.trim();
             if name.is_empty() {
                 return Some("Every parameter needs a name.".into());
             }
-            if (self.rows[..i].iter()).any(|(_, p)| p.name.trim().eq_ignore_ascii_case(name)) {
+            if (self.rows[..i].iter()).any(|p| p.name.trim().eq_ignore_ascii_case(name)) {
                 return Some(format!("{name} is there twice."));
             }
         }
@@ -71,10 +68,9 @@ impl ParameterSetEditor {
                 {
                     let name = (1..)
                         .map(|i| format!("Parameter-{i}"))
-                        .find(|n| !self.rows.iter().any(|(_, p)| &p.name == n))
+                        .find(|n| !self.rows.iter().any(|p| &p.name == n))
                         .unwrap_or_default();
-                    self.rows
-                        .push((None, Parameter::new(name, ValueKind::LENGTH, 0.1)));
+                    self.rows.push(Parameter::new(name, ValueKind::LENGTH, 0.1));
                 }
                 let problem = self.problem();
                 if let Some(problem) = &problem {
@@ -95,11 +91,11 @@ impl ParameterSetEditor {
                         .clicked()
                     {
                         let rows = (self.rows.iter())
-                            .map(|(old, p)| {
+                            .map(|p| {
                                 let mut p = p.clone();
                                 p.name = p.name.trim().to_owned();
                                 p.value = p.kind.clean(p.value);
-                                (old.clone(), p)
+                                p
                             })
                             .collect();
                         result = ParameterSetResult::Ok(rows);
@@ -125,7 +121,7 @@ impl ParameterSetEditor {
                 ui.strong("Value");
                 ui.label("");
                 ui.end_row();
-                for (i, (_, parameter)) in self.rows.iter_mut().enumerate() {
+                for (i, parameter) in self.rows.iter_mut().enumerate() {
                     ui.add_sized(
                         [140.0, 18.0],
                         egui::TextEdit::singleline(&mut parameter.name),
