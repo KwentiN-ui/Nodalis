@@ -572,15 +572,20 @@ mod tests {
             fe.steps.push(step);
         }
         let mut origins = Origins::default();
-        origins.insert(ItemRef::Tie("GLUE".into()), ModelItem::ContactRegion(4));
+        origins.insert(
+            ItemRef::Tie(plxs_core::TieId::at(0)),
+            ModelItem::ContactRegion(4),
+        );
         origins.insert(ItemRef::Step(0), ModelItem::Step(0));
         origins.insert(ItemRef::Step(1), ModelItem::Step(2));
         let untied = Diagnostic::new(
-            DiagnosticCode::TieNodesNotTied { tie: "GLUE".into() },
+            DiagnosticCode::TieNodesNotTied {
+                tie: plxs_core::TieId::at(0),
+            },
             SolverSeverity::Warning,
             "not tied",
         )
-        .concerning(ItemRef::Tie("GLUE".into()));
+        .concerning(ItemRef::Tie(plxs_core::TieId::at(0)));
         let mut free = Diagnostic::new(
             DiagnosticCode::RigidBodyMotion,
             SolverSeverity::Error,

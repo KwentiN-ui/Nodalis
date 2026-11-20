@@ -202,10 +202,20 @@ fn untied_slave_nodes_are_named() {
     input += &step("*BOUNDARY\nAX0, 1, 3\nBX0, 1, 3\n");
     let check = check_input(&input, None, &options(), &mut NoProgress);
     let untied: Vec<_> = (check.diagnostics.iter())
-        .filter(|d| matches!(&d.code, DiagnosticCode::TieNodesNotTied { tie } if tie == "GLUE"))
+        .filter(|d| {
+            matches!(d.code, DiagnosticCode::TieNodesNotTied { tie } if tie == plxs_core::TieId::at(0))
+        })
         .collect();
     assert_eq!(untied.len(), 1, "{:#?}", check.diagnostics);
     assert_eq!(untied[0].nodes.len(), 9);
     assert!(untied[0].nodes.iter().all(|&n| n > 1000));
-    assert_eq!(untied[0].item, Some(plxs_core::ItemRef::Tie("GLUE".into())));
+    assert_eq!(
+        untied[0].item,
+        Some(plxs_core::ItemRef::Tie(plxs_core::TieId::at(0)))
+    );
+    assert!(
+        untied[0].message.contains("*TIE GLUE:"),
+        "{}",
+        untied[0].message
+    );
 }

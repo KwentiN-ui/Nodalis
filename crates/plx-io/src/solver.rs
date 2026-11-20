@@ -41,29 +41,18 @@ pub fn import_from(
 }
 
 /// The history output of the results, read from the solver's history blocks as
-/// [`crate::dat::read_dat`] reads the `.dat` file; names `input` shortened are given in
-/// full. `None` without history output.
-pub fn history(solved: &SolverResults, input: Option<&str>) -> Option<DatImport> {
+/// [`crate::dat::read_dat`] reads the `.dat` file. `None` without history output.
+pub fn history(solved: &SolverResults) -> Option<DatImport> {
     if solved.results.history.is_empty() {
         return None;
     }
-    let names = input.map(shortened_names).unwrap_or_default();
-    let mut import = crate::dat::import_blocks(&solved.results, &solved.model.sets, &names);
+    let mut import = crate::dat::import_blocks(&solved.results, &solved.model.sets);
     if plxs_core::results::plane::is_plane(&solved.model) {
         for set in &mut import.sets {
             drop_out_of_plane(set);
         }
     }
     Some(import)
-}
-
-/// The names the input file says were shortened, each with its full name.
-fn shortened_names(input: &str) -> Vec<(String, String)> {
-    (input.lines())
-        .filter_map(|line| line.strip_prefix(crate::inp::SHORTENED_NAME))
-        .filter_map(|rest| rest.split_once(" = "))
-        .map(|(short, full)| (short.to_string(), full.to_string()))
-        .collect()
 }
 
 /// Leaves the history components out that are zero out of the plane of a 2D model, also
@@ -300,8 +289,7 @@ mod tests {
         }
         let dat = frd.with_extension("dat");
         let from_file = crate::dat::read_dat(&dat).ok();
-        let input_text = std::fs::read_to_string(input).ok();
-        let from_memory = history(&solved, input_text.as_deref());
+        let from_memory = history(&solved);
         assert_eq!(
             from_memory.as_ref().map(|d| d.sets.len()),
             from_file.as_ref().map(|d| d.sets.len()),
@@ -326,7 +314,7 @@ mod tests {
         let input = dir.join("plane.inp");
         std::fs::write(&input, text).unwrap();
         let (solved, _) = solve(&input, &dir).unwrap();
-        let import = history(&solved, None).unwrap();
+        let import = history(&solved).unwrap();
         let set_of = |import: &'_ DatImport, name: &str| {
             let set = import.sets.iter().find(|s| s.name.contains(name));
             set.cloned().unwrap()
@@ -388,7 +376,7 @@ mod tests {
         };
         assert_eq!(components("STRESS"), ["SXX", "SYY", "SXY"]);
         assert_eq!(components("TOSTRAIN"), ["EXX", "EYY", "EZZ", "EXY"]);
-        let import = history(&solved, None).unwrap();
+        let import = history(&solved).unwrap();
         let set = import
             .sets
             .iter()

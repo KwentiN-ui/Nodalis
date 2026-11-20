@@ -58,6 +58,10 @@ handle!(
     /// A tie: index in [`crate::Constraints::ties`].
     TieId
 );
+handle!(
+    /// A joint: index in [`crate::Constraints::joints`].
+    JointId
+);
 
 /// The handles a part of the model holds, by the name of their type
 /// (`"NodeSetId"`, `"AmplitudeId"`, ...) and index: what it refers to. Found by

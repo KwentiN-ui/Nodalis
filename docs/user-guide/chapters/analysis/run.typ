@@ -37,10 +37,12 @@ as in the project schematic (@project-window): changing a load makes only the so
 date, changing the meshing settings of a part makes its mesh out of date, and result paths or
 planes change nothing that the solver needs.
 
-The input file is named after the analysis, for example `Cantilever.inp`. Old result files of
-the analysis in its folder are deleted before the solver starts. Nodalis refuses to run a model
-without mesh, without step or with all steps deactivated, and it stops if the input file cannot
-be written (for example because a region is empty).
+The built-in solver takes the analysis directly and writes no input file; for CalculiX the
+input file is named after the analysis, for example `Cantilever.inp`. To look at the model as
+an input file, export it (@export-inp). Old result files of the
+analysis in its folder are deleted before the solver starts. Nodalis refuses to run a model
+without mesh, without step or with all steps deactivated, and it stops if the analysis cannot
+be made (for example because a region is empty).
 
 === Keeping the results of a stopped run <stop-keep-results>
 
@@ -503,7 +505,7 @@ raise the #ui("Tolerance") of the region above it (@contact-regions) or close th
 
 == Exporting the input file <export-inp>
 
-#menu("File", "Export", "CalculiX Input File ...") writes the same input file as a run, for example
+#menu("File", "Export", "CalculiX Input File ...") writes the analysis as an input file, for example
 to run it with CalculiX or with the command line solver `plxs` on another computer. Deactivated items appear as comments.
 
 == Submodels <submodel>

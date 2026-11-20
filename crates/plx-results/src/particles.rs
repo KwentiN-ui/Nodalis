@@ -551,6 +551,7 @@ pub fn history_blocks(
     let block =
         |increment: usize, quantity: HistoryQuantity, set: String, time: f64, values: Vec<f64>| {
             HistoryBlock {
+                origin: None,
                 step,
                 increment: increment as u32 + 1,
                 quantity,

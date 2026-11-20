@@ -28,12 +28,12 @@ pub enum ItemRef {
     Amplitude(crate::AmplitudeId),
     /// A section by its index in `Model::sections`.
     Section(usize),
-    /// A tie by its name.
-    Tie(String),
+    /// A tie.
+    Tie(crate::TieId),
     /// A rigid body by its index in `Constraints::rigid_bodies`.
     RigidBody(usize),
-    /// A joint by its name.
-    Joint(String),
+    /// A joint.
+    Joint(crate::JointId),
     /// A contact pair by its index in `Contact::pairs`.
     ContactPair(usize),
     /// A step by its 0-based index in `Analysis::steps`.
@@ -53,7 +53,7 @@ pub enum DiagnosticCode {
     NearlySingular,
     /// Slave nodes of a tie are farther than its tolerance from the master surface and are
     /// not tied.
-    TieNodesNotTied { tie: String },
+    TieNodesNotTied { tie: crate::TieId },
     /// The input cannot be read or refers to something undefined.
     Input,
     /// The model is complete, but the solver cannot compute it (yet).
