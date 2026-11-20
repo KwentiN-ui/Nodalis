@@ -423,7 +423,65 @@ impl ContactFace {
                 break;
             }
         }
-        p
+        if self.corners == 2 || self.is_interior(p) {
+            return p;
+        }
+        // Clamped to the border, the Newton iteration stops where the clamped step comes
+        // back to the same point, which is no closest point when the face's tangents are
+        // skewed: the clamp takes each natural coordinate back on its own (a triangle's
+        // hypotenuse by scaling towards the origin), not along the face's metric. A point
+        // beside the outer corner of a hexagon head was put on an edge inside the
+        // head's seat face, a third of a millimetre from the closest point (the corner),
+        // and took that edge's normal, which lies in the seat's plane: a sideways spring
+        // pushed the washer under the head back and forth until the increment was cut
+        // back to nothing. The closest point of the border is the closest of its edges'.
+        let distance = |q: [f64; 2], n: &mut [f64], dn: &mut [[f64; 2]]| {
+            let (at, _) = self.place(coords, q, n, dn);
+            norm(sub(x, at))
+        };
+        let mut best = (distance(p, n, dn), p);
+        for (from, to) in self.edges() {
+            let along = [to[0] - from[0], to[1] - from[1]];
+            let mut s = 0.5_f64;
+            for _ in 0..30 {
+                let q = [from[0] + s * along[0], from[1] + s * along[1]];
+                let (at, t) = self.place(coords, q, n, dn);
+                let tangent = [
+                    t[0][0] * along[0] + t[1][0] * along[1],
+                    t[0][1] * along[0] + t[1][1] * along[1],
+                    t[0][2] * along[0] + t[1][2] * along[1],
+                ];
+                let length = dot(tangent, tangent);
+                if length < 1e-300 {
+                    break;
+                }
+                let next = (s + dot(tangent, sub(x, at)) / length).clamp(0.0, 1.0);
+                let moved = (next - s).abs();
+                s = next;
+                if moved < 1e-13 {
+                    break;
+                }
+            }
+            let q = [from[0] + s * along[0], from[1] + s * along[1]];
+            let d = distance(q, n, dn);
+            if d < best.0 {
+                best = (d, q);
+            }
+        }
+        best.1
+    }
+
+    /// The edges of a triangle or quadrilateral face in natural coordinates, from one
+    /// corner to the next.
+    fn edges(&self) -> Vec<([f64; 2], [f64; 2])> {
+        let corners: &[[f64; 2]] = if self.corners == 4 {
+            &[[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]]
+        } else {
+            &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]
+        };
+        (0..corners.len())
+            .map(|k| (corners[k], corners[(k + 1) % corners.len()]))
+            .collect()
     }
 
     /// The point of the face at natural coordinates, without allocating.
@@ -860,6 +918,32 @@ mod tests {
         }
         let fp = f.at(&c, [0.0, 0.0]);
         assert!((fp.normal[2] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_point_beside_a_skewed_triangle_projects_on_its_closest_corner() {
+        // The Newton iteration clamped each natural coordinate on its own and stopped on
+        // the far corner (1, 0), 3.6 away instead of 2.8.
+        let face = ContactFace {
+            element: 0,
+            element_id: 1,
+            face_number: 1,
+            nodes: vec![0, 1, 2],
+            corners: 3,
+            quadratic: false,
+            planar: None,
+        };
+        let c = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [3.0, 1.0, 0.0]];
+        let (p, fp) = face.project(&c, [-2.0, -2.0, 0.5]);
+        assert!(fp.x[0].abs() < 1e-9 && fp.x[1].abs() < 1e-9, "{:?}", fp.x);
+        assert!(!face.is_interior(p));
+        // Beside an edge: the foot is the perpendicular one on it.
+        let (_, fp) = face.project(&c, [2.0, -1.0, 0.0]);
+        assert!(
+            (fp.x[0] - 1.4).abs() < 1e-9 && (fp.x[1] - 0.2).abs() < 1e-9,
+            "{:?}",
+            fp.x
+        );
     }
 
     #[test]
