@@ -4,7 +4,7 @@
 
 use plxs_assembly::ElementTable;
 use plxs_core::results::{
-    IncrementKind, ModeKind, ModeSet, ModeShape, ResultField, ResultsIncrement,
+    FieldQuantity, IncrementKind, ModeKind, ModeSet, ModeShape, ResultField, ResultsIncrement,
 };
 use plxs_core::state::IntegrationPointField;
 use plxs_core::{Model, ProgressEvent, Result, Step};
@@ -84,13 +84,14 @@ pub fn node_order(model: &Model) -> Vec<(u32, u32)> {
 }
 
 fn vector_field(
-    name: &str,
+    quantity: FieldQuantity,
     components: [&str; 3],
     order: &[(u32, u32)],
     values: &[f64],
 ) -> ResultField {
     ResultField {
-        name: name.to_string(),
+        quantity,
+        imaginary: false,
         components: components.iter().map(|c| c.to_string()).collect(),
         nodes: order.iter().map(|&(id, _)| id).collect(),
         values: (0..3)
@@ -246,9 +247,15 @@ pub fn nodal_average_scalar(
     sum
 }
 
-fn scalar_field(name: &str, component: &str, order: &[(u32, u32)], values: &[f64]) -> ResultField {
+fn scalar_field(
+    quantity: FieldQuantity,
+    component: &str,
+    order: &[(u32, u32)],
+    values: &[f64],
+) -> ResultField {
     ResultField {
-        name: name.to_string(),
+        quantity,
+        imaginary: false,
         components: vec![component.to_string()],
         nodes: order.iter().map(|&(id, _)| id).collect(),
         values: vec![order.iter().map(|&(_, i)| values[i as usize]).collect()],
@@ -256,13 +263,14 @@ fn scalar_field(name: &str, component: &str, order: &[(u32, u32)], values: &[f64
 }
 
 fn tensor_field(
-    name: &str,
+    quantity: FieldQuantity,
     components: [&str; 6],
     order: &[(u32, u32)],
     values: &[[f64; 6]],
 ) -> ResultField {
     ResultField {
-        name: name.to_string(),
+        quantity,
+        imaginary: false,
         components: components.iter().map(|c| c.to_string()).collect(),
         nodes: order.iter().map(|&(id, _)| id).collect(),
         values: (0..6)
@@ -430,12 +438,17 @@ pub fn build_fields_with(
         (table.reported_displacements(u), Vec::new())
     };
     if has(plxs_core::step::OutputVariable::Displacements) {
-        fields.push(vector_field("DISP", ["D1", "D2", "D3"], &order, u));
+        fields.push(vector_field(
+            FieldQuantity::Displacements,
+            ["D1", "D2", "D3"],
+            &order,
+            u,
+        ));
     }
     if has(plxs_core::step::OutputVariable::Stresses) {
         let (average, _) = nodal_average_with(table, model, stresses, &membrane_stresses);
         fields.push(tensor_field(
-            "STRESS",
+            FieldQuantity::Stresses,
             ["SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX"],
             &order,
             &average,
@@ -462,7 +475,8 @@ pub fn build_fields_with(
             .copied()
             .collect();
         fields.push(ResultField {
-            name: "SECFORC".into(),
+            quantity: FieldQuantity::SectionForces,
+            imaginary: false,
             components: ["N", "M", "MT"].map(String::from).to_vec(),
             nodes: beam_nodes.iter().map(|&(id, _)| id).collect(),
             values: (0..3)
@@ -477,14 +491,19 @@ pub fn build_fields_with(
     if has(plxs_core::step::OutputVariable::Strains) {
         let (average, _) = nodal_average_with(table, model, strains, &membrane_strains);
         fields.push(tensor_field(
-            "TOSTRAIN",
+            FieldQuantity::Strains,
             ["EXX", "EYY", "EZZ", "EXY", "EYZ", "EZX"],
             &order,
             &average,
         ));
     }
     if has(plxs_core::step::OutputVariable::ReactionForces) {
-        fields.push(vector_field("FORC", ["F1", "F2", "F3"], &order, reactions));
+        fields.push(vector_field(
+            FieldQuantity::Forces,
+            ["F1", "F2", "F3"],
+            &order,
+            reactions,
+        ));
     }
     if has(plxs_core::step::OutputVariable::EquivalentPlasticStrain) {
         let peeq = match material {
@@ -496,13 +515,19 @@ pub fn build_fields_with(
             },
         };
         let nodal = nodal_average_scalar(table, model, &peeq);
-        fields.push(scalar_field("PE", "PE", &order, &nodal));
+        fields.push(scalar_field(
+            FieldQuantity::EquivalentPlasticStrain,
+            "PE",
+            &order,
+            &nodal,
+        ));
     }
     if has(plxs_core::step::OutputVariable::StrainEnergyDensity) {
         let energy = internal_energy_density(stresses, strains);
         let nodal = nodal_average_scalar(table, model, &energy);
         fields.push(ResultField {
-            name: "ENER".into(),
+            quantity: FieldQuantity::StrainEnergyDensity,
+            imaginary: false,
             components: vec!["ENER".into()],
             nodes: order.iter().map(|&(id, _)| id).collect(),
             values: vec![order.iter().map(|&(_, i)| nodal[i as usize]).collect()],
@@ -516,7 +541,8 @@ pub fn build_fields_with(
     {
         let error = stress_error(table, model, stresses);
         fields.push(ResultField {
-            name: "ERROR".into(),
+            quantity: FieldQuantity::StressError,
+            imaginary: false,
             components: vec!["STR(%)".into()],
             nodes: order.iter().map(|&(id, _)| id).collect(),
             values: vec![order.iter().map(|&(_, i)| error[i as usize]).collect()],
@@ -555,7 +581,7 @@ pub fn write_increment(
         // CalculiX writes the contact fields before the error estimator.
         let at = fields
             .iter()
-            .position(|f| f.name == "ERROR")
+            .position(|f| f.key() == (FieldQuantity::StressError, false))
             .unwrap_or(fields.len());
         fields.splice(at..at, contact);
     }

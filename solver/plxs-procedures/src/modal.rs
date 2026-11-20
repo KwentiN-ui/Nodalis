@@ -496,7 +496,7 @@ impl Procedure for ModalDynamicsProcedure {
 /// Magnitudes and phases (CalculiX's convention, see [`crate::complex::phase`]) of a
 /// complex nodal field with `per_node` components given as real and imaginary parts.
 pub(crate) fn magnitude_phase(
-    name: &str,
+    quantity: plxs_core::results::FieldQuantity,
     components: &[&str],
     order: &[(u32, u32)],
     per_node: usize,
@@ -512,7 +512,8 @@ pub(crate) fn magnitude_phase(
         .fold(0.0, f64::max);
     let tiny = 1e-10 * largest;
     ResultField {
-        name: name.to_string(),
+        quantity,
+        imaginary: false,
         components: components.iter().map(|c| c.to_string()).collect(),
         nodes: order.iter().map(|&(id, _)| id).collect(),
         values: (0..2 * per_node)
@@ -677,12 +678,15 @@ impl Procedure for SteadyStateProcedure {
                     ctx.table, ctx.model, step, &u, &reactions, &stresses, &strains,
                 );
                 if suffix {
-                    part.retain(|f| f.name != "ERROR" && f.name != "ENER");
+                    part.retain(|f| {
+                        !matches!(
+                            f.quantity,
+                            plxs_core::results::FieldQuantity::StressError
+                                | plxs_core::results::FieldQuantity::StrainEnergyDensity
+                        )
+                    });
                     for field in &mut part {
-                        field.name = match field.name.as_str() {
-                            "TOSTRAIN" => "TOSTRAII".to_string(),
-                            other => format!("{other}I"),
-                        };
+                        field.imaginary = true;
                     }
                 }
                 *out = part;
@@ -712,7 +716,7 @@ impl Procedure for SteadyStateProcedure {
                 let b = ctx.table.reported_displacements(&u_im);
                 let order = crate::fields::node_order(ctx.model);
                 fields.push(magnitude_phase(
-                    "PDISP",
+                    plxs_core::results::FieldQuantity::DisplacementPhase,
                     &["MAG1", "MAG2", "MAG3", "PHA1", "PHA2", "PHA3"],
                     &order,
                     3,
@@ -721,15 +725,22 @@ impl Procedure for SteadyStateProcedure {
                 ));
             }
             if variables.contains(&plxs_core::step::OutputVariable::StressPhase) {
-                let stress = |name: &str| fields.iter().find(|f| f.name == name).cloned();
-                match (stress("STRESS"), stress("STRESSI")) {
+                let stress = |imaginary: bool| {
+                    (fields.iter())
+                        .find(|f| {
+                            f.key() == (plxs_core::results::FieldQuantity::Stresses, imaginary)
+                        })
+                        .cloned()
+                };
+                match (stress(false), stress(true)) {
                     (Some(sr), Some(si)) => fields.push({
                         let largest = (0..6)
                             .flat_map(|k| sr.values[k].iter().zip(&si.values[k]))
                             .map(|(x, y)| x.hypot(*y))
                             .fold(0.0, f64::max);
                         ResultField {
-                            name: "PSTRESS".into(),
+                            quantity: plxs_core::results::FieldQuantity::StressPhase,
+                            imaginary: false,
                             components: [
                                 "MAGXX", "MAGYY", "MAGZZ", "MAGXY", "MAGYZ", "MAGZX", "PHAXX",
                                 "PHAYY", "PHAZZ", "PHAXY", "PHAYZ", "PHAZX",

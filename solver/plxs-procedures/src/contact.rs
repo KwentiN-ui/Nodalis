@@ -109,7 +109,8 @@ pub fn contact_fields(
     {
         let names = ["COPEN", "CSLIP1", "CSLIP2", "CPRESS", "CSHEAR1", "CSHEAR2"];
         out.push(ResultField {
-            name: "CONTACT".into(),
+            quantity: plxs_core::results::FieldQuantity::Contact,
+            imaginary: false,
             components: names.iter().map(|s| s.to_string()).collect(),
             nodes: nodes.clone(),
             values: (0..6)
@@ -119,7 +120,8 @@ pub fn contact_fields(
     }
     if has(plxs_core::step::OutputVariable::ContactEnergy) {
         out.push(ResultField {
-            name: "CELS".into(),
+            quantity: plxs_core::results::FieldQuantity::ContactEnergy,
+            imaginary: false,
             components: vec!["CELS".into()],
             nodes,
             values: vec![order.iter().map(|&(_, i)| energy[i as usize]).collect()],

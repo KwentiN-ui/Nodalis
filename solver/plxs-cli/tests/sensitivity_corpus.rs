@@ -78,7 +78,7 @@ fn field(results: &Results, name: &str, component: usize) -> (Vec<u32>, Vec<f64>
         .increments
         .iter()
         .flat_map(|i| &i.fields)
-        .find(|f| f.name == name)
+        .find(|f| f.frd_name() == name)
         .expect(name);
     (f.nodes.clone(), f.values[component].clone())
 }

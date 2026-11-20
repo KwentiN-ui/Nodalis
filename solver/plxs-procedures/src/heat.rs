@@ -1014,8 +1014,11 @@ impl<'h> HeatRun<'h> {
         let table = ctx.table;
         let order = crate::fields::node_order(model);
         let ids: Vec<u32> = order.iter().map(|&(id, _)| id).collect();
-        let scalar = |name: &str, component: &str, values: &[f64]| ResultField {
-            name: name.into(),
+        let scalar = |quantity: plxs_core::results::FieldQuantity,
+                      component: &str,
+                      values: &[f64]| ResultField {
+            quantity,
+            imaginary: false,
             components: vec![component.into()],
             nodes: ids.clone(),
             values: vec![order.iter().map(|&(_, i)| values[i as usize]).collect()],
@@ -1023,13 +1026,18 @@ impl<'h> HeatRun<'h> {
         let mut front = Vec::new();
         let mut back = Vec::new();
         if has(plxs_core::step::OutputVariable::Temperatures) {
-            front.push(scalar("NDTEMP", "T", t));
+            front.push(scalar(
+                plxs_core::results::FieldQuantity::Temperatures,
+                "T",
+                t,
+            ));
         }
         if has(plxs_core::step::OutputVariable::HeatFlux) {
             let flux = heat_flux(model, table, self.heat, t)?;
             let (average, _) = nodal_average(table, model, &flux);
             back.push(ResultField {
-                name: "FLUX".into(),
+                quantity: plxs_core::results::FieldQuantity::HeatFlux,
+                imaginary: false,
                 components: vec!["F1".into(), "F2".into(), "F3".into()],
                 nodes: ids.clone(),
                 values: (0..3)
@@ -1044,7 +1052,11 @@ impl<'h> HeatRun<'h> {
             let mut kt = vec![0.0; t.len()];
             self.k.multiply(t, &mut kt);
             zero_on_expanded(ctx.table, &mut kt);
-            back.push(scalar("RFL", "RFL", &kt));
+            back.push(scalar(
+                plxs_core::results::FieldQuantity::ReactionHeatFlows,
+                "RFL",
+                &kt,
+            ));
         }
         let Some(last) = ctx.results.increments.last_mut() else {
             return Ok(());
@@ -1052,7 +1064,7 @@ impl<'h> HeatRun<'h> {
         let at = last
             .fields
             .iter()
-            .position(|f| f.name == "DISP")
+            .position(|f| f.key() == (plxs_core::results::FieldQuantity::Displacements, false))
             .map_or(0, |p| p + 1);
         for (offset, field) in front.into_iter().enumerate() {
             last.fields.insert(at + offset, field);

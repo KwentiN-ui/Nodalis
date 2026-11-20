@@ -878,13 +878,15 @@ mod tests {
                 nodal_diameter: None,
                 fields: vec![
                     ResultField {
-                        name: "DISP".into(),
+                        quantity: plxs_core::results::FieldQuantity::Displacements,
+                        imaginary: false,
                         components: vec!["D1".into(), "D2".into(), "D3".into()],
                         nodes: ids.clone(),
                         values: (0..3).map(column).collect(),
                     },
                     ResultField {
-                        name: "EMPTY".into(),
+                        quantity: plxs_core::results::FieldQuantity::Temperatures,
+                        imaginary: false,
                         components: vec!["X".into()],
                         nodes: Vec::new(),
                         values: vec![Vec::new()],

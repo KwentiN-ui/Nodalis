@@ -151,17 +151,18 @@ impl ModeShape {
 
     /// The shape as a `DISP` field on `nodes`, and the imaginary part as `DISPI`.
     pub fn fields(&self, nodes: &[NodeId]) -> Vec<ResultField> {
-        let field = |name: &str, components: [&str; 3], rows: &[[f32; 3]]| ResultField {
-            name: name.into(),
+        let field = |imaginary: bool, components: [&str; 3], rows: &[[f32; 3]]| ResultField {
+            quantity: FieldQuantity::Displacements,
+            imaginary,
             components: components.map(String::from).to_vec(),
             nodes: nodes.to_vec(),
             values: (0..3)
                 .map(|k| rows.iter().map(|r| f64::from(r[k])).collect())
                 .collect(),
         };
-        let mut fields = vec![field("DISP", ["D1", "D2", "D3"], &self.shape)];
+        let mut fields = vec![field(false, ["D1", "D2", "D3"], &self.shape)];
         if let Some(im) = &self.imaginary {
-            fields.push(field("DISPI", ["D1", "D2", "D3"], im));
+            fields.push(field(true, ["D1", "D2", "D3"], im));
         }
         fields
     }
@@ -203,17 +204,98 @@ pub struct ResultsIncrement {
     pub fields: Vec<ResultField>,
 }
 
-/// A nodal result field as written to the `.frd`: a CalculiX field name (`DISP`, `STRESS`,
-/// `FORC`...), component names (`D1`, `SXX`...) and the values per component, in the order
-/// of `nodes` (the output mesh: expanded nodes of shells and beams included, hence an own
-/// id list rather than the model's dense order).
+/// A nodal result field: its quantity, component names (`D1`, `SXX`...) and the values per
+/// component, in the order of `nodes` (the output mesh: expanded nodes of shells and beams
+/// included, hence an own id list rather than the model's dense order).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResultField {
-    pub name: String,
+    pub quantity: FieldQuantity,
+    /// The imaginary part of a complex field (a cyclic symmetric or complex mode).
+    pub imaginary: bool,
     pub components: Vec<String>,
     pub nodes: Vec<NodeId>,
     /// `values[component][node]`.
     pub values: Vec<Vec<f64>>,
+}
+
+impl ResultField {
+    /// The quantity and part, which tell fields apart.
+    pub fn key(&self) -> (FieldQuantity, bool) {
+        (self.quantity, self.imaginary)
+    }
+
+    /// The name of the field in `.frd` files (`DISP`, `DISPI` for the imaginary part).
+    pub fn frd_name(&self) -> String {
+        let name = self.quantity.frd_name();
+        if self.imaginary {
+            // `I` appended, in place of the last letter of a name with the eight letters
+            // the format allows (`TOSTRAIN` becomes `TOSTRAII`).
+            let mut out: String = name.chars().take(7).collect();
+            out.push('I');
+            out
+        } else {
+            name.to_string()
+        }
+    }
+}
+
+macro_rules! field_quantities {
+    ($($(#[$doc:meta])* $variant:ident = $frd:literal,)*) => {
+        /// What a result field holds.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        pub enum FieldQuantity {
+            $($(#[$doc])* $variant,)*
+        }
+
+        impl FieldQuantity {
+            pub const ALL: &[FieldQuantity] = &[$(FieldQuantity::$variant,)*];
+
+            /// The name of the field in `.frd` files.
+            pub fn frd_name(self) -> &'static str {
+                match self {
+                    $(FieldQuantity::$variant => $frd,)*
+                }
+            }
+        }
+    };
+}
+
+field_quantities! {
+    Displacements = "DISP",
+    Velocities = "VELO",
+    Accelerations = "ACCE",
+    /// Reaction forces.
+    Forces = "FORC",
+    Temperatures = "NDTEMP",
+    ReactionHeatFlows = "RFL",
+    Stresses = "STRESS",
+    Strains = "TOSTRAIN",
+    EquivalentPlasticStrain = "PE",
+    StrainEnergyDensity = "ENER",
+    /// The error estimate of the stresses.
+    StressError = "ERROR",
+    HeatFlux = "FLUX",
+    /// Opening, slip, pressure and shear of the contact.
+    Contact = "CONTACT",
+    ContactEnergy = "CELS",
+    SectionForces = "SECFORC",
+    /// Amplitude and phase of the displacements.
+    DisplacementPhase = "PDISP",
+    /// Amplitude and phase of the stresses.
+    StressPhase = "PSTRESS",
+    /// The normals of the design nodes of a sensitivity step.
+    DesignNormals = "NORM",
+    MassSensitivity = "SENMASS",
+    StrainEnergySensitivity = "SENENER",
+    FrequencySensitivity = "SENFREQ",
+    /// The quantities of a particle flow (density, pressure, ...).
+    ParticleFlow = "PFLOW",
+    /// The fine fraction of a grain mixture.
+    FineFraction = "FINE",
+    /// A mode shape of an eigenvalue step, normalized.
+    ModeShape = "MODE",
+    /// Magnitudes and phase angles of a complex mode.
+    ModePhase = "PMODE",
 }
 
 /// History values of an increment: a quantity of a source at a time, one row per node,
@@ -367,7 +449,7 @@ mod tests {
         };
         let mut fields = results.mode_fields();
         assert_eq!(fields.len(), 1);
-        assert_eq!(fields[0].name, "DISP");
+        assert_eq!(fields[0].quantity, FieldQuantity::Displacements);
         // The written mesh drops node 2 and scales the shape.
         fields[0].nodes = vec![1, 3];
         fields[0].values = vec![vec![0.0, 0.0], vec![0.0, 0.0], vec![2.0, 4.0]];

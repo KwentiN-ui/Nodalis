@@ -1012,7 +1012,16 @@ pub(crate) fn write_increment(
     let mut fields = crate::fields::build_fields_with(
         ctx.table, ctx.model, step, &motion.u, reactions, stresses, strains, material,
     );
-    if let (Some(carried), Some(ener)) = (carried, fields.iter_mut().find(|f| f.name == "ENER")) {
+    if let (Some(carried), Some(ener)) = (
+        carried,
+        fields.iter_mut().find(|f| {
+            f.key()
+                == (
+                    plxs_core::results::FieldQuantity::StrainEnergyDensity,
+                    false,
+                )
+        }),
+    ) {
         let order = node_order(ctx.model);
         for (value, &(_, i)) in ener.values[0].iter_mut().zip(&order) {
             *value += carried[i as usize];
@@ -1024,7 +1033,8 @@ pub(crate) fn write_increment(
     if has(plxs_core::step::OutputVariable::Velocities) {
         let v = ctx.table.reported_displacements(&motion.v);
         let field = ResultField {
-            name: "VELO".into(),
+            quantity: plxs_core::results::FieldQuantity::Velocities,
+            imaginary: false,
             components: vec!["V1".into(), "V2".into(), "V3".into()],
             nodes: order.iter().map(|&(id, _)| id).collect(),
             values: (0..3)
@@ -1033,14 +1043,15 @@ pub(crate) fn write_increment(
         };
         let at = fields
             .iter()
-            .position(|f| f.name == "DISP")
+            .position(|f| f.key() == (plxs_core::results::FieldQuantity::Displacements, false))
             .map_or(0, |p| p + 1);
         fields.insert(at, field);
     }
     if has(plxs_core::step::OutputVariable::Accelerations) {
         let a = ctx.table.reported_displacements(&motion.a);
         let field = ResultField {
-            name: "ACCE".into(),
+            quantity: plxs_core::results::FieldQuantity::Accelerations,
+            imaginary: false,
             components: vec!["A1".into(), "A2".into(), "A3".into()],
             nodes: order.iter().map(|&(id, _)| id).collect(),
             values: (0..3)
@@ -1049,7 +1060,10 @@ pub(crate) fn write_increment(
         };
         let at = fields
             .iter()
-            .position(|f| f.name == "VELO" || f.name == "DISP")
+            .position(|f| {
+                f.key() == (plxs_core::results::FieldQuantity::Velocities, false)
+                    || f.key() == (plxs_core::results::FieldQuantity::Displacements, false)
+            })
             .map_or(0, |p| p + 1);
         fields.insert(at, field);
     }
@@ -1065,7 +1079,7 @@ pub(crate) fn write_increment(
         // As in a static increment: the contact fields before the error estimator.
         let at = fields
             .iter()
-            .position(|f| f.name == "ERROR")
+            .position(|f| f.key() == (plxs_core::results::FieldQuantity::StressError, false))
             .unwrap_or(fields.len());
         fields.splice(at..at, contact);
     }

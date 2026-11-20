@@ -194,8 +194,9 @@ impl OutputMap {
             .enumerate()
             .map(|(i, &n)| (n, i))
             .collect();
-        let sum = field.name == "FORC";
-        let disp = field.name == "DISP";
+        use plxs_core::results::FieldQuantity as Q;
+        let sum = field.key() == (Q::Forces, false);
+        let disp = field.key() == (Q::Displacements, false);
         for &node in &written.native_nodes {
             let Some(groups) = self.groups.get(&node) else {
                 continue;
@@ -256,9 +257,10 @@ impl OutputMap {
 
     /// The rotations and moments of U1 nodes from their helper nodes.
     fn rotation_field(&self, field: &mut ResultField) {
-        let names: [&str; 3] = match field.name.as_str() {
-            "DISP" => ["D4", "D5", "D6"],
-            "FORC" => ["F4", "F5", "F6"],
+        use plxs_core::results::FieldQuantity as Q;
+        let names: [&str; 3] = match field.key() {
+            (Q::Displacements, false) => ["D4", "D5", "D6"],
+            (Q::Forces, false) => ["F4", "F5", "F6"],
             _ => return,
         };
         let position: HashMap<NodeId, usize> = field
@@ -298,7 +300,8 @@ pub struct Written {
 /// `field` without the nodes left out of the written mesh.
 fn trim_field(written: &Written, field: &mut ResultField) {
     // Element fields only where elements are.
-    let nodal = matches!(field.name.as_str(), "DISP" | "DISPI" | "FORC");
+    use plxs_core::results::FieldQuantity as Q;
+    let nodal = matches!(field.key(), (Q::Displacements, _) | (Q::Forces, false));
     let keep: Vec<bool> = field
         .nodes
         .iter()

@@ -70,9 +70,6 @@ const TEMPERATURE: usize = COMPONENTS.len();
 /// The index of the fine fraction of grain mixtures in [`ParticleFrame::fields`].
 const FINE: usize = TEMPERATURE + 1;
 
-/// The field of the fine fraction of grain mixtures, written when a material is one.
-pub const FINE_FIELD: &str = "FINE";
-
 /// The index of the body field in [`ParticleFrame::fields`].
 fn body_field() -> usize {
     PARTICLE_FIELDS.len() - 1
@@ -303,6 +300,8 @@ impl FrameTrack {
     /// a point where they were made, without values.
     pub fn complete(&self, increment: &mut ResultsIncrement) {
         for field in &mut increment.fields {
+            let displacements =
+                field.key() == (plxs_core::results::FieldQuantity::Displacements, false);
             let known: std::collections::HashSet<u32> = (field.nodes.iter())
                 .copied()
                 .filter(|&n| n > self.born_base)
@@ -315,7 +314,7 @@ impl FrameTrack {
                 for (c, corner) in self.corners.iter().enumerate() {
                     field.nodes.push(first + c as u32 + 1);
                     for (a, column) in field.values.iter_mut().enumerate() {
-                        column.push(if field.name == "DISP" {
+                        column.push(if displacements {
                             -self.halves[k] * corner[a]
                         } else {
                             f64::NAN
@@ -427,11 +426,14 @@ impl FrameTrack {
         let axes = if self.plane { 2 } else { 3 };
         disp.truncate(axes);
         velo.truncate(axes);
-        let field = |name: &str, components: &[&str], values| ResultField {
-            name: name.into(),
-            components: components.iter().map(|c| (*c).to_string()).collect(),
-            nodes: nodes.clone(),
-            values,
+        let field = |quantity: plxs_core::results::FieldQuantity, components: &[&str], values| {
+            ResultField {
+                quantity,
+                imaginary: false,
+                components: components.iter().map(|c| (*c).to_string()).collect(),
+                nodes: nodes.clone(),
+                values,
+            }
         };
         ResultsIncrement {
             step,
@@ -441,18 +443,37 @@ impl FrameTrack {
             total_time: frame.time,
             nodal_diameter: None,
             fields: [
-                field("DISP", &["D1", "D2", "D3"][..axes], disp),
-                field("VELO", &["V1", "V2", "V3"][..axes], velo),
-                field(FIELD, &COMPONENTS, quantities),
+                field(
+                    plxs_core::results::FieldQuantity::Displacements,
+                    &["D1", "D2", "D3"][..axes],
+                    disp,
+                ),
+                field(
+                    plxs_core::results::FieldQuantity::Velocities,
+                    &["V1", "V2", "V3"][..axes],
+                    velo,
+                ),
+                field(
+                    plxs_core::results::FieldQuantity::ParticleFlow,
+                    &COMPONENTS,
+                    quantities,
+                ),
             ]
             .into_iter()
-            .chain(
-                (self.temperatures.is_some()).then(|| field("NDTEMP", &["T"], vec![temperature])),
-            )
-            .chain(
-                self.mixtures
-                    .then(|| field(FINE_FIELD, &["FINE"], vec![fine])),
-            )
+            .chain((self.temperatures.is_some()).then(|| {
+                field(
+                    plxs_core::results::FieldQuantity::Temperatures,
+                    &["T"],
+                    vec![temperature],
+                )
+            }))
+            .chain(self.mixtures.then(|| {
+                field(
+                    plxs_core::results::FieldQuantity::FineFraction,
+                    &["FINE"],
+                    vec![fine],
+                )
+            }))
             .collect(),
         }
     }
@@ -745,7 +766,12 @@ mod tests {
         let mut model = model();
         let first = frame(0.0, vec![0], vec![[0.0; 3]]);
         let plain = FrameTrack::new(&model, &first).increment(&first, 1, 1);
-        assert!(plain.fields.iter().all(|f| f.name != FINE_FIELD));
+        assert!(
+            plain
+                .fields
+                .iter()
+                .all(|f| f.quantity != plxs_core::results::FieldQuantity::FineFraction)
+        );
         model.materials[0].law = plxs_core::particles::ParticleLaw::Granular {
             shear: 1e5,
             bulk: 1e6,
@@ -762,7 +788,7 @@ mod tests {
         let fine = increment
             .fields
             .iter()
-            .find(|f| f.name == FINE_FIELD)
+            .find(|f| f.quantity == plxs_core::results::FieldQuantity::FineFraction)
             .unwrap();
         assert_eq!(fine.components, vec!["FINE".to_string()]);
         assert!(fine.values[0][..8].iter().all(|&v| v == 0.75));
