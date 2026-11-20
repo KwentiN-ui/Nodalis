@@ -6,6 +6,7 @@
 // Calling into a C library needs `unsafe`; it is confined to this module and `ffi`.
 #![allow(unsafe_code)]
 
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::path::{Path, PathBuf};
@@ -55,17 +56,34 @@ pub struct LibraryInfo {
 pub struct Gmsh {
     api: Api,
     info: LibraryInfo,
+    /// Whether the model is no longer the shapes last read as they were read, see
+    /// [`Gmsh::read_untouched`]: set by whatever changes the shapes or leaves something in
+    /// the model that the next mesh would follow.
+    touched: Cell<bool>,
+    /// The size fields the model holds, which [`Gmsh::read_untouched`] takes back.
+    fields: RefCell<Vec<i32>>,
+    /// Whether the model of one part is the current one, see [`Gmsh::open_part_model`]:
+    /// what is done then leaves the model of all shapes as it is.
+    part_model: Cell<bool>,
 }
+
+/// The name of the model the shapes are read into.
+const MODEL: &str = "nodalis";
+/// The name of the model of one part, see [`Gmsh::open_part_model`].
+const PART_MODEL: &str = "nodalis-part";
 
 struct State {
     /// Library from the settings; `None` searches the default places.
     configured: Option<PathBuf>,
     loaded: Option<Gmsh>,
+    /// What the model was left holding by [`with_kept_shapes`], see there.
+    kept: Option<u64>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
     configured: None,
     loaded: None,
+    kept: None,
 });
 
 /// A boolean operation of OpenCASCADE.
@@ -148,12 +166,52 @@ pub fn with_gmsh<T>(f: impl FnOnce(&Gmsh) -> Result<T, GmshError>) -> Result<T, 
         let gmsh = Gmsh::load(state.configured.as_deref())?;
         state.loaded = Some(gmsh);
     }
+    state.kept = None;
     let gmsh = state.loaded.as_ref().expect("loaded above");
     gmsh.clear()?;
     gmsh.start_log()?;
     let result = f(gmsh);
+    if result.is_err() {
+        let _ = gmsh.restart();
+    }
     // The model is not needed any more; clearing frees its memory right away.
     let _ = gmsh.clear();
+    result
+}
+
+/// [`with_gmsh`] for uses that come one after the other for the same shapes, as when the
+/// parts of an assembly are meshed: the model is left as `f` leaves it, and the next call
+/// with the same `shapes` (a number that stands for them, such as a hash of their file)
+/// finds it again. `f` asks for the shapes with [`Gmsh::read_untouched`], which then reads
+/// them only if something changed them since, and works on one part of them in a model of
+/// its own ([`Gmsh::open_part_model`]), which leaves them as they are.
+///
+/// Reading the shapes of an assembly takes about a second, and so does removing all parts
+/// but one from them: without this, every part of an assembly pays both.
+pub fn with_kept_shapes<T>(
+    shapes: u64,
+    f: impl FnOnce(&Gmsh) -> Result<T, GmshError>,
+) -> Result<T, GmshError> {
+    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if state.loaded.is_none() {
+        let gmsh = Gmsh::load(state.configured.as_deref())?;
+        state.loaded = Some(gmsh);
+    }
+    // Forgotten while `f` runs, so that a panic in it leaves nothing to be found.
+    let kept = state.kept.take();
+    let gmsh = state.loaded.as_ref().expect("loaded above");
+    if kept != Some(shapes) {
+        gmsh.clear()?;
+    }
+    gmsh.start_log()?;
+    let result = f(gmsh);
+    if result.is_err() {
+        // The shapes are read again for the next part.
+        let _ = gmsh.restart();
+    } else if gmsh.close_part_model().is_ok() {
+        // Left in the model of all shapes, whatever `f` was doing when it ended.
+        state.kept = Some(shapes);
+    }
     result
 }
 
@@ -273,6 +331,9 @@ impl Gmsh {
                 version: String::new(),
                 untested: false,
             },
+            touched: Cell::new(true),
+            fields: RefCell::new(Vec::new()),
+            part_model: Cell::new(false),
         };
         gmsh.initialize()?;
         let version = gmsh.option_string("General.Version")?;
@@ -281,12 +342,28 @@ impl Gmsh {
             _ => return Err(GmshError::UnsupportedVersion { version }),
         }
         gmsh.info.version = version;
-        // Messages go to the log, and to the terminal only if asked for; STEP files are
-        // read in millimetres.
-        let terminal = TERMINAL.load(std::sync::atomic::Ordering::Relaxed);
-        gmsh.set_number("General.Terminal", f64::from(u8::from(terminal)))?;
-        gmsh.set_string("Geometry.OCCTargetUnit", "MM")?;
+        gmsh.set_up()?;
         Ok(gmsh)
+    }
+
+    /// The options Gmsh always runs with here: messages go to the log, and to the terminal
+    /// only if asked for; STEP files are read in millimetres.
+    fn set_up(&self) -> Result<(), GmshError> {
+        let terminal = TERMINAL.load(std::sync::atomic::Ordering::Relaxed);
+        self.set_number("General.Terminal", f64::from(u8::from(terminal)))?;
+        self.set_string("Geometry.OCCTargetUnit", "MM")
+    }
+
+    /// Starts Gmsh anew after it failed. A mesher of Gmsh that gives up with an error (such
+    /// as overlapping facets in the boundary of a volume) leaves Gmsh marked as busy
+    /// meshing, and every mesh asked for after that comes back empty at once ("I'm busy!
+    /// Ask me that later..."): the parts meshed after one that failed got no elements. Only
+    /// ending Gmsh takes the mark away.
+    fn restart(&self) -> Result<(), GmshError> {
+        self.call(|e| unsafe { (self.api.finalize)(e) })?;
+        self.initialize()?;
+        self.set_up()?;
+        self.clear()
     }
 
     pub fn info(&self) -> &LibraryInfo {
@@ -345,9 +422,13 @@ impl Gmsh {
         self.call(|e| unsafe { (self.api.initialize)(0, std::ptr::null_mut(), 0, 0, e) })
     }
 
+    /// Empties Gmsh: every model goes, and an empty one is there for the shapes.
     pub fn clear(&self) -> Result<(), GmshError> {
+        self.part_model.set(false);
+        self.touch();
+        self.fields.borrow_mut().clear();
         self.call(|e| unsafe { (self.api.clear)(e) })?;
-        let name = c_string("nodalis")?;
+        let name = c_string(MODEL)?;
         self.call(|e| unsafe { (self.api.model_add)(name.as_ptr(), e) })
     }
 
@@ -381,6 +462,7 @@ impl Gmsh {
     /// parts, survive next to the solids; the returned (dimension, tag) pairs are the shapes
     /// of the file.
     pub fn import_shapes(&self, path: &Path) -> Result<Vec<(i32, i32)>, GmshError> {
+        self.touch();
         let file = c_path(path)?;
         let empty = c_string("")?;
         let (mut tags, mut len) = (std::ptr::null_mut(), 0);
@@ -394,6 +476,7 @@ impl Gmsh {
 
     /// Adds an axis-parallel box from a corner by its size; returns its tag.
     pub fn add_box(&self, origin: [f64; 3], size: [f64; 3]) -> Result<i32, GmshError> {
+        self.touch();
         let ([x, y, z], [dx, dy, dz]) = (origin, size);
         let mut tag = 0;
         self.call(|e| tag = unsafe { (self.api.occ_add_box)(x, y, z, dx, dy, dz, -1, e) })?;
@@ -404,6 +487,7 @@ impl Gmsh {
     /// Adds a flat disk of a radius about a centre, normal to `axis`; returns its tag.
     /// A ball as a solid; returns its tag.
     pub fn add_sphere(&self, [x, y, z]: [f64; 3], radius: f64) -> Result<i32, GmshError> {
+        self.touch();
         use std::f64::consts::{FRAC_PI_2, TAU};
         let mut tag = 0;
         self.call(|e| {
@@ -423,6 +507,7 @@ impl Gmsh {
         [dx, dy, dz]: [f64; 3],
         radius: f64,
     ) -> Result<i32, GmshError> {
+        self.touch();
         let mut tag = 0;
         self.call(|e| {
             tag = unsafe {
@@ -450,6 +535,7 @@ impl Gmsh {
         radius: f64,
         axis: [f64; 3],
     ) -> Result<i32, GmshError> {
+        self.touch();
         let [x, y, z] = centre;
         let mut tag = 0;
         self.call(|e| {
@@ -480,6 +566,7 @@ impl Gmsh {
         size: [f64; 2],
         radius: f64,
     ) -> Result<i32, GmshError> {
+        self.touch();
         let ([x, y, z], [dx, dy]) = (origin, size);
         let mut tag = 0;
         self.call(|e| {
@@ -491,6 +578,7 @@ impl Gmsh {
 
     /// Adds a point; returns its tag. Points are the ends of lines, see [`Self::add_line`].
     pub fn add_point(&self, [x, y, z]: [f64; 3]) -> Result<i32, GmshError> {
+        self.touch();
         let mut tag = 0;
         self.call(|e| tag = unsafe { (self.api.occ_add_point)(x, y, z, 0.0, -1, e) })?;
         self.synchronize()?;
@@ -499,6 +587,7 @@ impl Gmsh {
 
     /// Adds a straight line between two points; returns its tag.
     pub fn add_line(&self, start: i32, end: i32) -> Result<i32, GmshError> {
+        self.touch();
         let mut tag = 0;
         self.call(|e| tag = unsafe { (self.api.occ_add_line)(start, end, -1, e) })?;
         self.synchronize()?;
@@ -513,6 +602,7 @@ impl Gmsh {
     /// here instead and removed one dimension after the other, from the solids down, which
     /// takes a fraction of that.
     pub fn remove(&self, entities: &[(i32, i32)]) -> Result<(), GmshError> {
+        self.touch();
         if entities.is_empty() {
             return Ok(());
         }
@@ -565,6 +655,7 @@ impl Gmsh {
     /// Merges entities that lie on each other, e.g. the edge two faces share once one of them
     /// was made anew, so that they are joined again.
     pub fn remove_all_duplicates(&self) -> Result<(), GmshError> {
+        self.touch();
         self.call(|e| unsafe { (self.api.occ_remove_all_duplicates)(e) })?;
         self.synchronize()
     }
@@ -572,6 +663,7 @@ impl Gmsh {
     /// Removes entities given as (dimension, tag) and nothing else, so that the faces of a
     /// removed solid stay.
     pub fn remove_only(&self, entities: &[(i32, i32)]) -> Result<(), GmshError> {
+        self.touch();
         let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
         self.call(|e| unsafe { (self.api.occ_remove)(flat.as_ptr(), flat.len(), 0, e) })?;
         self.synchronize()
@@ -711,6 +803,7 @@ impl Gmsh {
     /// ones, which it returns.
     /// On failure the solids may be gone from the model, which is then to be read anew.
     pub fn defeature(&self, volumes: &[i32], faces: &[i32]) -> Result<Vec<(i32, i32)>, GmshError> {
+        self.touch();
         let (mut out, mut out_len) = (std::ptr::null_mut(), 0);
         // Gmsh fixes each solid first by default, which makes a copy whose faces are none of
         // those to remove.
@@ -736,6 +829,7 @@ impl Gmsh {
 
     /// Copies of entities, with what bounds them; returns the copies.
     pub fn copy(&self, entities: &[(i32, i32)]) -> Result<Vec<(i32, i32)>, GmshError> {
+        self.touch();
         let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
         let (mut out, mut len) = (std::ptr::null_mut(), 0);
         self.call(|e| unsafe {
@@ -814,6 +908,7 @@ impl Gmsh {
 
     /// Moves entities of the OpenCASCADE model; their shapes stay what they are.
     pub fn translate(&self, entities: &[(i32, i32)], by: [f64; 3]) -> Result<(), GmshError> {
+        self.touch();
         let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
         self.call(|e| unsafe {
             (self.api.occ_translate)(flat.as_ptr(), flat.len(), by[0], by[1], by[2], e);
@@ -830,6 +925,7 @@ impl Gmsh {
         axis: [f64; 3],
         angle: f64,
     ) -> Result<(), GmshError> {
+        self.touch();
         let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
         let ([x, y, z], [ax, ay, az]) = (point, axis);
         self.call(|e| unsafe {
@@ -840,6 +936,7 @@ impl Gmsh {
 
     /// Reflects entities of the OpenCASCADE model at the plane a x + b y + c z + d = 0.
     pub fn mirror(&self, entities: &[(i32, i32)], plane: [f64; 4]) -> Result<(), GmshError> {
+        self.touch();
         let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
         let [a, b, c, d] = plane;
         self.call(|e| unsafe {
@@ -855,6 +952,7 @@ impl Gmsh {
         center: [f64; 3],
         factors: [f64; 3],
     ) -> Result<(), GmshError> {
+        self.touch();
         let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
         let ([x, y, z], [a, b, c]) = (center, factors);
         self.call(|e| unsafe {
@@ -869,6 +967,7 @@ impl Gmsh {
     /// planes stay planes and circles circles; a spline in their place would be cut into
     /// coarser splines by every boolean after it.
     pub fn place(&self, entities: &[(i32, i32)], frame: &[f64; 12]) -> Result<(), GmshError> {
+        self.touch();
         let r = |i: usize, j: usize| frame[4 * i + j];
         // The rotation as a unit quaternion, from the largest of its components.
         let trace = r(0, 0) + r(1, 1) + r(2, 2);
@@ -924,6 +1023,7 @@ impl Gmsh {
         entities: &[(i32, i32)],
         matrix: &[f64; 12],
     ) -> Result<(), GmshError> {
+        self.touch();
         let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
         self.call(|e| unsafe {
             (self.api.occ_affine_transform)(flat.as_ptr(), flat.len(), matrix.as_ptr(), 12, e);
@@ -942,6 +1042,7 @@ impl Gmsh {
         masters: &[i32],
         transform: &[f64; 16],
     ) -> Result<(), GmshError> {
+        self.touch();
         self.call(|e| unsafe {
             (self.api.mesh_set_periodic)(
                 dim,
@@ -962,6 +1063,7 @@ impl Gmsh {
         objects: &[(i32, i32)],
         tools: &[(i32, i32)],
     ) -> Result<Vec<(i32, i32)>, GmshError> {
+        self.touch();
         self.boolean(Boolean::Intersect, objects, tools, false)
     }
 
@@ -974,6 +1076,7 @@ impl Gmsh {
         tools: &[(i32, i32)],
         remove_tools: bool,
     ) -> Result<Vec<(i32, i32)>, GmshError> {
+        self.touch();
         let function = match operation {
             Boolean::Intersect => self.api.occ_intersect,
             Boolean::Fuse => self.api.occ_fuse,
@@ -1021,6 +1124,7 @@ impl Gmsh {
         remove_object: bool,
         remove_tool: bool,
     ) -> Result<Vec<(i32, i32)>, GmshError> {
+        self.touch();
         self.boolean_with_map(
             operation.function(&self.api),
             objects,
@@ -1039,6 +1143,7 @@ impl Gmsh {
         objects: &[(i32, i32)],
         tools: &[(i32, i32)],
     ) -> Result<Fragments, GmshError> {
+        self.touch();
         self.boolean_with_map(self.api.occ_fragment, objects, tools, true, true)
     }
 
@@ -1050,6 +1155,7 @@ impl Gmsh {
         remove_object: bool,
         remove_tool: bool,
     ) -> Result<Fragments, GmshError> {
+        self.touch();
         let objects: Vec<c_int> = objects.iter().flat_map(|&(d, t)| [d, t]).collect();
         let tools: Vec<c_int> = tools.iter().flat_map(|&(d, t)| [d, t]).collect();
         let (mut out, mut out_len) = (std::ptr::null_mut(), 0);
@@ -1090,6 +1196,7 @@ impl Gmsh {
         curves: &[i32],
         radius: f64,
     ) -> Result<Vec<(i32, i32)>, GmshError> {
+        self.touch();
         let (mut out, mut out_len) = (std::ptr::null_mut(), 0);
         self.call(|e| unsafe {
             (self.api.occ_fillet)(
@@ -1119,6 +1226,7 @@ impl Gmsh {
         surfaces: &[i32],
         distance: f64,
     ) -> Result<Vec<(i32, i32)>, GmshError> {
+        self.touch();
         let (mut out, mut out_len) = (std::ptr::null_mut(), 0);
         self.call(|e| unsafe {
             (self.api.occ_chamfer)(
@@ -1148,6 +1256,7 @@ impl Gmsh {
         entities: &[(i32, i32)],
         along: [f64; 3],
     ) -> Result<Vec<(i32, i32)>, GmshError> {
+        self.touch();
         let entities: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
         let (mut out, mut out_len) = (std::ptr::null_mut(), 0);
         let [dx, dy, dz] = along;
@@ -1182,6 +1291,7 @@ impl Gmsh {
         axis: [f64; 3],
         angle: f64,
     ) -> Result<Vec<(i32, i32)>, GmshError> {
+        self.touch();
         let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
         let (mut out, mut out_len) = (std::ptr::null_mut(), 0);
         let [x, y, z] = point;
@@ -1217,6 +1327,9 @@ impl Gmsh {
         let kind = c_string(kind)?;
         let mut tag = 0;
         self.call(|e| tag = unsafe { (self.api.field_add)(kind.as_ptr(), -1, e) })?;
+        if !self.part_model.get() {
+            self.fields.borrow_mut().push(tag);
+        }
         Ok(tag)
     }
 
@@ -1243,7 +1356,105 @@ impl Gmsh {
     }
 
     pub fn remove_field(&self, field: i32) -> Result<(), GmshError> {
+        if !self.part_model.get() {
+            self.fields.borrow_mut().retain(|&f| f != field);
+        }
         self.call(|e| unsafe { (self.api.field_remove)(field, e) })
+    }
+
+    /// Makes the model the shapes of `file` as they are read, with no mesh, and returns
+    /// whether it read them. They are only read if the model does not hold them untouched
+    /// any more: left as they were by the uses before, they are found again, see
+    /// [`with_kept_shapes`], and only a mesh and size fields are taken back.
+    ///
+    /// The caller answers for `file` being the shapes [`with_kept_shapes`] was called for.
+    pub fn read_untouched(&self, file: &Path) -> Result<bool, GmshError> {
+        self.close_part_model()?;
+        if self.touched.get() {
+            self.clear()?;
+            self.import_shapes(file)?;
+            self.touched.set(false);
+            return Ok(true);
+        }
+        self.clear_mesh()?;
+        let fields: Vec<i32> = self.fields.borrow().iter().rev().copied().collect();
+        for field in fields {
+            self.remove_field(field)?;
+        }
+        Ok(false)
+    }
+
+    /// Notes that the model of all shapes changed, unless the model of a part is the
+    /// current one.
+    fn touch(&self) {
+        if !self.part_model.get() {
+            self.touched.set(true);
+        }
+    }
+
+    /// Every entity of the model as (dimension, tag).
+    pub fn all_entities(&self) -> Result<Vec<(i32, i32)>, GmshError> {
+        let mut all = Vec::new();
+        for dim in 0..=3 {
+            all.extend(self.entities(dim)?.into_iter().map(|tag| (dim, tag)));
+        }
+        Ok(all)
+    }
+
+    /// Writes the shapes of the given entities, with what bounds them, to a BREP file; the
+    /// model stays as it is. Far faster than removing the other shapes of an assembly first.
+    pub fn write_shapes_of(&self, entities: &[(i32, i32)], path: &Path) -> Result<(), GmshError> {
+        let all = self.all_entities()?;
+        self.set_visibility(&all, false)?;
+        self.set_visibility(entities, true)?;
+        self.set_number("Geometry.OCCExportOnlyVisible", 1.0)?;
+        let written = self.write(path);
+        self.set_number("Geometry.OCCExportOnlyVisible", 0.0)?;
+        self.set_visibility(&all, true)?;
+        written
+    }
+
+    /// Opens an empty model next to the one of all shapes and reads the shapes of `file`
+    /// into it, numbered from `first` in each dimension (points, curves, faces, solids).
+    /// With the shapes of one part written by [`Self::write_shapes_of`] and the lowest tags
+    /// the part has among all shapes, the part is alone there under the tags it has among
+    /// the others. Whatever is done until [`Self::close_part_model`] happens to this model
+    /// only. A part model that is open is replaced.
+    pub fn open_part_model(&self, file: &Path, first: [i32; 4]) -> Result<(), GmshError> {
+        self.close_part_model()?;
+        let name = c_string(PART_MODEL)?;
+        self.call(|e| unsafe { (self.api.model_add)(name.as_ptr(), e) })?;
+        self.part_model.set(true);
+        for (dim, first) in (0..).zip(first) {
+            self.call(|e| unsafe { (self.api.occ_set_max_tag)(dim, first - 1, e) })?;
+        }
+        self.import_shapes(file).map(|_| ())
+    }
+
+    /// Discards the model of a part, if one is open, and goes back to the one of all shapes.
+    pub fn close_part_model(&self) -> Result<(), GmshError> {
+        if !self.part_model.get() {
+            return Ok(());
+        }
+        self.call(|e| unsafe { (self.api.model_remove)(e) })?;
+        self.part_model.set(false);
+        let name = c_string(MODEL)?;
+        self.call(|e| unsafe { (self.api.model_set_current)(name.as_ptr(), e) })?;
+        self.remove_views()
+    }
+
+    /// Removes the views Gmsh's quasi-structured algorithm leaves behind: the field it
+    /// guides the quadrilaterals by. Views belong to no model, and the algorithm takes the
+    /// one it finds for the model it meshes next, so that the faces of the next part were
+    /// meshed after the field of this one, far too coarse or too fine. Emptying Gmsh
+    /// removes them as well; discarding one model does not.
+    fn remove_views(&self) -> Result<(), GmshError> {
+        let (mut tags, mut len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe { (self.api.view_get_tags)(&mut tags, &mut len, e) })?;
+        for view in self.take_vec(tags, len) {
+            self.call(|e| unsafe { (self.api.view_remove)(view, e) })?;
+        }
+        Ok(())
     }
 
     /// Discards the whole mesh; the geometry stays.
@@ -1279,6 +1490,7 @@ impl Gmsh {
     }
 
     pub fn set_entity_name(&self, dim: i32, tag: i32, name: &str) -> Result<(), GmshError> {
+        self.touch();
         let name = c_string(name)?;
         self.call(|e| unsafe { (self.api.set_entity_name)(dim, tag, name.as_ptr(), e) })
     }
@@ -1338,6 +1550,7 @@ impl Gmsh {
     /// options `Mesh.StlLinearDeflection` and `Mesh.StlAngularDeflection`, as the mesh of the
     /// faces. Its triangles may be long and thin, so it is for display only.
     pub fn import_stl(&self) -> Result<(), GmshError> {
+        self.touch();
         self.call(|e| unsafe { (self.api.mesh_import_stl)(e) })
     }
 
@@ -1351,6 +1564,7 @@ impl Gmsh {
         corner_angle: f64,
         recombine: bool,
     ) -> Result<(), GmshError> {
+        self.touch();
         let flat: Vec<c_int> = faces.iter().flat_map(|&t| [2, t]).collect();
         self.call(|e| unsafe {
             (self.api.mesh_set_transfinite_automatic)(

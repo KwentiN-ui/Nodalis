@@ -2369,6 +2369,7 @@ impl ProjectApp {
         plx_results::values::set_budget(settings.post.results_memory_bytes());
         crate::style::set_theme(&cc.egui_ctx, settings.graphics.theme);
         plx_mesher::set_library_path(settings.gmsh.library());
+        crate::meshing::set_processes(settings.gmsh.processes);
         let units = crate::units_menu::first(settings.new_model.units);
         let mut app = Self {
             render_state,
@@ -8587,7 +8588,10 @@ impl ProjectApp {
                 return;
             }
         };
-        if new.gmsh != self.settings.gmsh && !plx_mesher::set_library_path(new.gmsh.library()) {
+        crate::meshing::set_processes(new.gmsh.processes);
+        if new.gmsh.library != self.settings.gmsh.library
+            && !plx_mesher::set_library_path(new.gmsh.library())
+        {
             self.output
                 .push("The changed Gmsh library is loaded after a restart".into());
         }

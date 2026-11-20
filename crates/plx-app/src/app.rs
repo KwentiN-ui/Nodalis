@@ -1204,10 +1204,13 @@ impl AnalysisWindow {
                 }
                 let text = match (&progress, cancelling) {
                     (_, true) => "Cancelling the meshing …".to_string(),
-                    (Some(p), _) if p.total > 1 => {
-                        format!("Part {} of {}: {}", p.done + 1, p.total, p.part)
+                    (Some(p), _) if p.total > 1 && p.parts.len() > 1 => {
+                        format!("{} of {} parts done: {}", p.done, p.total, p.now())
                     }
-                    (Some(p), _) => format!("Meshing {} …", p.part),
+                    (Some(p), _) if p.total > 1 => {
+                        format!("Part {} of {}: {}", p.done + 1, p.total, p.now())
+                    }
+                    (Some(p), _) => format!("Meshing {} …", p.now()),
                     (None, _) => "Meshing …".to_string(),
                 };
                 ui.add(egui::Label::new(text).truncate());
@@ -7848,7 +7851,10 @@ impl Workbench {
         new.graphics.shell_thickness = live.shell_thickness;
         new.graphics.beam_profiles = live.beam_profiles;
         new.graphics.show_linked = live.show_linked;
-        if new.gmsh != self.settings.gmsh && !plx_mesher::set_library_path(new.gmsh.library()) {
+        crate::meshing::set_processes(new.gmsh.processes);
+        if new.gmsh.library != self.settings.gmsh.library
+            && !plx_mesher::set_library_path(new.gmsh.library())
+        {
             self.output
                 .push("The changed Gmsh library is loaded after a restart".into());
         }
