@@ -56,6 +56,11 @@ gmsh_api! {
     option_set_string = "gmshOptionSetString": fn(*const c_char, *const c_char, Ierr);
     option_get_string = "gmshOptionGetString": fn(*const c_char, *mut *mut c_char, Ierr);
     model_add = "gmshModelAdd": fn(*const c_char, Ierr);
+    model_set_current = "gmshModelSetCurrent": fn(*const c_char, Ierr);
+    model_remove = "gmshModelRemove": fn(Ierr);
+    occ_set_max_tag = "gmshModelOccSetMaxTag": fn(c_int, c_int, Ierr);
+    view_get_tags = "gmshViewGetTags": fn(*mut *mut c_int, *mut usize, Ierr);
+    view_remove = "gmshViewRemove": fn(c_int, Ierr);
     get_entities = "gmshModelGetEntities": fn(*mut *mut c_int, *mut usize, c_int, Ierr);
     get_entity_name = "gmshModelGetEntityName": fn(c_int, c_int, *mut *mut c_char, Ierr);
     set_entity_name = "gmshModelSetEntityName": fn(c_int, c_int, *const c_char, Ierr);
