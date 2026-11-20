@@ -730,6 +730,20 @@ impl SettingsWindow {
                     None => ui.weak("not yet"),
                 };
                 ui.end_row();
+            });
+        ui.add(
+            egui::Label::new(
+                "If empty, the library is searched next to the executable (libgmsh.so or \
+                 gmsh-4.15.dll), then in the system search path. Another library is only \
+                 loaded after a restart.",
+            )
+            .wrap(),
+        );
+        ui.add_space(8.0);
+        egui::Grid::new("gmsh meshing settings")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
                 ui.label("Meshing processes");
                 ui.horizontal(|ui| {
                     let processes = &mut self.draft.gmsh.processes;
@@ -759,14 +773,6 @@ impl SettingsWindow {
                 );
                 ui.end_row();
             });
-        ui.add(
-            egui::Label::new(
-                "If empty, the library is searched next to the executable (libgmsh.so or \
-                 gmsh-4.15.dll), then in the system search path. Another library is only \
-                 loaded after a restart.",
-            )
-            .wrap(),
-        );
         ui.add_space(8.0);
         if let GmshCheck::Running(receiver) = &self.gmsh_check
             && let Ok(result) = receiver.try_recv()

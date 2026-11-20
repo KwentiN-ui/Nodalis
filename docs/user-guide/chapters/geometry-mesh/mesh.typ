@@ -39,8 +39,7 @@ them at the same time, each in a Gmsh process of its own: by default as many as 
 has processor cores, and never more than there are parts. The processes take the parts one
 after the other as they get done, so a few large parts do not hold up the many small ones.
 The bodies of a compound part (@compound-parts) are meshed together by one process. The
-meshes are the same as if the parts were meshed one by one, and they arrive in the FE model
-in the order of the parts.
+meshes arrive in the FE model in the order of the parts, whichever process made them.
 
 Every process reads the geometry and holds the mesh it works on in memory. If the memory runs
 out with a large assembly and a fine mesh, set fewer #ui("Meshing processes") under
