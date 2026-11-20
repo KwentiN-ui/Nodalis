@@ -2244,6 +2244,7 @@ mod tests {
             plx_model::Id::new(),
         );
         let model = FeModel {
+            global_system_hidden: false,
             bolts: Vec::new(),
             field_output: plx_model::FieldOutput {
                 additional: vec![plx_model::FieldResult::StrainEnergy],
