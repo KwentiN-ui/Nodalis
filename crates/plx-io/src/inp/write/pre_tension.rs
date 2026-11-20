@@ -21,10 +21,10 @@ pub(super) struct Cut {
     pub normal: [f64; 3],
 }
 
-/// The cut mesh with the cuts by load name.
-type Split = (FeMesh, BTreeMap<String, Cut>);
+/// The cut mesh with the cuts by load id.
+type Split = (FeMesh, BTreeMap<plx_model::Id<plx_model::Load>, Cut>);
 
-/// The mesh cut at the faces of every active pre-tension load, with the cuts by load name;
+/// The mesh cut at the faces of every active pre-tension load, with the cuts by load id;
 /// `None` without pre-tension loads.
 pub(super) fn split(mesh: &FeMesh, model: &FeModel) -> Result<Option<Split>, WriteError> {
     let loads = (model.steps.iter())
@@ -36,7 +36,7 @@ pub(super) fn split(mesh: &FeMesh, model: &FeModel) -> Result<Option<Split>, Wri
             continue;
         };
         let (mesh, cuts) = split.get_or_insert_with(|| (mesh.clone(), BTreeMap::new()));
-        if cuts.contains_key(&load.name) {
+        if cuts.contains_key(&load.id) {
             continue;
         }
         let faces = load.region.faces(mesh);
@@ -76,7 +76,7 @@ pub(super) fn split(mesh: &FeMesh, model: &FeModel) -> Result<Option<Split>, Wri
         let copies: BTreeMap<NodeId, NodeId> = (cut_nodes.iter().copied()).zip(first..).collect();
         mesh.split_nodes(&side, &copies);
         cuts.insert(
-            load.name.clone(),
+            load.id,
             Cut {
                 pairs: copies.into_iter().collect(),
                 normal,

@@ -1377,9 +1377,9 @@ struct Sets<'a> {
     /// Face element sets and node set of each element surface.
     surface_sets: BTreeMap<String, (Vec<(String, u8)>, String)>,
     /// The pre-tension node of each pre-tension load and the node set by which its force
-    /// and shortening are printed, by the load's name.
-    pre_tension_nodes: BTreeMap<String, NodeId>,
-    pre_tension_sets: BTreeMap<String, String>,
+    /// and shortening are printed, by the load's id.
+    pre_tension_nodes: BTreeMap<Id<plx_model::Load>, NodeId>,
+    pre_tension_sets: BTreeMap<Id<plx_model::Load>, String>,
     /// The original node of each copy a pre-tension cut made.
     cut_originals: BTreeMap<NodeId, NodeId>,
     /// Node sets of submodel boundary conditions, with the first boundary condition naming
@@ -3256,7 +3256,7 @@ fn cyclic_slave_nodes(mesh: &FeMesh, model: &FeModel) -> BTreeSet<NodeId> {
 fn pre_tension_sections(
     sets: &mut Sets,
     model: &FeModel,
-    cuts: &BTreeMap<String, pre_tension::Cut>,
+    cuts: &BTreeMap<Id<plx_model::Load>, pre_tension::Cut>,
     generated: &mut constraints::Generated,
 ) -> Vec<ir::constraints::Equation> {
     let mut equations = Vec::new();
@@ -3270,10 +3270,10 @@ fn pre_tension_sections(
         .filter(|s| s.active && s.kind.supports_loads())
     {
         for load in step.loads.iter().filter(|l| l.active) {
-            let Some(cut) = cuts.get(&load.name) else {
+            let Some(cut) = cuts.get(&load.id) else {
                 continue;
             };
-            if sets.pre_tension_nodes.contains_key(&load.name) {
+            if sets.pre_tension_nodes.contains_key(&load.id) {
                 continue;
             }
             // The node sits at the centre of the cut; the solver does not use its position.
@@ -3286,10 +3286,10 @@ fn pre_tension_sections(
             let node = next_node;
             next_node += 1;
             generated.nodes.push((node, centre));
-            sets.pre_tension_nodes.insert(load.name.clone(), node);
+            sets.pre_tension_nodes.insert(load.id, node);
             let set = sets.free_name("Internal_Selection", &name(&load.name));
             sets.node_sets.push((set.clone(), vec![node]));
-            sets.pre_tension_sets.insert(load.name.clone(), set);
+            sets.pre_tension_sets.insert(load.id, set);
             let mesh = sets.mesh;
             for mut terms in pre_tension::equations(cut, node) {
                 if (sets.dofs).claim_equation(&load.name, &mut terms, |n| {
@@ -4919,7 +4919,7 @@ fn step_block<'f>(
                 // force, or the shortening of the bolt since the start as a prescribed
                 // displacement. Locked, the node keeps the shortening of the previous step, or
                 // by displacement adds the value to it.
-                let node = NodeRef::Node(sets.pre_tension_nodes[&load.name]);
+                let node = NodeRef::Node(sets.pre_tension_nodes[&load.id]);
                 if lock {
                     let mut item = if by_displacement {
                         boundary(node, 1, 1, Some(value), amplitude)
@@ -5162,7 +5162,7 @@ fn step_block<'f>(
     // The force of a bolt is the reaction of its pre-tension node, also while it is locked,
     // and its shortening the node's displacement: shown under the name of the load.
     for load in step.loads.iter().filter(|l| l.active) {
-        if let Some(set) = sets.pre_tension_sets.get(&load.name).cloned() {
+        if let Some(set) = sets.pre_tension_sets.get(&load.id).cloned() {
             let set = Some(ir::step::HistorySet::Nodes(sets.node_id(&set)));
             (rest.outputs.node_print).push(node_print(set, &["RF", "U"], Totals::No));
         }
@@ -5243,7 +5243,7 @@ fn defined_fields(
     // before, and a step that passes its state on without temperatures of its own sets
     // those a step before was given back to the initial ones (ramped like removed loads).
     let index = (model.steps.iter().position(|s| std::ptr::eq(s, step)))
-        .or_else(|| model.steps.iter().position(|s| s.name == step.name));
+        .or_else(|| model.steps.iter().position(|s| s.id == step.id));
     if let Some(index) = index
         && model.temperature_source(index, step).is_some()
     {

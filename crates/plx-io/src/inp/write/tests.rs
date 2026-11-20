@@ -1556,12 +1556,17 @@ fn solver_yields_the_bar_pulled_beyond_its_yield_stress() {
 /// The element faces at x = 50 of the elements left of the cut: a pre-tension section
 /// through the middle of the bar.
 fn cut_faces(mesh: &FeMesh) -> Vec<(ElementId, u8)> {
+    cut_faces_at(mesh, 50.0)
+}
+
+/// The faces at x = `x` of the elements left of it.
+fn cut_faces_at(mesh: &FeMesh, x: f64) -> Vec<(ElementId, u8)> {
     (mesh.elements().iter())
         .flat_map(|e| {
             (1..=6u8).filter_map(move |f| {
                 let corners = e.shape.faces()[usize::from(f) - 1].corners;
-                let at_cut = (corners.iter()).all(|&l| mesh.node(e.nodes[l]).unwrap()[0] == 50.0);
-                let left = (e.nodes.iter()).all(|&n| mesh.node(n).unwrap()[0] <= 50.0);
+                let at_cut = (corners.iter()).all(|&l| mesh.node(e.nodes[l]).unwrap()[0] == x);
+                let left = (e.nodes.iter()).all(|&n| mesh.node(n).unwrap()[0] <= x);
                 (at_cut && left).then_some((e.id, f))
             })
         })
@@ -1907,6 +1912,19 @@ fn a_pre_tension_load_cuts_the_mesh_and_ties_the_sides_by_equations() {
     assert_eq!(coordinates(&analysis, 108)[0], 50.0);
     assert!(text.contains("*Cload, op=New\n109, 1, 1000\n"), "{text}");
     assert!(text.contains("*Boundary, Fixed\n109, 1, 1\n"), "{text}");
+}
+
+#[test]
+fn two_pre_tension_loads_of_the_same_name_cut_the_mesh_twice() {
+    let (mesh, mut model) = pre_tension(1000.0, false);
+    let mut second = model.steps[0].loads[0].clone();
+    second.id = plx_model::Id::new();
+    second.region = Region::Faces(cut_faces_at(&mesh, 30.0));
+    model.steps[0].loads.push(second);
+    let analysis = lowered(&mesh, &model);
+    // Each cut ties its 9 node pairs by 3 equations; with the loads told apart by name the
+    // second cut was not made and its load drove the node of the first.
+    assert_eq!(analysis.model.constraints.equations.len(), 54);
 }
 
 /// A bar 100 x 10 x 10 along x of C3D10 tetrahedra, six per cube of 10 x 5 x 5, with node set
