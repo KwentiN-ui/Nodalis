@@ -82,13 +82,7 @@ impl DesignNode {
     }
 }
 
-/// What a response needs from the element derivatives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResponseKind {
-    Mass,
-    StrainEnergy,
-    Eigenfrequency,
-}
+use plxs_core::step::DesignResponseKind as ResponseKind;
 
 /// A distributed load on one element, as the derivative of the load vector needs it.
 enum ElementLoad {
@@ -716,10 +710,10 @@ fn element_loads(ctx: &ProcedureContext<'_>, step: &Step) -> Result<Vec<Vec<Elem
                         ]
                     }))
                 }
-                DistributedLoadKind::Other { label, .. } => {
-                    return Err(Error::Unsupported(format!(
-                        "*DLOAD label {label} is not implemented yet"
-                    )));
+                DistributedLoadKind::ShellPressure { .. } => {
+                    return Err(Error::Unsupported(
+                        "the sensitivity of shell pressures is not implemented yet".into(),
+                    ));
                 }
             };
             loads[e as usize].push(element_load);
@@ -882,16 +876,10 @@ impl Procedure for SensitivityProcedure {
             ));
         }
         let requests = parse_responses(ctx, parameters)?;
-        if let Some(filter) = &parameters.filter {
-            if !filter.kind.eq_ignore_ascii_case("LINEAR") {
-                return Err(Error::Unsupported(format!(
-                    "*FILTER, TYPE={} is not implemented yet (only LINEAR)",
-                    filter.kind
-                )));
-            }
-            if filter.radius <= 0.0 {
-                return Err(Error::input("*FILTER", "the radius must be positive"));
-            }
+        if let Some(filter) = &parameters.filter
+            && filter.radius <= 0.0
+        {
+            return Err(Error::input("*FILTER", "the radius must be positive"));
         }
 
         let started = std::time::Instant::now();
@@ -1214,16 +1202,7 @@ fn parse_responses(
 ) -> Result<Vec<(ResponseKind, Option<Vec<bool>>)>> {
     let mut requests = Vec::new();
     for response in &parameters.responses {
-        let kind = match response.kind.as_str() {
-            "MASS" => ResponseKind::Mass,
-            "STRAINENERGY" => ResponseKind::StrainEnergy,
-            "EIGENFREQUENCY" => ResponseKind::Eigenfrequency,
-            other => {
-                return Err(Error::Unsupported(format!(
-                    "*DESIGN RESPONSE {other} is not implemented yet (MASS, STRAINENERGY and EIGENFREQUENCY are)"
-                )));
-            }
-        };
+        let kind = response.kind;
         let set = match kind {
             ResponseKind::Eigenfrequency => None,
             _ => response_elements(ctx.model, ctx.table, response.elset)?,

@@ -22,9 +22,9 @@ use plxs_core::material::TemperatureValue;
 use plxs_core::mesh::Surface;
 use plxs_core::section::{BeamProfile, SectionKind, SpringStiffness};
 use plxs_core::step::{
-    ContactChange, DefaultAmplitude, DefinedFieldKind, DistributedLoadKind, EquationSolver,
-    FieldOutput, FluxKind, Follower, HistoryOutput, Incrementation, Loads, ModalDamping,
-    OutputDimension, Procedure, Totals,
+    ContactChange, DefaultAmplitude, DefinedFieldKind, DistributedLoadKind, FieldOutput, FluxKind,
+    Follower, HistoryOutput, Incrementation, Loads, ModalDamping, OutputDimension, Procedure,
+    SolverMode, Totals,
 };
 use plxs_core::{Analysis, Model, Step};
 
@@ -1080,14 +1080,12 @@ fn steps(out: &mut Out, analysis: &Analysis) {
     }
 }
 
-fn solver_parameter(header: &mut String, solver: EquationSolver) {
+fn solver_parameter(header: &mut String, solver: SolverMode) {
     let name = match solver {
-        EquationSolver::Default => return,
-        EquationSolver::Spooles => "Spooles",
-        EquationSolver::Pastix => "PaStiX",
-        EquationSolver::Pardiso => "Pardiso",
-        EquationSolver::IterativeScaling => "Iterative scaling",
-        EquationSolver::IterativeCholesky => "Iterative Cholesky",
+        SolverMode::Automatic => return,
+        // The names CalculiX reads as well.
+        SolverMode::Direct => "PaStiX",
+        SolverMode::Iterative => "Iterative Cholesky",
     };
     let _ = write!(header, ", Solver={name}");
 }
@@ -1327,24 +1325,15 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
                 "*Sensitivity"
             });
             for response in &settings.responses {
-                if response.name.is_empty() {
-                    out.keyword("*Design response");
-                } else {
-                    out.keyword(&format!("*Design response, Name={}", response.name));
+                out.keyword("*Design response");
+                let kind = response.kind.keyword();
+                match response.elset {
+                    Some(set) => out.line(&format!("{kind}, {}", out.labels.element_set(set))),
+                    None => out.line(kind),
                 }
-                let mut fields = vec![
-                    response.kind.clone(),
-                    (response.elset)
-                        .map_or(String::new(), |set| out.labels.element_set(set).to_string()),
-                ];
-                fields.extend(response.data.iter().map(|&v| number(v)));
-                while fields.last().is_some_and(String::is_empty) {
-                    fields.pop();
-                }
-                out.line(&fields.join(", "));
             }
             if let Some(filter) = &settings.filter {
-                out.keyword(&format!("*Filter, Type={}", filter.kind));
+                out.keyword("*Filter, Type=Linear");
                 out.line(&number(filter.radius));
             }
         }
@@ -1506,9 +1495,9 @@ fn loads(out: &mut Out, loads: &Loads, carried: &Loads) {
                     .into_iter()
                     .chain(point.iter().chain(axis).map(|&v| number(v)))
                     .collect(),
-                DistributedLoadKind::Other { label, values } => std::iter::once(label.clone())
-                    .chain(values.iter().map(|&v| number(v)))
-                    .collect(),
+                DistributedLoadKind::ShellPressure { value } => {
+                    vec![String::from("P"), number(*value)]
+                }
             };
             format!("{}, {}", labels.element_ref(&l.region), values.join(", "))
         },

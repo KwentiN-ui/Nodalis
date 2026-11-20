@@ -1,8 +1,6 @@
-//! The steps of an analysis from the cards that define them, with CalculiX's carry-over
-//! between steps resolved: every [`Step`] holds what is in force during it.
-//!
-//! The reader feeds it the cards it reads; Nodalis's direct lowering of its model feeds it
-//! the same cards without text in between, so that both give the same steps.
+//! The steps of an analysis from the cards of an input file that define them, with
+//! CalculiX's carry-over between steps resolved: every [`Step`] holds what is in force
+//! during it.
 //!
 //! The rules (CalculiX manual 2.23 for `OP=`, the rest observed with ccx 2.21): a step starts
 //! with the boundary conditions of the step before, the loads and defined fields of the last
@@ -14,7 +12,7 @@
 
 use plxs_core::step::{
     Boundary, ConcentratedFlux, ConcentratedLoad, DefinedField, DistributedFlux, DistributedLoad,
-    FieldOutput, Film, HistoryOutput, Loads, Outputs, Radiate,
+    FieldOutput, Film, HandedOn, HistoryOutput, Outputs, Radiate,
 };
 use plxs_core::{Model, Step};
 
@@ -86,9 +84,7 @@ impl Card {
 /// What a step starts with, see the module documentation.
 #[derive(Clone, Debug, Default)]
 struct Carried {
-    boundaries: Vec<Boundary>,
-    loads: Loads,
-    fields: Vec<DefinedField>,
+    handed: HandedOn,
     outputs: Outputs,
 }
 
@@ -156,11 +152,11 @@ impl Assembler {
     /// steps before carry into it.
     pub fn begin(&mut self, mut step: Step) {
         if self.count == 0 {
-            self.carried.boundaries = self.model_boundaries.clone();
+            self.carried.handed.boundaries = self.model_boundaries.clone();
         }
-        step.boundaries = self.carried.boundaries.clone();
-        step.loads = self.carried.loads.clone();
-        step.fields = self.carried.fields.clone();
+        step.boundaries = self.carried.handed.boundaries.clone();
+        step.loads = self.carried.handed.loads.clone();
+        step.fields = self.carried.handed.fields.clone();
         step.outputs = self.carried.outputs.clone();
         self.carried_loads = (step.loads.concentrated.len(), step.loads.distributed.len());
         self.carried_heat = [
@@ -186,19 +182,10 @@ impl Assembler {
         std::mem::take(&mut self.warnings)
     }
 
-    /// What the next step starts with after `step`. A perturbation step does not carry its
-    /// loads on; its boundaries it does. Step-time amplitudes end with the step: their loads
-    /// go on with their final value.
+    /// What the next step starts with after `step`, see [`HandedOn`]; the output requests
+    /// carry on as well.
     fn carry_on(&mut self, model: &Model, step: &Step) {
-        let step_time = crate::carry::step_period(&step.procedure);
-        let mut boundaries = step.boundaries.clone();
-        let mut loads = step.loads.clone();
-        crate::carry::freeze_step_amplitudes(model, step_time, &mut boundaries, &mut loads);
-        self.carried.boundaries = boundaries;
-        if !step.perturbation {
-            self.carried.loads = loads;
-            self.carried.fields = step.fields.clone();
-        }
+        self.carried.handed.follow(model, step);
         self.carried.outputs = step.outputs.clone();
     }
 

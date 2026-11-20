@@ -1204,10 +1204,13 @@ impl AnalysisWindow {
                 }
                 let text = match (&progress, cancelling) {
                     (_, true) => "Cancelling the meshing …".to_string(),
-                    (Some(p), _) if p.total > 1 => {
-                        format!("Part {} of {}: {}", p.done + 1, p.total, p.part)
+                    (Some(p), _) if p.total > 1 && p.parts.len() > 1 => {
+                        format!("{} of {} parts done: {}", p.done, p.total, p.now())
                     }
-                    (Some(p), _) => format!("Meshing {} …", p.part),
+                    (Some(p), _) if p.total > 1 => {
+                        format!("Part {} of {}: {}", p.done + 1, p.total, p.now())
+                    }
+                    (Some(p), _) => format!("Meshing {} …", p.now()),
                     (None, _) => "Meshing …".to_string(),
                 };
                 ui.add(egui::Label::new(text).truncate());
@@ -2505,7 +2508,14 @@ impl Workbench {
             crate::output_news::OutputNews::title(unread).into(),
         ];
         let mut clicked = crate::style::status_tabs(ui, &titles, shown);
-        if let Some(line) = newest
+        // A solve running while its monitor is out of view says so here, as the news of the
+        // output would.
+        let running = (shown != Some(1)).then(|| self.running_status()).flatten();
+        if let Some(status) = running {
+            if crate::run_status::show(ui, &status) {
+                clicked = Some(1);
+            }
+        } else if let Some(line) = newest
             && crate::output_news::OutputNews::line(ui, line)
         {
             clicked = Some(2);
@@ -2521,6 +2531,25 @@ impl Workbench {
                 crate::layout::fold_output(&ctx, false);
             }
         }
+    }
+
+    /// The project's solve of the analysis or its Check Model, while it runs.
+    fn running_status(&self) -> Option<crate::run_status::RunStatus> {
+        if let Some(run) = self.project_run.as_ref().filter(|r| r.active) {
+            return Some(crate::run_status::RunStatus {
+                name: self.analysis_name.clone(),
+                state: run.state.to_owned(),
+                seconds: run.seconds,
+                progress: run.progress.clone(),
+            });
+        }
+        let analysis = self.analysis.as_ref().filter(|a| a.is_running())?;
+        Some(crate::run_status::RunStatus {
+            name: format!("{} (model check)", analysis.name()),
+            state: "running".to_owned(),
+            seconds: analysis.seconds(),
+            progress: analysis.progress(),
+        })
     }
 
     fn output(&mut self, ui: &mut egui::Ui, pane: egui::Frame) {
@@ -7821,7 +7850,10 @@ impl Workbench {
         new.graphics.shell_thickness = live.shell_thickness;
         new.graphics.beam_profiles = live.beam_profiles;
         new.graphics.show_linked = live.show_linked;
-        if new.gmsh != self.settings.gmsh && !plx_mesher::set_library_path(new.gmsh.library()) {
+        crate::meshing::set_processes(new.gmsh.processes);
+        if new.gmsh.library != self.settings.gmsh.library
+            && !plx_mesher::set_library_path(new.gmsh.library())
+        {
             self.output
                 .push("The changed Gmsh library is loaded after a restart".into());
         }

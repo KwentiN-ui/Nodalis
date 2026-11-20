@@ -4310,3 +4310,91 @@ fn push_pull_moves_a_split_face_as_a_whole() {
     assert!((solid_volume(&pulled) - 9.0 * area).abs() < 1e-6 * area);
     assert_eq!(part_names(&pulled).unwrap(), part_names(&halves).unwrap());
 }
+
+/// The parts of an assembly are meshed one after the other in a Gmsh that keeps the shapes
+/// and works on each solid in a model of its own: every part gets the mesh it gets when
+/// Gmsh starts empty, and the shapes are read once only as long as solids are meshed.
+#[test]
+fn parts_meshed_after_others_get_the_mesh_they_get_alone() {
+    if !gmsh_available() {
+        return;
+    }
+    for (name, tetrahedra) in [
+        ("zwei_bloecke.step", false),
+        ("zwei_bloecke.step", true),
+        ("benannte_teile.step", false),
+    ] {
+        let mut geometry = import_cad(&testdata(name), UnitSystem::Unitless)
+            .unwrap()
+            .geometry;
+        geometry.meshing.hexahedra_where_possible = !tetrahedra;
+        let names = part_names(&geometry).unwrap();
+        let file = TempFile::with_contents("brep", &geometry.brep).unwrap();
+        let (in_turn, read_again, alone) = gmsh::with_kept_shapes(1, |gmsh| {
+            let mut in_turn = Vec::new();
+            let mut read_again = Vec::new();
+            for part in &names {
+                in_turn.push(part_mesh_in(gmsh, &geometry, part, &[], &file.0)?);
+                read_again.push(gmsh.read_untouched(&file.0)?);
+            }
+            let mut alone = Vec::new();
+            for part in &names {
+                gmsh.clear()?;
+                alone.push(part_mesh_in(gmsh, &geometry, part, &[], &file.0)?);
+            }
+            Ok((in_turn, read_again, alone))
+        })
+        .unwrap();
+        for ((part, a), b) in names.iter().zip(&in_turn).zip(&alone) {
+            // The counts first, which say more than a thousand numbers.
+            assert_eq!(a.mesh.node_count(), b.mesh.node_count(), "{name}: {part}");
+            assert_eq!(
+                a.mesh.element_count(),
+                b.mesh.element_count(),
+                "{name}: {part}"
+            );
+            let same = a.mesh.node_ids() == b.mesh.node_ids()
+                && a.mesh.coords() == b.mesh.coords()
+                && a.mesh.elements() == b.mesh.elements()
+                && a.mesh.cad == b.mesh.cad;
+            assert!(same, "{name}: {part}: the meshes differ");
+        }
+        // A solid leaves the shapes as they were read; a shell is still left alone by
+        // removing the others, after which they are read anew.
+        let solids = default_part_kinds(&geometry).unwrap();
+        for (k, &read) in read_again.iter().enumerate() {
+            assert_eq!(read, solids[k] != 3, "{name}: {}", names[k]);
+        }
+        // Each part's mesh records the faces of its own solid, under the tags they have
+        // among all shapes.
+        let mut seen = BTreeSet::new();
+        for mesh in &in_turn {
+            for &face in mesh.mesh.cad.faces.keys() {
+                assert!(seen.insert(face), "{name}: face {face} is in two parts");
+            }
+        }
+        let display = tessellate(&geometry).unwrap();
+        assert_eq!(seen.len(), display.faces);
+    }
+}
+
+/// After a part that failed, Gmsh starts anew and the next part gets the mesh it gets
+/// alone. (A mesher of Gmsh that gives up leaves Gmsh busy for good, and the parts after it
+/// came back without elements.)
+#[test]
+fn a_part_that_fails_leaves_the_next_one_its_mesh() {
+    if !gmsh_available() {
+        return;
+    }
+    let geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless)
+        .unwrap()
+        .geometry;
+    let names = part_names(&geometry).unwrap();
+    let alone = generate_part_mesh(&geometry, &names[1]).unwrap();
+    generate_part_mesh(&geometry, &names[0]).unwrap();
+    assert!(generate_part_mesh(&geometry, "no such part").is_err());
+    let after = generate_part_mesh(&geometry, &names[1]).unwrap();
+    assert_eq!(alone.mesh.node_ids(), after.mesh.node_ids());
+    assert_eq!(alone.mesh.coords(), after.mesh.coords());
+    assert_eq!(alone.mesh.elements(), after.mesh.elements());
+}

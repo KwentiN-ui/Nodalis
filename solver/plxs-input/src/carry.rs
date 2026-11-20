@@ -21,7 +21,9 @@
 //!
 //! - Boundaries and loads with an amplitude in step time are frozen at their value at the
 //!   end of the step they come from; `TIME=TOTAL TIME` amplitudes go on
-//!   ([`freeze_step_amplitudes`]).
+//!   ([`plxs_core::step::HandedOn`]). Observed with ccx 2.21 for `*BOUNDARY`, `*CLOAD` and
+//!   `*DLOAD` (P, GRAV, CENTRIF): a carried load whose step-time amplitude rises further
+//!   does not rise in the next step.
 //!
 //! Carried set loads that are touched at some of their members are split into loads on the
 //! remaining single nodes or elements, so that nothing else changes.
@@ -29,11 +31,10 @@
 use std::collections::{BTreeMap, HashSet};
 use std::hash::Hash;
 
-use plxs_core::Model;
 use plxs_core::mesh::{ElementId, ElementRef, NodeId, NodeRef, Sets};
 use plxs_core::step::{
-    Boundary, ConcentratedFlux, ConcentratedLoad, DistributedFlux, DistributedLoad,
-    DistributedLoadKind, Film, FluxKind, Loads, Procedure, Radiate,
+    ConcentratedFlux, ConcentratedLoad, DistributedFlux, DistributedLoad, DistributedLoadKind,
+    Film, FluxKind, Radiate,
 };
 
 fn nodes_of(sets: &Sets, region: &NodeRef) -> Option<Vec<NodeId>> {
@@ -208,7 +209,7 @@ enum Key {
     Pressure(u8),
     Gravity([u64; 3]),
     Centrifugal { point: [u64; 3], axis: [u64; 3] },
-    Other(String),
+    ShellPressure,
 }
 
 fn bits(v: [f64; 3]) -> [u64; 3] {
@@ -223,7 +224,7 @@ fn key(kind: &DistributedLoadKind) -> Key {
             point: bits(*point),
             axis: bits(*axis),
         },
-        DistributedLoadKind::Other { label, .. } => Key::Other(label.clone()),
+        DistributedLoadKind::ShellPressure { .. } => Key::ShellPressure,
     }
 }
 
@@ -349,65 +350,5 @@ fn region_name(sets: &Sets, region: &ElementRef) -> String {
     match region {
         ElementRef::Element(id) => format!("element {id}"),
         ElementRef::Set(set) => format!("set {}", sets.element_set_name(*set)),
-    }
-}
-
-/// What carries over into the next step: boundaries and loads that follow an amplitude in
-/// step time are frozen at their value at the end of the step (the amplitude is dropped),
-/// those with a `TIME=TOTAL TIME` amplitude keep following it. Observed with ccx 2.21 for
-/// `*BOUNDARY`, `*CLOAD` and `*DLOAD` (P, GRAV, CENTRIF): a carried load whose step-time
-/// amplitude rises further does not rise in the next step.
-pub(crate) fn freeze_step_amplitudes(
-    model: &Model,
-    step_time: f64,
-    boundaries: &mut [Boundary],
-    loads: &mut Loads,
-) {
-    // The factor of a step-time amplitude at the end of the step, `None` for no amplitude,
-    // a total-time one or an unknown name (left to the validation).
-    let factor = |amplitude: &Option<plxs_core::AmplitudeId>| -> Option<f64> {
-        let a = model.amplitude((*amplitude)?)?;
-        // A placeholder of an amplitude not defined (yet) has no curve.
-        let defined = !a.points.is_empty() || a.signal.is_some();
-        (defined && !a.total_time).then(|| a.value(step_time))
-    };
-    for boundary in boundaries.iter_mut() {
-        if let Some(f) = factor(&boundary.amplitude) {
-            boundary.value = boundary.value.map(|v| v * f);
-            boundary.amplitude = None;
-        }
-    }
-    for load in &mut loads.concentrated {
-        if let Some(f) = factor(&load.amplitude) {
-            load.value *= f;
-            load.amplitude = None;
-        }
-    }
-    for load in &mut loads.distributed {
-        let Some(f) = factor(&load.amplitude) else {
-            continue;
-        };
-        match &mut load.kind {
-            DistributedLoadKind::Pressure { value, .. } => *value *= f,
-            DistributedLoadKind::Gravity { magnitude, .. } => *magnitude *= f,
-            DistributedLoadKind::Centrifugal { omega_squared, .. } => *omega_squared *= f,
-            // Labels the solver does not compute keep their amplitude.
-            DistributedLoadKind::Other { .. } => continue,
-        }
-        load.amplitude = None;
-    }
-}
-
-/// The step time at the end of a step: its period.
-pub(crate) fn step_period(procedure: &Procedure) -> f64 {
-    match procedure {
-        Procedure::Static(p) => p.increments.period(),
-        Procedure::Visco(p) => p.increments.period(),
-        Procedure::HeatTransfer(p)
-        | Procedure::CoupledTemperatureDisplacement(p)
-        | Procedure::UncoupledTemperatureDisplacement(p) => p.increments.period(),
-        Procedure::Dynamic(p) => p.increments.period(),
-        Procedure::ModalDynamics(p) if !p.steady_state => p.period,
-        _ => 1.0,
     }
 }

@@ -677,6 +677,11 @@ impl Analysis {
         Some(status)
     }
 
+    /// The name of the analysis it runs.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// How long the run has taken so far, or took.
     pub fn seconds(&self) -> f32 {
         (self.finished).unwrap_or_else(|| self.started.elapsed().as_secs_f32())

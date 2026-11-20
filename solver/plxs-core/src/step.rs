@@ -1,7 +1,8 @@
 //! Steps (concept section 1.5 and 1.6): the procedure, what holds and acts during the step,
-//! and what is written out. A step is self-contained: the reader resolves CalculiX's
-//! carry-over rules (`OP=NEW`, loads kept from earlier steps) so that a procedure only looks
-//! at its own step.
+//! and what is written out. A step is self-contained: it holds everything in force during
+//! it, so that a procedure only looks at its own step. Nodalis builds its steps so; the
+//! reader of input files resolves CalculiX's carry-over rules (`OP=NEW`, loads kept from
+//! earlier steps) into them.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,8 +22,8 @@ pub struct Step {
     pub max_increments: u32,
     /// `*STEP, AMPLITUDE=RAMP|STEP`: how loads without an amplitude vary over the step.
     pub default_amplitude: DefaultAmplitude,
-    /// Single-point constraints in force during the step (already including those of
-    /// earlier steps unless the step started with `OP=NEW`).
+    /// Single-point constraints in force during the step, those it keeps from the steps
+    /// before included.
     pub boundaries: Vec<Boundary>,
     pub loads: Loads,
     /// Temperature fields (`*TEMPERATURE`), in force during the step.
@@ -205,50 +206,24 @@ impl Procedure {
     }
 }
 
-/// The equation solver a step asks for by CalculiX's names (`SOLVER=`); the solver maps
-/// them to its automatic choice, its direct and its iterative solver, see [`Self::mode`].
+/// How the solver solves the systems of equations of a step.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EquationSolver {
-    /// No `SOLVER=`: the solver chooses automatically.
-    #[default]
-    Default,
-    Spooles,
-    Pastix,
-    Pardiso,
-    IterativeScaling,
-    IterativeCholesky,
-}
-
-impl EquationSolver {
-    /// Whether the step asks for an iterative solver.
-    pub fn is_iterative(self) -> bool {
-        self.mode() == SolverMode::Iterative
-    }
-
-    /// How the own solver solves the step's systems: no `SOLVER=` chooses automatically,
-    /// the iterative names mean conjugate gradients (`plxs_linalg::PcgSolver`), every
-    /// other name the direct solver.
-    pub fn mode(self) -> SolverMode {
-        match self {
-            EquationSolver::Default => SolverMode::Automatic,
-            EquationSolver::IterativeScaling | EquationSolver::IterativeCholesky => {
-                SolverMode::Iterative
-            }
-            EquationSolver::Spooles | EquationSolver::Pastix | EquationSolver::Pardiso => {
-                SolverMode::Direct
-            }
-        }
-    }
-}
-
-/// The own solver's reading of [`EquationSolver`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SolverMode {
     /// Direct while the factor fits into the memory, iterative beyond (and back to direct
     /// when the iteration fails), where the procedure has an iterative solver.
+    #[default]
     Automatic,
+    /// A sparse direct factorization.
     Direct,
+    /// Conjugate gradients (`plxs_linalg::PcgSolver`).
     Iterative,
+}
+
+impl SolverMode {
+    /// Whether the step asks for the iterative solver.
+    pub fn is_iterative(self) -> bool {
+        self == SolverMode::Iterative
+    }
 }
 
 /// Time incrementation of a step: initial increment, step period, minimum and maximum
@@ -292,7 +267,7 @@ impl Incrementation {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Static {
-    pub solver: EquationSolver,
+    pub solver: SolverMode,
     pub increments: Incrementation,
     /// `EXPLICIT`, `TIME RESET`, `TOTAL TIME AT START` are not written by Nodalis; kept
     /// for completeness.
@@ -302,7 +277,7 @@ pub struct Static {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Visco {
-    pub solver: EquationSolver,
+    pub solver: SolverMode,
     pub increments: Incrementation,
     /// `CETOL`: creep strain tolerance that controls the time step.
     pub cetol: f64,
@@ -310,7 +285,7 @@ pub struct Visco {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Frequency {
-    pub solver: EquationSolver,
+    pub solver: SolverMode,
     /// `STORAGE=YES`: write the modes to `<job>.eig` for later modal steps.
     pub storage: bool,
     /// `GLOBAL=NO`: modes in local systems; not written by Nodalis.
@@ -339,7 +314,7 @@ pub struct ComplexFrequency {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Buckle {
-    pub solver: EquationSolver,
+    pub solver: SolverMode,
     pub count: u32,
     pub accuracy: Option<f64>,
 }
@@ -347,7 +322,7 @@ pub struct Buckle {
 /// `*HEAT TRANSFER` and the coupled procedures.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct HeatTransfer {
-    pub solver: EquationSolver,
+    pub solver: SolverMode,
     pub steady_state: bool,
     pub increments: Incrementation,
     /// `DELTMX`: maximum temperature change per increment.
@@ -361,7 +336,7 @@ pub struct HeatTransfer {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Dynamic {
-    pub solver: EquationSolver,
+    pub solver: SolverMode,
     /// `ALPHA=`: numerical damping of the HHT-alpha integration (`-1/3..0`).
     pub alpha: Option<f64>,
     /// How the equation of motion is integrated over time (`INTEGRATION=`, Nodalis; ccx's
@@ -467,7 +442,7 @@ pub struct Rayleigh {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModalDynamics {
-    pub solver: EquationSolver,
+    pub solver: SolverMode,
     pub steady_state: bool,
     /// Time increment and period (steady state: relative error and maximum time instead).
     pub increment: f64,
@@ -489,7 +464,7 @@ pub enum ModalDamping {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SteadyStateDynamics {
-    pub solver: EquationSolver,
+    pub solver: SolverMode,
     pub harmonic: bool,
     pub lower: f64,
     pub upper: f64,
@@ -507,19 +482,36 @@ pub struct Sensitivity {
     pub filter: Option<Filter>,
 }
 
+/// `*DESIGN RESPONSE`: what the sensitivities are the derivatives of.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DesignResponse {
-    pub name: String,
-    /// `EIGENFREQUENCY`, `MASS`, `STRAINENERGY`, `STRESS`, `MISESSTRESS`, ...
-    pub kind: String,
+    pub kind: DesignResponseKind,
+    /// The elements whose mass or strain energy it is; all without.
     pub elset: Option<crate::ElementSetId>,
-    /// Further data (reference stress for `STRESS` and the like).
-    pub data: Vec<f64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DesignResponseKind {
+    Mass,
+    StrainEnergy,
+    Eigenfrequency,
+}
+
+impl DesignResponseKind {
+    /// The name in the input file.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            DesignResponseKind::Mass => "MASS",
+            DesignResponseKind::StrainEnergy => "STRAINENERGY",
+            DesignResponseKind::Eigenfrequency => "EIGENFREQUENCY",
+        }
+    }
+}
+
+/// `*FILTER, TYPE=LINEAR`: the sensitivities averaged over a radius, weighted linearly by
+/// the distance.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Filter {
-    pub kind: String,
     pub radius: f64,
 }
 
@@ -550,6 +542,105 @@ pub struct Loads {
     pub distributed_flux: Vec<DistributedFlux>,
     pub films: Vec<Film>,
     pub radiations: Vec<Radiate>,
+}
+
+impl Loads {
+    /// Adds the loads of `other` after these.
+    pub fn append(&mut self, other: Loads) {
+        self.concentrated.extend(other.concentrated);
+        self.distributed.extend(other.distributed);
+        self.concentrated_flux.extend(other.concentrated_flux);
+        self.distributed_flux.extend(other.distributed_flux);
+        self.films.extend(other.films);
+        self.radiations.extend(other.radiations);
+    }
+}
+
+/// What a step hands on to the steps after it: its boundary conditions, and the loads and
+/// defined fields of the last step that was no perturbation. Boundaries and loads with an
+/// amplitude in step time end with their step at its final value; `TIME=TOTAL TIME`
+/// amplitudes go on.
+///
+/// A step holds everything in force during it; one that keeps what the steps before it
+/// left (a perturbation about their loads, a modal step on the supports of its eigenmodes)
+/// starts from this.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HandedOn {
+    pub boundaries: Vec<Boundary>,
+    pub loads: Loads,
+    pub fields: Vec<DefinedField>,
+}
+
+impl HandedOn {
+    /// What the steps hand on after `step` of `model`, this being what they handed on
+    /// before it.
+    pub fn follow(&mut self, model: &crate::Model, step: &Step) {
+        let time = step_time(&step.procedure);
+        let mut boundaries = step.boundaries.clone();
+        let mut loads = step.loads.clone();
+        freeze_step_amplitudes(model, time, &mut boundaries, &mut loads);
+        self.boundaries = boundaries;
+        if !step.perturbation {
+            self.loads = loads;
+            self.fields = step.fields.clone();
+        }
+    }
+}
+
+/// The step time at the end of a step, which step-time amplitudes are evaluated at.
+fn step_time(procedure: &Procedure) -> f64 {
+    match procedure {
+        Procedure::Static(p) => p.increments.period(),
+        Procedure::Visco(p) => p.increments.period(),
+        Procedure::HeatTransfer(p)
+        | Procedure::CoupledTemperatureDisplacement(p)
+        | Procedure::UncoupledTemperatureDisplacement(p) => p.increments.period(),
+        Procedure::Dynamic(p) => p.increments.period(),
+        Procedure::ModalDynamics(p) if !p.steady_state => p.period,
+        _ => 1.0,
+    }
+}
+
+/// Replaces every step-time amplitude of `boundaries` and `loads` by its factor at
+/// `step_time`.
+fn freeze_step_amplitudes(
+    model: &crate::Model,
+    step_time: f64,
+    boundaries: &mut [Boundary],
+    loads: &mut Loads,
+) {
+    // The factor of a step-time amplitude at the end of the step, `None` for no amplitude,
+    // a total-time one or an unknown one (left to the validation).
+    let factor = |amplitude: &Option<crate::AmplitudeId>| -> Option<f64> {
+        let a = model.amplitude((*amplitude)?)?;
+        // A placeholder of an amplitude not defined (yet) has no curve.
+        let defined = !a.points.is_empty() || a.signal.is_some();
+        (defined && !a.total_time).then(|| a.value(step_time))
+    };
+    for boundary in boundaries.iter_mut() {
+        if let Some(f) = factor(&boundary.amplitude) {
+            boundary.value = boundary.value.map(|v| v * f);
+            boundary.amplitude = None;
+        }
+    }
+    for load in &mut loads.concentrated {
+        if let Some(f) = factor(&load.amplitude) {
+            load.value *= f;
+            load.amplitude = None;
+        }
+    }
+    for load in &mut loads.distributed {
+        let Some(f) = factor(&load.amplitude) else {
+            continue;
+        };
+        match &mut load.kind {
+            DistributedLoadKind::Pressure { value, .. }
+            | DistributedLoadKind::ShellPressure { value } => *value *= f,
+            DistributedLoadKind::Gravity { magnitude, .. } => *magnitude *= f,
+            DistributedLoadKind::Centrifugal { omega_squared, .. } => *omega_squared *= f,
+        }
+        load.amplitude = None;
+    }
 }
 
 /// `*CLOAD`: a force (DOF 1-3) or moment (4-6) on a node or set.
@@ -593,7 +684,8 @@ pub struct DistributedLoad {
 pub enum DistributedLoadKind {
     /// `P<n>`: pressure on face n (positive into the element).
     Pressure { face: u8, value: f64 },
-    /// `P<n>NU`, non-uniform pressure through a user routine, not supported.
+    /// `P`: pressure on a shell or membrane, on its bottom face along the normal.
+    ShellPressure { value: f64 },
     /// `GRAV`: acceleration magnitude and direction.
     Gravity { magnitude: f64, direction: [f64; 3] },
     /// `CENTRIF`: angular velocity squared, a point on the axis and the axis direction.
@@ -602,8 +694,12 @@ pub enum DistributedLoadKind {
         point: [f64; 3],
         axis: [f64; 3],
     },
-    /// `NEWTON`, `BX`/`BY`/`BZ` and other labels Nodalis does not write.
-    Other { label: String, values: Vec<f64> },
+}
+
+impl DistributedLoadKind {
+    pub fn is_centrifugal(&self) -> bool {
+        matches!(self, DistributedLoadKind::Centrifugal { .. })
+    }
 }
 
 /// `*CFLUX`: concentrated heat flux into a node (DOF 11).
@@ -706,6 +802,18 @@ pub struct Outputs {
     pub node_print: Vec<HistoryOutput>,
     pub el_print: Vec<HistoryOutput>,
     pub contact_print: Vec<HistoryOutput>,
+}
+
+impl Outputs {
+    /// Adds the requests of `other` after these.
+    pub fn append(&mut self, other: Outputs) {
+        self.node_file.extend(other.node_file);
+        self.el_file.extend(other.el_file);
+        self.contact_file.extend(other.contact_file);
+        self.node_print.extend(other.node_print);
+        self.el_print.extend(other.el_print);
+        self.contact_print.extend(other.contact_print);
+    }
 }
 
 /// `*NODE FILE`, `*EL FILE`, `*CONTACT FILE`: variables (`U`, `S`, `NOE`...) with their
