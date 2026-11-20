@@ -48,6 +48,7 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         distributions,
         initial_conditions,
         steps,
+        field_output,
         history_outputs,
         reference_points,
         coordinate_systems,
@@ -118,6 +119,10 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         }
     }
     hash.add_debug(&steps);
+    // The coordinate system of the field output is applied when the results are shown.
+    if !field_output.additional.is_empty() || field_output.dimension != Default::default() {
+        hash.add_debug(&(&field_output.additional, field_output.dimension));
+    }
     // The history outputs these steps print.
     let printed: Vec<_> = (history_outputs.iter())
         .filter(|o| steps.iter().any(|s| s.history_outputs.contains(&o.id)))

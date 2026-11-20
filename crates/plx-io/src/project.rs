@@ -1745,8 +1745,8 @@ mod tests {
         );
         load.system = Some(system);
         step.loads.push(load);
-        // The node output also shows the displacements in the moving system.
-        step.field_outputs[0].system = Some(system);
+        // The results also show the displacements in the moving system.
+        model.field_output.system = Some(system);
         model.steps.push(step);
         let project = single(None, &mesh, &model, None);
         save_project(std::path::Path::new(&path), &project).unwrap();
@@ -2198,6 +2198,11 @@ mod tests {
         let [rp, plane, interaction, region, detection] = [(); 5].map(|_| plx_model::Id::new());
         let model = FeModel {
             bolts: Vec::new(),
+            field_output: plx_model::FieldOutput {
+                additional: vec![plx_model::FieldResult::StrainEnergy],
+                system: None,
+                dimension: plx_model::OutputDimension::TwoD,
+            },
             history_outputs: Vec::new(),
             cross_sections: Vec::new(),
             distributions: Vec::new(),

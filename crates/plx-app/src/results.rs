@@ -610,44 +610,40 @@ impl ResultsView {
         warnings
     }
 
-    /// The results that the field outputs of `steps` want in a coordinate system of
-    /// `systems`: for each step of the results, the vector and tensor fields of its outputs
-    /// with a system.
+    /// The results that the field output of the analysis `fe` wants in a coordinate system
+    /// of `systems`: for each step of the results, the vector and tensor fields it writes.
     pub fn wanted_output_systems(
         &self,
-        steps: &[plx_model::Step],
+        fe: &plx_model::FeModel,
         systems: &[plx_model::CoordinateSystem],
     ) -> Vec<OutputSystem> {
         let mut wanted: Vec<OutputSystem> = Vec::new();
+        let system = (fe.field_output.system).and_then(|id| systems.iter().find(|c| c.id == id));
+        let Some(system) = system else {
+            return wanted;
+        };
+        let id = system.id;
         for result_step in &self.steps.steps {
-            let Some(step) = steps.iter().find(|s| s.name == result_step.name) else {
+            let Some(step) = fe.steps.iter().find(|s| s.name == result_step.name) else {
                 continue;
             };
-            let outputs = (step.field_outputs.iter()).filter(|o| o.active && o.kind.takes_system());
-            for output in outputs {
-                let Some(id) = output.system else {
-                    continue;
-                };
-                let Some(system) = systems.iter().find(|c| c.id == id) else {
-                    continue;
-                };
-                let fields = (output.variables.iter())
-                    .filter_map(|v| plx_model::output_variable_field(v))
-                    .flat_map(|f| [f.to_string(), plx_results::harmonic::imaginary_name(f)])
-                    .filter(|f| field_output::SYSTEM_FIELDS.contains(&f.as_str()));
-                for field in fields {
-                    let name = field_output::system_field_name(&field, &system.name);
-                    match (wanted.iter_mut()).find(|w| w.field == field && w.system == id) {
-                        Some(known) => {
-                            known.increments.extend(&result_step.increments);
-                        }
-                        None => wanted.push(OutputSystem {
-                            field,
-                            system: id,
-                            name,
-                            increments: result_step.increments.clone(),
-                        }),
+            let results = fe.field_results(step);
+            let fields = (results.iter())
+                .flat_map(|r| r.fields())
+                .flat_map(|f| [f.to_string(), plx_results::harmonic::imaginary_name(f)])
+                .filter(|f| field_output::SYSTEM_FIELDS.contains(&f.as_str()));
+            for field in fields {
+                let name = field_output::system_field_name(&field, &system.name);
+                match (wanted.iter_mut()).find(|w| w.field == field && w.system == id) {
+                    Some(known) => {
+                        known.increments.extend(&result_step.increments);
                     }
+                    None => wanted.push(OutputSystem {
+                        field,
+                        system: id,
+                        name,
+                        increments: result_step.increments.clone(),
+                    }),
                 }
             }
         }
@@ -2534,10 +2530,10 @@ mod tests {
         }
     }
 
-    /// A field output with a coordinate system adds its displacements in that system to
-    /// the increments of its step only; renaming the system renames the copy.
+    /// A field output with a coordinate system adds the displacements in that system to
+    /// the increments of the steps of the analysis; renaming the system renames the copy.
     #[test]
-    fn field_outputs_of_steps_show_results_in_their_system() {
+    fn the_field_output_shows_results_in_its_system() {
         let mut mesh = FeMesh::default();
         for (id, x) in [(1, 0.0), (2, 1.0)] {
             mesh.set_node(id, [x, 0.0, 0.0]);
@@ -2554,19 +2550,20 @@ mod tests {
         system.set_points([0.0; 3], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]);
         let id = system.id;
         fe.coordinate_systems.push(system);
-        let mut first = plx_model::Step::new_static("Step-1");
-        first.field_outputs[0].system = Some(id);
+        fe.field_output.system = Some(id);
+        let first = plx_model::Step::new_static("Step-1");
+        // A step the analysis does not have takes no system.
         let second = plx_model::Step::new_static("Step-2");
         let records: Vec<_> = [&first, &second]
             .iter()
             .enumerate()
             .map(|(i, s)| plx_results::steps::StepRecord::new(&s.name, &s.kind, vec![i as u32 + 1]))
             .collect();
-        fe.steps = vec![first, second];
+        fe.steps = vec![first];
         view.set_step_records(&records, &[], None);
         view.coordinate_systems = fe.coordinate_systems.clone();
 
-        let wanted = view.wanted_output_systems(&fe.steps, &fe.coordinate_systems);
+        let wanted = view.wanted_output_systems(&fe, &fe.coordinate_systems);
         let warnings = view.set_output_systems(wanted, &mesh);
         assert!(warnings.is_empty(), "{warnings:?}");
         let turned = view.increments[0]
@@ -2576,21 +2573,21 @@ mod tests {
         assert_eq!(u("U1"), [2.0; 2].into());
         assert_eq!(u("U2"), [-1.0; 2].into());
         assert_eq!(u("U3"), [3.0; 2].into());
-        // The global results stay; the second step has no system.
+        // The global results stay; the second step is none of the analysis.
         assert!(view.increments[0].field("DISP").is_some());
         assert!(view.increments[1].field("DISP_CS_1").is_none());
 
         fe.coordinate_systems[0].name = "Arm".into();
         view.coordinate_systems = fe.coordinate_systems.clone();
-        let wanted = view.wanted_output_systems(&fe.steps, &fe.coordinate_systems);
+        let wanted = view.wanted_output_systems(&fe, &fe.coordinate_systems);
         assert_ne!(wanted, view.output_systems);
         view.set_output_systems(wanted, &mesh);
         assert!(view.increments[0].field("DISP_CS_1").is_none());
         assert!(view.increments[0].field("DISP_Arm").is_some());
 
         // Back to global: the copy goes.
-        fe.steps[0].field_outputs[0].system = None;
-        let wanted = view.wanted_output_systems(&fe.steps, &fe.coordinate_systems);
+        fe.field_output.system = None;
+        let wanted = view.wanted_output_systems(&fe, &fe.coordinate_systems);
         view.set_output_systems(wanted, &mesh);
         assert!(view.increments[0].field("DISP_Arm").is_none());
     }

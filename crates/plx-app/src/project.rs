@@ -7484,15 +7484,15 @@ impl ProjectApp {
                     (links::target_step(link), link.item.get(1))
             {
                 let node = self.nodes.iter().find(|n| n.id == link.source);
-                let writers = node
+                let displacements = node
                     .filter(|n| n.as_file().is_none())
                     .and_then(Node::link_data)
-                    .and_then(|d| links::displacement_writers(d.fe, source_step));
+                    .and_then(|d| links::writes_displacements(d.fe, source_step));
                 incoming.global_sources.push(links::GlobalSource {
                     step: step.to_owned(),
                     source: source.clone(),
                     source_step: source_step.clone(),
-                    writers,
+                    displacements,
                 });
             }
             if links::is_state(link) {

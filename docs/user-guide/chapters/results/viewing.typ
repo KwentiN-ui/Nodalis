@@ -32,7 +32,7 @@ When results are opened, Nodalis shows the Results workspace with the last incre
 The result file numbers the components: `U1` to `U3`, `S11` to `S13`. The tree, the legend, the
 node query, path plots and the history tables show them by their directions instead, in the
 global system `UX`, `UY`, `UZ` and `SXX`, `SYY`, `SZZ`, `SXY`, `SYZ`, `SXZ`. A copy of a field
-in a coordinate system (a field output with a #ui("Coordinate system"), @step-field-outputs, or a
+in a coordinate system (the field output with a #ui("Coordinate system"), @step-field-outputs, or a
 #ui("Coordinate System Transformation"), @derived-fields) takes the directions of that system:
 in a cylindrical one `U radial`, `U tangential`, `U axial` and the stresses `SRR`, `STT`, `SAA`,
 `SRT`, `STA`, `SRA` (R radial, T tangential, A axial). The tooltip of a component says what it
@@ -310,7 +310,7 @@ Frequency, complex frequency and buckle steps solve an eigenvalue problem. Their
 the modes: the eigenvalue (frequency or buckling factor) and the shape of each mode, kept once
 and normalized so that its largest displacement is 1. A mode shape has no size of its own, so
 its stresses, strains and forces would tell nothing; the built-in solver does not compute or
-keep them, and these steps take no field outputs. A mode shows the single field #ui("MODE")
+keep them, and these steps write no fields. A mode shows the single field #ui("MODE")
 with the components `UX`, `UY`, `UZ` and their magnitude `ALL`, without a unit; a complex
 mode also has #ui("PMODE") with the magnitudes and phase angles that make it whirl.
 

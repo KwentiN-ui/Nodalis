@@ -172,7 +172,7 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
         | TreeItem::StepGroup(..)
         | TreeItem::BoundaryCondition(..)
         | TreeItem::Load(..)
-        | TreeItem::FieldOutput(..)
+        | TreeItem::FieldOutput
         | TreeItem::HistoryOutput(..)
         | TreeItem::DefinedField(..)
         | TreeItem::HotSpot(_)

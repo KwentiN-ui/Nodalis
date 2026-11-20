@@ -68,7 +68,8 @@ pub enum TreeItem {
     StepGroup(usize, &'static str),
     BoundaryCondition(usize, usize),
     Load(usize, usize),
-    FieldOutput(usize, usize),
+    /// The field output of the analysis, shown where it goes beyond the standard results.
+    FieldOutput,
     /// A history output of a step, by step and index.
     HistoryOutput(usize, usize),
     /// A defined field of a step, by step and index.
@@ -541,7 +542,6 @@ fn can_deactivate(item: &TreeItem) -> bool {
         TreeItem::Step(_)
             | TreeItem::BoundaryCondition(..)
             | TreeItem::Load(..)
-            | TreeItem::FieldOutput(..)
             | TreeItem::HistoryOutput(..)
             | TreeItem::DefinedField(..)
             | TreeItem::Constraint(_)
@@ -736,7 +736,6 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group("Initial Conditions") => Some(NewItem::InitialCondition),
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
-        TreeItem::StepGroup(step, "Field Outputs") => Some(NewItem::FieldOutput(step)),
         TreeItem::StepGroup(step, "History Outputs") => Some(NewItem::HistoryOutput(step)),
         TreeItem::StepGroup(step, "Defined Fields") => Some(NewItem::DefinedField(step)),
         TreeItem::Group(HOT_SPOTS) => Some(NewItem::ResultHotSpot),
@@ -834,7 +833,7 @@ fn is_fe_item(item: &TreeItem) -> bool {
             | TreeItem::Step(_)
             | TreeItem::BoundaryCondition(..)
             | TreeItem::Load(..)
-            | TreeItem::FieldOutput(..)
+            | TreeItem::FieldOutput
             | TreeItem::HistoryOutput(..)
             | TreeItem::DefinedField(..)
     )
@@ -1635,13 +1634,6 @@ impl Tree<'_> {
                              the .dat file at every increment of the step.",
                             |step| NewItem::ContactHistoryOutput(step, contact),
                         );
-                        self.step_item_menu(
-                            ui,
-                            "Create Contact Field Output",
-                            "Writes the contact pressure, slip and gap of all contacts into the \
-                             .frd file; a step that writes them already opens its output.",
-                            NewItem::ContactFieldOutput,
-                        );
                         separator(ui);
                     }
                     if self.master_slave.contains(&item) {
@@ -1716,9 +1708,7 @@ impl Tree<'_> {
                 Some(glyph) => TreeIcon::StepType(*glyph),
                 None => TreeIcon::Step,
             },
-            TreeItem::StepGroup(_, "Field Outputs") | TreeItem::FieldOutputs => {
-                TreeIcon::FieldOutput
-            }
+            TreeItem::FieldOutput | TreeItem::FieldOutputs => TreeIcon::FieldOutput,
             TreeItem::StepGroup(_, "History Outputs") | TreeItem::Group("History Outputs") => {
                 TreeIcon::HistoryOutput
             }
@@ -2688,6 +2678,11 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
         if !exposed.is_empty() {
             tree.container(ui, EXPOSED, exposed);
         }
+        // The steps write the results of their kinds without an item for them: the field
+        // output only shows where it adds to them.
+        if !fe.field_output.is_standard() {
+            tree.leaf(ui, TreeItem::FieldOutput, "Field Output");
+        }
         let steps = TreeItem::Group("Steps");
         tree.step_count = fe.steps.len();
         tree.step_types = fe.steps.iter().map(|s| StepGlyph::from(&s.kind)).collect();
@@ -2725,9 +2720,6 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 for (i, load) in step.loads.iter().enumerate() {
                     tree.symbols.insert(TreeItem::Load(s, i), load.visible);
                 }
-                for (i, _) in (step.field_outputs.iter().enumerate()).filter(|(_, f)| !f.active) {
-                    tree.inactive.insert(TreeItem::FieldOutput(s, i));
-                }
                 for (i, &id) in step.history_outputs.iter().enumerate() {
                     if fe.history_output(id).is_some_and(|h| !h.active) {
                         tree.inactive.insert(TreeItem::HistoryOutput(s, i));
@@ -2757,13 +2749,6 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 let handover = fe.step_handover(s);
                 tree.branch(ui, TreeItem::Step(s), &label, true, |tree, ui| {
                     tree.handover_row(ui, s, &handover);
-                    // An eigenvalue step leaves out the field outputs it has (from a
-                    // project of an earlier version): the solver keeps its mode shapes.
-                    let outputs = (step.field_outputs.iter().enumerate())
-                        .filter(|_| !step.kind.computes_eigenmodes())
-                        .map(|(i, f)| (TreeItem::FieldOutput(s, i), f.name.as_str()))
-                        .collect();
-                    tree.step_container(ui, s, "Field Outputs", outputs);
                     let outputs = (step.history_outputs.iter().enumerate())
                         .filter_map(|(i, &id)| Some((i, fe.history_output(id)?)))
                         .map(|(i, h)| (TreeItem::HistoryOutput(s, i), h.name.as_str()))

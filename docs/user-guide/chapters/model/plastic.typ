@@ -23,6 +23,6 @@ yield stress. The model check (@model-check) reports a curve that does not start
 strain that does not grow, or plasticity without elasticity as "Invalid plasticity".
 
 Plastic strains need a nonlinear analysis: switch on #ui("Nonlinear geometry") or use
-automatic incrementation with several increments in the static step (@steps), and request
-`PEEQ` (equivalent plastic strain) in the element field output to see where the material
-yields.
+automatic incrementation with several increments in the static step (@steps). With a plastic
+material in the model the steps write the equivalent plastic strain `PE` on their own, which
+shows where the material yields.

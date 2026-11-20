@@ -3752,35 +3752,8 @@ impl Workbench {
             }
             return;
         }
-        if let NewItem::FieldOutput(step) | NewItem::ContactFieldOutput(step) = kind
-            && let Some(step) = (self.setup_model()).and_then(|m| m.fe.steps.get(step))
-            && step.kind.computes_eigenmodes()
-        {
-            self.toast = Some(crate::toast::Toast::new(
-                format!(
-                    "{} keeps its mode shapes and takes no field outputs",
-                    step.name
-                ),
-                false,
-            ));
-            return;
-        }
         if let Some(model) = self.setup_model() {
-            // The solver writes the values of all contacts with one contact field output, so
-            // a step that has one opens it.
-            let existing = match kind {
-                NewItem::ContactFieldOutput(step) => (model.fe.steps.get(step))
-                    .and_then(|s| {
-                        (s.field_outputs.iter())
-                            .position(|f| f.kind == plx_model::OutputKind::Contact)
-                    })
-                    .map(|i| TreeItem::FieldOutput(step, i)),
-                _ => None,
-            };
-            self.editor = match existing {
-                Some(item) => Editor::edit(&item, &model.fe, model.mesh()),
-                None => Editor::create(kind, &model.fe),
-            };
+            self.editor = Editor::create(kind, &model.fe);
             self.set_tree_view(TreeView::FeModel);
         }
     }
@@ -7460,13 +7433,13 @@ impl Workbench {
                 self.output.extend(warnings);
                 self.results_changed = true;
             }
-            // The results that the steps' field outputs want in a coordinate system; the
-            // steps are those of the analysis, the results keep only its features.
-            let steps = match &self.model {
-                Some(project) if fe.steps.is_empty() => &project.fe.steps,
-                _ => &fe.steps,
+            // The results that the field output wants in a coordinate system; the steps and
+            // the field output are those of the analysis, the results keep only its features.
+            let analysis = match &self.model {
+                Some(project) if fe.steps.is_empty() => &project.fe,
+                _ => fe,
             };
-            let wanted = view.wanted_output_systems(steps, &fe.coordinate_systems);
+            let wanted = view.wanted_output_systems(analysis, &fe.coordinate_systems);
             if wanted != view.output_systems || (systems_changed && !wanted.is_empty()) {
                 let warnings = view.set_output_systems(wanted, mesh);
                 self.output.extend(warnings);
@@ -8941,7 +8914,6 @@ fn step_of(item: &TreeItem) -> Option<usize> {
         | TreeItem::StepGroup(s, _)
         | TreeItem::BoundaryCondition(s, _)
         | TreeItem::Load(s, _)
-        | TreeItem::FieldOutput(s, _)
         | TreeItem::HistoryOutput(s, _)
         | TreeItem::DefinedField(s, _) => Some(s),
         _ => None,
@@ -8963,10 +8935,8 @@ fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
         NewItem::Step => TreeItem::Group("Steps"),
         NewItem::BoundaryCondition(s)
         | NewItem::Load(s)
-        | NewItem::FieldOutput(s)
         | NewItem::HistoryOutput(s)
         | NewItem::ContactHistoryOutput(s, _)
-        | NewItem::ContactFieldOutput(s)
         | NewItem::DefinedField(s) => TreeItem::Step(*s),
         NewItem::Constraint => TreeItem::Group("Constraints"),
         NewItem::SurfaceInteraction

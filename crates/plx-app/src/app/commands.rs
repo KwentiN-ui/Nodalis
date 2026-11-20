@@ -218,8 +218,9 @@ impl AnalysisWindow {
             | Cmd::InitialCondition
             | Cmd::Amplitude
             | Cmd::Distribution
+            | Cmd::FieldOutput
             | Cmd::ExportInp => has_setup,
-            Cmd::BoundaryCondition | Cmd::FieldOutput | Cmd::HistoryOutput => last_step.is_some(),
+            Cmd::BoundaryCondition | Cmd::HistoryOutput => last_step.is_some(),
             Cmd::Load => last_step.is_some_and(|s| s.kind.supports_loads()),
             Cmd::DefinedField => last_step.is_some_and(|s| s.kind.supports_defined_fields()),
             Cmd::OpenResults | Cmd::RemoveResults => !running && kept,
@@ -464,7 +465,7 @@ impl AnalysisWindow {
             Cmd::DefinedField => w.create(NewItem::DefinedField(last_step)),
             Cmd::Amplitude => w.create(NewItem::Amplitude),
             Cmd::Distribution => w.create(NewItem::Distribution),
-            Cmd::FieldOutput => w.create(NewItem::FieldOutput(last_step)),
+            Cmd::FieldOutput => w.create(NewItem::FieldOutput),
             Cmd::HistoryOutput => w.create(NewItem::HistoryOutput(last_step)),
             Cmd::OpenResults => w.open_bound_results(),
             Cmd::RemoveResults => w.confirm_remove_results = true,
