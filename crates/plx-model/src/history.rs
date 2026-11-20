@@ -17,9 +17,105 @@ pub struct HistoryOutput {
     #[serde(default = "crate::active")]
     pub active: bool,
     pub kind: HistoryKind,
-    /// CalculiX's variable names, such as `U` or `RF`, in a fixed order.
-    pub variables: Vec<String>,
+    /// What it prints, in the order of [`HistoryKind::choices`].
+    pub variables: Vec<HistoryVariable>,
     pub totals: Totals,
+}
+
+/// A quantity a history output prints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum HistoryVariable {
+    ReactionForces,
+    Displacements,
+    Velocities,
+    Temperatures,
+    ReactionHeatFlows,
+    Stresses,
+    Strains,
+    MechanicalStrains,
+    PlasticStrain,
+    HeatFlux,
+    EnergyDensity,
+    ElementInternalEnergy,
+    ElementKineticEnergy,
+    ElementVolume,
+    ElementHeatGeneration,
+    ContactDisplacements,
+    ContactStresses,
+    ContactEnergy,
+    ContactElements,
+    /// Contact forces summed over the slave surface of the contact pair.
+    ContactForces,
+    InternalEnergy,
+    KineticEnergy,
+    ExternalWork,
+    DampingDissipation,
+}
+
+impl HistoryVariable {
+    /// The short name of the dialog's check box, as in Abaqus and CalculiX: `RF`, `U`.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::ReactionForces => "RF",
+            Self::Displacements => "U",
+            Self::Velocities => "V",
+            Self::Temperatures => "NT",
+            Self::ReactionHeatFlows => "RFL",
+            Self::Stresses => "S",
+            Self::Strains => "E",
+            Self::MechanicalStrains => "ME",
+            Self::PlasticStrain => "PEEQ",
+            Self::HeatFlux => "HFL",
+            Self::EnergyDensity => "ENER",
+            Self::ElementInternalEnergy => "ELSE",
+            Self::ElementKineticEnergy => "ELKE",
+            Self::ElementVolume => "EVOL",
+            Self::ElementHeatGeneration => "EBHE",
+            Self::ContactDisplacements => "CDIS",
+            Self::ContactStresses => "CSTR",
+            Self::ContactEnergy => "CELS",
+            Self::ContactElements => "CNUM",
+            Self::ContactForces => "CF",
+            Self::InternalEnergy => "ALLIE",
+            Self::KineticEnergy => "ALLKE",
+            Self::ExternalWork => "ALLWK",
+            Self::DampingDissipation => "ALLVD",
+        }
+    }
+
+    /// What it is, for the hover text of the dialog.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::ReactionForces => "Reaction forces.",
+            Self::Displacements => "Displacements.",
+            Self::Velocities => "Velocities.",
+            Self::Temperatures => "Temperatures.",
+            Self::ReactionHeatFlows => "External concentrated heat sources.",
+            Self::Stresses => "Stresses.",
+            Self::Strains => "Total strains.",
+            Self::MechanicalStrains => "Mechanical strains.",
+            Self::PlasticStrain => "Equivalent plastic strain.",
+            Self::HeatFlux => "Heat flux.",
+            Self::EnergyDensity => "Energy density.",
+            Self::ElementInternalEnergy => "Internal energy of whole elements.",
+            Self::ElementKineticEnergy => "Kinetic energy of whole elements.",
+            Self::ElementVolume => "Volume of whole elements.",
+            Self::ElementHeatGeneration => "Heat generation of whole elements (body heat flux).",
+            Self::ContactDisplacements => "Relative contact displacements.",
+            Self::ContactStresses => "Contact stresses.",
+            Self::ContactEnergy => "Contact energy.",
+            Self::ContactElements => "Number of contact elements.",
+            Self::ContactForces => {
+                "Contact forces summed over the slave surface of the contact pair."
+            }
+            Self::InternalEnergy => "Internal (strain) energy of the whole model.",
+            Self::KineticEnergy => "Kinetic energy of the whole model.",
+            Self::ExternalWork => "Work of the external loads since the start of the step.",
+            Self::DampingDissipation => {
+                "Energy dissipated by the damping since the start of the step."
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -62,14 +158,41 @@ impl Totals {
 
 impl HistoryKind {
     /// Variables the kind can print, in a fixed order.
-    pub fn choices(&self) -> &'static [&'static str] {
+    pub fn choices(&self) -> &'static [HistoryVariable] {
+        use HistoryVariable as V;
         match self {
-            HistoryKind::Node { .. } => &["RF", "U", "V", "NT", "RFL"],
-            HistoryKind::Element { .. } => &[
-                "S", "E", "ME", "PEEQ", "HFL", "ENER", "ELSE", "ELKE", "EVOL", "EBHE",
+            HistoryKind::Node { .. } => &[
+                V::ReactionForces,
+                V::Displacements,
+                V::Velocities,
+                V::Temperatures,
+                V::ReactionHeatFlows,
             ],
-            HistoryKind::Contact { .. } => &["CDIS", "CSTR", "CELS", "CNUM", "CF"],
-            HistoryKind::Energies => &["ALLIE", "ALLKE", "ALLWK", "ALLVD"],
+            HistoryKind::Element { .. } => &[
+                V::Stresses,
+                V::Strains,
+                V::MechanicalStrains,
+                V::PlasticStrain,
+                V::HeatFlux,
+                V::EnergyDensity,
+                V::ElementInternalEnergy,
+                V::ElementKineticEnergy,
+                V::ElementVolume,
+                V::ElementHeatGeneration,
+            ],
+            HistoryKind::Contact { .. } => &[
+                V::ContactDisplacements,
+                V::ContactStresses,
+                V::ContactEnergy,
+                V::ContactElements,
+                V::ContactForces,
+            ],
+            HistoryKind::Energies => &[
+                V::InternalEnergy,
+                V::KineticEnergy,
+                V::ExternalWork,
+                V::DampingDissipation,
+            ],
         }
     }
 
@@ -116,7 +239,7 @@ impl HistoryOutput {
             name: name.into(),
             active: true,
             kind: HistoryKind::Node { region },
-            variables: vec!["RF".into(), "U".into()],
+            variables: vec![HistoryVariable::ReactionForces, HistoryVariable::Displacements],
             totals: Totals::No,
         }
     }
@@ -128,7 +251,7 @@ impl HistoryOutput {
             name: name.into(),
             active: true,
             kind: HistoryKind::Element { region },
-            variables: vec!["S".into(), "E".into()],
+            variables: vec![HistoryVariable::Stresses, HistoryVariable::Strains],
             totals: Totals::No,
         }
     }
@@ -140,7 +263,10 @@ impl HistoryOutput {
             name: name.into(),
             active: true,
             kind: HistoryKind::Contact { pair },
-            variables: vec!["CDIS".into(), "CSTR".into()],
+            variables: vec![
+                HistoryVariable::ContactDisplacements,
+                HistoryVariable::ContactStresses,
+            ],
             totals: Totals::No,
         }
     }
@@ -152,11 +278,7 @@ impl HistoryOutput {
             name: name.into(),
             active: true,
             kind: HistoryKind::Energies,
-            variables: HistoryKind::Energies
-                .choices()
-                .iter()
-                .map(|v| v.to_string())
-                .collect(),
+            variables: HistoryKind::Energies.choices().to_vec(),
             totals: Totals::Only,
         }
     }
@@ -164,7 +286,7 @@ impl HistoryOutput {
     /// Sorts the variables into their fixed order and drops those the kind cannot print.
     pub fn normalize_variables(&mut self) {
         let choices = self.kind.choices();
-        self.variables.retain(|v| choices.contains(&v.as_str()));
+        self.variables.retain(|v| choices.contains(v));
         self.variables
             .sort_by_key(|v| choices.iter().position(|c| c == v));
         self.variables.dedup();

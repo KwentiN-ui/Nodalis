@@ -16,7 +16,7 @@ use plx_model::particle_flow::{
     BoxSide, Flow, FlowBoundary, FlowKind, FlowProperty, ParticleFlowStep,
 };
 use plx_model::{
-    Constraint, ContactBehavior, FeModel, HistoryKind, Material, ModelItem, ModelSpace, StepKind,
+    Constraint, ContactBehavior, FeModel, HistoryKind, HistoryVariable, Material, ModelItem, ModelSpace, StepKind,
 };
 use plx_results::particles::{HistoryRequest, TemperatureRequest, WallRequest, set_name};
 use plxs_core::particles::{
@@ -613,8 +613,9 @@ fn history_request(
         let region = match &output.kind {
             HistoryKind::Energies => {
                 for variable in &output.variables {
-                    if !request.energies.contains(variable) {
-                        request.energies.push(variable.clone());
+                    let name = variable.code().to_owned();
+                    if !request.energies.contains(&name) {
+                        request.energies.push(name);
                     }
                 }
                 continue;
@@ -646,8 +647,11 @@ fn history_request(
             .filter(|(_, p)| parts.contains(p))
             .map(|(b, _)| b)
             .collect();
-        let asks = |v: &str| output.variables.iter().any(|x| x == v);
-        let (force, heat) = (asks("RF"), asks("RFL"));
+        let asks = |v: HistoryVariable| output.variables.contains(&v);
+        let (force, heat) = (
+            asks(HistoryVariable::ReactionForces),
+            asks(HistoryVariable::ReactionHeatFlows),
+        );
         if (force || heat) && hit.is_empty() {
             warnings.push(format!(
                 "{name}: RF and RFL are written for rigid bodies, by their reference point or \
@@ -668,7 +672,7 @@ fn history_request(
                 None => request.walls.push(WallRequest { wall, force, heat }),
             }
         }
-        if asks("NT") {
+        if asks(HistoryVariable::Temperatures) {
             if model.heat.is_none() {
                 warnings.push(format!(
                     "{name}: NT needs the heat of the step; it is left out."
@@ -685,9 +689,14 @@ fn history_request(
                 });
             }
         }
+        let written = [
+            HistoryVariable::ReactionForces,
+            HistoryVariable::ReactionHeatFlows,
+            HistoryVariable::Temperatures,
+        ];
         let other: Vec<&str> = (output.variables.iter())
-            .map(String::as_str)
-            .filter(|v| !["RF", "RFL", "NT"].contains(v))
+            .filter(|v| !written.contains(v))
+            .map(|v| v.code())
             .collect();
         if !other.is_empty() {
             warnings.push(format!(

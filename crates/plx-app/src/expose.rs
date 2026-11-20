@@ -10,12 +10,10 @@ use std::collections::BTreeSet;
 use egui::{Response, Ui};
 use plx_model::{FeModel, Field, Geometry, ItemRef, ValuePath};
 
-/// What the expose buttons of one dialog know: the item, which of its fields are exposed and
+/// What the expose buttons of one dialog know: which fields of the item are exposed and
 /// which of those a link gives, and the fields toggled while the dialog is open.
 #[derive(Clone, Debug, Default)]
 pub struct Scope {
-    /// The item as it is in the model, for its exposed fields; `None` for a new item.
-    pub item: Option<ItemRef>,
     /// Exposed fields of the item, each with the block a value link gives it from.
     exposed: Vec<(Field, Option<String>)>,
     /// Fields whose button was clicked, to be exposed or no longer exposed on OK.
@@ -42,7 +40,6 @@ impl Scope {
             })
             .collect();
         Self {
-            item,
             exposed,
             toggled: BTreeSet::new(),
             available: Vec::new(),

@@ -120,14 +120,14 @@ pub use exposed::{Exposed, Field, ItemRef, ValuePath};
 pub use features::{
     GLOBAL, Plane, PlaneSource, PointDefinition, PointRef, ReferencePoint, ResultPath, ResultPlane,
 };
-pub use field::{FieldOutput, FieldResult, OutputDimension, output_variable_description};
+pub use field::{FieldOutput, FieldResult, OutputDimension};
 pub use geometry::{
     Algorithm2d, Algorithm3d, CompoundPart, ExtrudeLayers, ExtrudeMesh, Geometry,
     GeometryOperation, MeshSetupItem, MeshSetupKind, MeshingParameters, PartId, PeriodicFaces,
     Recombination, ThickenShellMesh,
 };
 pub use handover::Handover;
-pub use history::{HistoryKind, HistoryOutput, Totals};
+pub use history::{HistoryKind, HistoryOutput, HistoryVariable, Totals};
 pub use hyperelastic::{Hyperelastic, HyperelasticModel, TestMode};
 pub use infill::{InfillPattern, InfillSection};
 pub use library::MaterialLibrary;

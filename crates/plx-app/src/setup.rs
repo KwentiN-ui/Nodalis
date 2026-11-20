@@ -2646,7 +2646,7 @@ impl Editor {
                     Some(pair),
                 );
                 // The contact forces too, summed over the slave side.
-                output.variables.push("CF".into());
+                output.variables.push(plx_model::HistoryVariable::ContactForces);
                 output.normalize_variables();
                 let region = history_region(&output.kind, fe, &FeMesh::default());
                 Draft::HistoryOutput(step, output, region)
@@ -5507,15 +5507,15 @@ fn history_output_form(
             };
             for row in choices.chunks(per_row) {
                 for &variable in row {
-                    let mut on = output.variables.iter().any(|v| v == variable);
+                    let mut on = output.variables.contains(&variable);
                     let checkbox = ui
-                        .checkbox(&mut on, variable)
-                        .on_hover_text(plx_model::output_variable_description(variable));
+                        .checkbox(&mut on, variable.code())
+                        .on_hover_text(variable.description());
                     if checkbox.changed() {
                         changed = true;
-                        output.variables.retain(|v| v != variable);
+                        output.variables.retain(|&v| v != variable);
                         if on {
-                            output.variables.push(variable.to_string());
+                            output.variables.push(variable);
                         }
                     }
                 }

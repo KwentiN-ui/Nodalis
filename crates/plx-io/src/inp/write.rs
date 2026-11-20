@@ -14,7 +14,7 @@ use plx_model::{
     Active, AmplitudeTime, BeamProfile, BeamSection, BoundaryKind, BuckleStep,
     ComplexFrequencyStep, Constraint, ContactMethod, ContactPair, ContactScale, Damping,
     DefinedFieldKind, DynamicMethod, DynamicStep, FeModel, FieldResult, Formulation, FrequencyStep,
-    GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Id, IncrementPlan,
+    GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, HistoryVariable, Id, IncrementPlan,
     InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModelItem, ModelSpace,
     MovingFrame, NodeTie, Origins, OutputDimension, Quantity, RayleighFit, Region, RemoteBehavior,
     RemoteDof, Sampler, Section, SectionKind, SectorDisplay, SensitivityStep, StaticStep,
@@ -5682,6 +5682,37 @@ fn node_print(
     }
 }
 
+/// The solver's name of a variable of a history output.
+fn history_variable(variable: HistoryVariable) -> &'static str {
+    use HistoryVariable as V;
+    match variable {
+        V::ReactionForces => "RF",
+        V::Displacements => "U",
+        V::Velocities => "V",
+        V::Temperatures => "NT",
+        V::ReactionHeatFlows => "RFL",
+        V::Stresses => "S",
+        V::Strains => "E",
+        V::MechanicalStrains => "ME",
+        V::PlasticStrain => "PEEQ",
+        V::HeatFlux => "HFL",
+        V::EnergyDensity => "ENER",
+        V::ElementInternalEnergy => "ELSE",
+        V::ElementKineticEnergy => "ELKE",
+        V::ElementVolume => "EVOL",
+        V::ElementHeatGeneration => "EBHE",
+        V::ContactDisplacements => "CDIS",
+        V::ContactStresses => "CSTR",
+        V::ContactEnergy => "CELS",
+        V::ContactElements => "CNUM",
+        V::ContactForces => "CF",
+        V::InternalEnergy => "ALLIE",
+        V::KineticEnergy => "ALLKE",
+        V::ExternalWork => "ALLWK",
+        V::DampingDissipation => "ALLVD",
+    }
+}
+
 /// The history output requests of a history output; none without variables.
 fn history_output(
     sets: &mut Sets,
@@ -5691,7 +5722,7 @@ fn history_output(
     if output.variables.is_empty() {
         return Ok(Vec::new());
     }
-    let names: Vec<&str> = output.variables.iter().map(String::as_str).collect();
+    let names: Vec<&str> = output.variables.iter().map(|&v| history_variable(v)).collect();
     let card = match &output.kind {
         HistoryKind::Node {
             region: region @ (Region::ReferencePoint(_) | Region::RemotePoint(_)),
@@ -5718,7 +5749,7 @@ fn history_output(
         HistoryKind::Contact { pair } => {
             // Contact forces are summed over the slave surface of the pair.
             let mut request = node_print(None, &names, output.totals);
-            if output.variables.iter().any(|v| v == "CF") {
+            if output.variables.contains(&HistoryVariable::ContactForces) {
                 let (master, slave) =
                     (pair.and_then(|p| pair_surfaces.get(&p))).ok_or_else(|| {
                         WriteError::UnknownContactPair {
@@ -5812,8 +5843,8 @@ fn point_output(
     let ([reference, rotation], behavior) = point_nodes(sets, &output.name, region)?;
     let reactions = behavior == RemoteBehavior::Rigid;
     let printed: Vec<&str> = (output.variables.iter())
-        .map(String::as_str)
-        .filter(|&v| reactions || v != "RF")
+        .filter(|&&v| reactions || v != HistoryVariable::ReactionForces)
+        .map(|&v| history_variable(v))
         .collect();
     if printed.is_empty() {
         return Ok(Vec::new());

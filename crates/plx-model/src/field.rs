@@ -306,70 +306,9 @@ impl FeModel {
     }
 }
 
-/// The description of a history output variable, shown when hovering over its check box.
-pub fn output_variable_description(variable: &str) -> &'static str {
-    match variable {
-        "RF" => "Reaction forces.",
-        "U" => "Displacements.",
-        "PU" => "Displacements magnitude and phase.",
-        "V" => "Velocities.",
-        "A" => "Accelerations (Dynamic steps).",
-        "ALLIE" => "Internal (strain) energy of the whole model.",
-        "ALLKE" => "Kinetic energy of the whole model.",
-        "ALLWK" => "Work of the external loads since the start of the step.",
-        "ALLVD" => "Energy dissipated by the damping since the start of the step.",
-        "NT" => "Temperatures.",
-        "PNT" => "Temperatures magnitude and phase.",
-        "RFL" => "External concentrated heat sources.",
-        "SEN" => "Sensitivities of the design responses (sensitivity steps only).",
-        "S" => "Stresses.",
-        "PHS" => "Stresses magnitude and phase.",
-        "E" => "Total strains.",
-        "ME" => "Mechanical strains.",
-        "PEEQ" => "Equivalent plastic strain.",
-        "ENER" => "Energy density.",
-        "HFL" => "Heat flux.",
-        "ERR" => "Extrapolation error estimator for stress calculations.",
-        "HER" => "Extrapolation error estimator for heat calculations.",
-        "ZZS" => "Zienkiewicz-Zhu improved stress.",
-        "SDV" => "Internal state variables.",
-        "CDIS" => "Relative contact displacements.",
-        "CSTR" => "Contact stresses.",
-        "CELS" => "Contact energy.",
-        "PCON" => "Contact states for frequency and steady state dynamics calculations.",
-        "ELSE" => "Internal energy of whole elements.",
-        "ELKE" => "Kinetic energy of whole elements.",
-        "EVOL" => "Volume of whole elements.",
-        "EBHE" => "Heat generation of whole elements (body heat flux).",
-        "CNUM" => "Number of contact elements.",
-        "CF" => "Contact forces summed over the slave surface of the contact pair.",
-        _ => "",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{HistoryKind, Region};
-
-    #[test]
-    fn every_history_variable_has_a_description() {
-        let history = [
-            HistoryKind::Node {
-                region: Region::Nodes(Vec::new()),
-            },
-            HistoryKind::Element {
-                region: Region::Nodes(Vec::new()),
-            },
-            HistoryKind::Contact { pair: None },
-        ];
-        for variable in history.iter().flat_map(|k| k.choices()) {
-            assert!(
-                !output_variable_description(variable).is_empty(),
-                "{variable}"
-            );
-        }
-    }
 
     #[test]
     fn steps_write_the_results_of_their_kind_without_being_asked() {
