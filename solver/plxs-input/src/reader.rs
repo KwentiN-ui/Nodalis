@@ -1632,7 +1632,7 @@ impl Reader {
         }
         let global_elset = self.element_set_parameter(k, "GLOBAL ELSET");
         self.model().constraints.submodel = Some(Submodel {
-            input: input.to_string(),
+            global: plxs_core::handover::Source::Path(input.into()),
             node_sets,
             global_elset,
         });
@@ -2826,8 +2826,8 @@ impl Reader {
         ])?;
         let amplitude = self.amplitude_ref(k, "AMPLITUDE");
         let kind = match k.value("FILE") {
-            Some(file) => DefinedFieldKind::TemperatureFile {
-                file: file.to_string(),
+            Some(file) => DefinedFieldKind::TemperatureFrom {
+                source: plxs_core::handover::Source::Path(file.into()),
                 bstep: k.integer("BSTEP")?,
                 estep: k.integer("ESTEP")?,
                 binc: k.integer("BINC")?,
