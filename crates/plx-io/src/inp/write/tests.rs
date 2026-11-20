@@ -8149,7 +8149,7 @@ fn solver_prints_the_complex_frequencies_and_the_whirl_direction() {
         return;
     };
     let import = crate::dat::parse_dat(&dat);
-    let set = import.sets.iter().find(|s| s.name == "STEP_3").unwrap();
+    let set = import.sets.iter().find(|s| s.step == Some(3)).unwrap();
     let output = set.field("EIGENVALUE_OUTPUT").unwrap();
     let whirl = &output.component("TURNING_DIRECTION").unwrap().entries[0].values;
     assert_eq!(whirl.len(), 4, "{whirl:?}");
@@ -8743,7 +8743,7 @@ fn solver_computes_the_sensitivities_of_mass_and_strain_energy() {
     let index = frd.mesh.node_index(99).unwrap();
     let disp = frd.increments[0].field("DISP").unwrap();
     let tip = -f64::from(disp.component("U3").unwrap().values.get()[index]);
-    let set = dat.sets.iter().find(|s| s.name == "STEP_2").unwrap();
+    let set = dat.sets.iter().find(|s| s.step == Some(2)).unwrap();
     let response = |name: &str| {
         let field = set.field("DESIGN_RESPONSE").unwrap();
         field.component(name).unwrap().entries[0].values[0]
@@ -8788,7 +8788,7 @@ fn solver_filters_the_sensitivities() {
     ) else {
         return;
     };
-    let set = dat.sets.iter().find(|s| s.name == "STEP_2").unwrap();
+    let set = dat.sets.iter().find(|s| s.step == Some(2)).unwrap();
     assert!(set.field("GRADIENT_LENGTH").is_some());
     let sensitivity = (frd.increments.iter())
         .find(|i| i.step == 2 && i.field("SENENER").is_some())
@@ -9134,7 +9134,7 @@ fn solver_finds_the_disk_frequencies_on_a_sector() {
     }
     // The .dat file numbers the modes on through the nodal diameters, as the .frd does.
     let import = crate::dat::parse_dat(&dat);
-    let set = import.sets.iter().find(|s| s.name == "STEP_1").unwrap();
+    let set = import.sets.iter().find(|s| s.step == Some(1)).unwrap();
     let field = (set.fields.iter())
         .find(|f| f.name == "EIGENVALUE_OUTPUT")
         .unwrap();

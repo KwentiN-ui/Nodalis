@@ -197,8 +197,7 @@ fn modes_of(dat: &str, step: u32) -> Vec<Mode> {
 
 /// The complex frequencies and whirls of step `step` in history output.
 pub fn modes_of_history(import: &plx_io::dat::DatImport, step: u32) -> Vec<Mode> {
-    let name = format!("STEP_{step}");
-    let Some(set) = import.sets.iter().find(|s| s.name == name) else {
+    let Some(set) = import.sets.iter().find(|s| s.step == Some(step)) else {
         return Vec::new();
     };
     let Some(output) = set.field("EIGENVALUE_OUTPUT") else {
