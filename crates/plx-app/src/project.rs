@@ -52,6 +52,7 @@ mod minimap;
 mod numbers;
 mod saving;
 mod series;
+mod stop_keeping;
 mod study_worker;
 mod transform;
 mod units;
@@ -2269,6 +2270,8 @@ pub struct ProjectApp {
     /// The save running on a worker thread, and what autosave needs to know.
     saver: saving::Saver,
     unsaved: unsaved::Unsaved,
+    /// A Stop asks whether the increments the solves finished are kept.
+    stop_asking: Option<stop_keeping::Stopping>,
     /// Analyses Update Project still has to solve, in order, and those it solves.
     update_queue: VecDeque<u64>,
     updating: Vec<u64>,
@@ -2421,6 +2424,7 @@ impl ProjectApp {
                 .unwrap_or_default(),
             saver: Default::default(),
             unsaved: Default::default(),
+            stop_asking: None,
             update_queue: VecDeque::new(),
             updating: Vec::new(),
             shown_title: String::new(),
@@ -5554,11 +5558,13 @@ impl ProjectApp {
                 None => None,
             };
             // Done: solved, or stopped by an error the monitor shows.
-            let failed = matches!(outcome, Some(Outcome::Failed | Outcome::Stopped))
-                || match node.window() {
-                    Some(window) => window.current_status().is_some_and(|s| s.needs_solve()),
-                    None => node.status().is_some_and(|s| s.needs_solve()),
-                };
+            let failed = matches!(
+                outcome,
+                Some(Outcome::Failed | Outcome::Stopped | Outcome::StoppedWithResults)
+            ) || match node.window() {
+                Some(window) => window.current_status().is_some_and(|s| s.needs_solve()),
+                None => node.status().is_some_and(|s| s.needs_solve()),
+            };
             let name = node.name.clone();
             if failed {
                 // What depends on it is not solved; independent analyses go on.
@@ -5808,8 +5814,9 @@ impl ProjectApp {
         self.output.extend(lost);
     }
 
-    /// Stops Update Project: nothing more is started, and what runs is stopped.
-    fn stop_update(&mut self) {
+    /// Stops Update Project: nothing more is started, and what runs is stopped, keeping
+    /// the increments finished if `keep`.
+    fn stop_update_now(&mut self, keep: bool) {
         if let Some(run) = self.looping.take() {
             self.loops_due.clear();
             let name = self.name_of(run.id);
@@ -5827,7 +5834,10 @@ impl ProjectApp {
         self.updating.clear();
         self.forced.clear();
         for solve in &mut self.solves {
-            solve.stop();
+            match keep {
+                true => solve.stop_keeping_results(),
+                false => solve.stop(),
+            }
         }
         self.output.push("Update stopped".into());
     }
@@ -6044,12 +6054,16 @@ impl ProjectApp {
         }
     }
 
-    /// Stops the solve of one analysis; a queued one is taken out of the queue.
-    fn stop_solve(&mut self, id: u64) {
+    /// Stops the solve of one analysis, keeping the increments finished if `keep`; a
+    /// queued one is taken out of the queue.
+    fn stop_solve_now(&mut self, id: u64, keep: bool) {
         self.update_queue.retain(|&queued| queued != id);
         self.forced.remove(&id);
         if let Some(solve) = (self.solves.iter_mut()).find(|s| s.id == id && s.active()) {
-            solve.stop();
+            match keep {
+                true => solve.stop_keeping_results(),
+                false => solve.stop(),
+            }
         }
     }
 
@@ -8896,6 +8910,7 @@ impl eframe::App for ProjectApp {
         self.new_analysis_window(&ctx);
         self.settings_window(&ctx);
         self.unsaved_window(&ctx);
+        self.stop_keeping_window(&ctx);
         self.updater.show(&ctx, &mut self.output);
         self.keep_units();
         self.sync_links(&ctx);
