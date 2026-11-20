@@ -194,8 +194,6 @@ pub struct Lowered {
     /// The constraints whose overlaps with others were resolved, each with what was
     /// changed, in words (see [`resolved_overlaps`]).
     pub resolved_overlaps: Vec<String>,
-    /// Set names that were shortened, each with the full name it stands for.
-    pub shortened_names: Vec<(String, String)>,
     /// The names of the parts of the mesh, which are element sets.
     pub part_sets: Vec<String>,
     /// The profile of each general beam section, by its element set, as the comment the
@@ -212,13 +210,10 @@ pub struct Lowered {
 }
 
 impl Lowered {
-    /// The input file of the analysis: the comments naming the shortened names and the
-    /// resolved overlaps, then the analysis rendered as text.
+    /// The input file of the analysis: the comments naming the resolved overlaps, then the
+    /// analysis rendered as text.
     pub fn text(&self) -> String {
         let mut out = String::new();
-        for (short, full) in &self.shortened_names {
-            out.push_str(&format!("{SHORTENED_NAME}{short} = {full}\n"));
-        }
         for overlap in &self.resolved_overlaps {
             out.push_str(&format!("{}{overlap}\n", dofs::PREFIX));
         }
@@ -463,7 +458,6 @@ struct Built {
     /// The blocks of each step of the model; none for a deactivated step.
     steps: Vec<Vec<StepBlock>>,
     resolved_overlaps: Vec<String>,
-    shortened_names: Vec<(String, String)>,
     part_sets: Vec<String>,
     profile_comments: Vec<(String, String)>,
     /// The origins of everything but the steps, which [`Built::assemble`] adds.
@@ -525,7 +519,6 @@ impl Built {
             warnings: Vec::new(),
             analysis: ir::Analysis { model, steps },
             resolved_overlaps: self.resolved_overlaps,
-            shortened_names: self.shortened_names,
             part_sets: self.part_sets,
             profile_comments: self.profile_comments,
             origins,
@@ -1011,7 +1004,6 @@ fn lower_model_named(
         model: ir_model,
         steps,
         resolved_overlaps,
-        shortened_names: sets.shortened.clone(),
         part_sets: mesh.parts.iter().map(|p| p.name.clone()).collect(),
         profile_comments,
         origins,
@@ -1288,8 +1280,6 @@ struct Sets<'a> {
     surfaces: Vec<(String, Surface)>,
     /// Upper-case names in use; CalculiX names are case-insensitive.
     used: BTreeSet<String>,
-    /// Names too long for CalculiX as written, each with the name it stands for.
-    shortened: Vec<(String, String)>,
     /// Face element sets and node set of each element surface.
     surface_sets: BTreeMap<String, (Vec<(String, u8)>, String)>,
     /// The pre-tension node of each pre-tension load and the node set by which its force
@@ -1358,7 +1348,6 @@ impl<'a> Sets<'a> {
                 .chain(mesh.element_sets.keys().map(|n| n.to_ascii_uppercase()))
                 .chain(mesh.surfaces.keys().map(|n| n.to_ascii_uppercase()))
                 .collect(),
-            shortened: Vec::new(),
             surface_sets: BTreeMap::new(),
             reference_nodes: BTreeMap::new(),
             point_mass_names: BTreeMap::new(),
@@ -1458,17 +1447,10 @@ impl<'a> Sets<'a> {
 
     /// Next free name `<prefix>-<n>_<postfix>`.
     fn free_name(&mut self, prefix: &str, postfix: &str) -> String {
-        let (name, full) = (1..)
-            .map(|n| {
-                let head = format!("{prefix}-{n}_");
-                (fitted_name(&head, postfix), format!("{head}{postfix}"))
-            })
-            .find(|(name, _)| self.used.insert(name.to_ascii_uppercase()))
-            .expect("unbounded range");
-        if full != name {
-            self.shortened.push((name.clone(), full));
-        }
-        name
+        (1..)
+            .map(|n| format!("{prefix}-{n}_{postfix}"))
+            .find(|name| self.used.insert(name.to_ascii_uppercase()))
+            .expect("unbounded range")
     }
 
     /// An element surface: one element set per face number and a node
@@ -5811,33 +5793,6 @@ fn number(value: f64) -> String {
 }
 
 /// Item names as CalculiX accepts them: no spaces, commas or other special characters.
-/// Longest set or surface name the solver reads.
-const NAME_LIMIT: usize = 80;
-
-/// Longest name of a set made for a region: an element surface appends the face (`_S6`) to
-/// its sets.
-const SET_NAME_LIMIT: usize = NAME_LIMIT - 3;
-
-/// Start of the comment that names what a shortened name stands for, which the reader of
-/// the `.dat` file puts back.
-pub const SHORTENED_NAME: &str = "** Shortened name: ";
-
-/// `head` and `postfix` as one name, which the solver reads: a name too long keeps its start
-/// and ends in a hash of the whole name, so that names alike in their start differ.
-fn fitted_name(head: &str, postfix: &str) -> String {
-    let full = format!("{head}{postfix}");
-    if full.len() <= SET_NAME_LIMIT {
-        return full;
-    }
-    // FNV-1a, case-insensitive like the names.
-    let hash = (full.bytes()).fold(0x811c_9dc5_u32, |hash, byte| {
-        (hash ^ u32::from(byte.to_ascii_uppercase())).wrapping_mul(0x0100_0193)
-    });
-    let keep = SET_NAME_LIMIT.saturating_sub(head.len() + 9);
-    let start: String = postfix.chars().take(keep).collect();
-    format!("{head}{start}_{hash:08X}")
-}
-
 fn name(item: &str) -> String {
     item.chars()
         .map(|c| {

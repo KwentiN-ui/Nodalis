@@ -623,8 +623,7 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
                     solved.convergence.clone(),
                     solved.unconverged_step,
                 ));
-                let input = companion_input(path).and_then(|p| std::fs::read_to_string(p).ok());
-                solver_history = Some(plx_io::solver::history(&solved, input.as_deref()));
+                solver_history = Some(plx_io::solver::history(&solved));
                 plx_io::solver::import_from(&solved, file)
             } else {
                 read_frd(path).map_err(|e| format!("{}: {e}", path.display()))?

@@ -3,7 +3,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use plx_io::dat::{DatImport, parse_dat, restore_shortened_names};
+use plx_io::dat::{DatImport, parse_dat};
 use plx_io::frd::{FrdImport, read_frd_bytes};
 
 use crate::Meta;
@@ -99,28 +99,20 @@ pub fn load_reference(fixture: &Fixture) -> Result<FixtureResults, String> {
     let frd =
         read_frd_bytes(&bytes).map_err(|e| format!("{}: {e}", fixture.ref_frd().display()))?;
     let dat = match std::fs::read_to_string(fixture.ref_dat()) {
-        Ok(text) => Some(parse_dat_with_input(&text, &fixture.inp())),
+        Ok(text) => Some(parse_dat(&text)),
         Err(_) => None,
     };
     Ok(FixtureResults { frd, dat })
 }
 
-/// Parses a `.dat` text with the long names the input file holds for shortened set names.
-pub fn parse_dat_with_input(text: &str, input: &Path) -> DatImport {
-    match std::fs::read_to_string(input) {
-        Ok(inp) => parse_dat(&restore_shortened_names(text, &inp)),
-        Err(_) => parse_dat(text),
-    }
-}
-
 /// Reads the results a solver left in `dir` for job `name`.
-pub fn load_results(dir: &Path, name: &str, input: &Path) -> Result<FixtureResults, String> {
+pub fn load_results(dir: &Path, name: &str) -> Result<FixtureResults, String> {
     let frd_path = dir.join(format!("{name}.frd"));
     let frd = plx_io::frd::read_frd(&frd_path).map_err(|e| e.to_string())?;
     let dat = std::fs::read_to_string(dir.join(format!("{name}.dat")))
         .ok()
         .filter(|t| !t.trim().is_empty())
-        .map(|t| parse_dat_with_input(&t, input));
+        .map(|t| parse_dat(&t));
     Ok(FixtureResults { frd, dat })
 }
 

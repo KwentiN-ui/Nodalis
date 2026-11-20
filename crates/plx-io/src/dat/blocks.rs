@@ -12,12 +12,10 @@ use super::{
     cyclic_mode, name_rotations_after_point, repair_set_name,
 };
 
-/// The history sets of `results`; `sets` names the sets the blocks are of, `names` gives
-/// the full names of shortened set names (shortened, full).
-pub fn import_blocks(results: &Results, sets: &Sets, names: &[(String, String)]) -> DatImport {
+/// The history sets of `results`; `sets` names the sets the blocks are of.
+pub fn import_blocks(results: &Results, sets: &Sets) -> DatImport {
     let mut import = Import {
         sets,
-        names,
         data: Collector::default(),
         step: None,
         frequencies: HashMap::new(),
@@ -50,7 +48,6 @@ pub fn import_blocks(results: &Results, sets: &Sets, names: &[(String, String)])
 
 struct Import<'a> {
     sets: &'a Sets,
-    names: &'a [(String, String)],
     data: Collector,
     /// The step of the blocks so far; the modes below are those of this step.
     step: Option<u32>,
@@ -102,17 +99,10 @@ impl Import<'_> {
         }
     }
 
-    /// The name a set is shown under: in full where it was shortened, upper case and
-    /// without the prefix of the sets written for picked regions.
+    /// The name a set is shown under: upper case and without the prefix of the sets
+    /// written for picked regions.
     fn shown(&self, name: &str) -> String {
-        let mut name = name.to_ascii_uppercase();
-        for (short, full) in self.names {
-            name = name.replace(
-                &short.to_ascii_uppercase(),
-                &full.trim().to_ascii_uppercase(),
-            );
-        }
-        repair_set_name(&name)
+        repair_set_name(name)
     }
 
     /// The eigenvalue table of a frequency step: rows `(mode, [eigenvalue, omega,
@@ -488,7 +478,7 @@ mod tests {
             )],
             ..Results::default()
         };
-        let import = import_blocks(&results, &Sets::default(), &[]);
+        let import = import_blocks(&results, &Sets::default());
         let press = value(
             &import,
             ALL_CONTACT_ELEMENTS,
@@ -517,7 +507,7 @@ mod tests {
             history: vec![tip, table],
             ..Results::default()
         };
-        let import = import_blocks(&results, &Sets::default(), &[]);
+        let import = import_blocks(&results, &Sets::default());
         let output_of = |name: &str| import.sets.iter().find(|s| s.name == name).unwrap().output;
         assert_eq!(output_of("TIP"), Some(output));
         assert_eq!(output_of("STEP_1"), None);
@@ -533,7 +523,7 @@ mod tests {
             )],
             ..Results::default()
         };
-        let import = import_blocks(&results, &Sets::default(), &[]);
+        let import = import_blocks(&results, &Sets::default());
         let field = "PARTICLE_TEMPERATURE";
         assert_eq!(value(&import, "MIX", field, "TMEAN", "TMEAN"), 300.0);
         assert_eq!(value(&import, "MIX", field, "TMAX", "TMAX"), 350.0);

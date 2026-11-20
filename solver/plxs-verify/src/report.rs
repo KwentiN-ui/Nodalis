@@ -110,7 +110,7 @@ pub fn run_fixture(solver: &Path, fixture: &Fixture, work: &Path) -> Report {
             .unwrap_or_else(|| format!("exit {}", output.status));
         return report(Outcome::Error(error), short_log);
     }
-    let results = match load_results(work, job, &fixture.inp()) {
+    let results = match load_results(work, job) {
         Ok(r) => r,
         Err(e) => return report(Outcome::Error(format!("results: {e}")), short_log),
     };
