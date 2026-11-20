@@ -40,26 +40,30 @@ pub fn import_from(
     }
 }
 
-/// The history output of the results, as [`crate::dat::read_dat`] reads it; names `input`
-/// shortened for CalculiX are given in full. `None` without history output.
+/// The history output of the results, read from the solver's history blocks as
+/// [`crate::dat::read_dat`] reads the `.dat` file; names `input` shortened are given in
+/// full. `None` without history output.
 pub fn history(solved: &SolverResults, input: Option<&str>) -> Option<DatImport> {
     if solved.results.history.is_empty() {
         return None;
     }
-    // The blocks are named as the `.dat` file names them, so they take the same way.
-    let mut text = Vec::new();
-    plxs_output::dat::write_dat_to(&mut text, &solved.results).ok()?;
-    let mut text = String::from_utf8_lossy(&text).into_owned();
-    if let Some(input) = input {
-        text = crate::dat::restore_shortened_names(&text, input);
-    }
-    let mut import = crate::dat::parse_dat(&text);
+    let names = input.map(shortened_names).unwrap_or_default();
+    let mut import = crate::dat::import_blocks(&solved.results, &solved.model.sets, &names);
     if plxs_core::results::plane::is_plane(&solved.model) {
         for set in &mut import.sets {
             drop_out_of_plane(set);
         }
     }
     Some(import)
+}
+
+/// The names the input file says were shortened, each with its full name.
+fn shortened_names(input: &str) -> Vec<(String, String)> {
+    (input.lines())
+        .filter_map(|line| line.strip_prefix(crate::inp::SHORTENED_NAME))
+        .filter_map(|rest| rest.split_once(" = "))
+        .map(|(short, full)| (short.to_string(), full.to_string()))
+        .collect()
 }
 
 /// Leaves the history components out that are zero out of the plane of a 2D model, also
@@ -94,7 +98,7 @@ pub fn export_calculix(solved: &SolverResults, frd: &Path) -> std::io::Result<()
             std::fs::remove_file(&dat)?;
         }
     } else {
-        plxs_output::write_dat(&dat, &full).map_err(error)?;
+        plxs_output::write_dat(&dat, &full, &solved.model.sets).map_err(error)?;
     }
     Ok(())
 }

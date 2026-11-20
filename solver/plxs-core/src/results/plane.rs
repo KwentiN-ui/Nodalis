@@ -11,7 +11,7 @@
 //! axisymmetric model and the thickness stress of plane strain stay, and nothing that
 //! carries a value (a rotation about the axis normal to the plane) is ever lost.
 
-use super::{HistoryBlock, ResultField, Results};
+use super::{HistoryBlock, HistoryQuantity, HistorySource, ResultField, Results};
 use crate::{ElementFamily, Model};
 
 /// The components of a field in full, in their order, of the fields that have out-of-plane
@@ -115,45 +115,25 @@ fn largest(values: &[f64]) -> f64 {
 }
 
 /// History blocks of vector and tensor quantities and how many of their last values are
-/// out-of-plane components (the z value; the shear stresses or strains xz, yz).
+/// out-of-plane components (the z value; the shear stresses or strains xz, yz). The
+/// rotations and moments of a reference point have none: about z is the one a 2D model has.
 fn trailing_out_of_plane(block: &HistoryBlock) -> Option<usize> {
-    // The rotation node of a reference point: its displacements are rotations, its forces
-    // moments, of which the one about z is the one a 2D model has.
-    if block
-        .set
-        .to_ascii_uppercase()
-        .contains("INTERNAL_ROTATION-")
-    {
-        return None;
-    }
-    let q = block.quantity.as_str();
-    let vectors = [
-        "displacements (",
-        "velocities (",
-        "forces (",
-        "total force (",
-        "heat flux (",
-    ];
-    let tensors = ["stresses (", "strains (", "mechanical strains ("];
-    if vectors.iter().any(|v| q.starts_with(v)) {
-        Some(1)
-    } else if tensors.iter().any(|t| q.starts_with(t)) {
-        Some(2)
-    } else {
-        None
+    use HistoryQuantity as Q;
+    match block.quantity {
+        Q::Displacements | Q::Velocities | Q::Forces | Q::TotalForce | Q::HeatFlux => Some(1),
+        Q::Stresses | Q::Strains => Some(2),
+        _ => None,
     }
 }
 
 /// The number of values of a full row of a history block of [`trailing_out_of_plane`]:
 /// the integration point first for element values.
 fn full_row(block: &HistoryBlock) -> Option<usize> {
-    let point = usize::from(block.quantity.contains("integ.pnt."));
-    let q = block.quantity.as_str();
-    let tensor = ["stresses (", "strains (", "mechanical strains ("];
-    let values = if tensor.iter().any(|t| q.starts_with(t)) {
-        6
-    } else {
-        3
+    use HistoryQuantity as Q;
+    let (point, values) = match block.quantity {
+        Q::Stresses | Q::Strains => (1, 6),
+        Q::HeatFlux => (1, 3),
+        _ => (0, 3),
     };
     trailing_out_of_plane(block).map(|_| point + values)
 }
@@ -276,8 +256,8 @@ impl Results {
         }
 
         // History: per quantity and set, how many trailing values are zero everywhere.
-        let key = |b: &HistoryBlock| (b.quantity.clone(), b.set.clone());
-        let mut trailing: Vec<((String, String), usize)> = Vec::new();
+        let key = |b: &HistoryBlock| (b.quantity, b.source.clone());
+        let mut trailing: Vec<((HistoryQuantity, HistorySource), usize)> = Vec::new();
         for block in &self.history {
             let Some(count) = trailing_out_of_plane(block) else {
                 continue;
@@ -485,32 +465,26 @@ mod tests {
 
     #[test]
     fn a_plane_model_drops_trailing_zeros_of_the_history() {
-        let block = |quantity: &str, set: &str, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
+        let block = |quantity, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
             step: 1,
             increment: 1,
-            quantity: quantity.into(),
-            set: set.into(),
+            quantity,
+            source: HistorySource::Step,
             time: 1.0,
             rows,
         };
         let mut r = Results {
             history: vec![
                 block(
-                    "displacements (vx,vy,vz)",
-                    "TIP",
+                    HistoryQuantity::Displacements,
                     vec![(4, vec![1.0, 2.0, 0.0])],
                 ),
                 block(
-                    "stresses (elem, integ.pnt.,sxx,syy,szz,sxy,sxz,syz)",
-                    "E",
+                    HistoryQuantity::Stresses,
                     vec![(1, vec![1.0, 5.0, 6.0, 0.0, 7.0, 0.0, 0.0])],
                 ),
                 // Rotations of a reference point: about z is the one there is.
-                block(
-                    "displacements (vx,vy,vz)",
-                    "INTERNAL_ROTATION-1_NH",
-                    vec![(9, vec![0.0, 0.0, 0.3])],
-                ),
+                block(HistoryQuantity::Rotations, vec![(9, vec![0.0, 0.0, 0.3])]),
             ],
             ..Results::default()
         };

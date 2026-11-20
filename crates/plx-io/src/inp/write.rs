@@ -5592,6 +5592,7 @@ fn node_print(
         global: true,
         time_points: None,
         surfaces: None,
+        rotations: false,
     }
 }
 
@@ -5741,7 +5742,9 @@ fn point_output(
         let set = sets.free_name("Internal_Rotation", &name(&output.name));
         sets.node_sets.push((set.clone(), vec![rotation]));
         let set = Some(ir::step::HistorySet::Nodes(sets.node_id(&set)));
-        (outputs.node_print).push(node_print(set, &turning, output.totals));
+        let mut rotations = node_print(set, &turning, output.totals);
+        rotations.rotations = true;
+        outputs.node_print.push(rotations);
     }
     Ok(outputs)
 }

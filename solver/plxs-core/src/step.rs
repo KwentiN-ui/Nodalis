@@ -861,6 +861,9 @@ pub struct HistoryOutput {
     /// names a `*COMPRESSION ONLY` surface, which rests on the ground.
     #[serde(default)]
     pub surfaces: Option<(crate::SurfaceId, Option<crate::SurfaceId>)>,
+    /// The nodes are the rotation nodes of reference points: their displacements are
+    /// rotations, their forces moments.
+    pub rotations: bool,
 }
 
 /// The set of a history output: a node set for `*NODE PRINT`, an element set for

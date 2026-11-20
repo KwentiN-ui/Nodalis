@@ -53,6 +53,10 @@ impl Data<'_> {
     }
 }
 
+/// The start of the names Nodalis gives the sets of the rotation nodes of reference points
+/// (`INTERNAL_ROTATION-1_<output>`): their displacements are rotations, their forces moments.
+const ROTATION_SET_PREFIX: &str = "INTERNAL_ROTATION-";
+
 /// Keywords CalculiX knows that Nodalis does not write; they get a clear message instead
 /// of `cannot be interpreted`.
 const KNOWN_UNSUPPORTED: &[&str] = &[
@@ -3002,6 +3006,10 @@ impl Reader {
             global: k.value("GLOBAL") != Some("NO"),
             time_points: k.value("TIME POINTS").map(normalized_name),
             surfaces,
+            // Nodalis names the sets of the rotation nodes of reference points so.
+            rotations: kind == FileKind::Node
+                && (k.value("NSET"))
+                    .is_some_and(|set| normalized_name(set).starts_with(ROTATION_SET_PREFIX)),
         };
         let card = match kind {
             FileKind::Node => Card::NodePrint(output),

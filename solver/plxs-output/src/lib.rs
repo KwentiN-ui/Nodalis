@@ -13,7 +13,7 @@ pub mod packed;
 pub mod spool;
 pub mod sta;
 
-pub use dat::{EigenTable, write_dat};
+pub use dat::write_dat;
 pub use frd::{FrdFormat, imaginary_field_name, write_frd, write_frd_as};
 pub use sta::{CvgRow, StaRow, write_cvg, write_sta};
 

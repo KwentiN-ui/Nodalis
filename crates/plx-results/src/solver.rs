@@ -29,14 +29,15 @@ pub const EXTENSION: &str = "ndlr";
 
 /// The first bytes of a `.ndlr` file; the last two count the format, which is not converted:
 /// results of another format are solved again.
-const MAGIC: &[u8; 8] = b"PLXRES\x00\x0a";
+const MAGIC: &[u8; 8] = b"PLXRES\x00\x0b";
 
 /// What a run of the built-in solver computed, as Nodalis keeps it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SolverResults {
     /// The mesh the results are on: nodes, elements, sections and materials of the solver's
-    /// output model, with shells and beams expanded as the `.frd` file shows them. Sets,
-    /// constraints, contact and loads are left out.
+    /// output model, with shells and beams expanded as the `.frd` file shows them, and the
+    /// names of its sets and surfaces. Their members, constraints, contact and loads are
+    /// left out.
     pub model: Model,
     pub results: Results,
     /// The version of the solver that computed them.
@@ -75,6 +76,8 @@ impl SolverResults {
         kept.sections = model.sections.clone();
         // What the results are expanded to the sectors of a cyclic symmetric model with.
         kept.constraints.cyclic_symmetry = model.constraints.cyclic_symmetry.clone();
+        // The names of the sets the history is of.
+        kept.sets = model.sets.labels();
         kept.rebuild_indices();
         Self {
             model: kept,

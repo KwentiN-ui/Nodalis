@@ -388,7 +388,7 @@ fn run_continuing(
                 options.frd_format,
             )?;
             if !results.history.is_empty() {
-                plxs_output::write_dat(&output("dat"), &results)?;
+                plxs_output::write_dat(&output("dat"), &results, &model.sets)?;
             }
         }
         // A frequency step that stored its modes (`*FREQUENCY, STORAGE=YES`): the `.eig`

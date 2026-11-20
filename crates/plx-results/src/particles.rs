@@ -12,7 +12,9 @@
 //! four-node plane element) and a wall the triangles of its face in the plane.
 
 use plxs_core::particles::{PARTICLE_FIELDS, ParticleFrame, ParticleHistory, ParticleModel, Space};
-use plxs_core::results::{HistoryBlock, IncrementKind, ResultField, ResultsIncrement};
+use plxs_core::results::{
+    HistoryBlock, HistoryQuantity, HistorySource, IncrementKind, ResultField, ResultsIncrement,
+};
 use plxs_core::{Model, element::ElementType};
 
 /// The field of the quantities of the particles, beside `DISP` and `VELO`.
@@ -526,13 +528,15 @@ pub fn history_blocks(
 ) -> Vec<HistoryBlock> {
     let mut blocks = Vec::new();
     let block =
-        |increment: usize, quantity: &str, set: String, time: f64, values: Vec<f64>| HistoryBlock {
-            step,
-            increment: increment as u32 + 1,
-            quantity: quantity.into(),
-            set,
-            time,
-            rows: vec![(0, values)],
+        |increment: usize, quantity: HistoryQuantity, set: String, time: f64, values: Vec<f64>| {
+            HistoryBlock {
+                step,
+                increment: increment as u32 + 1,
+                quantity,
+                source: HistorySource::Named(set),
+                time,
+                rows: vec![(0, values)],
+            }
         };
     let at = |v: &[f64], i: usize| v.get(i).copied().unwrap_or(0.0);
     let asked = |name: &str| request.energies.iter().any(|e| e == name);
@@ -540,22 +544,22 @@ pub fn history_blocks(
         let energies = [
             (
                 "ALLKE",
-                "total model kinetic energy",
+                HistoryQuantity::ModelKineticEnergy,
                 at(&history.kinetic, i),
             ),
             (
                 "ALLIE",
-                "total model internal energy",
+                HistoryQuantity::ModelInternalEnergy,
                 at(&history.elastic, i),
             ),
             (
                 "ALLVD",
-                "total model damping dissipation",
+                HistoryQuantity::ModelDampingDissipation,
                 at(&history.dissipated, i) + at(&history.wall_loss, i),
             ),
             (
                 "ALLWK",
-                "total model external work",
+                HistoryQuantity::ModelExternalWork,
                 at(&history.wall_work, i) - at(&history.potential, i),
             ),
         ];
@@ -577,7 +581,7 @@ pub fn history_blocks(
                 let mean = if mass > 0.0 { heat / mass } else { hottest };
                 blocks.push(block(
                     i,
-                    "particle temperature",
+                    HistoryQuantity::ParticleTemperature,
                     asked.set.clone(),
                     time,
                     vec![mean, hottest],
@@ -594,7 +598,7 @@ pub fn history_blocks(
                 if let Some(force) = wall.force.get(i) {
                     blocks.push(block(
                         i,
-                        "total force (fx,fy,fz)",
+                        HistoryQuantity::TotalForce,
                         name.clone(),
                         time,
                         force.to_vec(),
@@ -603,19 +607,17 @@ pub fn history_blocks(
                 if let Some(&work) = wall.work.get(i) {
                     blocks.push(block(
                         i,
-                        "total model external work",
+                        HistoryQuantity::ModelExternalWork,
                         name.clone(),
                         time,
                         vec![work],
                     ));
                 }
                 if let Some(moment) = wall.moment.get(i) {
-                    // The moments as the rotation node of a reference point prints them.
-                    let set = format!("INTERNAL_ROTATION-{}_{name}", w + 1);
                     blocks.push(block(
                         i,
-                        "total force (fx,fy,fz)",
-                        set,
+                        HistoryQuantity::TotalMoment,
+                        name.clone(),
                         time,
                         moment.to_vec(),
                     ));
@@ -624,7 +626,8 @@ pub fn history_blocks(
             if asked.heat
                 && let Some(&heat) = wall.heat.get(i)
             {
-                blocks.push(block(i, "total wall heat", name.clone(), time, vec![heat]));
+                let quantity = HistoryQuantity::WallHeat;
+                blocks.push(block(i, quantity, name.clone(), time, vec![heat]));
             }
         }
     }
@@ -881,17 +884,20 @@ mod tests {
             }],
         };
         let blocks = history_blocks(&history, &request, 1);
-        let quantities: Vec<(&str, &str)> = (blocks.iter())
-            .map(|b| (b.quantity.as_str(), b.set.as_str()))
+        let quantities: Vec<(HistoryQuantity, &str)> = (blocks.iter())
+            .map(|b| match &b.source {
+                HistorySource::Named(name) => (b.quantity, name.as_str()),
+                _ => unreachable!(),
+            })
             .collect();
         assert_eq!(
             quantities,
             [
-                ("total model kinetic energy", MODEL_SET),
-                ("particle temperature", "Mix"),
-                ("total force (fx,fy,fz)", "Box_X_min"),
-                ("total model external work", "Box_X_min"),
-                ("total force (fx,fy,fz)", "INTERNAL_ROTATION-2_Box_X_min"),
+                (HistoryQuantity::ModelKineticEnergy, MODEL_SET),
+                (HistoryQuantity::ParticleTemperature, "Mix"),
+                (HistoryQuantity::TotalForce, "Box_X_min"),
+                (HistoryQuantity::ModelExternalWork, "Box_X_min"),
+                (HistoryQuantity::TotalMoment, "Box_X_min"),
             ]
         );
         // The mean by mass over both bodies, the highest of both.

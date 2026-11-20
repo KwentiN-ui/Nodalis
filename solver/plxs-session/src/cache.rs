@@ -30,7 +30,7 @@ use plxs_output::spool::Spool;
 
 use crate::restart::{self, Fnv};
 
-const RESULTS_MAGIC: &[u8; 8] = b"PLXSSTP6";
+const RESULTS_MAGIC: &[u8; 8] = b"PLXSSTP7";
 
 /// Where the cache of a job is and which solver build it belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]

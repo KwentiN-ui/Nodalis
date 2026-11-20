@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 const SNAPSHOT_MAGIC: &[u8; 8] = b"PLXSSNAP";
 const RESTART_MAGIC: &[u8; 8] = b"PLXSROUT";
 /// Raised whenever [`plxs_core::State`], [`Snapshot`] or the IR change their layout.
-const FORMAT: u32 = 4;
+const FORMAT: u32 = 5;
 
 /// FNV-1a, 64 bit: stable across Rust versions and processes, unlike `DefaultHasher`.
 pub(crate) struct Fnv(u64);
