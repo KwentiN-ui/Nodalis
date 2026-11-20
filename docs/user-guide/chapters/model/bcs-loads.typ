@@ -31,7 +31,7 @@ plates (rotations).
     model properties is #ui("Submodel"),
     @submodel). The check boxes select the global displacements X to Z; the step of the global
     results is the one linked to the #ui("Global results") row. The dialog names that step,
-    its analysis and the field outputs that write its displacements, and shows in red when
+    its analysis and whether it writes displacements, and shows in red when
     nothing usable is linked (@submodel). The global results hold no
     rotations. Each node takes the displacement interpolated in the global element it lies
     in; a node a little outside the global mesh (a curved surface meshed differently) takes

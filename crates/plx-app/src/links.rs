@@ -674,60 +674,19 @@ pub struct GlobalSource {
     pub source: String,
     /// The step of the source whose results are read.
     pub source_step: String,
-    /// What writes the displacements of `source_step`; `None` for a results file, whose
-    /// model is not known.
-    pub writers: Option<DisplacementWriters>,
+    /// Whether `source_step` writes the displacements of a load, rather than mode shapes,
+    /// temperatures or sensitivities; `None` for a results file, whose model is not known.
+    pub displacements: Option<bool>,
 }
 
-/// The field outputs that make a step of an analysis write its displacements, the U of a
-/// node field output.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct DisplacementWriters {
-    /// Names of the field outputs that write U.
-    pub outputs: Vec<String>,
-    /// The earlier step whose node field outputs the step keeps, having none of its own;
-    /// `None` when they are the step's own.
-    pub carried_from: Option<String>,
-    /// Whether the step computes the displacements of a load at all, rather than mode
-    /// shapes, temperatures or sensitivities.
-    pub load_case: bool,
-}
-
-/// What writes the displacements of `step` of `fe` into its results. A step without an
-/// active node field output of its own keeps those of the active step before it, as the
-/// solver does; inactive steps are not solved.
-pub fn displacement_writers(fe: &FeModel, step: &str) -> Option<DisplacementWriters> {
-    let mut current: Option<(&str, Vec<&plx_model::FieldOutput>)> = None;
-    for own in fe.steps.iter().filter(|s| s.active) {
-        let nodal: Vec<_> = (own.field_outputs.iter())
-            .filter(|o| {
-                o.active && o.kind == plx_model::OutputKind::Node && !o.variables.is_empty()
-            })
-            .collect();
-        if !nodal.is_empty() {
-            current = Some((own.name.as_str(), nodal));
-        }
-        if own.name != step {
-            continue;
-        }
-        let (from, outputs) = current.unwrap_or_default();
-        return Some(DisplacementWriters {
-            outputs: (outputs.iter())
-                .filter(|o| o.variables.iter().any(|v| v.eq_ignore_ascii_case("U")))
-                .map(|o| o.name.clone())
-                .collect(),
-            carried_from: (!from.is_empty() && from != step).then(|| from.to_owned()),
-            load_case: matches!(
-                own.kind,
-                StepKind::Static(_)
-                    | StepKind::Visco(_)
-                    | StepKind::Dynamic(_)
-                    | StepKind::CoupledTempDisp(_)
-                    | StepKind::UncoupledTempDisp(_)
-            ),
-        });
-    }
-    None
+/// Whether `step` of `fe` writes the displacements of a load into its results; `None` for
+/// a step the model does not solve. Inactive steps are not solved.
+pub fn writes_displacements(fe: &FeModel, step: &str) -> Option<bool> {
+    let step = fe.steps.iter().find(|s| s.active && s.name == step)?;
+    Some(
+        fe.field_results(step)
+            .contains(&plx_model::FieldResult::Displacements),
+    )
 }
 
 /// Name of the defined field a temperature link sets in its step.
@@ -1957,19 +1916,12 @@ fn category_items(fe: &FeModel, category: &str, name: Option<&str>) -> Vec<TreeI
         "Steps" => {
             for (s, step) in fe.steps.iter().enumerate().filter(|(_, s)| wanted(&s.name)) {
                 items.push(TreeItem::Step(s));
-                for group in [
-                    "BCs",
-                    "Loads",
-                    "Field Outputs",
-                    "History Outputs",
-                    "Defined Fields",
-                ] {
+                for group in ["BCs", "Loads", "History Outputs", "Defined Fields"] {
                     items.push(TreeItem::StepGroup(s, group));
                 }
                 let n = step.boundary_conditions.len();
                 items.extend((0..n).map(|i| TreeItem::BoundaryCondition(s, i)));
                 items.extend((0..step.loads.len()).map(|i| TreeItem::Load(s, i)));
-                items.extend((0..step.field_outputs.len()).map(|i| TreeItem::FieldOutput(s, i)));
                 let n = step.history_outputs.len();
                 items.extend((0..n).map(|i| TreeItem::HistoryOutput(s, i)));
                 let n = step.defined_fields.len();
@@ -2017,7 +1969,6 @@ pub fn path_of(fe: &FeModel, item: &TreeItem) -> Option<Vec<String>> {
         | TreeItem::StepGroup(s, _)
         | TreeItem::BoundaryCondition(s, _)
         | TreeItem::Load(s, _)
-        | TreeItem::FieldOutput(s, _)
         | TreeItem::HistoryOutput(s, _)
         | TreeItem::DefinedField(s, _) => entry("Steps", &fe.steps.get(*s)?.name),
         TreeItem::Group(
@@ -2074,41 +2025,16 @@ mod tests {
     use plx_model::{BoundaryCondition, Material, Region, Step};
 
     #[test]
-    fn displacement_writers_follow_the_field_outputs_the_solver_keeps() {
+    fn steps_of_loads_write_displacements() {
         let mut fe = FeModel::default();
-        fe.steps.push(Step::new_static("Preload"));
         fe.steps.push(Step::new_static("Load"));
         fe.steps.push(Step::new_frequency("Shake"));
-        let writers = |fe: &FeModel, step| displacement_writers(fe, step).unwrap();
-        // The defaults write U.
-        assert_eq!(writers(&fe, "Load").outputs, ["NF-Output-1"]);
-        assert_eq!(writers(&fe, "Load").carried_from, None);
-        assert!(writers(&fe, "Load").load_case);
-        // Two field outputs with U are both named.
-        let mut second = fe.steps[1].field_outputs[0].clone();
-        second.name = "Cut".into();
-        second.variables = vec!["U".into()];
-        fe.steps[1].field_outputs.push(second);
-        assert_eq!(writers(&fe, "Load").outputs, ["NF-Output-1", "Cut"]);
-        // Without U nothing writes the displacements.
-        for output in &mut fe.steps[1].field_outputs {
-            output.variables.retain(|v| v != "U");
-        }
-        assert!(writers(&fe, "Load").outputs.is_empty());
-        // Without node field outputs of its own the step keeps those of the step before.
-        fe.steps[1]
-            .field_outputs
-            .retain(|o| o.kind != plx_model::OutputKind::Node);
-        let kept = writers(&fe, "Load");
-        assert_eq!(kept.outputs, ["NF-Output-1"]);
-        assert_eq!(kept.carried_from.as_deref(), Some("Preload"));
-        // An inactive output writes nothing, and an inactive step is not solved.
-        fe.steps[0].field_outputs[0].active = false;
-        assert!(writers(&fe, "Load").outputs.is_empty());
-        fe.steps[0].active = false;
-        assert!(displacement_writers(&fe, "Preload").is_none());
+        assert_eq!(writes_displacements(&fe, "Load"), Some(true));
         // Mode shapes are no displacements of a load.
-        assert!(!writers(&fe, "Shake").load_case);
+        assert_eq!(writes_displacements(&fe, "Shake"), Some(false));
+        // An inactive step is not solved.
+        fe.steps[0].active = false;
+        assert_eq!(writes_displacements(&fe, "Load"), None);
     }
 
     /// A tetrahedron of one part `name`, its nodes from `first` on.

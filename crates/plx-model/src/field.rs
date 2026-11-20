@@ -1,56 +1,219 @@
-//! Field outputs of a step, the nodal, element and contact field outputs: the
-//! variables the solver writes into the `.frd` file (`*NODE FILE`, `*EL FILE`,
-//! `*CONTACT FILE`). The model keeps what the user picked; the keywords are made when the
-//! input file is written.
+//! Field outputs of an analysis: the results its steps write for every node, which the
+//! Results show as contours.
+//!
+//! A step always writes the results that belong to its kind ([`StepKind::standard_results`]
+//! and what the model adds, see [`FeModel::field_results`]): they are no items of the model
+//! and nothing the user has to ask for. The model keeps one [`FieldOutput`] with what goes
+//! beyond them. What the solver is asked for is made from both when the analysis is
+//! exported.
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+use crate::{FeModel, Step, StepKind};
+
+/// A result a step writes for the nodes of the model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum FieldResult {
+    Displacements,
+    ReactionForces,
+    Velocities,
+    Accelerations,
+    Stresses,
+    Strains,
+    /// The equivalent plastic strain, which is the equivalent creep strain of a creep law.
+    PlasticStrain,
+    Temperatures,
+    ReactionHeatFlows,
+    HeatFlux,
+    /// Gap and slip, pressure and shear of the contacts.
+    Contact,
+    Sensitivities,
+    StrainEnergy,
+    StressError,
+    ContactEnergy,
+    /// Displacements and stresses of a harmonic response as amplitude and phase, next to
+    /// their real and imaginary parts.
+    AmplitudePhase,
+}
+
+impl FieldResult {
+    /// The results the user can add to those the steps always write, in the order of the
+    /// dialog.
+    pub const ADDITIONAL: [FieldResult; 4] = [
+        Self::StrainEnergy,
+        Self::StressError,
+        Self::ContactEnergy,
+        Self::AmplitudePhase,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Displacements => "Displacements",
+            Self::ReactionForces => "Reaction forces",
+            Self::Velocities => "Velocities",
+            Self::Accelerations => "Accelerations",
+            Self::Stresses => "Stresses",
+            Self::Strains => "Strains",
+            Self::PlasticStrain => "Equivalent plastic strain",
+            Self::Temperatures => "Temperatures",
+            Self::ReactionHeatFlows => "Reaction heat flows",
+            Self::HeatFlux => "Heat flux",
+            Self::Contact => "Contact gap and pressure",
+            Self::Sensitivities => "Design sensitivities",
+            Self::StrainEnergy => "Strain energy density",
+            Self::StressError => "Stress error estimate",
+            Self::ContactEnergy => "Contact energy",
+            Self::AmplitudePhase => "Amplitude and phase",
+        }
+    }
+
+    /// What the result is, for the hover text of the dialog.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Displacements => "Displacements of the nodes.",
+            Self::ReactionForces => "Forces of the supports on the nodes they hold.",
+            Self::Velocities => "Velocities of the nodes.",
+            Self::Accelerations => "Accelerations of the nodes.",
+            Self::Stresses => "Stresses, averaged at the nodes.",
+            Self::Strains => "Total strains, averaged at the nodes.",
+            Self::PlasticStrain => {
+                "Equivalent plastic strain; the equivalent creep strain of a creep law."
+            }
+            Self::Temperatures => "Temperatures of the nodes.",
+            Self::ReactionHeatFlows => "Heat flows into the nodes of prescribed temperature.",
+            Self::HeatFlux => "Heat flux, averaged at the nodes.",
+            Self::Contact => "Gap and slip, pressure and shear of the contacts.",
+            Self::Sensitivities => "Sensitivities of the design responses.",
+            Self::StrainEnergy => "Strain energy per volume, averaged at the nodes.",
+            Self::StressError => {
+                "How much the stresses of the elements at a node differ, in percent: large \
+                 where the mesh is too coarse for the stress gradient."
+            }
+            Self::ContactEnergy => "Energy stored in the contacts.",
+            Self::AmplitudePhase => {
+                "Displacements and stresses of a harmonic response as amplitude and phase, \
+                 next to their real and imaginary parts."
+            }
+        }
+    }
+
+    /// The names of the results as the Results list them.
+    pub fn fields(self) -> &'static [&'static str] {
+        match self {
+            Self::Displacements => &["DISP"],
+            Self::ReactionForces => &["FORC"],
+            Self::Velocities => &["VELO"],
+            Self::Accelerations => &["ACCE"],
+            Self::Stresses => &["STRESS"],
+            Self::Strains => &["TOSTRAIN"],
+            Self::PlasticStrain => &["PE"],
+            Self::Temperatures => &["NDTEMP"],
+            Self::ReactionHeatFlows => &["RFL"],
+            Self::HeatFlux => &["FLUX"],
+            Self::Contact => &["CONTACT"],
+            Self::Sensitivities => &["SEN"],
+            Self::StrainEnergy => &["ENER"],
+            Self::StressError => &["ERROR"],
+            Self::ContactEnergy => &["CELS"],
+            Self::AmplitudePhase => &["PDISP", "PSTRESS"],
+        }
+    }
+}
+
+impl StepKind {
+    /// The results a step of the kind always writes. An eigenvalue step keeps its mode
+    /// shapes instead, a particle flow step its particles.
+    pub fn standard_results(&self) -> &'static [FieldResult] {
+        use FieldResult::*;
+        match self {
+            StepKind::Static(_) | StepKind::Visco(_) | StepKind::SteadyStateDynamics(_) => {
+                &[Displacements, ReactionForces, Stresses, Strains]
+            }
+            StepKind::Dynamic(_) => &[
+                Displacements,
+                ReactionForces,
+                Velocities,
+                Accelerations,
+                Stresses,
+                Strains,
+            ],
+            StepKind::HeatTransfer(_) => &[Temperatures, ReactionHeatFlows, HeatFlux],
+            StepKind::CoupledTempDisp(_) | StepKind::UncoupledTempDisp(_) => &[
+                Displacements,
+                ReactionForces,
+                Temperatures,
+                ReactionHeatFlows,
+                Stresses,
+                Strains,
+                HeatFlux,
+            ],
+            StepKind::Sensitivity(_) => &[Sensitivities],
+            StepKind::Frequency(_)
+            | StepKind::ComplexFrequency(_)
+            | StepKind::Buckle(_)
+            | StepKind::ParticleFlow(_) => &[],
+        }
+    }
+
+    /// Whether a step of the kind deforms the model under loads, over one or more
+    /// increments: such a step closes contacts and yields materials.
+    fn deforms_under_loads(&self) -> bool {
+        matches!(
+            self,
+            StepKind::Static(_)
+                | StepKind::Visco(_)
+                | StepKind::Dynamic(_)
+                | StepKind::CoupledTempDisp(_)
+                | StepKind::UncoupledTempDisp(_)
+        )
+    }
+
+    /// Whether a step of the kind can write the additional result.
+    pub fn writes_additional(&self, result: FieldResult) -> bool {
+        match result {
+            FieldResult::StrainEnergy | FieldResult::StressError => {
+                self.standard_results().contains(&FieldResult::Stresses)
+            }
+            FieldResult::ContactEnergy => self.takes_contact_results(),
+            FieldResult::AmplitudePhase => matches!(self, StepKind::SteadyStateDynamics(_)),
+            _ => false,
+        }
+    }
+
+    /// Whether a step of the kind writes the results of contacts.
+    fn takes_contact_results(&self) -> bool {
+        matches!(
+            self,
+            StepKind::Static(_) | StepKind::Visco(_) | StepKind::Dynamic(_)
+        )
+    }
+}
+
+/// What the steps of an analysis write beyond their standard results, and how the results
+/// are written and shown. One for the whole analysis: each step takes from it what it can
+/// compute.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FieldOutput {
-    pub name: String,
-    /// A deactivated field output is left out of the input file.
-    #[serde(default = "crate::active")]
-    pub active: bool,
-    pub kind: OutputKind,
-    /// CalculiX's variable names, such as `U` or `S`, in a fixed order.
-    pub variables: Vec<String>,
-    /// Writes the results of every iteration of the last increment, for finding out why a
-    /// solution diverges (`LAST ITERATIONS`).
-    #[serde(default)]
-    pub last_iterations: bool,
-    /// Writes the contact elements into a `.cel` file (`CONTACT ELEMENTS`).
-    #[serde(default)]
-    pub contact_elements: bool,
+    /// Results of [`FieldResult::ADDITIONAL`], in their order.
+    pub additional: Vec<FieldResult>,
     /// The coordinate system the vector and tensor results are also shown in, next to the
     /// global ones; `None` for the global system only. The solver writes global results;
     /// the transformation is made when the results are shown, so that it follows a moving
-    /// system. Contact outputs have no such option.
-    #[serde(default)]
+    /// system.
     pub system: Option<crate::Id>,
-    /// How 1D and 2D elements are written; only element outputs have the option.
-    #[serde(default)]
+    /// How shells and beams are written.
     pub dimension: OutputDimension,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OutputKind {
-    /// `*NODE FILE`
-    Node,
-    /// `*EL FILE`
-    Element,
-    /// `*CONTACT FILE`
-    Contact,
-}
-
-/// CalculiX's `OUTPUT` parameter of `*EL FILE`, the "Output (2D/3D)".
+/// The form shells and beams have in the results.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputDimension {
-    /// Left to CalculiX, which writes shells and beams as the solids it expands them to.
+    /// Shells and beams as the solids the solver expands them to; plane models in 2D.
     #[default]
     Default,
-    /// `OUTPUT=2D`
+    /// On the mid-surface and the axis.
     TwoD,
-    /// `OUTPUT=3D`: 1D and 2D elements in their expanded 3D form.
+    /// All 1D and 2D elements in their expanded 3D form.
     ThreeD,
 }
 
@@ -66,139 +229,84 @@ impl OutputDimension {
     }
 }
 
-impl OutputKind {
-    pub const ALL: [OutputKind; 3] = [Self::Node, Self::Element, Self::Contact];
-
-    /// Variables the kind can write, in a fixed order.
-    pub fn choices(self) -> &'static [&'static str] {
-        match self {
-            Self::Node => &["RF", "U", "PU", "V", "A", "NT", "PNT", "RFL", "SEN"],
-            Self::Element => &[
-                "S", "PHS", "E", "ME", "PEEQ", "ENER", "HFL", "ERR", "HER", "ZZS", "SDV",
-            ],
-            Self::Contact => &["CDIS", "CSTR", "CELS", "PCON"],
-        }
+impl FieldOutput {
+    /// Whether nothing goes beyond the standard results: the model then shows no field
+    /// output at all.
+    pub fn is_standard(&self) -> bool {
+        *self == Self::default()
     }
 
-    /// The variables of the kind in groups for the dialog: a heading and the variables.
-    pub fn groups(self) -> &'static [(&'static str, &'static [&'static str])] {
-        match self {
-            Self::Node => &[
-                ("Mechanical", &["U", "RF", "V", "A"]),
-                ("Thermal", &["NT", "RFL"]),
-                ("Steady state dynamics", &["PU", "PNT"]),
-                ("Sensitivity", &["SEN"]),
-            ],
-            Self::Element => &[
-                (
-                    "Stresses and strains",
-                    &["S", "E", "ME", "PEEQ", "ENER", "SDV"],
-                ),
-                ("Accuracy", &["ZZS", "ERR", "HER"]),
-                ("Thermal", &["HFL"]),
-                ("Steady state dynamics", &["PHS"]),
-            ],
-            Self::Contact => &[("Contact", &["CDIS", "CSTR", "CELS", "PCON"])],
-        }
-    }
-
-    /// Whether the kind has results that can be shown in another coordinate system.
-    pub fn takes_system(self) -> bool {
-        self != Self::Contact
-    }
-
-    /// The tree's and the dialog's name of the kind.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Node => "Node Output",
-            Self::Element => "Element Output",
-            Self::Contact => "Contact Output",
-        }
-    }
-
-    /// Prefix of default names, the `NF_Output`, `EF_Output` and `CF_Output`.
-    pub fn prefix(self) -> &'static str {
-        match self {
-            Self::Node => "NF_Output",
-            Self::Element => "EF_Output",
-            Self::Contact => "CF_Output",
-        }
-    }
-
-    /// The variables picked for a new field output of the kind.
-    pub fn default_variables(self) -> &'static [&'static str] {
-        match self {
-            Self::Node => &["U"],
-            Self::Element => &["S", "E"],
-            Self::Contact => &["CDIS", "CSTR"],
-        }
+    /// Sorts the additional results into their fixed order and drops what is none.
+    pub fn normalize(&mut self) {
+        let order = |r: &FieldResult| FieldResult::ADDITIONAL.iter().position(|a| a == r);
+        self.additional.retain(|r| order(r).is_some());
+        self.additional.sort_by_key(order);
+        self.additional.dedup();
     }
 }
 
-/// The readable name of a field output variable, shown in the dialog instead of the
-/// variable's keyword.
-pub fn output_variable_label(variable: &str) -> &'static str {
-    match variable {
-        "RF" => "Reaction forces",
-        "U" => "Displacements",
-        "PU" => "Displacement amplitude and phase",
-        "V" => "Velocities",
-        "A" => "Accelerations",
-        "NT" => "Temperatures",
-        "PNT" => "Temperature amplitude and phase",
-        "RFL" => "Reaction heat flows",
-        "SEN" => "Design sensitivities",
-        "S" => "Stresses",
-        "PHS" => "Stress amplitude and phase",
-        "E" => "Total strains",
-        "ME" => "Mechanical strains",
-        "PEEQ" => "Equivalent plastic strain",
-        "ENER" => "Strain energy density",
-        "HFL" => "Heat flux",
-        "ERR" => "Stress error estimate",
-        "HER" => "Heat flux error estimate",
-        "ZZS" => "Improved stresses (Zienkiewicz-Zhu)",
-        "SDV" => "Material state variables",
-        "CDIS" => "Contact gap and slip",
-        "CSTR" => "Contact pressure and shear",
-        "CELS" => "Contact energy",
-        "PCON" => "Contact amplitude and phase",
-        _ => "",
+impl FeModel {
+    /// Whether the model has contacts or compression only supports that are active.
+    fn has_contact(&self) -> bool {
+        self.contact_pairs.iter().any(|p| p.active)
+            || self.contact_regions.iter().any(|r| r.active)
+            || (self.constraints.iter())
+                .any(|c| matches!(c, crate::Constraint::CompressionOnly(s) if s.active))
+    }
+
+    /// Whether a material of the model yields or creeps.
+    fn has_inelastic_material(&self) -> bool {
+        (self.materials.iter()).any(|m| m.plastic.is_some() || m.creep.is_some())
+    }
+
+    /// Whether a step of the model prescribes temperatures.
+    fn has_prescribed_temperatures(&self) -> bool {
+        (self.steps.iter())
+            .filter(|s| s.active)
+            .any(|s| s.defined_fields.iter().any(|f| f.active))
+    }
+
+    /// The results the model adds to the standard ones of every step that deforms under
+    /// loads: the plastic strain where a material yields or creeps, the temperatures where
+    /// steps prescribe them, those of contacts where there are any.
+    pub fn model_results(&self) -> Vec<FieldResult> {
+        let mut results = Vec::new();
+        if self.has_inelastic_material() {
+            results.push(FieldResult::PlasticStrain);
+        }
+        if self.has_prescribed_temperatures() {
+            results.push(FieldResult::Temperatures);
+        }
+        if self.has_contact() {
+            results.push(FieldResult::Contact);
+        }
+        results
+    }
+
+    /// All results `step` writes: the standard ones of its kind, those the model adds and
+    /// the additional ones of the field output it can compute.
+    pub fn field_results(&self, step: &Step) -> Vec<FieldResult> {
+        let kind = &step.kind;
+        let mut results = kind.standard_results().to_vec();
+        for result in self.model_results() {
+            let takes = match result {
+                FieldResult::Contact => kind.takes_contact_results(),
+                _ => kind.deforms_under_loads(),
+            };
+            if takes && !results.contains(&result) {
+                results.push(result);
+            }
+        }
+        results.extend(
+            (self.field_output.additional.iter())
+                .copied()
+                .filter(|&r| kind.writes_additional(r)),
+        );
+        results
     }
 }
 
-/// The name of the result the solver writes for a field output variable, as the results
-/// tree shows it; `None` for a variable without a result field of its own.
-pub fn output_variable_field(variable: &str) -> Option<&'static str> {
-    Some(match variable {
-        "RF" => "FORC",
-        "U" => "DISP",
-        "PU" => "PDISP",
-        "V" => "VELO",
-        "A" => "ACCE",
-        "NT" => "NDTEMP",
-        "PNT" => "PNDTEMP",
-        "RFL" => "RFL",
-        "SEN" => "SEN",
-        "S" => "STRESS",
-        "PHS" => "PSTRESS",
-        "E" => "TOSTRAIN",
-        "ME" => "MESTRAIN",
-        "PEEQ" => "PE",
-        "ENER" => "ENER",
-        "HFL" => "FLUX",
-        "ERR" => "ERROR",
-        "HER" => "HERROR",
-        "ZZS" => "ZZSTR",
-        "SDV" => "SDV",
-        "CDIS" | "CSTR" | "CELS" => "CONTACT",
-        "PCON" => "PCONTAC",
-        _ => return None,
-    })
-}
-
-/// The description of a field or history output variable, shown when hovering over its
-/// check box; the history-only variables are described as in the CalculiX manual.
+/// The description of a history output variable, shown when hovering over its check box.
 pub fn output_variable_description(variable: &str) -> &'static str {
     match variable {
         "RF" => "Reaction forces.",
@@ -239,133 +347,23 @@ pub fn output_variable_description(variable: &str) -> &'static str {
     }
 }
 
-impl FieldOutput {
-    /// A field output of the kind with the given variables and the default options.
-    pub fn new(name: impl Into<String>, kind: OutputKind, variables: &[&str]) -> Self {
-        Self {
-            name: name.into(),
-            active: true,
-            kind,
-            variables: variables.iter().map(|v| v.to_string()).collect(),
-            last_iterations: false,
-            contact_elements: false,
-            system: None,
-            dimension: OutputDimension::Default,
-        }
-    }
-
-    /// Sorts the variables into their fixed order and drops those the kind cannot write.
-    pub fn normalize_variables(&mut self) {
-        let choices = self.kind.choices();
-        self.variables.retain(|v| choices.contains(&v.as_str()));
-        self.variables
-            .sort_by_key(|v| choices.iter().position(|c| c == v));
-        self.variables.dedup();
-    }
-
-    /// Why the solver would reject the variables.
-    pub fn check_variables(&self) -> Result<(), String> {
-        if self.variables.is_empty() {
-            return Err("Please select at least one variable.".into());
-        }
-        let has = |v: &str| self.variables.iter().any(|x| x == v);
-        for other in ["ERR", "HER"] {
-            if has(other) && has("ZZS") {
-                return Err(format!(
-                    "{} and {} cannot be written together.",
-                    output_variable_label(other),
-                    output_variable_label("ZZS"),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// Field outputs added to a new static step. `NOE` is added when writing.
-    pub fn defaults() -> Vec<Self> {
-        vec![
-            Self::new("NF-Output-1", OutputKind::Node, &["RF", "U"]),
-            Self::new("EF-Output-1", OutputKind::Element, &["S", "E"]),
-        ]
-    }
-
-    /// Field outputs of a new visco step: those of a static step and the equivalent creep
-    /// strain, which the solver writes as `PEEQ`.
-    pub fn visco_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[1].variables.push("PEEQ".into());
-        outputs
-    }
-
-    /// Field outputs added to a new heat transfer step: temperatures, reaction heat
-    /// flows and heat fluxes.
-    pub fn heat_transfer_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[0].variables = vec!["NT".into(), "RFL".into()];
-        outputs[1].variables = vec!["HFL".into()];
-        outputs
-    }
-
-    /// Field outputs added to a new dynamic step: velocities and accelerations too.
-    pub fn dynamic_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[0].variables = ["RF", "U", "V", "A"].map(String::from).to_vec();
-        outputs[1].variables = ["S", "E"].map(String::from).to_vec();
-        outputs
-    }
-
-    /// Field outputs of a new sensitivity step: the sensitivities only, as the step
-    /// computes no displacements or stresses of its own.
-    pub fn sensitivity_defaults() -> Vec<Self> {
-        vec![Self::new("NF-Output-1", OutputKind::Node, &["SEN"])]
-    }
-
-    /// Field outputs added to a new coupled temperature-displacement step.
-    pub fn coupled_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[0].variables = ["RF", "U", "NT", "RFL"].map(String::from).to_vec();
-        outputs[1].variables = ["S", "E", "HFL"].map(String::from).to_vec();
-        outputs
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{HistoryKind, Region};
 
     #[test]
-    fn projects_without_the_options_load_with_the_defaults() {
-        let saved = r#"(name: "NF-Output-1", kind: Node, variables: ["RF", "U"])"#;
-        let output: FieldOutput = ron::from_str(saved).unwrap();
-        assert_eq!(
-            output,
-            FieldOutput::new("NF-Output-1", OutputKind::Node, &["RF", "U"])
-        );
-    }
-
-    #[test]
-    fn error_estimators_exclude_improved_stresses() {
-        let mut output = FieldOutput::new("EF_Output-1", OutputKind::Element, &["S", "ERR"]);
-        assert!(output.check_variables().is_ok());
-        output.variables.push("ZZS".into());
-        assert!(output.check_variables().is_err());
-        output.variables.clear();
-        assert!(output.check_variables().is_err());
-    }
-
-    #[test]
-    fn every_output_variable_has_a_description() {
+    fn every_history_variable_has_a_description() {
         let history = [
-            crate::HistoryKind::Node {
-                region: crate::Region::Nodes(Vec::new()),
+            HistoryKind::Node {
+                region: Region::Nodes(Vec::new()),
             },
-            crate::HistoryKind::Element {
-                region: crate::Region::Nodes(Vec::new()),
+            HistoryKind::Element {
+                region: Region::Nodes(Vec::new()),
             },
-            crate::HistoryKind::Contact { pair: None },
+            HistoryKind::Contact { pair: None },
         ];
-        let field = OutputKind::ALL.iter().flat_map(|k| k.choices());
-        for variable in field.chain(history.iter().flat_map(|k| k.choices())) {
+        for variable in history.iter().flat_map(|k| k.choices()) {
             assert!(
                 !output_variable_description(variable).is_empty(),
                 "{variable}"
@@ -374,23 +372,64 @@ mod tests {
     }
 
     #[test]
-    fn every_field_variable_has_a_name_and_a_group() {
-        for kind in OutputKind::ALL {
-            let grouped: Vec<&str> = (kind.groups().iter())
-                .flat_map(|(_, v)| v.iter().copied())
-                .collect();
-            for variable in kind.choices() {
-                assert!(!output_variable_label(variable).is_empty(), "{variable}");
-                assert!(grouped.contains(variable), "{variable}");
-            }
-            assert_eq!(grouped.len(), kind.choices().len());
-        }
+    fn steps_write_the_results_of_their_kind_without_being_asked() {
+        let mut model = FeModel::default();
+        let step = Step::new_static("Step-1");
+        assert!(model.field_output.is_standard());
+        assert_eq!(
+            model.field_results(&step),
+            [
+                FieldResult::Displacements,
+                FieldResult::ReactionForces,
+                FieldResult::Stresses,
+                FieldResult::Strains
+            ]
+        );
+        let dynamic = model.field_results(&Step::new_dynamic("Step-2"));
+        assert!(dynamic.contains(&FieldResult::Velocities));
+        // An eigenvalue step keeps its mode shapes only.
+        assert!(
+            model
+                .field_results(&Step::new_frequency("Step-3"))
+                .is_empty()
+        );
+        let heat = model.field_results(&Step::new_heat_transfer("Step-4"));
+        assert_eq!(heat[0], FieldResult::Temperatures);
+        assert!(!heat.contains(&FieldResult::Stresses));
+        // The additional results reach the steps that can compute them only.
+        model.field_output.additional = vec![
+            FieldResult::AmplitudePhase,
+            FieldResult::Displacements,
+            FieldResult::StrainEnergy,
+        ];
+        model.field_output.normalize();
+        assert_eq!(
+            model.field_output.additional,
+            [FieldResult::StrainEnergy, FieldResult::AmplitudePhase]
+        );
+        let results = model.field_results(&step);
+        assert!(results.contains(&FieldResult::StrainEnergy));
+        assert!(!results.contains(&FieldResult::AmplitudePhase));
+        let heat = model.field_results(&Step::new_heat_transfer("Step-4"));
+        assert!(!heat.contains(&FieldResult::StrainEnergy));
     }
 
     #[test]
-    fn variables_keep_their_order() {
-        let mut output = FieldOutput::new("x", OutputKind::Node, &["V", "U", "S", "U"]);
-        output.normalize_variables();
-        assert_eq!(output.variables, ["U", "V"]);
+    fn yielding_materials_add_the_plastic_strain() {
+        let mut model = FeModel::default();
+        let step = Step::new_static("Step-1");
+        assert!(model.model_results().is_empty());
+        model.materials.push(crate::Material {
+            plastic: Some(crate::Plastic::default()),
+            ..Default::default()
+        });
+        assert_eq!(model.model_results(), [FieldResult::PlasticStrain]);
+        assert!(
+            model
+                .field_results(&step)
+                .contains(&FieldResult::PlasticStrain)
+        );
+        let heat = model.field_results(&Step::new_heat_transfer("Step-2"));
+        assert!(!heat.contains(&FieldResult::PlasticStrain));
     }
 }

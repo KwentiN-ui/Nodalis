@@ -371,53 +371,56 @@ A static step over a creep time in which materials with a creep law creep (`*VIS
 
 === Field outputs <step-field-outputs>
 
-Field outputs control which results the solver writes. A new step gets a node and an
-element field output whose results depend on the step type. Frequency, complex frequency and
-buckle steps take none: their results are the normalized mode shapes (@mode-shapes), so the
-tree shows no #ui("Field Outputs") under such a step and #ui("Field Output") on the
-#ui("Steps") tab does not add one to it. Create more with #ui("Field Output") on the
-#ui("Steps") tab; it goes into the active step (@active-step). Edit one with a double-click.
-Hovering over a result shows what it is.
+Every step writes the results that belong to its type, without an item in the tree and
+without anything to switch on:
 
 #fields(
-  [Type], [#ui("Node Output"), #ui("Element Output") or #ui("Contact Output"); chosen when the
-    output is created.],
-  [Results], [Checked by name, in groups. Node: displacements, reaction forces, velocities,
-    accelerations, temperatures, reaction heat flows, amplitude and phase of displacements and
-    temperatures, design sensitivities (sensitivity steps only). Element: stresses, strains,
-    equivalent plastic strain, strain energy density, material state variables, improved
-    stresses and error estimates (the improved stresses exclude the error estimates), heat
-    flux, amplitude and phase of stresses. Contact: gap and slip, pressure and shear, energy,
-    amplitude and phase.],
-  [Coordinate system], [Node and element outputs. #ui("Global"), or a coordinate system
-    (@coordinate-systems) in which the displacements, forces, velocities, accelerations,
-    stresses, strains and heat fluxes of the output are shown as well: the results of the
-    step get a copy named after the field and the system, such as `DISP_CS_1` for the
-    displacements in #ui("CS-1"), next to the global field. Scalars such as temperatures stay
-    as they are. In a moving system the copy turns with its selection in every increment and
-    the displacements are taken relative to the system. The copy follows when the system or
-    the output is edited, without solving again.],
-  [Shells and beams], [Element outputs; the node outputs of the step follow them.
-    #ui("Default") and #ui("On the expanded solid (3D)") write shells and beams in the 3D form
-    the solver expands them to, #ui("On the mid-surface (2D)") at their own nodes, where the
-    stresses of shells lack the bending.],
-  [Diagnostics], [#ui("Every iteration of the last increment") writes each iteration of the
-    last increment, to find out why a solution diverges. #ui("Contact elements") writes the
-    contact elements to a `.cel` file.],
+  [Static, Visco, Steady State Dynamics], [Displacements, reaction forces, stresses and
+    strains.],
+  [Dynamic], [The same, and velocities and accelerations.],
+  [Heat Transfer], [Temperatures, reaction heat flows and heat flux.],
+  [Coupled and uncoupled temperature-displacement], [The results of a static and of a heat
+    transfer step.],
+  [Sensitivity], [The design sensitivities.],
+  [Frequency, Complex Frequency, Buckle], [The normalized mode shapes (@mode-shapes), no
+    fields.],
 )
 
-#screenshot("field-output-dialog.png", [A node field output that also shows its displacements in a coordinate system])
+The model adds to that on its own: the equivalent plastic strain where a material yields or
+creeps (@plasticity, @creep), the temperatures where a step prescribes them, and gap, slip,
+pressure and shear of the contacts where the model has contacts or compression only supports.
+
+What goes beyond these results is set once for the whole analysis, with #ui("Field Output")
+on the #ui("Steps") tab. Each step takes from it what it can compute. As long as nothing is
+set there, the tree shows no field output; afterwards #ui("Field Output") stands above the
+steps, a double-click opens it and #ui("Delete") in its context menu goes back to the
+standard results. Hovering over a result shows what it is.
+
+#fields(
+  [Always written], [What the steps of the analysis write anyway, by step type.],
+  [Additional results], [#ui("Strain energy density") and #ui("Stress error estimate") (how
+    much the stresses of the elements at a node differ, large where the mesh is too coarse)
+    in all steps with stresses, #ui("Contact energy") in static, visco and dynamic steps,
+    #ui("Amplitude and phase") of displacements and stresses in steady state dynamics steps.],
+  [Coordinate system], [#ui("Global"), or a coordinate system (@coordinate-systems) in which
+    the displacements, forces, velocities, accelerations, stresses, strains and heat fluxes
+    are shown as well: the results get a copy named after the field and the system, such as
+    `DISP_CS_1` for the displacements in #ui("CS-1"), next to the global field. Scalars such
+    as temperatures stay as they are. In a moving system the copy turns with its selection
+    in every increment and the displacements are taken relative to the system. The copy
+    follows when the system or the field output is edited, without solving again.],
+  [Shells and beams], [#ui("Default") and #ui("On the expanded solid (3D)") write shells and
+    beams in the 3D form the solver expands them to, #ui("On the mid-surface (2D)") at their
+    own nodes, where the stresses of shells lack the bending.],
+)
+
+#screenshot("field-output-dialog.png", [The field output of an analysis: two additional results, and the displacements also in a coordinate system])
 
 #screenshot("field-output-system-results.png", [The displacements of the lever relative to the
   moving system at its end: `DISP_Lever_End` next to the global `DISP`])
 
-Like boundary conditions, field outputs can be deactivated and deleted from their context menu.
-A deactivated field output is left out of the input file.
-
-#screenshot("field-output-tree.png", [A deactivated contact field output])
-
-#note[Field outputs of a step are what the solver computes. The field outputs on the #ui("Results")
-tab derive new fields from opened results instead (@derived-fields).]
+#note[The field output of the analysis is what the solver computes. The field outputs on the
+#ui("Results") tab derive new fields from opened results instead (@derived-fields).]
 
 === History outputs <history-output-step>
 
