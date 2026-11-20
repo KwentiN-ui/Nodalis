@@ -281,6 +281,7 @@ impl FeModel {
                 } else {
                     (load.region.missing_reference(mesh))
                         .or_else(|| self.missing_region_point(&load.region))
+                        .or_else(|| self.missing_remote_point(mesh, &load.region))
                         .or_else(|| {
                             self.missing_amplitude([&load.amplitude, &load.factor_amplitude])
                         })
@@ -297,16 +298,24 @@ impl FeModel {
                                 .then(|| "No active point mass sits on the reference point".into()),
                             _ => None,
                         })
+                        .or_else(|| {
+                            // Nodes of 2D elements have no rotations: a moment turns a point.
+                            (matches!(load.kind, LoadKind::Moment(_))
+                                && self.properties.space.is_2d()
+                                && !load.region.is_point())
+                            .then(|| {
+                                "In a 2D model a moment acts at a reference point or at the \
+                                 point of a displacement or remote force"
+                                    .into()
+                            })
+                        })
                         .or_else(|| match &load.kind {
                             // An unknown coordinate system, or no node in the pinball region.
-                            LoadKind::RemoteForce(remote)
-                                if load.region.reference_point().is_none() =>
-                            {
-                                (remote.point())
-                                    .resolve(self, mesh, &load.region, &Default::default())
-                                    .and_then(|point| remote.global(self, point.position))
-                                    .err()
-                            }
+                            LoadKind::RemoteForce(remote) if !load.region.is_point() => (remote
+                                .point())
+                            .resolve(self, mesh, &load.region, &Default::default())
+                            .and_then(|point| remote.global(self, point.position))
+                            .err(),
                             _ => None,
                         })
                         .or_else(|| load_system_problem(self, load))

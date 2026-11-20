@@ -91,7 +91,7 @@ struct Out {
 }
 
 /// The names of the items in the text: their labels as an input file can hold them (upper
-/// case, at most 80 characters, without the commas, blanks, quotes and equal signs that
+/// case ASCII, at most 80 characters, without the commas, blanks, quotes and equal signs that
 /// would split or join them, not a number), made unique within their kind, so that two items
 /// with similar labels stay two items when the text is read back.
 #[derive(Default)]
@@ -114,10 +114,19 @@ impl Labels {
                 .enumerate()
                 .map(|(i, label)| {
                     let mut name: String = (label.trim().trim_start_matches('*').chars())
-                        .map(|c| match c {
-                            ',' | '=' | '"' => '_',
-                            c if c.is_whitespace() || c.is_control() => '_',
-                            c => c.to_ascii_uppercase(),
+                        .flat_map(|c| -> Vec<char> {
+                            match c {
+                                ',' | '=' | '"' => vec!['_'],
+                                c if c.is_whitespace() || c.is_control() => vec!['_'],
+                                // German umlauts written out, other letters beyond ASCII as
+                                // `_`: CalculiX reads bytes and counts them.
+                                'ä' | 'Ä' => vec!['A', 'E'],
+                                'ö' | 'Ö' => vec!['O', 'E'],
+                                'ü' | 'Ü' => vec!['U', 'E'],
+                                'ß' | 'ẞ' => vec!['S', 'S'],
+                                c if !c.is_ascii() => vec!['_'],
+                                c => vec![c.to_ascii_uppercase()],
+                            }
                         })
                         .take(80)
                         .collect();
@@ -332,15 +341,16 @@ fn mesh(out: &mut Out, model: &Model, parts: &[String]) {
     // what such blocks leave of a set follows as `*ELSET`.
     let labels = out.labels.clone();
     let sets = &model.sets.element_sets;
-    let part_name = |set: usize| {
+    // A part's set; its name as the part has it where the label is the part's name in
+    // upper case, else the label, e.g. for a part named in words.
+    let is_part = |set: usize| {
         let label = &labels.element_sets[set];
-        (parts.iter())
-            .find(|p| plxs_core::normalized_name(p) == sets[set].name.as_str())
-            .filter(|p| p.eq_ignore_ascii_case(label))
+        let part =
+            (parts.iter()).find(|p| plxs_core::normalized_name(p) == sets[set].name.as_str())?;
+        Some(part.eq_ignore_ascii_case(label).then_some(part))
     };
-    let part_sets: Vec<usize> = (0..sets.len())
-        .filter(|&s| part_name(s).is_some())
-        .collect();
+    let part_name = |set: usize| is_part(set).flatten();
+    let part_sets: Vec<usize> = (0..sets.len()).filter(|&s| is_part(s).is_some()).collect();
     let mut covered: Vec<usize> = vec![0; sets.len()];
     let mut user_element = false;
     let elements = &model.elements;

@@ -79,6 +79,9 @@ pub enum Request {
     /// Stop taking the item at this path from another analysis; the analysis keeps its
     /// copy.
     Unlink(Vec<String>),
+    /// The geometry objects deleted in the analysis, by id with their names: the links that
+    /// brought them no longer do, so that they do not come back.
+    Deleted(Vec<(plx_model::Id, String)>),
     /// Open the Campbell block of this analysis, made and linked first if it has none.
     Campbell,
     /// Close the analysis shown in the project window: its data goes back to the project.
@@ -1590,9 +1593,10 @@ fn free_compound_name(
         .expect("unbounded range")
 }
 
-/// The name `typed` for the compound part `old` as the solver needs it: upper case, of
-/// letters, digits, _ and -, used by no other part of the geometry or the mesh, set or
-/// compound. `parts` are the parts of the geometry.
+/// The name `typed` for the compound part `old`: any text, kept as typed apart from the
+/// surrounding blanks, used by no other part of the geometry or the mesh, set or compound,
+/// regardless of case. The solver never sees it: the export derives its own labels. `parts`
+/// are the parts of the geometry.
 fn compound_name(
     geometry: &plx_model::Geometry,
     mesh: &plx_mesh::FeMesh,
@@ -1600,17 +1604,12 @@ fn compound_name(
     old: &str,
     typed: &str,
 ) -> Result<String, String> {
-    let name = typed.trim().to_ascii_uppercase();
+    let name = typed.trim().to_owned();
     if name.is_empty() {
         return Err("The name must not be empty.".into());
     }
-    if name.len() > 80 {
-        return Err("The name must be at most 80 characters long.".into());
-    }
-    if !(name.chars()).all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-        return Err("Allowed are letters without accents, digits, _ and -.".into());
-    }
-    if name == old {
+    // Only the case changes: the name is its own.
+    if name.eq_ignore_ascii_case(old) {
         return Ok(name);
     }
     let taken = geometry.compound_named(&name).is_some()
@@ -2761,7 +2760,10 @@ impl Workbench {
                 false
             }
         };
-        if check(response.delete.as_ref(), self) {
+        // A part a link brings can be deleted: the link no longer brings it, see
+        // [`Request::Deleted`].
+        let part = matches!(response.delete, Some(TreeItem::Part(_)));
+        if !part && check(response.delete.as_ref(), self) {
             response.delete = None;
         }
         if check(response.toggle_active.as_ref(), self) {
@@ -6208,6 +6210,9 @@ impl Workbench {
             return;
         }
         let name = names.join(", ");
+        let deleted: Vec<(plx_model::Id, String)> = (names.iter())
+            .filter_map(|n| Some((model.object_id(n)?, n.clone())))
+            .collect();
         let cad: Vec<String> = (names.iter())
             .filter(|n| !model.is_imported(n))
             .cloned()
@@ -6291,6 +6296,7 @@ impl Workbench {
             model.geometry = smaller;
         }
         self.output.push(deleted_message(names));
+        self.requests.push(Request::Deleted(deleted));
         self.sync_imported();
         self.after_parts_changed();
     }
@@ -9220,8 +9226,11 @@ mod tests {
 
         // Renamed in the FE model, the compound keeps the name when meshed anew, and the
         // section stays on it.
-        model.rename_part(0, "block").unwrap();
-        assert_eq!(model.geometry.as_ref().unwrap().compounds[0].name, "BLOCK");
+        model.rename_part(0, "Block für Lager").unwrap();
+        assert_eq!(
+            model.geometry.as_ref().unwrap().compounds[0].name,
+            "Block für Lager"
+        );
         assert_eq!(on(&model), plx_model::Region::Parts(vec![id]));
 
         // Dissolved, the parts are parts of their own again and keep the section.
@@ -9235,7 +9244,7 @@ mod tests {
     }
 
     #[test]
-    fn compound_names_are_solver_names_used_by_nothing_else() {
+    fn compound_names_are_any_text_used_by_nothing_else() {
         let model = two_part_model();
         let geometry = model.geometry.as_ref().unwrap();
         let parts = vec![
@@ -9248,14 +9257,18 @@ mod tests {
             "COMPOUND-1"
         );
         let name = |typed: &str| compound_name(geometry, model.mesh(), &parts, "COMPOUND-1", typed);
-        assert_eq!(name(" Rahmen-2 "), Ok("RAHMEN-2".into()));
+        assert_eq!(name(" Rahmen-2 "), Ok("Rahmen-2".into()));
+        assert_eq!(
+            name("Gehäuse, oben (Ø 40)"),
+            Ok("Gehäuse, oben (Ø 40)".into())
+        );
+        assert_eq!(name("compound-1"), Ok("compound-1".into()), "its own name");
         assert!(
             name("solid-3").is_err(),
             "a part of the geometry not meshed yet"
         );
         assert!(name("SOLID-1").is_err());
-        assert!(name("zwei wörter").is_err());
-        assert!(name("").is_err());
+        assert!(name("  ").is_err());
     }
 
     /// A local mesh size on a face of one of two bodies touches that body only: the other

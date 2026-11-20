@@ -226,6 +226,12 @@ impl Region {
         }
     }
 
+    /// Whether the region is a point: a reference point, or the point of a boundary
+    /// condition or remote force.
+    pub fn is_point(&self) -> bool {
+        matches!(self, Region::ReferencePoint(_) | Region::RemotePoint(_))
+    }
+
     /// The remote displacement whose point the region stands for, if it is one.
     pub fn remote_point(&self) -> Option<crate::Id> {
         match self {

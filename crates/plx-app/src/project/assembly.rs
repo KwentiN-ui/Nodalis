@@ -132,6 +132,11 @@ impl ProjectApp {
         let mut print = plx_mesh::Fnv::new();
         for (source, parts) in pieces {
             let from = self.name_of(source);
+            // What the analysis deleted of what the link brings stays out.
+            let left_out = (self.links.iter())
+                .find(|l| l.source == source && l.target == target && l.item == path)
+                .map(links::left_out)
+                .unwrap_or_default();
             let node = self.node(source)?;
             if let Some(file) = node.as_file_mut()
                 && file.model.geometry.is_some()
@@ -175,7 +180,15 @@ impl ProjectApp {
                 continue;
             }
             print.add(&links::fingerprint(data, &path).to_le_bytes());
-            copies.push(links::MeshCopy::of(data));
+            print.add_debug(&left_out);
+            let mut copy = links::MeshCopy::of(data);
+            let failed = copy.leave_out(&left_out).err();
+            copies.push(copy);
+            if let Some(why) = failed {
+                self.warn_once(format!(
+                    "{from}: the parts deleted in {name} are taken: {why}."
+                ));
+            }
             names.push(from);
         }
         if copies.is_empty() {
