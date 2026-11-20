@@ -4461,3 +4461,40 @@ fn faces_of_many_edges_skip_the_quasi_structured_algorithm() {
             .any(|e| e.type_name == "S8")
     );
 }
+
+#[test]
+fn local_mesh_sizes_go_below_the_min_element_size() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = rectangle([10.0, 0.0, 0.0], [20.0, 10.0], 0.0);
+    geometry.meshing.max_size = 2.0;
+    geometry.meshing.min_size = 1.0;
+    geometry.meshing.second_order = false;
+    let edges: Vec<i32> = (tessellate(&geometry).unwrap().entities.iter())
+        .filter_map(|e| match e {
+            CadEntity::Edge(tag) => Some(*tag),
+            _ => None,
+        })
+        .collect();
+    geometry.mesh_items = vec![MeshSetupItem {
+        id: plx_model::Id::new(),
+        name: "Local_Mesh_Size-1".into(),
+        kind: MeshSetupKind::LocalMeshSize {
+            faces: Vec::new(),
+            edges,
+            size: 0.25,
+            depth: 0.0,
+        },
+    }];
+    for quads in [false, true] {
+        geometry.meshing.quad_dominated = quads;
+        let mesh = generate_mesh(&geometry).unwrap().mesh;
+        // The long bottom edge of 20 gets about 80 elements, not the 20 of the min size.
+        let bottom = mesh.coords().iter().filter(|c| c[1].abs() < 1e-9).count();
+        assert!(
+            bottom > 60,
+            "quads {quads}: {bottom} nodes along the bottom"
+        );
+    }
+}

@@ -1528,7 +1528,12 @@ fn part_mesh_in(
     options.quads = false;
     options.apply(gmsh)?;
     let faces: BTreeSet<i32> = gmsh.adjacencies(3, volume)?.1.into_iter().collect();
-    size_fields(gmsh, &local_sizes(gmsh, geometry, &faces)?, 1.0)?;
+    size_fields(
+        gmsh,
+        &local_sizes(gmsh, geometry, &faces)?,
+        1.0,
+        options.min_size,
+    )?;
     let rotations = periodic::rotations(gmsh, matching)?;
     let faces_list: Vec<i32> = faces.iter().copied().collect();
     periodic::match_rotated(gmsh, 2, &faces_list, &rotations)?;
@@ -2046,7 +2051,7 @@ fn transfinite_faces(
     // The sizes as asked for: the quasi-structured algorithm's halving does not apply.
     grid.algorithms.0 = Algorithm2d::FrontalDelaunay;
     grid.apply(gmsh)?;
-    let fields = size_fields(gmsh, sizes, grid.size_factor())?;
+    let fields = size_fields(gmsh, sizes, grid.size_factor(), grid.min_size)?;
     gmsh.set_transfinite_automatic(faces, GRID_CORNER_ANGLE, true)?;
     let result = gmsh.generate(2);
     for field in fields.into_iter().rev() {
@@ -2236,8 +2241,20 @@ fn local_sizes(
 /// Makes the local mesh sizes Gmsh size fields; Gmsh takes the smallest of them and the
 /// other size limits. The sizes are multiplied by the factor, see
 /// [`MeshOptions::size_factor`]. Returns the fields made, to take them back with.
-fn size_fields(gmsh: &Gmsh, sizes: &[LocalSize], factor: f64) -> Result<Vec<i32>, GmshError> {
+fn size_fields(
+    gmsh: &Gmsh,
+    sizes: &[LocalSize],
+    factor: f64,
+    min_size: f64,
+) -> Result<Vec<i32>, GmshError> {
     let mut fields = Vec::new();
+    // Gmsh clamps every size, the fields' too, to its min size: a local size below the min
+    // element size lowers it, else the local size would end at the min element size.
+    let smallest = (sizes.iter())
+        .filter(|l| l.size > 0.0 && !(l.faces.is_empty() && l.edges.is_empty()))
+        .map(|l| l.size * factor)
+        .fold(min_size, f64::min);
+    gmsh.set_number("Mesh.MeshSizeMin", smallest)?;
     // The fields of sizes, which the background field takes the smallest of; `fields`
     // also has the distances they are made from.
     let mut size_list = Vec::new();
@@ -2442,7 +2459,7 @@ fn generate_faces(
     }
     let run = |options: &MeshOptions| -> Result<Result<(), GmshError>, GmshError> {
         options.apply(gmsh)?;
-        let fields = size_fields(gmsh, sizes, options.size_factor())?;
+        let fields = size_fields(gmsh, sizes, options.size_factor(), options.min_size)?;
         let result = gmsh.generate(2);
         for field in fields.into_iter().rev() {
             gmsh.remove_field(field)?;
