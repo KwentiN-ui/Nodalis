@@ -377,6 +377,7 @@ impl Collector {
                     })
                     .collect();
                 let mut set = HistorySet {
+                    output: None,
                     name: set.name,
                     rows: order.iter().map(|&r| rows[r]).collect(),
                     fields,

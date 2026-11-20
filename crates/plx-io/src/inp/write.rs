@@ -5608,6 +5608,7 @@ fn node_print(
     totals_of: Totals,
 ) -> ir::step::HistoryOutput {
     ir::step::HistoryOutput {
+        origin: None,
         set,
         variables: variables(names.iter().copied()),
         frequency: 1,
@@ -5619,8 +5620,24 @@ fn node_print(
     }
 }
 
-/// The history output requests of a history output; none without variables.
+/// The history output requests of a history output, which carry its id to the history they
+/// print; none without variables.
 fn history_output(
+    sets: &mut Sets,
+    output: &HistoryOutput,
+    pair_surfaces: &PairSurfaces,
+) -> Result<ir::step::Outputs, WriteError> {
+    let mut outputs = history_requests(sets, output, pair_surfaces)?;
+    for request in (outputs.node_print.iter_mut())
+        .chain(&mut outputs.el_print)
+        .chain(&mut outputs.contact_print)
+    {
+        request.origin = Some(output.id.raw());
+    }
+    Ok(outputs)
+}
+
+fn history_requests(
     sets: &mut Sets,
     output: &HistoryOutput,
     pair_surfaces: &PairSurfaces,

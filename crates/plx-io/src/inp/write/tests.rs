@@ -7349,6 +7349,12 @@ fn a_step_prints_only_the_history_outputs_it_lists() {
         .map(|s| s.outputs.node_print.len())
         .collect();
     assert_eq!(printed, [1, 0, 1]);
+    // The requests carry the output's id to the history they print.
+    let origins: Vec<Option<u64>> = (analysis.steps.iter())
+        .flat_map(|s| &s.outputs.node_print)
+        .map(|r| r.origin)
+        .collect();
+    assert_eq!(origins, [Some(id.raw()); 2]);
 }
 
 #[test]

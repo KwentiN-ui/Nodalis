@@ -142,6 +142,7 @@ pub fn history_blocks(
 ) -> Vec<HistoryBlock> {
     let mut out = Vec::new();
     let block = |quantity, source, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
+        origin: request.origin,
         step,
         increment,
         quantity,
