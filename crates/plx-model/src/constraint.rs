@@ -621,7 +621,7 @@ impl crate::FeModel {
         let end = joint.locating_end().ok_or("Both ends are World")?;
         if is_point(end) {
             self.point_position(mesh, end)
-                .ok_or_else(|| format!("{} has no position", end.describe(self)))
+                .ok_or_else(|| format!("{} has no position", end.describe(self, mesh)))
         } else {
             end.centroid(mesh)
                 .ok_or_else(|| "The selection contains no nodes.".to_string())

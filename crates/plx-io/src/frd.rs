@@ -203,6 +203,7 @@ impl<'a> Reader<'a> {
             match parts.iter_mut().find(|p| p.name == name) {
                 Some(part) => part.elements.extend(elements),
                 None => parts.push(Part {
+                    id: Default::default(),
                     bodies: Vec::new(),
                     name,
                     elements,

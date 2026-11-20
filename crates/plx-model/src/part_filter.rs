@@ -13,8 +13,8 @@ use crate::{FeModel, Region};
 /// One way of naming parts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PartTerm {
-    /// The part of this name.
-    Part(String),
+    /// The part of this id, see [`plx_mesh::Part::id`].
+    Part(crate::Id),
     /// Parts whose name matches the pattern, ignoring case: `*` stands for any text and `?`
     /// for one character; a pattern without them matches names containing it.
     Pattern(String),
@@ -57,6 +57,7 @@ impl PartGroup {
 /// sections, gathered once for the many filters of a detection.
 #[derive(Clone, Debug, Default)]
 pub struct PartContext {
+    pub ids: Vec<crate::Id>,
     pub names: Vec<String>,
     pub materials: Vec<BTreeSet<crate::Id>>,
     groups: HashMap<crate::Id, PartFilter>,
@@ -90,13 +91,10 @@ impl PartFilter {
         Self::default()
     }
 
-    /// The filter of these parts by name.
-    pub fn parts<S: Into<String>>(names: impl IntoIterator<Item = S>) -> Self {
+    /// The filter of these parts by id.
+    pub fn parts(ids: impl IntoIterator<Item = crate::Id>) -> Self {
         Self {
-            include: names
-                .into_iter()
-                .map(|n| PartTerm::Part(n.into()))
-                .collect(),
+            include: ids.into_iter().map(PartTerm::Part).collect(),
             exclude: Vec::new(),
         }
     }
@@ -154,31 +152,24 @@ impl PartFilter {
         self.exclude.retain(keep);
     }
 
-    /// Renames the part `old` to `new` in its terms.
-    pub fn rename_part(&mut self, old: &str, new: &str) {
-        for term in self.include.iter_mut().chain(&mut self.exclude) {
-            if let PartTerm::Part(name) = term
-                && name == old
-            {
-                *name = new.to_string();
-            }
-        }
-    }
-
-    /// Replaces the part `old` by the parts `new` in its terms.
-    pub fn split_part(&mut self, old: &str, new: &[String]) {
+    /// Replaces the part `old` by the parts `new` in its terms, as when parts are merged or
+    /// a compound part is made or dissolved.
+    pub fn replace_part(&mut self, old: crate::Id, new: &[crate::Id]) {
         for terms in [&mut self.include, &mut self.exclude] {
-            if let Some(at) = terms.iter().position(|t| *t == PartTerm::Part(old.into())) {
-                terms.splice(at..=at, new.iter().map(|n| PartTerm::Part(n.clone())));
+            if let Some(at) = terms.iter().position(|t| *t == PartTerm::Part(old)) {
+                terms.splice(at..=at, new.iter().map(|&n| PartTerm::Part(n)));
+                let mut seen = BTreeSet::new();
+                terms.retain(|t| !matches!(t, PartTerm::Part(id) if !seen.insert(*id)));
             }
         }
     }
 
-    /// A short text for lists, such as "Bolt*, Steel except Group A".
-    pub fn describe(&self, fe: &FeModel) -> String {
+    /// A short text for lists, such as "Bolt*, Steel except Group A"; parts by their names
+    /// in `context`.
+    pub fn describe(&self, fe: &FeModel, context: &PartContext) -> String {
         let terms = |terms: &[PartTerm]| {
             (terms.iter())
-                .map(|t| t.describe(fe))
+                .map(|t| t.describe(fe, context))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -198,7 +189,7 @@ impl PartFilter {
 impl PartTerm {
     fn matches(&self, part: usize, context: &PartContext, depth: usize) -> bool {
         match self {
-            PartTerm::Part(name) => context.names.get(part).is_some_and(|n| n == name),
+            PartTerm::Part(id) => context.ids.get(part) == Some(id),
             PartTerm::Pattern(pattern) => context
                 .names
                 .get(part)
@@ -209,10 +200,11 @@ impl PartTerm {
         }
     }
 
-    /// The term as the user reads it.
-    pub fn describe(&self, fe: &FeModel) -> String {
+    /// The term as the user reads it, a part by its name in `context`.
+    pub fn describe(&self, fe: &FeModel, context: &PartContext) -> String {
         match self {
-            PartTerm::Part(name) => name.clone(),
+            PartTerm::Part(id) => (context.ids.iter().position(|p| p == id))
+                .map_or_else(|| "(deleted)".to_owned(), |p| context.names[p].clone()),
             PartTerm::Pattern(pattern) => format!("Name: {pattern}"),
             PartTerm::Material(id) => match fe.material(*id) {
                 Some(m) => format!("Material: {}", m.name),
@@ -264,8 +256,8 @@ impl FeModel {
     /// The parts of `mesh` as filters see them: their names, the materials of their
     /// sections and the part groups of the model; the parts `left_out` they never take.
     pub fn part_context(&self, mesh: &FeMesh, left_out: &crate::LeftOut) -> PartContext {
-        let index: HashMap<&str, usize> = (mesh.parts.iter().enumerate())
-            .map(|(i, p)| (p.name.as_str(), i))
+        let index: HashMap<crate::Id, usize> = (mesh.parts.iter().enumerate())
+            .map(|(i, p)| (p.id, i))
             .collect();
         let mut materials = vec![BTreeSet::new(); mesh.parts.len()];
         let mut part_of = HashMap::new();
@@ -273,11 +265,11 @@ impl FeModel {
             let Some(material) = section.material else {
                 continue;
             };
-            // Sections on whole parts are found by name, so that the display of the CAD
+            // Sections on whole parts are found by id, so that the display of the CAD
             // geometry, which has the parts but none of their elements, sees them too.
-            if let Region::Parts(names) = &section.region {
-                for name in names {
-                    if let Some(&p) = index.get(name.as_str()) {
+            if let Region::Parts(ids) = &section.region {
+                for id in ids {
+                    if let Some(&p) = index.get(id) {
                         materials[p].insert(material);
                     }
                 }
@@ -297,6 +289,7 @@ impl FeModel {
             }
         }
         PartContext {
+            ids: mesh.part_ids(),
             names: mesh.parts.iter().map(|p| p.name.clone()).collect(),
             materials,
             groups: (self.part_groups.iter())
@@ -307,7 +300,7 @@ impl FeModel {
     }
 
     /// Part filters naming the part `old` name the parts `new`.
-    pub(crate) fn split_part_in_filters(&mut self, old: &str, new: &[String]) {
+    pub(crate) fn replace_part_in_filters(&mut self, old: crate::Id, new: &[crate::Id]) {
         let filters = (self.contact_detections.iter_mut())
             .flat_map(|d| {
                 std::iter::once(&mut d.scope)
@@ -315,7 +308,7 @@ impl FeModel {
             })
             .chain(self.part_groups.iter_mut().map(|g| &mut g.filter));
         for filter in filters {
-            filter.split_part(old, new);
+            filter.replace_part(old, new);
         }
     }
 
@@ -340,6 +333,7 @@ mod tests {
 
     fn context(names: &[&str], groups: &[PartGroup]) -> PartContext {
         PartContext {
+            ids: names.iter().map(|n| crate::named(n)).collect(),
             names: names.iter().map(|n| n.to_string()).collect(),
             materials: vec![BTreeSet::new(); names.len()],
             groups: groups.iter().map(|g| (g.id, g.filter.clone())).collect(),
@@ -352,7 +346,7 @@ mod tests {
         let mut context = context(&["A", "B"], &[]);
         context.left_out = crate::LeftOut(vec![false, true]);
         let named = PartFilter {
-            include: vec![PartTerm::Part("B".into())],
+            include: vec![PartTerm::Part(crate::named("B"))],
             exclude: Vec::new(),
         };
         assert_eq!(named.searched(&context, &[true, true]), [false, false]);

@@ -1327,7 +1327,9 @@ mod tests {
             nodes: vec![1, 2],
         })
         .unwrap();
+        let a = crate::Id::new();
         mesh.parts.push(Part {
+            id: a,
             bodies: Vec::new(),
             name: "A".into(),
             elements: vec![1],
@@ -1335,7 +1337,7 @@ mod tests {
         let mut fe = FeModel::default();
         let operation = |transform| crate::MeshOperation {
             name: "Transform-1".into(),
-            parts: vec!["A".into()],
+            parts: vec![a],
             kind: MeshOperationKind::Transform(transform),
         };
         let shift = operation(MeshTransform::Translate([0.5, 0.0, 0.0]));

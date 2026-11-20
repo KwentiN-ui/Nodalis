@@ -458,8 +458,8 @@ fn rules_table(
                 let sides = format!(
                     "{}.  {}  to  {}",
                     i + 1,
-                    rule.side_a.describe(fe),
-                    rule.side_b.describe(fe)
+                    rule.side_a.describe(fe, context),
+                    rule.side_b.describe(fe, context)
                 );
                 if ui
                     .selectable_label(open, sides)
@@ -1322,8 +1322,8 @@ pub fn worksheet(
                 || [
                     r.name.clone(),
                     model.fe.name_or_missing(r.detected_by),
-                    r.side_a.describe(&model.fe),
-                    r.side_b.describe(&model.fe),
+                    r.side_a.describe(&model.fe, model.mesh()),
+                    r.side_b.describe(&model.fe, model.mesh()),
                 ]
                 .iter()
                 .any(|t| plx_model::name_matches(text, t))
@@ -1500,8 +1500,8 @@ pub fn worksheet(
                                     other => other.name().to_owned(),
                                 };
                                 ui.label(behavior);
-                                ui.label(region.side_a.describe(&model.fe));
-                                ui.label(region.side_b.describe(&model.fe));
+                                ui.label(region.side_a.describe(&model.fe, model.mesh()));
+                                ui.label(region.side_b.describe(&model.fe, model.mesh()));
                                 let master = resolved.items.get(i).map(|r| r.a_is_master);
                                 ui.label(match master {
                                     Some(true) => "A",
@@ -1834,7 +1834,7 @@ mod tests {
             orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
-            region: Region::Parts(names.clone()),
+            region: Region::Parts(view.mesh().part_ids()),
             thickness: 1.0,
             kind: SectionKind::Solid,
         });
@@ -2015,7 +2015,7 @@ mod tests {
             orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
-            region: Region::Parts(names.clone()),
+            region: Region::Parts(view.mesh().part_ids()),
             thickness: 1.0,
             kind: SectionKind::Solid,
         });

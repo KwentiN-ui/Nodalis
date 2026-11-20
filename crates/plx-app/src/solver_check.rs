@@ -259,7 +259,7 @@ pub(crate) fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeMod
             orientation: None,
             name: "Section-1".into(),
             material: Some(material.id),
-            region: Region::Parts(vec!["BEAM".into()]),
+            region: Region::Parts(mesh.part_ids()),
             thickness: 1.0,
             kind: SectionKind::Solid,
         }],
@@ -331,6 +331,7 @@ pub(crate) fn beam_mesh_divided(divisions: [u32; 3]) -> FeMesh {
         }
     }
     mesh.parts.push(Part {
+        id: Default::default(),
         bodies: Vec::new(),
         name: "BEAM".into(),
         elements,

@@ -37,7 +37,6 @@ pub mod handover;
 mod history;
 pub mod hyperelastic;
 pub mod hyperelastic_fit;
-mod id;
 pub mod infill;
 pub mod library;
 mod measure;
@@ -130,7 +129,6 @@ pub use geometry::{
 pub use handover::Handover;
 pub use history::{HistoryKind, HistoryOutput, Totals};
 pub use hyperelastic::{Hyperelastic, HyperelasticModel, TestMode};
-pub use id::Id;
 pub use infill::{InfillPattern, InfillSection};
 pub use library::MaterialLibrary;
 pub use measure::{MeasureKind, MeasureRegion, POINT_AXES};
@@ -139,16 +137,17 @@ pub use mesh_set::{MeshSet, SetKind};
 pub use moving_load::{AXIS_LABELS, LoadStations, MovingFrame, MovingLoad, Wheel, load_stations};
 pub use number::{MathOp, apply_series, switch};
 pub use origin::{
-    Active, LeftOut, PartOrigin, PartOrigins, active_model, bodies as part_bodies, drop_orphans,
-    orphans, suppressed_bodies, unmeshed_parts,
+    Active, LeftOut, PartOrigin, PartOrigins, active_model, bodies as part_bodies, body_ids,
+    drop_orphans, orphans, suppressed_bodies, unmeshed_parts,
 };
 pub use overview::{Cell, OverviewGroup, OverviewRow, StepItemKey, StepOverview};
 pub use parameter::{Parameter, ValueKind};
 pub use part_filter::{PartContext, PartFilter, PartGroup, PartTerm, name_matches};
 pub use plot::{PlotKind, histogram};
+pub use plx_core::Id;
 pub use primitive::{MAX_PRIMITIVE_ELEMENTS, MeshPrimitive, Param, ParamSlot, ParamValue};
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
-pub use region::{Region, describe_entities};
+pub use region::{Region, describe_entities, part_names};
 pub use remote::{
     Behavior, Displacement, Formulation, RemoteBehavior, RemoteDof, RemotePoint, expanded_nodes,
 };
@@ -256,7 +255,11 @@ use serde::{Deserialize, Serialize};
 /// sketches with the shear factor 5/6. Format 55 replaces the field outputs of the steps
 /// with one of the analysis ([`FeModel::field_output`]) that holds only what goes beyond
 /// the results every step writes; the field outputs of older steps are dropped.
-pub const PROJECT_FORMAT: u32 = 55;
+/// Format 56 gives the parts of the mesh ids ([`plx_mesh::Part::id`]) and has everything
+/// refer to them by id instead of by name: regions of whole parts, element types, part
+/// filters, mesh operations and compound parts, so that renaming a part keeps every
+/// reference to it; older projects are refused.
+pub const PROJECT_FORMAT: u32 = 56;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -596,63 +599,57 @@ impl FeModel {
         initial.chain(steps).filter_map(|d| *d).collect()
     }
 
-    /// Follows a renamed part: regions on the part, or on the element set an input file
-    /// defines for it, keep pointing at it.
-    pub fn rename_part(&mut self, old: &str, new: &str) {
-        self.rename_element_types(old, new);
-        self.rename_mesh_operation_parts(old, new);
-        self.replace_part_in_regions(old, &[new.to_owned()]);
-        self.rename_part_in_filters(old, new);
-    }
-
-    /// Part filters naming the part `old` name the part `new`.
-    fn rename_part_in_filters(&mut self, old: &str, new: &str) {
-        for detection in &mut self.contact_detections {
-            detection.rename_part(old, new);
+    /// Follows a part that became the parts `new`, as parts merged into another one, a part
+    /// joined into a compound part or a dissolved compound part into the parts it joined:
+    /// what was on the part `old` is on each of them. Renaming a part needs nothing of
+    /// this, since everything refers to it by id.
+    pub fn replace_part(&mut self, old: Id, new: &[Id]) {
+        if new == [old] {
+            return;
         }
-        for group in &mut self.part_groups {
-            group.filter.rename_part(old, new);
-        }
-    }
-
-    /// Follows a part split into several, as a dissolved compound part into the parts it
-    /// joined: what was on the part is on each of them.
-    pub fn split_part(&mut self, old: &str, new: &[String]) {
-        let Some((first, rest)) = new.split_first() else {
+        let Some((&first, rest)) = new.split_first() else {
             return;
         };
         let choices: Vec<PartElementType> = (self.element_types.iter())
             .filter(|c| c.part == old)
             .cloned()
             .collect();
-        for name in rest {
+        for &id in rest {
             for choice in &choices {
-                if !self.element_types.iter().any(|c| c.part == *name) {
+                if !self.element_types.iter().any(|c| c.part == id) {
                     self.element_types.push(PartElementType {
-                        part: name.clone(),
+                        part: id,
                         ..choice.clone()
                     });
                 }
             }
         }
-        self.rename_element_types(old, first);
-        self.split_part_in_filters(old, new);
-        for operation in &mut self.mesh_operations {
-            if let Some(at) = operation.parts.iter().position(|n| n == old) {
-                operation.parts.splice(at..=at, new.iter().cloned());
-                let mut seen = std::collections::BTreeSet::new();
-                operation.parts.retain(|name| seen.insert(name.clone()));
-            }
-        }
+        self.move_element_types(old, first);
+        self.replace_part_in_filters(old, new);
+        self.replace_part_in_mesh_operations(old, new);
         self.replace_part_in_regions(old, new);
+    }
+
+    /// Follows a renamed element set, such as the one an input file defines for a part and
+    /// that is renamed with it: regions on it keep pointing at it.
+    pub fn rename_element_set(&mut self, old: &str, new: &str) {
+        let rename = |region: &mut Region| {
+            if let Region::ElementSet(name) = region
+                && name == old
+            {
+                *name = new.to_owned();
+            }
+        };
+        self.regions_mut().for_each(rename);
+        (self.initial_conditions.iter_mut()).for_each(|i| rename(&mut i.region));
     }
 
     /// Parts deleted from the mesh leave the regions that picked them: the region keeps
     /// the other parts, and nothing is reported for the deleted ones.
-    pub fn remove_parts_from_regions(&mut self, deleted: &[String]) {
+    pub fn remove_parts_from_regions(&mut self, deleted: &[Id]) {
         let drop = |region: &mut Region| {
-            if let Region::Parts(names) = region {
-                names.retain(|name| !deleted.contains(name));
+            if let Region::Parts(ids) = region {
+                ids.retain(|id| !deleted.contains(id));
             }
         };
         self.regions_mut().for_each(drop);
@@ -701,21 +698,17 @@ impl FeModel {
         dropped
     }
 
-    /// Regions on the part `old`, or on the element set of its name, are on the parts `new`.
-    fn replace_part_in_regions(&mut self, old: &str, new: &[String]) {
-        let replace = |region: &mut Region| match region {
-            Region::Parts(names) => {
-                if let Some(at) = names.iter().position(|n| n == old) {
-                    names.splice(at..=at, new.iter().cloned());
-                }
-                // Merged parts leave the same name twice.
+    /// Regions on the part `old` are on the parts `new`.
+    fn replace_part_in_regions(&mut self, old: Id, new: &[Id]) {
+        let replace = |region: &mut Region| {
+            if let Region::Parts(ids) = region
+                && let Some(at) = ids.iter().position(|&n| n == old)
+            {
+                ids.splice(at..=at, new.iter().copied());
+                // Merged parts leave the same part twice.
                 let mut seen = std::collections::BTreeSet::new();
-                names.retain(|name| seen.insert(name.clone()));
+                ids.retain(|id| seen.insert(*id));
             }
-            Region::ElementSet(name) if name == old && new.len() == 1 => {
-                *name = new[0].clone();
-            }
-            _ => {}
         };
         self.regions_mut().for_each(replace);
         (self.initial_conditions.iter_mut()).for_each(|i| replace(&mut i.region));
@@ -2844,6 +2837,15 @@ pub fn next_name<'a>(prefix: &str, existing: impl IntoIterator<Item = &'a str>) 
         .expect("unbounded range")
 }
 
+/// The id the tests give the part or item `name`: the same for the same name.
+#[cfg(test)]
+pub(crate) fn named(name: &str) -> Id {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    static IDS: LazyLock<Mutex<HashMap<String, Id>>> = LazyLock::new(Default::default);
+    *(IDS.lock().unwrap().entry(name.into())).or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2971,13 +2973,14 @@ mod tests {
     }
 
     #[test]
-    fn regions_follow_renamed_parts() {
+    fn regions_follow_merged_parts_and_renamed_element_sets() {
+        let [a, b, c] = [crate::Id::new(), crate::Id::new(), crate::Id::new()];
         let mut model = FeModel::default();
         model.sections.push(Section {
             orientation: None,
             name: "Section-1".into(),
             material: None,
-            region: Region::Parts(vec!["A".into(), "B".into()]),
+            region: Region::Parts(vec![a, b]),
             thickness: 1.0,
             kind: SectionKind::Solid,
         });
@@ -3007,11 +3010,10 @@ mod tests {
             follower: false,
         });
         model.steps.push(step);
-        model.rename_part("A", "C");
-        assert_eq!(
-            model.sections[0].region,
-            Region::Parts(vec!["C".into(), "B".into()])
-        );
+        // Merged into C.
+        model.replace_part(a, &[c]);
+        model.rename_element_set("A", "C");
+        assert_eq!(model.sections[0].region, Region::Parts(vec![c, b]));
         let step = &model.steps[0];
         assert_eq!(
             step.boundary_conditions[0].region,
@@ -3019,18 +3021,19 @@ mod tests {
         );
         assert_eq!(step.loads[0].region, Region::Surface("A".into()));
         // A part merged into another leaves no duplicate.
-        model.rename_part("B", "C");
-        assert_eq!(model.sections[0].region, Region::Parts(vec!["C".into()]));
+        model.replace_part(b, &[c]);
+        assert_eq!(model.sections[0].region, Region::Parts(vec![c]));
     }
 
     #[test]
     fn deleted_parts_leave_regions() {
+        let [a, b] = [crate::Id::new(), crate::Id::new()];
         let mut model = FeModel::default();
         model.sections.push(Section {
             orientation: None,
             name: "Section-1".into(),
             material: None,
-            region: Region::Parts(vec!["A".into(), "B".into()]),
+            region: Region::Parts(vec![a, b]),
             thickness: 1.0,
             kind: SectionKind::Solid,
         });
@@ -3041,13 +3044,13 @@ mod tests {
             name: "Fixed-1".into(),
             active: true,
             visible: true,
-            region: Region::Parts(vec!["A".into()]),
+            region: Region::Parts(vec![a]),
             kind: BoundaryKind::displacement([Some(0.0); 6]),
             amplitude: None,
         });
         model.steps.push(step);
-        model.remove_parts_from_regions(&["A".to_string()]);
-        assert_eq!(model.sections[0].region, Region::Parts(vec!["B".into()]));
+        model.remove_parts_from_regions(&[a]);
+        assert_eq!(model.sections[0].region, Region::Parts(vec![b]));
         assert_eq!(
             model.steps[0].boundary_conditions[0].region,
             Region::Parts(Vec::new())

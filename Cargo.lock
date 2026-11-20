@@ -3577,6 +3577,10 @@ dependencies = [
 [[package]]
 name = "plx-core"
 version = "0.5.7"
+dependencies = [
+ "ron",
+ "serde",
+]
 
 [[package]]
 name = "plx-io"

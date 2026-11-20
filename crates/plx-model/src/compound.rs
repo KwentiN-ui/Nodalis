@@ -419,10 +419,12 @@ mod tests {
         let mut part = Part::new("COMPOUND-1", vec![1, 2]);
         part.bodies = vec![
             Body {
+                id: Default::default(),
                 name: "SOLID-1".into(),
                 elements: vec![1],
             },
             Body {
+                id: Default::default(),
                 name: "SOLID-2".into(),
                 elements: vec![2],
             },
@@ -478,6 +480,7 @@ mod tests {
         let mut part = Part::new("COMPOUND-1", bodies.concat());
         part.bodies = (bodies.into_iter().enumerate())
             .map(|(i, elements)| Body {
+                id: Default::default(),
                 name: format!("SOLID-{}", i + 1),
                 elements,
             })

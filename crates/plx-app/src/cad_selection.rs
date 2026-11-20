@@ -837,7 +837,7 @@ mod tests {
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("Steel")),
-                region: Region::Parts(vec!["SOLID-1".into()]),
+                region: Region::Parts(model.mesh().ids_of(&["SOLID-1"])),
                 thickness: 1.0,
                 kind: SectionKind::Solid,
             }],
@@ -945,7 +945,8 @@ mod tests {
         let mut geometry = model.geometry.clone().unwrap();
         geometry.meshing.max_size = 20.0;
         model.set_mesh(plx_mesher::generate_mesh(&geometry).unwrap().mesh);
-        let lines: Vec<String> = model.mesh().parts.iter().map(|p| p.name.clone()).collect();
+        let lines: Vec<plx_model::Id> = model.mesh().part_ids();
+        let names: Vec<String> = model.mesh().parts.iter().map(|p| p.name.clone()).collect();
         assert_eq!(lines.len(), 1, "{lines:?}");
 
         // Looking down onto the lines at x, within 1 of them.
@@ -1077,7 +1078,7 @@ mod tests {
         let coarse = check(&model);
         let coarse_deflection = tip_deflection(&model);
 
-        for part in &lines {
+        for part in &names {
             geometry.mesh_items.push(plx_model::MeshSetupItem {
                 name: format!("Meshing_Parameters-{part}"),
                 kind: plx_model::MeshSetupKind::MeshingParameters {
@@ -1089,7 +1090,7 @@ mod tests {
                 },
             });
         }
-        for part in &lines {
+        for part in &names {
             let fine = plx_mesher::generate_part_mesh(&geometry, part).unwrap();
             let mesh = plx_mesher::merge_part(model.mesh(), fine.mesh);
             model.set_mesh(mesh);

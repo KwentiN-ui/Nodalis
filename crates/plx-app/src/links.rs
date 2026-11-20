@@ -166,6 +166,7 @@ pub fn merge_meshes(
     };
     let (mut parts_used, mut sets_used, mut ops_used) =
         (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    let mut ids_used: BTreeSet<plx_model::Id> = BTreeSet::new();
     let mut renamings = Vec::with_capacity(copies.len());
     let (mut node_offset, mut element_offset) = (0, 0);
     for (index, copy) in copies.into_iter().enumerate() {
@@ -179,7 +180,20 @@ pub fn merge_meshes(
             parts_used.insert(name.clone());
             parts.insert(part.name.clone(), name);
         }
-        let part = |name: &String| parts.get(name).cloned().unwrap_or_else(|| name.clone());
+        // The parts and bodies keep their ids, unless another copy has them already, as
+        // when two links bring the same block: the second copy is other parts then.
+        let mut ids: BTreeMap<plx_model::Id, plx_model::Id> = BTreeMap::new();
+        for part in &copy.mesh.parts {
+            for id in std::iter::once(part.id).chain(part.bodies.iter().map(|b| b.id)) {
+                let new = if ids_used.insert(id) {
+                    id
+                } else {
+                    plx_model::Id::new()
+                };
+                ids.insert(id, new);
+            }
+        }
+        let part = |id: &plx_model::Id| ids.get(id).copied().unwrap_or(*id);
         let mut sets: BTreeMap<String, String> = BTreeMap::new();
         let names = (copy.mesh.node_sets.keys())
             .chain(copy.mesh.element_sets.keys())
@@ -206,10 +220,15 @@ pub fn merge_meshes(
         element_offset = mesh.elements().iter().map(|e| e.id).max().unwrap_or(0);
         for p in &copy.mesh.parts {
             mesh.parts.push(Part {
-                name: part(&p.name),
+                id: part(&p.id),
+                name: parts
+                    .get(&p.name)
+                    .cloned()
+                    .unwrap_or_else(|| p.name.clone()),
                 elements: p.elements.iter().map(|e| e + elements).collect(),
                 bodies: (p.bodies.iter())
                     .map(|b| plx_mesh::Body {
+                        id: part(&b.id),
                         name: (geometry_renamed.get(index))
                             .and_then(|r| r.get(&b.name))
                             .cloned()
@@ -267,7 +286,7 @@ pub fn merge_meshes(
         for mut set_item in copy.mesh_sets {
             set_item.name = set(&set_item.name);
             set_item.region = match set_item.region {
-                Region::Parts(names) => Region::Parts(names.iter().map(part).collect()),
+                Region::Parts(ids) => Region::Parts(ids.iter().map(part).collect()),
                 Region::Nodes(ids) => Region::Nodes(ids.iter().map(|n| n + nodes).collect()),
                 Region::Faces(faces) => {
                     Region::Faces(faces.iter().map(|&(e, f)| (e + elements, f)).collect())
@@ -858,14 +877,20 @@ pub fn results_slot(
 /// Lets `fe` use the results of another analysis: `file` is the results file (`.frd`) or,
 /// for eigenmodes, the `.eig` file, `global` the step of it. Returns whether anything
 /// changed.
-pub fn apply_results(fe: &mut FeModel, link: &Link, global: u32, file: PathBuf) -> bool {
+pub fn apply_results(
+    fe: &mut FeModel,
+    mesh: &FeMesh,
+    link: &Link,
+    global: u32,
+    file: PathBuf,
+) -> bool {
     let Some(kind) = ResultsUse::of(link) else {
         return false;
     };
     let step = target_step(link).unwrap_or_default().to_owned();
     match kind {
         ResultsUse::Submodel => apply_submodel(fe, &step, global, file),
-        ResultsUse::WallLoads => apply_wall_loads(fe, &step, file),
+        ResultsUse::WallLoads => apply_wall_loads(fe, mesh, &step, file),
         ResultsUse::Modes => {
             let changed = fe.properties.stored_modes.as_ref() != Some(&file);
             fe.properties.stored_modes = Some(file);
@@ -907,7 +932,7 @@ pub fn apply_results(fe: &mut FeModel, link: &Link, global: u32, file: PathBuf) 
 /// Lets step `step` of `fe` take the loads on the walls in `file`: its load
 /// [`LINKED_WALL_LOADS`] reads them, made on the parts of the walls the first time. Returns
 /// whether anything changed.
-fn apply_wall_loads(fe: &mut FeModel, step: &str, file: PathBuf) -> bool {
+fn apply_wall_loads(fe: &mut FeModel, mesh: &FeMesh, step: &str, file: PathBuf) -> bool {
     let Some(step) = fe.steps.iter_mut().find(|s| s.name == step) else {
         return false;
     };
@@ -921,13 +946,13 @@ fn apply_wall_loads(fe: &mut FeModel, step: &str, file: PathBuf) -> bool {
             _ => false,
         };
     }
-    // The parts of the walls, by name, as the run lists them.
-    let mut parts: Vec<String> = Vec::new();
+    // The parts of the walls, which the run lists by name.
+    let mut parts: Vec<plx_model::Id> = Vec::new();
     if let Ok(loads) = plx_results::wall_loads::WallLoads::read(&file) {
         for wall in &loads.walls {
-            for part in &wall.parts {
-                if !parts.contains(part) {
-                    parts.push(part.clone());
+            for part in wall.parts.iter().filter_map(|p| mesh.part_id(p)) {
+                if !parts.contains(&part) {
+                    parts.push(part);
                 }
             }
         }
@@ -1053,21 +1078,18 @@ pub fn take_geometry(
             if own_compounds {
                 let mut compounds = own.compounds;
                 for compound in &mut compounds {
-                    compound
-                        .parts
-                        .retain(|p| taken.part_names.iter().any(|n| n.eq_ignore_ascii_case(p)));
+                    compound.parts.retain(|&p| taken.part_name(p).is_some());
                 }
                 compounds.retain(|c| !c.parts.is_empty());
                 if !compounds.is_empty() {
                     // Compounds the new shapes bring of parts in none of the own ones stay
                     // too, such as the pieces of a split.
-                    let joined = |part: &String| {
-                        (compounds.iter())
-                            .any(|c| c.parts.iter().any(|p| p.eq_ignore_ascii_case(part)))
-                    };
+                    let joined =
+                        |part: &plx_model::Id| (compounds.iter()).any(|c| c.parts.contains(part));
                     let brought: Vec<_> = (taken.compounds.drain(..))
                         .filter(|c| {
-                            (compounds.iter()).all(|o| !o.name.eq_ignore_ascii_case(&c.name))
+                            (compounds.iter())
+                                .all(|o| o.id != c.id && !o.name.eq_ignore_ascii_case(&c.name))
                                 && !c.parts.iter().any(joined)
                         })
                         .collect();
@@ -1084,9 +1106,8 @@ pub fn take_geometry(
 
 /// Renames what the analysis has of the parts the source renamed since the analysis took
 /// its shapes, found by the parts' ids ([`Geometry::renames_since`]): the part in its own
-/// geometry with its suppression, mesh setup and compound, its mesh, and the sections,
-/// boundary conditions and other items of the FE model on it. Returns the renames, as (old,
-/// new) names.
+/// geometry with its suppression and mesh setup, and its mesh. The items of the FE model
+/// refer to the part by id and stay on it. Returns the renames, as (old, new) names.
 pub fn follow_renames(
     geometry: &mut Option<Geometry>,
     source: Option<&Geometry>,
@@ -1123,7 +1144,7 @@ pub fn follow_renames(
                 }
             }
         }
-        fe.rename_part(old, new);
+        fe.rename_element_set(old, new);
         origins.rename(old, new);
     }
     for ((_, new), up_to_date) in renames.iter().zip(up_to_date) {
@@ -1202,6 +1223,7 @@ pub fn take_objects(
         .map(str::to_owned)
         .collect();
     if !own.is_empty() {
+        let own = plx_model::body_ids(&incoming, &own);
         incoming.remove_bodies(&own);
     }
     linked.reconcile(&incoming);
@@ -1221,14 +1243,14 @@ pub fn take_objects(
         .map(str::to_owned)
         .collect();
     let mut kept = mesh.clone();
-    kept.remove_bodies(&dropped);
+    kept.remove_bodies(&plx_model::body_ids(mesh, &dropped));
     if let Some(tags) = &tags {
         kept.cad = kept.cad.renumbered(tags);
     }
     let mut kept_origins = origins.clone();
     kept_origins.reconcile(&kept);
     let before = mesh;
-    let (mesh, origins) = if kept.parts.is_empty() {
+    let (mut mesh, origins) = if kept.parts.is_empty() {
         (incoming, linked)
     } else if incoming.parts.is_empty() {
         (kept, kept_origins)
@@ -1252,6 +1274,8 @@ pub fn take_objects(
         origins.reconcile(&both);
         (both, origins)
     };
+    // A link's mesh read anew from a file knows its parts only by name.
+    mesh.adopt_ids(before);
     // What was picked by node or element numbers on an object whose mesh stays the same
     // follows its new numbers: within the object a node keeps its local number.
     let (nodes, elements) = before.renumbering_to(&mesh);
@@ -2210,7 +2234,7 @@ mod tests {
         fe.mesh_sets.push(MeshSet::new(
             "Node_Set-1",
             SetKind::Elements,
-            Region::Parts(vec!["SOLID-2".into()]),
+            Region::Parts(own.ids_of(&["SOLID-2"])),
         ));
         fe.mesh_sets.push(MeshSet::new(
             "Node_Set-1",
@@ -2220,6 +2244,7 @@ mod tests {
         let own_nodes = own.elements()[1].nodes.clone();
         assert_eq!(own_nodes, [5, 6, 7, 8]);
         let picked = own.node(5).unwrap();
+        let own_id = own.part_id("SOLID-2").unwrap();
         // The source renames both parts, swapping SOLID-1 to SOLID-2, and meshes anew with
         // more nodes.
         shapes.rename_part("SOLID-2", "WING");
@@ -2241,6 +2266,7 @@ mod tests {
         let wing = (taken.mesh.parts.iter())
             .find(|p| p.name == "WING")
             .unwrap();
+        assert_eq!(wing.id, own_id);
         let element = taken.mesh.element(wing.elements[0]).unwrap();
         assert_eq!(element.nodes, [9, 10, 11, 12]);
         assert!(geometry.meshes_itself("WING") && geometry.is_suppressed("WING"));
@@ -2259,7 +2285,7 @@ mod tests {
         let set = |kind, name: &str| fe.mesh_set(kind, name).map(|s| s.region.clone());
         assert_eq!(
             set(SetKind::Elements, "Node_Set-1"),
-            Some(Region::Parts(vec!["WING".into()]))
+            Some(Region::Parts(vec![own_id]))
         );
         assert_eq!(
             set(SetKind::Nodes, "Node_Set-1"),
@@ -2353,7 +2379,8 @@ mod tests {
                 nodes: vec![1, 2, 3, 4],
             })
             .unwrap();
-            mesh.parts.push(Part::new("BLOCK", vec![1]));
+            let block = crate::test_ids::named("BLOCK");
+            mesh.parts.push(Part::with_id(block, "BLOCK", vec![1]));
             mesh.node_sets.insert(set.into(), vec![1, 2]);
             MeshCopy {
                 geometry: None,
@@ -2369,7 +2396,7 @@ mod tests {
                     Region::Nodes(vec![1, 2]),
                 )],
                 element_types: vec![plx_model::PartElementType {
-                    part: "BLOCK".into(),
+                    part: block,
                     type_name: "C3D4".into(),
                 }],
                 mesh_operations: Vec::new(),
@@ -2385,7 +2412,10 @@ mod tests {
         assert_eq!(mesh.node_sets["FIX-2"], [5, 6]);
         assert_eq!(merged.mesh_sets[1].name, "FIX-2");
         assert_eq!(merged.mesh_sets[1].region, Region::Nodes(vec![5, 6]));
-        assert_eq!(merged.element_types[1].part, "BLOCK-2");
+        // The second part is another part: it has an id of its own, and its element type
+        // goes with it.
+        assert_ne!(mesh.parts[1].id, mesh.parts[0].id);
+        assert_eq!(merged.element_types[1].part, mesh.parts[1].id);
         // Without a geometry of all, the parts are imported meshes.
         assert!(merged.origins.is_imported("BLOCK"));
         assert!(merged.origins.is_imported("BLOCK-2"));
@@ -2518,14 +2548,20 @@ mod tests {
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
+            ids: (parts.iter())
+                .map(|&p| plx_model::PartId {
+                    name: p.into(),
+                    id: crate::test_ids::named(p),
+                })
+                .collect(),
             from_link: false,
             operations: Vec::new(),
             input: None,
         };
         let compound = |name: &str, parts: &[&str]| plx_model::CompoundPart {
+            id: crate::test_ids::named(name),
             name: name.into(),
-            parts: parts.iter().map(|p| p.to_string()).collect(),
+            parts: parts.iter().map(|&p| crate::test_ids::named(p)).collect(),
         };
         let mut own = named(&["A", "B", "C"]);
         own.compounds = vec![compound("COMPOUND-1", &["A", "B"])];
@@ -3000,12 +3036,14 @@ mod tests {
         assert_eq!(target_step(&temperature), Some("Load"));
         assert!(apply_results(
             &mut target,
+            &FeMesh::default(),
             &temperature,
             1,
             "heat.frd".into()
         ));
         assert!(!apply_results(
             &mut target,
+            &FeMesh::default(),
             &temperature,
             1,
             "heat.frd".into()
@@ -3013,7 +3051,13 @@ mod tests {
         assert_eq!(target.result_files(), [std::path::Path::new("heat.frd")]);
         let modes = link(&["Results", "Modes"], modes);
         assert_eq!(ResultsUse::of(&modes), Some(ResultsUse::Modes));
-        assert!(apply_results(&mut target, &modes, 1, "modes.eig".into()));
+        assert!(apply_results(
+            &mut target,
+            &FeMesh::default(),
+            &modes,
+            1,
+            "modes.eig".into()
+        ));
         assert_eq!(target.properties.stored_modes, Some("modes.eig".into()));
         clear_results(&mut target, &temperature, false);
         clear_results(&mut target, &modes, false);
@@ -3042,6 +3086,10 @@ mod tests {
         assert!(!step_inputs(&target.steps[1]).contains(&WALL_LOADS));
 
         // The link makes a load on the parts of the walls, which follows the file.
+        let mut mesh = FeMesh::default();
+        for name in ["SCREW", "SHAFT"] {
+            mesh.parts.push(plx_mesh::Part::new(name, Vec::new()));
+        }
         let dir = std::env::temp_dir().join(format!("plx-wall-link-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("job.walls");
@@ -3060,19 +3108,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(ResultsUse::of(&link), Some(ResultsUse::WallLoads));
-        assert!(apply_results(&mut target, &link, 1, file.clone()));
-        assert!(!apply_results(&mut target, &link, 1, file.clone()));
+        assert!(apply_results(&mut target, &mesh, &link, 1, file.clone()));
+        assert!(!apply_results(&mut target, &mesh, &link, 1, file.clone()));
         let made = &target.steps[0].loads[0];
         assert_eq!(made.name, LINKED_WALL_LOADS);
-        assert_eq!(
-            made.region,
-            plx_model::Region::Parts(vec!["SCREW".into(), "SHAFT".into()])
-        );
+        assert_eq!(made.region, plx_model::Region::Parts(mesh.part_ids()));
         // A new run: the same load reads the new file, keeping what the user chose.
         if let plx_model::LoadKind::WallLoads(w) = &mut target.steps[0].loads[0].kind {
             w.time = plx_model::WallLoadTime::OverTime;
         }
-        assert!(apply_results(&mut target, &link, 1, dir.join("new.walls")));
+        assert!(apply_results(
+            &mut target,
+            &mesh,
+            &link,
+            1,
+            dir.join("new.walls")
+        ));
         let plx_model::LoadKind::WallLoads(w) = &target.steps[0].loads[0].kind else {
             panic!("not a wall load");
         };

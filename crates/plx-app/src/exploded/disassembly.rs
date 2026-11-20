@@ -1372,6 +1372,7 @@ mod tests {
             }
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: name.into(),
             elements,

@@ -1350,7 +1350,12 @@ impl<'a> Sets<'a> {
     fn element_set(&mut self, item: &str, region: &Region) -> Result<String, WriteError> {
         let members = match region {
             Region::ElementSet(set) => return Ok(set.clone()),
-            Region::Parts(parts) if !parts.is_empty() => Members::Parts(parts.clone()),
+            Region::Parts(parts) if !parts.is_empty() => Members::Parts(
+                (parts.iter())
+                    .filter_map(|&id| self.mesh.part(id))
+                    .map(|p| p.name.clone())
+                    .collect(),
+            ),
             _ => {
                 let ids = region.elements(self.mesh);
                 if ids.is_empty() {
@@ -3485,7 +3490,7 @@ fn complex_frequency_blocks(
     let (point, axis) = settings.axis_in(context.model).map_err(invalid)?;
     // The rotating elements; no parts picked: all of them.
     let region = if settings.rotates_whole_model() {
-        Region::Parts(sets.mesh.parts.iter().map(|p| p.name.clone()).collect())
+        Region::Parts(sets.mesh.part_ids())
     } else {
         settings.region.clone()
     };
@@ -5141,7 +5146,7 @@ fn sensitivity_step(
 ) -> Result<ir::Step, WriteError> {
     let responses = settings.responses();
     let elements = if responses.iter().any(|r| *r != "EIGENFREQUENCY") {
-        let parts = sets.mesh.parts.iter().map(|p| p.name.clone()).collect();
+        let parts = sets.mesh.part_ids();
         Some(ir_name(&sets.element_set(step, &Region::Parts(parts))?))
     } else {
         None
@@ -5576,7 +5581,7 @@ fn history_output(
         }
         HistoryKind::Energies => {
             // Sums over the whole model, printed under a set of all elements.
-            let parts = sets.mesh.parts.iter().map(|p| p.name.clone()).collect();
+            let parts = sets.mesh.part_ids();
             let set = sets.element_set(&output.name, &Region::Parts(parts))?;
             let mut request = node_print(&set, &names, Totals::Only);
             request.set = Some(ir_name(&set));

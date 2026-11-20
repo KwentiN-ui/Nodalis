@@ -738,10 +738,8 @@ impl Region {
     /// exist".
     pub fn missing_reference(&self, mesh: &FeMesh) -> Option<String> {
         match self {
-            Region::Parts(names) => names
-                .iter()
-                .find(|name| !mesh.parts.iter().any(|p| &p.name == *name))
-                .map(|name| format!("Part {name} does not exist")),
+            Region::Parts(ids) => (!ids.iter().all(|&id| mesh.part(id).is_some()))
+                .then(|| "A part of it was deleted".to_owned()),
             Region::NodeSet(name) => (!mesh.node_sets.contains_key(name))
                 .then(|| format!("Node Set {name} does not exist")),
             Region::ElementSet(name) => (!mesh.element_sets.contains_key(name))
@@ -843,6 +841,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(Part {
+            id: crate::named("PART-1"),
             bodies: Vec::new(),
             name: "PART-1".into(),
             elements: vec![1],
@@ -877,7 +876,7 @@ mod tests {
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(steel),
-                region: Region::Parts(vec!["PART-1".into()]),
+                region: Region::Parts(vec![crate::named("PART-1")]),
                 thickness: 1.0,
                 kind: SectionKind::Solid,
             }],
@@ -977,7 +976,7 @@ mod tests {
                 .is_some()
         );
         assert!(
-            Region::Parts(vec!["PART-2".into()])
+            Region::Parts(mesh.ids_of(&["PART-2"]))
                 .missing_reference(&mesh)
                 .is_some()
         );

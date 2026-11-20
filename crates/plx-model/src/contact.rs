@@ -876,6 +876,7 @@ mod tests {
             }
             let name = ["LOWER", "UPPER"][block as usize];
             mesh.parts.push(Part {
+                id: Default::default(),
                 bodies: Vec::new(),
                 name: name.into(),
                 elements,
@@ -895,7 +896,7 @@ mod tests {
                 orientation: None,
                 name: part.into(),
                 material: model.materials.last().map(|m| m.id),
-                region: Region::Parts(vec![part.into()]),
+                region: Region::Parts(mesh.ids_of(&[&part])),
                 thickness: 1.0,
                 kind: crate::SectionKind::Solid,
             });

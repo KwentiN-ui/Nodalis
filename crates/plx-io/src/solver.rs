@@ -212,7 +212,13 @@ mod tests {
                 (b.id, &b.type_name, &b.nodes)
             );
         }
-        assert_eq!(memory.mesh.parts, file.mesh.parts, "{what}");
+        // Both readings give the parts new ids.
+        let parts = |mesh: &plx_mesh::FeMesh| -> Vec<(String, Vec<u32>)> {
+            (mesh.parts.iter())
+                .map(|p| (p.name.clone(), p.elements.clone()))
+                .collect()
+        };
+        assert_eq!(parts(&memory.mesh), parts(&file.mesh), "{what}");
         assert_eq!(memory.materials, file.materials, "{what}");
         for (a, b) in memory
             .mesh

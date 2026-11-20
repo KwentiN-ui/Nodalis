@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 /// derived from them when writing the input file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Region {
-    /// Whole parts by name.
-    Parts(Vec<String>),
+    /// Whole parts by id, see [`plx_mesh::Part::id`]: renaming a part keeps the region on
+    /// it.
+    Parts(Vec<crate::Id>),
     /// Picked nodes.
     Nodes(Vec<NodeId>),
     /// Picked element faces as (element, CalculiX face number 1..6).
@@ -56,8 +57,8 @@ impl Region {
     pub fn elements(&self, mesh: &FeMesh) -> Vec<ElementId> {
         let mut ids: BTreeSet<ElementId> = BTreeSet::new();
         match self {
-            Region::Parts(names) => {
-                for part in mesh.parts.iter().filter(|p| names.contains(&p.name)) {
+            Region::Parts(parts) => {
+                for part in mesh.parts.iter().filter(|p| parts.contains(&p.id)) {
                     ids.extend(part.elements.iter().copied());
                 }
             }
@@ -149,10 +150,10 @@ impl Region {
     }
 
     /// Short description for the GUI, e.g. "3 nodes", with the names of the items of
-    /// `model` it refers to.
-    pub fn describe(&self, model: &crate::FeModel) -> String {
+    /// `model` and the parts of `mesh` it refers to.
+    pub fn describe(&self, model: &crate::FeModel, mesh: &FeMesh) -> String {
         match self {
-            Region::Parts(names) => names.join(", "),
+            Region::Parts(ids) => part_names(mesh, ids).join(", "),
             Region::Nodes(nodes) => format!("{} nodes", nodes.len()),
             Region::Faces(faces) => format!("{} element faces", faces.len()),
             Region::Edges(edges) => format!("{} element edges", edges.len()),
@@ -208,6 +209,13 @@ impl Region {
 }
 
 /// E.g. "2 faces, 1 edge".
+/// The names of the parts `ids` of `mesh`, "(deleted)" for a part it does not have.
+pub fn part_names(mesh: &FeMesh, ids: &[crate::Id]) -> Vec<String> {
+    (ids.iter())
+        .map(|&id| mesh.part_name(id).unwrap_or("(deleted)").to_owned())
+        .collect()
+}
+
 pub fn describe_entities(entities: &[CadEntity]) -> String {
     let count = |f: fn(&CadEntity) -> bool| entities.iter().filter(|e| f(e)).count();
     let parts = [

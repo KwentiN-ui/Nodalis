@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn sections_of_old_projects_are_solid() {
-        let text = r#"(name: "S", material: Some(3), region: Parts(["P"]))"#;
+        let text = r#"(name: "S", material: Some(3), region: Parts([7]))"#;
         let section: Section = ron::from_str(text).unwrap();
         assert_eq!(section.kind, SectionKind::Solid);
         // One millimetre, in SI units.

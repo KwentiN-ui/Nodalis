@@ -341,6 +341,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "PART-1".into(),
             elements: vec![1],
@@ -449,7 +450,8 @@ mod tests {
         let mut model = meshed_model();
         let made_from = model.origins().made_from("PART-1");
         assert!(made_from.is_some());
-        model.edit_mesh(|mesh, _| mesh.remove_bodies(&["PART-1".into()]));
+        let part = model.mesh().part_id("PART-1").unwrap();
+        model.edit_mesh(|mesh, _| mesh.remove_bodies(&[part]));
         record(&mut model);
         assert_eq!(model.origins().get("PART-1"), None);
         assert!(undo(&mut model));
