@@ -987,20 +987,27 @@ it takes the name of what it shows:
     it changes; if that fails, the block says so and its tooltip tells why.],
   [Mesh], [A small picture of the mesh, shown in the #ui("Geometry") row when the objects
     linked have one: drag the #ui("Geometry") of an analysis or the #ui("Mesh") of a mesh block
-    there. The parts have the colors of the analysis, seen along the diagonal like the
-    isometric view; a 2D mesh is seen from the front. The picture is drawn anew in the
-    background whenever the mesh changes.],
+    there. The parts have the colors of the analysis with their element edges, seen along
+    the diagonal like the isometric view; a 2D mesh is seen from the front. The element
+    edges are left out where the elements would be too small in the picture to tell apart,
+    then only the outline shows. The picture is drawn anew in the background whenever the
+    mesh changes.],
   [Value], [A number, drawn large with its unit and the name of the block that gives it.
     A series (@series) is drawn as a line over its index, with its count, mean, smallest and
     largest value and standard deviation below.],
 )
 
 A new link replaces the one before, whatever it brought: a Preview block shows one thing.
+Drag the corner at the bottom right of the picture to make it larger or smaller; the project
+keeps the size.
 Until the analysis is solved, a linked number shows #ui("No value yet").
 
 #screenshot("preview-block.png", [Two Preview blocks: Deflection shows the series of the tip
   deflection over the step with its statistics, Peak Stress the maximum stress that the Max
   block gives])
+
+#screenshot("preview-mesh.png", [Preview blocks showing meshes with their element edges: a
+  rectangle of CPS8R elements in a preview dragged larger, and a box of C3D8 elements])
 
 #screenshot("preview-geometry.png", [Preview blocks showing geometry: Bracket the STEP file
   as read, Rotated the same geometry after a Transform block turned it by 90 degrees about Z,

@@ -263,9 +263,16 @@ pub(super) struct PreviewBlock {
     pub values: Option<Vec<f64>>,
     /// Whether the link brings a series rather than one number.
     pub series: bool,
+    /// The size of its picture in points, as dragged at its corner; `None` [`PICTURE`].
+    pub size: Option<egui::Vec2>,
 }
 
 impl PreviewBlock {
+    /// The size of its picture in points.
+    pub(super) fn size(&self) -> egui::Vec2 {
+        self.size.unwrap_or(PICTURE)
+    }
+
     /// Takes the numbers a link gives it; whether they changed.
     pub(super) fn take_values(&mut self, values: Option<(Vec<f64>, bool)>) -> bool {
         let (values, series) = match values {
@@ -377,6 +384,16 @@ impl ProjectApp {
                     if c == links::PARAMETERS && !keys.contains(&k.as_str()))
         });
         self.sync_due = true;
+    }
+
+    /// The size of the picture of a Preview block, dragged at its corner: within
+    /// [`MIN_PICTURE`] and [`MAX_PICTURE`], whole points.
+    pub(super) fn set_preview_size(&mut self, id: u64, size: egui::Vec2) {
+        let Some(Block::Preview(preview)) = self.node(id).map(|n| &mut n.block) else {
+            return;
+        };
+        let size = size.clamp(MIN_PICTURE, MAX_PICTURE).round();
+        preview.size = (size != PICTURE).then_some(size);
     }
 
     /// The number of bins of a histogram, typed in its block.
@@ -495,8 +512,15 @@ impl ProjectApp {
                 continue;
             }
             let shape = preview_shape(node, &self.links);
-            // Nothing to draw: the key of no shape.
-            let key = shape.as_ref().map_or(0, Shape::key);
+            let points = node.as_preview().map_or(PICTURE, PreviewBlock::size);
+            // Nothing to draw: the key of no shape. A picture of another size is drawn anew.
+            let key = shape.as_ref().map_or(0, |shape| {
+                let mut print = plx_mesh::Fnv::new();
+                print.add(&shape.key().to_le_bytes());
+                print.add(&points.x.to_le_bytes());
+                print.add(&points.y.to_le_bytes());
+                print.finish()
+            });
             let picture = self.pictures.entry(node.id).or_default();
             if let Some((drawn, receiver)) = &picture.drawing {
                 match receiver.try_recv() {
@@ -528,8 +552,8 @@ impl ProjectApp {
                 continue;
             }
             let size = [
-                PICTURE.x as usize * PIXELS_PER_POINT,
-                PICTURE.y as usize * PIXELS_PER_POINT,
+                points.x as usize * PIXELS_PER_POINT,
+                points.y as usize * PIXELS_PER_POINT,
             ];
             let (sender, receiver) = std::sync::mpsc::channel();
             match shape {
@@ -772,6 +796,37 @@ fn draw_shapes(
         let ink = [0.08, 0.08, 0.09, 1.0];
         let bias = 0.01 * depth_span;
         let feature = geometry.is_none();
+        // The element edges of a mesh, between the faces and their outline in shade, where
+        // the elements are large enough in the picture to be told apart.
+        if feature && element_edges_visible(&skin.edges, &screen, scale) {
+            let shade = [
+                0.4 * color[0] + 0.6 * ink[0],
+                0.4 * color[1] + 0.6 * ink[1],
+                0.4 * color[2] + 0.6 * ink[2],
+                1.0,
+            ];
+            for edge in skin.edges.iter().filter(|e| !e.feature) {
+                // Through the midside node of a quadratic face.
+                let path = match edge.mid {
+                    Some(mid) => vec![edge.a, mid, edge.b],
+                    None => vec![edge.a, edge.b],
+                };
+                for pair in path.windows(2) {
+                    if let (Some(&a), Some(&b)) = (screen.get(pair[0]), screen.get(pair[1])) {
+                        draw_line(
+                            &mut pixels,
+                            &depth,
+                            width,
+                            height,
+                            [to_pixel(a), to_pixel(b)],
+                            shade,
+                            bias,
+                            1.0,
+                        );
+                    }
+                }
+            }
+        }
         for edge in skin.edges.iter().filter(|e| feature && e.feature) {
             if let (Some(&a), Some(&b)) = (screen.get(edge.a), screen.get(edge.b)) {
                 draw_line(
@@ -808,6 +863,29 @@ fn draw_shapes(
         }
     }
     downsample(&pixels, width, height)
+}
+
+/// The most element edges of a part a picture draws: more would take long to draw and
+/// darken it to one colour.
+const MAX_ELEMENT_EDGES: usize = 40_000;
+
+/// The least mean length of the element edges, in pixels of the supersampled picture, at
+/// which they are drawn: shorter, the faces would be no more than lines.
+const MIN_ELEMENT_EDGE_PIXELS: f64 = 4.0 * SUPERSAMPLE as f64;
+
+/// Whether the element edges of a skin are drawn in a picture of `scale` pixels per unit:
+/// not too many, and on average long enough to show the elements between them.
+fn element_edges_visible(edges: &[plx_mesh::SkinEdge], screen: &[[f64; 3]], scale: f64) -> bool {
+    let inner = edges.iter().filter(|e| !e.feature);
+    let count = inner.clone().count();
+    if count == 0 || count > MAX_ELEMENT_EDGES {
+        return false;
+    }
+    let length: f64 = inner
+        .filter_map(|e| Some((screen.get(e.a)?, screen.get(e.b)?)))
+        .map(|(a, b)| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt())
+        .sum();
+    length * scale / count as f64 >= MIN_ELEMENT_EDGE_PIXELS
 }
 
 /// The unit normal of a polygon in screen space (Newell's method).
@@ -1132,50 +1210,104 @@ impl Viewer {
 
     /// The body of a Preview block: the picture of its mesh, the number or series linked to
     /// it, or what it needs.
+    ///
+    /// Dragged at the corner at its bottom right, it gives the size it is to take.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn show_preview(
         &self,
         ui: &mut egui::Ui,
+        size: egui::Vec2,
         texture: Option<egui::TextureId>,
         linked: bool,
         shape: bool,
         failed: Option<&str>,
         view: Option<&PreviewView>,
-    ) {
-        let (rect, _) = ui.allocate_exact_size(PICTURE, egui::Sense::hover());
+    ) -> Option<egui::Vec2> {
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 3.0, crate::style::label_fill());
         let faint = crate::style::plot_text().gamma_multiply(0.6);
         if let Some(view) = view {
             show_values(&painter, rect, view);
-            return;
+        } else {
+            show_picture(ui, &painter, rect, texture, linked, shape, failed, faint);
         }
-        match texture {
-            Some(texture) if shape => {
-                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                painter.image(texture, rect, uv, egui::Color32::WHITE);
+        resize_corner(ui, &painter, rect)
+    }
+}
+
+/// The picture of the mesh or geometry of a Preview block in `rect`, or what it needs.
+#[allow(clippy::too_many_arguments)]
+fn show_picture(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    texture: Option<egui::TextureId>,
+    linked: bool,
+    shape: bool,
+    failed: Option<&str>,
+    faint: egui::Color32,
+) {
+    match texture {
+        Some(texture) if shape => {
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            painter.image(texture, rect, uv, egui::Color32::WHITE);
+        }
+        _ => {
+            let text = match failed {
+                Some(_) if shape => "Cannot draw the geometry",
+                _ if shape => "Drawing ...",
+                _ if linked => "Nothing to show yet",
+                _ => "Link something to see it here",
+            };
+            let response = ui.interact(rect, ui.id().with("preview failure"), egui::Sense::hover());
+            if let Some(why) = failed.filter(|_| shape) {
+                response.on_hover_text(why);
             }
-            _ => {
-                let text = match failed {
-                    Some(_) if shape => "Cannot draw the geometry",
-                    _ if shape => "Drawing ...",
-                    _ if linked => "Nothing to show yet",
-                    _ => "Link something to see it here",
-                };
-                let response =
-                    ui.interact(rect, ui.id().with("preview failure"), egui::Sense::hover());
-                if let Some(why) = failed.filter(|_| shape) {
-                    response.on_hover_text(why);
-                }
-                painter.text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    text,
-                    egui::FontId::proportional(11.0),
-                    faint,
-                );
-            }
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                text,
+                egui::FontId::proportional(11.0),
+                faint,
+            );
         }
     }
+}
+
+/// The least and the largest size of the picture of a Preview block in points.
+const MIN_PICTURE: egui::Vec2 = egui::vec2(120.0, 80.0);
+const MAX_PICTURE: egui::Vec2 = egui::vec2(1600.0, 1200.0);
+
+/// The corner at the bottom right of the picture of a Preview block, to drag it larger or
+/// smaller: the size it is to take while it is dragged.
+fn resize_corner(ui: &egui::Ui, painter: &egui::Painter, rect: egui::Rect) -> Option<egui::Vec2> {
+    let side = 12.0;
+    let corner = egui::Rect::from_min_max(rect.max - egui::vec2(side, side), rect.max);
+    let response = ui
+        .interact(corner, ui.id().with("preview size"), egui::Sense::drag())
+        .on_hover_cursor(egui::CursorIcon::ResizeNwSe)
+        .on_hover_text("Drag to resize the preview");
+    let ink = if response.hovered() || response.dragged() {
+        crate::style::plot_text()
+    } else {
+        crate::style::plot_text().gamma_multiply(0.45)
+    };
+    // Three short diagonal strokes, like the grip of a window.
+    for k in 1..=3 {
+        let d = 3.0 * k as f32;
+        painter.line_segment(
+            [rect.max - egui::vec2(d, 2.0), rect.max - egui::vec2(2.0, d)],
+            egui::Stroke::new(1.0, ink),
+        );
+    }
+    let pointer = response
+        .interact_pointer_pos()
+        .filter(|_| response.dragged())?;
+    let size = (pointer - rect.min + (rect.max - corner.center()))
+        .clamp(MIN_PICTURE, MAX_PICTURE)
+        .round();
+    (size != rect.size().round()).then_some(size)
 }
 
 /// Draws a number large, or a series as a line over its index with its statistics below.
