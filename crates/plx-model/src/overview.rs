@@ -29,8 +29,8 @@ impl OverviewGroup {
     }
 }
 
-/// The step item a row stands for, the same in every step: boundary conditions and loads
-/// and history outputs by their id, defined fields, which have none, by their name.
+/// The step item a row stands for, the same in every step by its id: boundary conditions,
+/// loads, defined fields and history outputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StepItemKey {
     BoundaryCondition(Id<crate::BoundaryCondition>),

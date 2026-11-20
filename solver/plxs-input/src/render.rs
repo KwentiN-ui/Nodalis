@@ -345,8 +345,7 @@ fn mesh(out: &mut Out, model: &Model, parts: &[String]) {
     // upper case, else the label, e.g. for a part named in words.
     let is_part = |set: usize| {
         let label = &labels.element_sets[set];
-        let part =
-            (parts.iter()).find(|p| plxs_core::normalized_name(p) == sets[set].name.as_str())?;
+        let part = (parts.iter()).find(|p| crate::normalized_name(p) == sets[set].name.as_str())?;
         Some(part.eq_ignore_ascii_case(label).then_some(part))
     };
     let part_name = |set: usize| is_part(set).flatten();

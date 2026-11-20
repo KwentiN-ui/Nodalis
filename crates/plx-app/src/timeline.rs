@@ -489,6 +489,7 @@ mod tests {
         steps: &[u32],
     ) -> StepRecord {
         StepRecord {
+            step: None,
             name: name.into(),
             category,
             nlgeom: false,

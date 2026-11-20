@@ -104,9 +104,6 @@ pub struct FeatureDialog {
     region: RegionDraft,
     /// The button to show or remove the path's plot in the 3D view was clicked.
     plot_toggled: bool,
-    /// Name of the path when its plot was put into the 3D view, by which the plot refers
-    /// to it while the dialog is open.
-    plot_key: Option<String>,
     /// Height of the dialog's rows other than the path plot in the last frame.
     rows_height: Option<f32>,
     /// The path plot was drawn in the last frame.
@@ -259,7 +256,6 @@ impl FeatureDialog {
             located: None,
             region,
             plot_toggled: false,
-            plot_key: None,
             rows_height: None,
             plotted: false,
             coupling,
@@ -310,25 +306,15 @@ impl FeatureDialog {
         }
     }
 
-    /// The name by which a plot in the 3D view refers to the edited path: its name when the
-    /// plot was added, else its stored name, or for a new path the one entered.
-    pub fn plot_name(&self, fe: &FeModel) -> Option<String> {
-        let path = self.path_draft()?;
-        let stored = self.index.and_then(|i| fe.result_paths.get(i));
-        Some(
-            (self.plot_key.clone())
-                .or_else(|| stored.map(|p| p.name.clone()))
-                .unwrap_or_else(|| path.name.clone()),
-        )
+    /// The id by which a plot in the 3D view refers to the edited path, which a rename
+    /// keeps; `None` for a draft other than a path.
+    pub fn plot_path(&self) -> Option<plx_model::Id<plx_model::ResultPath>> {
+        self.path_draft().map(|p| p.id)
     }
 
     /// Whether the path's plot is to be shown or removed in the 3D view; resets the request.
     pub fn take_plot_toggle(&mut self) -> bool {
         std::mem::take(&mut self.plot_toggled)
-    }
-
-    pub fn set_plot_key(&mut self, name: String) {
-        self.plot_key = Some(name);
     }
 
     /// Whether the dialog creates a new item rather than editing one.
@@ -813,8 +799,8 @@ impl FeatureDialog {
         let distances: Vec<f64> = points.iter().map(|p| p.distance).collect();
         plot(ui, &distances, &values, "Distance", false, plot_height);
         self.plotted = true;
-        let shown = (self.plot_name(&model.fe))
-            .is_some_and(|name| model.path_plots.iter().any(|p| p.is_path(&name)));
+        let shown =
+            (self.plot_path()).is_some_and(|path| model.path_plots.iter().any(|p| p.is_path(path)));
         ui.horizontal(|ui| {
             let label = if shown {
                 "Remove from View"

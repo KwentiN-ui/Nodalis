@@ -440,7 +440,7 @@ mod tests {
             thickness: 10.0,
             ..HotSpot::new("Hot_Spot-1")
         };
-        let mut plot = crate::path_plot::PathPlot::hot_spot("Hot_Spot-1".into());
+        let mut plot = crate::path_plot::PathPlot::hot_spot(hot_spot.id);
         let shown = plot.hot_spot_box(0, &results, &hot_spot).unwrap();
         let toe_index = results.mesh().node_index(toe[0]).unwrap();
         let drawn = results.node_position(toe_index).unwrap();

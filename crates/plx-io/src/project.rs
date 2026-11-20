@@ -905,7 +905,7 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
 
 /// The oldest format that can still be opened. While Nodalis is being designed, a new
 /// format is not converted: older projects are refused.
-pub const FIRST_PROJECT_FORMAT: u32 = 58;
+pub const FIRST_PROJECT_FORMAT: u32 = 59;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
@@ -2824,7 +2824,7 @@ mod tests {
     #[test]
     fn table_plots_keep_missing_values() {
         let plot = plx_results::saved_view::SavedPathPlot {
-            path: "SP_A.STRESSES.MISES".into(),
+            of: None,
             offset: Some([20.0, 30.0]),
             size: [400.0, 240.0],
             on_path: false,
@@ -2835,6 +2835,7 @@ mod tests {
             y_range: None,
             hot_spot: false,
             table: Some(plx_results::saved_view::SavedTablePlot {
+                title: "SP_A.STRESSES.MISES".into(),
                 x_label: "Increment".into(),
                 x: vec![1.0, 2.0, 3.0],
                 curves: vec![("12_1".into(), vec![0.5, f64::NAN, 1.5])],

@@ -1056,6 +1056,7 @@ mod tests {
             values: values.to_vec(),
         };
         vec![HistorySet {
+            step: None,
             output: None,
             name: "NH_OUTPUT-1".into(),
             rows: vec![(1, 1, 0.25), (1, 2, 0.5), (1, 3, 1.0)],
@@ -1217,6 +1218,7 @@ mod tests {
         // Field output only at the end of each step.
         let increments = vec![increment(1, 2, 1.0), increment(2, 2, 3.0)];
         let record = |name: &str, steps: &[u32]| StepRecord {
+            step: None,
             name: name.into(),
             category: StepCategory::Static,
             nlgeom: false,
@@ -1299,6 +1301,7 @@ mod tests {
 
     fn forces() -> HistorySet {
         HistorySet {
+            step: None,
             output: None,
             name: "NH_OUTPUT-2".into(),
             rows: vec![(1, 1, 0.25), (1, 3, 1.0)],

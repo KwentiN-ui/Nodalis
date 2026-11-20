@@ -62,9 +62,3 @@ pub use section::Section;
 pub use state::State;
 pub use step::{Boundary, Loads, Outputs, Procedure, Step};
 pub use validate::validate;
-
-/// A name as CalculiX stores it: upper case, surrounding blanks removed. Set, surface,
-/// material, interaction and amplitude names are compared this way.
-pub fn normalized_name(name: &str) -> String {
-    name.trim().to_ascii_uppercase()
-}

@@ -182,7 +182,10 @@ use serde::{Deserialize, Serialize};
 /// Format 58: the results another analysis hands a model (global results of a submodel,
 /// eigenmodes, initial temperatures, temperature fields, wall loads) are kept by the
 /// analysis they come from ([`ResultsFile::Linked`]), not by the path of a result file.
-pub const PROJECT_FORMAT: u32 = 58;
+///
+/// Format 59: result paths have an id ([`ResultPath::id`]), by which the plots of paths
+/// and hot spots saved with bound results refer to them, not by their names.
+pub const PROJECT_FORMAT: u32 = 59;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -127,6 +127,9 @@ pub struct HistorySet {
     /// The history output of the project the set was printed for; `None` for the tables of
     /// a step and for sets read from a `.dat` file.
     pub output: Option<plx_model::Id>,
+    /// The step whose tables (eigenvalues, buckling factors, design responses) the set
+    /// holds; `None` for the values of a set.
+    pub step: Option<u32>,
     /// Step, increment and time (or frequency, buckling factor) of every row.
     pub rows: Vec<(u32, u32, f64)>,
     pub fields: Vec<HistoryField>,
@@ -186,6 +189,7 @@ pub fn compute(
     };
     Ok(HistorySet {
         output: None,
+        step: None,
         name: output.name.clone(),
         rows: rows(increments),
         fields,

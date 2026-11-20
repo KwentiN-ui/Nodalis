@@ -80,8 +80,9 @@ pub enum PlotKind {
 
 /// A path or hot spot whose plot the 3D view shows, with where the user put it.
 pub struct PathPlot {
-    /// Name of the path in the model's features, or of the hot spot.
-    pub path: String,
+    /// The result path in the model's features or the hot spot the plot is of; `None` for
+    /// the plot of a table.
+    pub of: Option<plx_model::Id>,
     pub kind: PlotKind,
     pub placement: Placement,
     /// Read-out points of the path as last located.
@@ -100,7 +101,7 @@ impl PathPlot {
     pub fn saved(&self) -> plx_results::saved_view::SavedPathPlot {
         let p = &self.placement;
         plx_results::saved_view::SavedPathPlot {
-            path: self.path.clone(),
+            of: self.of,
             offset: p.offset.map(|o| [o.x, o.y]),
             size: [p.size.x, p.size.y],
             on_path: p.on_path,
@@ -114,6 +115,7 @@ impl PathPlot {
                 .table
                 .as_ref()
                 .map(|data| plx_results::saved_view::SavedTablePlot {
+                    title: data.title.clone(),
                     x_label: data.x_label.clone(),
                     x: data.x.clone(),
                     curves: data.curves.clone(),
@@ -123,7 +125,7 @@ impl PathPlot {
     }
 
     pub fn from_saved(saved: &plx_results::saved_view::SavedPathPlot) -> Self {
-        let mut plot = Self::new(saved.path.clone());
+        let mut plot = Self::of(saved.of);
         if saved.hot_spot {
             plot.kind = PlotKind::HotSpot;
         }
@@ -133,7 +135,7 @@ impl PathPlot {
                 .map(crate::history_table::HistoryTable::from_recipe)
                 .collect();
             plot.table = Some(XyData {
-                title: saved.path.clone(),
+                title: table.title.clone(),
                 x_label: table.x_label.clone(),
                 x: table.x.clone(),
                 curves: table.curves.clone(),
@@ -155,9 +157,14 @@ impl PathPlot {
         plot
     }
 
-    pub fn new(path: String) -> Self {
+    /// The plot of result path `path`.
+    pub fn new(path: plx_model::Id<plx_model::ResultPath>) -> Self {
+        Self::of(Some(path.any()))
+    }
+
+    fn of(of: Option<plx_model::Id>) -> Self {
         Self {
-            path,
+            of,
             kind: PlotKind::Path,
             placement: Placement::default(),
             located: None,
@@ -167,17 +174,17 @@ impl PathPlot {
         }
     }
 
-    /// The plot of the hot spot named `name`.
-    pub fn hot_spot(name: String) -> Self {
+    /// The plot of the hot spot with id `id`.
+    pub fn hot_spot(id: plx_model::Id) -> Self {
         Self {
             kind: PlotKind::HotSpot,
-            ..Self::new(name)
+            ..Self::of(Some(id))
         }
     }
 
     /// The plot of curves from a history output table.
     pub fn table(data: XyData, sources: Vec<crate::history_table::HistoryTable>) -> Self {
-        let mut plot = Self::new(data.title.clone());
+        let mut plot = Self::of(None);
         plot.sources = sources;
         plot.kind = PlotKind::Table;
         plot.placement.x_label = data.x_label.clone();
@@ -231,14 +238,14 @@ impl PathPlot {
         })
     }
 
-    /// Whether this is the plot of the path named `name`.
-    pub fn is_path(&self, name: &str) -> bool {
-        self.kind == PlotKind::Path && self.path == name
+    /// Whether this is the plot of result path `path`.
+    pub fn is_path(&self, path: plx_model::Id<plx_model::ResultPath>) -> bool {
+        self.kind == PlotKind::Path && self.of == Some(path.any())
     }
 
-    /// Whether this is the plot of the hot spot named `name`.
-    pub fn is_hot_spot(&self, name: &str) -> bool {
-        self.kind == PlotKind::HotSpot && self.path == name
+    /// Whether this is the plot of the hot spot with id `id`.
+    pub fn is_hot_spot(&self, id: plx_model::Id) -> bool {
+        self.kind == PlotKind::HotSpot && self.of == Some(id)
     }
 
     /// The plot of `hot_spot` in the shown increment, or `None` where it has no values.

@@ -1556,12 +1556,17 @@ fn solver_yields_the_bar_pulled_beyond_its_yield_stress() {
 /// The element faces at x = 50 of the elements left of the cut: a pre-tension section
 /// through the middle of the bar.
 fn cut_faces(mesh: &FeMesh) -> Vec<(ElementId, u8)> {
+    cut_faces_at(mesh, 50.0)
+}
+
+/// The faces at x = `x` of the elements left of it.
+fn cut_faces_at(mesh: &FeMesh, x: f64) -> Vec<(ElementId, u8)> {
     (mesh.elements().iter())
         .flat_map(|e| {
             (1..=6u8).filter_map(move |f| {
                 let corners = e.shape.faces()[usize::from(f) - 1].corners;
-                let at_cut = (corners.iter()).all(|&l| mesh.node(e.nodes[l]).unwrap()[0] == 50.0);
-                let left = (e.nodes.iter()).all(|&n| mesh.node(n).unwrap()[0] <= 50.0);
+                let at_cut = (corners.iter()).all(|&l| mesh.node(e.nodes[l]).unwrap()[0] == x);
+                let left = (e.nodes.iter()).all(|&n| mesh.node(n).unwrap()[0] <= x);
                 (at_cut && left).then_some((e.id, f))
             })
         })
@@ -1907,6 +1912,19 @@ fn a_pre_tension_load_cuts_the_mesh_and_ties_the_sides_by_equations() {
     assert_eq!(coordinates(&analysis, 108)[0], 50.0);
     assert!(text.contains("*Cload, op=New\n109, 1, 1000\n"), "{text}");
     assert!(text.contains("*Boundary, Fixed\n109, 1, 1\n"), "{text}");
+}
+
+#[test]
+fn two_pre_tension_loads_of_the_same_name_cut_the_mesh_twice() {
+    let (mesh, mut model) = pre_tension(1000.0, false);
+    let mut second = model.steps[0].loads[0].clone();
+    second.id = plx_model::Id::new();
+    second.region = Region::Faces(cut_faces_at(&mesh, 30.0));
+    model.steps[0].loads.push(second);
+    let analysis = lowered(&mesh, &model);
+    // Each cut ties its 9 node pairs by 3 equations; with the loads told apart by name the
+    // second cut was not made and its load drove the node of the first.
+    assert_eq!(analysis.model.constraints.equations.len(), 54);
 }
 
 /// A bar 100 x 10 x 10 along x of C3D10 tetrahedra, six per cube of 10 x 5 x 5, with node set
@@ -8149,7 +8167,7 @@ fn solver_prints_the_complex_frequencies_and_the_whirl_direction() {
         return;
     };
     let import = crate::dat::parse_dat(&dat);
-    let set = import.sets.iter().find(|s| s.name == "STEP_3").unwrap();
+    let set = import.sets.iter().find(|s| s.step == Some(3)).unwrap();
     let output = set.field("EIGENVALUE_OUTPUT").unwrap();
     let whirl = &output.component("TURNING_DIRECTION").unwrap().entries[0].values;
     assert_eq!(whirl.len(), 4, "{whirl:?}");
@@ -8743,7 +8761,7 @@ fn solver_computes_the_sensitivities_of_mass_and_strain_energy() {
     let index = frd.mesh.node_index(99).unwrap();
     let disp = frd.increments[0].field("DISP").unwrap();
     let tip = -f64::from(disp.component("U3").unwrap().values.get()[index]);
-    let set = dat.sets.iter().find(|s| s.name == "STEP_2").unwrap();
+    let set = dat.sets.iter().find(|s| s.step == Some(2)).unwrap();
     let response = |name: &str| {
         let field = set.field("DESIGN_RESPONSE").unwrap();
         field.component(name).unwrap().entries[0].values[0]
@@ -8788,7 +8806,7 @@ fn solver_filters_the_sensitivities() {
     ) else {
         return;
     };
-    let set = dat.sets.iter().find(|s| s.name == "STEP_2").unwrap();
+    let set = dat.sets.iter().find(|s| s.step == Some(2)).unwrap();
     assert!(set.field("GRADIENT_LENGTH").is_some());
     let sensitivity = (frd.increments.iter())
         .find(|i| i.step == 2 && i.field("SENENER").is_some())
@@ -9134,7 +9152,7 @@ fn solver_finds_the_disk_frequencies_on_a_sector() {
     }
     // The .dat file numbers the modes on through the nodal diameters, as the .frd does.
     let import = crate::dat::parse_dat(&dat);
-    let set = import.sets.iter().find(|s| s.name == "STEP_1").unwrap();
+    let set = import.sets.iter().find(|s| s.step == Some(1)).unwrap();
     let field = (set.fields.iter())
         .find(|f| f.name == "EIGENVALUE_OUTPUT")
         .unwrap();
@@ -12023,8 +12041,9 @@ fn the_analysis_knows_the_items_it_came_from() {
     );
 }
 
-/// An error of the lowering names the item of the tree it stopped at, also when another
-/// step has an item of the same name.
+/// An error of the lowering names the item of the tree it stopped at by its id, in the step
+/// it stopped at: the copy of a step keeps the ids of its items, as an item acting in several
+/// steps does.
 #[test]
 fn a_lowering_error_names_its_item() {
     use plx_model::ModelItem;
