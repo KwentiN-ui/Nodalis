@@ -1346,7 +1346,6 @@ pub fn follow_renames(
     geometry: &mut Option<Geometry>,
     source: Option<&Geometry>,
     mesh: &mut FeMesh,
-    fe: &mut FeModel,
 ) -> Vec<(String, String)> {
     let (Some(own), Some(source)) = (geometry.as_mut(), source) else {
         return Vec::new();
@@ -1373,14 +1372,6 @@ pub fn follow_renames(
                 body.name = name;
             }
         }
-    }
-    // Through names of no set, so that parts that swap names keep their sets apart.
-    let parked: Vec<String> = (0..renames.len()).map(|i| format!("\u{1}{i}")).collect();
-    for ((old, _), park) in renames.iter().zip(&parked) {
-        fe.rename_element_set(old, park);
-    }
-    for ((_, new), park) in renames.iter().zip(&parked) {
-        fe.rename_element_set(park, new);
     }
     renames
 }
@@ -1424,7 +1415,7 @@ pub fn take_objects(
     // What the analysis has of parts the source renamed takes their new names first.
     let mut mesh = mesh.clone();
     let origins = origins.clone();
-    let renames = follow_renames(geometry, shapes.as_ref(), &mut mesh, fe);
+    let renames = follow_renames(geometry, shapes.as_ref(), &mut mesh);
     let (mesh, origins) = (&mesh, &origins);
     // The link's meshes of CAD parts come with the compound parts they were joined to.
     let cad_meshes = (incoming_origins.iter())

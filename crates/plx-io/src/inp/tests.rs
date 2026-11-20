@@ -236,6 +236,11 @@ fn reads_the_thickness_of_shells_and_the_area_of_trusses() {
         ]
     );
     assert_eq!(import.sections[0].region.elements(&import.mesh), vec![1]);
+    // A section on the set of a part is on the part by id, so that renaming the part
+    // keeps it; one on another set keeps the set.
+    let bar = import.mesh.part_id("BAR").unwrap();
+    assert_eq!(import.sections[1].region, Region::Parts(vec![bar]));
+    assert_eq!(import.sections[0].region, Region::ElementSet("SKIN".into()));
     assert_eq!(import.cross_sections.len(), 1);
     assert_eq!(import.cross_sections[0].name, "BEAM");
     assert_eq!(

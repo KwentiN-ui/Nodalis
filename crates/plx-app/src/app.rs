@@ -635,7 +635,7 @@ impl AnalysisWindow {
         let mut own = model.geometry.take();
         // The FE model follows parts the source renamed; the mesh is the source's anyway.
         let mut scratch = plx_mesh::FeMesh::default();
-        crate::links::follow_renames(&mut own, geometry.as_ref(), &mut scratch, &mut model.fe);
+        crate::links::follow_renames(&mut own, geometry.as_ref(), &mut scratch);
         // The mesh is the source's: of its shapes as they are, without operations here.
         let geometry = geometry.map(plx_model::Geometry::without_operations);
         crate::links::take_geometry(&mut own, geometry, false);

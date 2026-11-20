@@ -2818,9 +2818,6 @@ impl Model {
         }
         let id = self.mesh.parts.get(index).map(|p| p.id);
         if let Some(old) = self.mesh.rename_part(index, &name) {
-            // Regions on the element set an input file defines for the part, renamed with
-            // it, keep pointing at it.
-            self.fe.rename_element_set(&old, &name);
             // The name is the geometry object's: a compound part keeps it when it is meshed
             // anew, a part of the geometry is renamed with its mesh, an imported mesh is its
             // own geometry object.
