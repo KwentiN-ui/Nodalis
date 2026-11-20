@@ -4425,10 +4425,22 @@ fn faces_of_many_edges_skip_the_quasi_structured_algorithm() {
     }
     // A plate of 100 by 100 with 10 by 10 holes: a face of 104 edges, on which the
     // quasi-structured algorithm takes half a minute.
-    let import = import_cad(&testdata("lochblech.step"), UnitSystem::Unitless).unwrap();
-    assert!(import.geometry.meshing.quad_dominated);
+    let mut geometry = made_geometry(|gmsh| {
+        let plate = gmsh.add_rectangle([0.0; 3], [100.0, 100.0], 0.0)?;
+        let mut holes = Vec::new();
+        for i in 0..10 {
+            for j in 0..10 {
+                let centre = [10.0 * f64::from(i) + 5.0, 10.0 * f64::from(j) + 5.0, 0.0];
+                holes.push((2, gmsh.add_disk(centre, 2.5, [0.0, 0.0, 1.0])?));
+            }
+        }
+        gmsh.boolean(crate::gmsh::Boolean::Cut, &[(2, plate)], &holes, true)?;
+        Ok(())
+    });
+    geometry.meshing = MeshingParameters::for_diagonal(100.0 * 2f64.sqrt());
+    assert!(geometry.meshing.quad_dominated);
     let started = std::time::Instant::now();
-    let generated = generate_mesh(&import.geometry).unwrap();
+    let generated = generate_mesh(&geometry).unwrap();
     assert!(
         started.elapsed().as_secs() < 15,
         "Meshing took {:?}",
