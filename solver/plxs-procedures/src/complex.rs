@@ -571,19 +571,30 @@ impl Procedure for ComplexFrequencyProcedure {
                     ctx.table, ctx.model, step, &x_re, &zero, &stresses, &strains,
                 );
             }
-            fields.retain(|f| f.name != "FORC" && f.name != "ENER");
+            fields.retain(|f| {
+                !matches!(
+                    f.key(),
+                    (
+                        plxs_core::results::FieldQuantity::Forces
+                            | plxs_core::results::FieldQuantity::StrainEnergyDensity,
+                        false
+                    )
+                )
+            });
             let re = ctx.table.reported_displacements(&x_re);
             let im = ctx.table.reported_displacements(&x_im);
             let variables = crate::fields::requested_variables(step);
-            if variables.iter().any(|v| v == "PU") {
+            if variables.contains(&plxs_core::step::OutputVariable::DisplacementPhase) {
                 let at = fields
                     .iter()
-                    .position(|f| f.name == "ERROR")
+                    .position(|f| {
+                        f.key() == (plxs_core::results::FieldQuantity::StressError, false)
+                    })
                     .unwrap_or(fields.len());
                 fields.insert(
                     at,
                     crate::modal::magnitude_phase(
-                        "PDISP",
+                        plxs_core::results::FieldQuantity::DisplacementPhase,
                         &["MAG1", "MAG2", "MAG3", "PHA1", "PHA2", "PHA3"],
                         &order,
                         3,
@@ -624,22 +635,22 @@ impl Procedure for ComplexFrequencyProcedure {
                 fields,
             });
         }
-        let table_block = |quantity: &str, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
+        let table_block = |quantity, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
             step: ctx.step_number,
             increment: 0,
-            quantity: quantity.to_string(),
-            set: String::new(),
+            quantity,
+            source: plxs_core::results::HistorySource::Step,
             time: 0.0,
             rows,
         };
         ctx.results.history.push(table_block(
-            plxs_output::EigenTable::COMPLEX_EIGENVALUES,
+            plxs_core::results::HistoryQuantity::ComplexEigenvalues,
             eigen_rows,
         ));
         if rotation.is_some() {
             turning_rows.push((0, axis.to_vec()));
             ctx.results.history.push(table_block(
-                plxs_output::EigenTable::TURNING_DIRECTION,
+                plxs_core::results::HistoryQuantity::TurningDirection,
                 turning_rows,
             ));
         }

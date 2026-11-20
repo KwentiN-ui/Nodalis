@@ -212,7 +212,8 @@ mod tests {
             total_time: scale,
             nodal_diameter: None,
             fields: vec![ResultField {
-                name: "DISP".into(),
+                quantity: plxs_core::results::FieldQuantity::Displacements,
+                imaginary: false,
                 components: vec!["D1".into(), "D2".into()],
                 nodes: (1..=200_000).collect(),
                 values: (0..2)

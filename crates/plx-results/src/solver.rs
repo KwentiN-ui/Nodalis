@@ -13,11 +13,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use plx_mesh::{Element, FeMesh, Part};
+use plxs_core::results::FieldQuantity;
 use plxs_core::results::{
     IncrementKind, ModeKind, ModeShape, ResultField, ResultsIncrement, plane,
 };
 use plxs_core::{Model, Results};
-use plxs_output::frd::imaginary_field_name;
 use plxs_output::packed::{self, Array, Packable};
 use serde::{Deserialize, Serialize};
 
@@ -29,14 +29,15 @@ pub const EXTENSION: &str = "ndlr";
 
 /// The first bytes of a `.ndlr` file; the last two count the format, which is not converted:
 /// results of another format are solved again.
-const MAGIC: &[u8; 8] = b"PLXRES\x00\x0a";
+const MAGIC: &[u8; 8] = b"PLXRES\x00\x0c";
 
 /// What a run of the built-in solver computed, as Nodalis keeps it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SolverResults {
     /// The mesh the results are on: nodes, elements, sections and materials of the solver's
-    /// output model, with shells and beams expanded as the `.frd` file shows them. Sets,
-    /// constraints, contact and loads are left out.
+    /// output model, with shells and beams expanded as the `.frd` file shows them, and the
+    /// names of its sets and surfaces. Their members, constraints, contact and loads are
+    /// left out.
     pub model: Model,
     pub results: Results,
     /// The version of the solver that computed them.
@@ -75,6 +76,8 @@ impl SolverResults {
         kept.sections = model.sections.clone();
         // What the results are expanded to the sectors of a cyclic symmetric model with.
         kept.constraints.cyclic_symmetry = model.constraints.cyclic_symmetry.clone();
+        // The names of the sets the history is of.
+        kept.sets = model.sets.labels();
         kept.rebuild_indices();
         Self {
             model: kept,
@@ -412,7 +415,7 @@ struct Context {
     index: HashMap<u32, usize>,
     nodes: usize,
     /// The components the mode fields keep in a 2D model, by field.
-    plane_modes: Option<Vec<(String, Vec<String>)>>,
+    plane_modes: Option<KeptComponents>,
 }
 
 impl Context {
@@ -420,15 +423,15 @@ impl Context {
     /// of a cyclic symmetric model the other part of the mode, which turns it into the
     /// other sectors.
     fn read(&self, written: &Written, field: usize) -> Result<ResultsIncrement, String> {
-        let name = &written.fields[field].name;
+        let this = &written.fields[field];
         let needed: Vec<usize> = (0..written.fields.len())
             .filter(|&f| {
-                let other = &written.fields[f].name;
+                let other = &written.fields[f];
                 f == field
                     || (self.cyclic.is_some()
                         && written.nodal_diameter.is_some()
-                        && (imaginary_field_name(name) == *other
-                            || imaginary_field_name(other) == *name))
+                        && other.quantity == this.quantity
+                        && other.imaginary != this.imaginary)
             })
             .collect();
         let fields = match written.origin {
@@ -443,11 +446,9 @@ impl Context {
                         keep_components(field, kept);
                     }
                 }
-                let wanted: Vec<&str> = needed
-                    .iter()
-                    .map(|&f| written.fields[f].name.as_str())
-                    .collect();
-                fields.retain(|f| wanted.contains(&f.name.as_str()));
+                let wanted: Vec<(FieldQuantity, bool)> =
+                    needed.iter().map(|&f| written.fields[f].key()).collect();
+                fields.retain(|f| wanted.contains(&f.key()));
                 fields
             }
         };
@@ -466,12 +467,12 @@ impl Context {
     /// [`from_source`] converts them.
     fn load(&self, written: &Written, field: usize, part: usize) -> Result<Vec<Vec<f32>>, String> {
         let increment = self.read(written, field)?;
-        let name = &written.fields[field].name;
+        let key = written.fields[field].key();
         let fields = match &self.cyclic {
             Some(model) => plxs_output::frd::expand_increment(model, &increment),
             None => increment.fields,
         };
-        let read = fields.iter().find(|f| f.name == *name).ok_or(MISSING)?;
+        let read = fields.iter().find(|f| f.key() == key).ok_or(MISSING)?;
         let mut converted = convert(read, |id| self.index.get(&id).copied(), self.nodes);
         add_derived_components(&mut converted);
         let part = (crate::split_rotations(converted).into_iter().nth(part)).ok_or(MISSING)?;
@@ -615,7 +616,13 @@ pub fn from_source(solved: &SolverResults, source: Arc<dyn ArraySource>) -> Solv
         let nodal_diameter = written.nodal_diameter.filter(|_| modal);
         for (index, field) in written.fields.iter().enumerate() {
             // Numbered as the `.frd` reader numbers the blocks (`plx-io::frd`).
-            let sensitivity = field.name == "NORM" || field.name.starts_with("SEN");
+            let sensitivity = matches!(
+                field.quantity,
+                FieldQuantity::DesignNormals
+                    | FieldQuantity::MassSensitivity
+                    | FieldQuantity::StrainEnergySensitivity
+                    | FieldQuantity::FrequencySensitivity
+            );
             let kind = match written.kind {
                 IncrementKind::Time => AnalysisKind::Static,
                 IncrementKind::Dynamic | IncrementKind::SteadyState => AnalysisKind::Dynamic,
@@ -645,7 +652,13 @@ pub fn from_source(solved: &SolverResults, source: Arc<dyn ArraySource>) -> Solv
                     buckling = Some((written.step, ordinal, number));
                     number
                 }
-                AnalysisKind::Sensitivity if field.name == "SENFREQ" => {
+                AnalysisKind::Sensitivity
+                    if field.key()
+                        == (
+                            plxs_core::results::FieldQuantity::FrequencySensitivity,
+                            false,
+                        ) =>
+                {
                     let count = senfreq.entry(written.step).or_default();
                     *count += 1;
                     *count
@@ -656,7 +669,7 @@ pub fn from_source(solved: &SolverResults, source: Arc<dyn ArraySource>) -> Solv
             };
             // The imaginary part of a cyclic symmetric mode only turned it into the other
             // sectors.
-            if field.name == MODE_IMAGINARY {
+            if field.key() == (FieldQuantity::ModeShape, true) {
                 continue;
             }
             // The fields without values: their components, read when they are wanted.
@@ -729,7 +742,7 @@ fn convert(field: &ResultField, index_of: impl Fn(u32) -> Option<usize>, count: 
             }
         })
         .collect();
-    Field::new(field.name.clone(), components)
+    Field::new(field.frd_name(), components)
 }
 
 /// The field of a mode shape of an eigenvalue step, normalized to a largest displacement of
@@ -738,17 +751,15 @@ pub const MODE: &str = "MODE";
 /// Magnitudes and phase angles of a complex mode (`MAG1`..., `PHA1`... in degrees), which
 /// make it whirl: `u_k = MAG_k cos(ωt + PHA_k)`.
 pub const MODE_PHASES: &str = "PMODE";
-/// The imaginary part of a mode shape, while the sectors of a cyclic symmetric model are
-/// made of it.
-const MODE_IMAGINARY: &str = "MODEI";
 
 /// The increments the `.frd` file writes, without the values of their fields: those of the
 /// results, with the modes of their eigenvalue steps as increments of one field each
-/// ([`MODE`], with [`MODE_PHASES`] for complex modes and [`MODE_IMAGINARY`] for cyclic
+/// ([`MODE`], with [`MODE_PHASES`] for complex modes and its imaginary part for cyclic
 /// symmetric ones) after the increments of the steps before.
 fn written_increments(results: &Results) -> Vec<Written> {
     let empty = |field: &ResultField| ResultField {
-        name: field.name.clone(),
+        quantity: field.quantity,
+        imaginary: field.imaginary,
         components: field.components.clone(),
         nodes: Vec::new(),
         values: vec![Vec::new(); field.values.len()],
@@ -808,8 +819,11 @@ fn written_increments(results: &Results) -> Vec<Written> {
 
 /// The fields of a mode with the nodes `nodes` of its set, see [`written_increments`].
 fn mode_fields(kind: ModeKind, nodes: &[u32], mode: &ModeShape) -> Vec<ResultField> {
-    let field = |name: &str, components: &[&str], values: Vec<Vec<f64>>| ResultField {
-        name: name.into(),
+    let field = |(quantity, imaginary): (FieldQuantity, bool),
+                 components: &[&str],
+                 values: Vec<Vec<f64>>| ResultField {
+        quantity,
+        imaginary,
         components: components.iter().map(|c| c.to_string()).collect(),
         nodes: nodes.to_vec(),
         values,
@@ -819,7 +833,11 @@ fn mode_fields(kind: ModeKind, nodes: &[u32], mode: &ModeShape) -> Vec<ResultFie
             .map(|k| rows.iter().map(|r| f64::from(r[k])).collect())
             .collect()
     };
-    let mut fields = vec![field(MODE, &["D1", "D2", "D3"], columns(&mode.shape))];
+    let mut fields = vec![field(
+        (FieldQuantity::ModeShape, false),
+        &["D1", "D2", "D3"],
+        columns(&mode.shape),
+    )];
     match (&mode.imaginary, kind) {
         (Some(im), ModeKind::ComplexFrequency) => {
             let mut values: Vec<Vec<f64>> = (0..6).map(|_| Vec::with_capacity(im.len())).collect();
@@ -837,19 +855,26 @@ fn mode_fields(kind: ModeKind, nodes: &[u32], mode: &ModeShape) -> Vec<ResultFie
                 }
             }
             let names = ["MAG1", "MAG2", "MAG3", "PHA1", "PHA2", "PHA3"];
-            fields.push(field(MODE_PHASES, &names, values));
+            fields.push(field((FieldQuantity::ModePhase, false), &names, values));
         }
         (Some(im), _) => {
-            fields.push(field(MODE_IMAGINARY, &["D1", "D2", "D3"], columns(im)));
+            fields.push(field(
+                (FieldQuantity::ModeShape, true),
+                &["D1", "D2", "D3"],
+                columns(im),
+            ));
         }
         (None, _) => {}
     }
     fields
 }
 
-/// Keeps the components of `field` that `kept` lists for its name.
-fn keep_components(field: &mut ResultField, kept: &[(String, Vec<String>)]) {
-    let Some((_, names)) = kept.iter().find(|(n, _)| *n == field.name) else {
+/// The components kept of each field, by quantity and part.
+type KeptComponents = Vec<((FieldQuantity, bool), Vec<String>)>;
+
+/// Keeps the components of `field` that `kept` lists for its quantity and part.
+fn keep_components(field: &mut ResultField, kept: &KeptComponents) {
+    let Some((_, names)) = kept.iter().find(|(n, _)| *n == field.key()) else {
         return;
     };
     let mut values = std::mem::take(&mut field.values).into_iter();
@@ -868,7 +893,7 @@ fn plane_mode_components(
     model: &Model,
     written: &[Written],
     source: &dyn ArraySource,
-) -> Vec<(String, Vec<String>)> {
+) -> KeptComponents {
     let mut modes = Results::default();
     for written in written {
         let Origin::Mode(set, mode) = written.origin else {
@@ -888,10 +913,10 @@ fn plane_mode_components(
         });
     }
     modes.drop_out_of_plane(model);
-    let mut kept: Vec<(String, Vec<String>)> = Vec::new();
+    let mut kept: KeptComponents = Vec::new();
     for field in modes.increments.iter().flat_map(|i| &i.fields) {
-        if !kept.iter().any(|(n, _)| *n == field.name) {
-            kept.push((field.name.clone(), field.components.clone()));
+        if !kept.iter().any(|(n, _)| *n == field.key()) {
+            kept.push((field.key(), field.components.clone()));
         }
     }
     kept

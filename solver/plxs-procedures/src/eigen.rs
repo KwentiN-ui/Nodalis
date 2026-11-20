@@ -28,13 +28,14 @@ use plxs_assembly::{
     assemble_mass, assemble_stiffness, assemble_tangent_stiffness, load_vector,
 };
 use plxs_constraints::{ConstraintSet, ModelConstraints};
+use plxs_core::results::HistoryQuantity;
 use plxs_core::results::{IncrementKind, ModeKind, ResultsIncrement};
 use plxs_core::state::{IntegrationPointField, NodalField, StoredModes};
 use plxs_core::step::{Procedure as ProcedureKind, SolverMode};
 use plxs_core::{Error, Failure, Model, Progress, ProgressEvent, Result, Step};
 use plxs_linalg::Unknowns;
 use plxs_linalg::{LanczosOptions, ShiftInvertLanczos, SparseMatrix};
-use plxs_output::{EigenTable, StaRow};
+use plxs_output::StaRow;
 use rayon::prelude::*;
 
 use crate::equations::{Equations, in_increment};
@@ -590,25 +591,25 @@ impl Procedure for FrequencyProcedure {
         write_table(
             ctx.results,
             ctx.step_number,
-            EigenTable::EIGENVALUES,
+            HistoryQuantity::Eigenvalues,
             eigen_rows,
         );
         write_table(
             ctx.results,
             ctx.step_number,
-            EigenTable::PARTICIPATION,
+            HistoryQuantity::ParticipationFactors,
             participation_rows,
         );
         write_table(
             ctx.results,
             ctx.step_number,
-            EigenTable::EFFECTIVE_MODAL_MASS,
+            HistoryQuantity::EffectiveModalMass,
             modal_mass_rows,
         );
         write_table(
             ctx.results,
             ctx.step_number,
-            EigenTable::TOTAL_EFFECTIVE_MASS,
+            HistoryQuantity::TotalEffectiveMass,
             vec![(0, total_effective)],
         );
         if parameters.storage {
@@ -845,7 +846,12 @@ impl Procedure for BuckleProcedure {
                 fields,
             });
         }
-        write_table(ctx.results, ctx.step_number, EigenTable::BUCKLING, rows);
+        write_table(
+            ctx.results,
+            ctx.step_number,
+            HistoryQuantity::BucklingFactors,
+            rows,
+        );
         ctx.sta.push(StaRow {
             step: ctx.step_number,
             increment: 1,

@@ -225,7 +225,8 @@ mod tests {
             total_time: time,
             nodal_diameter: None,
             fields: vec![ResultField {
-                name: "DISP".into(),
+                quantity: plxs_core::results::FieldQuantity::Displacements,
+                imaginary: false,
                 components: vec!["D1".into()],
                 values: vec![vec![1.0; nodes.len()]],
                 nodes,

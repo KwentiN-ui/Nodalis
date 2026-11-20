@@ -1,27 +1,28 @@
-//! The `.dat` writer: history blocks with CalculiX's headings (`plx-io::dat` recognises the
-//! headings in `crates/plx-io/src/dat.rs`).
+//! The `.dat` writer, for the export: history blocks with CalculiX's headings (`plx-io::dat`
+//! reads such files).
 
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use plxs_core::results::{HistoryBlock, Results};
+use plxs_core::mesh::Sets;
+use plxs_core::results::{HistoryBlock, HistoryQuantity, HistorySource, Results};
 use plxs_core::{Error, Result};
 
 use crate::{fortran_e13, fortran_time};
 
-/// Writes the history blocks of all steps.
-pub fn write_dat(path: &Path, results: &Results) -> Result<()> {
+/// Writes the history blocks of all steps; `sets` names the sets they are of.
+pub fn write_dat(path: &Path, results: &Results, sets: &Sets) -> Result<()> {
     let io = |e: std::io::Error| Error::Io {
         path: path.display().to_string(),
         message: e.to_string(),
     };
     let file = std::fs::File::create(path).map_err(io)?;
     let mut out = BufWriter::new(file);
-    write_dat_to(&mut out, results).map_err(io)?;
+    write_dat_to(&mut out, results, sets).map_err(io)?;
     out.flush().map_err(io)
 }
 
-pub fn write_dat_to(out: &mut impl Write, results: &Results) -> std::io::Result<()> {
+pub fn write_dat_to(out: &mut impl Write, results: &Results, sets: &Sets) -> std::io::Result<()> {
     let mut last: Option<(u32, u32)> = None;
     for block in &results.history {
         if last.map(|(s, _)| s) != Some(block.step) {
@@ -29,7 +30,7 @@ pub fn write_dat_to(out: &mut impl Write, results: &Results) -> std::io::Result<
             writeln!(out, "                        S T E P {:>7}", block.step)?;
             writeln!(out)?;
         }
-        if block.quantity == DESIGN_RESPONSE_TABLE {
+        if block.quantity == HistoryQuantity::DesignResponses {
             if last.map(|(s, _)| s) != Some(block.step) {
                 writeln!(out)?;
             }
@@ -56,18 +57,98 @@ pub fn write_dat_to(out: &mut impl Write, results: &Results) -> std::io::Result<
             writeln!(out)?;
             last = Some((block.step, block.increment));
         }
-        write_block(out, block)?;
+        write_block(out, block, sets)?;
     }
     Ok(())
 }
 
+/// The heading of a block of increment values as CalculiX writes it, before `for set`.
+fn heading(quantity: HistoryQuantity) -> String {
+    use HistoryQuantity as Q;
+    let slave = |faces: bool| {
+        if faces {
+            "slave element+face"
+        } else {
+            "slave node"
+        }
+    };
+    match quantity {
+        Q::Displacements | Q::Rotations => "displacements (vx,vy,vz)".into(),
+        Q::Velocities | Q::AngularVelocities => "velocities (vx,vy,vz)".into(),
+        Q::Forces | Q::Moments => "forces (fx,fy,fz)".into(),
+        Q::TotalForce | Q::TotalMoment => "total force (fx,fy,fz)".into(),
+        Q::Temperatures => "temperatures".into(),
+        Q::HeatGeneration => "heat generation".into(),
+        Q::TotalHeatGeneration => "total heat generation".into(),
+        Q::HeatFlux => "heat flux (elem, integ.pnt.,qx,qy,qz)".into(),
+        Q::Stresses => "stresses (elem, integ.pnt.,sxx,syy,szz,sxy,sxz,syz)".into(),
+        Q::Strains => "strains (elem, integ.pnt.,exx,eyy,ezz,exy,exz,eyz)".into(),
+        Q::EquivalentPlasticStrain => "equivalent plastic strain (elem, integ.pnt.,pe)".into(),
+        Q::InternalEnergyDensity => "internal energy density (elem, integ.pnt.,energy)".into(),
+        Q::Volume => "volume (element, volume)".into(),
+        Q::TotalVolume => "total volume".into(),
+        Q::ModelInternalEnergy => "total model internal energy".into(),
+        Q::ModelKineticEnergy => "total model kinetic energy".into(),
+        Q::ModelExternalWork => "total model external work".into(),
+        Q::ModelDampingDissipation => "total model damping dissipation".into(),
+        Q::ParticleTemperature => "particle temperature".into(),
+        Q::WallHeat => "total wall heat".into(),
+        Q::ContactElements => "total number of contact elements".into(),
+        Q::RelativeContactDisplacement { faces } => {
+            format!(
+                "relative contact displacement ({},normal,tang1,tang2)",
+                slave(faces)
+            )
+        }
+        Q::ContactStress { faces } => {
+            format!("contact stress ({},press,tang1,tang2)", slave(faces))
+        }
+        Q::ContactSpringEnergy { faces } => {
+            format!("contact spring energy ({},energy)", slave(faces))
+        }
+        // Tables and statistics have headings of their own.
+        _ => String::new(),
+    }
+}
+
+/// The name of the set of a block, as the file prints it.
+pub fn set_name<'a>(source: &'a HistorySource, sets: &'a Sets) -> &'a str {
+    match source {
+        HistorySource::Nodes(set) => sets.node_set_name(*set),
+        HistorySource::Elements(set) => sets.element_set_name(*set),
+        HistorySource::Contact { slave, .. } => sets.surface_name(*slave),
+        HistorySource::Named(name) => name,
+        HistorySource::Step => "",
+    }
+}
+
+/// The set name a block is printed for: the rotations and moments of a group without a
+/// set (the walls of a particle flow) under the name of a rotation node set, as the
+/// rotation nodes of reference points are named.
+fn printed_set(block: &HistoryBlock, sets: &Sets) -> String {
+    use HistoryQuantity as Q;
+    let name = set_name(&block.source, sets);
+    let rotational = matches!(
+        block.quantity,
+        Q::Rotations | Q::AngularVelocities | Q::Moments | Q::TotalMoment
+    );
+    match &block.source {
+        HistorySource::Named(_) if rotational => format!("INTERNAL_ROTATION-1_{name}"),
+        _ => name.to_string(),
+    }
+}
+
 /// The blocks of `*CONTACT PRINT` (empty set): headings without a set, elements with their
 /// face, the statistics in four labelled rows.
-fn write_contact_block(out: &mut impl Write, block: &HistoryBlock) -> std::io::Result<()> {
+fn write_contact_block(
+    out: &mut impl Write,
+    block: &HistoryBlock,
+    sets: &Sets,
+) -> std::io::Result<()> {
     let time = fortran_time(block.time);
     writeln!(out)?;
-    let q = &block.quantity;
-    if q.starts_with("total number of contact elements") {
+    let q = &heading(block.quantity);
+    if block.quantity == HistoryQuantity::ContactElements {
         writeln!(out, " {q} for time  {time}")?;
         writeln!(out)?;
         for (_, values) in &block.rows {
@@ -76,8 +157,14 @@ fn write_contact_block(out: &mut impl Write, block: &HistoryBlock) -> std::io::R
         writeln!(out)?;
         return Ok(());
     }
-    if q.starts_with("statistics for slave set") {
-        writeln!(out, " {q} and time  {time}")?;
+    if let HistorySource::Contact { slave, master } = block.source {
+        // A compression only support rests on the ground.
+        let master = master.map_or("GROUND", |m| sets.surface_name(m));
+        writeln!(
+            out,
+            " statistics for slave set {}, master set {master} and time  {time}",
+            sets.surface_name(slave)
+        )?;
         let labels = [
             "total surface force (fx,fy,fz) and moment about the origin (mx,my,mz)",
             "center of gravity and mean normal",
@@ -114,21 +201,22 @@ fn write_contact_block(out: &mut impl Write, block: &HistoryBlock) -> std::io::R
     Ok(())
 }
 
-fn write_block(out: &mut impl Write, block: &HistoryBlock) -> std::io::Result<()> {
-    if block.set.is_empty() && is_contact_quantity(&block.quantity) {
-        return write_contact_block(out, block);
+fn write_block(out: &mut impl Write, block: &HistoryBlock, sets: &Sets) -> std::io::Result<()> {
+    let quantity = heading(block.quantity);
+    if is_contact_quantity(block.quantity) && !matches!(block.source, HistorySource::Named(_)) {
+        return write_contact_block(out, block, sets);
     }
     writeln!(out)?;
     writeln!(
         out,
         " {} for set {} and time  {}",
-        block.quantity,
-        block.set,
+        quantity,
+        printed_set(block, sets),
         fortran_time(block.time)
     )?;
     writeln!(out)?;
-    let per_point = block.quantity.contains("integ.pnt.");
-    let totals = block.quantity.starts_with("total ");
+    let per_point = quantity.contains("integ.pnt.");
+    let totals = quantity.starts_with("total ");
     for (id, values) in &block.rows {
         let mut values = values.as_slice();
         if totals {
@@ -148,24 +236,29 @@ fn write_block(out: &mut impl Write, block: &HistoryBlock) -> std::io::Result<()
     Ok(())
 }
 
-fn is_contact_quantity(quantity: &str) -> bool {
-    quantity.starts_with("total number of contact elements")
-        || quantity.starts_with("statistics for slave set")
-        || quantity.starts_with("relative contact displacement")
-        || quantity.starts_with("contact stress")
-        || quantity.starts_with("contact spring energy")
+fn is_contact_quantity(quantity: HistoryQuantity) -> bool {
+    use HistoryQuantity as Q;
+    matches!(
+        quantity,
+        Q::ContactElements
+            | Q::ContactStatistics
+            | Q::RelativeContactDisplacement { .. }
+            | Q::ContactStress { .. }
+            | Q::ContactSpringEnergy { .. }
+    )
 }
-
-/// The table a `*SENSITIVITY` step prints per design response (or per mode for
-/// `EIGENFREQUENCY`): [`HistoryBlock::quantity`] is this name, `set` holds the response
-/// kinds of the rows joined by commas (`MASS,STRAINENERGY`; the writer names every response
-/// by its kind), each row is `(index, [value, length of the gradient])`.
-pub const DESIGN_RESPONSE_TABLE: &str = "DESIGN RESPONSE INFORMATION";
 
 const DESIGN_RESPONSE_RULE: &str = "   ##############################################################################################################";
 
+/// The table a `*SENSITIVITY` step prints per design response (or per mode for
+/// `EIGENFREQUENCY`), [`HistoryQuantity::DesignResponses`]: the source names the response
+/// kinds of the rows joined by commas (`MASS,STRAINENERGY`; the writer names every response
+/// by its kind), each row is `(index, [value, length of the gradient])`.
 fn write_design_response_table(out: &mut impl Write, block: &HistoryBlock) -> std::io::Result<()> {
-    let names: Vec<&str> = block.set.split(',').collect();
+    let names: Vec<&str> = match &block.source {
+        HistorySource::Named(names) => names.split(',').collect(),
+        _ => Vec::new(),
+    };
     writeln!(out)?;
     writeln!(out, "{DESIGN_RESPONSE_RULE}")?;
     writeln!(
@@ -193,11 +286,9 @@ fn write_design_response_table(out: &mut impl Write, block: &HistoryBlock) -> st
     Ok(())
 }
 
-/// The tables an eigenvalue step prints: [`HistoryBlock::quantity`] names them in
-/// CalculiX's spelling without the spacing, the set is empty, rows are keyed by mode (0
-/// for a total row). Written by `plxs-procedures::history`.
+/// The tables an eigenvalue step prints, rows keyed by mode (0 for a total row).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EigenTable {
+enum EigenTable {
     /// Rows `(mode, [eigenvalue, omega, frequency, imaginary part])`.
     Eigenvalues,
     /// Rows `(mode, [x, y, z, rx, ry, rz])`.
@@ -223,30 +314,18 @@ pub enum EigenTable {
 }
 
 impl EigenTable {
-    pub const EIGENVALUES: &'static str = "EIGENVALUE OUTPUT";
-    pub const PARTICIPATION: &'static str = "PARTICIPATION FACTORS";
-    pub const EFFECTIVE_MODAL_MASS: &'static str = "EFFECTIVE MODAL MASS";
-    pub const TOTAL_EFFECTIVE_MASS: &'static str = "TOTAL EFFECTIVE MASS";
-    pub const BUCKLING: &'static str = "BUCKLING FACTOR OUTPUT";
-    pub const COMPLEX_EIGENVALUES: &'static str = "COMPLEX EIGENVALUE OUTPUT";
-    pub const CYCLIC_EIGENVALUES: &'static str = "CYCLIC EIGENVALUE OUTPUT";
-    pub const TURNING_DIRECTION: &'static str = "EIGENMODE TURNING DIRECTION";
-    pub const CYCLIC_TURNING_DIRECTION: &'static str = "CYCLIC EIGENMODE TURNING DIRECTION";
-
-    pub fn of(block: &HistoryBlock) -> Option<EigenTable> {
-        if !block.set.is_empty() {
-            return None;
-        }
-        Some(match block.quantity.as_str() {
-            Self::EIGENVALUES => EigenTable::Eigenvalues,
-            Self::PARTICIPATION => EigenTable::ParticipationFactors,
-            Self::EFFECTIVE_MODAL_MASS => EigenTable::EffectiveModalMass,
-            Self::TOTAL_EFFECTIVE_MASS => EigenTable::TotalEffectiveMass,
-            Self::BUCKLING => EigenTable::BucklingFactors,
-            Self::COMPLEX_EIGENVALUES => EigenTable::ComplexEigenvalues,
-            Self::CYCLIC_EIGENVALUES => EigenTable::CyclicEigenvalues,
-            Self::TURNING_DIRECTION => EigenTable::TurningDirection,
-            Self::CYCLIC_TURNING_DIRECTION => EigenTable::CyclicTurningDirection,
+    fn of(block: &HistoryBlock) -> Option<EigenTable> {
+        use HistoryQuantity as Q;
+        Some(match block.quantity {
+            Q::Eigenvalues => EigenTable::Eigenvalues,
+            Q::ParticipationFactors => EigenTable::ParticipationFactors,
+            Q::EffectiveModalMass => EigenTable::EffectiveModalMass,
+            Q::TotalEffectiveMass => EigenTable::TotalEffectiveMass,
+            Q::BucklingFactors => EigenTable::BucklingFactors,
+            Q::ComplexEigenvalues => EigenTable::ComplexEigenvalues,
+            Q::CyclicEigenvalues => EigenTable::CyclicEigenvalues,
+            Q::TurningDirection => EigenTable::TurningDirection,
+            Q::CyclicTurningDirection => EigenTable::CyclicTurningDirection,
             _ => return None,
         })
     }

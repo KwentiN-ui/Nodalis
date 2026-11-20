@@ -878,13 +878,15 @@ mod tests {
                 nodal_diameter: None,
                 fields: vec![
                     ResultField {
-                        name: "DISP".into(),
+                        quantity: plxs_core::results::FieldQuantity::Displacements,
+                        imaginary: false,
                         components: vec!["D1".into(), "D2".into(), "D3".into()],
                         nodes: ids.clone(),
                         values: (0..3).map(column).collect(),
                     },
                     ResultField {
-                        name: "EMPTY".into(),
+                        quantity: plxs_core::results::FieldQuantity::Temperatures,
+                        imaginary: false,
                         components: vec!["X".into()],
                         nodes: Vec::new(),
                         values: vec![Vec::new()],
@@ -894,8 +896,8 @@ mod tests {
             history: vec![HistoryBlock {
                 step: 1,
                 increment: 1,
-                quantity: "displacements".into(),
-                set: "TIP".into(),
+                quantity: plxs_core::results::HistoryQuantity::Displacements,
+                source: plxs_core::results::HistorySource::Named("TIP".into()),
                 time: 1.0,
                 rows: vec![(7, vec![1.5, -2.0, f64::MIN_POSITIVE])],
             }],

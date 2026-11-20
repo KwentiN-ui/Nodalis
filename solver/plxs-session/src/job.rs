@@ -388,7 +388,7 @@ fn run_continuing(
                 options.frd_format,
             )?;
             if !results.history.is_empty() {
-                plxs_output::write_dat(&output("dat"), &results)?;
+                plxs_output::write_dat(&output("dat"), &results, &model.sets)?;
             }
         }
         // A frequency step that stored its modes (`*FREQUENCY, STORAGE=YES`): the `.eig`
@@ -426,7 +426,8 @@ fn run_continuing(
     for (index, step) in analysis.steps.iter().enumerate().skip(first) {
         for variable in crate::unsupported_outputs(step) {
             progress.event(ProgressEvent::Warning(format!(
-                "output variable {variable} is not implemented yet and is left out"
+                "output variable {} is not implemented yet and is left out",
+                variable.code()
             )));
         }
         if options.cancel.is_cancelled() {
