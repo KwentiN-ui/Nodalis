@@ -213,8 +213,9 @@ node).
   When the source is solved again, the analyses that use its results are solved after it. A
   source whose results are out of date is not solved again on its own; its block shows the
   circular arrow, and #ui("Update Project") brings both up to date.
-- Before the run, Nodalis copies the result files it needs next to the input file, because
-  CalculiX reads them from there.
+- The project keeps which analysis the results come from, not the path of a result file, so
+  moving the project or the work folder, or renaming either analysis, keeps the link. Before
+  the run, Nodalis copies the result files it needs next to the input file.
 - #ui("Unlink") takes back what the link set: the defined field, the eigenmodes or the initial
   temperatures.
 

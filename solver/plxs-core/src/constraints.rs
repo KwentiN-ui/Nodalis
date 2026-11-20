@@ -120,11 +120,12 @@ pub enum TransformKind {
 }
 
 /// `*SUBMODEL, TYPE=NODE`: the nodes of the given sets take their displacements (or
-/// temperatures) from the results of a global model, read from `input`, in the steps whose
+/// temperatures) from the results of a global model, `global`, in the steps whose
 /// `*BOUNDARY, SUBMODEL` names them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Submodel {
-    pub input: String,
+    /// The global model's results: the `.frd` file of `INPUT`, or the results themselves.
+    pub global: crate::handover::Source<crate::handover::GlobalResults>,
     pub node_sets: Vec<crate::NodeSetId>,
     /// `GLOBAL ELSET`: the elements of the global model to interpolate in.
     pub global_elset: Option<crate::ElementSetId>,

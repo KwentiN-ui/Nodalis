@@ -510,7 +510,7 @@ fn every_fixture_renders_as_text_that_reads_back_the_same() {
         let mut first = super::read_inp(&file)
             .unwrap_or_else(|e| panic!("{}: {e:?}", file.display()))
             .analysis;
-        first.model.stored_modes_file = None;
+        first.model.stored_modes = None;
         let text = super::render(&first);
         let again = match read_inp_str(&text, None) {
             Ok(reading) => reading.analysis,

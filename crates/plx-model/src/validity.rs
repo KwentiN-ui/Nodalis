@@ -367,8 +367,7 @@ impl FeModel {
                         .missing_reference(mesh)
                         .or_else(|| self.missing_amplitude([&field.amplitude]))
                         .or_else(|| self.missing_distribution(&field.distribution)),
-                    crate::DefinedFieldKind::TemperatureFromFile { file, .. } => (!file.is_file())
-                        .then(|| format!("Result file {} does not exist", file.display())),
+                    crate::DefinedFieldKind::TemperatureFromFile { file, .. } => file.missing(),
                 };
                 if let Some(reason) = reason {
                     invalid.push(Invalid {

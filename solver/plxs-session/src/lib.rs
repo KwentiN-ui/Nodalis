@@ -144,13 +144,21 @@ impl Session {
             displacements: plxs_core::state::NodalField::zeros(model.nodes.len(), 3),
             ..State::default()
         };
-        // Modes stored by an earlier run (`<job>.eig`) for modal steps without a frequency
+        // Modes of an earlier run (given, or `<job>.eig`) for modal steps without a frequency
         // step of their own.
-        if let Some(path) = &model.stored_modes_file {
-            match read_stored_modes(path, &model) {
-                Ok(modes) => state.stored_modes = Some(modes),
-                Err(e) => pending_warnings.push(format!("{e}; the file is not used")),
+        match &model.stored_modes {
+            Some(plxs_core::handover::Source::Path(path)) => {
+                match read_stored_modes(path, &model) {
+                    Ok(modes) => state.stored_modes = Some(modes),
+                    Err(e) => pending_warnings.push(format!("{e}; the file is not used")),
+                }
             }
+            Some(plxs_core::handover::Source::Loaded(modes)) => match modes_of_model(modes, &model)
+            {
+                Ok(modes) => state.stored_modes = Some(modes),
+                Err(e) => pending_warnings.push(format!("{e}; the modes are not used")),
+            },
+            None => {}
         }
         Ok(Session {
             model,
@@ -440,6 +448,48 @@ fn read_stored_modes(
         )));
     }
     Ok(modes)
+}
+
+/// The modes given by node id in the layout of the model's displacements; every node of
+/// the model needs a value.
+fn modes_of_model(
+    given: &plxs_core::handover::NodalModes,
+    model: &Model,
+) -> std::result::Result<plxs_core::state::StoredModes, String> {
+    if given.modes.len() != given.eigenvalues.len() {
+        return Err(format!(
+            "the stored modes have {} shapes for {} eigenvalues",
+            given.modes.len(),
+            given.eigenvalues.len()
+        ));
+    }
+    let mut missing = 0;
+    let modes = (given.modes.iter())
+        .map(|shape| {
+            let mut field = plxs_core::state::NodalField::zeros(model.nodes.len(), 3);
+            for (i, id) in model.nodes.ids.iter().enumerate() {
+                match shape.get(id) {
+                    Some(u) => field.node_mut(i).copy_from_slice(u),
+                    None => missing += 1,
+                }
+            }
+            field
+        })
+        .collect();
+    if missing > 0 {
+        let nodes = missing / given.modes.len().max(1);
+        return Err(format!(
+            "the stored modes have no values at {nodes} of the {} nodes of the model",
+            model.nodes.len()
+        ));
+    }
+    Ok(plxs_core::state::StoredModes {
+        step: 0,
+        count: given.eigenvalues.len() as u32,
+        eigenvalues: given.eigenvalues.clone(),
+        modes,
+        nodal_diameters: given.nodal_diameters.clone(),
+    })
 }
 
 /// The fields at integration points have an entry for every continuum element of the

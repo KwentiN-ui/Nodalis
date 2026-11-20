@@ -581,7 +581,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
             | Procedure::ComplexFrequency(_)
                 if !stored_modes_before(&analysis.steps, index)
                     && model.restart_read.is_none()
-                    && model.stored_modes_file.is_none() =>
+                    && model.stored_modes.is_none() =>
             {
                 errors.push(Error::input(
                     step.procedure.keyword(),

@@ -119,7 +119,7 @@ fn read_with(
         .map(|p| p.with_extension("eig"))
         .filter(|p| p.is_file())
     {
-        reading.analysis.model.stored_modes_file = Some(eig);
+        reading.analysis.model.stored_modes = Some(plxs_core::handover::Source::Path(eig));
     }
     match plxs_core::validate(&mut reading.analysis) {
         Ok(warnings) if undefined.is_empty() => {

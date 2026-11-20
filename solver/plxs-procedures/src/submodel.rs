@@ -8,8 +8,8 @@
 //! takes the displacement of the nearest point of the global mesh, with a warning (no
 //! extrapolation: the quadratic shape functions grow quickly beyond their element).
 //!
-//! The global results come from the ASCII `.frd` file named by `INPUT`, relative to the
-//! job's directory; its solid elements (also the expanded ones of shells, beams and plane
+//! The global results are given with the analysis, or come from the ASCII `.frd` file named
+//! by `INPUT`, relative to the job's directory; their solid elements (also the expanded ones of shells, beams and plane
 //! elements) carry the interpolation. Only the displacement degrees of freedom 1 to 3 are
 //! supported (Nodalis writes no thermal submodels).
 //!
@@ -19,18 +19,41 @@ use std::collections::HashMap;
 
 use plxs_assembly::Spc;
 use plxs_assembly::dofs::amplitude_factor;
+use plxs_core::ElementType;
+use plxs_core::handover::{GlobalResults, Source};
 use plxs_core::mesh::NodeRef;
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
 use plxs_elements::Family;
 
-/// The mesh and displacements of a global model's `.frd`.
+/// The mesh of the global model to locate the submodel's nodes in.
 #[derive(Clone, Debug, Default)]
-pub struct GlobalResults {
-    pub nodes: HashMap<u32, [f64; 3]>,
+struct GlobalMesh {
+    nodes: HashMap<u32, [f64; 3]>,
     /// Solid elements: family and node ids in CalculiX's order.
-    pub elements: Vec<(Family, Vec<u32>)>,
-    /// `DISP` of the last increment of every step: step number to node values.
-    pub displacements: HashMap<u32, HashMap<u32, [f64; 3]>>,
+    elements: Vec<(Family, Vec<u32>)>,
+}
+
+impl GlobalMesh {
+    /// The solid elements of `global` this module interpolates in.
+    fn of(global: &GlobalResults) -> Self {
+        let family = |kind: ElementType| {
+            Some(match kind {
+                ElementType::C3D8 | ElementType::C3D8R | ElementType::C3D8I => Family::Hex8,
+                ElementType::C3D20 | ElementType::C3D20R => Family::Hex20,
+                ElementType::C3D4 => Family::Tet4,
+                ElementType::C3D10 | ElementType::C3D10T => Family::Tet10,
+                ElementType::C3D6 => Family::Wedge6,
+                ElementType::C3D15 => Family::Wedge15,
+                _ => return None,
+            })
+        };
+        Self {
+            nodes: global.nodes.iter().map(|(&id, &x)| (id, x)).collect(),
+            elements: (global.elements.iter())
+                .filter_map(|(kind, nodes)| Some((family(*kind)?, nodes.clone())))
+                .collect(),
+        }
+    }
 }
 
 fn field(line: &str, range: std::ops::Range<usize>) -> Option<&str> {
@@ -39,7 +62,7 @@ fn field(line: &str, range: std::ops::Range<usize>) -> Option<&str> {
 
 /// The frd element types this module interpolates in and the CalculiX index of every frd
 /// node position.
-fn frd_family(kind: u32) -> Option<(Family, &'static [usize])> {
+fn frd_family(kind: u32) -> Option<(ElementType, &'static [usize])> {
     const HEX8: [usize; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
     // frd lists the vertical midside nodes of quadratic hexahedra and wedges before the top
     // ones (the inverse of the writer's order).
@@ -51,12 +74,12 @@ fn frd_family(kind: u32) -> Option<(Family, &'static [usize])> {
     const WEDGE6: [usize; 6] = [0, 1, 2, 3, 4, 5];
     const WEDGE15: [usize; 15] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 13, 14, 9, 10, 11];
     Some(match kind {
-        1 => (Family::Hex8, &HEX8),
-        2 => (Family::Wedge6, &WEDGE6),
-        3 => (Family::Tet4, &TET4),
-        4 => (Family::Hex20, &HEX20),
-        5 => (Family::Wedge15, &WEDGE15),
-        6 => (Family::Tet10, &TET10),
+        1 => (ElementType::C3D8, &HEX8),
+        2 => (ElementType::C3D6, &WEDGE6),
+        3 => (ElementType::C3D4, &TET4),
+        4 => (ElementType::C3D20, &HEX20),
+        5 => (ElementType::C3D15, &WEDGE15),
+        6 => (ElementType::C3D10, &TET10),
         _ => return None,
     })
 }
@@ -354,7 +377,7 @@ struct Location {
     outside: bool,
 }
 
-impl GlobalResults {
+impl GlobalMesh {
     /// Locates points in the global mesh. Candidates come from a uniform grid of element
     /// boxes. A point in no element of its cell takes the nearest element of the
     /// neighbouring cells, or of all elements when none is within a cell's size.
@@ -493,13 +516,25 @@ impl SubmodelValues {
                 "*SUBMODEL: GLOBAL ELSET is not supported; all elements of the global model are used".into(),
             ));
         }
-        let path = work_dir.join(&submodel.input);
-        let text = std::fs::read(&path).map_err(|e| Error::Io {
-            path: path.display().to_string(),
-            message: e.to_string(),
-        })?;
-        let global = read_global_frd(&String::from_utf8_lossy(&text))
-            .map_err(|e| Error::input("*SUBMODEL", format!("{}: {e}", path.display())))?;
+        let (read, origin);
+        let global: &GlobalResults = match &submodel.global {
+            Source::Loaded(global) => {
+                origin = "of the global model".to_string();
+                global
+            }
+            Source::Path(file) => {
+                let path = work_dir.join(file);
+                let text = std::fs::read(&path).map_err(|e| Error::Io {
+                    path: path.display().to_string(),
+                    message: e.to_string(),
+                })?;
+                read = read_global_frd(&String::from_utf8_lossy(&text))
+                    .map_err(|e| Error::input("*SUBMODEL", format!("{}: {e}", path.display())))?;
+                origin = path.display().to_string();
+                &read
+            }
+        };
+        let mesh = GlobalMesh::of(global);
         let mut outside = std::collections::HashSet::new();
         let mut farthest = 0.0f64;
         let mut located: HashMap<String, Vec<Option<Location>>> = HashMap::new();
@@ -517,8 +552,7 @@ impl SubmodelValues {
                 return Err(Error::input(
                     "*BOUNDARY, SUBMODEL",
                     format!(
-                        "the global results {} have no displacements of step {global_step}",
-                        path.display()
+                        "the global results {origin} have no displacements of step {global_step}"
                     ),
                 ));
             };
@@ -535,7 +569,7 @@ impl SubmodelValues {
             // their locations.
             let locations = located
                 .entry(format!("{:?}", boundary.region))
-                .or_insert_with(|| global.locate(&points));
+                .or_insert_with(|| mesh.locate(&points));
             for (node, location) in nodes.iter().zip(locations.iter().cloned()) {
                 let Some(location) = location else {
                     return Err(Error::input(
@@ -550,7 +584,7 @@ impl SubmodelValues {
                     outside.insert(*node);
                     farthest = farthest.max(location.distance);
                 }
-                let element = &global.elements[location.element].1;
+                let element = &mesh.elements[location.element].1;
                 let mut u = [0.0; 3];
                 for (id, w) in element.iter().zip(&location.weights) {
                     let value = displacements.get(id).copied().unwrap_or([0.0; 3]);
@@ -655,7 +689,7 @@ mod tests {
     }
 
     /// A unit cube of one C3D20, its displacement one at a single midside node.
-    fn cube() -> GlobalResults {
+    fn cube() -> GlobalMesh {
         let corners = [
             [0.0, 0.0, 0.0],
             [1.0, 0.0, 0.0],
@@ -689,7 +723,7 @@ mod tests {
                 0.5 * (a[2] + b[2]),
             ]);
         }
-        let mut global = GlobalResults::default();
+        let mut global = GlobalMesh::default();
         for (i, x) in coords.iter().enumerate() {
             global.nodes.insert(i as u32 + 1, *x);
         }

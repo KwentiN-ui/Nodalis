@@ -4,16 +4,15 @@
 //! file is written, the points of the walls with their mean forces are spread onto the faces
 //! of the load's region near them as nodal forces (roadmap stage 5, the Loads link).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 /// The loads of a Particle Flow run on its walls, as a load of a step.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WallLoads {
-    /// The file of the loads the run wrote (`.walls`), a copy for the analysis taking them;
-    /// set by the link.
-    pub file: PathBuf,
+    /// The file of the loads the run wrote (`.walls`): through the link, or one picked.
+    pub file: crate::ResultsFile,
     /// The walls taken, by the ids of their rigid bodies or boundary conditions; empty: all.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub walls: Vec<crate::Id>,
@@ -55,7 +54,7 @@ impl WallLoadTime {
 impl WallLoads {
     /// The file, if one is set.
     pub fn file(&self) -> Option<&Path> {
-        (!self.file.as_os_str().is_empty()).then_some(self.file.as_path())
+        self.file.path()
     }
 
     /// Whether the wall `id` is taken.
