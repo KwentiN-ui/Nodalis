@@ -89,6 +89,9 @@ pub enum WriteError {
     /// Something of the model the solver does not compute, such as massless contact.
     #[error("{item}: {reason}")]
     Unsupported { item: String, reason: String },
+    /// An error that arose lowering the item `owner` of the model, see [`WriteError::of`].
+    #[error("{error}")]
+    Of { owner: Id, error: Box<WriteError> },
 }
 
 impl WriteError {
@@ -116,6 +119,27 @@ impl WriteError {
             | E::NoGlobalResults { item }
             | E::NoSymmetryPlane { item, .. }
             | E::Unsupported { item, .. } => item,
+            E::Of { error, .. } => error.item_name(),
+        }
+    }
+
+    /// The error as one of lowering the item `owner`, unless it already names the item it
+    /// arose in (an item lowered within another one).
+    pub fn of(self, owner: Id) -> Self {
+        match self {
+            WriteError::Of { .. } => self,
+            error => WriteError::Of {
+                owner,
+                error: Box::new(error),
+            },
+        }
+    }
+
+    /// The error itself and the item it arose in.
+    fn owned(self) -> (Self, Option<Id>) {
+        match self {
+            WriteError::Of { owner, error } => (*error, Some(owner)),
+            error => (error, None),
         }
     }
 }
@@ -153,6 +177,17 @@ impl WriteError {
     }
 }
 
+/// `error` as one of lowering the item `owner`, for `return of(owner, error)` in the loop
+/// that lowers it.
+pub(crate) fn of<T>(owner: Id, error: WriteError) -> Result<T, WriteError> {
+    Err(error.of(owner))
+}
+
+/// [`WriteError::of`] for `map_err`.
+pub(crate) fn by(owner: Id) -> impl FnOnce(WriteError) -> WriteError {
+    move |error| error.of(owner)
+}
+
 /// An error of the model with the item of the tree it is about, so that the GUI can point
 /// at it. `item` is `None` when the error is about something the lowering derived (a tie of
 /// a contact region's detection) that has no item of its own.
@@ -164,12 +199,12 @@ pub struct ModelError {
 }
 
 impl ModelError {
-    /// The error with the item it names, looked up in `model` (in the step that was being
-    /// lowered first).
-    fn new(model: &FeModel, mut error: WriteError, step: Option<usize>) -> Self {
+    /// The error with the item it arose in, looked up in `model` by its id.
+    fn new(model: &FeModel, error: WriteError) -> Self {
+        let (mut error, owner) = error.owned();
         error.name_reference(model);
         Self {
-            item: model.item_named(error.item_name(), step),
+            item: owner.and_then(|id| model.item_with_id(id)),
             error,
         }
     }
@@ -604,18 +639,11 @@ fn step_title(name: &str) -> Option<String> {
 /// The analysis lowered from mesh and model, without the assembly of its steps; an error
 /// names the item it is about.
 fn lower_model(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Built, ModelError> {
-    let mut step = None;
-    lower_model_named(mesh, model, heading, &mut step)
-        .map_err(|error| ModelError::new(model, error, step))
+    lower_model_owned(mesh, model, heading).map_err(|error| ModelError::new(model, error))
 }
 
-/// [`lower_model`], keeping the index of the step being lowered in `lowering`.
-fn lower_model_named(
-    mesh: &FeMesh,
-    model: &FeModel,
-    heading: &str,
-    lowering: &mut Option<usize>,
-) -> Result<Built, WriteError> {
+/// [`lower_model`], with errors that name the item they arose in by its id.
+fn lower_model_owned(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Built, WriteError> {
     let original = model;
     // The faces of 2D elements are their edges; a mesh whose surface elements are still
     // typed as shells is lowered as the model space types them. Parts get the element
@@ -771,8 +799,7 @@ fn lower_model_named(
         &mut orientations,
     )?;
     let mut generated = constraints::Generated::default();
-    let (mut constraints, mut constraint_owners) =
-        constraints(&mut sets, model, &mut generated, lowering)?;
+    let (mut constraints, mut constraint_owners) = constraints(&mut sets, model, &mut generated)?;
     let pre_tension_equations = pre_tension_sections(&mut sets, model, &cuts, &mut generated);
     let node_tie_equations = node_ties(&mut sets, model, &lines)?;
     constraints::springs(&mut sets, model, &mut generated)?;
@@ -806,8 +833,8 @@ fn lower_model_named(
     let initial_conditions = initial_conditions(&mut sets, model)?;
     let design_variables = design_variables(&mut sets, model)?;
     let (amplitudes, amplitude_ids) = amplitudes(model)?;
-    let steps = (model.steps.iter().enumerate())
-        .map(|(s, step)| {
+    let steps = (model.steps.iter())
+        .map(|step| {
             let context = StepContext {
                 cyclic: (model.ties.iter()).any(|t| t.active && t.cyclic.is_some()),
                 cyclic_slaves: &cyclic_slaves,
@@ -818,11 +845,9 @@ fn lower_model_named(
                 pair_surfaces: &pair_surfaces,
                 model,
             };
-            *lowering = Some(s);
-            lower_step(&mut sets, step, &context)
+            lower_step(&mut sets, step, &context).map_err(by(step.id))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    *lowering = None;
 
     // The model in the order of the input file, which the solver reads it in: submodel,
     // nodes, elements, sets, surfaces, coordinate systems, materials, sections,
@@ -1064,20 +1089,23 @@ fn transforms(
 fn submodel(
     model: &FeModel,
     handles: &mut Handles,
-    node_sets: &[(String, String)],
+    node_sets: &[(String, Id, String)],
 ) -> Result<Option<ir::constraints::Submodel>, WriteError> {
-    let Some((_, first)) = node_sets.first() else {
+    let Some((_, id, first)) = node_sets.first() else {
         return Ok(None);
     };
     let input = (model.properties.submodel_input())
         .and_then(|path| path.file_name())
-        .ok_or_else(|| WriteError::NoGlobalResults {
-            item: first.clone(),
+        .ok_or_else(|| {
+            WriteError::NoGlobalResults {
+                item: first.clone(),
+            }
+            .of(*id)
         })?;
     Ok(Some(ir::constraints::Submodel {
         input: input.to_string_lossy().into_owned(),
         node_sets: (node_sets.iter())
-            .map(|(set, _)| handles.node_set(set))
+            .map(|(set, _, _)| handles.node_set(set))
             .collect(),
         global_elset: None,
     }))
@@ -1097,10 +1125,13 @@ impl LineElements {
         let mut types = BTreeMap::new();
         for section in &model.sections {
             if let Some(reason) = section.kind_problem(model, mesh) {
-                return Err(WriteError::InvalidSection {
-                    item: section.name.clone(),
-                    reason,
-                });
+                return of(
+                    section.id,
+                    WriteError::InvalidSection {
+                        item: section.name.clone(),
+                        reason,
+                    },
+                );
             }
             if !section.kind.is_line() {
                 continue;
@@ -1295,7 +1326,7 @@ struct Sets<'a> {
     cut_originals: BTreeMap<NodeId, NodeId>,
     /// Node sets of submodel boundary conditions, with the first boundary condition naming
     /// each; `*SUBMODEL` lists them.
-    submodel_sets: Vec<(String, String)>,
+    submodel_sets: Vec<(String, Id, String)>,
     /// Reference and rotation node of each reference point an active rigid body is driven
     /// by, and the node set holding the reference node once something refers to it.
     reference_nodes: BTreeMap<Id, ReferenceNodes>,
@@ -1768,10 +1799,13 @@ fn amplitudes(
     let mut ids = AmplitudeIds::default();
     for amplitude in &model.amplitudes {
         if let Some(reason) = amplitude.points_problem() {
-            return Err(WriteError::InvalidAmplitude {
-                item: amplitude.name.clone(),
-                reason,
-            });
+            return of(
+                amplitude.id,
+                WriteError::InvalidAmplitude {
+                    item: amplitude.name.clone(),
+                    reason,
+                },
+            );
         }
         let ir_amplitude = ir::amplitude::Amplitude {
             name: amplitude.name.clone(),
@@ -1793,10 +1827,13 @@ fn amplitudes(
         for table in step.tables() {
             let (item, item_id, label) = table_owner(step, &table);
             if let Some(reason) = table.table.points_problem() {
-                return Err(WriteError::InvalidAmplitude {
-                    item: item.to_owned(),
-                    reason,
-                });
+                return of(
+                    item_id,
+                    WriteError::InvalidAmplitude {
+                        item: item.to_owned(),
+                        reason,
+                    },
+                );
             }
             let amplitude = ir::amplitude::Amplitude {
                 name: format!("{}_{item}_{label}", step.name),
@@ -1821,11 +1858,12 @@ fn amplitudes(
             let Some(file) = walls.file() else {
                 continue;
             };
-            let loads =
-                crate::wall_loads::read(file).map_err(|reason| WriteError::InvalidLoad {
+            let loads = crate::wall_loads::read(file)
+                .map_err(|reason| WriteError::InvalidLoad {
                     item: load.name.clone(),
                     reason,
-                })?;
+                })
+                .map_err(by(load.id))?;
             let times = &loads.times;
             for k in 0..times.len() {
                 let before = if k == 0 { 0.0 } else { times[k - 1] };
@@ -1858,10 +1896,13 @@ fn amplitudes(
                 continue;
             };
             if let Some(reason) = excitation.signal.problem(dynamic.duration) {
-                return Err(WriteError::InvalidAmplitude {
-                    item: load.name.clone(),
-                    reason,
-                });
+                return of(
+                    load.id,
+                    WriteError::InvalidAmplitude {
+                        item: load.name.clone(),
+                        reason,
+                    },
+                );
             }
             let amplitude = ir::amplitude::Amplitude {
                 name: format!("{}_{}", step.name, load.name),
@@ -2090,30 +2131,36 @@ fn initial_conditions(
     for condition in model.initial_conditions.iter().filter(|c| c.active) {
         match condition.kind {
             InitialConditionKind::Temperature(t) => {
-                match distribution(model, &condition.name, &condition.distribution)? {
+                match distribution(model, &condition.name, &condition.distribution)
+                    .map_err(by(condition.id))?
+                {
                     Some(sampler) => {
                         let nodes = condition.region.nodes(sets.mesh);
                         if nodes.is_empty() {
-                            return Err(empty(&condition.name, "nodes"));
+                            return of(condition.id, empty(&condition.name, "nodes"));
                         }
                         let units = model.properties.units;
                         (out.temperatures)
                             .extend(distributed_nodes(sets.mesh, &nodes, t, &sampler, units));
                     }
                     None => {
-                        let set = sets.node_set(&condition.name, &condition.region)?;
+                        let set = sets
+                            .node_set(&condition.name, &condition.region)
+                            .map_err(by(condition.id))?;
                         out.temperatures.push((sets.node_ref(&set), t));
                     }
                 }
             }
             InitialConditionKind::Velocity(v) => {
-                let set = sets.node_set(&condition.name, &condition.region)?;
+                let set = sets
+                    .node_set(&condition.name, &condition.region)
+                    .map_err(by(condition.id))?;
                 velocities(&mut out, sets.node_ref(&set), v);
             }
             InitialConditionKind::AngularVelocity { .. } => {
                 let nodes = condition.region.nodes(sets.mesh);
                 if nodes.is_empty() {
-                    return Err(empty(&condition.name, "nodes"));
+                    return of(condition.id, empty(&condition.name, "nodes"));
                 }
                 for id in nodes {
                     let Some(position) = sets.mesh.node(id) else {
@@ -2155,20 +2202,27 @@ fn sections(
     let halved_beams = model.halved_beams(sets.mesh);
     for (index, section) in model.sections.iter().enumerate() {
         let Some(material) = section.material.and_then(|m| model.material(m)) else {
-            return Err(WriteError::UnknownMaterial {
-                item: section.name.clone(),
-                material: model.name_or_missing(section.material),
-            });
+            return of(
+                section.id,
+                WriteError::UnknownMaterial {
+                    item: section.name.clone(),
+                    material: model.name_or_missing(section.material),
+                },
+            );
         };
         let base = material;
         let material = material_ids[&material.id];
-        let axes = (model.section_axes(section)).map_err(|reason| WriteError::InvalidSection {
-            item: section.name.clone(),
-            reason,
-        })?;
+        let axes = (model.section_axes(section))
+            .map_err(|reason| WriteError::InvalidSection {
+                item: section.name.clone(),
+                reason,
+            })
+            .map_err(by(section.id))?;
         match &section.kind {
             SectionKind::Solid => {
-                let set = sets.element_set(&section.name, &section.region)?;
+                let set = sets
+                    .element_set(&section.name, &section.region)
+                    .map_err(by(section.id))?;
                 // Plane stress and plane strain sections have a thickness.
                 let thickness =
                     (model.properties.space.has_thickness()).then_some(section.thickness);
@@ -2202,33 +2256,39 @@ fn sections(
                             "the printed material {} needs isotropic linear elasticity",
                             base.name
                         ))
-                    })?;
+                    })
+                    .map_err(by(section.id))?;
                 let core_material = (infill.core_material)
                     .and_then(|m| model.material(m))
                     .filter(|_| infill.pattern == plx_model::InfillPattern::Custom);
                 let core = match core_material {
                     Some(core) => Some(match (&core.anisotropic, core.small_strain_elastic()) {
-                        (Some(a), _) => a.matrix().map_err(failed)?,
+                        (Some(a), _) => a.matrix().map_err(failed).map_err(by(section.id))?,
                         (None, Some(e)) => plx_model::Anisotropic::Orthotropic(
                             plx_model::EngineeringConstants::isotropic(e),
                         )
                         .matrix()
-                        .map_err(failed)?,
+                        .map_err(failed)
+                        .map_err(by(section.id))?,
                         (None, None) => {
-                            return Err(failed(format!(
-                                "the core material {} has no elasticity",
-                                core.name
-                            )));
+                            return of(
+                                section.id,
+                                failed(format!(
+                                    "the core material {} has no elasticity",
+                                    core.name
+                                )),
+                            );
                         }
                     }),
                     None => None,
                 };
                 let axes = axes.unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
-                let (wall, core_matrix) =
-                    (infill.matrices_in(elastic, core, &axes)).map_err(failed)?;
+                let (wall, core_matrix) = (infill.matrices_in(elastic, core, &axes))
+                    .map_err(failed)
+                    .map_err(by(section.id))?;
                 let elements = section.region.elements(sets.mesh);
                 if elements.is_empty() {
-                    return Err(empty(&section.name, "elements"));
+                    return of(section.id, empty(&section.name, "elements"));
                 }
                 let inside = symmetry_nodes(sets.mesh, model);
                 let levels = infill::wall_levels(sets.mesh, &elements, infill, axes[2], &inside);
@@ -2275,7 +2335,9 @@ fn sections(
                 }
             }
             SectionKind::Truss { area } => {
-                let set = sets.element_set(&section.name, &section.region)?;
+                let set = sets
+                    .element_set(&section.name, &section.region)
+                    .map_err(by(section.id))?;
                 out.push(IrSection {
                     elset: sets.element_id(&set),
                     kind: Kind::Solid {
@@ -2286,7 +2348,9 @@ fn sections(
                 });
             }
             &SectionKind::Shell { thickness, offset } => {
-                let set = sets.element_set(&section.name, &section.region)?;
+                let set = sets
+                    .element_set(&section.name, &section.region)
+                    .map_err(by(section.id))?;
                 out.push(IrSection {
                     elset: sets.element_id(&set),
                     kind: Kind::Shell {
@@ -2298,7 +2362,9 @@ fn sections(
                 });
             }
             &SectionKind::Membrane { thickness, offset } => {
-                let set = sets.element_set(&section.name, &section.region)?;
+                let set = sets
+                    .element_set(&section.name, &section.region)
+                    .map_err(by(section.id))?;
                 out.push(IrSection {
                     elset: sets.element_id(&set),
                     kind: Kind::Membrane {
@@ -2309,13 +2375,13 @@ fn sections(
                 });
             }
             SectionKind::Beam(beam) => {
-                let profile = profile_of(model, &section.name, beam)?;
+                let profile = profile_of(model, &section.name, beam).map_err(by(section.id))?;
                 let ir_profile = beam_profile(&profile);
                 // One section per normal: the solver takes one normal per section, and an
                 // automatic orientation may differ between the beams of the region. Beams on
                 // a symmetry plane get half the section, in sets of their own.
                 for (normal, drawn, set, half) in
-                    beam_groups(sets, section, &profile, &halved_beams)?
+                    beam_groups(sets, section, &profile, &halved_beams).map_err(by(section.id))?
                 {
                     // A halved section keeps the comment of its whole profile: the solver
                     // reads the values below it, the results draw the beam whole, as the
@@ -2558,7 +2624,6 @@ fn constraints(
     sets: &mut Sets,
     model: &FeModel,
     generated: &mut constraints::Generated,
-    lowering: &mut Option<usize>,
 ) -> Result<(Vec<ConstraintItem>, Vec<Option<ModelItem>>), WriteError> {
     let mut items = Vec::new();
     // The item each of `items` came from, where the solver can name it (a rigid body).
@@ -2583,7 +2648,8 @@ fn constraints(
                     generated,
                     &mut next_node,
                     (&mut items, &mut owners),
-                )?;
+                )
+                .map_err(by(constraint.id()))?;
             }
             // After the rigid bodies, whose points they may sit on.
             Constraint::PointMass(_) => {}
@@ -2599,10 +2665,13 @@ fn constraints(
             continue;
         }
         if let Some(problem) = model.point_mass_problem(mass) {
-            return Err(WriteError::InvalidConstraint {
-                item: mass.name.clone(),
-                reason: problem,
-            });
+            return of(
+                constraint.id(),
+                WriteError::InvalidConstraint {
+                    item: mass.name.clone(),
+                    reason: problem,
+                },
+            );
         }
         let nodes = match constraint.coupling() {
             Some(coupling) => couple_point(
@@ -2613,8 +2682,11 @@ fn constraints(
                 generated,
                 &mut next_node,
                 (&mut items, &mut owners),
-            )?,
-            None => sets.reference_nodes(&mass.name, mass.reference_point)?,
+            )
+            .map_err(by(constraint.id()))?,
+            None => sets
+                .reference_nodes(&mass.name, mass.reference_point)
+                .map_err(by(constraint.id()))?,
         };
         let inertia = match &mass.inertia {
             Some(inertia) => {
@@ -2628,7 +2700,8 @@ fn constraints(
                             item: mass.name.clone(),
                             reason: "the coordinate system of the rotary inertia has no axes"
                                 .into(),
-                        })?;
+                        })
+                        .map_err(by(constraint.id()))?;
                     inertia.global(axes)
                 };
                 Some((nodes.rotation, tensor))
@@ -2687,17 +2760,15 @@ fn constraints(
             }
             // An error is about the boundary condition of this step, whatever the others of
             // the same name.
-            *lowering = Some(s);
             let steps = model.point_steps(sets.mesh, &bc.region, remote);
             let excluded = model.directly_held_nodes_in(sets.mesh, |s| steps.contains(&s));
             let held = model.held_translations_in(sets.mesh, |s| steps.contains(&s));
-            let point =
-                (remote.resolve(model, sets.mesh, &bc.region, &excluded)).map_err(|reason| {
-                    WriteError::InvalidBoundary {
-                        item: bc.name.clone(),
-                        reason,
-                    }
-                })?;
+            let point = (remote.resolve(model, sets.mesh, &bc.region, &excluded))
+                .map_err(|reason| WriteError::InvalidBoundary {
+                    item: bc.name.clone(),
+                    reason,
+                })
+                .map_err(by(bc.id))?;
             let nodes = remote_point(
                 RemoteSource {
                     item: &bc.name,
@@ -2714,7 +2785,8 @@ fn constraints(
                 sets,
                 model,
                 generated,
-            )?;
+            )
+            .map_err(by(bc.id))?;
             (sets.remote_names.entry(bc.id)).or_insert((nodes, behavior));
         }
     }
@@ -2734,16 +2806,15 @@ fn constraints(
             (sets.remote_names.entry(load.id)).or_insert((nodes, force.behavior));
             continue;
         }
-        *lowering = Some(s);
         let steps = model.remote_force_steps(region, force);
         let excluded = model.directly_held_nodes_in(sets.mesh, |s| steps.contains(&s));
         let held = model.held_translations_in(sets.mesh, |s| steps.contains(&s));
-        let point = (spec.resolve(model, sets.mesh, region, &excluded)).map_err(|reason| {
-            WriteError::InvalidLoad {
+        let point = (spec.resolve(model, sets.mesh, region, &excluded))
+            .map_err(|reason| WriteError::InvalidLoad {
                 item: load.name.clone(),
                 reason,
-            }
-        })?;
+            })
+            .map_err(by(model.steps[s].loads[i].id))?;
         let nodes = remote_point(
             RemoteSource {
                 item: &load.name,
@@ -2760,10 +2831,10 @@ fn constraints(
             sets,
             model,
             generated,
-        )?;
+        )
+        .map_err(by(model.steps[s].loads[i].id))?;
         (sets.remote_names.entry(load.id)).or_insert((nodes, force.behavior));
     }
-    *lowering = None;
     // Joints, after the points of boundary conditions and remote forces they may connect.
     for (index, constraint) in model.constraints.iter().enumerate() {
         let Constraint::Joint(joint) = constraint else {
@@ -2780,14 +2851,15 @@ fn constraints(
             sets,
             model,
             generated,
-        )?;
+        )
+        .map_err(by(constraint.id()))?;
         owners.resize(items.len(), None);
         items.push(item);
         owners.push(Some(ModelItem::Constraint(index)));
     }
     for (index, t) in model.ties.iter().enumerate().filter(|(_, t)| t.active) {
         owners.resize(items.len(), None);
-        items.push(tie(sets, t)?);
+        items.push(tie(sets, t).map_err(by(t.id))?);
         owners.push(Some(ModelItem::Tie(index)));
     }
     // A spring ending on a reference point no rigid body drives ends on ground there: a
@@ -3144,7 +3216,7 @@ fn node_ties(
 ) -> Result<Vec<ir::constraints::Equation>, WriteError> {
     let mut equations = Vec::new();
     for tie in model.node_ties.iter().filter(|t| t.active) {
-        node_tie(&mut equations, sets, tie, lines)?;
+        node_tie(&mut equations, sets, tie, lines).map_err(by(tie.id))?;
     }
     Ok(equations)
 }
@@ -3384,46 +3456,60 @@ fn contact_pairs(
     let mut surfaces = PairSurfaces::new();
     for pair in model.contact_pairs.iter().filter(|p| p.active) {
         let Some(interaction) = pair.interaction.and_then(|i| model.surface_interaction(i)) else {
-            return Err(WriteError::UnknownInteraction {
-                item: pair.name.clone(),
-                interaction: model.name_or_missing(pair.interaction),
-            });
+            return of(
+                pair.id,
+                WriteError::UnknownInteraction {
+                    item: pair.name.clone(),
+                    interaction: model.name_or_missing(pair.interaction),
+                },
+            );
         };
         // Faces on a symmetry plane are the cut of the half model, no surface to touch.
         let master_region = model.without_symmetry_faces(sets.mesh, &pair.master);
-        let master = sets.surface(
-            &pair.name,
-            "Master",
-            master_region.as_ref().unwrap_or(&pair.master),
-        )?;
+        let master = sets
+            .surface(
+                &pair.name,
+                "Master",
+                master_region.as_ref().unwrap_or(&pair.master),
+            )
+            .map_err(by(pair.id))?;
         // Beams and ropes as the slave side touch with their nodes, at the radius of a rope
         // profile from the axis: a node surface of node-to-surface contact.
         let lines = pair.slave.is_lines(sets.mesh);
         let slave = if lines {
             if pair.method != ContactMethod::NodeToSurface {
-                return Err(WriteError::Unsupported {
-                    item: pair.name.clone(),
-                    reason: "a slave side of beams or ropes needs Node to Surface contact".into(),
-                });
+                return of(
+                    pair.id,
+                    WriteError::Unsupported {
+                        item: pair.name.clone(),
+                        reason: "a slave side of beams or ropes needs Node to Surface contact"
+                            .into(),
+                    },
+                );
             }
-            sets.node_surface(&pair.name, "Slave", &pair.slave)?
+            sets.node_surface(&pair.name, "Slave", &pair.slave)
+                .map_err(by(pair.id))?
         } else {
             let slave_region = model.without_symmetry_faces(sets.mesh, &pair.slave);
             sets.surface(
                 &pair.name,
                 "Slave",
                 slave_region.as_ref().unwrap_or(&pair.slave),
-            )?
+            )
+            .map_err(by(pair.id))?
         };
         let kind = match pair.method {
             ContactMethod::NodeToSurface => c::ContactKind::NodeToSurface,
             ContactMethod::SurfaceToSurface => c::ContactKind::SurfaceToSurface,
             ContactMethod::Mortar => c::ContactKind::Mortar,
             ContactMethod::Massless => {
-                return Err(WriteError::Unsupported {
-                    item: pair.name.clone(),
-                    reason: "the solver has no massless contact".into(),
-                });
+                return of(
+                    pair.id,
+                    WriteError::Unsupported {
+                        item: pair.name.clone(),
+                        reason: "the solver has no massless contact".into(),
+                    },
+                );
             }
         };
         pairs.push(c::ContactPair {
@@ -3484,22 +3570,24 @@ fn lower_step(
             && step.kind.supports_load(&load.kind)
         {
             if context.space == ModelSpace::Axisymmetric {
-                return Err(WriteError::InvalidLoad {
-                    item: load.name.clone(),
-                    reason: "a moving load needs a 3D or plane model".into(),
-                });
+                return of(
+                    load.id,
+                    WriteError::InvalidLoad {
+                        item: load.name.clone(),
+                        reason: "a moving load needs a 3D or plane model".into(),
+                    },
+                );
             }
             let faces = load.region.faces(sets.mesh);
             if faces.is_empty() {
-                return Err(empty(&load.name, "element faces"));
+                return of(load.id, empty(&load.name, "element faces"));
             }
-            let frames =
-                (load_kind.frames(context.model, sets.mesh, &faces, two_d)).map_err(|reason| {
-                    WriteError::InvalidLoad {
-                        item: load.name.clone(),
-                        reason,
-                    }
-                })?;
+            let frames = (load_kind.frames(context.model, sets.mesh, &faces, two_d))
+                .map_err(|reason| WriteError::InvalidLoad {
+                    item: load.name.clone(),
+                    reason,
+                })
+                .map_err(by(load.id))?;
             moving.push((index, load_kind.stations(), frames));
         }
     }
@@ -4219,9 +4307,10 @@ fn step_block<'f>(
             let Some(&(_, _, [reference, rotation])) = (sets.remote_points.iter())
                 .find(|(r, p, _)| *r == bc.region && p.same_point(remote))
             else {
-                return Err(empty(&bc.name, "nodes"));
+                return of(bc.id, empty(&bc.name, "nodes"));
             };
-            let amplitude = amplitude_parameter(amplitudes, &bc.name, &bc.amplitude)?;
+            let amplitude =
+                amplitude_parameter(amplitudes, &bc.name, &bc.amplitude).map_err(by(bc.id))?;
             // The translations are those of the reference node, the rotations the
             // displacements of the rotation node.
             let (values, dof_amplitudes) =
@@ -4246,7 +4335,9 @@ fn step_block<'f>(
         };
         // A distributed temperature takes a value per node, which needs no set.
         let distributed = match bc.kind {
-            BoundaryKind::Temperature(_) => distribution(model, &bc.name, &bc.distribution)?,
+            BoundaryKind::Temperature(_) => {
+                distribution(model, &bc.name, &bc.distribution).map_err(by(bc.id))?
+            }
             _ => None,
         };
         // Nodes held in different systems take the boundary condition in their own system,
@@ -4258,7 +4349,9 @@ fn step_block<'f>(
                 reason,
             };
             let form = formulation(model, sets.mesh, step.id, bc.id);
-            let hold = node_frames::hold(model, sets.mesh, bc, form, dofs).map_err(invalid)?;
+            let hold = node_frames::hold(model, sets.mesh, bc, form, dofs)
+                .map_err(invalid)
+                .map_err(by(bc.id))?;
             if let Some(hold) = hold.filter(|h| !h.submodel) {
                 let (own, rest): (Vec<NodeId>, Vec<NodeId>) = (bc.region.nodes(sets.mesh))
                     .into_iter()
@@ -4266,7 +4359,8 @@ fn step_block<'f>(
                     .partition(|n| sets.node_frames.contains_key(n));
                 if !own.is_empty() {
                     let reference = bc.amplitude.filter(|_| bc.kind.takes_amplitude());
-                    let amplitude = amplitude_parameter(amplitudes, &bc.name, &reference)?;
+                    let amplitude =
+                        amplitude_parameter(amplitudes, &bc.name, &reference).map_err(by(bc.id))?;
                     let dof_amplitudes = match &bc.kind {
                         BoundaryKind::Displacement(displacement) => {
                             displacement_values(step, bc, displacement, &amplitude, amplitudes).1
@@ -4278,7 +4372,8 @@ fn step_block<'f>(
                         let point = sets.mesh.node(node).unwrap_or_default();
                         let at = hold
                             .at_node(point, &sets.node_frames[&node])
-                            .map_err(invalid)?;
+                            .map_err(invalid)
+                            .map_err(by(bc.id))?;
                         let values = at.map(|v| v.map(|(value, _)| value));
                         let node_amplitudes =
                             std::array::from_fn(|j| at[j].and_then(|(_, d)| dof_amplitudes[d]));
@@ -4303,9 +4398,10 @@ fn step_block<'f>(
                 .filter(|n| !cyclic_slaves.contains(n))
                 .collect();
             if nodes.is_empty() {
-                return Err(empty(&bc.name, "nodes"));
+                return of(bc.id, empty(&bc.name, "nodes"));
             }
-            let amplitude = amplitude_parameter(amplitudes, &bc.name, &bc.amplitude)?;
+            let amplitude =
+                amplitude_parameter(amplitudes, &bc.name, &bc.amplitude).map_err(by(bc.id))?;
             let mut items = Vec::new();
             if let BoundaryKind::Temperature(t) = bc.kind {
                 let units = model.properties.units;
@@ -4316,25 +4412,30 @@ fn step_block<'f>(
             boundaries.add(Content::boundaries(items));
             continue;
         } else if cyclic_slaves.is_empty() {
-            sets.node_set(&bc.name, &region)?
+            sets.node_set(&bc.name, &region).map_err(by(bc.id))?
         } else {
             let nodes = region.nodes(sets.mesh);
             if nodes.iter().any(|n| cyclic_slaves.contains(n)) {
                 let free = nodes.into_iter().filter(|n| !cyclic_slaves.contains(n));
-                sets.node_set(&bc.name, &Region::Nodes(free.collect()))?
+                sets.node_set(&bc.name, &Region::Nodes(free.collect()))
+                    .map_err(by(bc.id))?
             } else {
-                sets.node_set(&bc.name, &region)?
+                sets.node_set(&bc.name, &region).map_err(by(bc.id))?
             }
         };
         let target = sets.node_ref(&set);
         // The rotations of a rigid body are the displacements of its rotation node.
         let rotation_node = match bc.region.reference_point() {
-            Some(point) => Some(sets.reference_nodes(&bc.name, point)?.rotation),
+            Some(point) => Some(
+                sets.reference_nodes(&bc.name, point)
+                    .map_err(by(bc.id))?
+                    .rotation,
+            ),
             None => None,
         };
         // Symmetry supports stay zero; an amplitude would not change them.
         let reference = bc.amplitude.filter(|_| bc.kind.takes_amplitude());
-        let amplitude = amplitude_parameter(amplitudes, &bc.name, &reference)?;
+        let amplitude = amplitude_parameter(amplitudes, &bc.name, &reference).map_err(by(bc.id))?;
         let mut items = Vec::new();
         match bc.kind {
             BoundaryKind::Displacement(ref displacement) => {
@@ -4346,12 +4447,13 @@ fn step_block<'f>(
                         .ok_or_else(|| WriteError::InvalidBoundary {
                             item: bc.name.clone(),
                             reason: "The coordinate system does not exist".into(),
-                        })?;
+                        })
+                        .map_err(by(bc.id))?;
                     let invalid = |reason: String| WriteError::InvalidBoundary {
                         item: bc.name.clone(),
                         reason,
                     };
-                    let [x, y, z] = system.axes().map_err(invalid)?;
+                    let [x, y, z] = system.axes().map_err(invalid).map_err(by(bc.id))?;
                     let transform = match system.kind {
                         plx_model::CoordinateSystemKind::Rectangular => {
                             Transform::Rectangular(x, y)
@@ -4407,17 +4509,17 @@ fn step_block<'f>(
                     item.submodel_step = Some(step.max(1));
                     items.push(item);
                 }
-                if !sets.submodel_sets.iter().any(|(s, _)| *s == set) {
-                    sets.submodel_sets.push((set, bc.name.clone()));
+                if !sets.submodel_sets.iter().any(|(s, _, _)| *s == set) {
+                    sets.submodel_sets.push((set, bc.id, bc.name.clone()));
                 }
             }
             BoundaryKind::Symmetry { normal, .. } => {
-                let plane = symmetry_plane(sets.mesh, &bc.region, space, normal).map_err(|e| {
-                    WriteError::NoSymmetryPlane {
+                let plane = symmetry_plane(sets.mesh, &bc.region, space, normal)
+                    .map_err(|e| WriteError::NoSymmetryPlane {
                         item: bc.name.clone(),
                         reason: e.to_string(),
-                    }
-                })?;
+                    })
+                    .map_err(by(bc.id))?;
                 // A coordinate plane holds global degrees of freedom; any other plane gets a
                 // local system with x along its normal, which turns rotations as well.
                 let (axis, transformed) = match plane.axis() {
@@ -4461,12 +4563,15 @@ fn step_block<'f>(
         // An excitation follows its signal instead of an amplitude.
         let amplitude = match load.kind {
             LoadKind::Excitation(_) => amplitudes.signal(&step.name, load.id),
-            _ => amplitude_parameter(amplitudes, &load.name, &load.amplitude)?,
+            _ => {
+                amplitude_parameter(amplitudes, &load.name, &load.amplitude).map_err(by(load.id))?
+            }
         };
         // The second amplitude of a film scales its coefficient, of radiation the emissivity.
         let factor_amplitude = match load.kind {
             LoadKind::Film { .. } | LoadKind::Radiation { .. } => {
-                amplitude_parameter(amplitudes, &load.name, &load.factor_amplitude)?
+                amplitude_parameter(amplitudes, &load.name, &load.factor_amplitude)
+                    .map_err(by(load.id))?
             }
             _ => None,
         };
@@ -4477,11 +4582,15 @@ fn step_block<'f>(
                     reason,
                 };
                 let file = (walls.file())
-                    .ok_or_else(|| invalid("no Particle Flow step is linked to it".into()))?;
-                let loads = crate::wall_loads::read(file).map_err(invalid)?;
+                    .ok_or_else(|| invalid("no Particle Flow step is linked to it".into()))
+                    .map_err(by(load.id))?;
+                let loads = crate::wall_loads::read(file)
+                    .map_err(invalid)
+                    .map_err(by(load.id))?;
                 let sets_of_forces =
                     crate::wall_loads::nodal_forces(sets.mesh, &load.region, walls, &loads)
-                        .map_err(invalid)?;
+                        .map_err(invalid)
+                        .map_err(by(load.id))?;
                 let mut items = Vec::new();
                 for (k, (time, mapped)) in sets_of_forces.into_iter().enumerate() {
                     let amplitude = match time {
@@ -4497,15 +4606,22 @@ fn step_block<'f>(
                     }
                 }
                 if items.is_empty() {
-                    return Err(invalid(
-                        "no face of the region lies near the walls of the Particle Flow run".into(),
-                    ));
+                    return of(
+                        load.id,
+                        invalid(
+                            "no face of the region lies near the walls of the Particle Flow run"
+                                .into(),
+                        ),
+                    );
                 }
                 Content::cloads(items)
             }
             LoadKind::Moving(_) => {
                 let frame = moving(index).cloned().unwrap_or_default();
-                loads.push((index, moving_load(load, &frame, context)?));
+                loads.push((
+                    index,
+                    moving_load(load, &frame, context).map_err(by(load.id))?,
+                ));
                 continue;
             }
             LoadKind::Moment(moment) => {
@@ -4513,10 +4629,16 @@ fn step_block<'f>(
                 // at nodes of beams and shells on their rotations.
                 let (target, first_dof) = match load.region.reference_point() {
                     Some(point) => {
-                        let nodes = sets.reference_nodes(&load.name, point)?;
+                        let nodes = sets
+                            .reference_nodes(&load.name, point)
+                            .map_err(by(load.id))?;
                         (NodeRef::Node(nodes.rotation), 1)
                     }
-                    None => (sets.region_ref(&load.name, &load.region)?, 4),
+                    None => (
+                        sets.region_ref(&load.name, &load.region)
+                            .map_err(by(load.id))?,
+                        4,
+                    ),
                 };
                 let (moment, component_amplitudes) = load_components(
                     step,
@@ -4527,10 +4649,12 @@ fn step_block<'f>(
                     amplitudes,
                 );
                 // In a system of its own, at every node in the directions there.
-                let positions = component_positions(model, sets, load, &target)?;
+                let positions =
+                    component_positions(model, sets, load, &target).map_err(by(load.id))?;
                 let mut items = Vec::new();
                 for (target, position) in positions {
-                    let moment = global_components(model, load, position, moment)?;
+                    let moment =
+                        global_components(model, load, position, moment).map_err(by(load.id))?;
                     for (dof, value) in (0..).zip(moment) {
                         if value != 0.0 && dof as usize + 4 <= dofs {
                             let amplitude = &component_amplitudes[dof as usize];
@@ -4539,7 +4663,10 @@ fn step_block<'f>(
                     }
                 }
                 let set = load.region.reference_point().is_none().then_some(&target);
-                set_follower(&mut items, follower(model, sets, load, set)?);
+                set_follower(
+                    &mut items,
+                    follower(model, sets, load, set).map_err(by(load.id))?,
+                );
                 Content::cloads(items)
             }
             LoadKind::RemoteForce(ref remote) => {
@@ -4548,16 +4675,17 @@ fn step_block<'f>(
                 // global directions.
                 let (nodes, force, moment) = match load.region.reference_point() {
                     Some(point) => {
-                        let nodes = sets.reference_nodes(&load.name, point)?;
+                        let nodes = sets
+                            .reference_nodes(&load.name, point)
+                            .map_err(by(load.id))?;
                         let position =
                             (model.reference_point(point)).map_or([0.0; 3], |p| p.position);
-                        let (force, moment) =
-                            (remote.global(model, position)).map_err(|reason| {
-                                WriteError::InvalidLoad {
-                                    item: load.name.clone(),
-                                    reason,
-                                }
-                            })?;
+                        let (force, moment) = (remote.global(model, position))
+                            .map_err(|reason| WriteError::InvalidLoad {
+                                item: load.name.clone(),
+                                reason,
+                            })
+                            .map_err(by(load.id))?;
                         ([nodes.reference, nodes.rotation], force, moment)
                     }
                     None => {
@@ -4565,7 +4693,7 @@ fn step_block<'f>(
                         let Some(&(_, _, nodes)) = (sets.remote_points.iter())
                             .find(|(r, p, _)| *r == load.region && p.same_point(&spec))
                         else {
-                            return Err(empty(&load.name, "nodes"));
+                            return of(load.id, empty(&load.name, "nodes"));
                         };
                         let allowed = space.remote_dofs();
                         let keep = |v: [f64; 3], offset: usize| {
@@ -4590,7 +4718,7 @@ fn step_block<'f>(
                 }
                 set_follower(
                     &mut items,
-                    moving_system_follower(model, sets, remote.system)?,
+                    moving_system_follower(model, sets, remote.system).map_err(by(load.id))?,
                 );
                 Content::cloads(items)
             }
@@ -4599,12 +4727,12 @@ fn step_block<'f>(
                 let ([pressure], [amplitude]) =
                     load_components(step, load, [pressure], ["P"], &amplitude, amplitudes);
                 let mut items = Vec::new();
-                match distribution(model, &load.name, &load.distribution)? {
+                match distribution(model, &load.name, &load.distribution).map_err(by(load.id))? {
                     // Every face takes the pressure scaled at its center.
                     Some(sampler) => {
                         let faces = load.region.faces(sets.mesh);
                         if faces.is_empty() {
-                            return Err(empty(&load.name, "element faces"));
+                            return of(load.id, empty(&load.name, "element faces"));
                         }
                         for (element, face) in faces {
                             if let Some(center) = face_center(sets.mesh, element, face) {
@@ -4615,7 +4743,10 @@ fn step_block<'f>(
                         }
                     }
                     None => {
-                        for (set, face) in sets.face_sets(&load.name, &load.region)? {
+                        for (set, face) in sets
+                            .face_sets(&load.name, &load.region)
+                            .map_err(by(load.id))?
+                        {
                             let kind = Pressure {
                                 face,
                                 value: pressure,
@@ -4683,10 +4814,15 @@ fn step_block<'f>(
                         Some(_) => 1,
                         None => load.region.nodes(sets.mesh).len(),
                     };
-                    let target = sets.region_ref(&load.name, &load.region)?;
+                    let target = sets
+                        .region_ref(&load.name, &load.region)
+                        .map_err(by(load.id))?;
                     region_set = Some(target.clone());
-                    for (target, position) in component_positions(model, sets, load, &target)? {
-                        let force = global_components(model, load, position, force)?;
+                    for (target, position) in
+                        component_positions(model, sets, load, &target).map_err(by(load.id))?
+                    {
+                        let force =
+                            global_components(model, load, position, force).map_err(by(load.id))?;
                         for (dof, value) in (1..).zip(force).take(dofs) {
                             if value != 0.0 {
                                 let share = value / count as f64;
@@ -4703,11 +4839,12 @@ fn step_block<'f>(
                         traction_forces(sets.mesh, &faces, force, axisymmetric)
                     };
                     if nodal.is_empty() {
-                        return Err(empty(&load.name, "element faces or edges"));
+                        return of(load.id, empty(&load.name, "element faces or edges"));
                     }
                     for (node, values) in nodal {
                         let position = sets.mesh.node(node).unwrap_or([0.0; 3]);
-                        let values = global_components(model, load, position, values)?;
+                        let values = global_components(model, load, position, values)
+                            .map_err(by(load.id))?;
                         for (dof, value) in (1..).zip(values).take(dofs) {
                             if value != 0.0 {
                                 let amplitude = &component_amplitudes[dof as usize - 1];
@@ -4718,7 +4855,7 @@ fn step_block<'f>(
                 }
                 set_follower(
                     &mut items,
-                    follower(model, sets, load, region_set.as_ref())?,
+                    follower(model, sets, load, region_set.as_ref()).map_err(by(load.id))?,
                 );
                 Content::cloads(items)
             }
@@ -4738,7 +4875,9 @@ fn step_block<'f>(
                         true => 1,
                         false => load.region.nodes(sets.mesh).len().max(1),
                     };
-                    let set = sets.node_set(&load.name, &load.region)?;
+                    let set = sets
+                        .node_set(&load.name, &load.region)
+                        .map_err(by(load.id))?;
                     vec![ir::step::ConcentratedFlux {
                         region: sets.node_ref(&set),
                         value: flux / count as f64,
@@ -4755,7 +4894,10 @@ fn step_block<'f>(
                         volume_fluxes(sets.mesh, &elements, flux, axisymmetric)
                     };
                     if nodal.is_empty() {
-                        return Err(empty(&load.name, "element faces, edges or volumes"));
+                        return of(
+                            load.id,
+                            empty(&load.name, "element faces, edges or volumes"),
+                        );
                     }
                     (nodal.into_iter())
                         .filter(|(_, value)| value[0] != 0.0)
@@ -4769,41 +4911,52 @@ fn step_block<'f>(
                 Content::cfluxes(items)
             }
             LoadKind::Film { sink, coefficient } => {
-                let items = (sets.face_sets(&load.name, &load.region)?.into_iter())
-                    .map(|(set, face)| ir::step::Film {
-                        region: sets.element_ref(&set),
-                        face,
-                        sink_temperature: sink,
-                        coefficient,
-                        amplitude,
-                        film_amplitude: factor_amplitude,
-                    })
-                    .collect();
+                let items = (sets
+                    .face_sets(&load.name, &load.region)
+                    .map_err(by(load.id))?
+                    .into_iter())
+                .map(|(set, face)| ir::step::Film {
+                    region: sets.element_ref(&set),
+                    face,
+                    sink_temperature: sink,
+                    coefficient,
+                    amplitude,
+                    film_amplitude: factor_amplitude,
+                })
+                .collect();
                 Content::films(items)
             }
             LoadKind::Radiation { sink, emissivity } => {
-                let items = (sets.face_sets(&load.name, &load.region)?.into_iter())
-                    .map(|(set, face)| ir::step::Radiate {
-                        region: sets.element_ref(&set),
-                        face,
-                        cavity: false,
-                        sink_temperature: sink,
-                        emissivity,
-                        amplitude,
-                        radiation_amplitude: factor_amplitude,
-                    })
-                    .collect();
+                let items = (sets
+                    .face_sets(&load.name, &load.region)
+                    .map_err(by(load.id))?
+                    .into_iter())
+                .map(|(set, face)| ir::step::Radiate {
+                    region: sets.element_ref(&set),
+                    face,
+                    cavity: false,
+                    sink_temperature: sink,
+                    emissivity,
+                    amplitude,
+                    radiation_amplitude: factor_amplitude,
+                })
+                .collect();
                 Content::radiations(items)
             }
             // Gravity: the size of the acceleration and its direction.
             LoadKind::Gravity(_) | LoadKind::StandardGravity(_) => {
                 let acceleration = load.kind.gravity_vector().unwrap_or_default();
-                let set = sets.body_load_set(&load.name, &load.region)?;
+                let set = sets
+                    .body_load_set(&load.name, &load.region)
+                    .map_err(by(load.id))?;
                 let Some((size, direction)) = unit_vector(acceleration) else {
-                    return Err(WriteError::InvalidLoad {
-                        item: load.name.clone(),
-                        reason: "the gravitational acceleration is zero".into(),
-                    });
+                    return of(
+                        load.id,
+                        WriteError::InvalidLoad {
+                            item: load.name.clone(),
+                            reason: "the gravitational acceleration is zero".into(),
+                        },
+                    );
                 };
                 let kind = ir::step::DistributedLoadKind::Gravity {
                     magnitude: size,
@@ -4814,12 +4967,17 @@ fn step_block<'f>(
             // Centrifugal load: the square of the rotational speed, a point on
             // the axis and the axis direction.
             LoadKind::Centrifugal { point, axis, speed } => {
-                let set = sets.body_load_set(&load.name, &load.region)?;
+                let set = sets
+                    .body_load_set(&load.name, &load.region)
+                    .map_err(by(load.id))?;
                 let Some((_, direction)) = unit_vector(axis) else {
-                    return Err(WriteError::InvalidLoad {
-                        item: load.name.clone(),
-                        reason: "the rotation axis has no direction".into(),
-                    });
+                    return of(
+                        load.id,
+                        WriteError::InvalidLoad {
+                            item: load.name.clone(),
+                            reason: "the rotation axis has no direction".into(),
+                        },
+                    );
                 };
                 let kind = ir::step::DistributedLoadKind::Centrifugal {
                     omega_squared: speed * speed,
@@ -4843,7 +5001,7 @@ fn step_block<'f>(
         .filter_map(|&id| model.history_output(id))
         .filter(|o| o.active && (dynamic || o.kind != HistoryKind::Energies))
     {
-        (rest.outputs).append(history_output(sets, output, pair_surfaces)?);
+        (rest.outputs).append(history_output(sets, output, pair_surfaces).map_err(by(output.id))?);
     }
     // The force of a bolt is the reaction of its pre-tension node, also while it is locked,
     // and its shortening the node's displacement: shown under the name of the load.
@@ -4942,18 +5100,23 @@ fn defined_fields(
     for field in step.defined_fields.iter().filter(|f| f.active) {
         let field = match &field.kind {
             DefinedFieldKind::Temperature(t) => {
-                let amplitude = amplitude_parameter(amplitudes, &field.name, &field.amplitude)?;
-                let values = match distribution(model, &field.name, &field.distribution)? {
+                let amplitude = amplitude_parameter(amplitudes, &field.name, &field.amplitude)
+                    .map_err(by(field.id))?;
+                let values = match distribution(model, &field.name, &field.distribution)
+                    .map_err(by(field.id))?
+                {
                     Some(sampler) => {
                         let nodes = field.region.nodes(sets.mesh);
                         if nodes.is_empty() {
-                            return Err(empty(&field.name, "nodes"));
+                            return of(field.id, empty(&field.name, "nodes"));
                         }
                         let units = model.properties.units;
                         distributed_nodes(sets.mesh, &nodes, *t, &sampler, units)
                     }
                     None => {
-                        let set = sets.node_set(&field.name, &field.region)?;
+                        let set = sets
+                            .node_set(&field.name, &field.region)
+                            .map_err(by(field.id))?;
                         vec![(sets.node_ref(&set), *t)]
                     }
                 };
@@ -4965,10 +5128,13 @@ fn defined_fields(
             DefinedFieldKind::TemperatureFromFile { file, step } => {
                 let name = file.file_name().map(|n| n.to_string_lossy());
                 let Some(name) = name.filter(|n| !n.is_empty() && !n.contains(',')) else {
-                    return Err(WriteError::InvalidResultFile {
-                        item: field.name.clone(),
-                        file: file.display().to_string(),
-                    });
+                    return of(
+                        field.id,
+                        WriteError::InvalidResultFile {
+                            item: field.name.clone(),
+                            file: file.display().to_string(),
+                        },
+                    );
                 };
                 ir::step::DefinedField {
                     kind: ir::step::DefinedFieldKind::TemperatureFile {

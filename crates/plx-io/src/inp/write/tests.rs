@@ -11996,8 +11996,8 @@ fn the_analysis_knows_the_items_it_came_from() {
     );
 }
 
-/// An error of the lowering names the item of the tree it stopped at, also when another
-/// step has an item of the same name.
+/// An error of the lowering names the item of the tree it stopped at by its id, also when
+/// another step has an item of the same name.
 #[test]
 fn a_lowering_error_names_its_item() {
     use plx_model::ModelItem;
@@ -12005,6 +12005,7 @@ fn a_lowering_error_names_its_item() {
     let mut second = model.steps[0].clone();
     second.id = plx_model::Id::new();
     second.name = "Step-2".into();
+    second.loads[0].id = plx_model::Id::new();
     second.loads[0].amplitude = Some(named("Gone"));
     model.steps.push(second);
     let error = lower_unvalidated(&mesh, &model, "").unwrap_err();
@@ -12110,6 +12111,9 @@ fn solver_turns_a_face_by_a_point_in_a_step_after_one_holding_its_nodes() {
     let mut second = model.steps[0].clone();
     second.id = plx_model::Id::new();
     second.name = "Step-2".into();
+    for bc in &mut second.boundary_conditions {
+        bc.id = plx_model::Id::new();
+    }
     let turn = &mut second.boundary_conditions[1];
     // The same nodes, picked differently: a point of its own.
     turn.region = Region::Nodes(Region::Surface("TIP".into()).nodes(&mesh));
@@ -12157,6 +12161,9 @@ fn an_error_of_a_point_names_the_boundary_condition_of_its_step() {
     let mut second = model.steps[0].clone();
     second.id = plx_model::Id::new();
     second.name = "Step-2".into();
+    for bc in &mut second.boundary_conditions {
+        bc.id = plx_model::Id::new();
+    }
     let turn = &mut second.boundary_conditions[1];
     turn.region = Region::Surface("TIP".into());
     if let BoundaryKind::Displacement(d) = &mut turn.kind {

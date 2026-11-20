@@ -17,7 +17,7 @@ use plx_model::{
     SideRoles, Spring, SpringLayout,
 };
 
-use super::{Members, Sets, WriteError, empty, number};
+use super::{Members, Sets, WriteError, by, empty, number};
 
 /// What the constraints add to the input file besides the mesh.
 #[derive(Default)]
@@ -104,18 +104,22 @@ pub(super) fn springs(
     let mut held = std::collections::BTreeSet::new();
     for region in &model.contact_regions {
         if region.active && region.behavior == ContactBehavior::NoSeparation {
-            writer.no_separation(mesh, region, &mut held)?;
+            writer
+                .no_separation(mesh, region, &mut held)
+                .map_err(by(region.id))?;
         }
     }
     for constraint in model.constraints.iter().filter(|c| c.active()) {
         match constraint {
             Constraint::Spring(spring) => {
                 writer.stabilize = spring.stabilize;
-                writer.spring(sets, spring)?;
+                writer.spring(sets, spring).map_err(by(constraint.id()))?;
                 writer.stabilize = 0.0;
             }
             Constraint::CompressionOnly(support) => {
-                writer.compression_only(sets, support)?;
+                writer
+                    .compression_only(sets, support)
+                    .map_err(by(constraint.id()))?;
                 nonlinear |= support.nonlinear;
             }
             // Written as `*Rigid body` by the caller.
