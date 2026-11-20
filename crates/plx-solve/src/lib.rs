@@ -158,8 +158,6 @@ pub struct Run {
 #[derive(Clone, Debug)]
 pub struct Prepared {
     pub analysis: plxs_core::Analysis,
-    /// The analysis as input text, written as `<name>.inp` beside the results.
-    pub text: String,
     /// What the lowering noticed but did not stop for, shown as the solver's warnings.
     pub warnings: Vec<String>,
     /// The steps of the FE model the analysis' steps come from, kept with the results.
@@ -242,13 +240,6 @@ pub(crate) enum Job {
 }
 
 impl Job {
-    fn text(&self) -> &str {
-        match self {
-            Job::Text(text) => text,
-            Job::Analysis(prepared) => &prepared.text,
-        }
-    }
-
     /// A copy for the model check after a failed run: of a text, the text again.
     fn spare(&self) -> Job {
         match self {
@@ -366,8 +357,7 @@ impl Run {
     }
 
     /// Starts the solver on an analysis lowered from the model, as [`Run::start`] but
-    /// without reading it from text: the input text is written as `<name>.inp` for
-    /// reference only.
+    /// without text: no input file is written.
     pub fn start_analysis(
         threads: u32,
         work_dir: &Path,
@@ -436,8 +426,12 @@ impl Run {
                 std::fs::remove_file(path)?;
             }
         }
+        // An input text is read as from `<name>.inp`; an analysis given directly is not
+        // written as text.
         let input_path = work_dir.join(format!("{name}.inp"));
-        std::fs::write(&input_path, job.text())?;
+        if let Job::Text(text) = &job {
+            std::fs::write(&input_path, text)?;
+        }
         if let Job::Analysis(prepared) = &mut job {
             keep_modes_as_shapes(&mut prepared.analysis);
         }
@@ -989,7 +983,6 @@ S
         let read = SolverResults::read(&run.file("ndlr")).unwrap();
         assert_eq!(read, *solved);
         assert_lazy_reads_the_same(&run.file("ndlr"), &solved);
-        assert!(run.file("inp").is_file());
         assert!(run.file("sta").is_file());
         // Every run measures where its time went, with the size of the model.
         let profile = run.profile().expect("a finished run has a profile");
@@ -1340,7 +1333,6 @@ S
         let analysis = plxs_input::read_inp_str(text, None).unwrap().analysis;
         Prepared {
             analysis,
-            text: text.to_owned(),
             warnings: vec!["a lowering warning".into()],
             steps: Vec::new(),
             preparation_steps: Vec::new(),
@@ -1351,9 +1343,8 @@ S
     fn an_analysis_runs_without_reading_its_input_text() {
         let dir = std::env::temp_dir().join(format!("plx-solve-ir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        // The text is for reference only: the run takes the analysis.
-        let mut cube = prepared(CUBE);
-        cube.text = "not an input file".into();
+        // The run takes the analysis and writes no input file.
+        let cube = prepared(CUBE);
         let mut run = Run::start_analysis(1, &dir, "Cube", cube).unwrap();
         let status = run.wait();
         let output = run.new_output();
@@ -1362,10 +1353,7 @@ S
             output.iter().any(|l| l.contains("a lowering warning")),
             "{output:#?}"
         );
-        assert_eq!(
-            std::fs::read_to_string(run.file("inp")).unwrap(),
-            "not an input file"
-        );
+        assert!(!run.file("inp").exists());
         let solved = run.solver_results().unwrap();
         let u1 = plx_results::from_solver(&solved).increments[0]
             .field("DISP")

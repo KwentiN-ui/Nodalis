@@ -3381,23 +3381,21 @@ mod tests {
     use super::*;
 
     /// Results of the built-in solver open from their `.ndlr` file like CalculiX's from the
-    /// `.frd`: with the parts of the input file beside them and the history output, without
-    /// any `.frd` or `.dat` file.
+    /// `.frd`: with their parts and the history output, without any `.frd`, `.dat` or `.inp`
+    /// file.
     #[test]
     fn results_of_the_built_in_solver_open_without_a_frd_file() {
         let dir = std::env::temp_dir().join(format!("plx-ndlr-{}", std::process::id()));
         let path = crate::solver_check::solve_beam_built_in(&dir);
         assert!(plx_results::solver::is_solver_results(&path));
-        assert!(!path.with_extension("frd").exists() && !path.with_extension("dat").exists());
+        for extension in ["frd", "dat", "inp"] {
+            assert!(!path.with_extension(extension).exists(), "{extension}");
+        }
         let loaded = load(&path, UnitSystem::Unitless).unwrap();
         let view = loaded.model.results.as_ref().unwrap();
         let disp = view.increments[0].field("DISP").unwrap();
         assert!(disp.component("ALL").is_some());
-        let read = plx_io::inp::read_inp(&path.with_extension("inp")).unwrap();
-        let names = |parts: &[plx_mesh::Part]| -> Vec<String> {
-            parts.iter().map(|p| p.name.clone()).collect()
-        };
-        assert_eq!(names(&loaded.model.mesh.parts).len(), read.mesh.parts.len());
+        assert!(!loaded.model.mesh.parts.is_empty());
         assert!(!view.history.is_empty(), "{:?}", loaded.model.warnings);
         let _ = std::fs::remove_dir_all(&dir);
     }
