@@ -4963,11 +4963,11 @@ fn defined_fields(
                 }
             }
             DefinedFieldKind::TemperatureFromFile { file, step } => {
-                let name = file.file_name().map(|n| n.to_string_lossy());
+                let name = (file.path().and_then(|p| p.file_name())).map(|n| n.to_string_lossy());
                 let Some(name) = name.filter(|n| !n.is_empty() && !n.contains(',')) else {
                     return Err(WriteError::InvalidResultFile {
                         item: field.name.clone(),
-                        file: file.display().to_string(),
+                        file: file.label(),
                     });
                 };
                 ir::step::DefinedField {

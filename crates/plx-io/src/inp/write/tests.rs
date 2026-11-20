@@ -6440,7 +6440,7 @@ fn temperature_from_file(name: &str, file: &str, step: u32) -> DefinedField {
         active: true,
         region: Region::Nodes(Vec::new()),
         kind: DefinedFieldKind::TemperatureFromFile {
-            file: PathBuf::from(file),
+            file: PathBuf::from(file).into(),
             step,
         },
         amplitude: None,
@@ -6484,7 +6484,7 @@ fn a_defined_temperature_is_written() {
     assert!(model.result_files().is_empty());
     model.steps[0].kind = StepKind::Static(StaticStep::default());
     model.steps[0].defined_fields[1].kind = DefinedFieldKind::TemperatureFromFile {
-        file: PathBuf::from("a,b.frd"),
+        file: PathBuf::from("a,b.frd").into(),
         step: 1,
     };
     assert!(matches!(
@@ -7916,7 +7916,7 @@ fn cantilever_submodel(dofs: [bool; 6]) -> (FeMesh, FeModel) {
         amplitude: None,
     });
     model.properties.kind = plx_model::ModelKind::Submodel;
-    model.properties.global_results = Some(PathBuf::from("/somewhere/global.frd"));
+    model.properties.global_results = Some(PathBuf::from("/somewhere/global.frd").into());
     (mesh, model)
 }
 
@@ -8196,7 +8196,7 @@ fn solver_submodel_follows_the_global_cantilever() {
     let dir = std::env::temp_dir().join(format!("plx-write-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::copy(testdata("kragbalken_c3d8.frd"), dir.join("global.frd")).unwrap();
-    model.properties.global_results = Some(dir.join("global.frd"));
+    model.properties.global_results = Some(dir.join("global.frd").into());
     dump_fixture_file(
         name,
         "global.frd",
@@ -8234,7 +8234,7 @@ fn solver_submodel_interpolates_inside_the_global_elements() {
     let dir = std::env::temp_dir().join(format!("plx-write-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::copy(testdata("kragbalken_c3d8.frd"), dir.join("global.frd")).unwrap();
-    model.properties.global_results = Some(dir.join("global.frd"));
+    model.properties.global_results = Some(dir.join("global.frd").into());
     dump_fixture_file(
         name,
         "global.frd",

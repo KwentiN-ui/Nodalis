@@ -16,7 +16,7 @@ pub struct ModelProperties {
     /// Results file (`.frd`) of the global model a submodel reads its boundary displacements
     /// from (`*SUBMODEL, INPUT=`); only used when [`ModelProperties::kind`] is
     /// [`ModelKind::Submodel`].
-    pub global_results: Option<std::path::PathBuf>,
+    pub global_results: Option<crate::ResultsFile>,
     /// Absolute zero on the model's temperature scale (`*PHYSICAL CONSTANTS`); radiation
     /// needs it. `None` leaves it undefined.
     pub absolute_zero: Option<f64>,
@@ -26,20 +26,21 @@ pub struct ModelProperties {
     /// and Steady State Dynamics steps without a Frequency step before them work on them.
     /// Set by a results link of the project.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub stored_modes: Option<std::path::PathBuf>,
+    pub stored_modes: Option<crate::ResultsFile>,
     /// The temperatures of a step of a result file (`.frd`, the step counted from 1) the
     /// model starts at, on every node of the file (`*INITIAL CONDITIONS, TYPE=TEMPERATURE`).
     /// Set by a results link of the project.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub initial_temperatures: Option<(std::path::PathBuf, u32)>,
+    pub initial_temperatures: Option<(crate::ResultsFile, u32)>,
 }
 
 impl ModelProperties {
     /// The global results file of a submodel; `None` for a general model.
     pub fn submodel_input(&self) -> Option<&std::path::Path> {
         (self.kind == ModelKind::Submodel)
-            .then_some(self.global_results.as_deref())
+            .then_some(self.global_results.as_ref())
             .flatten()
+            .and_then(crate::ResultsFile::path)
     }
 
     /// Absolute zero and the Stefan-Boltzmann constant as they are stored, in SI units

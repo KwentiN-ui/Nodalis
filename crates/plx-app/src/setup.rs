@@ -4296,20 +4296,23 @@ impl Editor {
                     DefinedFieldKind::TemperatureFromFile { file, step } => {
                         ui.label("Result file");
                         ui.horizontal(|ui| {
-                            let name = file.file_name().map_or_else(
-                                || "(none)".to_string(),
-                                |n| n.to_string_lossy().into_owned(),
-                            );
-                            ui.label(name).on_hover_text(file.display().to_string());
+                            let linked = file.analysis().is_some();
+                            let name = match file.path().and_then(|p| p.file_name()) {
+                                _ if linked => "Linked results".to_string(),
+                                Some(n) => n.to_string_lossy().into_owned(),
+                                None => "(none)".to_string(),
+                            };
+                            ui.label(name).on_hover_text(file.label());
                             if ui.button("...").clicked() {
                                 let mut dialog = rfd::FileDialog::new()
                                     .set_title("Result file of the heat transfer analysis")
                                     .add_filter("CalculiX results (*.frd)", &["frd"]);
-                                if let Some(dir) = file.parent().filter(|d| d.is_dir()) {
+                                let dir = (file.path()).and_then(|p| p.parent());
+                                if let Some(dir) = dir.filter(|d| d.is_dir()) {
                                     dialog = dialog.set_directory(dir);
                                 }
                                 if let Some(picked) = dialog.pick_file() {
-                                    *file = picked;
+                                    *file = picked.into();
                                 }
                             }
                         });
@@ -4529,7 +4532,7 @@ impl Editor {
         if let Draft::DefinedField(_, field, _) = &self.draft
             && let DefinedFieldKind::TemperatureFromFile { file, step } = &field.kind
         {
-            if file.as_os_str().is_empty() {
+            if file.path().is_none() {
                 return Err("Choose the result file (.frd) of a heat transfer analysis.".into());
             }
             if *step == 0 {
