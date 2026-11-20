@@ -440,11 +440,11 @@ impl Run {
         // the file too, which is no input of the next run.)
         let eig = input_path.with_extension("eig");
         if let Job::Analysis(prepared) = &mut job
-            && prepared.analysis.model.stored_modes_file.is_none()
+            && prepared.analysis.model.stored_modes.is_none()
             && prepared.analysis.needs_stored_modes()
             && eig.is_file()
         {
-            prepared.analysis.model.stored_modes_file = Some(eig);
+            prepared.analysis.model.stored_modes = Some(plxs_core::handover::Source::Path(eig));
         }
         let output = Arc::new(Mutex::new(vec![
             "************************************************************".to_owned(),

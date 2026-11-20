@@ -77,24 +77,41 @@ pub fn defined_temperatures(
                     }
                 }
             }
-            DefinedFieldKind::TemperatureFile { file, bstep, .. } => {
-                let path = work_dir.join(file);
-                let text = std::fs::read(&path).map_err(|e| {
-                    Error::input(
-                        "*TEMPERATURE",
-                        format!("cannot read the result file {}: {e}", path.display()),
-                    )
-                })?;
+            DefinedFieldKind::TemperatureFrom { source, bstep, .. } => {
                 let step_number = bstep.unwrap_or(1);
-                let values = frd_temperatures(&text, step_number).ok_or_else(|| {
-                    Error::input(
-                        "*TEMPERATURE",
-                        format!(
-                            "the result file {} has no temperatures (NDTEMP) for step {step_number}",
-                            path.display()
-                        ),
-                    )
-                })?;
+                let values: Vec<(u32, f64)> = match source {
+                    plxs_core::handover::Source::Loaded(temperatures) => (temperatures.steps)
+                        .get(&step_number)
+                        .ok_or_else(|| {
+                            Error::input(
+                                "*TEMPERATURE",
+                                format!(
+                                    "the analysis the temperatures come from has none of step {step_number}"
+                                ),
+                            )
+                        })?
+                        .iter()
+                        .map(|(&id, &t)| (id, t))
+                        .collect(),
+                    plxs_core::handover::Source::Path(file) => {
+                        let path = work_dir.join(file);
+                        let text = std::fs::read(&path).map_err(|e| {
+                            Error::input(
+                                "*TEMPERATURE",
+                                format!("cannot read the result file {}: {e}", path.display()),
+                            )
+                        })?;
+                        frd_temperatures(&text, step_number).ok_or_else(|| {
+                            Error::input(
+                                "*TEMPERATURE",
+                                format!(
+                                    "the result file {} has no temperatures (NDTEMP) for step {step_number}",
+                                    path.display()
+                                ),
+                            )
+                        })?
+                    }
+                };
                 for (id, value) in values {
                     if let Some(i) = model.nodes.index(id) {
                         set(i, value);
