@@ -32,11 +32,12 @@ the mesh (picked nodes of an old mesh) is still listed, but stays empty until yo
 again; items using it show a missing reference.
 
 Sets are used through the region combo box of the dialogs (#ui("Node Set"), #ui("Element Set"),
-#ui("Surface")). Renaming a set renames it in every item that uses it. The input file contains
+#ui("Surface")). Items keep the set they use when it is renamed. The input file contains
 the sets as `*NSET`, `*ELSET` and `*SURFACE` with your names.
 
 Editing a node set or an element surface of an imported mesh turns it into a set of your own
-with the same nodes or faces, which you can then pick anew.
+with the same nodes or faces, which you can then pick anew. The items that used the imported set
+use your set from then on.
 
 #limitation[Element sets and node-based surfaces of an imported mesh cannot be edited, only
 deleted. Element sets are picked through element faces, so in 2D models only the elements at the
