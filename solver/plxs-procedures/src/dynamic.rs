@@ -706,11 +706,16 @@ pub(crate) struct Energies {
     pub(crate) dissipation: f64,
 }
 
-/// The variables (`ALLIE`, `ALLKE`, `ALLWK`, `ALLVD`) of each `*EL PRINT` of the step that
-/// asks for energies of the model, with its set.
-pub(crate) fn energy_requests(
-    step: &Step,
-) -> Vec<(HistorySource, Vec<plxs_core::step::OutputVariable>)> {
+/// An `*EL PRINT` of energies of the model.
+pub(crate) struct EnergyRequest {
+    source: HistorySource,
+    /// `ALLIE`, `ALLKE`, `ALLWK`, `ALLVD`.
+    variables: Vec<plxs_core::step::OutputVariable>,
+    origin: Option<u64>,
+}
+
+/// The requests of the step that ask for energies of the model.
+pub(crate) fn energy_requests(step: &Step) -> Vec<EnergyRequest> {
     (step.outputs.el_print.iter())
         .filter_map(|request| {
             use plxs_core::step::OutputVariable as V;
@@ -731,7 +736,11 @@ pub(crate) fn energy_requests(
                 Some(plxs_core::step::HistorySet::Elements(set)) => HistorySource::Elements(set),
                 None => HistorySource::Step,
             };
-            (!variables.is_empty()).then_some((source, variables))
+            (!variables.is_empty()).then_some(EnergyRequest {
+                source,
+                variables,
+                origin: request.origin,
+            })
         })
         .collect()
 }
@@ -739,12 +748,12 @@ pub(crate) fn energy_requests(
 /// One history block per requested energy, a single total row each.
 pub(crate) fn write_energies(
     results: &mut plxs_core::Results,
-    requests: &[(HistorySource, Vec<plxs_core::step::OutputVariable>)],
+    requests: &[EnergyRequest],
     energies: &Energies,
     (step, increment, time): (u32, u32, f64),
 ) {
-    for (set, variables) in requests {
-        for variable in variables {
+    for request in requests {
+        for variable in &request.variables {
             use plxs_core::results::HistoryQuantity as Q;
             use plxs_core::step::OutputVariable as V;
             let (quantity, value) = match variable {
@@ -754,10 +763,11 @@ pub(crate) fn write_energies(
                 _ => (Q::ModelDampingDissipation, energies.dissipation),
             };
             results.history.push(plxs_core::results::HistoryBlock {
+                origin: request.origin,
                 step,
                 increment,
                 quantity,
-                source: set.clone(),
+                source: request.source.clone(),
                 time,
                 rows: vec![(0, vec![value])],
             });

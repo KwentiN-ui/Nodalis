@@ -37,7 +37,7 @@ pub struct ModelConstraints {
     /// step with `*SELECT CYCLIC SYMMETRY MODES` uses.
     pub cyclic_real: Vec<LinearConstraint>,
     /// Slave nodes (dense indices) of each tie that are too far from its master surface.
-    pub untied: Vec<(String, Vec<u32>)>,
+    pub untied: Vec<(plxs_core::TieId, Vec<u32>)>,
     /// Slave nodes (dense indices) each tie with `ADJUST` moved on to its master surface,
     /// by more than rounding.
     pub moved: Vec<(String, Vec<u32>)>,
@@ -72,7 +72,7 @@ impl ModelConstraints {
         // Ties first: adjusting changes coordinates that rigid bodies and cylindrical
         // systems use.
         let mut tie_constraints = Vec::new();
-        for t in model.constraints.ties.clone() {
+        for (index, t) in model.constraints.ties.clone().into_iter().enumerate() {
             if t.cyclic_symmetry || t.multistage {
                 // A cyclic symmetry tie only names the sides (see `cyclic`).
                 continue;
@@ -91,7 +91,8 @@ impl ModelConstraints {
                     ids.join(", "),
                     if missed.len() > 10 { ", ..." } else { "" }
                 ));
-                mc.untied.push((t.name.clone(), missed.clone()));
+                mc.untied
+                    .push((plxs_core::TieId::at(index), missed.clone()));
             }
             if t.adjust {
                 let mut moved = Vec::new();

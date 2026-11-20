@@ -894,6 +894,7 @@ mod tests {
                 ],
             }],
             history: vec![HistoryBlock {
+                origin: None,
                 step: 1,
                 increment: 1,
                 quantity: plxs_core::results::HistoryQuantity::Displacements,
