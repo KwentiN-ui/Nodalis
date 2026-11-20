@@ -79,6 +79,9 @@ pub enum Request {
     /// Stop taking the item at this path from another analysis; the analysis keeps its
     /// copy.
     Unlink(Vec<String>),
+    /// The geometry objects deleted in the analysis, by id with their names: the links that
+    /// brought them no longer do, so that they do not come back.
+    Deleted(Vec<(plx_model::Id, String)>),
     /// Open the Campbell block of this analysis, made and linked first if it has none.
     Campbell,
     /// Close the analysis shown in the project window: its data goes back to the project.
@@ -2761,7 +2764,10 @@ impl Workbench {
                 false
             }
         };
-        if check(response.delete.as_ref(), self) {
+        // A part a link brings can be deleted: the link no longer brings it, see
+        // [`Request::Deleted`].
+        let part = matches!(response.delete, Some(TreeItem::Part(_)));
+        if !part && check(response.delete.as_ref(), self) {
             response.delete = None;
         }
         if check(response.toggle_active.as_ref(), self) {
@@ -6208,6 +6214,9 @@ impl Workbench {
             return;
         }
         let name = names.join(", ");
+        let deleted: Vec<(plx_model::Id, String)> = (names.iter())
+            .filter_map(|n| Some((model.object_id(n)?, n.clone())))
+            .collect();
         let cad: Vec<String> = (names.iter())
             .filter(|n| !model.is_imported(n))
             .cloned()
@@ -6291,6 +6300,7 @@ impl Workbench {
             model.geometry = smaller;
         }
         self.output.push(deleted_message(names));
+        self.requests.push(Request::Deleted(deleted));
         self.sync_imported();
         self.after_parts_changed();
     }

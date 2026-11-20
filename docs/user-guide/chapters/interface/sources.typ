@@ -98,6 +98,16 @@ that side when the mesh is made anew with other divisions, other lengths or anot
 refinement, as on imported geometry. A selection of single nodes or element faces holds only
 for the mesh it was made on.
 
+The part keeps its identity through every new mesh: an analysis that takes the block puts the
+new mesh in place of the one it had, under the same part, so that its section and the
+selections on the part stay. Deleting the part in the Geometry or FE Model workspace of the
+analysis removes the wire of the block to it from the project schematic, and the output pane
+says so ("Analysis-1 no longer takes BOX from Box: it was deleted there"); Undo in the analysis
+brings the mesh back, not the wire.
+
+#screenshot("linked-part-deleted.png", [BOX deleted in Analysis-1: the wire from the box is
+  gone])
+
 #screenshot("box-face-remeshed.png", [A boundary condition picked on the end face of a box with
   12 x 2 x 2 elements, after the box was made anew with 24 x 4 x 2 elements])
 
@@ -284,7 +294,10 @@ link brings it as it is. A part of a file comes without a mesh, and the analysis
 its own mesh setup. A part linked from an analysis that meshed it comes with that mesh, so
 that a second analysis solves on the very same nodes, e.g. to take its temperatures or modes.
 The mesh changes where it comes from; in the analysis that takes it, the part's mesh is shown
-as linked and cannot be moved or deleted there.
+as linked and cannot be moved there. Deleting it there ends its link (@mesh-block): the wire
+of the part, or of a block that brings nothing else, is removed; the wire of a whole file
+gives way to wires of its other parts; the wire of a whole analysis or block stays, and leaves
+the deleted object out from then on.
 
 To mesh such a part with the analysis' own setup instead, use #ui("Create Mesh") or
 #ui("Clear Mesh") on it in the Geometry workspace: from then on the analysis leaves the linked
