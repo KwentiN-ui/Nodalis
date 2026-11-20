@@ -62,7 +62,7 @@ fn every_example_of_testdata_reads() {
         );
         for (name, nodes) in &plx.mesh.node_sets {
             assert_eq!(
-                model.sets.node_sets.get(name),
+                model.sets.named_nodes(name),
                 Some(nodes),
                 "{}: set {name}",
                 file.display()
@@ -102,7 +102,7 @@ fn every_fixture_of_the_corpus_reads() {
                 .filter(|&n| plx.mesh.node_index(n).is_some())
                 .collect();
             assert_eq!(
-                model.sets.node_sets.get(name),
+                model.sets.named_nodes(name),
                 Some(&nodes),
                 "{}: set {name}",
                 file.display()
@@ -115,7 +115,7 @@ fn every_fixture_of_the_corpus_reads() {
                 .filter(|&e| model.element_index(e).is_some())
                 .collect();
             assert_eq!(
-                model.sets.element_sets.get(name),
+                model.sets.named_elements(name),
                 Some(&plx_elements),
                 "{}: set {name}",
                 file.display()
@@ -314,7 +314,10 @@ fn carried_loads_keep_their_final_value_of_a_step_time_amplitude() {
     assert_eq!(cload_at(&analysis, 1, 6, 3), -50.0);
     assert_eq!(cload_at(&analysis, 1, 7, 3), -100.0);
     let total = step.loads.concentrated.iter().find(|l| l.value == -100.0);
-    assert_eq!(total.unwrap().amplitude.as_deref(), Some("TOTAL"));
+    assert_eq!(
+        amplitude_label(&analysis, total.unwrap().amplitude),
+        Some("TOTAL")
+    );
     assert!(matches!(
         step.loads.distributed[0].kind,
         DistributedLoadKind::Pressure { value, .. } if value == 1.0
@@ -349,9 +352,10 @@ fn names_are_upper_case_and_references_resolve() {
     ))
     .unwrap();
     let step = &analysis.steps[0];
-    assert_eq!(step.boundaries[0].region, NodeRef::Set("FIX".into()));
+    let fix = analysis.model.sets.node_set_named("FIX").unwrap();
+    assert_eq!(step.boundaries[0].region, NodeRef::Set(fix));
     assert_eq!(
-        step.loads.concentrated[0].amplitude.as_deref(),
+        amplitude_label(&analysis, step.loads.concentrated[0].amplitude),
         Some("RAMP")
     );
     assert!(matches!(
@@ -408,7 +412,10 @@ fn equations_and_generated_sets_are_read() {
 *Step\n*Static\n*Boundary\nFIX, 1, 3\n*End step\n",
     ))
     .unwrap();
-    assert_eq!(analysis.model.sets.node_sets["GEN"], [1, 3, 5, 7]);
+    assert_eq!(
+        analysis.model.sets.named_nodes("GEN").unwrap(),
+        &[1, 3, 5, 7]
+    );
     let equation = &analysis.model.constraints.equations[0];
     assert_eq!(equation.terms.len(), 3);
     assert_eq!(equation.terms[2].coefficient, -0.5);
@@ -505,11 +512,6 @@ fn every_fixture_renders_as_text_that_reads_back_the_same() {
             .analysis;
         first.model.stored_modes_file = None;
         let text = super::render(&first);
-        assert!(
-            super::unwritable_names(&first).is_empty(),
-            "{}",
-            file.display()
-        );
         let again = match read_inp_str(&text, None) {
             Ok(reading) => reading.analysis,
             Err(e) => {
@@ -648,7 +650,7 @@ fn signal_amplitudes_read_and_render_back() {
 *Amplitude, Name=Sweep, Shape=Chirp, Sweep=Log\n0.2, 0.8, 10, 1000\n\
 *Step\n*Dynamic, Direct\n0.001, 1\n*Boundary\nFIX, 1, 3, 0\n*Cload\n5, 3, -1, , SWEEP\n*End step\n";
     let analysis = read(&cube(step)).unwrap();
-    let signal = |name: &str| analysis.model.amplitude(name).unwrap().signal.clone();
+    let signal = |name: &str| amplitude_named(&analysis, name).signal.clone();
     assert_eq!(
         signal("KICK"),
         Some(Signal::Pulse {
@@ -660,7 +662,7 @@ fn signal_amplitudes_read_and_render_back() {
         panic!("{:?}", signal("SHAKE"))
     };
     assert!((phase - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
-    assert!((analysis.model.amplitude("SHAKE").unwrap().value(0.0) - 1.0).abs() < 1e-12);
+    assert!((amplitude_named(&analysis, "SHAKE").value(0.0) - 1.0).abs() < 1e-12);
     assert!(matches!(
         signal("SWEEP"),
         Some(Signal::Chirp {
@@ -671,7 +673,7 @@ fn signal_amplitudes_read_and_render_back() {
     let again = read(&super::render(&analysis)).unwrap();
     for name in ["KICK", "SHAKE", "SWEEP"] {
         let a = signal(name).unwrap();
-        let b = again.model.amplitude(name).unwrap().signal.clone().unwrap();
+        let b = amplitude_named(&again, name).signal.clone().unwrap();
         for t in [0.0, 0.1, 0.101, 0.3, 0.55, 0.9] {
             assert!((a.value(t) - b.value(t)).abs() < 1e-9, "{name} at {t}");
         }
@@ -715,13 +717,9 @@ fn anisotropic_elasticity_and_orientations_read_and_render_back() {
         let SectionKind::Solid { orientation, .. } = &analysis.model.sections[0].kind else {
             panic!("no solid section");
         };
-        assert_eq!(orientation.as_deref(), Some("TURNED"));
-        let axes = analysis
-            .model
-            .orientation("TURNED")
-            .unwrap()
-            .axes()
-            .unwrap();
+        let orientation = analysis.model.orientation(orientation.unwrap()).unwrap();
+        assert_eq!(orientation.name, "TURNED");
+        let axes = orientation.axes().unwrap();
         assert_eq!(axes[2], [0.0, 0.0, 1.0]);
     };
     let analysis = read(&text).unwrap();
@@ -739,4 +737,39 @@ fn anisotropic_elasticity_and_orientations_read_and_render_back() {
     ));
     assert!(read(&text.replace("Name=Turned\n0, 1, 0, -1", "Name=Turned\n0, 1, 0, 0")).is_err());
     assert!(read(&text.replace("Name=Turned", "Name=Turned, System=Cylindrical")).is_err());
+}
+
+/// The label of the amplitude `id`.
+fn amplitude_label(analysis: &Analysis, id: Option<plxs_core::AmplitudeId>) -> Option<&str> {
+    Some(analysis.model.amplitude(id?)?.name.as_str())
+}
+
+/// The amplitude labelled `name`.
+fn amplitude_named<'a>(analysis: &'a Analysis, name: &str) -> &'a plxs_core::Amplitude {
+    (analysis.model.amplitudes.iter())
+        .find(|a| a.name == name)
+        .unwrap_or_else(|| panic!("no amplitude {name}"))
+}
+
+/// A material or amplitude may be used before its definition; one never defined is an error
+/// that names it.
+#[test]
+fn names_resolve_in_any_order_and_undefined_ones_are_errors() {
+    let text = "*Node\n1, 0, 0, 0\n2, 1, 0, 0\n3, 0, 1, 0\n4, 0, 0, 1\n\
+*Element, Type=C3D4, Elset=EALL\n1, 1, 2, 3, 4\n\
+*Solid section, Elset=EALL, Material=Late\n\
+*Material, Name=Late\n*Elastic\n1000, 0.3\n\
+*Step\n*Static\n*Boundary\n1, 1, 3\n*Cload, Amplitude=Later\n4, 3, -1\n*End step\n";
+    let errors = read(text).unwrap_err();
+    let texts: Vec<String> = errors.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        texts,
+        ["*ERROR in *CLOAD: amplitude LATER has not been defined"]
+    );
+    let defined = text.replace("*Step", "*Amplitude, Name=Later\n0, 0, 1, 1\n*Step");
+    let analysis = read(&defined).unwrap();
+    let material = analysis.model.sections[0].kind.material().unwrap();
+    assert_eq!(analysis.model.material(material).unwrap().name, "LATE");
+    let amplitude = analysis.steps[0].loads.concentrated[0].amplitude;
+    assert_eq!(amplitude_label(&analysis, amplitude), Some("LATER"));
 }

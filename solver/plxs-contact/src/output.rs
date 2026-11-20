@@ -153,7 +153,8 @@ pub fn history_blocks(
     let pairs: Vec<usize> = (0..contact.pairs.len())
         .filter(|&i| {
             request.surfaces.as_ref().is_none_or(|(slave, master)| {
-                contact.pairs[i].slave_name == *slave && contact.pairs[i].master_name == *master
+                contact.pairs[i].slave_surface == *slave
+                    && Some(contact.pairs[i].master_surface) == *master
             })
         })
         .collect();

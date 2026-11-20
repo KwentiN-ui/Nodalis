@@ -151,7 +151,7 @@ impl Expander {
             .constraints
             .transforms
             .iter()
-            .flat_map(|t| model.nodes_of(&NodeRef::Set(t.nset.clone())))
+            .flat_map(|t| model.nodes_of(&NodeRef::Set(t.nset)))
             .collect();
         // And one per node of a `*RIGID BODY` (ccx 2.21: the first expanded id moves by
         // the size of the rigid body's node set).
@@ -162,10 +162,10 @@ impl Expander {
             .map(|body| {
                 let mut nodes: Vec<NodeId> = match &body.nodes {
                     plxs_core::constraints::RigidBodyNodes::NodeSet(set) => {
-                        model.nodes_of(&NodeRef::Set(set.clone()))
+                        model.nodes_of(&NodeRef::Set(*set))
                     }
                     plxs_core::constraints::RigidBodyNodes::ElementSet(set) => model
-                        .elements_of(&plxs_core::mesh::ElementRef::Set(set.clone()))
+                        .elements_of(&plxs_core::mesh::ElementRef::Set(*set))
                         .iter()
                         .filter_map(|&id| model.element(id))
                         .flat_map(|e| e.nodes.iter().copied())
@@ -423,9 +423,9 @@ impl Expander {
         for k in 0..model.constraints.rigid_bodies.len() {
             let body = &model.constraints.rigid_bodies[k];
             let mut nodes: Vec<NodeId> = match &body.nodes {
-                RigidBodyNodes::NodeSet(set) => model.nodes_of(&NodeRef::Set(set.clone())),
+                RigidBodyNodes::NodeSet(set) => model.nodes_of(&NodeRef::Set(*set)),
                 RigidBodyNodes::ElementSet(set) => model
-                    .elements_of(&ElementRef::Set(set.clone()))
+                    .elements_of(&ElementRef::Set(*set))
                     .iter()
                     .filter_map(|&id| model.element(id))
                     .flat_map(|e| e.nodes.iter().copied())
@@ -454,12 +454,9 @@ impl Expander {
             }
             members.sort_unstable();
             members.dedup();
-            let mut name = format!("__RIGID_BODY_EXPANDED_{}", k + 1);
-            while model.sets.node_sets.contains_key(&name) {
-                name.push('_');
-            }
-            model.sets.node_sets.insert(name.clone(), members);
-            model.constraints.rigid_bodies[k].nodes = RigidBodyNodes::NodeSet(name);
+            let set =
+                (model.sets).add_node_set(format!("__RIGID_BODY_EXPANDED_{}", k + 1), members);
+            model.constraints.rigid_bodies[k].nodes = RigidBodyNodes::NodeSet(set);
         }
     }
 
@@ -619,7 +616,9 @@ impl Expander {
                 && converted.insert(s)
             {
                 let section = &mut self.analysis.model.sections[s as usize];
-                let material = section.kind.material().unwrap_or_default().to_string();
+                let Some(material) = section.kind.material() else {
+                    continue;
+                };
                 section.kind = SectionKind::Solid {
                     material,
                     thickness: None,
@@ -763,7 +762,7 @@ impl Expander {
         let model = &mut self.analysis.model;
         let mut kept = Vec::new();
         for t in std::mem::take(&mut model.constraints.transforms) {
-            let nodes = model.nodes_of(&NodeRef::Set(t.nset.clone()));
+            let nodes = model.nodes_of(&NodeRef::Set(t.nset));
             let structural = nodes
                 .iter()
                 .filter(|n| self.groups.contains_key(n) || self.u1_rotations.contains_key(n))
@@ -775,7 +774,7 @@ impl Expander {
             if structural != nodes.len() {
                 return Err(Error::Unsupported(format!(
                     "*TRANSFORM on set {} mixes shell or beam nodes with others",
-                    t.nset
+                    model.sets.node_set_name(t.nset)
                 )));
             }
             if t.kind != plxs_core::constraints::TransformKind::Rectangular {
@@ -914,7 +913,7 @@ impl Expander {
     /// ties the original node, the expanded nodes follow on average).
     fn surface_nodes(&self, knots: &HashSet<NodeId>) -> HashSet<NodeId> {
         let mut out = HashSet::new();
-        for surface in self.analysis.model.sets.surfaces.values() {
+        for surface in self.analysis.model.sets.surfaces.iter().map(|s| &s.surface) {
             if let plxs_core::mesh::Surface::Node(ids) = surface {
                 out.extend(
                     ids.iter()
@@ -1406,13 +1405,9 @@ impl Expander {
         }
         expanded.sort_unstable();
         expanded.dedup();
-        let sets = &mut self.analysis.model.sets.node_sets;
-        let name = (1..)
-            .map(|k| format!("PLXS-FOLLOWER-{k}"))
-            .find(|name| !sets.contains_key(name))
-            .unwrap_or_default();
-        sets.insert(name.clone(), expanded);
-        Follower::Nodes(NodeRef::Set(name))
+        let sets = &mut self.analysis.model.sets;
+        let name = format!("PLXS-FOLLOWER-{}", sets.node_sets.len() + 1);
+        Follower::Nodes(NodeRef::Set(sets.add_node_set(name, expanded)))
     }
 
     fn remap_pressure(

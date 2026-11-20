@@ -10,7 +10,8 @@ use crate::{FeModel, ModelSpace};
 /// gets it again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartElementType {
-    pub part: String,
+    /// The part by id, see [`plx_mesh::Part::id`].
+    pub part: crate::Id,
     /// The CalculiX type; its shape tells which elements of the part it is for. Plane
     /// elements follow the model space: `CPE4R` is written as `CAX4R` in an axisymmetric
     /// model.
@@ -54,7 +55,7 @@ pub fn element_type_options(shape: ElementShape, space: ModelSpace) -> Vec<Strin
 impl FeModel {
     /// The element type chosen for the elements of the shape in the part, in the model's
     /// space.
-    pub fn element_type(&self, part: &str, shape: ElementShape) -> Option<String> {
+    pub fn element_type(&self, part: crate::Id, shape: ElementShape) -> Option<String> {
         (self.element_types.iter())
             .find(|c| c.part == part && c.shape() == Some(shape))
             .map(|c| self.properties.space.element_type(&c.type_name, shape))
@@ -62,7 +63,7 @@ impl FeModel {
 
     /// Chooses the element type of the elements of its shape in the part; false for a name
     /// the solver has no shape for.
-    pub fn set_element_type(&mut self, part: &str, type_name: &str) -> bool {
+    pub fn set_element_type(&mut self, part: crate::Id, type_name: &str) -> bool {
         let type_name = type_name.trim().to_ascii_uppercase();
         let Some(shape) = ElementShape::from_type_name(&type_name) else {
             return false;
@@ -72,10 +73,7 @@ impl FeModel {
         }
         self.element_types
             .retain(|c| c.part != part || c.shape() != Some(shape));
-        self.element_types.push(PartElementType {
-            part: part.to_string(),
-            type_name,
-        });
+        self.element_types.push(PartElementType { part, type_name });
         true
     }
 
@@ -88,7 +86,7 @@ impl FeModel {
         let mut changes = Vec::new();
         for part in &mesh.parts {
             let choices: Vec<(ElementShape, String)> = (self.element_types.iter())
-                .filter(|c| c.part == part.name)
+                .filter(|c| c.part == part.id)
                 .filter_map(|c| {
                     let shape = c.shape()?;
                     Some((
@@ -138,9 +136,9 @@ impl FeModel {
         !changes.is_empty()
     }
 
-    /// Follows a renamed part with the element types chosen for it. Merged parts keep the
-    /// choices of the part merged into.
-    pub(crate) fn rename_element_types(&mut self, old: &str, new: &str) {
+    /// Moves the element types chosen for the part `old` to the part `new`, as when parts
+    /// are merged into `new`: merged parts keep the choices of the part merged into.
+    pub(crate) fn move_element_types(&mut self, old: crate::Id, new: crate::Id) {
         let kept: Vec<Option<ElementShape>> = (self.element_types.iter())
             .filter(|c| c.part == new)
             .map(PartElementType::shape)
@@ -148,7 +146,7 @@ impl FeModel {
         self.element_types
             .retain(|c| c.part != old || !kept.contains(&c.shape()));
         for choice in self.element_types.iter_mut().filter(|c| c.part == old) {
-            choice.part = new.to_string();
+            choice.part = new;
         }
     }
 }
@@ -180,11 +178,13 @@ mod tests {
         .unwrap();
         mesh.parts = vec![
             Part {
+                id: Default::default(),
                 bodies: Vec::new(),
                 name: "A".into(),
                 elements: vec![1, 3],
             },
             Part {
+                id: Default::default(),
                 bodies: Vec::new(),
                 name: "B".into(),
                 elements: vec![2],
@@ -230,12 +230,13 @@ mod tests {
 
     #[test]
     fn chosen_types_apply_to_their_part_and_shape_only() {
+        let mut mesh = mesh();
+        let a = mesh.parts[0].id;
         let mut model = FeModel::default();
         model.properties.space = ModelSpace::PlaneStress;
-        assert!(model.set_element_type("A", "cps4r"));
-        assert!(!model.set_element_type("A", "XYZ"));
-        assert!(!model.set_element_type("A", "B32"));
-        let mut mesh = mesh();
+        assert!(model.set_element_type(a, "cps4r"));
+        assert!(!model.set_element_type(a, "XYZ"));
+        assert!(!model.set_element_type(a, "B32"));
         assert!(model.apply_element_types(&mut mesh));
         let types: Vec<&str> = mesh
             .elements()
@@ -246,14 +247,14 @@ mod tests {
         assert!(!model.apply_element_types(&mut mesh));
 
         // A new choice for the shape replaces the old one.
-        model.set_element_type("A", "CPS4");
+        model.set_element_type(a, "CPS4");
         assert_eq!(model.element_types.len(), 1);
 
         // The choice follows the model space, keeping the reduced integration.
-        model.set_element_type("A", "CPS4R");
+        model.set_element_type(a, "CPS4R");
         model.properties.space = ModelSpace::Axisymmetric;
         assert_eq!(
-            model.element_type("A", ElementShape::Quad4).as_deref(),
+            model.element_type(a, ElementShape::Quad4).as_deref(),
             Some("CAX4R")
         );
         model.apply_element_types(&mut mesh);
@@ -261,17 +262,27 @@ mod tests {
     }
 
     #[test]
-    fn choices_follow_renamed_and_merged_parts() {
+    fn choices_stay_on_renamed_parts_and_follow_merged_ones() {
+        let mut mesh = mesh();
+        let [a, b, c] = [mesh.parts[0].id, mesh.parts[1].id, crate::Id::new()];
         let mut model = FeModel::default();
-        model.set_element_type("A", "C3D8R");
-        model.set_element_type("A", "C3D20R");
-        model.set_element_type("B", "C3D8I");
-        model.rename_part("A", "C");
-        assert!(model.element_types.iter().all(|c| c.part != "A"));
-        // B merged into C: C keeps its C3D8R.
-        model.rename_part("B", "C");
+        model.set_element_type(a, "C3D8R");
+        model.set_element_type(a, "C3D20R");
+        model.set_element_type(b, "C3D8I");
+        // Renamed, the part keeps its choices.
+        mesh.rename_part(0, "RENAMED");
         assert_eq!(
-            model.element_type("C", ElementShape::Hex8).as_deref(),
+            model
+                .element_type(mesh.parts[0].id, ElementShape::Hex8)
+                .as_deref(),
+            Some("C3D8R")
+        );
+        model.replace_part(a, &[c]);
+        assert!(model.element_types.iter().all(|t| t.part != a));
+        // B merged into C: C keeps its C3D8R.
+        model.replace_part(b, &[c]);
+        assert_eq!(
+            model.element_type(c, ElementShape::Hex8).as_deref(),
             Some("C3D8R")
         );
         assert_eq!(model.element_types.len(), 2);

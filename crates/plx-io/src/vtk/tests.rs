@@ -57,11 +57,13 @@ fn mixed_mesh() -> FeMesh {
     })
     .unwrap();
     mesh.parts.push(Part {
+        id: Default::default(),
         bodies: Vec::new(),
         name: "SOLID".into(),
         elements: vec![10],
     });
     mesh.parts.push(Part {
+        id: Default::default(),
         bodies: Vec::new(),
         name: "BEAM & <more>".into(),
         elements: vec![11],

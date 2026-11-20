@@ -268,8 +268,7 @@ pub fn write_frd_to_as(
             .section
             .and_then(|s| model.sections.get(s as usize))
             .and_then(|s| s.kind.material())
-            .and_then(|name| model.materials.iter().position(|m| m.name == name))
-            .map_or(1, |i| i + 1)
+            .map_or(1, |material| material.index() + 1)
     };
     let written = written_elements(model);
     writeln!(

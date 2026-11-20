@@ -178,10 +178,13 @@ fn apply_split(
         brep,
         part_names,
         signatures,
-        compounds,
+        compounds: Vec::new(),
         ..input.clone()
     };
     geometry.ensure_ids();
+    geometry.compounds = (compounds.into_iter())
+        .map(|c| c.with_ids(&mut geometry))
+        .collect();
     Ok(geometry)
 }
 

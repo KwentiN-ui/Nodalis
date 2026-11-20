@@ -372,10 +372,8 @@ impl ElementTable {
                 None => {
                     let section = &model.sections[section_index as usize];
                     let name = match &section.kind {
-                        SectionKind::Solid { material, .. } => material.as_str(),
-                        SectionKind::Beam { material, .. } if section_rule.is_some() => {
-                            material.as_str()
-                        }
+                        SectionKind::Solid { material, .. } => *material,
+                        SectionKind::Beam { material, .. } if section_rule.is_some() => *material,
                         _ => {
                             return Err(Error::input(
                                 "*SOLID SECTION",
@@ -383,21 +381,25 @@ impl ElementTable {
                             ));
                         }
                     };
-                    let mat = model
-                        .material(name)
-                        .ok_or_else(|| Error::undefined("*SOLID SECTION", "material", name))?;
+                    let mat = model.material(name).ok_or_else(|| {
+                        Error::undefined("*SOLID SECTION", "material", format!("#{}", name.0))
+                    })?;
                     let axes = match &section.kind {
                         SectionKind::Solid {
                             orientation: Some(orientation),
                             ..
                         } => {
-                            let o = model.orientation(orientation).ok_or_else(|| {
-                                Error::undefined("*SOLID SECTION", "orientation", orientation)
+                            let o = model.orientation(*orientation).ok_or_else(|| {
+                                Error::undefined(
+                                    "*SOLID SECTION",
+                                    "orientation",
+                                    format!("#{}", orientation.0),
+                                )
                             })?;
                             Some(o.axes().ok_or_else(|| {
                                 Error::input(
                                     "*ORIENTATION",
-                                    format!("orientation {orientation} has parallel axes"),
+                                    format!("orientation {} has parallel axes", o.name),
                                 )
                             })?)
                         }
@@ -639,9 +641,9 @@ impl ElementTable {
         else {
             return Err(bad("needs *BEAM SECTION, SECTION=GENERAL"));
         };
-        let mat = model
-            .material(material)
-            .ok_or_else(|| Error::undefined("*BEAM SECTION", "material", material))?;
+        let mat = model.material(*material).ok_or_else(|| {
+            Error::undefined("*BEAM SECTION", "material", format!("#{}", material.0))
+        })?;
         let elastic = LinearElastic::of(mat, temperature)?;
         let nodes = Self::node_indices(model, element)?;
         let x = |i: usize| model.nodes.coordinates[nodes[i] as usize];
@@ -715,9 +717,9 @@ impl ElementTable {
             } => (material, *thickness),
             _ => return Err(bad("needs *MEMBRANE SECTION or *SHELL SECTION")),
         };
-        let mat = model
-            .material(material)
-            .ok_or_else(|| Error::undefined("*MEMBRANE SECTION", "material", material))?;
+        let mat = model.material(*material).ok_or_else(|| {
+            Error::undefined("*MEMBRANE SECTION", "material", format!("#{}", material.0))
+        })?;
         let elastic = LinearElastic::of(mat, temperature)?;
         let nodes = Self::node_indices(model, element)?;
         let coordinates: Vec<[f64; 3]> = nodes

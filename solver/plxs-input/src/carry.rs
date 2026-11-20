@@ -39,14 +39,17 @@ use plxs_core::step::{
 fn nodes_of(sets: &Sets, region: &NodeRef) -> Option<Vec<NodeId>> {
     match region {
         NodeRef::Node(id) => Some(vec![*id]),
-        NodeRef::Set(name) => sets.node_sets.get(name).cloned(),
+        NodeRef::Set(set) => sets.node_sets.get(set.index()).map(|s| s.nodes.clone()),
     }
 }
 
 fn elements_of(sets: &Sets, region: &ElementRef) -> Option<Vec<ElementId>> {
     match region {
         ElementRef::Element(id) => Some(vec![*id]),
-        ElementRef::Set(name) => sets.element_sets.get(name).cloned(),
+        // A set without elements: the name of point masses.
+        ElementRef::Set(set) => (sets.element_sets.get(set.index()))
+            .map(|s| s.elements.clone())
+            .filter(|elements| !elements.is_empty()),
     }
 }
 
@@ -268,7 +271,7 @@ pub(crate) fn replace_distributed(
             "*WARNING in *DLOAD: the CENTRIF load on {} has another point or axis than the \
              one carried over from an earlier step on {dropped} element(s); like CalculiX the \
              carried one is kept there and the new one ignored (use OP=NEW to replace it)",
-            region_name(&load.region)
+            region_name(sets, &load.region)
         ));
         if dropped < elements.len() {
             for element in elements {
@@ -342,10 +345,10 @@ fn key_id(k: Key, keys: &mut Vec<Key>) -> KeyId {
     }
 }
 
-fn region_name(region: &ElementRef) -> String {
+fn region_name(sets: &Sets, region: &ElementRef) -> String {
     match region {
         ElementRef::Element(id) => format!("element {id}"),
-        ElementRef::Set(name) => format!("set {name}"),
+        ElementRef::Set(set) => format!("set {}", sets.element_set_name(*set)),
     }
 }
 
@@ -362,9 +365,11 @@ pub(crate) fn freeze_step_amplitudes(
 ) {
     // The factor of a step-time amplitude at the end of the step, `None` for no amplitude,
     // a total-time one or an unknown name (left to the validation).
-    let factor = |amplitude: &Option<String>| -> Option<f64> {
-        let a = model.amplitude(amplitude.as_deref()?)?;
-        (!a.total_time).then(|| a.value(step_time))
+    let factor = |amplitude: &Option<plxs_core::AmplitudeId>| -> Option<f64> {
+        let a = model.amplitude((*amplitude)?)?;
+        // A placeholder of an amplitude not defined (yet) has no curve.
+        let defined = !a.points.is_empty() || a.signal.is_some();
+        (defined && !a.total_time).then(|| a.value(step_time))
     };
     for boundary in boundaries.iter_mut() {
         if let Some(f) = factor(&boundary.amplitude) {

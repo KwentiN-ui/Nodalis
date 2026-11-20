@@ -707,6 +707,22 @@ impl Analysis {
         self.poll();
     }
 
+    /// Stops the solver keeping the increments it finished: the run ends once they are
+    /// written, see [`plx_solve::Run::stop_keeping_results`].
+    pub fn stop_keeping_results(&mut self) {
+        self.job.stop_keeping_results();
+    }
+
+    /// Whether the run was stopped and writes the results it has.
+    pub fn is_stopping(&self) -> bool {
+        self.job.is_stopping()
+    }
+
+    /// The increments the solver finished so far, which a stop can keep.
+    pub fn increments_done(&self) -> u32 {
+        self.job.increments_done()
+    }
+
     pub fn status_text(status: JobStatus) -> &'static str {
         match status {
             JobStatus::Running => "running",
@@ -714,6 +730,7 @@ impl Analysis {
             JobStatus::FailedWithResults => "finished with errors, results available",
             JobStatus::Failed => "failed",
             JobStatus::Killed => "killed",
+            JobStatus::StoppedWithResults => "stopped, results so far kept",
         }
     }
 
@@ -765,11 +782,11 @@ impl Analysis {
                 ui.spinner();
             }
             let seconds = self.seconds();
-            ui.label(format!(
-                "{}: {} ({seconds:.1} s)",
-                self.name,
-                Self::status_text(status)
-            ));
+            let state = match self.is_stopping() {
+                true => "stopping, writing the results so far",
+                false => Self::status_text(status),
+            };
+            ui.label(format!("{}: {state} ({seconds:.1} s)", self.name));
             if let Some(text) = self.progress() {
                 ui.separator();
                 ui.label(text);
@@ -880,6 +897,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(plx_mesh::Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "Solid-1".into(),
             elements: vec![1, 2, 3],
@@ -928,7 +946,7 @@ mod tests {
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("S235")),
-                region: Region::Parts(vec!["Solid-1".into()]),
+                region: Region::Parts(model.mesh().ids_of(&["Solid-1"])),
                 thickness: 1.0,
                 kind: plx_model::SectionKind::Solid,
             }],
@@ -1023,6 +1041,7 @@ mod tests {
         model.edit_mesh(|mesh, _| {
             mesh.parts[0].elements = vec![1, 2];
             mesh.parts.push(plx_mesh::Part {
+                id: Default::default(),
                 bodies: Vec::new(),
                 name: "Solid-2".into(),
                 elements: vec![3],

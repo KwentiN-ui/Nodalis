@@ -688,6 +688,7 @@ fn draw_shapes(
     let all_parts;
     let parts: &[plx_mesh::Part] = if mesh.parts.is_empty() {
         all_parts = [plx_mesh::Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: String::new(),
             elements: mesh.elements().iter().map(|e| e.id).collect(),

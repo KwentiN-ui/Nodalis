@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::mesh::NodeId;
 
-/// A section on an element set. `elset` is upper case; `material` too.
+/// A section on an element set.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Section {
-    pub elset: String,
+    pub elset: crate::ElementSetId,
     pub kind: SectionKind,
 }
 
@@ -16,17 +16,17 @@ pub enum SectionKind {
     /// `*SOLID SECTION`: solids, 2D elements (with their thickness), trusses (with their
     /// cross-section area in the same field).
     Solid {
-        material: String,
+        material: crate::MaterialId,
         /// Thickness of plane stress/strain elements or area of trusses, when given.
         thickness: Option<f64>,
-        /// `ORIENTATION=`: the name (upper case) of the `*ORIENTATION` whose axes the
-        /// constants of an anisotropic material refer to.
+        /// `ORIENTATION=`: the orientation whose axes the constants of an anisotropic
+        /// material refer to.
         #[serde(default)]
-        orientation: Option<String>,
+        orientation: Option<crate::OrientationId>,
     },
     /// `*SHELL SECTION`.
     Shell {
-        material: String,
+        material: crate::MaterialId,
         thickness: f64,
         /// Offset of the reference surface in units of the thickness.
         offset: f64,
@@ -35,14 +35,14 @@ pub enum SectionKind {
     },
     /// `*MEMBRANE SECTION`.
     Membrane {
-        material: String,
+        material: crate::MaterialId,
         thickness: f64,
         offset: f64,
     },
     /// `*BEAM SECTION`, also with `SECTION=GENERAL` on Nodalis's `U1` user elements
     /// ([`BeamProfile::General`]).
     Beam {
-        material: String,
+        material: crate::MaterialId,
         profile: BeamProfile,
         /// The direction (in the data) that fixes the orientation of the profile, the first
         /// local axis as CalculiX defines it.
@@ -58,12 +58,12 @@ pub enum SectionKind {
 
 impl SectionKind {
     /// The material of the section, if it has one (springs and gaps have none).
-    pub fn material(&self) -> Option<&str> {
+    pub fn material(&self) -> Option<crate::MaterialId> {
         match self {
             SectionKind::Solid { material, .. }
             | SectionKind::Shell { material, .. }
             | SectionKind::Membrane { material, .. }
-            | SectionKind::Beam { material, .. } => Some(material),
+            | SectionKind::Beam { material, .. } => Some(*material),
             SectionKind::Spring(_) | SectionKind::Gap(_) => None,
         }
     }
@@ -110,7 +110,7 @@ pub enum BeamProfile {
 /// second in the plane of `a` and `b`, the third normal to both.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Orientation {
-    /// Upper case name.
+    /// Label (the name of the input), not used to refer to it.
     pub name: String,
     pub a: [f64; 3],
     pub b: [f64; 3],
@@ -154,7 +154,7 @@ pub struct Spring {
     pub dof2: u8,
     pub stiffness: SpringStiffness,
     /// `ORIENTATION` is not written by Nodalis; springs act along global axes.
-    pub orientation: Option<String>,
+    pub orientation: Option<crate::OrientationId>,
     /// `STABILIZE` (own parameter): the spring also resists the displacement within each
     /// increment of a nonlinear static step with this factor times its stiffness, a force
     /// that starts from zero in every increment and so leaves none behind. Zero: none.

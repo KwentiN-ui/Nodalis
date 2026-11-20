@@ -79,9 +79,12 @@ pub struct Pair {
     /// `TYPE=MORTAR`: face-to-face integration with a stiff penalty in place of the
     /// Lagrange multipliers, nodal results as mortar (dual-basis) nodal values.
     pub mortar: bool,
+    pub slave_surface: plxs_core::SurfaceId,
+    pub master_surface: plxs_core::SurfaceId,
+    /// Labels of the surfaces, for messages.
     pub slave_name: String,
     pub master_name: String,
-    pub interaction: String,
+    pub interaction: plxs_core::InteractionId,
     pub law: Law,
     /// Friction as defined with the interaction and as currently in force (`*CHANGE
     /// FRICTION`).
@@ -453,7 +456,7 @@ fn element_young(model: &Model, element: u32) -> Option<f64> {
         plxs_core::section::SectionKind::Shell { material, .. } => material,
         _ => return None,
     };
-    let material = model.material(name)?;
+    let material = model.material(*name)?;
     plxs_materials::LinearElastic::of(material, 0.0)
         .ok()
         .map(|e| e.young)
@@ -469,19 +472,22 @@ impl ContactModel {
         let young_default = first_young(model);
         for (index, pair) in model.contact.pairs.iter().enumerate() {
             let keyword = "*CONTACT PAIR";
-            let interaction = model
-                .contact
-                .interactions
-                .iter()
-                .find(|i| i.name == pair.interaction)
+            let interaction = (model.contact.interactions)
+                .get(pair.interaction.index())
                 .ok_or_else(|| {
-                    Error::undefined(keyword, "surface interaction", &pair.interaction)
+                    Error::undefined(
+                        keyword,
+                        "surface interaction",
+                        format!("#{}", pair.interaction.0),
+                    )
                 })?;
-            let master = ContactFace::surface_faces(model, keyword, &pair.master)?;
+            let slave_name = model.sets.surface_name(pair.slave).to_string();
+            let master_name = model.sets.surface_name(pair.master).to_string();
+            let master = ContactFace::surface_faces(model, keyword, pair.master)?;
             if master.is_empty() {
                 return Err(Error::input(
                     keyword,
-                    format!("master surface {} has no faces", pair.master),
+                    format!("master surface {master_name} has no faces"),
                 ));
             }
             let coords = model.nodes.coordinates.clone();
@@ -490,14 +496,14 @@ impl ContactModel {
 
             // Slave side.
             let is_node_surface = matches!(
-                model.sets.surfaces.get(&pair.slave),
+                model.sets.surface(pair.slave),
                 Some(plxs_core::mesh::Surface::Node(_))
             );
             let slave_faces = if is_node_surface {
-                let nodes = surface_nodes(model, keyword, &pair.slave)?;
+                let nodes = surface_nodes(model, keyword, pair.slave)?;
                 ContactFace::faces_of_node_set(model, &nodes)
             } else {
-                ContactFace::surface_faces(model, keyword, &pair.slave)?
+                ContactFace::surface_faces(model, keyword, pair.slave)?
             };
             let young = slave_faces
                 .first()
@@ -534,7 +540,7 @@ impl ContactModel {
             let mut cutoff = Vec::new();
             match pair.kind {
                 ContactKind::NodeToSurface => {
-                    let nodes = surface_nodes(model, keyword, &pair.slave)?;
+                    let nodes = surface_nodes(model, keyword, pair.slave)?;
                     // Consistent nodal areas from the slave faces.
                     let mut area = vec![0.0; model.nodes.len()];
                     for face in &slave_faces {
@@ -547,7 +553,7 @@ impl ContactModel {
                     if is_node_surface && slave_faces.is_empty() && !all_ropes {
                         out.warnings.push(format!(
                             "node surface {} has no exterior faces; unit areas are used for its contact springs",
-                            pair.slave
+                            slave_name
                         ));
                     }
                     let coords = &model.nodes.coordinates;
@@ -643,8 +649,7 @@ impl ContactModel {
             // node-to-face pair with a clearance behaves as without one).
             let clearance = if pair.kind == ContactKind::NodeToSurface && clearance.is_some() {
                 out.warnings.push(format!(
-                    "*CLEARANCE of contact pair {} / {} is ignored: it applies to face-to-face contact only",
-                    pair.slave, pair.master
+                    "*CLEARANCE of contact pair {slave_name} / {master_name} is ignored: it applies to face-to-face contact only",
                 ));
                 None
             } else {
@@ -654,9 +659,11 @@ impl ContactModel {
                 index,
                 kind: pair.kind,
                 mortar,
-                slave_name: pair.slave.clone(),
-                master_name: pair.master.clone(),
-                interaction: pair.interaction.clone(),
+                slave_surface: pair.slave,
+                master_surface: pair.master,
+                slave_name,
+                master_name,
+                interaction: pair.interaction,
                 law,
                 base_friction: friction,
                 friction,
@@ -717,14 +724,14 @@ impl ContactModel {
                 Some(Adjust::Distance(d)) => Some((*d, None)),
                 Some(Adjust::NodeSet(set)) => Some((
                     f64::INFINITY,
-                    Some(model.nodes_of(&plxs_core::mesh::NodeRef::Set(set.clone()))),
+                    Some(model.nodes_of(&plxs_core::mesh::NodeRef::Set(*set))),
                 )),
                 None => None,
             };
             if let Some((distance, set)) = adjust_distance {
                 let allowed: Option<HashSet<u32>> =
                     set.map(|ids| ids.iter().filter_map(|id| model.nodes.index(*id)).collect());
-                let slave_nodes = surface_nodes(model, keyword, &pair.slave)?;
+                let slave_nodes = surface_nodes(model, keyword, pair.slave)?;
                 let master_nodes: HashSet<u32> = prepared
                     .master
                     .iter()
@@ -772,7 +779,7 @@ impl ContactModel {
                 if moved > 0 {
                     out.warnings.push(format!(
                         "contact pair {} / {}: {moved} slave nodes adjusted on to the master surface",
-                        pair.slave, pair.master
+                        prepared.slave_name, prepared.master_name
                     ));
                 }
             }
@@ -839,7 +846,7 @@ impl ContactModel {
                 ContactChange::ContactPair { add, slave, master } => {
                     let mut found = false;
                     for pair in &mut self.pairs {
-                        if &pair.slave_name == slave && &pair.master_name == master {
+                        if &pair.slave_surface == slave && &pair.master_surface == master {
                             pair.active = *add;
                             found = true;
                             let index = pair.index as u32;
@@ -851,7 +858,8 @@ impl ContactModel {
                     }
                     if !found {
                         warnings.push(format!(
-                            "*MODEL CHANGE: no contact pair with slave {slave} and master {master}"
+                            "*MODEL CHANGE: no contact pair with slave #{} and master #{}",
+                            slave.0, master.0
                         ));
                     }
                 }
@@ -861,7 +869,7 @@ impl ContactModel {
                 } => {
                     let mut found = false;
                     for pair in &mut self.pairs {
-                        if &pair.interaction == interaction {
+                        if pair.interaction == *interaction {
                             let young = pair.base_friction.map_or(0.0, |f| 2.0 * f.stick);
                             pair.friction = FrictionLaw::resolve(Some(friction), young);
                             found = true;
@@ -869,7 +877,8 @@ impl ContactModel {
                     }
                     if !found {
                         warnings.push(format!(
-                            "*CHANGE FRICTION: no contact pair uses interaction {interaction}"
+                            "*CHANGE FRICTION: no contact pair uses interaction #{}",
+                            interaction.0
                         ));
                     }
                 }

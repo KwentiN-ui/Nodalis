@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Material {
-    /// Upper case name.
+    /// Label (the name of the input), not used to refer to it.
     pub name: String,
     pub elastic: Option<Elastic>,
     /// Hyperelasticity (`*HYPERELASTIC`); replaces `elastic` where both are given.

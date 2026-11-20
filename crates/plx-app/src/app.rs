@@ -519,7 +519,8 @@ impl AnalysisWindow {
     /// [`crate::links::apply_results`].
     pub fn apply_results(&mut self, link: &plx_io::project::Link, global: u32, file: PathBuf) {
         if let Some(model) = &mut self.workbench.model
-            && crate::links::apply_results(&mut model.fe, link, global, file)
+            && let split = model.split()
+            && crate::links::apply_results(split.fe, split.mesh, link, global, file)
         {
             self.workbench.symbols_shown = None;
         }
@@ -1532,8 +1533,8 @@ pub(crate) fn merge_part_meshes(
 /// Joins the mesh anew after the compound parts of the geometry changed from `before`: the
 /// meshes of the parts become bodies of their compound parts, or parts of their own again.
 /// What the FE model put on a part follows it: on a part of the geometry joined into a
-/// compound to the compound, on a dissolved compound to each of its parts, on a renamed one
-/// to its new name.
+/// compound to the compound, on a dissolved compound to each of its parts. A renamed part
+/// or compound is the same part by id.
 pub(crate) fn apply_compounds(model: &mut Model, before: &[plx_model::CompoundPart]) {
     let Some(geometry) = &model.geometry else {
         return;
@@ -1543,21 +1544,21 @@ pub(crate) fn apply_compounds(model: &mut Model, before: &[plx_model::CompoundPa
     }
     let after = geometry.compounds.clone();
     let members = geometry.compound_members();
-    let before_members: Vec<(String, Vec<String>)> = (before.iter())
-        .map(|c| (c.name.clone(), c.parts.clone()))
+    let before_members: Vec<(plx_model::Id, String, Vec<plx_model::Id>)> = (before.iter())
+        .map(|c| (c.id, c.name.clone(), c.parts.clone()))
         .collect();
     model.edit_mesh(|mesh, fe| {
         // The mesh operations name what they moved, see below.
         let operations = fe.mesh_operations.clone();
         mesh.split_compounds();
         for old in before {
-            if after.iter().any(|a| a.name == old.name) {
+            if after.iter().any(|a| a.id == old.id) {
                 continue;
             }
-            let renamed = (after.iter()).find(|a| a.parts.iter().any(|p| old.parts.contains(p)));
-            match renamed {
-                Some(new) => fe.rename_part(&old.name, &new.name),
-                None => fe.split_part(&old.name, &old.parts),
+            let joined = (after.iter()).find(|a| a.parts.iter().any(|p| old.parts.contains(p)));
+            match joined {
+                Some(new) => fe.replace_part(old.id, &[new.id]),
+                None => fe.replace_part(old.id, &old.parts),
             }
         }
         mesh.compose_compounds(&members);
@@ -1565,8 +1566,8 @@ pub(crate) fn apply_compounds(model: &mut Model, before: &[plx_model::CompoundPa
         // nodes of their own.
         mesh.unshare_parts();
         for compound in &after {
-            for part in &compound.parts {
-                fe.rename_part(part, &compound.name);
+            for &part in &compound.parts {
+                fe.replace_part(part, &[compound.id]);
             }
         }
         fe.follow_compounds_in_mesh_operations(operations, &before_members, &members);
@@ -3762,35 +3763,8 @@ impl Workbench {
             }
             return;
         }
-        if let NewItem::FieldOutput(step) | NewItem::ContactFieldOutput(step) = kind
-            && let Some(step) = (self.setup_model()).and_then(|m| m.fe.steps.get(step))
-            && step.kind.computes_eigenmodes()
-        {
-            self.toast = Some(crate::toast::Toast::new(
-                format!(
-                    "{} keeps its mode shapes and takes no field outputs",
-                    step.name
-                ),
-                false,
-            ));
-            return;
-        }
         if let Some(model) = self.setup_model() {
-            // The solver writes the values of all contacts with one contact field output, so
-            // a step that has one opens it.
-            let existing = match kind {
-                NewItem::ContactFieldOutput(step) => (model.fe.steps.get(step))
-                    .and_then(|s| {
-                        (s.field_outputs.iter())
-                            .position(|f| f.kind == plx_model::OutputKind::Contact)
-                    })
-                    .map(|i| TreeItem::FieldOutput(step, i)),
-                _ => None,
-            };
-            self.editor = match existing {
-                Some(item) => Editor::edit(&item, &model.fe, model.mesh()),
-                None => Editor::create(kind, &model.fe),
-            };
+            self.editor = Editor::create(kind, &model.fe);
             self.set_tree_view(TreeView::FeModel);
         }
     }
@@ -6233,14 +6207,15 @@ impl Workbench {
         }
         // The parts of the FE model that go whole: the selections that picked them simply
         // lose them.
-        let gone: Vec<String> = (model.mesh().parts.iter())
+        let gone: Vec<plx_model::Id> = (model.mesh().parts.iter())
             .filter(|p| {
                 plx_model::part_bodies(p)
                     .iter()
                     .all(|b| names.iter().any(|n| n.eq_ignore_ascii_case(b)))
             })
-            .map(|p| p.name.clone())
+            .map(|p| p.id)
             .collect();
+        let bodies = plx_model::body_ids(model.mesh(), names);
         let tags = shapes.as_ref().map(|(_, tags)| tags);
         // Both changes happen in one frame, so one undo brings back the mesh and the
         // selections.
@@ -6250,7 +6225,7 @@ impl Workbench {
             // A selection on the geometry of only the deleted parts is gone too, meshed or
             // not.
             let mut smaller = mesh.clone();
-            smaller.remove_bodies(names);
+            smaller.remove_bodies(&bodies);
             fe.drop_items_where(|region| {
                 let lost = |tags: &std::collections::BTreeMap<_, _>| match region {
                     plx_model::Region::Geometry(entities) => {
@@ -6266,7 +6241,7 @@ impl Workbench {
                 mesh.cad = mesh.cad.renumbered(tags);
                 fe.renumber_cad(tags);
             }
-            mesh.remove_bodies(names);
+            mesh.remove_bodies(&bodies);
             fe.remove_parts_from_regions(&gone);
         });
         if let Some((smaller, tags)) = shapes {
@@ -6320,7 +6295,10 @@ impl Workbench {
         if let Some(geometry) = &mut model.geometry {
             geometry.set_own_meshes(&linked, true);
         }
-        model.edit_mesh(|mesh, _| mesh.remove_bodies(&names));
+        model.edit_mesh(|mesh, _| {
+            let bodies = plx_model::body_ids(mesh, &names);
+            mesh.remove_bodies(&bodies);
+        });
         self.output
             .push(format!("Mesh of {} discarded", names.join(", ")));
         self.after_parts_changed();
@@ -6380,8 +6358,11 @@ impl Workbench {
         };
         let index =
             |name: &String| (view.parts.iter()).position(|p| p.name.eq_ignore_ascii_case(name));
-        (geometry.compounds.iter())
-            .map(|c| (c.name.clone(), c.parts.iter().filter_map(index).collect()))
+        (geometry.compounds.iter().enumerate())
+            .map(|(i, c)| {
+                let members = geometry.member_names(i);
+                (c.name.clone(), members.iter().filter_map(index).collect())
+            })
             .collect()
     }
 
@@ -6502,22 +6483,24 @@ impl Workbench {
                 }
                 geometry.remove_from_compounds(&action_parts);
                 let name = free_compound_name(geometry, mesh, &all_parts);
-                geometry.compounds.push(plx_model::CompoundPart {
-                    name: name.clone(),
-                    parts: action_parts.clone(),
-                });
+                let parts = geometry.part_ids_of(&action_parts);
+                (geometry.compounds).push(plx_model::CompoundPart::new(name.clone(), parts));
                 format!("Compound part {name} made of {}", action_parts.join(", "))
             }
             CompoundAction::Add(c, _) => {
                 let Some(name) = geometry.compounds.get(c).map(|c| c.name.clone()) else {
                     return;
                 };
+                let id = geometry.compounds[c].id;
                 geometry.remove_from_compounds(&action_parts);
-                match geometry.compound_named(&name) {
-                    Some(c) => geometry.compounds[c].parts.extend(action_parts.clone()),
+                let parts = geometry.part_ids_of(&action_parts);
+                match geometry.compound_with_id(id) {
+                    Some(c) => geometry.compounds[c].parts.extend(parts),
+                    // Left empty, it went: it comes back with the parts, the same part.
                     None => geometry.compounds.push(plx_model::CompoundPart {
+                        id,
                         name: name.clone(),
-                        parts: action_parts.clone(),
+                        parts,
                     }),
                 }
                 format!("{} added to {name}", action_parts.join(", "))
@@ -6550,11 +6533,12 @@ impl Workbench {
                 if c >= geometry.compounds.len() {
                     return;
                 }
+                let members = geometry.member_names(c);
                 let gone = geometry.compounds.remove(c);
                 format!(
                     "Compound part {} dissolved into {}",
                     gone.name,
-                    gone.parts.join(", ")
+                    members.join(", ")
                 )
             }
         };
@@ -6605,11 +6589,16 @@ impl Workbench {
         }
         let mut merged = None;
         model.edit_mesh(|mesh, fe| {
-            merged = mesh.merge_parts(parts);
-            if let Some((kept, gone)) = &merged {
-                for name in gone {
-                    fe.rename_part(name, kept);
+            let mut names: Vec<String> = (parts.iter())
+                .filter_map(|&i| mesh.parts.get(i))
+                .map(|p| p.name.clone())
+                .collect();
+            if let Some((kept, gone)) = mesh.merge_parts(parts) {
+                for &id in &gone {
+                    fe.replace_part(id, &[kept]);
                 }
+                let kept = names.remove(0);
+                merged = Some((kept, names));
             }
         });
         let Some((kept, gone)) = merged else {
@@ -6844,10 +6833,10 @@ impl Workbench {
         editor.set_global_sources(&self.incoming.global_sources);
         // A contact detection searches the geometry, if there is one to search; its derived
         // tolerance is worked out again only when the parts searched change.
-        let picked: Vec<String> = (self.tree.selected_parts(TreeView::FeModel).into_iter())
-            .filter_map(|p| model.mesh().parts.get(p).map(|p| p.name.clone()))
+        let picked: Vec<plx_model::Id> = (self.tree.selected_parts(TreeView::FeModel).into_iter())
+            .filter_map(|p| model.mesh().parts.get(p).map(|p| p.id))
             .collect();
-        crate::part_filter_ui::set_selected_part_names(ctx, picked);
+        crate::part_filter_ui::set_selected_parts(ctx, picked);
         let scope = (editor.detection_filter()).and_then(|filter| {
             let display = crate::connections::detection_display(model, self.geometry.as_ref())?;
             Some(crate::connections::DetectionScope::new(
@@ -7470,13 +7459,13 @@ impl Workbench {
                 self.output.extend(warnings);
                 self.results_changed = true;
             }
-            // The results that the steps' field outputs want in a coordinate system; the
-            // steps are those of the analysis, the results keep only its features.
-            let steps = match &self.model {
-                Some(project) if fe.steps.is_empty() => &project.fe.steps,
-                _ => &fe.steps,
+            // The results that the field output wants in a coordinate system; the steps and
+            // the field output are those of the analysis, the results keep only its features.
+            let analysis = match &self.model {
+                Some(project) if fe.steps.is_empty() => &project.fe,
+                _ => fe,
             };
-            let wanted = view.wanted_output_systems(steps, &fe.coordinate_systems);
+            let wanted = view.wanted_output_systems(analysis, &fe.coordinate_systems);
             if wanted != view.output_systems || (systems_changed && !wanted.is_empty()) {
                 let warnings = view.set_output_systems(wanted, mesh);
                 self.output.extend(warnings);
@@ -8954,7 +8943,6 @@ fn step_of(item: &TreeItem) -> Option<usize> {
         | TreeItem::StepGroup(s, _)
         | TreeItem::BoundaryCondition(s, _)
         | TreeItem::Load(s, _)
-        | TreeItem::FieldOutput(s, _)
         | TreeItem::HistoryOutput(s, _)
         | TreeItem::DefinedField(s, _) => Some(s),
         _ => None,
@@ -8976,10 +8964,8 @@ fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
         NewItem::Step => TreeItem::Group("Steps"),
         NewItem::BoundaryCondition(s)
         | NewItem::Load(s)
-        | NewItem::FieldOutput(s)
         | NewItem::HistoryOutput(s)
         | NewItem::ContactHistoryOutput(s, _)
-        | NewItem::ContactFieldOutput(s)
         | NewItem::DefinedField(s) => TreeItem::Step(*s),
         NewItem::Constraint => TreeItem::Group("Constraints"),
         NewItem::SurfaceInteraction
@@ -9152,8 +9138,19 @@ mod tests {
             })
             .unwrap();
             let name = format!("SOLID-{}", part + 1);
-            mesh.parts.push(plx_mesh::Part::new(name, vec![part + 1]));
+            mesh.parts.push(plx_mesh::Part::with_id(
+                crate::test_ids::named(&name),
+                name,
+                vec![part + 1],
+            ));
         }
+        let ids = (mesh.parts.iter())
+            .map(|p| plx_model::PartId {
+                name: p.name.clone(),
+                id: p.id,
+            })
+            .collect();
+        let both = mesh.ids_of(&["SOLID-1", "SOLID-2"]);
         let mut model = Model::new(std::path::Path::new("/tmp/teile.ndl"), mesh);
         model.geometry = Some(plx_model::Geometry {
             source: "teile.step".into(),
@@ -9166,7 +9163,7 @@ mod tests {
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
+            ids,
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -9175,7 +9172,7 @@ mod tests {
             orientation: None,
             name: "Section-1".into(),
             material: None,
-            region: plx_model::Region::Parts(vec!["SOLID-1".into(), "SOLID-2".into()]),
+            region: plx_model::Region::Parts(both),
             thickness: 1.0,
             kind: plx_model::SectionKind::Solid,
         });
@@ -9185,26 +9182,24 @@ mod tests {
     #[test]
     fn a_compound_part_joins_the_meshed_parts_and_the_model_follows() {
         let mut model = two_part_model();
-        let parts = vec!["SOLID-1".to_owned(), "SOLID-2".to_owned()];
+        let parts = model.mesh().ids_of(&["SOLID-1", "SOLID-2"]);
         let geometry = model.geometry.as_mut().unwrap();
-        geometry.compounds.push(plx_model::CompoundPart {
-            name: "COMPOUND-1".into(),
-            parts: parts.clone(),
-        });
+        let compound = plx_model::CompoundPart::new("COMPOUND-1", parts.clone());
+        let id = compound.id;
+        geometry.compounds.push(compound);
         apply_compounds(&mut model, &[]);
         let names: Vec<&str> = model.parts.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["COMPOUND-1"]);
+        assert_eq!(model.mesh().parts[0].id, id);
         assert_eq!(model.mesh().parts[0].bodies.len(), 2);
         let on = |model: &Model| model.fe.sections[0].region.clone();
-        assert_eq!(
-            on(&model),
-            plx_model::Region::Parts(vec!["COMPOUND-1".into()])
-        );
+        assert_eq!(on(&model), plx_model::Region::Parts(vec![id]));
 
-        // Renamed in the FE model, the compound keeps the name when meshed anew.
+        // Renamed in the FE model, the compound keeps the name when meshed anew, and the
+        // section stays on it.
         model.rename_part(0, "block").unwrap();
         assert_eq!(model.geometry.as_ref().unwrap().compounds[0].name, "BLOCK");
-        assert_eq!(on(&model), plx_model::Region::Parts(vec!["BLOCK".into()]));
+        assert_eq!(on(&model), plx_model::Region::Parts(vec![id]));
 
         // Dissolved, the parts are parts of their own again and keep the section.
         let before = model.geometry.as_ref().unwrap().compounds.clone();

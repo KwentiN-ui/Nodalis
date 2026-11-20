@@ -52,6 +52,7 @@ mod minimap;
 mod numbers;
 mod saving;
 mod series;
+mod stop_keeping;
 mod study_worker;
 mod transform;
 mod units;
@@ -2269,6 +2270,8 @@ pub struct ProjectApp {
     /// The save running on a worker thread, and what autosave needs to know.
     saver: saving::Saver,
     unsaved: unsaved::Unsaved,
+    /// A Stop asks whether the increments the solves finished are kept.
+    stop_asking: Option<stop_keeping::Stopping>,
     /// Analyses Update Project still has to solve, in order, and those it solves.
     update_queue: VecDeque<u64>,
     updating: Vec<u64>,
@@ -2422,6 +2425,7 @@ impl ProjectApp {
                 .unwrap_or_default(),
             saver: Default::default(),
             unsaved: Default::default(),
+            stop_asking: None,
             update_queue: VecDeque::new(),
             updating: Vec::new(),
             shown_title: String::new(),
@@ -5555,11 +5559,13 @@ impl ProjectApp {
                 None => None,
             };
             // Done: solved, or stopped by an error the monitor shows.
-            let failed = matches!(outcome, Some(Outcome::Failed | Outcome::Stopped))
-                || match node.window() {
-                    Some(window) => window.current_status().is_some_and(|s| s.needs_solve()),
-                    None => node.status().is_some_and(|s| s.needs_solve()),
-                };
+            let failed = matches!(
+                outcome,
+                Some(Outcome::Failed | Outcome::Stopped | Outcome::StoppedWithResults)
+            ) || match node.window() {
+                Some(window) => window.current_status().is_some_and(|s| s.needs_solve()),
+                None => node.status().is_some_and(|s| s.needs_solve()),
+            };
             let name = node.name.clone();
             if failed {
                 // What depends on it is not solved; independent analyses go on.
@@ -5809,8 +5815,9 @@ impl ProjectApp {
         self.output.extend(lost);
     }
 
-    /// Stops Update Project: nothing more is started, and what runs is stopped.
-    fn stop_update(&mut self) {
+    /// Stops Update Project: nothing more is started, and what runs is stopped, keeping
+    /// the increments finished if `keep`.
+    fn stop_update_now(&mut self, keep: bool) {
         if let Some(run) = self.looping.take() {
             self.loops_due.clear();
             let name = self.name_of(run.id);
@@ -5828,7 +5835,10 @@ impl ProjectApp {
         self.updating.clear();
         self.forced.clear();
         for solve in &mut self.solves {
-            solve.stop();
+            match keep {
+                true => solve.stop_keeping_results(),
+                false => solve.stop(),
+            }
         }
         self.output.push("Update stopped".into());
     }
@@ -6045,12 +6055,16 @@ impl ProjectApp {
         }
     }
 
-    /// Stops the solve of one analysis; a queued one is taken out of the queue.
-    fn stop_solve(&mut self, id: u64) {
+    /// Stops the solve of one analysis, keeping the increments finished if `keep`; a
+    /// queued one is taken out of the queue.
+    fn stop_solve_now(&mut self, id: u64, keep: bool) {
         self.update_queue.retain(|&queued| queued != id);
         self.forced.remove(&id);
         if let Some(solve) = (self.solves.iter_mut()).find(|s| s.id == id && s.active()) {
-            solve.stop();
+            match keep {
+                true => solve.stop_keeping_results(),
+                false => solve.stop(),
+            }
         }
     }
 
@@ -7485,15 +7499,15 @@ impl ProjectApp {
                     (links::target_step(link), link.item.get(1))
             {
                 let node = self.nodes.iter().find(|n| n.id == link.source);
-                let writers = node
+                let displacements = node
                     .filter(|n| n.as_file().is_none())
                     .and_then(Node::link_data)
-                    .and_then(|d| links::displacement_writers(d.fe, source_step));
+                    .and_then(|d| links::writes_displacements(d.fe, source_step));
                 incoming.global_sources.push(links::GlobalSource {
                     step: step.to_owned(),
                     source: source.clone(),
                     source_step: source_step.clone(),
-                    writers,
+                    displacements,
                 });
             }
             if links::is_state(link) {
@@ -7969,7 +7983,7 @@ impl ProjectApp {
                 }
             }
             Payload::Results(global, file) => {
-                links::apply_results(data.fe, link, global, file);
+                links::apply_results(data.fe, data.mesh, link, global, file);
             }
             Payload::Chain { .. } | Payload::Bundle { .. } => {}
         }
@@ -8900,6 +8914,7 @@ impl eframe::App for ProjectApp {
         self.new_analysis_window(&ctx);
         self.settings_window(&ctx);
         self.unsaved_window(&ctx);
+        self.stop_keeping_window(&ctx);
         self.updater.show(&ctx, &mut self.output);
         self.keep_units();
         self.sync_links(&ctx);
@@ -10005,6 +10020,7 @@ fn take_refine_input(nodes: &mut [Node], links: &[Link], id: u64) {
                     .filter(|(name, _)| copy.origins.is_cad(name))
                     .map(|(name, _)| name.to_owned())
                     .collect();
+                let cad = plx_model::body_ids(&copy.mesh, &cad);
                 copy.mesh.remove_bodies(&cad);
                 copy.origins.reconcile(&copy.mesh);
                 refine.model.data_mut().take_mesh(copy);
@@ -14853,6 +14869,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(plx_mesh::Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "A".into(),
             elements: vec![1],
@@ -14860,7 +14877,7 @@ mod tests {
         let mut model = plx_model::FeModel::default();
         let shift = plx_model::MeshOperation {
             name: "Transform-1".into(),
-            parts: vec!["A".into()],
+            parts: mesh.ids_of(&["A"]),
             kind: plx_model::MeshOperationKind::Transform(plx_mesh::MeshTransform::Translate([
                 0.0, 1.0, 0.0,
             ])),

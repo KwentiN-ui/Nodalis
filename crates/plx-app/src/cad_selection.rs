@@ -837,7 +837,7 @@ mod tests {
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("Steel")),
-                region: Region::Parts(vec!["SOLID-1".into()]),
+                region: Region::Parts(model.mesh().ids_of(&["SOLID-1"])),
                 thickness: 1.0,
                 kind: SectionKind::Solid,
             }],
@@ -908,14 +908,13 @@ mod tests {
         );
         let fine_elongation = elongation(&model);
 
-        if let (Some(coarse), Some(fine)) = (coarse_elongation, fine_elongation) {
-            // 100 MPa over 100 mm of steel stretch it by 0.048 mm; the hole adds a little.
-            let plain = 100.0 / 210000.0 * 100.0;
-            for value in [coarse, fine] {
-                assert!(value > plain && value < 1.3 * plain, "{value} vs. {plain}");
-            }
-            assert!((fine - coarse).abs() < 0.03 * fine, "{coarse} -> {fine}");
+        let (coarse, fine) = (coarse_elongation, fine_elongation);
+        // 100 MPa over 100 mm of steel stretch it by 0.048 mm; the hole adds a little.
+        let plain = 100.0 / 210000.0 * 100.0;
+        for value in [coarse, fine] {
+            assert!(value > plain && value < 1.3 * plain, "{value} vs. {plain}");
         }
+        assert!((fine - coarse).abs() < 0.03 * fine, "{coarse} -> {fine}");
     }
 
     /// A cantilever of two CAD lines along x, 0..60 and 60..100, meshed as beams: fixed at
@@ -946,7 +945,8 @@ mod tests {
         let mut geometry = model.geometry.clone().unwrap();
         geometry.meshing.max_size = 20.0;
         model.set_mesh(plx_mesher::generate_mesh(&geometry).unwrap().mesh);
-        let lines: Vec<String> = model.mesh().parts.iter().map(|p| p.name.clone()).collect();
+        let lines: Vec<plx_model::Id> = model.mesh().part_ids();
+        let names: Vec<String> = model.mesh().parts.iter().map(|p| p.name.clone()).collect();
         assert_eq!(lines.len(), 1, "{lines:?}");
 
         // Looking down onto the lines at x, within 1 of them.
@@ -1078,7 +1078,7 @@ mod tests {
         let coarse = check(&model);
         let coarse_deflection = tip_deflection(&model);
 
-        for part in &lines {
+        for part in &names {
             geometry.mesh_items.push(plx_model::MeshSetupItem {
                 name: format!("Meshing_Parameters-{part}"),
                 kind: plx_model::MeshSetupKind::MeshingParameters {
@@ -1090,7 +1090,7 @@ mod tests {
                 },
             });
         }
-        for part in &lines {
+        for part in &names {
             let fine = plx_mesher::generate_part_mesh(&geometry, part).unwrap();
             let mesh = plx_mesher::merge_part(model.mesh(), fine.mesh);
             model.set_mesh(mesh);
@@ -1099,20 +1099,19 @@ mod tests {
         assert!(fine > 3 * coarse, "{coarse} -> {fine}");
         let fine_deflection = tip_deflection(&model);
 
-        if let (Some(coarse), Some(fine)) = (coarse_deflection, fine_deflection) {
-            // F L^3 / (3 E I) with I = 10^4 / 12.
-            let theory = 100.0 * 100f32.powi(3) / (3.0 * 210000.0 * 1e4 / 12.0);
-            for value in [coarse, fine] {
-                assert!(
-                    (value - theory).abs() < 0.03 * theory,
-                    "{value} vs. {theory}"
-                );
-            }
+        let (coarse, fine) = (coarse_deflection, fine_deflection);
+        // F L^3 / (3 E I) with I = 10^4 / 12.
+        let theory = 100.0 * 100f32.powi(3) / (3.0 * 210000.0 * 1e4 / 12.0);
+        for value in [coarse, fine] {
+            assert!(
+                (value - theory).abs() < 0.03 * theory,
+                "{value} vs. {theory}"
+            );
         }
     }
 
-    /// The largest downward displacement CalculiX computes, if ccx is installed.
-    fn tip_deflection(model: &Model) -> Option<f32> {
+    /// The largest downward displacement the solver computes.
+    fn tip_deflection(model: &Model) -> f32 {
         let inp = plx_io::inp::write_inp(&model.active(), "Kragarm").unwrap();
         let dir = std::env::temp_dir().join(format!(
             "nodalis-lines-remesh-{}-{}",
@@ -1126,11 +1125,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         let disp = results.increments.last().unwrap().field("DISP").unwrap();
         let values = &disp.component("U3").unwrap().values;
-        Some(-values.get().iter().copied().fold(f32::MAX, f32::min))
+        -values.get().iter().copied().fold(f32::MAX, f32::min)
     }
 
-    /// The largest displacement along x CalculiX computes, if ccx is installed.
-    fn elongation(model: &Model) -> Option<f32> {
+    /// The largest displacement along x the solver computes.
+    fn elongation(model: &Model) -> f32 {
         let inp = plx_io::inp::write_inp(&model.active(), "Platte").unwrap();
         let dir = std::env::temp_dir().join(format!(
             "nodalis-remesh-{}-{}",
@@ -1144,6 +1143,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         let disp = results.increments.last().unwrap().field("DISP").unwrap();
         let values = &disp.component("U1").unwrap().values;
-        Some(values.get().iter().copied().fold(f32::MIN, f32::max))
+        values.get().iter().copied().fold(f32::MIN, f32::max)
     }
 }

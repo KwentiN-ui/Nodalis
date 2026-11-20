@@ -38,7 +38,7 @@ Create them with #ui("Constraint") on the #ui("Connections") tab of the ribbon.
     written as `GAPUNI` elements to fixed ground nodes, one per node; only there do
     #ui("Tensile force") and #ui("Offset") matter. With #ui("Nonlinear") the contact is solved
     nonlinearly, otherwise it is linearised in a linear step. On solids and 2D models the
-    support reports like a contact: a #ui("Contact Output") field output with `CSTR` and `CDIS`
+    support reports like a contact: the field #ui("CONTACT") of the results
     shows its pressure (`CPRESS`, e.g. the bearing pressure in a bolt hole modelled without
     the bolt) and its opening (`COPEN`, negative where it is closed), and a
     #ui("Contact Output") history output with the support as its pair prints the force it
@@ -553,7 +553,7 @@ the model check reports them.
 ==== Contact outputs <contact-outputs>
 
 Right-click a contact region or a contact pair in the tree to create its outputs directly:
-#ui("Create Contact History Output") and #ui("Create Contact Field Output"). With one step the
+#ui("Create Contact History Output"). With one step the
 entry opens the dialog right away, with several steps a submenu asks for the step.
 
 #screenshot("contact-output-menu.png", [Contact outputs in the context menu of a contact region])
@@ -566,9 +566,9 @@ following steps (see History outputs in the step chapter).
 
 #screenshot("contact-output-dialog.png", [Prefilled contact history output of a bonded region])
 
-The contact field output (`*CONTACT FILE`) writes the pressure, slip and gap of all contacts into
-the `.frd` file; CalculiX knows no field output for one contact only. A step that writes contact
-field outputs already opens its output instead of creating a second one (@step-field-outputs).
+The pressure, slip and gap of all contacts are in the results of every static, visco and
+dynamic step as the field #ui("CONTACT"), without a field output to create
+(@step-field-outputs).
 
 Only contact pairs have contact values. A bonded region with a contact history output is
 therefore written as a tied contact instead of a tie when its formulation allows it. A bonded

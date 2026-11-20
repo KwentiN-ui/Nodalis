@@ -57,10 +57,10 @@ pub fn load_vector(
     let mut warnings = Vec::new();
 
     for load in &step.loads.concentrated {
-        let factor = amplitude_factor(model, step, load.amplitude.as_deref(), time, total, period);
+        let factor = amplitude_factor(model, step, load.amplitude, time, total, period);
         let nodes: Vec<u32> = match &load.region {
             NodeRef::Node(id) => vec![*id],
-            NodeRef::Set(name) => model.sets.node_sets.get(name).cloned().unwrap_or_default(),
+            NodeRef::Set(set) => model.sets.nodes(*set).to_vec(),
         };
         for node in nodes {
             let Some(index) = model.nodes.index(node) else {
@@ -79,15 +79,10 @@ pub fn load_vector(
     // Distributed loads per element, computed in parallel and scattered afterwards.
     let mut per_element: Vec<(u32, DistributedLoadKind, f64)> = Vec::new();
     for load in &step.loads.distributed {
-        let factor = amplitude_factor(model, step, load.amplitude.as_deref(), time, total, period);
+        let factor = amplitude_factor(model, step, load.amplitude, time, total, period);
         let elements: Vec<u32> = match &load.region {
             ElementRef::Element(id) => vec![*id],
-            ElementRef::Set(name) => model
-                .sets
-                .element_sets
-                .get(name)
-                .cloned()
-                .unwrap_or_default(),
+            ElementRef::Set(set) => model.sets.elements(*set).to_vec(),
         };
         for id in elements {
             let Some(index) = model.element_index(id) else {
@@ -214,9 +209,7 @@ fn point_mass_body_loads(
     let elements_of = |region: &ElementRef| -> std::collections::HashSet<u32> {
         match region {
             ElementRef::Element(id) => [*id].into(),
-            ElementRef::Set(name) => (model.sets.element_sets.get(name))
-                .map(|ids| ids.iter().copied().collect())
-                .unwrap_or_default(),
+            ElementRef::Set(set) => model.sets.elements(*set).iter().copied().collect(),
         }
     };
     for load in &step.loads.distributed {
@@ -226,7 +219,7 @@ fn point_mass_body_loads(
         ) {
             continue;
         }
-        let factor = amplitude_factor(model, step, load.amplitude.as_deref(), time, total, period);
+        let factor = amplitude_factor(model, step, load.amplitude, time, total, period);
         let loaded = elements_of(&load.region);
         let named = |mass: &plxs_core::PointMass| match (&load.region, &mass.name) {
             (ElementRef::Set(set), Some(name)) => set == name,
@@ -236,8 +229,7 @@ fn point_mass_body_loads(
             let carried = named(mass)
                 || match &mass.elset {
                     None => true,
-                    Some(set) => (model.sets.element_sets.get(set))
-                        .is_some_and(|ids| ids.iter().any(|id| loaded.contains(id))),
+                    Some(set) => (model.sets.elements(*set).iter()).any(|id| loaded.contains(id)),
                 };
             let Some(node) = model.nodes.index(mass.node).filter(|_| carried) else {
                 continue;
@@ -290,15 +282,10 @@ fn membrane_body_loads(
         ) {
             continue;
         }
-        let factor = amplitude_factor(model, step, load.amplitude.as_deref(), time, total, period);
+        let factor = amplitude_factor(model, step, load.amplitude, time, total, period);
         let elements: Vec<u32> = match &load.region {
             ElementRef::Element(id) => vec![*id],
-            ElementRef::Set(name) => model
-                .sets
-                .element_sets
-                .get(name)
-                .cloned()
-                .unwrap_or_default(),
+            ElementRef::Set(set) => model.sets.elements(*set).to_vec(),
         };
         for id in elements {
             let Some(index) = model.element_index(id) else {
@@ -372,15 +359,10 @@ pub fn membrane_pressures(
         return Ok(out);
     }
     for load in &step.loads.distributed {
-        let factor = amplitude_factor(model, step, load.amplitude.as_deref(), time, total, period);
+        let factor = amplitude_factor(model, step, load.amplitude, time, total, period);
         let elements: Vec<u32> = match &load.region {
             ElementRef::Element(id) => vec![*id],
-            ElementRef::Set(name) => model
-                .sets
-                .element_sets
-                .get(name)
-                .cloned()
-                .unwrap_or_default(),
+            ElementRef::Set(set) => model.sets.elements(*set).to_vec(),
         };
         for id in elements {
             let Some(index) = model.element_index(id) else {

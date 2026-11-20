@@ -1,9 +1,7 @@
 //! Validation of an analysis: every reference (set, surface, material, interaction,
 //! amplitude, node, element) points at something defined, every element has a section, and
 //! the sections are assigned to the elements. The reader calls it once the input is read;
-//! Nodalis will call it on a model it built itself.
-
-use std::collections::{BTreeSet, HashSet};
+//! Nodalis calls it on the model it lowers.
 
 use crate::contact::ContactKind;
 use crate::diagnostic::ItemRef;
@@ -51,28 +49,30 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
     // Sets and surfaces. CalculiX tolerates set members that are not defined (it allocates
     // by the largest number); they are dropped here with a warning.
     let nodes = &model.nodes;
-    for (name, members) in &mut model.sets.node_sets {
-        let before = members.len();
-        members.retain(|&node| nodes.index(node).is_some());
-        if members.len() != before {
+    for set in &mut model.sets.node_sets {
+        let before = set.nodes.len();
+        set.nodes.retain(|&node| nodes.index(node).is_some());
+        if set.nodes.len() != before {
             warnings.push(format!(
-                "*WARNING in *NSET: {} undefined node(s) left out of set {name}",
-                before - members.len()
+                "*WARNING in *NSET: {} undefined node(s) left out of set {}",
+                before - set.nodes.len(),
+                set.name
             ));
         }
     }
     let defined: std::collections::HashSet<_> = model.elements.iter().map(|e| e.id).collect();
-    for (name, members) in &mut model.sets.element_sets {
-        let before = members.len();
-        members.retain(|element| defined.contains(element));
-        if members.len() != before {
+    for set in &mut model.sets.element_sets {
+        let before = set.elements.len();
+        set.elements.retain(|element| defined.contains(element));
+        if set.elements.len() != before {
             warnings.push(format!(
-                "*WARNING in *ELSET: {} undefined element(s) left out of set {name}",
-                before - members.len()
+                "*WARNING in *ELSET: {} undefined element(s) left out of set {}",
+                before - set.elements.len(),
+                set.name
             ));
         }
     }
-    for (name, surface) in &model.sets.surfaces {
+    for crate::mesh::NamedSurface { name, surface } in &model.sets.surfaces {
         match surface {
             Surface::Element(faces) => {
                 for face in faces {
@@ -100,7 +100,6 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
     }
 
     // Sections: materials and element sets, then the assignment.
-    let material_names: HashSet<&str> = model.materials.iter().map(|m| m.name.as_str()).collect();
     let mut assignment: Vec<Option<u32>> = vec![None; model.elements.len()];
     let mut before_section = errors.len();
     for (index, section) in model.sections.iter().enumerate() {
@@ -119,14 +118,23 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
             SectionKind::Gap(_) => "*GAP",
         };
         if let Some(material) = section.kind.material()
-            && !material_names.contains(material)
+            && model.material(material).is_none()
         {
-            errors.push(Error::undefined(keyword, "material", material));
+            errors.push(Error::undefined(
+                keyword,
+                "material",
+                format!("#{}", material.0),
+            ));
         }
-        let Some(elements) = model.sets.element_sets.get(&section.elset) else {
-            errors.push(Error::undefined(keyword, "element set", &section.elset));
+        let Some(set) = model.sets.element_sets.get(section.elset.index()) else {
+            errors.push(Error::undefined(
+                keyword,
+                "element set",
+                format!("#{}", section.elset.0),
+            ));
             continue;
         };
+        let elements = &set.elements;
         for &id in elements {
             if let Some(i) = model.element_index(id) {
                 let element = &model.elements[i as usize];
@@ -149,7 +157,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                         keyword,
                         format!(
                             "element {id} of type {} does not fit the section on set {}",
-                            element.kind, section.elset
+                            element.kind, set.name
                         ),
                     ));
                 }
@@ -175,11 +183,11 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
     // Constraints.
     let node_known = |model: &crate::Model, region: &NodeRef| match region {
         NodeRef::Node(id) => model.nodes.index(*id).is_some(),
-        NodeRef::Set(name) => model.sets.node_sets.contains_key(name),
+        NodeRef::Set(set) => set.index() < model.sets.node_sets.len(),
     };
     let element_known = |model: &crate::Model, region: &ElementRef| match region {
         ElementRef::Element(id) => model.element_index(*id).is_some(),
-        ElementRef::Set(name) => model.sets.element_sets.contains_key(name),
+        ElementRef::Set(set) => set.index() < model.sets.element_sets.len(),
     };
     let kind_of_node_ref = |region: &NodeRef| match region {
         NodeRef::Node(_) => "node",
@@ -195,7 +203,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                 errors.push(Error::undefined(
                     "*EQUATION",
                     kind_of_node_ref(&term.node),
-                    term.node.to_string(),
+                    term.node.describe(&model.sets),
                 ));
             }
         }
@@ -203,14 +211,18 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
     for (index, body) in model.constraints.rigid_bodies.iter().enumerate() {
         let before = errors.len();
         match &body.nodes {
-            crate::constraints::RigidBodyNodes::NodeSet(name) => {
-                if !model.sets.node_sets.contains_key(name) {
-                    errors.push(Error::undefined("*RIGID BODY", "node set", name));
+            crate::constraints::RigidBodyNodes::NodeSet(set) => {
+                if set.index() >= model.sets.node_sets.len() {
+                    errors.push(Error::undefined("*RIGID BODY", "node set", handle(set.0)));
                 }
             }
-            crate::constraints::RigidBodyNodes::ElementSet(name) => {
-                if !model.sets.element_sets.contains_key(name) {
-                    errors.push(Error::undefined("*RIGID BODY", "element set", name));
+            crate::constraints::RigidBodyNodes::ElementSet(set) => {
+                if set.index() >= model.sets.element_sets.len() {
+                    errors.push(Error::undefined(
+                        "*RIGID BODY",
+                        "element set",
+                        handle(set.0),
+                    ));
                 }
             }
         }
@@ -228,10 +240,14 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                 errors.push(Error::undefined("*POINT MASS", "node", node.to_string()));
             }
         }
-        if let Some(set) = &mass.elset
-            && !model.sets.element_sets.contains_key(set)
-        {
-            errors.push(Error::undefined("*POINT MASS", "element set", set));
+        for set in mass.elset.iter().chain(&mass.name) {
+            if set.index() >= model.sets.element_sets.len() {
+                errors.push(Error::undefined(
+                    "*POINT MASS",
+                    "element set",
+                    handle(set.0),
+                ));
+            }
         }
     }
     for joint in &model.constraints.joints {
@@ -247,87 +263,100 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
         concerning(&mut errors, before, ItemRef::Joint(joint.name.clone()));
     }
     for tie in &model.constraints.ties {
-        for surface in [&tie.slave, &tie.master] {
-            if !model.sets.surfaces.contains_key(surface) {
+        for surface in [tie.slave, tie.master] {
+            if model.sets.surface(surface).is_none() {
                 errors.push(
-                    Error::undefined("*TIE", "surface", surface)
+                    Error::undefined("*TIE", "surface", handle(surface.0))
                         .concerning(ItemRef::Tie(tie.name.clone())),
                 );
             }
         }
     }
     if let Some(cyclic) = &model.constraints.cyclic_symmetry
-        && !model.constraints.ties.iter().any(|t| t.name == cyclic.tie)
+        && cyclic.tie.index() >= model.constraints.ties.len()
     {
         errors.push(Error::undefined(
             "*CYCLIC SYMMETRY MODEL",
             "tie",
-            &cyclic.tie,
+            handle(cyclic.tie.0),
         ));
     }
     for transform in &model.constraints.transforms {
-        if !model.sets.node_sets.contains_key(&transform.nset) {
-            errors.push(Error::undefined("*TRANSFORM", "node set", &transform.nset));
+        if transform.nset.index() >= model.sets.node_sets.len() {
+            errors.push(Error::undefined(
+                "*TRANSFORM",
+                "node set",
+                handle(transform.nset.0),
+            ));
         }
     }
     if let Some(submodel) = &model.constraints.submodel {
         for set in &submodel.node_sets {
-            if !model.sets.node_sets.contains_key(set) {
-                errors.push(Error::undefined("*SUBMODEL", "node set", set));
+            if set.index() >= model.sets.node_sets.len() {
+                errors.push(Error::undefined("*SUBMODEL", "node set", handle(set.0)));
             }
         }
     }
 
     // Contact.
-    let interaction_names: HashSet<&str> = (model.contact.interactions.iter())
-        .map(|i| i.name.as_str())
-        .collect();
     for (index, pair) in model.contact.pairs.iter().enumerate() {
         let before = errors.len();
-        if !interaction_names.contains(pair.interaction.as_str()) {
+        if model
+            .contact
+            .interactions
+            .get(pair.interaction.index())
+            .is_none()
+        {
             errors.push(Error::undefined(
                 "*CONTACT PAIR",
                 "surface interaction",
-                &pair.interaction,
+                format!("#{}", pair.interaction.0),
             ));
         }
-        for surface in [&pair.slave, &pair.master] {
-            if !model.sets.surfaces.contains_key(surface) {
-                errors.push(Error::undefined("*CONTACT PAIR", "surface", surface));
+        for surface in [pair.slave, pair.master] {
+            if model.sets.surface(surface).is_none() {
+                errors.push(Error::undefined(
+                    "*CONTACT PAIR",
+                    "surface",
+                    handle(surface.0),
+                ));
             }
         }
-        if let Some(Surface::Node(_)) = model.sets.surfaces.get(&pair.master) {
+        if let Some(Surface::Node(_)) = model.sets.surface(pair.master) {
             errors.push(Error::input(
                 "*CONTACT PAIR",
-                format!("master surface {} must be an element surface", pair.master),
+                format!(
+                    "master surface {} must be an element surface",
+                    model.sets.surface_name(pair.master)
+                ),
             ));
         }
         if pair.kind != ContactKind::NodeToSurface
-            && let Some(Surface::Node(_)) = model.sets.surfaces.get(&pair.slave)
+            && let Some(Surface::Node(_)) = model.sets.surface(pair.slave)
         {
             errors.push(Error::input(
                 "*CONTACT PAIR",
                 format!(
                     "slave surface {} must be an element surface for surface to surface contact",
-                    pair.slave
+                    model.sets.surface_name(pair.slave)
                 ),
             ));
         }
         concerning(&mut errors, before, ItemRef::ContactPair(index));
     }
     for clearance in &model.contact.clearances {
-        for surface in [&clearance.slave, &clearance.master] {
-            if !model.sets.surfaces.contains_key(surface) {
-                errors.push(Error::undefined("*CLEARANCE", "surface", surface));
+        for surface in [clearance.slave, clearance.master] {
+            if model.sets.surface(surface).is_none() {
+                errors.push(Error::undefined("*CLEARANCE", "surface", handle(surface.0)));
             }
         }
     }
     for support in &model.contact.compression_only {
-        if !model.sets.surfaces.contains_key(&support.surface) {
+        if model.sets.surface(support.surface).is_none() {
             errors.push(Error::undefined(
                 "*COMPRESSION ONLY",
                 "surface",
-                &support.surface,
+                handle(support.surface.0),
             ));
         }
     }
@@ -338,7 +367,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
             errors.push(Error::undefined(
                 "*INITIAL CONDITIONS",
                 kind_of_node_ref(region),
-                region.to_string(),
+                region.describe(&model.sets),
             ));
         }
     }
@@ -352,28 +381,26 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
             errors.push(Error::undefined(
                 "*INITIAL CONDITIONS",
                 kind_of_node_ref(region),
-                region.to_string(),
+                region.describe(&model.sets),
             ));
         }
     }
     if let Some(design) = &model.design_variables
-        && !model.sets.node_sets.contains_key(&design.nset)
+        && design.nset.index() >= model.sets.node_sets.len()
     {
         errors.push(Error::undefined(
             "*DESIGN VARIABLES",
             "node set",
-            &design.nset,
+            handle(design.nset.0),
         ));
     }
 
     // Steps.
-    let amplitude_names: BTreeSet<&str> =
-        model.amplitudes.iter().map(|a| a.name.as_str()).collect();
-    let amplitude = |errors: &mut Vec<Error>, keyword: &str, name: &Option<String>| {
-        if let Some(name) = name
-            && !amplitude_names.contains(name.as_str())
+    let amplitude = |errors: &mut Vec<Error>, keyword: &str, id: &Option<crate::AmplitudeId>| {
+        if let Some(id) = id
+            && model.amplitude(*id).is_none()
         {
-            errors.push(Error::undefined(keyword, "amplitude", name));
+            errors.push(Error::undefined(keyword, "amplitude", format!("#{}", id.0)));
         }
     };
     let stored_modes_before = |steps: &[crate::Step], index: usize| {
@@ -389,7 +416,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                 errors.push(Error::undefined(
                     "*BOUNDARY",
                     kind_of_node_ref(&boundary.region),
-                    format!("{} (step {name})", boundary.region),
+                    format!("{} (step {name})", boundary.region.describe(&model.sets)),
                 ));
             }
             amplitude(&mut errors, "*BOUNDARY", &boundary.amplitude);
@@ -405,7 +432,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                 errors.push(Error::undefined(
                     "*CLOAD",
                     kind_of_node_ref(&load.region),
-                    format!("{} (step {name})", load.region),
+                    format!("{} (step {name})", load.region.describe(&model.sets)),
                 ));
             }
             amplitude(&mut errors, "*CLOAD", &load.amplitude);
@@ -415,7 +442,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                 errors.push(Error::undefined(
                     "*DLOAD",
                     kind_of_element_ref(&load.region),
-                    format!("{} (step {name})", load.region),
+                    format!("{} (step {name})", load.region.describe(&model.sets)),
                 ));
             }
             amplitude(&mut errors, "*DLOAD", &load.amplitude);
@@ -425,7 +452,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                 errors.push(Error::undefined(
                     "*CFLUX",
                     kind_of_node_ref(&flux.region),
-                    format!("{} (step {name})", flux.region),
+                    format!("{} (step {name})", flux.region.describe(&model.sets)),
                 ));
             }
             amplitude(&mut errors, "*CFLUX", &flux.amplitude);
@@ -435,7 +462,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                 errors.push(Error::undefined(
                     "*DFLUX",
                     kind_of_element_ref(&flux.region),
-                    format!("{} (step {name})", flux.region),
+                    format!("{} (step {name})", flux.region.describe(&model.sets)),
                 ));
             }
             amplitude(&mut errors, "*DFLUX", &flux.amplitude);
@@ -445,7 +472,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                 errors.push(Error::undefined(
                     "*FILM",
                     kind_of_element_ref(&film.region),
-                    format!("{} (step {name})", film.region),
+                    format!("{} (step {name})", film.region.describe(&model.sets)),
                 ));
             }
             amplitude(&mut errors, "*FILM", &film.amplitude);
@@ -456,7 +483,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                 errors.push(Error::undefined(
                     "*RADIATE",
                     kind_of_element_ref(&radiate.region),
-                    format!("{} (step {name})", radiate.region),
+                    format!("{} (step {name})", radiate.region.describe(&model.sets)),
                 ));
             }
             amplitude(&mut errors, "*RADIATE", &radiate.amplitude);
@@ -476,7 +503,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                         errors.push(Error::undefined(
                             "*TEMPERATURE",
                             kind_of_node_ref(region),
-                            format!("{region} (step {name})"),
+                            format!("{} (step {name})", region.describe(&model.sets)),
                         ));
                     }
                 }
@@ -491,45 +518,61 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
                         errors.push(Error::undefined(
                             "*MODEL CHANGE",
                             "contact pair",
-                            format!("{slave}, {master}"),
+                            format!(
+                                "{}, {}",
+                                model.sets.surface_name(*slave),
+                                model.sets.surface_name(*master)
+                            ),
                         ));
                     }
                 }
                 ContactChange::Elements { elset, .. } => {
-                    if !model.sets.element_sets.contains_key(elset) {
-                        errors.push(Error::undefined("*MODEL CHANGE", "element set", elset));
+                    if elset.index() >= model.sets.element_sets.len() {
+                        errors.push(Error::undefined(
+                            "*MODEL CHANGE",
+                            "element set",
+                            handle(elset.0),
+                        ));
                     }
                 }
                 ContactChange::Friction { interaction, .. } => {
-                    if !interaction_names.contains(interaction.as_str()) {
+                    if model
+                        .contact
+                        .interactions
+                        .get(interaction.index())
+                        .is_none()
+                    {
                         errors.push(Error::undefined(
                             "*CHANGE FRICTION",
                             "surface interaction",
-                            interaction,
+                            format!("#{}", interaction.0),
                         ));
                     }
                 }
             }
         }
         for output in (step.outputs.node_file.iter()).chain(&step.outputs.el_file) {
-            if let Some(nset) = &output.nset
-                && !model.sets.node_sets.contains_key(nset)
+            if let Some(nset) = output.nset
+                && nset.index() >= model.sets.node_sets.len()
             {
-                errors.push(Error::undefined("*NODE FILE", "node set", nset));
+                errors.push(Error::undefined("*NODE FILE", "node set", handle(nset.0)));
             }
         }
-        for output in &step.outputs.node_print {
-            if let Some(set) = &output.set
-                && !model.sets.node_sets.contains_key(set)
-            {
-                errors.push(Error::undefined("*NODE PRINT", "node set", set));
-            }
-        }
-        for output in &step.outputs.el_print {
-            if let Some(set) = &output.set
-                && !model.sets.element_sets.contains_key(set)
-            {
-                errors.push(Error::undefined("*EL PRINT", "element set", set));
+        for (keyword, output) in (step.outputs.node_print.iter().map(|o| ("*NODE PRINT", o)))
+            .chain(step.outputs.el_print.iter().map(|o| ("*EL PRINT", o)))
+        {
+            match output.set {
+                Some(crate::step::HistorySet::Nodes(set))
+                    if set.index() >= model.sets.node_sets.len() =>
+                {
+                    errors.push(Error::undefined(keyword, "node set", handle(set.0)));
+                }
+                Some(crate::step::HistorySet::Elements(set))
+                    if set.index() >= model.sets.element_sets.len() =>
+                {
+                    errors.push(Error::undefined(keyword, "element set", handle(set.0)));
+                }
+                _ => {}
             }
         }
         match &step.procedure {
@@ -549,10 +592,14 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
             }
             Procedure::Sensitivity(sensitivity) => {
                 for response in &sensitivity.responses {
-                    if let Some(elset) = &response.elset
-                        && !model.sets.element_sets.contains_key(elset)
+                    if let Some(elset) = response.elset
+                        && elset.index() >= model.sets.element_sets.len()
                     {
-                        errors.push(Error::undefined("*DESIGN RESPONSE", "element set", elset));
+                        errors.push(Error::undefined(
+                            "*DESIGN RESPONSE",
+                            "element set",
+                            handle(elset.0),
+                        ));
                     }
                 }
             }
@@ -566,6 +613,11 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
     } else {
         Err(errors)
     }
+}
+
+/// How a message names an item by its handle.
+fn handle(index: u32) -> String {
+    format!("#{index}")
 }
 
 /// Names `item` as what the errors from `from` on are about.
@@ -616,8 +668,8 @@ mod tests {
             nodes: vec![1, 2, 3, 4],
             section: None,
         });
-        model.sets.add_elements("EALL", [1]);
-        model.sets.add_nodes("FIX", [1, 2, 3]);
+        model.sets.add_element_set("EALL", [1]);
+        model.sets.add_node_set("FIX", [1, 2, 3]);
         model.materials.push(Material {
             name: "STEEL".into(),
             elastic: Some(Elastic {
@@ -630,9 +682,9 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(Section {
-            elset: "EALL".into(),
+            elset: crate::ElementSetId(0),
             kind: SectionKind::Solid {
-                material: "STEEL".into(),
+                material: crate::MaterialId(0),
                 thickness: None,
                 orientation: None,
             },
@@ -654,16 +706,16 @@ mod tests {
     fn missing_references_are_reported_with_their_keyword() {
         let mut analysis = small_analysis();
         analysis.model.sections[0].kind = SectionKind::Solid {
-            material: "RUBBER".into(),
+            material: crate::MaterialId(7),
             thickness: None,
             orientation: None,
         };
         analysis.steps[0].boundaries.push(crate::step::Boundary {
-            region: NodeRef::Set("NOWHERE".into()),
+            region: NodeRef::Set(crate::NodeSetId(7)),
             first_dof: 1,
             last_dof: 3,
             value: None,
-            amplitude: Some("A1".into()),
+            amplitude: Some(crate::AmplitudeId(3)),
             fixed: false,
             submodel_step: None,
             load_case: None,
@@ -673,9 +725,9 @@ mod tests {
         assert_eq!(
             texts,
             [
-                "*ERROR in *SOLID SECTION: material RUBBER has not been defined",
-                "*ERROR in *BOUNDARY: node set NOWHERE (step Step-1) has not been defined",
-                "*ERROR in *BOUNDARY: amplitude A1 has not been defined",
+                "*ERROR in *SOLID SECTION: material #7 has not been defined",
+                "*ERROR in *BOUNDARY: node set #7 (step Step-1) has not been defined",
+                "*ERROR in *BOUNDARY: amplitude #3 has not been defined",
             ]
         );
     }
@@ -684,12 +736,12 @@ mod tests {
     fn errors_name_the_item_they_are_about() {
         let mut analysis = small_analysis();
         analysis.model.sections[0].kind = SectionKind::Solid {
-            material: "RUBBER".into(),
+            material: crate::MaterialId(7),
             thickness: None,
             orientation: None,
         };
         analysis.steps[0].boundaries.push(crate::step::Boundary {
-            region: NodeRef::Set("NOWHERE".into()),
+            region: NodeRef::Set(crate::NodeSetId(7)),
             first_dof: 1,
             last_dof: 3,
             value: None,

@@ -117,11 +117,10 @@ impl ModelConstraints {
         let plane = plane_nodes(model);
 
         // Cyclic symmetry: the axis is oriented so that the slave side lies at +φ.
-        let label = model
-            .constraints
-            .cyclic_symmetry
-            .as_ref()
-            .map(|c| format!("*TIE {} (cyclic symmetry)", c.tie));
+        let label = model.constraints.cyclic_symmetry.as_ref().map(|c| {
+            let tie = (model.constraints.ties.get(c.tie.index())).map_or("", |t| &t.name);
+            format!("*TIE {tie} (cyclic symmetry)")
+        });
         if let Some(label) = label {
             let origin = mc.label(label);
             if let Some(cyclic) = CyclicSymmetry::new(model, origin)? {
@@ -300,9 +299,7 @@ impl ModelConstraints {
             for term in &equation.terms {
                 let ids = match &term.node {
                     NodeRef::Node(id) => vec![*id],
-                    NodeRef::Set(name) => {
-                        model.sets.node_sets.get(name).cloned().unwrap_or_default()
-                    }
+                    NodeRef::Set(set) => model.sets.nodes(*set).to_vec(),
                 };
                 if ids.len() != 1 || !(1..=3).contains(&term.dof) {
                     skipped = true;
@@ -930,13 +927,11 @@ fn add_term(terms: &mut Vec<(u32, f64)>, dof: u32, a: f64) {
 /// The dense nodes of a rigid body: a node set, or the nodes of an element set.
 fn rigid_body_nodes(model: &Model, nodes: &RigidBodyNodes) -> Vec<u32> {
     let ids: Vec<u32> = match nodes {
-        RigidBodyNodes::NodeSet(name) => {
-            model.sets.node_sets.get(name).cloned().unwrap_or_default()
-        }
-        RigidBodyNodes::ElementSet(name) => {
+        RigidBodyNodes::NodeSet(set) => model.sets.nodes(*set).to_vec(),
+        RigidBodyNodes::ElementSet(set) => {
             let mut ids = Vec::new();
             let mut seen = std::collections::HashSet::new();
-            for &e in model.sets.element_sets.get(name).into_iter().flatten() {
+            for &e in model.sets.elements(*set) {
                 if let Some(element) = model.element(e) {
                     for &n in &element.nodes {
                         if seen.insert(n) {

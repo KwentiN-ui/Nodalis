@@ -13,12 +13,12 @@ use plx_model::{
     AXIS_LABELS, Amplitude, BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition,
     BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, CrossSection,
     CyclicSymmetry, Damping, DampingRange, DefinedField, DefinedFieldKind, Displacement,
-    Distribution, DynamicMethod, DynamicStep, Elastic, FeModel, Field, FieldOutput, Formulation,
-    FrequencyStep, GravityDirection, Hardening, HeatTransferStep, HistoryKind, HistoryOutput,
-    Hyperelastic, HyperelasticModel, Id, IncrementControl, IncrementSize, InitialCondition,
-    InitialConditionKind, ItemRef, LinearSolverChoice, Load, LoadKind, Material, MeshSet,
-    ModalDamping, ModeDamping, ModelSpace, MovingLoad, NodeTie, NumericalDamping, OutputDimension,
-    OutputKind, PlasticPoint, Quantity, RayleighDamping, Region, RemoteBehavior, RemoteForce,
+    Distribution, DynamicMethod, DynamicStep, Elastic, FeModel, Field, FieldOutput, FieldResult,
+    Formulation, FrequencyStep, GravityDirection, Hardening, HeatTransferStep, HistoryKind,
+    HistoryOutput, Hyperelastic, HyperelasticModel, Id, IncrementControl, IncrementSize,
+    InitialCondition, InitialConditionKind, ItemRef, LinearSolverChoice, Load, LoadKind, Material,
+    MeshSet, ModalDamping, ModeDamping, ModelSpace, MovingLoad, NodeTie, NumericalDamping,
+    OutputDimension, PlasticPoint, Quantity, RayleighDamping, Region, RemoteBehavior, RemoteForce,
     STANDARD_GRAVITY, Section, SectionKind, SensitivityStep, SetKind, StaticStep,
     SteadyStateDynamicsStep, Step, StepKind, StepLimit, SurfaceInteraction, SymmetryError,
     TestMode, Tie, TimeStep, UnitSystem, ViscoStep, Wheel, next_name, symmetry_plane,
@@ -56,16 +56,14 @@ pub enum NewItem {
     Step,
     BoundaryCondition(usize),
     Load(usize),
-    /// A field output of a step, written into the `.frd` file.
-    FieldOutput(usize),
+    /// The field output of the analysis: what its steps write beyond their standard
+    /// results. There is one; creating it opens it.
+    FieldOutput,
     /// A history output of a step, printed into the `.dat` file.
     HistoryOutput(usize),
     /// A history output of a step printing the contact values of a contact region or pair,
     /// created in the menu of the contact.
     ContactHistoryOutput(usize, ContactItem),
-    /// A contact field output of a step, created in the menu of a contact; a step that has
-    /// one already opens it.
-    ContactFieldOutput(usize),
     /// A defined temperature of a step.
     DefinedField(usize),
     /// A spring, support or rigid body, chosen in the dialog.
@@ -252,7 +250,7 @@ impl RegionDraft {
         match region {
             Region::Parts(parts) => {
                 draft.source = Source::Parts;
-                draft.parts = PartPicks::from_names(parts.iter().cloned());
+                draft.parts = PartPicks::from_ids(parts, mesh);
             }
             Region::Nodes(nodes) => draft.nodes = History::from_items(nodes.iter().copied()),
             Region::Faces(faces)
@@ -346,7 +344,7 @@ impl RegionDraft {
                 }
                 Target::Lines => Region::Edges(self.edges.items().into_iter().collect()),
             },
-            Source::Parts => Region::Parts(self.parts.names().into_iter().collect()),
+            Source::Parts => Region::Parts(self.parts.ids().into_iter().collect()),
             Source::NodeSet => Region::NodeSet(self.set.clone()),
             Source::ElementSet => Region::ElementSet(self.set.clone()),
             Source::Surface => Region::Surface(self.set.clone()),
@@ -1336,9 +1334,9 @@ pub fn shown_faces(
 pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
     let mut highlight = Highlight::default();
     match region {
-        Region::Parts(names) => {
-            highlight.parts = (model.parts.iter().enumerate())
-                .filter(|(_, p)| names.contains(&p.name))
+        Region::Parts(ids) => {
+            highlight.parts = (model.mesh().parts.iter().enumerate())
+                .filter(|(_, p)| ids.contains(&p.id))
                 .map(|(i, _)| i)
                 .collect();
         }
@@ -1418,7 +1416,8 @@ enum Draft {
     BoundaryCondition(usize, BoundaryCondition, RegionDraft),
     Load(usize, Load, RegionDraft),
     InitialCondition(InitialCondition, RegionDraft),
-    FieldOutput(usize, FieldOutput),
+    /// The one field output of the analysis, without a name.
+    FieldOutput(FieldOutput),
     /// The region draft is unused by contact history outputs.
     HistoryOutput(usize, HistoryOutput, RegionDraft),
     /// The region draft is unused by temperatures read from a file.
@@ -2098,8 +2097,8 @@ fn symmetry_rows(
 
 /// Rows of a submodel boundary condition: the displacements that follow the global model,
 /// and where they come from: the analysis and step linked to the Global results row of the
-/// step `step`, and the field outputs that write the displacements there. The global
-/// results hold no rotations.
+/// step `step`, and whether that step writes displacements. The global results hold no
+/// rotations.
 fn submodel_rows(
     ui: &mut egui::Ui,
     dofs: &mut [bool; 6],
@@ -2161,41 +2160,24 @@ fn submodel_source_lines(
     let from = format!("{} of {}", source.source_step, source.source);
     lines.push(("Global results", line(Tone::Plain, from)));
     let (global, global_step) = (&source.source, &source.source_step);
-    let written = match &source.writers {
+    let written = match source.displacements {
         None => line(
             Tone::Weak,
             "Read from the results file; whether it holds displacements of the step shows \
              when the analysis runs."
                 .into(),
         ),
-        Some(writers) if !writers.load_case => line(
+        Some(false) => line(
             Tone::Error,
             format!(
                 "{global_step} computes no displacements of a load (mode shapes, \
                  temperatures or sensitivities). Link a static or dynamic step."
             ),
         ),
-        Some(writers) if writers.outputs.is_empty() => line(
-            Tone::Error,
-            format!(
-                "{global} writes no displacements in {global_step}: add U to a node field \
-                 output of the step and solve it again."
-            ),
+        Some(true) => line(
+            Tone::Weak,
+            format!("The values at the end of {global_step} are read."),
         ),
-        Some(writers) => {
-            let names = writers.outputs.join(", ");
-            let by = match &writers.carried_from {
-                Some(earlier) => format!(
-                    "Written by {names} of {earlier}, which {global_step} keeps having no node \
-                     field output of its own."
-                ),
-                None => format!("Written by {names}."),
-            };
-            line(
-                Tone::Weak,
-                format!("{by} The values at the end of {global_step} are read."),
-            )
-        }
     };
     lines.push(("Displacements", written));
     // The submodel reads a single global results file.
@@ -2372,7 +2354,7 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
 
 /// The parts of the walls of the Particle Flow step of `fe`: those of its rigid bodies and
 /// those a boundary condition of the step holds in shape.
-fn flow_wall_parts(fe: &FeModel, mesh: &FeMesh) -> Vec<String> {
+fn flow_wall_parts(fe: &FeModel, mesh: &FeMesh) -> Vec<plx_model::Id> {
     let Some(flow) = fe.particle_flow_step() else {
         return Vec::new();
     };
@@ -2392,7 +2374,7 @@ fn flow_wall_parts(fe: &FeModel, mesh: &FeMesh) -> Vec<String> {
         .collect();
     (mesh.parts.iter())
         .filter(|p| p.elements.iter().any(|e| elements.contains(e)))
-        .map(|p| p.name.clone())
+        .map(|p| p.id)
         .collect()
 }
 
@@ -2647,15 +2629,8 @@ impl Editor {
                     load_region(&kind, None, fe, &FeMesh::default()),
                 )
             }
-            NewItem::FieldOutput(step) => {
-                let target = fe.steps.get(step)?;
-                let kind = OutputKind::Node;
-                let output = FieldOutput::new(
-                    next_name(kind.prefix(), names(&target.field_outputs, |f| &f.name)),
-                    kind,
-                    kind.default_variables(),
-                );
-                Draft::FieldOutput(step, output)
+            NewItem::FieldOutput => {
+                return Self::edit(&TreeItem::FieldOutput, fe, &FeMesh::default());
             }
             NewItem::ContactHistoryOutput(step, contact) => {
                 fe.steps.get(step)?;
@@ -2672,16 +2647,6 @@ impl Editor {
                 output.normalize_variables();
                 let region = history_region(&output.kind, fe, &FeMesh::default());
                 Draft::HistoryOutput(step, output, region)
-            }
-            NewItem::ContactFieldOutput(step) => {
-                let target = fe.steps.get(step)?;
-                let kind = OutputKind::Contact;
-                let output = FieldOutput::new(
-                    next_name(kind.prefix(), names(&target.field_outputs, |f| &f.name)),
-                    kind,
-                    kind.default_variables(),
-                );
-                Draft::FieldOutput(step, output)
             }
             NewItem::HistoryOutput(step) => {
                 fe.steps.get(step)?;
@@ -2902,10 +2867,7 @@ impl Editor {
                 );
                 (Draft::InitialCondition(condition, region), i)
             }
-            TreeItem::FieldOutput(s, i) => {
-                let output = fe.steps.get(s)?.field_outputs.get(i)?.clone();
-                (Draft::FieldOutput(s, output), i)
-            }
+            TreeItem::FieldOutput => (Draft::FieldOutput(fe.field_output.clone()), 0),
             TreeItem::HistoryOutput(s, i) => {
                 let output = fe.step_history_output(s, i)?.clone();
                 let region = history_region(&output.kind, fe, mesh);
@@ -3034,7 +2996,7 @@ impl Editor {
             Draft::BoundaryCondition(_, b, _) => ("Boundary Condition", &b.name),
             Draft::Load(_, l, _) => ("Load", &l.name),
             Draft::InitialCondition(c, _) => ("Initial Condition", &c.name),
-            Draft::FieldOutput(_, f) => ("Field Output", &f.name),
+            Draft::FieldOutput(_) => return "Field Output".into(),
             Draft::HistoryOutput(_, h, _) => ("History Output", &h.name),
             Draft::DefinedField(_, f, _) => ("Defined Field", &f.name),
             Draft::Constraint(c) => ("Constraint", c.name()),
@@ -4340,9 +4302,7 @@ impl Editor {
                 );
                 ui.end_row();
             }
-            Draft::FieldOutput(_, output) => {
-                field_output_form(ui, model, output, &taken, self.index.is_none());
-            }
+            Draft::FieldOutput(output) => field_output_form(ui, model, output),
             Draft::HistoryOutput(_, output, region) => {
                 history_output_form(ui, model, output, region, &taken);
             }
@@ -4441,7 +4401,7 @@ impl Editor {
             }
             Draft::Load(step, ..) => names(&fe.steps[*step].loads, |l| &l.name),
             Draft::InitialCondition(..) => names(&fe.initial_conditions, |i| &i.name),
-            Draft::FieldOutput(step, _) => names(&fe.steps[*step].field_outputs, |f| &f.name),
+            Draft::FieldOutput(_) => Vec::new(),
             // One output of the model, whichever steps print it.
             Draft::HistoryOutput(_, output, _) => {
                 return (fe.history_outputs.iter())
@@ -4486,7 +4446,7 @@ impl Editor {
             Draft::BoundaryCondition(_, b, _) => &b.name,
             Draft::Load(_, l, _) => &l.name,
             Draft::InitialCondition(c, _) => &c.name,
-            Draft::FieldOutput(_, f) => &f.name,
+            Draft::FieldOutput(_) => return Ok(()),
             Draft::HistoryOutput(_, h, _) => &h.name,
             Draft::DefinedField(_, f, _) => &f.name,
             Draft::Constraint(c) => c.name(),
@@ -4646,7 +4606,6 @@ impl Editor {
             Draft::Distribution(distribution, _) => {
                 distribution_dialog::validate(distribution, fe)?
             }
-            Draft::FieldOutput(_, output) => output.check_variables()?,
             Draft::HistoryOutput(_, output, region) => {
                 validate_history_output(output, region, fe)?;
             }
@@ -4940,13 +4899,9 @@ impl Editor {
                 }
                 put(&mut fe.initial_conditions, index, condition);
             }
-            Draft::FieldOutput(s, mut output) => {
-                output.normalize_variables();
-                let list = &mut fe.steps[s].field_outputs;
-                if let Some(existing) = index.and_then(|i| list.get(i)) {
-                    output.active = existing.active;
-                }
-                put(list, index, output);
+            Draft::FieldOutput(mut output) => {
+                output.normalize();
+                fe.field_output = output;
             }
             Draft::DefinedField(s, mut field, region) => {
                 if field.kind.takes_region() {
@@ -5102,10 +5057,12 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
             .steps
             .get_mut(s)
             .is_some_and(|st| remove(&mut st.loads, i)),
-        TreeItem::FieldOutput(s, i) => fe
-            .steps
-            .get_mut(s)
-            .is_some_and(|st| remove(&mut st.field_outputs, i)),
+        // Back to the standard results, which leaves nothing to show.
+        TreeItem::FieldOutput => {
+            let changed = !fe.field_output.is_standard();
+            fe.field_output = FieldOutput::default();
+            changed
+        }
         // Out of every step that prints it.
         TreeItem::HistoryOutput(s, i) => match fe.step_history_output(s, i).map(|h| h.id) {
             Some(id) => {
@@ -5207,9 +5164,6 @@ fn active_mut<'a>(fe: &'a mut FeModel, item: &TreeItem) -> Option<&'a mut bool> 
         TreeItem::Load(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.loads.get_mut(i))
             .map(|l| &mut l.active),
-        TreeItem::FieldOutput(s, i) => (fe.steps.get_mut(s))
-            .and_then(|st| st.field_outputs.get_mut(i))
-            .map(|f| &mut f.active),
         TreeItem::HistoryOutput(s, i) => fe.step_history_output_mut(s, i).map(|h| &mut h.active),
         TreeItem::DefinedField(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.defined_fields.get_mut(i))
@@ -5384,9 +5338,9 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
 /// tree.
 pub fn acting_on_parts(model: &Model, parts: &BTreeSet<usize>) -> BTreeSet<TreeItem> {
     let mesh = &model.mesh();
-    let names: HashSet<&str> = (parts.iter())
+    let ids: HashSet<plx_model::Id> = (parts.iter())
         .filter_map(|&p| mesh.parts.get(p))
-        .map(|p| p.name.as_str())
+        .map(|p| p.id)
         .collect();
     let elements: HashSet<ElementId> = (parts.iter())
         .filter_map(|&p| mesh.parts.get(p))
@@ -5394,7 +5348,7 @@ pub fn acting_on_parts(model: &Model, parts: &BTreeSet<usize>) -> BTreeSet<TreeI
         .collect();
     let fe = &model.fe;
     let on_parts = |region: &Region| match region {
-        Region::Parts(regions) => regions.iter().any(|n| names.contains(n.as_str())),
+        Region::Parts(regions) => regions.iter().any(|n| ids.contains(n)),
         Region::RemotePoint(_) => false,
         _ => {
             let mut ids = region.elements(mesh);
@@ -5647,121 +5601,112 @@ fn point_hint(region: &Region, fe: &FeModel, mesh: &FeMesh) -> Option<&'static s
     })
 }
 
-/// The field output dialog: the kind, chosen only for a new output, the results by their
-/// names in groups, the coordinate system they are also shown in and the options of the
-/// solver's output.
-fn field_output_form(
-    ui: &mut Ui,
-    model: &Model,
-    output: &mut FieldOutput,
-    taken: &[&str],
-    new: bool,
-) {
-    name_row(ui, &mut output.name);
-    ui.label("Type");
-    if new {
-        ui.horizontal(|ui| {
-            for kind in OutputKind::ALL {
-                let selected = kind == output.kind;
-                if ui.radio(selected, kind.label()).clicked() && !selected {
-                    rename_default(&mut output.name, output.kind.prefix(), kind.prefix(), taken);
-                    output.variables = (kind.default_variables().iter())
-                        .map(|v| v.to_string())
-                        .collect();
-                    output.kind = kind;
-                }
-            }
-        });
-    } else {
-        ui.label(output.kind.label());
-    }
-    ui.end_row();
-    // The results in groups, one per line: fixed rows, as wrapping inside the grid overlaps
-    // the next row.
-    for (heading, variables) in output.kind.groups() {
-        ui.label(*heading);
-        ui.vertical(|ui| {
-            for &variable in *variables {
-                let mut on = output.variables.iter().any(|v| v == variable);
-                let label = plx_model::output_variable_label(variable);
-                let checkbox = ui
-                    .checkbox(&mut on, label)
-                    .on_hover_text(plx_model::output_variable_description(variable));
-                if checkbox.changed() {
-                    output.variables.retain(|v| v != variable);
-                    if on {
-                        output.variables.push(variable.to_string());
-                    }
-                    output.normalize_variables();
-                }
-            }
-        });
-        ui.end_row();
-    }
-    if output.kind.takes_system() {
-        ui.label("Coordinate system");
-        crate::pick_item::system_combo(
-            ui,
-            "field output system",
-            &mut output.system,
-            &model.fe,
-            200.0,
-        );
-        ui.end_row();
-        let system =
-            (output.system).and_then(|id| model.fe.coordinate_systems.iter().find(|c| c.id == id));
-        let hint = match system {
-            None if model.fe.coordinate_systems.is_empty() => {
-                "The results are global. Create a coordinate system to see displacements, \
-                 stresses and other vectors and tensors in it as well."
-                    .to_string()
-            }
-            None => "The results are global.".to_string(),
-            Some(system) => format!(
-                "Displacements, stresses and other vectors and tensors are also shown in \
-                 {}, e.g. as {}.{}",
-                system.name,
-                plx_results::field_output::system_field_name("DISP", &system.name),
-                match system.moves(&model.fe.coordinate_systems) {
-                    true => " The system turns with its selection in every increment.",
-                    false => "",
-                }
-            ),
+/// What the steps of the model always write, one line per kind of step, for the dialog.
+fn standard_results_text(fe: &FeModel) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for step in fe.steps.iter().filter(|s| s.active) {
+        let results: Vec<&str> = (fe.field_results(step).iter())
+            .filter(|r| !FieldResult::ADDITIONAL.contains(r))
+            .map(|r| r.label())
+            .collect();
+        let written = if step.kind.computes_eigenmodes() {
+            "Mode shapes".to_string()
+        } else if results.is_empty() {
+            continue;
+        } else {
+            results.join(", ")
         };
-        ui.label("");
-        ui.add(egui::Label::new(egui::RichText::new(hint).weak()).wrap());
-        ui.end_row();
+        let line = format!("{}: {written}", step_kind_label(&step.kind));
+        if !lines.contains(&line) {
+            lines.push(line);
+        }
     }
-    if output.kind == OutputKind::Element {
-        ui.label("Shells and beams");
-        egui::ComboBox::from_id_salt("field output dimension")
-            .selected_text(output.dimension.label())
-            .width(crate::dock::fit_width(ui, 200.0))
-            .show_ui(ui, |ui| {
-                for dimension in OutputDimension::ALL {
-                    ui.selectable_value(&mut output.dimension, dimension, dimension.label());
-                }
-            })
-            .response
-            .on_hover_text(
-                "With 3D, 1D and 2D elements are written in their expanded 3D form. Default \
-                 writes shell and plane models in 2D.",
-            );
-        ui.end_row();
+    if lines.is_empty() {
+        return "The analysis has no steps yet.".into();
     }
-    ui.label("Diagnostics");
+    lines.join("\n")
+}
+
+/// The field output dialog: what the steps write anyway, the results added to that, the
+/// coordinate system the results are also shown in and the form of shells and beams.
+fn field_output_form(ui: &mut Ui, model: &Model, output: &mut FieldOutput) {
+    let fe = &model.fe;
+    ui.label("Always written");
+    ui.add(egui::Label::new(egui::RichText::new(standard_results_text(fe)).weak()).wrap());
+    ui.end_row();
+    ui.label("Additional results");
     ui.vertical(|ui| {
-        ui.checkbox(
-            &mut output.last_iterations,
-            "Every iteration of the last increment",
-        )
-        .on_hover_text(
-            "Writes the results of every iteration of the last increment, for finding \
-                 out why a solution diverges.",
-        );
-        ui.checkbox(&mut output.contact_elements, "Contact elements")
-            .on_hover_text("Writes the contact elements into a file with the .cel extension.");
+        for result in FieldResult::ADDITIONAL {
+            let mut on = output.additional.contains(&result);
+            // Which steps can write it; none of the model's may.
+            let writes = |s: &&Step| s.active && s.kind.writes_additional(result);
+            let hint = match fe.steps.iter().any(|s| writes(&s)) {
+                true => result.description().to_string(),
+                false => format!(
+                    "{} No step of the analysis can write it.",
+                    result.description()
+                ),
+            };
+            if ui
+                .checkbox(&mut on, result.label())
+                .on_hover_text(hint)
+                .changed()
+            {
+                output.additional.retain(|r| *r != result);
+                if on {
+                    output.additional.push(result);
+                }
+                output.normalize();
+            }
+        }
     });
+    ui.end_row();
+    ui.label("Coordinate system");
+    crate::pick_item::system_combo(
+        ui,
+        "field output system",
+        &mut output.system,
+        &model.fe,
+        200.0,
+    );
+    ui.end_row();
+    let system =
+        (output.system).and_then(|id| model.fe.coordinate_systems.iter().find(|c| c.id == id));
+    let hint = match system {
+        None if model.fe.coordinate_systems.is_empty() => {
+            "The results are global. Create a coordinate system to see displacements, \
+             stresses and other vectors and tensors in it as well."
+                .to_string()
+        }
+        None => "The results are global.".to_string(),
+        Some(system) => format!(
+            "Displacements, stresses and other vectors and tensors are also shown in \
+             {}, e.g. as {}.{}",
+            system.name,
+            plx_results::field_output::system_field_name("DISP", &system.name),
+            match system.moves(&model.fe.coordinate_systems) {
+                true => " The system turns with its selection in every increment.",
+                false => "",
+            }
+        ),
+    };
+    ui.label("");
+    ui.add(egui::Label::new(egui::RichText::new(hint).weak()).wrap());
+    ui.end_row();
+    ui.label("Shells and beams");
+    egui::ComboBox::from_id_salt("field output dimension")
+        .selected_text(output.dimension.label())
+        .width(crate::dock::fit_width(ui, 200.0))
+        .show_ui(ui, |ui| {
+            for dimension in OutputDimension::ALL {
+                ui.selectable_value(&mut output.dimension, dimension, dimension.label());
+            }
+        })
+        .response
+        .on_hover_text(
+            "With 3D, 1D and 2D elements are written in their expanded 3D form. Default \
+             writes shell and plane models in 2D.",
+        );
     ui.end_row();
 }
 
@@ -7027,79 +6972,45 @@ fn print_energies(fe: &mut FeModel, s: usize) {
     fe.put_history_output(s, output);
 }
 
-/// The step kinds of the dialog: label, the kind with its settings and its default field
-/// outputs (none for eigenvalue steps, which keep their mode shapes), in order. The
+/// The step kinds of the dialog: label and the kind with its settings, in order. The
 /// sensitivity step is left out of 2D model spaces: the solver derives the design nodes from
 /// the external faces of solid elements and skips plane and axisymmetric elements, so it has
 /// nothing to differentiate there.
-fn step_kinds(fe: &FeModel) -> Vec<(&'static str, StepKind, Vec<FieldOutput>)> {
+fn step_kinds(fe: &FeModel) -> Vec<(&'static str, StepKind)> {
     let heat = HeatTransferStep::default();
     let mut kinds = vec![
-        (
-            STATIC_LABEL,
-            StepKind::Static(previous_static(fe)),
-            FieldOutput::defaults(),
-        ),
+        (STATIC_LABEL, StepKind::Static(previous_static(fe))),
         (
             FREQUENCY_LABEL,
             StepKind::Frequency(FrequencyStep::default()),
-            Vec::new(),
         ),
-        (
-            DYNAMIC_LABEL,
-            StepKind::Dynamic(DynamicStep::default()),
-            FieldOutput::dynamic_defaults(),
-        ),
+        (DYNAMIC_LABEL, StepKind::Dynamic(DynamicStep::default())),
         (
             STEADY_STATE_LABEL,
             StepKind::SteadyStateDynamics(SteadyStateDynamicsStep::default()),
-            FieldOutput::defaults(),
         ),
         (
             COMPLEX_FREQUENCY_LABEL,
             StepKind::ComplexFrequency(ComplexFrequencyStep::default()),
-            Vec::new(),
         ),
-        (
-            BUCKLE_LABEL,
-            StepKind::Buckle(BuckleStep::default()),
-            Vec::new(),
-        ),
-        (
-            HEAT_TRANSFER_LABEL,
-            StepKind::HeatTransfer(heat.clone()),
-            FieldOutput::heat_transfer_defaults(),
-        ),
-        (
-            COUPLED_LABEL,
-            StepKind::CoupledTempDisp(heat.clone()),
-            FieldOutput::coupled_defaults(),
-        ),
-        (
-            UNCOUPLED_LABEL,
-            StepKind::UncoupledTempDisp(heat),
-            FieldOutput::coupled_defaults(),
-        ),
-        (
-            VISCO_LABEL,
-            StepKind::Visco(ViscoStep::default()),
-            FieldOutput::visco_defaults(),
-        ),
+        (BUCKLE_LABEL, StepKind::Buckle(BuckleStep::default())),
+        (HEAT_TRANSFER_LABEL, StepKind::HeatTransfer(heat.clone())),
+        (COUPLED_LABEL, StepKind::CoupledTempDisp(heat.clone())),
+        (UNCOUPLED_LABEL, StepKind::UncoupledTempDisp(heat)),
+        (VISCO_LABEL, StepKind::Visco(ViscoStep::default())),
         (
             SENSITIVITY_LABEL,
             StepKind::Sensitivity(SensitivityStep::default()),
-            FieldOutput::sensitivity_defaults(),
         ),
         (
             PARTICLE_FLOW_LABEL,
             StepKind::ParticleFlow(Default::default()),
-            Vec::new(),
         ),
     ];
     if fe.properties.space.is_2d() {
         // Particles flow in plane strain and about an axis, not in a thin plate.
         let plate = fe.properties.space == plx_model::ModelSpace::PlaneStress;
-        kinds.retain(|(_, kind, _)| match kind {
+        kinds.retain(|(_, kind)| match kind {
             StepKind::Sensitivity(_) => false,
             StepKind::ParticleFlow(_) => !plate,
             _ => true,
@@ -7139,7 +7050,7 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
 }
 
 /// The step dialog. The kind is chosen when the step is created, from the list of
-/// step types; switching it starts with that kind's default field outputs.
+/// step types.
 /// `cyclic_sectors` is the number of sectors of a cyclic symmetric model.
 /// `index` is that of the step edited, `None` for a new one.
 fn step_form(
@@ -7172,10 +7083,9 @@ fn step_form(
             .selected_text(current)
             .width(280.0)
             .show_ui(ui, |ui| {
-                for (label, kind, outputs) in step_kinds(fe) {
+                for (label, kind) in step_kinds(fe) {
                     if ui.selectable_label(current == label, label).clicked() && current != label {
                         step.kind = kind;
-                        step.field_outputs = outputs;
                     }
                 }
             });
@@ -8778,7 +8688,7 @@ mod tests {
     #[test]
     fn a_region_with_a_selection_starts_locked() {
         let mesh = FeMesh::default();
-        let region = Region::Parts(["A".to_string()].into_iter().collect());
+        let region = Region::Parts(vec![crate::test_ids::named("A")]);
         let draft = RegionDraft::from_region(&region, SOLID_SOURCES, Target::Faces, &mesh);
         assert!(draft.locked && !draft.picks());
         let empty = RegionDraft::new(SOLID_SOURCES, Target::Faces);
@@ -8817,48 +8727,31 @@ mod tests {
 
     #[test]
     fn submodel_rows_name_the_global_results_and_what_is_wrong_with_them() {
-        use crate::links::{DisplacementWriters, GlobalSource};
-        let source = |step: &str, analysis: &str, writers| GlobalSource {
+        use crate::links::GlobalSource;
+        let source = |step: &str, analysis: &str, displacements| GlobalSource {
             step: step.into(),
             source: analysis.into(),
             source_step: "Load".into(),
-            writers,
+            displacements,
         };
         let tones = |lines: &[(&str, Line)]| lines.iter().map(|(_, l)| l.tone).collect::<Vec<_>>();
         // Nothing linked to the step.
         let lines = submodel_source_lines("Step-1", &[]);
         assert_eq!(tones(&lines), [Tone::Error]);
         assert!(lines[0].1.text.contains("Global results row of Step-1"));
-        let writers = DisplacementWriters {
-            outputs: vec!["NF-Output-1".into()],
-            carried_from: None,
-            load_case: true,
-        };
-        let good = [source("Step-1", "Global", Some(writers.clone()))];
+        let good = [source("Step-1", "Global", Some(true))];
         let lines = submodel_source_lines("Step-1", &good);
         assert_eq!(lines[0].1.text, "Load of Global");
         assert_eq!(tones(&lines), [Tone::Plain, Tone::Weak]);
-        assert!(lines[1].1.text.starts_with("Written by NF-Output-1."));
-        // No U requested.
-        let none = DisplacementWriters {
-            outputs: Vec::new(),
-            ..writers.clone()
-        };
-        let lines = submodel_source_lines("Step-1", &[source("Step-1", "Global", Some(none))]);
-        assert_eq!(tones(&lines), [Tone::Plain, Tone::Error]);
-        assert!(lines[1].1.text.contains("writes no displacements in Load"));
+        assert!(lines[1].1.text.contains("end of Load"));
         // Mode shapes.
-        let modes = DisplacementWriters {
-            load_case: false,
-            ..writers.clone()
-        };
-        let lines = submodel_source_lines("Step-1", &[source("Step-1", "Global", Some(modes))]);
+        let lines = submodel_source_lines("Step-1", &[source("Step-1", "Global", Some(false))]);
         assert_eq!(tones(&lines), [Tone::Plain, Tone::Error]);
         // Two global analyses.
         let both = [
-            source("Step-1", "Global", Some(writers.clone())),
-            source("Step-2", "Other", Some(writers.clone())),
-            source("Step-3", "Other", Some(writers)),
+            source("Step-1", "Global", Some(true)),
+            source("Step-2", "Other", Some(true)),
+            source("Step-3", "Other", Some(true)),
         ];
         let lines = submodel_source_lines("Step-1", &both);
         assert_eq!(tones(&lines), [Tone::Plain, Tone::Weak, Tone::Error]);
@@ -9159,7 +9052,7 @@ mod tests {
             let draft = RegionDraft::from_region(&region, NODE_SOURCES, target, &mesh);
             assert_eq!(draft.region(), region);
         }
-        let parts = Region::Parts(vec!["A".into(), "B".into()]);
+        let parts = Region::Parts(mesh.ids_of(&["A", "B"]));
         let draft = RegionDraft::from_region(&parts, ELEMENT_SOURCES, Target::Faces, &mesh);
         assert_eq!(draft.region(), parts);
         // Element regions list whole parts first; picked faces still reopen as a selection.
@@ -9265,34 +9158,29 @@ mod tests {
     }
 
     #[test]
-    fn field_outputs_are_created_deactivated_and_deleted() {
+    fn the_field_output_is_edited_and_reset() {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
-        let mut editor = Editor::create(NewItem::FieldOutput(0), &fe).unwrap();
-        if let Draft::FieldOutput(_, output) = &mut editor.draft {
-            assert_eq!(output.name, "NF_Output-1");
-            output.kind = OutputKind::Element;
-            output.variables = vec!["ZZS".into(), "S".into(), "ERR".into()];
-        }
-        assert!(
-            editor.validate(&fe).is_err(),
-            "ERR and ZZS exclude each other"
-        );
-        if let Draft::FieldOutput(_, output) = &mut editor.draft {
-            output.variables.pop();
+        // There is one field output: creating it opens it.
+        let mut editor = Editor::create(NewItem::FieldOutput, &fe).unwrap();
+        assert_eq!(editor.title(), "Field Output");
+        if let Draft::FieldOutput(output) = &mut editor.draft {
+            assert!(output.is_standard());
+            output.additional = vec![FieldResult::StressError, FieldResult::StrainEnergy];
         }
         assert_eq!(editor.validate(&fe), Ok(()));
         editor.apply(&mut fe);
-        let added = TreeItem::FieldOutput(0, 2);
-        assert_eq!(fe.steps[0].field_outputs[2].variables, ["S", "ZZS"]);
-        assert!(toggle_active(&mut fe, &added));
-        assert!(!fe.steps[0].field_outputs[2].active);
-        // Editing keeps the output deactivated.
-        let editor = Editor::edit(&added, &fe, &FeMesh::default()).unwrap();
+        assert_eq!(
+            fe.field_output.additional,
+            [FieldResult::StrainEnergy, FieldResult::StressError]
+        );
+        let editor = Editor::edit(&TreeItem::FieldOutput, &fe, &FeMesh::default()).unwrap();
         editor.apply(&mut fe);
-        assert!(!fe.steps[0].field_outputs[2].active);
-        assert!(delete(&mut fe, &added));
-        assert_eq!(fe.steps[0].field_outputs.len(), 2);
+        assert_eq!(fe.field_output.additional.len(), 2);
+        // Deleting it leaves the standard results.
+        assert!(delete(&mut fe, &TreeItem::FieldOutput));
+        assert!(fe.field_output.is_standard());
+        assert!(!delete(&mut fe, &TreeItem::FieldOutput));
     }
 
     #[test]
@@ -9511,13 +9399,16 @@ mod tests {
         assert!(editor.validate(&fe).is_err(), "empty region");
         if let Draft::InitialCondition(_, region) = &mut editor.draft {
             region.source = Source::Parts;
-            region.parts = PartPicks::from_names(["A".to_string()]);
+            region.parts = PartPicks::from_parts([(crate::test_ids::named("A"), "A".into())]);
         }
         assert_eq!(editor.validate(&fe), Ok(()));
         editor.apply(&mut fe);
         let condition = &fe.initial_conditions[0];
         assert_eq!(condition.name, "Temperature-1");
-        assert_eq!(condition.region, Region::Parts(vec!["A".into()]));
+        assert_eq!(
+            condition.region,
+            Region::Parts(vec![crate::test_ids::named("A")])
+        );
         assert_eq!(condition.kind, InitialConditionKind::Temperature(20.0));
         let item = TreeItem::InitialCondition(0);
         assert!(toggle_active(&mut fe, &item));
@@ -9722,8 +9613,8 @@ mod tests {
             "Contact_Pair-1",
             Some(crate::test_ids::named("Interaction-1")),
         );
-        pair.master = Region::Parts(vec!["PLATTE".into()]);
-        pair.slave = Region::Parts(vec!["STUETZEN".into()]);
+        pair.master = Region::Parts(model.mesh().ids_of(&["PLATTE"]));
+        pair.slave = Region::Parts(model.mesh().ids_of(&["STUETZEN"]));
         model.fe.contact_pairs.push(pair);
 
         let acting = |parts: &[usize]| acting_on_parts(&model, &parts.iter().copied().collect());
@@ -9753,7 +9644,7 @@ mod tests {
             orientation: None,
             name: name.into(),
             material,
-            region: Region::Parts(vec!["A".into()]),
+            region: Region::Parts(vec![crate::test_ids::named("A")]),
             thickness: 1.0,
             kind: SectionKind::Solid,
         };
@@ -9776,6 +9667,7 @@ mod tests {
         let mesh = plx_io::inp::read_inp(&path).unwrap().mesh;
         let mut model = Model::new(&path, mesh);
         let part = model.mesh().parts[0].name.clone();
+        let part_id = model.mesh().parts[0].id;
 
         // A new element set of the whole part.
         let mut editor = Editor::create_set(SetKind::Elements, &model.fe, model.mesh());
@@ -9784,7 +9676,7 @@ mod tests {
         };
         assert_eq!(set.name, "Element_Set-1");
         region.source = Source::Parts;
-        region.parts = PartPicks::from_names([part.clone()]);
+        region.parts = PartPicks::from_ids(&[part_id], model.mesh());
         assert_eq!(editor.validate(&model.fe), Ok(()));
         assert_eq!(editor.validate_set(&model), Ok(()));
         // An element set must not take a part's name.

@@ -460,7 +460,12 @@ impl MeshItemEditor {
             MeshSetupKind::ExtrudeMesh(extrude) if !extrude.faces.is_empty() => {
                 PartPicks::default()
             }
-            kind => PartPicks::from_names(kind.parts().unwrap_or_default().iter().cloned()),
+            // The mesh setup keeps the parts by name; the display has them by the ids of
+            // the geometry.
+            kind => PartPicks::from_parts((kind.parts().unwrap_or_default().iter()).map(|name| {
+                let id = geometry.part_id(name).unwrap_or_default();
+                (id, name.clone())
+            })),
         };
         let mut layer_text = ["0.2; 0.6; 0.2;".to_string(), "2; 4; 2;".to_string()];
         let mut source_faces = false;

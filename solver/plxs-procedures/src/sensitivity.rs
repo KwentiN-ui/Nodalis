@@ -100,13 +100,17 @@ enum ElementLoad {
 fn response_elements(
     model: &Model,
     table: &ElementTable,
-    elset: Option<&str>,
+    elset: Option<plxs_core::ElementSetId>,
 ) -> Result<Option<Vec<bool>>> {
-    let Some(name) = elset else {
+    let Some(set) = elset else {
         return Ok(None);
     };
-    let Some(ids) = model.sets.element_sets.get(name) else {
-        return Err(Error::undefined("*DESIGN RESPONSE", "element set", name));
+    let Some(ids) = (model.sets.element_sets.get(set.index())).map(|s| &s.elements) else {
+        return Err(Error::undefined(
+            "*DESIGN RESPONSE",
+            "element set",
+            format!("#{}", set.0),
+        ));
     };
     let mut flags = vec![false; table.entries.len()];
     for id in ids {
@@ -191,11 +195,11 @@ fn design_nodes(ctx: &ProcedureContext<'_>, step: &Step) -> Result<Vec<DesignNod
             "the step needs *DESIGN VARIABLES, TYPE=COORDINATE before the steps",
         ));
     };
-    let Some(ids) = model.sets.node_sets.get(&design.nset) else {
+    let Some(ids) = (model.sets.node_sets.get(design.nset.index())).map(|s| &s.nodes) else {
         return Err(Error::undefined(
             "*DESIGN VARIABLES",
             "node set",
-            &design.nset,
+            format!("#{}", design.nset.0),
         ));
     };
     let mut in_set = vec![false; model.nodes.len()];
@@ -661,15 +665,10 @@ fn element_loads(ctx: &ProcedureContext<'_>, step: &Step) -> Result<Vec<Vec<Elem
     let mut loads: Vec<Vec<ElementLoad>> = (0..table.entries.len()).map(|_| Vec::new()).collect();
     let total = ctx.state.total_time;
     for load in &step.loads.distributed {
-        let factor = amplitude_factor(model, step, load.amplitude.as_deref(), 1.0, total, 1.0);
+        let factor = amplitude_factor(model, step, load.amplitude, 1.0, total, 1.0);
         let elements: Vec<u32> = match &load.region {
             ElementRef::Element(id) => vec![*id],
-            ElementRef::Set(name) => model
-                .sets
-                .element_sets
-                .get(name)
-                .cloned()
-                .unwrap_or_default(),
+            ElementRef::Set(set) => model.sets.elements(*set).to_vec(),
         };
         for id in elements {
             let Some(index) = model.element_index(id) else {
@@ -1227,7 +1226,7 @@ fn parse_responses(
         };
         let set = match kind {
             ResponseKind::Eigenfrequency => None,
-            _ => response_elements(ctx.model, ctx.table, response.elset.as_deref())?,
+            _ => response_elements(ctx.model, ctx.table, response.elset)?,
         };
         requests.push((kind, set));
     }

@@ -2375,7 +2375,7 @@ mod tests {
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("Steel")),
-                region: plx_model::Region::Parts(vec!["EALL".into()]),
+                region: plx_model::Region::Parts(mesh.ids_of(&["EALL"])),
                 thickness: 1.0,
                 kind: plx_model::SectionKind::Solid,
             }],
@@ -2537,7 +2537,7 @@ mod tests {
                 orientation: None,
                 name: "Shell-1".into(),
                 material: Some(polycarbonate),
-                region: plx_model::Region::Parts(vec!["DISC".into()]),
+                region: plx_model::Region::Parts(mesh.ids_of(&["DISC"])),
                 thickness: 1.0,
                 kind: plx_model::SectionKind::Shell {
                     thickness: 1.2e-3,

@@ -14,7 +14,6 @@ pub struct Geometry {
     /// The shapes as an OpenCASCADE BREP file.
     pub brep: String,
     /// Meshing parameters of the parts that no Meshing Parameters item covers.
-    #[serde(alias = "mesh_setup")]
     pub meshing: MeshingParameters,
     /// The mesh setup items.
     #[serde(default)]
@@ -105,9 +104,22 @@ pub struct PeriodicFaces {
 /// solver input ties them, as a bonded contact would.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompoundPart {
+    /// The id of the part of the FE model it becomes, see [`plx_mesh::Part::id`].
+    pub id: crate::Id,
     pub name: String,
-    /// Names of the parts of the geometry it joins.
-    pub parts: Vec<String>,
+    /// The parts of the geometry it joins, by their ids ([`Geometry::ids`]).
+    pub parts: Vec<crate::Id>,
+}
+
+impl CompoundPart {
+    /// A new compound part of the parts of the geometry `parts`, by id.
+    pub fn new(name: impl Into<String>, parts: Vec<crate::Id>) -> Self {
+        Self {
+            id: crate::Id::new(),
+            name: name.into(),
+            parts,
+        }
+    }
 }
 
 fn one() -> f64 {
@@ -143,7 +155,17 @@ impl Geometry {
 
     /// The compound part holding the part `part`, by index.
     pub fn compound_of(&self, part: &str) -> Option<usize> {
-        (self.compounds.iter()).position(|c| names(&c.parts, part))
+        self.compound_of_id(self.part_id(part)?)
+    }
+
+    /// The compound part holding the part of the id `part`, by index.
+    pub fn compound_of_id(&self, part: crate::Id) -> Option<usize> {
+        (self.compounds.iter()).position(|c| c.parts.contains(&part))
+    }
+
+    /// The compound part of the id `id`, by index.
+    pub fn compound_with_id(&self, id: crate::Id) -> Option<usize> {
+        (self.compounds.iter()).position(|c| c.id == id)
     }
 
     /// The compound part named `name`, by index.
@@ -164,34 +186,29 @@ impl Geometry {
     /// of a compound, else the part itself.
     pub fn parts_of_fe_part(&self, name: &str) -> Vec<String> {
         match self.compound_named(name) {
-            Some(c) => self.compounds[c].parts.clone(),
+            Some(c) => self.member_names(c),
             None => vec![name.to_owned()],
         }
     }
 
-    /// The compounds as the mesh joins its parts, see [`plx_mesh::FeMesh::compose_compounds`].
-    pub fn compound_members(&self) -> Vec<(String, Vec<String>)> {
-        (self.compounds.iter())
-            .map(|c| (c.name.clone(), c.parts.clone()))
+    /// The names of the parts the compound part `compound` (by index) joins.
+    pub fn member_names(&self, compound: usize) -> Vec<String> {
+        (self.compounds[compound].parts.iter())
+            .filter_map(|&id| self.part_name(id))
+            .map(str::to_owned)
             .collect()
     }
 
-    /// Renames a part in the compounds; false if none holds it.
-    pub fn rename_compound_member(&mut self, old: &str, new: &str) -> bool {
-        let mut renamed = false;
-        for compound in &mut self.compounds {
-            for part in &mut compound.parts {
-                if part.eq_ignore_ascii_case(old) {
-                    *part = new.to_owned();
-                    renamed = true;
-                }
-            }
-        }
-        renamed
+    /// The compounds as the mesh joins its parts, as (id, name, members), see
+    /// [`plx_mesh::FeMesh::compose_compounds`].
+    pub fn compound_members(&self) -> Vec<(crate::Id, String, Vec<crate::Id>)> {
+        (self.compounds.iter())
+            .map(|c| (c.id, c.name.clone(), c.parts.clone()))
+            .collect()
     }
 
     /// Renames the part `old` of the geometry to `new`, with what refers to it by name: its
-    /// compound, its suppression and the mesh setup items. False if the geometry has no part
+    /// suppression and the mesh setup items. Its compound refers to it by id. False if the geometry has no part
     /// of that name: its names are not known without Gmsh, see [`Geometry::part_names`].
     pub fn rename_part(&mut self, old: &str, new: &str) -> bool {
         let Some(at) = (self.part_names.iter()).position(|p| p.eq_ignore_ascii_case(old)) else {
@@ -199,7 +216,6 @@ impl Geometry {
         };
         self.ensure_ids();
         self.part_names[at] = new.to_owned();
-        self.rename_compound_member(old, new);
         for entry in &mut self.ids {
             if entry.name.eq_ignore_ascii_case(old) {
                 entry.name = new.to_owned();
@@ -251,6 +267,50 @@ impl Geometry {
         (self.ids.iter())
             .find(|p| p.name.eq_ignore_ascii_case(name))
             .map(|p| p.id)
+    }
+
+    /// The name of the part of the id `id`.
+    pub fn part_name(&self, id: crate::Id) -> Option<&str> {
+        (self.ids.iter())
+            .find(|p| p.id == id)
+            .map(|p| p.name.as_str())
+    }
+
+    /// The ids of the parts `names`, giving parts without one an id: for picking parts by
+    /// the names the meshes and Gmsh show.
+    pub fn part_ids_of(&mut self, names: &[String]) -> Vec<crate::Id> {
+        (names.iter())
+            .map(|name| match self.part_id(name) {
+                Some(id) => id,
+                None => {
+                    let id = crate::Id::new();
+                    self.ids.push(PartId {
+                        name: name.clone(),
+                        id,
+                    });
+                    id
+                }
+            })
+            .collect()
+    }
+
+    /// Gives the parts of a mesh Gmsh made of this geometry, and their bodies, the ids of
+    /// the parts of the geometry they are the meshes of, by name, and compound parts the
+    /// compound's: so that a part meshed anew is the same part to everything referring to
+    /// it ([`plx_mesh::Part::id`]).
+    pub fn stamp_ids(&self, mesh: &mut plx_mesh::FeMesh) {
+        for part in &mut mesh.parts {
+            if let Some(c) = self.compound_named(&part.name) {
+                part.id = self.compounds[c].id;
+            } else if let Some(id) = self.part_id(&part.name) {
+                part.id = id;
+            }
+            for body in &mut part.bodies {
+                if let Some(id) = self.part_id(&body.name) {
+                    body.id = id;
+                }
+            }
+        }
     }
 
     /// Gives every part of known name an id, and drops the ids of parts that went.
@@ -317,8 +377,9 @@ impl Geometry {
 
     /// Takes parts out of their compounds; compounds left empty go.
     pub fn remove_from_compounds(&mut self, parts: &[String]) {
+        let ids: Vec<crate::Id> = parts.iter().filter_map(|p| self.part_id(p)).collect();
         for compound in &mut self.compounds {
-            compound.parts.retain(|p| !names(parts, p));
+            compound.parts.retain(|p| !ids.contains(p));
         }
         self.compounds.retain(|c| !c.parts.is_empty());
     }
@@ -481,7 +542,6 @@ pub struct MeshingParameters {
     /// Solids that are straight extrusions or bodies of revolution get a swept mesh of
     /// hexahedra, with the defaults of the Extrude Mesh item for extrusions; the others stay
     /// tetrahedra.
-    #[serde(alias = "extrude_where_possible")]
     pub hexahedra_where_possible: bool,
 }
 
@@ -942,13 +1002,5 @@ mod tests {
         geometry.mesh_items.push(tet);
         assert!(geometry.extrusion("A").is_none());
         assert!(geometry.extrusion("B").is_some());
-    }
-
-    #[test]
-    fn projects_of_the_first_geometry_version_still_read() {
-        let text = r#"(source: "a.step", brep: "", mesh_setup: (max_size: 3.0))"#;
-        let geometry: Geometry = ron::from_str(text).unwrap();
-        assert_eq!(geometry.meshing.max_size, 3.0);
-        assert!(geometry.mesh_items.is_empty());
     }
 }

@@ -1097,24 +1097,61 @@ impl Picker {
 
 /// Whole parts picked in the 3D view, for regions of parts and mesh setup items. As for
 /// other selections a click replaces the picked parts, Shift adds and Ctrl removes.
+/// The parts are kept by id ([`plx_mesh::Part::id`]), with their names for the row.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PartPicks {
-    history: History<String>,
+    history: History<plx_model::Id>,
+    names: std::collections::BTreeMap<plx_model::Id, String>,
 }
 
 impl PartPicks {
-    pub fn from_names(names: impl IntoIterator<Item = String>) -> Self {
+    /// The parts `parts` picked, as (id, name).
+    pub fn from_parts(parts: impl IntoIterator<Item = (plx_model::Id, String)>) -> Self {
+        let names: std::collections::BTreeMap<plx_model::Id, String> = parts.into_iter().collect();
         Self {
-            history: History::from_items(names),
+            history: History::from_items(names.keys().copied()),
+            names,
         }
     }
 
-    pub fn names(&self) -> BTreeSet<String> {
+    /// The parts of the ids `ids` of `mesh` picked.
+    pub fn from_ids(ids: &[plx_model::Id], mesh: &plx_mesh::FeMesh) -> Self {
+        Self::from_parts(ids.iter().map(|&id| {
+            let name = mesh.part_name(id).unwrap_or("(deleted)");
+            (id, name.to_owned())
+        }))
+    }
+
+    /// The ids of the picked parts.
+    pub fn ids(&self) -> BTreeSet<plx_model::Id> {
         self.history.items()
     }
 
+    /// The names of the picked parts.
+    pub fn names(&self) -> BTreeSet<String> {
+        (self.ids().iter())
+            .filter_map(|id| self.names.get(id).cloned())
+            .collect()
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.names().is_empty()
+        self.ids().is_empty()
+    }
+
+    /// Picks with `operation` the parts of `model` of the indices `parts`.
+    fn push(
+        &mut self,
+        model: &Model,
+        operation: Operation,
+        parts: impl IntoIterator<Item = usize>,
+    ) {
+        let mesh = model.mesh();
+        let mut ids = BTreeSet::new();
+        for part in parts.into_iter().filter_map(|p| mesh.parts.get(p)) {
+            self.names.insert(part.id, part.name.clone());
+            ids.insert(part.id);
+        }
+        self.history.push(operation, ids);
     }
 
     pub fn can_undo(&self) -> bool {
@@ -1127,8 +1164,8 @@ impl PartPicks {
 
     /// A click on the part of the hit, or into empty space.
     pub fn click(&mut self, model: &Model, hit: Option<&Hit>, operation: Operation) {
-        match hit.and_then(|hit| model.parts.get(hit.part)) {
-            Some(part) => (self.history).push(operation, BTreeSet::from([part.name.clone()])),
+        match hit.filter(|hit| hit.part < model.mesh().parts.len()) {
+            Some(hit) => self.push(model, operation, [hit.part]),
             // Nodalis clears the selection on a plain click into empty space.
             None if operation == Operation::Replace => self.clear(),
             None => {}
@@ -1137,28 +1174,26 @@ impl PartPicks {
 
     /// The visible parts inside a selection box, or crossing it when dragged to the left.
     pub fn box_select(&mut self, model: &Model, area: &BoxSelect, operation: Operation) {
-        let names = (0..model.parts.len())
+        let parts: Vec<usize> = (0..model.parts.len())
             .filter(|&p| model.parts[p].pickable() && part_in_box(model, p, area))
-            .map(|p| model.parts[p].name.clone())
             .collect();
-        self.history.push(operation, names);
+        self.push(model, operation, parts);
     }
 
     /// Applies a button of the selection window.
     pub fn action(&mut self, model: &Model, action: PickerAction) {
-        let visible = || {
-            (model.parts.iter())
-                .filter(|p| p.visible)
-                .map(|p| p.name.clone())
-        };
+        let visible = || (0..model.parts.len()).filter(|&p| model.parts[p].visible);
         match action {
             PickerAction::Undo => self.history.undo(),
             PickerAction::Clear => self.clear(),
-            PickerAction::All => self.history.push(Operation::Replace, visible().collect()),
+            PickerAction::All => self.push(model, Operation::Replace, visible()),
             PickerAction::Invert => {
-                let picked = self.names();
-                let others = visible().filter(|n| !picked.contains(n)).collect();
-                self.history.push(Operation::Replace, others);
+                let picked = self.ids();
+                let mesh = model.mesh();
+                let others: Vec<usize> = visible()
+                    .filter(|&p| mesh.parts.get(p).is_some_and(|p| !picked.contains(&p.id)))
+                    .collect();
+                self.push(model, Operation::Replace, others);
             }
             PickerAction::Ids(..) => {}
         }
@@ -2117,12 +2152,15 @@ mod tests {
         let right = block(&mut mesh, 10.0, 3);
         if compound {
             mesh.parts.push(Part {
+                id: Default::default(),
                 bodies: vec![
                     Body {
+                        id: Default::default(),
                         name: "LEFT".into(),
                         elements: left.clone(),
                     },
                     Body {
+                        id: Default::default(),
                         name: "RIGHT".into(),
                         elements: right.clone(),
                     },
@@ -2133,6 +2171,7 @@ mod tests {
         } else {
             for (name, elements) in [("LEFT", left), ("RIGHT", right)] {
                 mesh.parts.push(Part {
+                    id: Default::default(),
                     bodies: Vec::new(),
                     name: name.into(),
                     elements,
@@ -2249,6 +2288,7 @@ mod tests {
             }
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "PLATE".into(),
             elements,
@@ -2288,6 +2328,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "BEAM".into(),
             elements: vec![1, 2],
@@ -2398,6 +2439,7 @@ mod tests {
             }
         }
         let mut part = plx_mesh::Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "PLATE".into(),
             elements: Vec::new(),

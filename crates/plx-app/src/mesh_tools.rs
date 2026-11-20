@@ -123,8 +123,8 @@ pub struct MeshToolDialog {
     tool: MeshTool,
     /// Name of the mesh operation.
     name: String,
-    /// The parts the mesh operation changes, by name.
-    parts: Vec<String>,
+    /// The parts the mesh operation changes, by id.
+    parts: Vec<plx_model::Id>,
     transform: TransformDraft,
     tolerance: f64,
     first_node: u32,
@@ -161,8 +161,8 @@ impl MeshToolDialog {
             MeshTool::Transform(parts) => (
                 plx_model::next_name("Transform", operations.iter().map(|o| o.name.as_str())),
                 (parts.iter())
-                    .filter_map(|&p| model.parts.get(p))
-                    .map(|p| p.name.clone())
+                    .filter_map(|&p| model.mesh().parts.get(p))
+                    .map(|p| p.id)
                     .collect(),
                 TransformDraft::new(),
             ),
@@ -366,10 +366,9 @@ impl MeshToolDialog {
                 }
                 // The parts in the order of the mesh; bodies of compound parts it names
                 // since they were joined stay.
-                let parts: Vec<String> = (model.mesh().parts.iter())
-                    .flat_map(|p| std::iter::once(&p.name).chain(p.bodies.iter().map(|b| &b.name)))
+                let parts: Vec<plx_model::Id> = (model.mesh().parts.iter())
+                    .flat_map(|p| std::iter::once(p.id).chain(p.bodies.iter().map(|b| b.id)))
                     .filter(|p| self.parts.contains(p))
-                    .cloned()
                     .collect();
                 let operation = MeshOperation {
                     name: name.clone(),
@@ -391,7 +390,7 @@ impl MeshToolDialog {
                     Some(_) => return Err("The transform no longer exists.".into()),
                     None => operations.push(operation),
                 }
-                let names = self.parts.join(", ");
+                let names = plx_model::part_names(model.mesh(), &self.parts).join(", ");
                 model.edit_mesh(|mesh, fe| fe.set_mesh_operations(mesh, operations));
                 let what = TRANSFORM_KINDS
                     .iter()
@@ -443,13 +442,14 @@ impl MeshToolDialog {
 
 /// A check box per mesh part; parts the list names that the mesh no longer has stay
 /// listed, so that they can be taken out.
-fn parts_list(ui: &mut Ui, parts: &mut Vec<String>, model: &Model) {
-    let mut names: Vec<String> = model.parts.iter().map(|p| p.name.clone()).collect();
-    names.extend(
+fn parts_list(ui: &mut Ui, parts: &mut Vec<plx_model::Id>, model: &Model) {
+    let mesh = model.mesh();
+    let mut ids = mesh.part_ids();
+    ids.extend(
         parts
             .iter()
-            .filter(|p| !names.contains(p))
-            .cloned()
+            .filter(|p| !ids.contains(p))
+            .copied()
             .collect::<Vec<_>>(),
     );
     egui::ScrollArea::vertical()
@@ -457,13 +457,14 @@ fn parts_list(ui: &mut Ui, parts: &mut Vec<String>, model: &Model) {
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.vertical(|ui| {
-                for name in names {
-                    let mut checked = parts.contains(&name);
-                    if ui.checkbox(&mut checked, &name).changed() {
+                for id in ids {
+                    let mut checked = parts.contains(&id);
+                    let name = mesh.part_name(id).unwrap_or("(deleted)");
+                    if ui.checkbox(&mut checked, name).changed() {
                         if checked {
-                            parts.push(name);
+                            parts.push(id);
                         } else {
-                            parts.retain(|p| *p != name);
+                            parts.retain(|p| *p != id);
                         }
                     }
                 }
@@ -682,10 +683,10 @@ mod tests {
         };
         let start = [min_x(&model, 0), min_x(&model, 1)];
         let geometry = model.geometry.as_mut().unwrap();
-        geometry.compounds.push(plx_model::CompoundPart {
-            name: "COMPOUND-1".into(),
-            parts: vec!["SOLID-1".into(), "SOLID-2".into()],
-        });
+        let parts = geometry.part_ids_of(&["SOLID-1".into(), "SOLID-2".into()]);
+        let compound = plx_model::CompoundPart::new("COMPOUND-1", parts.clone());
+        let id = compound.id;
+        geometry.compounds.push(compound);
         crate::app::apply_compounds(&mut model, &[]);
         assert_eq!(model.parts.len(), 1);
         let body_min_x = |model: &Model, body: usize| {
@@ -702,7 +703,7 @@ mod tests {
         let mut dialog = MeshToolDialog::new(MeshTool::Transform(vec![0]), &model);
         dialog.transform.translation = [100.0, 0.0, 0.0];
         dialog.apply(&mut model).unwrap();
-        assert_eq!(model.fe.mesh_operations[0].parts, ["COMPOUND-1"]);
+        assert_eq!(model.fe.mesh_operations[0].parts, [id]);
         assert!(moved(&model, 100.0));
 
         remesh(&mut model, Some(vec!["SOLID-1".into()]));
@@ -753,12 +754,13 @@ mod tests {
 
         // Joined with the other block.
         let geometry = model.geometry.as_mut().unwrap();
-        geometry.compounds.push(plx_model::CompoundPart {
-            name: "COMPOUND-1".into(),
-            parts: vec!["SOLID-1".into(), "SOLID-2".into()],
-        });
+        let parts = geometry.part_ids_of(&["SOLID-1".into(), "SOLID-2".into()]);
+        let compound = plx_model::CompoundPart::new("COMPOUND-1", parts.clone());
+        let id = compound.id;
+        geometry.compounds.push(compound);
         crate::app::apply_compounds(&mut model, &[]);
-        assert_eq!(model.fe.mesh_operations[0].parts, ["SOLID-1"]);
+        assert_eq!(model.fe.mesh_operations[0].parts, [parts[0]]);
+        assert_eq!(model.mesh().parts[0].id, id);
         assert!(moved(&model, [100.0, 0.0]));
         remesh(&mut model, None);
         assert!(moved(&model, [100.0, 0.0]), "meshed again in the compound");
@@ -773,7 +775,7 @@ mod tests {
         model.geometry.as_mut().unwrap().compounds.clear();
         crate::app::apply_compounds(&mut model, &before);
         assert_eq!(model.parts.len(), 2);
-        assert_eq!(model.fe.mesh_operations[1].parts, ["SOLID-1", "SOLID-2"]);
+        assert_eq!(model.fe.mesh_operations[1].parts, parts);
         remesh(&mut model, None);
         assert!(
             moved(&model, [110.0, 10.0]),
@@ -812,7 +814,8 @@ mod tests {
         remesh(&mut model, Some(vec!["SOLID-2".into()]));
         assert_eq!(fe_parts(&model), (both.clone(), vec![]));
         // Without its mesh, a part is still listed.
-        model.edit_mesh(|mesh, _| mesh.remove_bodies(&["SOLID-1".to_owned()]));
+        let solid_1 = model.mesh().part_id("SOLID-1").unwrap();
+        model.edit_mesh(|mesh, _| mesh.remove_bodies(&[solid_1]));
         assert_eq!(
             fe_parts(&model),
             (vec!["SOLID-2".to_owned()], vec!["SOLID-1".to_owned()])

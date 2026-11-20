@@ -72,16 +72,6 @@ impl CadOperationKind {
         }
     }
 
-    /// The key of its length among the parameters of the block, `["Parameters", key]`.
-    pub fn value_key(self) -> &'static str {
-        match self {
-            Self::Fillet => "radius",
-            Self::Chamfer => "distance",
-            Self::PushPull | Self::SplitPlane | Self::HoleRing => "offset",
-            Self::Defeature => "max_size",
-        }
-    }
-
     /// Whether it acts on entities of this kind.
     pub fn picks(self, entity: CadEntity) -> bool {
         match self {

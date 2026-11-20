@@ -21,9 +21,10 @@ each other's files.
     again (@step-cache).],
   [Check Model], [Lets the solver only read and check the model and its steps, without
     solving it.],
-  [Stop], [Stops meshing for a solve, or the running solver. The program does not wait for
-    the solver: it stops at once, also in the middle of a long factorization or eigenvalue
-    extraction, and what the stopped run computed is discarded.],
+  [Stop], [Stops meshing for a solve, or the running solver. If the solver has finished
+    increments, Nodalis first asks whether their results are kept (@stop-keep-results).
+    Otherwise it does not wait for the solver: it stops at once, also in the middle of a long
+    factorization or eigenvalue extraction, and what the stopped run computed is discarded.],
   [Monitor], [Shows the #ui("Analysis") tab of the output pane (@monitor).],
   [Open Results], [On the #ui("File") tab: opens the results the analysis keeps.],
   [Remove], [On the #ui("File") tab: drops the results the analysis keeps, after asking
@@ -40,6 +41,36 @@ The input file is named after the analysis, for example `Cantilever.inp`. Old re
 the analysis in its folder are deleted before the solver starts. Nodalis refuses to run a model
 without mesh, without step or with all steps deactivated, and it stops if the input file cannot
 be written (for example because a region is empty).
+
+=== Keeping the results of a stopped run <stop-keep-results>
+
+A nonlinear step with many increments may already show what you wanted to know long before it
+ends, or you may see that it goes wrong and want to look at where. When you stop a run that has
+finished increments (#ui("Stop") on the ribbon, #ui("Kill") in the monitor, #ui("Stop") or
+#ui("Stop All") in the solution monitor, or #ui("Stop") of #ui("Update Project")), Nodalis asks what happens to them:
+
+#fields(
+  [Stop and Keep Results], [Stops the solver and keeps the results of the increments done, as
+    the results of a stopped run. The step stopped halfway is marked as not finished, as after a
+    step that did not converge. If that step asked for fewer result frames than it finished
+    increments, the last increment done is written as an additional frame, so that the results
+    end where the run stopped.],
+  [Stop and Discard], [Stops the solver at once and keeps nothing, as before.],
+  [Cancel], [Lets the solver go on (#key("Escape")). #key("Enter") presses no button, so that no
+    run is stopped by habit.],
+)
+
+#screenshot("stop-keep-results.png", [The question when a nonlinear static step is stopped after
+  some increments])
+
+With #ui("Stop and Keep Results") the solver still finishes what it computes at that moment (an
+iteration, a factorization) and then writes the results; the monitor shows
+#ui("stopping, writing the results so far") meanwhile, and the status at the end is
+#ui("stopped, results so far kept"). Pressing #ui("Stop") again while it writes stops at once and
+discards them. Analyses of #ui("Update Project") that take data from the stopped one are not
+solved. A run without finished increments, such as a linear static step, stops at once without
+asking. Only nonlinear static steps write the last increment done as an additional frame; other
+steps keep the frames they wrote until the stop.
 
 === Steps that did not change <step-cache>
 
@@ -111,7 +142,7 @@ Once there are more, the oldest lines go and the top row tells how many, for exa
 #screenshot("monitor-long-output.png", [The end of a long run, its first lines dropped])
 
 The status at the end is #ui("completed"), #ui("finished with errors, results available"),
-#ui("failed") or #ui("killed"). If the solver failed, it reports the causes it found
+#ui("failed"), #ui("killed") or #ui("stopped, results so far kept") (@stop-keep-results). If the solver failed, it reports the causes it found
 and Nodalis adds a line "Possible cause: ..." with a remedy, for example for distorted
 elements, missing material data, rigid body motion or missing convergence.
 
@@ -494,27 +525,21 @@ linked in the schematic (@results-links):
 
 The dialog of a #ui("Submodel") boundary condition shows where its displacements come from.
 #ui("Global results") names the step and the analysis linked to the #ui("Global results") input
-of its step. #ui("Displacements") names the field outputs of that global step that request U: a
-global step without a node field output of its own keeps those of the step before it, as the
-solver does. The displacements at the end of the global step are read; U requested by several
-field outputs is written only once, so it makes no difference. The dialog shows in red what
-keeps the submodel from running:
+of its step. #ui("Displacements") says whether that global step writes displacements: every
+step that deforms the model under loads does. The displacements at the end of the global step
+are read. The dialog shows in red what keeps the submodel from running:
 
 - nothing is linked to the step of the boundary condition,
-- the global step writes no displacements: no active node field output requests U,
 - the global step computes mode shapes, temperatures or sensitivities, not the displacements of
   a load,
 - steps of the submodel take results of different global analyses; a submodel reads one global
   results file.
 
-For the results of a file block the dialog cannot tell which field outputs wrote them; a file
+For the results of a file block the dialog cannot tell what they hold; a file
 without displacements of the step stops the run with a message.
 
 #screenshot("submodel-bc-source.png", [The boundary condition reads the displacements of Step-1
-  of the analysis Global, which NF-Output-1 writes])
-
-#screenshot("submodel-bc-no-displacements.png", [The field outputs of the global step do not
-  request U])
+  of the analysis Global])
 
 In the Results workspace of the submodel, #ui("Global Contours") on the #ui("Display") tab,
 next to #ui("Show Undeformed"), draws the edges of the global model around the results, read from

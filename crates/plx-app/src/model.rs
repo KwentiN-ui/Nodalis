@@ -800,18 +800,18 @@ impl Model {
             planes: self.fe.planes.clone(),
             result_paths: self.fe.result_paths.clone(),
             result_planes: self.fe.result_planes.clone(),
-            plain_part_names: (self.parts.iter())
-                .filter(|part| !part.contours)
-                .map(|part| part.name.clone())
+            plain_part_ids: (self.parts.iter().zip(&self.mesh.parts))
+                .filter(|(part, _)| !part.contours)
+                .map(|(_, part)| part.id)
                 .collect(),
             mesh: Some(self.mesh.fingerprint()),
             ..view.settings()
         })
         .map(|mut settings| {
             let saved = &mut settings.view;
-            saved.hidden_parts = (self.parts.iter())
-                .filter(|p| !p.visible)
-                .map(|p| p.name.clone())
+            saved.hidden_parts = (self.parts.iter().zip(&self.mesh.parts))
+                .filter(|(p, _)| !p.visible)
+                .map(|(_, p)| p.id)
                 .collect();
             saved.annotations = self.query_annotations.iter().map(Into::into).collect();
             saved.path_plots = self.path_plots.iter().map(|p| p.saved()).collect();
@@ -834,23 +834,17 @@ impl Model {
         self.fe.result_planes = settings.result_planes.clone();
         self.hot_spots.definitions = settings.hot_spots.clone();
         let view = &settings.view;
-        for part in &mut self.parts {
-            part.visible = !view.hidden_parts.contains(&part.name);
+        for (part, meshed) in self.parts.iter_mut().zip(&self.mesh.parts) {
+            part.visible = !view.hidden_parts.contains(&meshed.id);
         }
         self.query_annotations = view.annotations.iter().cloned().map(Into::into).collect();
         self.path_plots = (view.path_plots.iter())
             .map(crate::path_plot::PathPlot::from_saved)
             .collect();
-        let plain: Vec<usize> = if settings.plain_part_names.is_empty()
-            && settings.mesh == Some(self.mesh.fingerprint())
-        {
-            settings.plain_parts.clone()
-        } else {
-            (self.parts.iter().enumerate())
-                .filter(|(_, part)| settings.plain_part_names.contains(&part.name))
-                .map(|(index, _)| index)
-                .collect()
-        };
+        let plain: Vec<usize> = (self.mesh.parts.iter().enumerate())
+            .filter(|(_, part)| settings.plain_part_ids.contains(&part.id))
+            .map(|(index, _)| index)
+            .collect();
         self.set_contours(&plain, false);
         // History outputs of hot spots need their values first.
         let reports = crate::hot_spots::evaluate(self);
@@ -1202,7 +1196,11 @@ impl Model {
         let mut display = self.into_geometry_display();
         if !shown.is_empty() {
             // They come last: the nodes and elements of the geometry keep their places.
-            display.mesh.remove_parts(&shown);
+            let gone: Vec<plx_model::Id> = (display.mesh.parts.iter())
+                .filter(|p| shown.iter().any(|s| s.eq_ignore_ascii_case(&p.name)))
+                .map(|p| p.id)
+                .collect();
+            display.mesh.remove_parts(&gone);
             display.part_dimensions.truncate(cad_parts);
         }
         let mut node = display.mesh.node_ids().iter().copied().max().unwrap_or(0);
@@ -1556,6 +1554,7 @@ impl Model {
     /// Replaces the mesh, e.g. by a newly generated one; the FE model stays. A part whose
     /// origin is not known is an imported mesh ([`plx_model::PartOrigins::reconcile`]).
     pub fn set_mesh(&mut self, mut mesh: FeMesh) {
+        mesh.adopt_ids(&self.mesh);
         // The user's sets are found on the new mesh by their selections, and its parts get
         // the element types chosen for them, also when they were meshed anew.
         self.fe.write_mesh_sets(&mut mesh);
@@ -2766,7 +2765,8 @@ impl Model {
     }
 
     /// Renames a part as CalculiX needs it: upper case, unique among parts, sets and
-    /// surfaces. Sections, boundary conditions and loads on the part follow.
+    /// surfaces. Sections, boundary conditions and loads on the part refer to it by id and
+    /// stay on it.
     pub fn rename_part(&mut self, index: usize, name: &str) -> Result<(), String> {
         let name = name.trim().to_ascii_uppercase();
         if name.is_empty() {
@@ -2789,14 +2789,17 @@ impl Model {
             self.history
                 .mesh_replaced(self.mesh.clone(), self.origins.clone());
         }
+        let id = self.mesh.parts.get(index).map(|p| p.id);
         if let Some(old) = self.mesh.rename_part(index, &name) {
-            self.fe.rename_part(&old, &name);
+            // Regions on the element set an input file defines for the part, renamed with
+            // it, keep pointing at it.
+            self.fe.rename_element_set(&old, &name);
             // The name is the geometry object's: a compound part keeps it when it is meshed
             // anew, a part of the geometry is renamed with its mesh, an imported mesh is its
             // own geometry object.
             let (space, matching) = (self.fe.properties.space, self.fe.matching_faces());
             if let Some(geometry) = &mut self.geometry
-                && let Some(c) = geometry.compound_named(&old)
+                && let Some(c) = id.and_then(|id| geometry.compound_with_id(id))
             {
                 geometry.compounds[c].name.clone_from(&name);
             } else if let Some(geometry) = &mut self.geometry
@@ -2823,9 +2826,12 @@ impl Model {
     /// Gives the elements of the part that have the shape of `type_name` this type,
     /// as the part properties do; the choice is kept for the part when it is meshed anew.
     pub fn set_element_type(&mut self, index: usize, type_name: &str) -> Result<(), String> {
-        let part = self.parts.get(index).ok_or("The part no longer exists.")?;
-        let part = part.name.clone();
-        if !self.fe.set_element_type(&part, type_name) {
+        let part = self
+            .mesh
+            .parts
+            .get(index)
+            .ok_or("The part no longer exists.")?;
+        if !self.fe.set_element_type(part.id, type_name) {
             return Err(format!("{type_name} is not an element type of a part"));
         }
         self.edit_mesh(|_, _| {});
@@ -3476,11 +3482,12 @@ mod tests {
             .unwrap()
             .model;
         let (first, second) = (model.parts[0].name.clone(), model.parts[1].name.clone());
+        let id = model.mesh.parts[0].id;
         model.fe.sections.push(plx_model::Section {
             orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
-            region: plx_model::Region::Parts(vec![first.clone()]),
+            region: plx_model::Region::Parts(vec![id]),
             thickness: 1.0,
             kind: SectionKind::Solid,
         });
@@ -3490,11 +3497,16 @@ mod tests {
         assert_eq!(model.rename_part(0, " Platte-1 "), Ok(()));
         assert_eq!(model.parts[0].name, "PLATTE-1");
         assert_eq!(model.mesh.parts[0].name, "PLATTE-1");
+        assert_eq!(model.mesh.parts[0].id, id);
         assert!(model.mesh.element_sets.contains_key("PLATTE-1"));
         assert!(!model.mesh.element_sets.contains_key(&first));
         assert_eq!(
             model.fe.sections[0].region,
-            plx_model::Region::Parts(vec!["PLATTE-1".into()])
+            plx_model::Region::Parts(vec![id])
+        );
+        assert_eq!(
+            model.fe.sections[0].region.describe(&model.fe, &model.mesh),
+            "PLATTE-1"
         );
         assert_eq!(model.rename_part(0, "platte-1"), Ok(()));
     }
@@ -4091,7 +4103,7 @@ mod tests {
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(steel),
-                region: Region::Parts(mesh.parts.iter().map(|p| p.name.clone()).collect()),
+                region: Region::Parts(mesh.part_ids()),
                 thickness: 1.0,
                 kind: SectionKind::Solid,
             });
@@ -4248,6 +4260,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "BEAM".into(),
             elements: vec![1, 2],
@@ -4296,7 +4309,7 @@ mod tests {
         let geometry = model.geometry.clone().unwrap();
         let mut mesh = plx_mesher::generate_mesh(&geometry).unwrap().mesh;
         // Only the first block is meshed.
-        let second = mesh.parts[1].name.clone();
+        let second = mesh.parts[1].id;
         mesh.remove_parts(&[second]);
         model.set_mesh(mesh);
         let overlays = model.mesh_overlay_source(&view, &[]).build();
@@ -4391,9 +4404,9 @@ mod tests {
         assert!(regions.iter().all(|&r| (1..=6).contains(&r)));
     }
 
-    /// Meshes the plate with a hole, sets up a tension test and checks CalculiX's stress.
+    /// Meshes the plate with a hole, sets up a tension test and checks the solver's stress.
     #[test]
-    fn generated_meshes_solve_with_calculix() {
+    fn generated_meshes_solve() {
         if !gmsh_available() {
             eprintln!("Gmsh missing, test skipped");
             return;
@@ -4451,7 +4464,7 @@ mod tests {
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("Steel")),
-                region: Region::Parts(vec!["SOLID-1".into()]),
+                region: Region::Parts(model.mesh.ids_of(&["SOLID-1"])),
                 thickness: 1.0,
                 kind: SectionKind::Solid,
             }],
@@ -4459,14 +4472,15 @@ mod tests {
             ..FeModel::default()
         };
         let inp = plx_io::inp::write_inp(&model.active(), "Platte").unwrap();
-        let dir = std::env::temp_dir().join(format!("nodalis-ccx-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-plate-solve-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("platte.inp"), inp).unwrap();
         plxs_session::run_input_file(&dir, "platte").unwrap_or_else(|e| panic!("{e}"));
         let results = read_frd(&dir.join("platte.frd")).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         // A strain of 0.1 / 100 gives about 210 MPa in the net section away from the hole;
-        // the hole raises the peak, CalculiX's extrapolation keeps it below a few times that.
+        // the hole raises the peak, the extrapolation to the nodes keeps it below a few times
+        // that.
         let stress = results.increments.last().unwrap().field("STRESS").unwrap();
         let sxx = &stress.component("S11").unwrap().values;
         let max = sxx.get().iter().copied().fold(f32::MIN, f32::max);
@@ -4503,6 +4517,7 @@ mod tests {
                 .unwrap();
         }
         project.parts.push(plx_mesh::Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "PLATE".into(),
             elements: vec![1, 2],
@@ -4541,6 +4556,7 @@ mod tests {
                 .unwrap();
         }
         solved.parts.push(plx_mesh::Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "PLATE".into(),
             elements: vec![1, 2],
@@ -4592,6 +4608,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(plx_mesh::Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "Plate".into(),
             elements: vec![1],
@@ -4601,7 +4618,7 @@ mod tests {
             orientation: None,
             name: "Shell_Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
-            region: plx_model::Region::Parts(vec!["Plate".into()]),
+            region: plx_model::Region::Parts(model.mesh.ids_of(&["Plate"])),
             thickness: 1.0,
             kind: SectionKind::Shell {
                 thickness: 2.0,
@@ -4641,6 +4658,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(plx_mesh::Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "Beam".into(),
             elements: vec![1],
@@ -4650,7 +4668,7 @@ mod tests {
             orientation: None,
             name: "Beam_Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
-            region: plx_model::Region::Parts(vec!["Beam".into()]),
+            region: plx_model::Region::Parts(model.mesh.ids_of(&["Beam"])),
             thickness: 1.0,
             kind: SectionKind::Beam(plx_model::BeamSection {
                 cross_section: Some(crate::test_ids::named("Rect")),
@@ -4824,7 +4842,7 @@ S
             .map(|(id, _)| *id)
             .collect();
         assert!(rim.len() > 20);
-        let part = model.mesh.parts[0].name.clone();
+        let part = model.mesh.parts[0].id;
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
             id: crate::test_ids::named("Clamped"),
@@ -4842,7 +4860,7 @@ S
             name: "Weight".into(),
             active: true,
             visible: true,
-            region: Region::Parts(vec![part.clone()]),
+            region: Region::Parts(vec![part]),
             kind: LoadKind::Gravity([0.0, 0.0, -gravity]),
             amplitude: None,
             factor_amplitude: None,
@@ -4927,6 +4945,7 @@ S
             }))
             .unwrap();
             mesh.parts.push(plx_mesh::Part {
+                id: Default::default(),
                 bodies: Vec::new(),
                 name: name.to_string(),
                 elements: vec![id],
@@ -4970,7 +4989,7 @@ S
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("S235")),
-                region: Region::Parts(names.map(String::from).to_vec()),
+                region: Region::Parts(mesh.part_ids()),
                 thickness: 1.0,
                 kind: SectionKind::Solid,
             }],
@@ -5055,7 +5074,7 @@ S
                 ..plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])
             }],
             result_paths: vec![plx_model::ResultPath::new("Path-1")],
-            plain_part_names: vec![model.parts[0].name.clone()],
+            plain_part_ids: vec![model.mesh.parts[0].id],
             mesh: Some(model.mesh.fingerprint()),
             units: model.results.as_ref().map(|view| view.units),
             increment: 0,
@@ -5066,14 +5085,13 @@ S
                 mode_deformation: Some(plx_results::saved_view::SavedDeformation::Automatic(2.0)),
                 mode_amplitude: Some(4.0),
                 show_undeformed: Some(false),
-                levels: Some(12),
                 color_scale: Some(plx_model::ColorScale {
                     spectrum: plx_model::ColorSpectrum::CoolWarm,
                     levels: 12,
                     manual: Some([0.5, 3.0]),
                     ..Default::default()
                 }),
-                hidden_parts: vec![model.parts[0].name.clone()],
+                hidden_parts: vec![model.mesh.parts[0].id],
                 annotations: vec![
                     plx_results::saved_view::SavedAnnotation::Nodes(vec![99]),
                     plx_results::saved_view::SavedAnnotation::Distance([1, 99]),
@@ -5117,18 +5135,6 @@ S
             ("SCALED", "VALUE")
         );
         assert_eq!(model.results_settings(), Some(settings.clone()));
-        // Projects saved before part names were kept name parts by index, which only fit
-        // results of the same mesh.
-        let mut legacy = settings;
-        legacy.plain_part_names.clear();
-        legacy.plain_parts = vec![0];
-        legacy.mesh = Some(model.mesh.fingerprint() ^ 1);
-        model.set_contours(&[0], true);
-        model.restore_results_settings(&legacy, Vec::new());
-        assert!(model.parts[0].contours);
-        legacy.mesh = Some(model.mesh.fingerprint());
-        model.restore_results_settings(&legacy, Vec::new());
-        assert!(!model.parts[0].contours);
         // Hidden parts leave the legend range like parts without contours.
         model.parts[0].visible = true;
         model.set_contours(&[0], true);
@@ -5168,6 +5174,7 @@ S
             .unwrap();
         }
         mesh.parts.push(plx_mesh::Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "Paste".into(),
             elements: (1..=n).collect(),

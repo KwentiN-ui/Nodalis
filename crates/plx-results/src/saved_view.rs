@@ -19,13 +19,11 @@ pub struct SavedView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode_amplitude: Option<f64>,
     pub show_undeformed: Option<bool>,
-    /// Colour levels of the legend; also in `color_scale`, kept for older projects.
-    pub levels: Option<u32>,
     /// Colour spectrum, colour levels and limits of the legend.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color_scale: Option<plx_model::ColorScale>,
-    /// Parts hidden, by name.
-    pub hidden_parts: Vec<String>,
+    /// Parts hidden, by id ([`plx_mesh::Part::id`]).
+    pub hidden_parts: Vec<plx_model::Id>,
     /// What the query tool left in the view.
     pub annotations: Vec<SavedAnnotation>,
     /// Plots of result paths, hot spots and history tables in the view.

@@ -88,14 +88,15 @@ pub fn particle_mesh(model: &ParticleModel, first: &ParticleFrame) -> Model {
     mesh.heading = model.heading.clone();
     // The results make a part of each material: here one named like each body.
     for body in &model.bodies {
+        let material = plxs_core::MaterialId::at(mesh.materials.len());
         mesh.materials.push(plxs_core::material::Material {
             name: body.name.clone(),
             ..Default::default()
         });
         mesh.sections.push(plxs_core::section::Section {
-            elset: body.name.clone(),
+            elset: mesh.sets.add_element_set(body.name.clone(), []),
             kind: plxs_core::section::SectionKind::Solid {
-                material: body.name.clone(),
+                material,
                 thickness: None,
                 orientation: None,
             },
@@ -120,14 +121,15 @@ pub fn particle_mesh(model: &ParticleModel, first: &ParticleFrame) -> Model {
     let mut node = wall_base(model, first);
     let mut element = node;
     for (w, wall) in model.walls.iter().enumerate() {
+        let material = plxs_core::MaterialId::at(mesh.materials.len());
         mesh.materials.push(plxs_core::material::Material {
             name: wall.name.clone(),
             ..Default::default()
         });
         mesh.sections.push(plxs_core::section::Section {
-            elset: wall.name.clone(),
+            elset: mesh.sets.add_element_set(wall.name.clone(), []),
             kind: plxs_core::section::SectionKind::Membrane {
-                material: wall.name.clone(),
+                material,
                 thickness: 0.0,
                 offset: 0.0,
             },

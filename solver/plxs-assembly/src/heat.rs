@@ -53,11 +53,14 @@ impl HeatTable {
                     format!("element {} needs a material", element.id),
                 )
             })?;
-            let index = model
-                .materials
-                .iter()
-                .position(|m| m.name == name)
-                .ok_or_else(|| Error::undefined("*SOLID SECTION", "material", name))?;
+            let index = name.index();
+            if model.material(name).is_none() {
+                return Err(Error::undefined(
+                    "*SOLID SECTION",
+                    "material",
+                    format!("#{}", name.0),
+                ));
+            }
             temperature_dependent |= model.materials[index]
                 .conductivity
                 .as_ref()
@@ -112,7 +115,7 @@ impl HeatTable {
 /// (`ramp`) or the full value.
 pub fn heat_factor(
     model: &Model,
-    amplitude: Option<&str>,
+    amplitude: Option<plxs_core::AmplitudeId>,
     time: f64,
     total: f64,
     period: f64,
@@ -142,14 +145,14 @@ pub fn temperature_spc(
         if !(boundary.first_dof..=boundary.last_dof).contains(&11) {
             continue;
         }
-        let amplitude = model
-            .amplitude(boundary.amplitude.as_deref().unwrap_or(""))
+        let amplitude = (boundary.amplitude)
+            .and_then(|a| model.amplitude(a))
             .map(|a| a.value(if a.total_time { total } else { time }));
         let ramp_factor = (ramp && period > 0.0).then(|| (time / period).clamp(0.0, 1.0));
         let target = boundary.value.unwrap_or(0.0);
         let nodes = match &boundary.region {
             NodeRef::Node(id) => vec![*id],
-            NodeRef::Set(name) => model.sets.node_sets.get(name).cloned().unwrap_or_default(),
+            NodeRef::Set(set) => model.sets.nodes(*set).to_vec(),
         };
         for node in nodes {
             let Some(index) = model.nodes.index(node) else {
@@ -277,7 +280,7 @@ pub fn heat_loads(
     for load in &step.loads.concentrated_flux {
         let factor = full(heat_factor(
             model,
-            load.amplitude.as_deref(),
+            load.amplitude,
             time,
             total,
             period,
@@ -285,7 +288,7 @@ pub fn heat_loads(
         ));
         let ids = match &load.region {
             NodeRef::Node(id) => vec![*id],
-            NodeRef::Set(name) => model.sets.node_sets.get(name).cloned().unwrap_or_default(),
+            NodeRef::Set(set) => model.sets.nodes(*set).to_vec(),
         };
         for id in ids {
             if let Some(index) = model.nodes.index(id) {
@@ -311,7 +314,7 @@ pub fn heat_loads(
     for load in &step.loads.distributed_flux {
         let factor = full(heat_factor(
             model,
-            load.amplitude.as_deref(),
+            load.amplitude,
             time,
             total,
             period,
@@ -329,12 +332,11 @@ pub fn heat_loads(
         // The sink temperature acts in full unless it has an amplitude; the coefficient
         // ramps like a load.
         let sink = film.sink_temperature
-            * heat_factor(model, film.amplitude.as_deref(), time, total, period, false)
-                .unwrap_or(1.0);
+            * heat_factor(model, film.amplitude, time, total, period, false).unwrap_or(1.0);
         let h = film.coefficient
             * full(heat_factor(
                 model,
-                film.film_amplitude.as_deref(),
+                film.film_amplitude,
                 time,
                 total,
                 period,
@@ -361,19 +363,12 @@ pub fn heat_loads(
                 ));
             }
             let sink = radiation.sink_temperature
-                * heat_factor(
-                    model,
-                    radiation.amplitude.as_deref(),
-                    time,
-                    total,
-                    period,
-                    false,
-                )
-                .unwrap_or(1.0);
+                * heat_factor(model, radiation.amplitude, time, total, period, false)
+                    .unwrap_or(1.0);
             let emissivity = radiation.emissivity
                 * full(heat_factor(
                     model,
-                    radiation.radiation_amplitude.as_deref(),
+                    radiation.radiation_amplitude,
                     time,
                     total,
                     period,

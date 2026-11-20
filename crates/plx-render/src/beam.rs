@@ -417,6 +417,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "P".into(),
             elements: vec![1, 2],
@@ -630,6 +631,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "P".into(),
             elements: vec![1, 2],
@@ -710,6 +712,7 @@ mod tests {
             .unwrap();
         }
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "P".into(),
             elements: (1..=n).collect(),

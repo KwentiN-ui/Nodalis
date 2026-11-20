@@ -11,7 +11,7 @@
 //! The keywords are spelled as the CalculiX manual (2.23) documents them, so that the file
 //! also runs in CalculiX for the features both have.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use plxs_core::amplitude::Signal;
@@ -37,16 +37,20 @@ pub fn render(analysis: &Analysis) -> String {
 /// names (`*ELEMENT, ELSET=`), as far as the order of the elements allows: a mesh reader
 /// makes parts of them. The names are written as given, in any case.
 pub fn render_with_parts(analysis: &Analysis, parts: &[String]) -> String {
-    let mut out = Out::default();
     let model = &analysis.model;
+    let mut out = Out {
+        text: String::new(),
+        labels: std::rc::Rc::new(Labels::of(model)),
+    };
     heading(&mut out, model);
     if let Some(submodel) = &model.constraints.submodel {
         let mut header = format!("*Submodel, Type=Node, Input=\"{}\"", submodel.input);
-        if let Some(elset) = &submodel.global_elset {
-            let _ = write!(header, ", Global elset={elset}");
+        if let Some(elset) = submodel.global_elset {
+            let _ = write!(header, ", Global elset={}", out.labels.element_set(elset));
         }
         out.keyword(&header);
-        out.list(submodel.node_sets.iter().map(String::as_str));
+        let labels = out.labels.clone();
+        out.list(submodel.node_sets.iter().map(|&set| labels.node_set(set)));
     }
     mesh(&mut out, model, parts);
     materials(&mut out, model);
@@ -58,7 +62,8 @@ pub fn render_with_parts(analysis: &Analysis, parts: &[String]) -> String {
     initial_conditions(&mut out, model);
     if let Some(design) = &model.design_variables {
         out.keyword("*Design variables, Type=Coordinate");
-        out.line(&design.nset);
+        let line = out.labels.node_set(design.nset).to_string();
+        out.line(&line);
     }
     if let Some(restart) = &model.restart_read {
         match restart.step {
@@ -70,9 +75,157 @@ pub fn render_with_parts(analysis: &Analysis, parts: &[String]) -> String {
     out.text
 }
 
-#[derive(Default)]
 struct Out {
     text: String,
+    /// The names the items get in the text.
+    labels: std::rc::Rc<Labels>,
+}
+
+/// The names of the items in the text: their labels as an input file can hold them (upper
+/// case, at most 80 characters, without the commas, blanks, quotes and equal signs that
+/// would split or join them, not a number), made unique within their kind, so that two items
+/// with similar labels stay two items when the text is read back.
+#[derive(Default)]
+struct Labels {
+    materials: Vec<String>,
+    orientations: Vec<String>,
+    amplitudes: Vec<String>,
+    interactions: Vec<String>,
+    node_sets: Vec<String>,
+    element_sets: Vec<String>,
+    surfaces: Vec<String>,
+    ties: Vec<String>,
+}
+
+impl Labels {
+    fn of(model: &Model) -> Self {
+        fn unique<'a>(prefix: &str, labels: impl Iterator<Item = &'a str>) -> Vec<String> {
+            let mut used = std::collections::HashSet::new();
+            labels
+                .enumerate()
+                .map(|(i, label)| {
+                    let mut name: String = (label.trim().trim_start_matches('*').chars())
+                        .map(|c| match c {
+                            ',' | '=' | '"' => '_',
+                            c if c.is_whitespace() || c.is_control() => '_',
+                            c => c.to_ascii_uppercase(),
+                        })
+                        .take(80)
+                        .collect();
+                    if name.is_empty() {
+                        name = format!("{prefix}-{}", i + 1);
+                    } else if name.chars().all(|c| c.is_ascii_digit()) {
+                        // A number names a node or element.
+                        name = format!("{prefix}-{name}");
+                    }
+                    let mut candidate = name.clone();
+                    let mut n = 2;
+                    while !used.insert(candidate.clone()) {
+                        let suffix = format!("-{n}");
+                        let head: String = name.chars().take(80 - suffix.len()).collect();
+                        candidate = format!("{head}{suffix}");
+                        n += 1;
+                    }
+                    candidate
+                })
+                .collect()
+        }
+        Self {
+            materials: unique("MATERIAL", model.materials.iter().map(|m| m.name.as_str())),
+            orientations: unique(
+                "ORIENTATION",
+                model.orientations.iter().map(|o| o.name.as_str()),
+            ),
+            amplitudes: unique(
+                "AMPLITUDE",
+                model.amplitudes.iter().map(|a| a.name.as_str()),
+            ),
+            interactions: unique(
+                "INTERACTION",
+                (model.contact.interactions.iter()).map(|i| i.name.as_str()),
+            ),
+            node_sets: unique(
+                "NSET",
+                (model.sets.node_sets.iter()).map(|s| s.name.as_str()),
+            ),
+            element_sets: unique(
+                "ELSET",
+                (model.sets.element_sets.iter()).map(|s| s.name.as_str()),
+            ),
+            surfaces: unique(
+                "SURFACE",
+                (model.sets.surfaces.iter()).map(|s| s.name.as_str()),
+            ),
+            ties: unique(
+                "TIE",
+                (model.constraints.ties.iter()).map(|t| t.name.as_str()),
+            ),
+        }
+    }
+
+    fn material(&self, id: plxs_core::MaterialId) -> &str {
+        self.materials
+            .get(id.index())
+            .map_or("UNDEFINED", String::as_str)
+    }
+
+    fn orientation(&self, id: plxs_core::OrientationId) -> &str {
+        self.orientations
+            .get(id.index())
+            .map_or("UNDEFINED", String::as_str)
+    }
+
+    fn amplitude(&self, id: plxs_core::AmplitudeId) -> &str {
+        self.amplitudes
+            .get(id.index())
+            .map_or("UNDEFINED", String::as_str)
+    }
+
+    fn node_set(&self, id: plxs_core::NodeSetId) -> &str {
+        self.node_sets
+            .get(id.index())
+            .map_or("UNDEFINED", String::as_str)
+    }
+
+    fn element_set(&self, id: plxs_core::ElementSetId) -> &str {
+        self.element_sets
+            .get(id.index())
+            .map_or("UNDEFINED", String::as_str)
+    }
+
+    fn surface(&self, id: plxs_core::SurfaceId) -> &str {
+        self.surfaces
+            .get(id.index())
+            .map_or("UNDEFINED", String::as_str)
+    }
+
+    fn tie(&self, id: plxs_core::TieId) -> &str {
+        self.ties
+            .get(id.index())
+            .map_or("UNDEFINED", String::as_str)
+    }
+
+    /// A node or a node set as a data line names it.
+    fn node_ref(&self, region: &plxs_core::mesh::NodeRef) -> String {
+        match region {
+            plxs_core::mesh::NodeRef::Node(id) => id.to_string(),
+            plxs_core::mesh::NodeRef::Set(set) => self.node_set(*set).to_string(),
+        }
+    }
+
+    /// An element or an element set as a data line names it.
+    fn element_ref(&self, region: &plxs_core::mesh::ElementRef) -> String {
+        match region {
+            plxs_core::mesh::ElementRef::Element(id) => id.to_string(),
+            plxs_core::mesh::ElementRef::Set(set) => self.element_set(*set).to_string(),
+        }
+    }
+
+    fn interaction(&self, id: plxs_core::InteractionId) -> &str {
+        self.interactions
+            .get(id.index())
+            .map_or("UNDEFINED", String::as_str)
+    }
 }
 
 impl Out {
@@ -168,9 +321,18 @@ fn mesh(out: &mut Out, model: &Model, parts: &[String]) {
     }
     // An element block takes the name of the part whose members go on with its elements;
     // what such blocks leave of a set follows as `*ELSET`.
+    let labels = out.labels.clone();
     let sets = &model.sets.element_sets;
-    let part_name = |set: &str| parts.iter().find(|p| plxs_core::normalized_name(p) == set);
-    let mut covered: BTreeMap<&str, usize> = sets.keys().map(|k| (k.as_str(), 0)).collect();
+    let part_name = |set: usize| {
+        let label = &labels.element_sets[set];
+        (parts.iter())
+            .find(|p| plxs_core::normalized_name(p) == sets[set].name.as_str())
+            .filter(|p| p.eq_ignore_ascii_case(label))
+    };
+    let part_sets: Vec<usize> = (0..sets.len())
+        .filter(|&s| part_name(s).is_some())
+        .collect();
+    let mut covered: Vec<usize> = vec![0; sets.len()];
     let mut user_element = false;
     let elements = &model.elements;
     let mut i = 0;
@@ -181,20 +343,19 @@ fn mesh(out: &mut Out, model: &Model, parts: &[String]) {
                 .take_while(|(id, e)| **id == e.id && e.kind == kind)
                 .count()
         };
-        let mut best: Option<(&str, usize)> = None;
-        for (name, ids) in sets.iter().filter(|(name, _)| part_name(name).is_some()) {
-            let n = run(&ids[covered[name.as_str()]..]);
+        let mut best: Option<(usize, usize)> = None;
+        for &set in &part_sets {
+            let n = run(&sets[set].elements[covered[set]..]);
             if n > 0 && best.is_none_or(|(_, m)| n > m) {
-                best = Some((name, n));
+                best = Some((set, n));
             }
         }
         let (set, count) = match best {
             Some((set, n)) => (Some(set), n),
             None => {
                 // Up to the next element a set goes on with.
-                let heads: BTreeSet<u32> = (sets.iter())
-                    .filter(|(name, _)| part_name(name).is_some())
-                    .filter_map(|(name, ids)| ids.get(covered[name.as_str()]).copied())
+                let heads: BTreeSet<u32> = (part_sets.iter())
+                    .filter_map(|&set| sets[set].elements.get(covered[set]).copied())
                     .collect();
                 let n = (elements[i..].iter().enumerate())
                     .take_while(|(k, e)| e.kind == kind && (*k == 0 || !heads.contains(&e.id)))
@@ -207,9 +368,10 @@ fn mesh(out: &mut Out, model: &Model, parts: &[String]) {
         }
         match set {
             Some(set) => {
-                let written = part_name(set).map_or(set, String::as_str);
+                let written =
+                    part_name(set).map_or(labels.element_sets[set].as_str(), String::as_str);
                 out.keyword(&format!("*Element, Type={kind}, Elset={written}"));
-                *covered.get_mut(set).unwrap() += count;
+                covered[set] += count;
             }
             None => out.keyword(&format!("*Element, Type={kind}")),
         }
@@ -220,19 +382,20 @@ fn mesh(out: &mut Out, model: &Model, parts: &[String]) {
         }
         i += count;
     }
-    for (name, ids) in &model.sets.node_sets {
+    for (set, name) in model.sets.node_sets.iter().zip(&labels.node_sets) {
         out.keyword(&format!("*Nset, Nset={name}"));
-        out.ids(ids);
+        out.ids(&set.nodes);
     }
-    for (name, ids) in sets {
-        let rest = &ids[covered[name.as_str()]..];
-        if ids.is_empty() || !rest.is_empty() {
+    for (i, set) in sets.iter().enumerate() {
+        let rest = &set.elements[covered[i]..];
+        if set.elements.is_empty() || !rest.is_empty() {
+            let name = part_name(i).map_or(labels.element_sets[i].as_str(), String::as_str);
             out.keyword(&format!("*Elset, Elset={name}"));
             out.ids(rest);
         }
     }
-    for (name, surface) in &model.sets.surfaces {
-        match surface {
+    for (surface, name) in model.sets.surfaces.iter().zip(&labels.surfaces) {
+        match &surface.surface {
             Surface::Element(faces) => {
                 out.keyword(&format!("*Surface, Name={name}, Type=Element"));
                 for face in faces {
@@ -259,8 +422,9 @@ fn table(out: &mut Out, rows: &[TemperatureValue]) {
 }
 
 fn materials(out: &mut Out, model: &Model) {
-    for material in &model.materials {
-        out.keyword(&format!("*Material, Name={}", material.name));
+    let labels = out.labels.clone();
+    for (material, name) in model.materials.iter().zip(&labels.materials) {
+        out.keyword(&format!("*Material, Name={name}"));
         if let Some(elastic) = &material.elastic {
             out.keyword("*Elastic");
             for row in &elastic.rows {
@@ -332,28 +496,30 @@ fn materials(out: &mut Out, model: &Model) {
 }
 
 fn orientations(out: &mut Out, model: &Model) {
-    for orientation in &model.orientations {
-        out.keyword(&format!(
-            "*Orientation, Name={}, System=Rectangular",
-            orientation.name
-        ));
+    let labels = out.labels.clone();
+    for (orientation, name) in model.orientations.iter().zip(&labels.orientations) {
+        out.keyword(&format!("*Orientation, Name={name}, System=Rectangular"));
         let [a, b] = [orientation.a, orientation.b];
         out.numbers(&[a[0], a[1], a[2], b[0], b[1], b[2]]);
     }
 }
 
 fn sections(out: &mut Out, model: &Model) {
+    let labels = out.labels.clone();
     for section in &model.sections {
-        let elset = &section.elset;
+        let elset = labels.element_set(section.elset);
         match &section.kind {
             SectionKind::Solid {
                 material,
                 thickness,
                 orientation,
             } => {
-                let mut header = format!("*Solid section, Elset={elset}, Material={material}");
+                let mut header = format!(
+                    "*Solid section, Elset={elset}, Material={}",
+                    labels.material(*material)
+                );
                 if let Some(orientation) = orientation {
-                    let _ = write!(header, ", Orientation={orientation}");
+                    let _ = write!(header, ", Orientation={}", labels.orientation(*orientation));
                 }
                 out.keyword(&header);
                 if let Some(thickness) = thickness {
@@ -366,7 +532,10 @@ fn sections(out: &mut Out, model: &Model) {
                 offset,
                 nodal_thickness,
             } => {
-                let mut header = format!("*Shell section, Elset={elset}, Material={material}");
+                let mut header = format!(
+                    "*Shell section, Elset={elset}, Material={}",
+                    labels.material(*material)
+                );
                 if *offset != 0.0 {
                     let _ = write!(header, ", Offset={}", number(*offset));
                 }
@@ -381,7 +550,10 @@ fn sections(out: &mut Out, model: &Model) {
                 thickness,
                 offset,
             } => {
-                let mut header = format!("*Membrane section, Elset={elset}, Material={material}");
+                let mut header = format!(
+                    "*Membrane section, Elset={elset}, Material={}",
+                    labels.material(*material)
+                );
                 if *offset != 0.0 {
                     let _ = write!(header, ", Offset={}", number(*offset));
                 }
@@ -421,8 +593,10 @@ fn sections(out: &mut Out, model: &Model) {
                         ("General", values)
                     }
                 };
-                let mut header =
-                    format!("*Beam section, Elset={elset}, Material={material}, Section={name}");
+                let mut header = format!(
+                    "*Beam section, Elset={elset}, Material={}, Section={name}",
+                    labels.material(*material)
+                );
                 if *offset1 != 0.0 {
                     let _ = write!(header, ", Offset1={}", number(*offset1));
                 }
@@ -453,8 +627,8 @@ fn sections(out: &mut Out, model: &Model) {
                 out.keyword(&header);
                 // SPRING2 takes both degrees of freedom, SPRING1 one.
                 let two = spring.dof1 != spring.dof2
-                    || (model.sets.element_sets.get(elset)).is_some_and(|ids| {
-                        ids.iter().any(|&id| {
+                    || (model.sets.element_sets.get(section.elset.index())).is_some_and(|set| {
+                        set.elements.iter().any(|&id| {
                             model
                                 .element(id)
                                 .is_some_and(|e| e.kind == ElementType::SPRING2)
@@ -500,7 +674,8 @@ fn constraints(out: &mut Out, model: &Model) {
             TransformKind::Rectangular => "R",
             TransformKind::Cylindrical => "C",
         };
-        out.keyword(&format!("*Transform, Nset={}, Type={kind}", transform.nset));
+        let nset = out.labels.node_set(transform.nset).to_string();
+        out.keyword(&format!("*Transform, Nset={nset}, Type={kind}"));
         let [a, b] = [transform.a, transform.b];
         out.numbers(&[a[0], a[1], a[2], b[0], b[1], b[2]]);
     }
@@ -519,8 +694,8 @@ fn constraints(out: &mut Out, model: &Model) {
     }
     for body in &constraints.rigid_bodies {
         let nodes = match &body.nodes {
-            RigidBodyNodes::NodeSet(set) => format!("Nset={set}"),
-            RigidBodyNodes::ElementSet(set) => format!("Elset={set}"),
+            RigidBodyNodes::NodeSet(set) => format!("Nset={}", out.labels.node_set(*set)),
+            RigidBodyNodes::ElementSet(set) => format!("Elset={}", out.labels.element_set(*set)),
         };
         out.keyword(&format!(
             "*Rigid body, {nodes}, Ref node={}, Rot node={}",
@@ -551,11 +726,11 @@ fn constraints(out: &mut Out, model: &Model) {
         if let Some((rotation, _)) = mass.inertia {
             keyword.push_str(&format!(", Rotation node={rotation}"));
         }
-        if let Some(set) = &mass.elset {
-            keyword.push_str(&format!(", Elset={set}"));
+        if let Some(set) = mass.elset {
+            keyword.push_str(&format!(", Elset={}", out.labels.element_set(set)));
         }
-        if let Some(name) = &mass.name {
-            keyword.push_str(&format!(", Name={name}"));
+        if let Some(name) = mass.name {
+            keyword.push_str(&format!(", Name={}", out.labels.element_set(name)));
         }
         out.keyword(&keyword);
         let mut values = vec![number(mass.mass)];
@@ -571,17 +746,18 @@ fn constraints(out: &mut Out, model: &Model) {
             // Four terms to a line, as CalculiX reads them.
             for chunk in equation.terms.chunks(4) {
                 let terms: Vec<String> = (chunk.iter())
-                    .map(|t| format!("{}, {}, {}", t.node, t.dof, number(t.coefficient)))
+                    .map(|t| {
+                        let node = out.labels.node_ref(&t.node);
+                        format!("{node}, {}, {}", t.dof, number(t.coefficient))
+                    })
                     .collect();
                 out.line(&terms.join(", "));
             }
         }
     }
-    for tie in &constraints.ties {
-        let mut header = String::from("*Tie");
-        if !tie.name.is_empty() {
-            let _ = write!(header, ", Name={}", tie.name);
-        }
+    let labels = out.labels.clone();
+    for (tie, name) in constraints.ties.iter().zip(&labels.ties) {
+        let mut header = format!("*Tie, Name={name}");
         if let Some(tolerance) = tie.position_tolerance {
             let _ = write!(header, ", Position tolerance={}", number(tolerance));
         }
@@ -595,15 +771,22 @@ fn constraints(out: &mut Out, model: &Model) {
             header.push_str(", Multistage");
         }
         out.keyword(&header);
-        let _ = writeln!(out.text, "{}, {}", tie.slave, tie.master);
+        let _ = writeln!(
+            out.text,
+            "{}, {}",
+            labels.surface(tie.slave),
+            labels.surface(tie.master)
+        );
     }
     if let Some(cyclic) = &constraints.cyclic_symmetry {
         let mut header = format!(
             "*Cyclic symmetry model, N={}, Ngraph={}, Tie={}",
-            cyclic.sectors, cyclic.ngraph, cyclic.tie
+            cyclic.sectors,
+            cyclic.ngraph,
+            labels.tie(cyclic.tie)
         );
-        if let Some(elset) = &cyclic.elset {
-            let _ = write!(header, ", Elset={elset}");
+        if let Some(elset) = cyclic.elset {
+            let _ = write!(header, ", Elset={}", labels.element_set(elset));
         }
         if !cyclic.check {
             header.push_str(", Check=No");
@@ -616,8 +799,9 @@ fn constraints(out: &mut Out, model: &Model) {
 
 fn contact(out: &mut Out, model: &Model) {
     let contact = &model.contact;
-    for interaction in &contact.interactions {
-        out.keyword(&format!("*Surface interaction, Name={}", interaction.name));
+    let labels = out.labels.clone();
+    for (interaction, name) in contact.interactions.iter().zip(&labels.interactions) {
+        out.keyword(&format!("*Surface interaction, Name={name}"));
         match &interaction.behavior {
             None => {}
             Some(SurfaceBehavior::Hard) => {
@@ -676,7 +860,7 @@ fn contact(out: &mut Out, model: &Model) {
         };
         let mut header = format!(
             "*Contact pair, Interaction={}, Type={kind}",
-            pair.interaction
+            labels.interaction(pair.interaction)
         );
         if pair.small_sliding {
             header.push_str(", Small sliding");
@@ -687,24 +871,29 @@ fn contact(out: &mut Out, model: &Model) {
                 let _ = write!(header, ", Adjust={}", number(*distance));
             }
             Some(Adjust::NodeSet(set)) => {
-                let _ = write!(header, ", Adjust={set}");
+                let _ = write!(header, ", Adjust={}", labels.node_set(*set));
             }
         }
         out.keyword(&header);
-        let _ = writeln!(out.text, "{}, {}", pair.slave, pair.master);
+        let _ = writeln!(
+            out.text,
+            "{}, {}",
+            labels.surface(pair.slave),
+            labels.surface(pair.master)
+        );
     }
     for clearance in &contact.clearances {
         out.keyword(&format!(
             "*Clearance, Master={}, Slave={}, Value={}",
-            clearance.master,
-            clearance.slave,
+            labels.surface(clearance.master),
+            labels.surface(clearance.slave),
             number(clearance.value)
         ));
     }
     for support in &contact.compression_only {
         let mut header = format!(
             "*Compression only, Surface={}, Clearance={}",
-            support.surface,
+            labels.surface(support.surface),
             number(support.clearance)
         );
         if let Some(stiffness) = support.stiffness {
@@ -725,8 +914,9 @@ fn friction_line(out: &mut Out, friction: &plxs_core::contact::Friction) {
 }
 
 fn amplitudes(out: &mut Out, model: &Model) {
-    for amplitude in &model.amplitudes {
-        let mut header = format!("*Amplitude, Name={}", amplitude.name);
+    let labels = out.labels.clone();
+    for (amplitude, name) in model.amplitudes.iter().zip(&labels.amplitudes) {
+        let mut header = format!("*Amplitude, Name={name}");
         if amplitude.total_time {
             header.push_str(", Time=Total time");
         }
@@ -777,6 +967,7 @@ fn initial_conditions(out: &mut Out, model: &Model) {
     if !initial.temperatures.is_empty() {
         out.keyword("*Initial conditions, Type=Temperature");
         for (region, value) in &initial.temperatures {
+            let region = out.labels.node_ref(region);
             let _ = writeln!(out.text, "{region}, {}", number(*value));
         }
     }
@@ -789,6 +980,7 @@ fn initial_conditions(out: &mut Out, model: &Model) {
         }
         out.keyword(&format!("*Initial conditions, Type={kind}"));
         for (region, dof, value) in entries {
+            let region = out.labels.node_ref(region);
             let _ = writeln!(out.text, "{region}, {dof}, {}", number(*value));
         }
     }
@@ -1142,7 +1334,8 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
                 }
                 let mut fields = vec![
                     response.kind.clone(),
-                    response.elset.clone().unwrap_or_default(),
+                    (response.elset)
+                        .map_or(String::new(), |set| out.labels.element_set(set).to_string()),
                 ];
                 fields.extend(response.data.iter().map(|&v| number(v)));
                 while fields.last().is_some_and(String::is_empty) {
@@ -1153,10 +1346,6 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
             if let Some(filter) = &settings.filter {
                 out.keyword(&format!("*Filter, Type={}", filter.kind));
                 out.line(&number(filter.radius));
-            }
-            if !settings.objectives.is_empty() {
-                out.keyword("*Objective");
-                out.list(settings.objectives.iter().map(String::as_str));
             }
         }
     }
@@ -1173,8 +1362,12 @@ fn boundaries(out: &mut Out, step: &Step, op_new: bool) {
     let mut current: Option<String> = None;
     for boundary in &step.boundaries {
         let mut parameters = String::new();
-        if let Some(amplitude) = &boundary.amplitude {
-            let _ = write!(parameters, ", Amplitude={amplitude}");
+        if let Some(amplitude) = boundary.amplitude {
+            let _ = write!(
+                parameters,
+                ", Amplitude={}",
+                out.labels.amplitude(amplitude)
+            );
         }
         if boundary.fixed {
             parameters.push_str(", Fixed");
@@ -1196,7 +1389,9 @@ fn boundaries(out: &mut Out, step: &Step, op_new: bool) {
         }
         let mut line = format!(
             "{}, {}, {}",
-            boundary.region, boundary.first_dof, boundary.last_dof
+            out.labels.node_ref(&boundary.region),
+            boundary.first_dof,
+            boundary.last_dof
         );
         if let Some(value) = boundary.value {
             let _ = write!(line, ", {}", number(value));
@@ -1238,10 +1433,13 @@ fn cards<T>(
     }
 }
 
-fn amplitude_parameter(name: &str, amplitude: &Option<String>) -> String {
+fn amplitude_parameter(
+    labels: &Labels,
+    name: &str,
+    amplitude: &Option<plxs_core::AmplitudeId>,
+) -> String {
     amplitude
-        .as_ref()
-        .map(|a| format!(", {name}={a}"))
+        .map(|a| format!(", {name}={}", labels.amplitude(a)))
         .unwrap_or_default()
 }
 
@@ -1257,21 +1455,27 @@ fn case_and_sector(load_case: Option<u8>, sector: Option<u32>) -> String {
 }
 
 fn loads(out: &mut Out, loads: &Loads, carried: &Loads) {
+    let labels = out.labels.clone();
     cards(
         out,
         "*Cload",
         &loads.concentrated,
         !carried.concentrated.is_empty(),
         |l| {
-            amplitude_parameter("Amplitude", &l.amplitude)
+            amplitude_parameter(&labels, "Amplitude", &l.amplitude)
                 + &case_and_sector(l.load_case, l.sector)
                 + &match &l.follower {
                     None => String::new(),
-                    Some(Follower::Nodes(nodes)) => format!(", Follower={nodes}"),
+                    Some(Follower::Nodes(nodes)) => {
+                        format!(", Follower={}", labels.node_ref(nodes))
+                    }
                     Some(Follower::Rotation(node)) => format!(", Follower rotation={node}"),
                 }
         },
-        |l| format!("{}, {}, {}", l.region, l.dof, number(l.value)),
+        |l| {
+            let region = labels.node_ref(&l.region);
+            format!("{region}, {}, {}", l.dof, number(l.value))
+        },
     );
     cards(
         out,
@@ -1279,7 +1483,8 @@ fn loads(out: &mut Out, loads: &Loads, carried: &Loads) {
         &loads.distributed,
         !carried.distributed.is_empty(),
         |l| {
-            amplitude_parameter("Amplitude", &l.amplitude) + &case_and_sector(l.load_case, l.sector)
+            amplitude_parameter(&labels, "Amplitude", &l.amplitude)
+                + &case_and_sector(l.load_case, l.sector)
         },
         |l| {
             let values: Vec<String> = match &l.kind {
@@ -1305,7 +1510,7 @@ fn loads(out: &mut Out, loads: &Loads, carried: &Loads) {
                     .chain(values.iter().map(|&v| number(v)))
                     .collect(),
             };
-            format!("{}, {}", l.region, values.join(", "))
+            format!("{}, {}", labels.element_ref(&l.region), values.join(", "))
         },
     );
     cards(
@@ -1313,21 +1518,25 @@ fn loads(out: &mut Out, loads: &Loads, carried: &Loads) {
         "*Cflux",
         &loads.concentrated_flux,
         !carried.concentrated_flux.is_empty(),
-        |l| amplitude_parameter("Amplitude", &l.amplitude),
-        |l| format!("{}, 11, {}", l.region, number(l.value)),
+        |l| amplitude_parameter(&labels, "Amplitude", &l.amplitude),
+        |l| format!("{}, 11, {}", labels.node_ref(&l.region), number(l.value)),
     );
     cards(
         out,
         "*Dflux",
         &loads.distributed_flux,
         !carried.distributed_flux.is_empty(),
-        |l| amplitude_parameter("Amplitude", &l.amplitude),
+        |l| amplitude_parameter(&labels, "Amplitude", &l.amplitude),
         |l| {
             let label = match l.kind {
                 FluxKind::Face(face) => format!("S{face}"),
                 FluxKind::Body => "BF".into(),
             };
-            format!("{}, {label}, {}", l.region, number(l.value))
+            format!(
+                "{}, {label}, {}",
+                labels.element_ref(&l.region),
+                number(l.value)
+            )
         },
     );
     cards(
@@ -1336,13 +1545,13 @@ fn loads(out: &mut Out, loads: &Loads, carried: &Loads) {
         &loads.films,
         !carried.films.is_empty(),
         |l| {
-            amplitude_parameter("Amplitude", &l.amplitude)
-                + &amplitude_parameter("Film amplitude", &l.film_amplitude)
+            amplitude_parameter(&labels, "Amplitude", &l.amplitude)
+                + &amplitude_parameter(&labels, "Film amplitude", &l.film_amplitude)
         },
         |l| {
             format!(
                 "{}, F{}, {}, {}",
-                l.region,
+                labels.element_ref(&l.region),
                 l.face,
                 number(l.sink_temperature),
                 number(l.coefficient)
@@ -1355,14 +1564,14 @@ fn loads(out: &mut Out, loads: &Loads, carried: &Loads) {
         &loads.radiations,
         !carried.radiations.is_empty(),
         |l| {
-            amplitude_parameter("Amplitude", &l.amplitude)
-                + &amplitude_parameter("Radiation amplitude", &l.radiation_amplitude)
+            amplitude_parameter(&labels, "Amplitude", &l.amplitude)
+                + &amplitude_parameter(&labels, "Radiation amplitude", &l.radiation_amplitude)
         },
         |l| {
             let cavity = if l.cavity { "CR" } else { "" };
             format!(
                 "{}, R{}{cavity}, {}, {}",
-                l.region,
+                labels.element_ref(&l.region),
                 l.face,
                 number(l.sink_temperature),
                 number(l.emissivity)
@@ -1376,13 +1585,15 @@ fn fields(out: &mut Out, step: &Step) {
         // Nothing to say "no fields" with: an empty card would be a field without values.
         return;
     }
+    let labels = out.labels.clone();
     for (i, field) in step.fields.iter().enumerate() {
         let new = if i == 0 { ", op=New" } else { "" };
-        let amplitude = amplitude_parameter("Amplitude", &field.amplitude);
+        let amplitude = amplitude_parameter(&labels, "Amplitude", &field.amplitude);
         match &field.kind {
             DefinedFieldKind::Temperature(values) => {
                 out.keyword(&format!("*Temperature{new}{amplitude}"));
                 for (region, value) in values {
+                    let region = labels.node_ref(region);
                     let _ = writeln!(out.text, "{region}, {}", number(*value));
                 }
             }
@@ -1419,16 +1630,23 @@ fn contact_change(out: &mut Out, change: &ContactChange) {
             master,
         } => {
             out.keyword(&format!("*Model change, Type=Contact pair, {}", add(*a)));
-            let _ = writeln!(out.text, "{slave}, {master}");
+            let line = format!(
+                "{}, {}",
+                out.labels.surface(*slave),
+                out.labels.surface(*master)
+            );
+            out.line(&line);
         }
         ContactChange::Elements { add: a, elset } => {
             out.keyword(&format!("*Model change, Type=Element, {}", add(*a)));
-            out.line(elset);
+            let line = out.labels.element_set(*elset).to_string();
+            out.line(&line);
         }
         ContactChange::Friction {
             interaction,
             friction,
         } => {
+            let interaction = out.labels.interaction(*interaction).to_owned();
             out.keyword(&format!("*Change friction, Interaction={interaction}"));
             out.keyword("*Friction");
             friction_line(out, friction);
@@ -1436,13 +1654,13 @@ fn contact_change(out: &mut Out, change: &ContactChange) {
     }
 }
 
-fn field_output_header(keyword: &str, output: &FieldOutput) -> String {
+fn field_output_header(labels: &Labels, keyword: &str, output: &FieldOutput) -> String {
     let mut header = String::from(keyword);
     if output.frequency != 1 {
         let _ = write!(header, ", Frequency={}", output.frequency);
     }
-    if let Some(nset) = &output.nset {
-        let _ = write!(header, ", Nset={nset}");
+    if let Some(nset) = output.nset {
+        let _ = write!(header, ", Nset={}", labels.node_set(nset));
     }
     if output.last_iterations {
         header.push_str(", Last iterations");
@@ -1467,15 +1685,26 @@ fn field_output_header(keyword: &str, output: &FieldOutput) -> String {
     header
 }
 
-fn history_output_header(keyword: &str, set: &str, output: &HistoryOutput) -> String {
+fn history_output_header(
+    labels: &Labels,
+    keyword: &str,
+    set: &str,
+    output: &HistoryOutput,
+) -> String {
     let mut header = String::from(keyword);
-    if let Some(name) = &output.set {
-        let _ = write!(header, ", {set}={name}");
+    match output.set {
+        Some(plxs_core::step::HistorySet::Nodes(nodes)) => {
+            let _ = write!(header, ", {set}={}", labels.node_set(nodes));
+        }
+        Some(plxs_core::step::HistorySet::Elements(elements)) => {
+            let _ = write!(header, ", {set}={}", labels.element_set(elements));
+        }
+        None => {}
     }
-    if let Some((slave, master)) = &output.surfaces {
-        let _ = write!(header, ", Slave={slave}");
-        if !master.is_empty() {
-            let _ = write!(header, ", Master={master}");
+    if let Some((slave, master)) = output.surfaces {
+        let _ = write!(header, ", Slave={}", labels.surface(slave));
+        if let Some(master) = master {
+            let _ = write!(header, ", Master={}", labels.surface(master));
         }
     }
     if output.frequency != 1 {
@@ -1503,7 +1732,8 @@ fn outputs(out: &mut Out, step: &Step) {
         ("*Contact file", &outputs.contact_file),
     ] {
         for output in list {
-            out.keyword(&field_output_header(keyword, output));
+            let header = field_output_header(&out.labels, keyword, output);
+            out.keyword(&header);
             out.list(output.variables.iter().map(String::as_str));
         }
     }
@@ -1513,28 +1743,9 @@ fn outputs(out: &mut Out, step: &Step) {
         ("*Contact print", "", &outputs.contact_print),
     ] {
         for output in list {
-            out.keyword(&history_output_header(keyword, set, output));
+            let header = history_output_header(&out.labels, keyword, set, output);
+            out.keyword(&header);
             out.list(output.variables.iter().map(String::as_str));
         }
     }
-}
-
-/// Names the analysis uses that the text cannot hold as they are, e.g. with a comma or a
-/// blank: the reader would split or join them. Empty when the analysis renders faithfully.
-pub fn unwritable_names(analysis: &Analysis) -> BTreeSet<String> {
-    let sets = &analysis.model.sets;
-    let names = (sets.node_sets.keys())
-        .chain(sets.element_sets.keys())
-        .chain(sets.surfaces.keys())
-        .chain(analysis.model.materials.iter().map(|m| &m.name))
-        .chain(analysis.model.amplitudes.iter().map(|a| &a.name));
-    names
-        .filter(|n| {
-            n.is_empty()
-                || n.contains([',', ' ', '"', '='])
-                || n.starts_with('*')
-                || n.parse::<u32>().is_ok()
-        })
-        .cloned()
-        .collect()
 }

@@ -48,6 +48,7 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         distributions,
         initial_conditions,
         steps,
+        field_output,
         history_outputs,
         reference_points,
         coordinate_systems,
@@ -118,6 +119,10 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         }
     }
     hash.add_debug(&steps);
+    // The coordinate system of the field output is applied when the results are shown.
+    if !field_output.additional.is_empty() || field_output.dimension != Default::default() {
+        hash.add_debug(&(&field_output.additional, field_output.dimension));
+    }
     // The history outputs these steps print.
     let printed: Vec<_> = (history_outputs.iter())
         .filter(|o| steps.iter().any(|s| s.history_outputs.contains(&o.id)))
@@ -234,7 +239,7 @@ pub fn mesh_input(
     // meet: joining a part into a compound, taking it out or changing the compound's
     // members leaves its mesh out of date. Without a compound the input stays what it was.
     if let Some(compound) = geometry.compound_of(part) {
-        let mut members: Vec<String> = (geometry.compounds[compound].parts.iter())
+        let mut members: Vec<String> = (geometry.member_names(compound).iter())
             .filter(|p| !geometry.is_suppressed(p))
             .map(|p| p.to_ascii_lowercase())
             .collect();
@@ -278,16 +283,17 @@ mod tests {
     fn joining_a_compound_leaves_the_mesh_out_of_date() {
         let space = ModelSpace::default();
         let mut joined = geometry();
+        let names = ["SOLID-1", "SOLID-2", "SOLID-3", "SOLID-4"].map(String::from);
+        let ids = joined.part_ids_of(&names);
         let alone = mesh_input(&joined, &[], space, "SOLID-1");
-        joined.compounds.push(crate::CompoundPart {
-            name: "COMPOUND-1".into(),
-            parts: vec!["SOLID-1".into(), "SOLID-2".into()],
-        });
+        joined
+            .compounds
+            .push(crate::CompoundPart::new("COMPOUND-1", vec![ids[0], ids[1]]));
         let first = mesh_input(&joined, &[], space, "SOLID-1");
         assert_ne!(alone, first);
         // Another member changes it too, a part outside the compound stays.
         let outside = mesh_input(&joined, &[], space, "SOLID-3");
-        joined.compounds[0].parts.push("SOLID-4".into());
+        joined.compounds[0].parts.push(ids[3]);
         assert_ne!(first, mesh_input(&joined, &[], space, "SOLID-1"));
         assert_eq!(outside, mesh_input(&joined, &[], space, "SOLID-3"));
         // Dissolved, the input is what it was.

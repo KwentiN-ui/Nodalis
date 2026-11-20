@@ -22,7 +22,37 @@ type Entity = (i32, i32);
 pub(crate) struct Split {
     /// (dimension, centre of mass, part name) of every entity of a part.
     pub(crate) places: Vec<(i32, [f64; 3], String)>,
-    pub(crate) compounds: Vec<CompoundPart>,
+    pub(crate) compounds: Vec<NamedCompound>,
+}
+
+/// A compound part with its members by name, while a split names the pieces; their ids
+/// are given once the geometry has them, see [`NamedCompound::with_ids`].
+pub(crate) struct NamedCompound {
+    pub(crate) id: plx_model::Id,
+    pub(crate) name: String,
+    pub(crate) parts: Vec<String>,
+}
+
+impl NamedCompound {
+    /// The compounds of `geometry`, their members by name.
+    pub(crate) fn of(geometry: &Geometry) -> Vec<Self> {
+        (geometry.compounds.iter().enumerate())
+            .map(|(i, c)| Self {
+                id: c.id,
+                name: c.name.clone(),
+                parts: geometry.member_names(i),
+            })
+            .collect()
+    }
+
+    /// The compound part, its members by their ids in `geometry`.
+    pub(crate) fn with_ids(self, geometry: &mut Geometry) -> CompoundPart {
+        CompoundPart {
+            id: self.id,
+            name: self.name,
+            parts: geometry.part_ids_of(&self.parts),
+        }
+    }
 }
 
 fn fail(message: impl Into<String>) -> GmshError {
@@ -69,7 +99,7 @@ pub(crate) fn split_by_plane(
     };
     let extent = 2.0 * size;
     let frame = plane_frame(normal, foot);
-    let mut compounds = input.compounds.clone();
+    let mut compounds = NamedCompound::of(input);
     let mut used: BTreeSet<String> = parts.iter().map(|(_, n)| n.clone()).collect();
     let mut places = Vec::new();
     let mut cut_any = false;
@@ -205,7 +235,8 @@ pub(crate) fn split_by_plane(
             }
         }
         if names.len() > 1 && operation.compound && input.compound_of(&name).is_none() {
-            compounds.push(CompoundPart {
+            compounds.push(NamedCompound {
+                id: plx_model::Id::new(),
                 name: unique_name(&name, &used),
                 parts: names,
             });
@@ -385,7 +416,7 @@ pub(crate) fn split_around_holes(
     }
     Ok(Split {
         places,
-        compounds: input.compounds.clone(),
+        compounds: NamedCompound::of(input),
     })
 }
 
@@ -464,7 +495,7 @@ fn record(
 }
 
 /// Puts the pieces of a split part in its place in the compound holding it.
-fn remove_from(compounds: &mut Vec<CompoundPart>, part: &str, pieces: &[String]) {
+fn remove_from(compounds: &mut Vec<NamedCompound>, part: &str, pieces: &[String]) {
     for compound in compounds.iter_mut() {
         if let Some(at) = compound
             .parts

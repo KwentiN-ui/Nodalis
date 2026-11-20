@@ -6,7 +6,7 @@ use std::f64::consts::PI;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Amplitude {
-    /// Upper case name.
+    /// Label (the name of the input), not used to refer to it.
     pub name: String,
     /// `TIME=TOTAL TIME`: the table is read with the total time, otherwise with the step time.
     pub total_time: bool,

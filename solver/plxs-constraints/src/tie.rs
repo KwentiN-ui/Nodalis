@@ -28,7 +28,7 @@ use plxs_core::constraints::Tie;
 use plxs_core::mesh::Surface;
 use plxs_core::section::SectionKind;
 use plxs_core::{ElementFamily, ElementType};
-use plxs_core::{Error, Model, Result};
+use plxs_core::{Error, Model, Result, SurfaceId};
 use plxs_elements::membrane::is_native as is_membrane;
 use plxs_elements::shape::face_shape;
 use plxs_elements::solid;
@@ -95,16 +95,16 @@ pub struct Coupling {
 }
 
 /// The faces of an element surface as dense node lists.
-pub fn surface_faces(model: &Model, keyword: &str, name: &str) -> Result<Vec<MasterFace>> {
-    let surface = model
-        .sets
-        .surfaces
-        .get(name)
-        .ok_or_else(|| Error::undefined(keyword, "surface", name))?;
+pub fn surface_faces(model: &Model, keyword: &str, id: SurfaceId) -> Result<Vec<MasterFace>> {
+    let surface = (model.sets.surface(id))
+        .ok_or_else(|| Error::undefined(keyword, "surface", format!("#{}", id.0)))?;
     let Surface::Element(faces) = surface else {
         return Err(Error::input(
             keyword,
-            format!("the master surface {name} must consist of element faces"),
+            format!(
+                "the master surface {} must consist of element faces",
+                model.sets.surface_name(id)
+            ),
         ));
     };
     let mut out = Vec::with_capacity(faces.len());
@@ -232,12 +232,9 @@ fn face_table(kind: ElementType) -> Option<(Vec<(Vec<usize>, Vec<usize>)>, bool)
 }
 
 /// The slave nodes of a surface (element faces or nodes), dense, in order, unique.
-pub fn surface_nodes(model: &Model, keyword: &str, name: &str) -> Result<Vec<u32>> {
-    let surface = model
-        .sets
-        .surfaces
-        .get(name)
-        .ok_or_else(|| Error::undefined(keyword, "surface", name))?;
+pub fn surface_nodes(model: &Model, keyword: &str, id: SurfaceId) -> Result<Vec<u32>> {
+    let surface = (model.sets.surface(id))
+        .ok_or_else(|| Error::undefined(keyword, "surface", format!("#{}", id.0)))?;
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     match surface {
@@ -251,7 +248,7 @@ pub fn surface_nodes(model: &Model, keyword: &str, name: &str) -> Result<Vec<u32
             }
         }
         Surface::Element(_) => {
-            for face in surface_faces(model, keyword, name)? {
+            for face in surface_faces(model, keyword, id)? {
                 for n in face.nodes {
                     if seen.insert(n) {
                         out.push(n);
@@ -265,10 +262,10 @@ pub fn surface_nodes(model: &Model, keyword: &str, name: &str) -> Result<Vec<u32
 
 /// The layers of the membrane faces of an element surface, by dense node (the first face
 /// of a node gives its layer); empty for other surfaces.
-fn membrane_layers(model: &Model, name: &str) -> Result<HashMap<u32, Layer>> {
+fn membrane_layers(model: &Model, id: SurfaceId) -> Result<HashMap<u32, Layer>> {
     let mut out = HashMap::new();
-    if let Some(Surface::Element(_)) = model.sets.surfaces.get(name) {
-        for face in surface_faces(model, "*TIE", name)? {
+    if let Some(Surface::Element(_)) = model.sets.surface(id) {
+        for face in surface_faces(model, "*TIE", id)? {
             if let Some(layer) = face.layer {
                 for &n in &face.nodes {
                     out.entry(n).or_insert_with(|| layer.clone());
@@ -443,9 +440,9 @@ pub fn couplings(
     tie: &Tie,
     coords: &[[f64; 3]],
 ) -> Result<(Vec<Coupling>, Vec<u32>)> {
-    let faces = surface_faces(model, "*TIE", &tie.master)?;
-    let slaves = surface_nodes(model, "*TIE", &tie.slave)?;
-    let slave_layers = membrane_layers(model, &tie.slave)?;
+    let faces = surface_faces(model, "*TIE", tie.master)?;
+    let slaves = surface_nodes(model, "*TIE", tie.slave)?;
+    let slave_layers = membrane_layers(model, tie.slave)?;
     if faces.is_empty() {
         return Ok((Vec::new(), slaves));
     }

@@ -3,9 +3,8 @@
 
 use crate::units::{Quantity, UnitSystem};
 use crate::{
-    BoundaryKind, Constraint, FeModel, GapConductance, Geometry, InitialConditionKind,
-    InteractionProperty, LoadKind, Material, MeshSetupKind, MeshingParameters, StaticStep,
-    StepKind, SurfaceBehavior,
+    BoundaryKind, Constraint, FeModel, GapConductance, InitialConditionKind, InteractionProperty,
+    LoadKind, Material, StaticStep, StepKind, SurfaceBehavior,
 };
 
 /// Converts values from one unit system into another.
@@ -613,35 +612,6 @@ impl InteractionProperty {
                 }
             },
         }
-    }
-}
-
-impl Geometry {
-    /// Converts the mesh sizes; the shapes themselves are scaled by the mesher, which can
-    /// read them.
-    pub fn convert_sizes(&mut self, c: &Conversion) {
-        self.meshing.convert_units(c);
-        for item in &mut self.mesh_items {
-            match &mut item.kind {
-                MeshSetupKind::MeshingParameters { parameters, .. } => parameters.convert_units(c),
-                MeshSetupKind::LocalMeshSize { size, depth, .. } => {
-                    c.value(size, Quantity::Length);
-                    c.value(depth, Quantity::Length);
-                }
-                MeshSetupKind::ThickenShellMesh(thicken) => {
-                    c.value(&mut thicken.thickness, Quantity::Length);
-                    c.value(&mut thicken.offset, Quantity::Length);
-                }
-                MeshSetupKind::TetrahedralGmsh { .. } | MeshSetupKind::ExtrudeMesh(_) => {}
-            }
-        }
-    }
-}
-
-impl MeshingParameters {
-    fn convert_units(&mut self, c: &Conversion) {
-        c.value(&mut self.max_size, Quantity::Length);
-        c.value(&mut self.min_size, Quantity::Length);
     }
 }
 

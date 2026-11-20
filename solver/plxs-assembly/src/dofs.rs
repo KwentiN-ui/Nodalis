@@ -51,7 +51,7 @@ pub struct Spc {
 pub fn amplitude_factor(
     model: &Model,
     step: &Step,
-    amplitude: Option<&str>,
+    amplitude: Option<plxs_core::AmplitudeId>,
     time: f64,
     total: f64,
     period: f64,
@@ -105,14 +105,7 @@ impl Spc {
     ) -> Result<Spc> {
         let mut prescribed: Vec<(u32, f64)> = Vec::new();
         for boundary in &step.boundaries {
-            let factor = amplitude_factor(
-                model,
-                step,
-                boundary.amplitude.as_deref(),
-                time,
-                total,
-                period,
-            );
+            let factor = amplitude_factor(model, step, boundary.amplitude, time, total, period);
             let value = boundary.value.unwrap_or(0.0) * factor;
             for node in Self::nodes(model, boundary) {
                 let Some(index) = model.nodes.index(node) else {
@@ -147,7 +140,7 @@ impl Spc {
     fn nodes(model: &Model, boundary: &Boundary) -> Vec<u32> {
         match &boundary.region {
             NodeRef::Node(id) => vec![*id],
-            NodeRef::Set(name) => model.sets.node_sets.get(name).cloned().unwrap_or_default(),
+            NodeRef::Set(set) => model.sets.nodes(*set).to_vec(),
         }
     }
 

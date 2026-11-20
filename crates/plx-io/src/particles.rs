@@ -565,15 +565,19 @@ pub fn after_flow(
             region.active = false;
         }
     }
+    let filled_ids: Vec<plx_model::Id> = (mesh.parts.iter())
+        .filter(|p| lowered.bodies.contains(&p.name))
+        .map(|p| p.id)
+        .collect();
     let mut mesh = mesh.clone();
-    mesh.remove_bodies(&lowered.bodies);
+    mesh.remove_bodies(&plx_model::body_ids(&mesh, &lowered.bodies));
     // The sections of the filled parts alone go with them.
     let filled = |section: &plx_model::Section| {
-        matches!(&section.region, plx_model::Region::Parts(names)
-            if !names.is_empty() && names.iter().all(|n| lowered.bodies.contains(n)))
+        matches!(&section.region, plx_model::Region::Parts(ids)
+            if !ids.is_empty() && ids.iter().all(|id| filled_ids.contains(id)))
     };
     fe.sections.retain(|section| !filled(section));
-    fe.remove_parts_from_regions(&lowered.bodies);
+    fe.remove_parts_from_regions(&filled_ids);
     for step in &mut fe.steps {
         for load in &mut step.loads {
             if let plx_model::LoadKind::WallLoads(w) = &mut load.kind
@@ -1320,9 +1324,9 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 
 /// The parts the elements and faces of a region belong to.
 fn parts_of(region: &plx_model::Region, mesh: &FeMesh) -> BTreeSet<usize> {
-    if let plx_model::Region::Parts(names) = region {
+    if let plx_model::Region::Parts(ids) = region {
         return (mesh.parts.iter().enumerate())
-            .filter(|(_, p)| names.contains(&p.name))
+            .filter(|(_, p)| ids.contains(&p.id))
             .map(|(i, _)| i)
             .collect();
     }
@@ -1519,6 +1523,15 @@ mod tests {
         Step,
     };
 
+    /// The id of the test parts called `name`: the same for all of them.
+    fn id(name: &str) -> plx_model::Id {
+        use std::collections::HashMap;
+        use std::sync::{LazyLock, Mutex};
+        static IDS: LazyLock<Mutex<HashMap<String, plx_model::Id>>> =
+            LazyLock::new(Default::default);
+        *(IDS.lock().unwrap().entry(name.into())).or_default()
+    }
+
     /// Two unit cubes side by side: a paste and a tool.
     fn mesh() -> FeMesh {
         let mut mesh = FeMesh::default();
@@ -1548,6 +1561,7 @@ mod tests {
             })
             .unwrap();
             mesh.parts.push(Part {
+                id: id(name),
                 bodies: Vec::new(),
                 name: name.into(),
                 elements: vec![c as u32 + 1],
@@ -1576,7 +1590,7 @@ mod tests {
             visible: true,
         };
         let mut body = RigidBody::new("Tool", point.id);
-        body.region = Region::Parts(vec!["Tool".into()]);
+        body.region = Region::Parts(vec![id("Tool")]);
         let mut step = Step::new_static("Flow");
         step.kind = StepKind::ParticleFlow(ParticleFlowStep {
             duration: 2.0,
@@ -1602,7 +1616,7 @@ mod tests {
                 orientation: None,
                 name: "Paste".into(),
                 material: Some(material.id),
-                region: Region::Parts(vec!["Paste".into()]),
+                region: Region::Parts(vec![id("Paste")]),
                 thickness: 1.0,
                 kind: Default::default(),
             }],
@@ -1623,7 +1637,7 @@ mod tests {
         let mut load = plx_model::Step::new_static("Load");
         load.loads.push(plx_model::Load::new(
             "Walls",
-            Region::Parts(vec!["Tool".into()]),
+            Region::Parts(vec![id("Tool")]),
             plx_model::LoadKind::WallLoads(Default::default()),
         ));
         fe.steps.push(load);
@@ -1679,6 +1693,7 @@ mod tests {
                 elements.push(element);
             }
             mesh.parts.push(Part {
+                id: id(name),
                 bodies: Vec::new(),
                 name: name.into(),
                 elements,
@@ -1831,7 +1846,7 @@ mod tests {
             Some(6.0),
         ]);
         held.behavior = plx_model::Behavior::Rigid;
-        let region = Region::Parts(vec!["Tool".into()]);
+        let region = Region::Parts(vec![id("Tool")]);
         let center = region.centroid(&mesh).unwrap();
         fe.steps[0].boundary_conditions.push(BoundaryCondition::new(
             "Held",
@@ -1861,7 +1876,7 @@ mod tests {
         fe.put_history_output(0, energies);
         fe.steps[0].loads.push(plx_model::Load::new(
             "Gravity",
-            Region::Parts(vec!["Paste".into()]),
+            Region::Parts(vec![id("Paste")]),
             plx_model::LoadKind::Gravity([0.0, 0.0, -9.81]),
         ));
         fe.steps[0].loads.push(plx_model::Load::new(
@@ -2000,7 +2015,7 @@ mod tests {
         fe.initial_conditions.push(plx_model::InitialCondition {
             name: "Cold".into(),
             active: true,
-            region: Region::Parts(vec!["Paste".into()]),
+            region: Region::Parts(vec![id("Paste")]),
             kind: plx_model::InitialConditionKind::Temperature(4.0),
             distribution: None,
         });

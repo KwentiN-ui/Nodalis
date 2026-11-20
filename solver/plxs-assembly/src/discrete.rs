@@ -263,7 +263,7 @@ impl SupportPoints {
 /// reference configuration.
 pub fn support_points(model: &Model, support: &CompressionOnly) -> Result<SupportPoints> {
     const KEYWORD: &str = "*COMPRESSION ONLY";
-    let faces = ContactFace::surface_faces(model, KEYWORD, &support.surface)?;
+    let faces = ContactFace::surface_faces(model, KEYWORD, support.surface)?;
     let coords = &model.nodes.coordinates;
     let stiffness = match support.stiffness {
         Some(k) => k,
@@ -279,7 +279,7 @@ pub fn support_points(model: &Model, support: &CompressionOnly) -> Result<Suppor
                         format!(
                             "surface {} lies on elements without an elastic material: give \
                              STIFFNESS",
-                            support.surface
+                            model.sets.surface_name(support.surface)
                         ),
                     )
                 })?;
@@ -436,7 +436,7 @@ fn element_young(model: &Model, element: u32) -> Option<f64> {
     let SectionKind::Solid { material, .. } = &section.kind else {
         return None;
     };
-    plxs_materials::LinearElastic::of(model.material(material)?, 0.0)
+    plxs_materials::LinearElastic::of(model.material(*material)?, 0.0)
         .ok()
         .map(|e| e.young)
 }

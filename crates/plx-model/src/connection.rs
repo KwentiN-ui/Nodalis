@@ -1091,24 +1091,6 @@ impl FeModel {
         for step in &mut lowered.steps {
             step.history_outputs.retain(|o| kept.contains(o));
         }
-        // Contact results for the contact check after solving, where none are asked for.
-        if (lowered.contact_pairs.iter().skip(origin.first_pair)).any(|p| p.active) {
-            for step in &mut lowered.steps {
-                let asked = (step.field_outputs.iter())
-                    .any(|f| f.active && f.kind == crate::OutputKind::Contact);
-                let structural = matches!(
-                    step.kind,
-                    StepKind::Static(_) | StepKind::Visco(_) | StepKind::Dynamic(_)
-                );
-                if structural && !asked {
-                    step.field_outputs.push(crate::FieldOutput::new(
-                        "PLX_Contact",
-                        crate::OutputKind::Contact,
-                        crate::OutputKind::Contact.default_variables(),
-                    ));
-                }
-            }
-        }
         (lowered, origin, resolved)
     }
 }

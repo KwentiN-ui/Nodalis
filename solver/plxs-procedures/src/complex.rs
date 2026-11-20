@@ -64,12 +64,7 @@ fn rotation(model: &Model, table: &ElementTable, step: &Step) -> Option<Rotation
         let speed = omega_squared.max(0.0).sqrt();
         let elements: Vec<u32> = match &load.region {
             ElementRef::Element(id) => vec![*id],
-            ElementRef::Set(name) => model
-                .sets
-                .element_sets
-                .get(name)
-                .cloned()
-                .unwrap_or_default(),
+            ElementRef::Set(set) => model.sets.elements(*set).to_vec(),
         };
         let rotation = found.get_or_insert(Rotation {
             omega: unit.map(|c| c * speed),
@@ -115,12 +110,7 @@ pub(crate) fn add_spin_softening(
         let a = axis.map(|c| c / len);
         let elements: Vec<u32> = match &load.region {
             ElementRef::Element(id) => vec![*id],
-            ElementRef::Set(name) => model
-                .sets
-                .element_sets
-                .get(name)
-                .cloned()
-                .unwrap_or_default(),
+            ElementRef::Set(set) => model.sets.elements(*set).to_vec(),
         };
         for id in elements {
             let Some(index) = model.element_index(id) else {

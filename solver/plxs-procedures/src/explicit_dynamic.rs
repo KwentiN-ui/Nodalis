@@ -502,12 +502,12 @@ const FOLLOWER_CHUNK: usize = 16;
 /// ascending.
 fn amplitude_corners<'n>(
     ctx: &ProcedureContext<'_>,
-    names: impl Iterator<Item = &'n String>,
+    names: impl Iterator<Item = &'n plxs_core::AmplitudeId>,
     start_total: f64,
     period: f64,
 ) -> Vec<f64> {
     let mut corners: Vec<f64> = names
-        .filter_map(|name| ctx.model.amplitude(name))
+        .filter_map(|&name| ctx.model.amplitude(name))
         .flat_map(|a| {
             let offset = a.shift_x - if a.total_time { start_total } else { 0.0 };
             a.corner_times().into_iter().map(move |t| t + offset)
@@ -520,7 +520,7 @@ fn amplitude_corners<'n>(
 }
 
 struct LoadHistory {
-    groups: Vec<(Option<String>, Vec<f64>)>,
+    groups: Vec<(Option<plxs_core::AmplitudeId>, Vec<f64>)>,
     per_step: bool,
     /// The step times at which an amplitude of the loads has a corner, ascending.
     corners: Vec<f64>,
@@ -531,7 +531,7 @@ struct LoadHistory {
 
 impl LoadHistory {
     fn new(ctx: &ProcedureContext<'_>, step: &Step, start_total: f64, period: f64) -> Result<Self> {
-        let mut names: Vec<Option<String>> = Vec::new();
+        let mut names: Vec<Option<plxs_core::AmplitudeId>> = Vec::new();
         let loads = &step.loads;
         for name in loads
             .concentrated
@@ -540,7 +540,7 @@ impl LoadHistory {
             .chain(loads.distributed.iter().map(|l| &l.amplitude))
         {
             if !names.contains(name) {
-                names.push(name.clone());
+                names.push(*name);
             }
         }
         let corners = amplitude_corners(ctx, names.iter().flatten(), start_total, period);
@@ -628,7 +628,7 @@ impl LoadHistory {
             let factor = plxs_assembly::dofs::amplitude_factor(
                 ctx.model,
                 step,
-                name.as_deref(),
+                *name,
                 time,
                 start_total + time,
                 period,
@@ -2150,7 +2150,7 @@ impl Procedure for ExplicitDynamic {
         let carried_nodal = carried
             .as_ref()
             .map(|e| nodal_average_scalar(ctx.table, ctx.model, e));
-        let requests = energy_requests(step);
+        let requests = energy_requests(ctx.model, step);
 
         // Under NLGEOM the shortest distances in the elements watch the time step: the
         // frequencies are computed again when one has changed by 5 %, or after

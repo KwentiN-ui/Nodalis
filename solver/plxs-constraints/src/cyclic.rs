@@ -82,16 +82,11 @@ impl CyclicSymmetry {
         let Some(definition) = &model.constraints.cyclic_symmetry else {
             return Ok(None);
         };
-        let Some(t) = model
-            .constraints
-            .ties
-            .iter()
-            .find(|t| t.name == definition.tie)
-        else {
+        let Some(t) = model.constraints.ties.get(definition.tie.index()) else {
             return Err(Error::undefined(
                 "*CYCLIC SYMMETRY MODEL",
                 "tie",
-                &definition.tie,
+                format!("#{}", definition.tie.0),
             ));
         };
         if definition.sectors == 0 {
@@ -108,7 +103,7 @@ impl CyclicSymmetry {
         }
         let unit = d.map(|c| c / length);
         let angle = 2.0 * std::f64::consts::PI / f64::from(definition.sectors);
-        let slaves = tie::surface_nodes(model, "*TIE", &t.slave)?;
+        let slaves = tie::surface_nodes(model, "*TIE", t.slave)?;
         let mut best: Option<(usize, f64, CyclicSymmetry)> = None;
         for sign in [1.0, -1.0] {
             let axis = unit.map(|c| c * sign);

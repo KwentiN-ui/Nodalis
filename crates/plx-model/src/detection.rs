@@ -180,15 +180,6 @@ impl ContactDetection {
             rule.side_b.forget(id);
         }
     }
-
-    /// Renames the part `old` to `new` in its filters.
-    pub fn rename_part(&mut self, old: &str, new: &str) {
-        self.scope.rename_part(old, new);
-        for rule in &mut self.rules {
-            rule.side_a.rename_part(old, new);
-            rule.side_b.rename_part(old, new);
-        }
-    }
 }
 
 /// Which surfaces a detection searches.
@@ -597,7 +588,7 @@ impl FeModel {
                     None => Region::Faces(faces),
                 }
             };
-            let rope = Region::Parts(vec![mesh.parts[rope].name.clone()]);
+            let rope = Region::Parts(vec![mesh.parts[rope].id]);
             candidates.push((faces, rope, true));
         }
         report.per_rule = vec![0; detection.rules.len() + 1];
@@ -765,7 +756,7 @@ impl FeModel {
             if !searched.get(rope).copied().unwrap_or(false) || skin.lines.is_empty() {
                 continue;
             }
-            let part = Region::Parts(vec![mesh.parts[rope].name.clone()]);
+            let part = Region::Parts(vec![mesh.parts[rope].id]);
             let Some(radius) = self.contact_radius(&part, mesh) else {
                 continue;
             };

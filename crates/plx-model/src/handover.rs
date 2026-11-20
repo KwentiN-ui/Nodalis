@@ -59,12 +59,6 @@ impl StepKind {
             _ => None,
         }
     }
-
-    /// Whether the step leaves eigenmodes behind that a later sensitivity step reads: a
-    /// frequency step that stores them.
-    pub fn stores_modes(&self) -> bool {
-        matches!(self, StepKind::Frequency(settings) if settings.storage)
-    }
 }
 
 /// How a step stands in the chain of steps of its analysis.

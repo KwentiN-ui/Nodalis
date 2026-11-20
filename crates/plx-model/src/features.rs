@@ -359,16 +359,8 @@ impl FeModel {
             .collect()
     }
 
-    pub fn reference_point_named(&self, name: &str) -> Option<&ReferencePoint> {
-        self.reference_points.iter().find(|r| r.name == name)
-    }
-
     pub fn coordinate_system(&self, id: Id) -> Option<&CoordinateSystem> {
         self.coordinate_systems.iter().find(|c| c.id == id)
-    }
-
-    pub fn coordinate_system_named(&self, name: &str) -> Option<&CoordinateSystem> {
-        self.coordinate_systems.iter().find(|c| c.name == name)
     }
 
     /// A coordinate system of the features resolved to global coordinates in the undeformed
@@ -398,18 +390,8 @@ impl FeModel {
         }
     }
 
-    /// The coordinate system of a name for items read from an input file or typed in:
-    /// `None` for [`GLOBAL`] and for a name the features lack.
-    pub fn system_by_name(&self, name: &str) -> Option<Id> {
-        self.coordinate_system_named(name).map(|c| c.id)
-    }
-
     pub fn plane(&self, id: Id) -> Option<&Plane> {
         self.planes.iter().find(|p| p.id == id)
-    }
-
-    pub fn plane_named(&self, name: &str) -> Option<&Plane> {
-        self.planes.iter().find(|p| p.name == name)
     }
 
     /// The features the FE model shares with its results: reference points, coordinate
@@ -788,6 +770,7 @@ mod tests {
         })
         .unwrap();
         mesh.parts.push(Part {
+            id: Default::default(),
             bodies: Vec::new(),
             name: "P".into(),
             elements: vec![1],

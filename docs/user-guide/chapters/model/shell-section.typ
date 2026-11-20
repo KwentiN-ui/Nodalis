@@ -23,9 +23,9 @@ node numbers; their stresses differ on the top and the bottom face, as bending m
 Measure block on shell nodes takes the values of the nodes they were expanded to: a node set
 the extremes over the thickness, a single node the mean (forces their sum).
 
-#note[A field output with #ui("Output (2D/3D)") set to #ui("2D") reports the shells at their
-own nodes instead. CalculiX then gives the stresses of the mid-surface only: the bending
-stresses are missing.]
+#note[With #ui("Shells and beams") of the field output (@step-field-outputs) set to
+#ui("On the mid-surface (2D)") the shells are reported at their own nodes instead, with the
+stresses of the mid-surface only: the bending stresses are missing.]
 
 Shell nodes have rotations: #ui("Displacement/Rotation") boundary conditions can hold `UR1`,
 `UR2`, `UR3`, and #ui("Moment") loads can act on them.

@@ -13,8 +13,8 @@ use plxs_output::spool::Spool;
 
 use crate::SolverResults;
 
-/// The name of a material of the solver's model.
-fn material_of(kind: &mut SectionKind) -> Option<&mut String> {
+/// The material of a section of the solver's model.
+fn material_of(kind: &mut SectionKind) -> Option<&mut plxs_core::MaterialId> {
     match kind {
         SectionKind::Solid { material, .. }
         | SectionKind::Shell { material, .. }
@@ -58,7 +58,6 @@ pub fn chain(
     // The parts the steps show: the results group elements into parts by material.
     let fe_parts: BTreeSet<String> = fe.model.materials.iter().map(|m| m.name.clone()).collect();
     // A material of the flow named like one of the FE steps is renamed.
-    let mut renamed = Vec::new();
     for material in &mut flow.model.materials {
         if fe_parts.contains(&material.name) {
             let old = material.name.clone();
@@ -68,19 +67,27 @@ pub fn chain(
                 name = format!("{old} (flow {k})");
                 k += 1;
             }
-            material.name = name.clone();
-            renamed.push((old, name));
+            material.name = name;
         }
     }
 
     let model = &mut fe.model;
     let sections = model.sections.len() as u32;
-    for mut section in flow.model.sections {
-        if let Some(material) = material_of(&mut section.kind)
-            && let Some((_, new)) = renamed.iter().find(|(old, _)| old == material)
-        {
-            *material = new.clone();
+    // The flow's materials follow the FE steps' ones.
+    let material_offset = model.materials.len() as u32;
+    // And the sections' element sets the FE ones, with the elements renumbered.
+    let set_offset = model.sets.element_sets.len() as u32;
+    for mut set in flow.model.sets.element_sets {
+        for element in &mut set.elements {
+            *element += element_offset;
         }
+        model.sets.element_sets.push(set);
+    }
+    for mut section in flow.model.sections {
+        if let Some(material) = material_of(&mut section.kind) {
+            material.0 += material_offset;
+        }
+        section.elset.0 += set_offset;
         model.sections.push(section);
     }
     model.materials.append(&mut flow.model.materials);
@@ -183,9 +190,9 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(Section {
-            elset: material.into(),
+            elset: model.sets.add_element_set(material, []),
             kind: SectionKind::Solid {
-                material: material.into(),
+                material: plxs_core::MaterialId(0),
                 thickness: None,
                 orientation: None,
             },
@@ -259,7 +266,10 @@ mod tests {
         assert_eq!(all.model.elements[1].section, Some(1));
         // A material of the same name is the flow's own part.
         assert_eq!(all.model.materials[1].name, "Steel (flow)");
-        assert_eq!(all.model.sections[1].kind.material(), Some("Steel (flow)"));
+        assert_eq!(
+            all.model.sections[1].kind.material(),
+            Some(plxs_core::MaterialId(1))
+        );
         // The flow is step 1, the FE step 2, after the flow in time.
         assert_eq!(spool.len(), 2);
         let first = spool.read(0).unwrap();

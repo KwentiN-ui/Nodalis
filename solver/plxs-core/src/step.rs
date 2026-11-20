@@ -102,14 +102,14 @@ impl Step {
             )
             .chain(self.fields.iter().map(|f| &f.amplitude))
             .flatten();
-        let mut seen: Vec<&str> = Vec::new();
+        let mut seen: Vec<crate::AmplitudeId> = Vec::new();
         let mut times = Vec::new();
-        for name in names {
-            if seen.contains(&name.as_str()) {
+        for &id in names {
+            if seen.contains(&id) {
                 continue;
             }
-            seen.push(name);
-            let Some(amplitude) = model.amplitude(name) else {
+            seen.push(id);
+            let Some(amplitude) = model.amplitude(id) else {
                 continue;
             };
             let offset = if amplitude.total_time {
@@ -205,11 +205,11 @@ impl Procedure {
     }
 }
 
-/// The equation solver CalculiX is asked for (`SOLVER=`); the own solver maps the names to
-/// its automatic choice, its direct and its iterative solver, see [`Self::mode`].
+/// The equation solver a step asks for by CalculiX's names (`SOLVER=`); the solver maps
+/// them to its automatic choice, its direct and its iterative solver, see [`Self::mode`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EquationSolver {
-    /// No `SOLVER=`: CalculiX takes its default; the own solver chooses automatically.
+    /// No `SOLVER=`: the solver chooses automatically.
     #[default]
     Default,
     Spooles,
@@ -505,8 +505,6 @@ pub struct Sensitivity {
     pub nlgeom: bool,
     pub responses: Vec<DesignResponse>,
     pub filter: Option<Filter>,
-    /// `*OBJECTIVE`, written by older Nodalis versions; names of the responses.
-    pub objectives: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -514,7 +512,7 @@ pub struct DesignResponse {
     pub name: String,
     /// `EIGENFREQUENCY`, `MASS`, `STRAINENERGY`, `STRESS`, `MISESSTRESS`, ...
     pub kind: String,
-    pub elset: Option<String>,
+    pub elset: Option<crate::ElementSetId>,
     /// Further data (reference stress for `STRESS` and the like).
     pub data: Vec<f64>,
 }
@@ -534,7 +532,7 @@ pub struct Boundary {
     pub last_dof: u8,
     /// Prescribed value; `None` means zero (homogeneous).
     pub value: Option<f64>,
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
     /// `FIXED`: the node keeps the value it had at the end of the previous step; a value
     /// (times its amplitude) is added to it. CalculiX ignores the value.
     pub fixed: bool,
@@ -560,7 +558,7 @@ pub struct ConcentratedLoad {
     pub region: NodeRef,
     pub dof: u8,
     pub value: f64,
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
     pub load_case: Option<u8>,
     /// `SECTOR=` of cyclic symmetry models.
     pub sector: Option<u32>,
@@ -586,7 +584,7 @@ pub enum Follower {
 pub struct DistributedLoad {
     pub region: ElementRef,
     pub kind: DistributedLoadKind,
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
     pub load_case: Option<u8>,
     pub sector: Option<u32>,
 }
@@ -613,7 +611,7 @@ pub enum DistributedLoadKind {
 pub struct ConcentratedFlux {
     pub region: NodeRef,
     pub value: f64,
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
 }
 
 /// `*DFLUX`: heat flux on a face (`S<n>`) or per volume (`BF`).
@@ -622,7 +620,7 @@ pub struct DistributedFlux {
     pub region: ElementRef,
     pub kind: FluxKind,
     pub value: f64,
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -639,9 +637,9 @@ pub struct Film {
     pub sink_temperature: f64,
     pub coefficient: f64,
     /// Amplitude of the sink temperature.
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
     /// `FILM AMPLITUDE`: amplitude of the coefficient.
-    pub film_amplitude: Option<String>,
+    pub film_amplitude: Option<crate::AmplitudeId>,
 }
 
 /// `*RADIATE`: radiation from a face to the environment (`R<n>`) or a cavity (`R<n>CR`).
@@ -652,16 +650,16 @@ pub struct Radiate {
     pub cavity: bool,
     pub sink_temperature: f64,
     pub emissivity: f64,
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
     /// `RADIATION AMPLITUDE`: amplitude of the emissivity.
-    pub radiation_amplitude: Option<String>,
+    pub radiation_amplitude: Option<crate::AmplitudeId>,
 }
 
 /// `*TEMPERATURE`: temperatures of nodes as a load (thermal strain) in mechanical steps.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DefinedField {
     pub kind: DefinedFieldKind,
-    pub amplitude: Option<String>,
+    pub amplitude: Option<crate::AmplitudeId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -684,14 +682,17 @@ pub enum ContactChange {
     /// `*MODEL CHANGE, TYPE=CONTACT PAIR, ADD|REMOVE` with the slave and master surface.
     ContactPair {
         add: bool,
-        slave: String,
-        master: String,
+        slave: crate::SurfaceId,
+        master: crate::SurfaceId,
     },
     /// `*MODEL CHANGE, TYPE=ELEMENT, ADD|REMOVE`, not written by Nodalis.
-    Elements { add: bool, elset: String },
+    Elements {
+        add: bool,
+        elset: crate::ElementSetId,
+    },
     /// `*CHANGE FRICTION, INTERACTION=` with the new `*FRICTION` values.
     Friction {
-        interaction: String,
+        interaction: crate::InteractionId,
         friction: crate::contact::Friction,
     },
 }
@@ -715,7 +716,7 @@ pub struct FieldOutput {
     /// `FREQUENCY=`: every n-th increment (0 or 1: every one).
     pub frequency: u32,
     /// `FREQUENCYF=` of fluids, ignored.
-    pub nset: Option<String>,
+    pub nset: Option<crate::NodeSetId>,
     pub last_iterations: bool,
     pub contact_elements: bool,
     /// `OUTPUT=2D|3D`: whether 2D, shell and beam results are written on the original
@@ -741,17 +742,25 @@ pub enum OutputDimension {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistoryOutput {
     /// Node set, element set, or `None` for contact print.
-    pub set: Option<String>,
+    pub set: Option<HistorySet>,
     pub variables: Vec<String>,
     pub frequency: u32,
     pub totals: Totals,
     pub global: bool,
     pub time_points: Option<String>,
     /// `*CONTACT PRINT, SLAVE=, MASTER=`: the slave and master surface of the pair the
-    /// statistics (`CF`) are printed for (upper case); `None` for all pairs. An empty master
-    /// (`SLAVE=` alone) names a `*COMPRESSION ONLY` surface, which rests on the ground.
+    /// statistics (`CF`) are printed for; `None` for all pairs. No master (`SLAVE=` alone)
+    /// names a `*COMPRESSION ONLY` surface, which rests on the ground.
     #[serde(default)]
-    pub surfaces: Option<(String, String)>,
+    pub surfaces: Option<(crate::SurfaceId, Option<crate::SurfaceId>)>,
+}
+
+/// The set of a history output: a node set for `*NODE PRINT`, an element set for
+/// `*EL PRINT`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistorySet {
+    Nodes(crate::NodeSetId),
+    Elements(crate::ElementSetId),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -804,17 +813,17 @@ mod amplitude_time_tests {
             table("UNUSED", false, vec![(0.25, 0.0)]),
         ];
         let mut step = Step::new("Step-1", Procedure::NoAnalysis);
-        let boundary = |amplitude: &str| Boundary {
+        let boundary = |amplitude: u32| Boundary {
             region: NodeRef::Node(1),
             first_dof: 1,
             last_dof: 1,
             value: Some(1.0),
-            amplitude: Some(amplitude.into()),
+            amplitude: Some(crate::AmplitudeId(amplitude)),
             fixed: false,
             submodel_step: None,
             load_case: None,
         };
-        step.boundaries = vec![boundary("A"), boundary("B"), boundary("A")];
+        step.boundaries = vec![boundary(0), boundary(1), boundary(0)];
         assert_eq!(step.amplitude_times(&model, 2.0, 2.0), [0.5, 1.0, 1.25]);
     }
 }
