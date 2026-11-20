@@ -167,10 +167,10 @@ pub fn load_vector(
                         &mut fe,
                     );
                 }
-                DistributedLoadKind::Other { label, .. } => {
-                    return Err(Error::Unsupported(format!(
-                        "*DLOAD label {label} is not implemented yet"
-                    )));
+                DistributedLoadKind::ShellPressure { .. } => {
+                    return Err(Error::Unsupported(
+                        "a pressure P without face on solid elements is not supported".into(),
+                    ));
                 }
             }
             Ok((*index as usize, fe))
@@ -379,17 +379,10 @@ pub fn membrane_pressures(
                 }
                 DistributedLoadKind::Pressure { face: 1, value } => *value,
                 DistributedLoadKind::Pressure { face: 2, value } => -*value,
-                DistributedLoadKind::Other { label, values } if label == "P" => {
-                    values.first().copied().unwrap_or(0.0)
-                }
+                DistributedLoadKind::ShellPressure { value } => *value,
                 DistributedLoadKind::Pressure { face, .. } => {
                     return Err(Error::Unsupported(format!(
                         "edge load P{face} on membrane element {id} is not implemented yet"
-                    )));
-                }
-                other => {
-                    return Err(Error::Unsupported(format!(
-                        "*DLOAD {other:?} on membrane element {id} is not implemented yet"
                     )));
                 }
             };

@@ -773,3 +773,27 @@ fn names_resolve_in_any_order_and_undefined_ones_are_errors() {
     let amplitude = analysis.steps[0].loads.concentrated[0].amplitude;
     assert_eq!(amplitude_label(&analysis, amplitude), Some("LATER"));
 }
+
+#[test]
+fn unsupported_labels_and_responses_are_errors_when_read() {
+    let errors = read(&cube("*Step\n*Static\n*Dload\nEALL, BX, 1\n*End step\n")).unwrap_err();
+    assert!(
+        errors[0].to_string().contains("BX is not supported"),
+        "{errors:?}"
+    );
+    let sensitivity = "*Step\n*Sensitivity\n*Design response\nSTRESS, EALL\n*End step\n";
+    let errors = read(&cube(sensitivity)).unwrap_err();
+    assert!(
+        errors[0].to_string().contains("STRESS is not supported"),
+        "{errors:?}"
+    );
+    let filter =
+        "*Step\n*Sensitivity\n*Design response\nMASS\n*Filter, Type=Quadratic\n1\n*End step\n";
+    assert!(read(&cube(filter)).is_err());
+    // A pressure without face is the shell pressure.
+    let analysis = read(&cube("*Step\n*Static\n*Dload\nEALL, P, 2\n*End step\n")).unwrap();
+    assert_eq!(
+        analysis.steps[0].loads.distributed[0].kind,
+        DistributedLoadKind::ShellPressure { value: 2.0 }
+    );
+}
