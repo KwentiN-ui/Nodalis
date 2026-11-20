@@ -9368,7 +9368,7 @@ mod tests {
         let mut editor =
             Editor::edit(&TreeItem::HistoryOutput(2, 0), &fe, &FeMesh::default()).unwrap();
         if let Draft::HistoryOutput(_, output, _) = &mut editor.draft {
-            output.variables = vec!["U".into()];
+            output.variables = plx_model::history_variables(&["U"]);
         }
         editor.apply(&mut fe);
         assert_eq!(fe.history_outputs.len(), 1);

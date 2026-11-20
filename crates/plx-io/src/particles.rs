@@ -1884,10 +1884,10 @@ mod tests {
         let mut fe = model(Some(6.0));
         let point = fe.reference_points[0].id;
         let mut torque = plx_model::HistoryOutput::node("Torque", Region::ReferencePoint(point));
-        torque.variables = vec!["RF".into(), "U".into()];
+        torque.variables = plx_model::history_variables(&["RF", "U"]);
         fe.put_history_output(0, torque);
         let mut energies = plx_model::HistoryOutput::energies("Energies");
-        energies.variables = vec!["ALLKE".into()];
+        energies.variables = plx_model::history_variables(&["ALLKE"]);
         fe.put_history_output(0, energies);
         fe.steps[0].loads.push(plx_model::Load::new(
             "Gravity",

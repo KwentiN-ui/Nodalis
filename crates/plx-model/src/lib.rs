@@ -127,7 +127,7 @@ pub use geometry::{
     Recombination, ThickenShellMesh,
 };
 pub use handover::Handover;
-pub use history::{HistoryKind, HistoryOutput, HistoryVariable, Totals};
+pub use history::{HistoryKind, HistoryOutput, HistoryVariable, Totals, history_variables};
 pub use hyperelastic::{Hyperelastic, HyperelasticModel, TestMode};
 pub use infill::{InfillPattern, InfillSection};
 pub use library::MaterialLibrary;

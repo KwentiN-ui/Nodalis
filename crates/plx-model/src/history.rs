@@ -52,6 +52,38 @@ pub enum HistoryVariable {
 }
 
 impl HistoryVariable {
+    pub const ALL: [Self; 24] = [
+        Self::ReactionForces,
+        Self::Displacements,
+        Self::Velocities,
+        Self::Temperatures,
+        Self::ReactionHeatFlows,
+        Self::Stresses,
+        Self::Strains,
+        Self::MechanicalStrains,
+        Self::PlasticStrain,
+        Self::HeatFlux,
+        Self::EnergyDensity,
+        Self::ElementInternalEnergy,
+        Self::ElementKineticEnergy,
+        Self::ElementVolume,
+        Self::ElementHeatGeneration,
+        Self::ContactDisplacements,
+        Self::ContactStresses,
+        Self::ContactEnergy,
+        Self::ContactElements,
+        Self::ContactForces,
+        Self::InternalEnergy,
+        Self::KineticEnergy,
+        Self::ExternalWork,
+        Self::DampingDissipation,
+    ];
+
+    /// The variable of a short name ([`Self::code`]).
+    pub fn of_code(code: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.code() == code)
+    }
+
     /// The short name of the dialog's check box, as in Abaqus and CalculiX: `RF`, `U`.
     pub fn code(self) -> &'static str {
         match self {
@@ -293,6 +325,13 @@ impl HistoryOutput {
             .sort_by_key(|v| choices.iter().position(|c| c == v));
         self.variables.dedup();
     }
+}
+
+/// The variables of short names ([`HistoryVariable::code`]), for tests.
+pub fn history_variables(codes: &[&str]) -> Vec<HistoryVariable> {
+    (codes.iter())
+        .map(|c| HistoryVariable::of_code(c).unwrap_or_else(|| panic!("no variable {c}")))
+        .collect()
 }
 
 impl crate::FeModel {

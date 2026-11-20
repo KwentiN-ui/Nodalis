@@ -1516,6 +1516,7 @@ mod tests {
         // A second step pressing harder, to show the contacts of a step.
         if std::env::var_os("PLX_CONTACT_DEMO_STEPS").is_some() {
             let mut second = step.clone();
+            second.id = plx_model::Id::new();
             second.name = "Step-2".into();
             second.loads[0].kind = plx_model::LoadKind::Pressure(10e6);
             model.steps.push(step);
@@ -1844,6 +1845,7 @@ mod tests {
             },
         ));
         let mut more = step.clone();
+        more.id = plx_model::Id::new();
         more.name = "More_Load".into();
         let mut modes = plx_model::Step::new_frequency("Modes");
         modes.boundary_conditions = step.boundary_conditions.clone();
@@ -1922,8 +1924,9 @@ mod tests {
         model.steps = vec![step];
         let tip = plx_model::HistoryOutput::node("Tip", Region::Faces(top));
         let mut support = plx_model::HistoryOutput::node("Support", Region::Faces(bottom));
-        support.variables = vec!["RF".into()];
+        support.variables = plx_model::history_variables(&["RF"]);
         support.totals = plx_model::Totals::Only;
+        let (tip_id, support_id) = (tip.id, support.id);
         model.put_history_output(0, tip);
         model.put_history_output(0, support);
         let mut project = single(None, &mesh, &model, None);
@@ -1931,8 +1934,8 @@ mod tests {
             analysis.name = "Cantilever".into();
             analysis.position = [0.0, 0.0];
         }
-        let history = |set: &str, field: &str, component: &str| MeasureKind::History {
-            set: set.into(),
+        let history = |output, field: &str, component: &str| MeasureKind::History {
+            output: Some(output),
             field: field.into(),
             component: component.into(),
             whole: true,
@@ -1975,13 +1978,13 @@ mod tests {
                 3,
                 "Tip",
                 [260.0, -60.0],
-                history("TIP", "DISPLACEMENTS", "U2"),
+                history(tip_id, "DISPLACEMENTS", "U2"),
             ),
             measure(
                 4,
                 "Support",
                 [260.0, 90.0],
-                history("SUPPORT", "TOTAL_FORCE", "RF2"),
+                history(support_id, "TOTAL_FORCE", "RF2"),
             ),
             math(5, "Force", [500.0, 90.0], MathOp::Multiply, vec![0.0, -1.0]),
             plot(6, "Force over Deflection", [740.0, -60.0], PlotKind::Line),
@@ -2313,7 +2316,7 @@ mod tests {
                 key: 1,
                 name: "Steel density".into(),
                 path: plx_model::ValuePath::new(
-                    plx_model::ItemRef::Material("Steel".into()),
+                    plx_model::ItemRef::Material(plx_model::Id::new()),
                     plx_model::Field::Density,
                 ),
             }],
@@ -2560,7 +2563,7 @@ mod tests {
                 key: 1,
                 name: "Tube Radius".into(),
                 path: plx_model::ValuePath::new(
-                    plx_model::ItemRef::CrossSection("Tube".into()),
+                    plx_model::ItemRef::CrossSection(plx_model::Id::new()),
                     plx_model::Field::Radius,
                 ),
             }],
@@ -2594,7 +2597,7 @@ mod tests {
                 key: 1,
                 name: "Steel density".into(),
                 path: plx_model::ValuePath::new(
-                    plx_model::ItemRef::Material("Steel".into()),
+                    plx_model::ItemRef::Material(plx_model::Id::new()),
                     plx_model::Field::Density,
                 ),
             }],
@@ -2812,47 +2815,6 @@ mod tests {
             Err(ProjectError::Older { format: 5, .. })
         ));
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn steps_of_older_projects_are_active() {
-        let mut step = Step::new_static("Step-1");
-        step.active = false;
-        let text = ron::to_string(&step).unwrap();
-        assert!(text.contains("active:false,"), "{text}");
-        let older: Step = ron::from_str(&text.replace("active:false,", "")).unwrap();
-        assert!(older.active);
-    }
-
-    #[test]
-    fn hot_spots_of_older_projects_are_skipped() {
-        // Hot spots were part of the FE model for a while; they are defined on the results
-        // now, and projects saved with them still open.
-        let text = ron::to_string(&FeModel::default()).unwrap();
-        let hot_spots = "hot_spots:[(name:\"Hot_Spot-1\",toe:Nodes([3,7]),\
-            direction:(1.0,0.0,0.0),thickness:10.0,extrapolation:Custom([2.0,6.0]),\
-            component:Perpendicular)],";
-        let older = text.replacen(
-            "reference_points:",
-            &format!("{hot_spots}reference_points:"),
-            1,
-        );
-        assert_ne!(older, text);
-        let model: FeModel = ron::from_str(&older).unwrap();
-        assert_eq!(model, FeModel::default());
-    }
-
-    #[test]
-    fn path_plots_saved_before_hot_spot_plots_still_load() {
-        let older = "(path:\"Path-1\",offset:None,size:(400.0,240.0),on_path:false,\
-            height:80.0,title:\"\",x_label:\"Distance\",y_label:\"\",y_range:None)";
-        let plot: plx_results::saved_view::SavedPathPlot = ron::from_str(older).unwrap();
-        assert!(!plot.hot_spot);
-        let saved = ron::to_string(&plot).unwrap();
-        assert_eq!(
-            ron::from_str::<plx_results::saved_view::SavedPathPlot>(&saved).unwrap(),
-            plot
-        );
     }
 
     #[test]

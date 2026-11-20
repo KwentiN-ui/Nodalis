@@ -6131,6 +6131,7 @@ mod tests {
         // A point in one step is the point of the boundary condition in all of them.
         model.exposed.clear();
         let mut second = model.steps[0].clone();
+        second.id = crate::Id::new();
         second.name = "Step-2".into();
         second.boundary_conditions[0].kind =
             BoundaryKind::displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
