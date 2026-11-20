@@ -38,6 +38,20 @@ impl Origins {
     }
 }
 
+/// Whether a finding of [`diagnose_solver_check`] explains the failed run its findings are
+/// of. Slave nodes a tie left out let a part move freely at most: they explain a singular
+/// matrix or a floating part, not iterations that did not settle with every part held. There
+/// they are a warning, which [`crate::diagnose_solver_warnings`] gives after any run.
+pub fn explains_failure(finding: &Finding, findings: &[Finding]) -> bool {
+    finding.problem != Problem::TieNodesNotTied
+        || !findings.iter().any(|f| {
+            matches!(
+                f.problem,
+                Problem::ContactNoConvergence | Problem::NoConvergence | Problem::HeatNoConvergence
+            )
+        })
+}
+
 /// The findings of the solver's diagnostics. Information (sizes, free modes of a frequency
 /// step) gives none. `origins` leads the items the solver names back to the model's.
 pub fn diagnose_solver_check(
@@ -536,6 +550,19 @@ mod tests {
     /// The items the solver names lead to the model's through the lowering's table: an
     /// untied tie to the contact region it stands for, a step to the model's step of that
     /// analysis step, which skips deactivated ones.
+    #[test]
+    fn untied_nodes_do_not_explain_iterations_that_did_not_settle() {
+        let untied = Finding::new(ModelItem::Analysis, Problem::TieNodesNotTied, "2 nodes");
+        let contact = Finding::new(ModelItem::Analysis, Problem::ContactNoConvergence, "");
+        let free = Finding::new(ModelItem::Analysis, Problem::RigidBodyMotion, "");
+        let findings = [untied.clone(), contact.clone()];
+        assert!(!explains_failure(&untied, &findings));
+        assert!(explains_failure(&contact, &findings));
+        // A part moving freely may be one the tie left loose.
+        assert!(explains_failure(&untied, &[untied.clone(), free]));
+        assert!(explains_failure(&untied, std::slice::from_ref(&untied)));
+    }
+
     #[test]
     fn the_solver_items_lead_back_to_the_tree() {
         let mut fe = FeModel::default();
