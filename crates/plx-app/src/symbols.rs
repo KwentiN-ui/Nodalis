@@ -439,15 +439,21 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                 }
             }
             // A remote force: an arrow for the force and one for the moment at its point,
-            // with lines to it from nodes spread over the region; at a reference point the
-            // arrows alone.
+            // with lines to it from nodes spread over the region; at a reference point or the
+            // point of a displacement the arrows alone.
             Kind::Load(LoadKind::RemoteForce(ref remote)) => {
-                let (centre, nodes) = match item.region.reference_point() {
-                    Some(name) => match model.fe.reference_point(name) {
+                let (centre, nodes) = match &item.region {
+                    Region::ReferencePoint(id) => match model.fe.reference_point(*id) {
                         Some(point) => (DVec3::from(point.position), None),
                         None => continue,
                     },
-                    None => {
+                    Region::RemotePoint(id) => {
+                        match model.fe.remote_point_position(model.mesh(), *id) {
+                            Some(position) => (DVec3::from(position), None),
+                            None => continue,
+                        }
+                    }
+                    _ => {
                         let none = Default::default();
                         let point = remote.point();
                         let Ok(point) = point.resolve(&model.fe, model.mesh(), &item.region, &none)
@@ -772,12 +778,14 @@ fn node_points(model: &Model, region: &Region, visible: &Visible) -> Vec<DVec3> 
             .map(|point| DVec3::from(point.position))
             .collect();
     }
-    // The point of a boundary condition or remote force, at the centre of its region.
+    // The point of a boundary condition or remote force.
     if let Region::RemotePoint(id) = region {
-        return (model.fe.remote_point_of(model.mesh(), *id).into_iter())
-            .filter_map(|(region, _)| region.centroid(model.mesh()))
-            .map(DVec3::from)
-            .collect();
+        return (model
+            .fe
+            .remote_point_position(model.mesh(), *id)
+            .into_iter())
+        .map(DVec3::from)
+        .collect();
     }
     let coords = model.exploded_coords();
     region

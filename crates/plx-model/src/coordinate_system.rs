@@ -324,6 +324,97 @@ impl CoordinateSystem {
     }
 }
 
+impl CoordinateSystem {
+    /// Whether the system lies in the plane of a 2D model: its origin at z = 0 and its z axis
+    /// along the global +Z, so that its x and y axes lie in the x-y plane. Also false when it
+    /// does not resolve.
+    pub fn lies_in_plane(&self, systems: &[CoordinateSystem]) -> bool {
+        let frame = self.frame(systems);
+        let Ok([_, _, z]) = frame.axes() else {
+            return false;
+        };
+        let size = norm(frame.origin).max(1.0);
+        frame.origin[2].abs() <= 1e-9 * size && z[2] >= 1.0 - 1e-9
+    }
+
+    /// The system laid into the plane of a 2D model, keeping its origin's x and y and the
+    /// direction of its x axis in the plane (of its y axis turned back, when x is normal to
+    /// the plane), given anew in its base, or in the global system when the base does not lie
+    /// in the plane, by the same kind of definition in plane form (see
+    /// [`CoordinateSystem::to_plane_form`]). `None` when the system does not resolve.
+    pub fn laid_in_plane(&self, systems: &[CoordinateSystem]) -> Option<CoordinateSystem> {
+        let frame = self.frame(systems);
+        let [x, y, _] = frame.axes().ok()?;
+        let x = normalize([x[0], x[1], 0.0])
+            .filter(|_| x[0].hypot(x[1]) > 1e-6)
+            .or_else(|| normalize([y[1], -y[0], 0.0]))?;
+        let y = [-x[1], x[0], 0.0];
+        let origin = [frame.origin[0], frame.origin[1], 0.0];
+        let length = match self.definition {
+            SystemDefinition::ThreePoints {
+                origin, point_x, ..
+            } => norm(sub(point_x, origin)),
+            SystemDefinition::OffsetRotation { .. } => 1.0,
+        };
+        let length = if length > 0.0 { length } else { 1.0 };
+        let base = (self.base).filter(|&id| {
+            (systems.iter().find(|c| c.id == id)).is_some_and(|b| b.lies_in_plane(systems))
+        });
+        let flat = CoordinateSystem {
+            base: None,
+            definition: SystemDefinition::ThreePoints {
+                origin,
+                point_x: add(origin, scale(x, length)),
+                point_xy: add(origin, scale(y, length)),
+            },
+            ..self.clone()
+        };
+        let mut placed = flat.placed_in(base, self.definition.index(), systems)?;
+        placed.to_plane_form();
+        // Rounding noise of the turns into the base, so that typed values stay round.
+        let snap = |p: &mut [f64; 3]| {
+            let size = p.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            for v in p.iter_mut() {
+                if v.abs() <= 1e-12 * size {
+                    *v = 0.0;
+                }
+            }
+        };
+        match &mut placed.definition {
+            SystemDefinition::ThreePoints {
+                origin,
+                point_x,
+                point_xy,
+            } => [origin, point_x, point_xy].into_iter().for_each(snap),
+            SystemDefinition::OffsetRotation { offset, .. } => snap(offset),
+        }
+        Some(placed)
+    }
+
+    /// Puts the definition into the form of a system in the plane of a 2D model, given in a
+    /// base that lies in it: points and offset at z = 0, the point in the xy plane a quarter
+    /// turn on from the point on the x axis at the same distance, only a turn about z.
+    pub fn to_plane_form(&mut self) {
+        match &mut self.definition {
+            SystemDefinition::ThreePoints {
+                origin,
+                point_x,
+                point_xy,
+            } => {
+                origin[2] = 0.0;
+                point_x[2] = 0.0;
+                let d = sub(*point_x, *origin);
+                *point_xy = [origin[0] - d[1], origin[1] + d[0], 0.0];
+            }
+            SystemDefinition::OffsetRotation { offset, angles } => {
+                offset[2] = 0.0;
+                angles[0] = 0.0;
+                angles[1] = 0.0;
+            }
+        }
+    }
+}
+
 /// A coordinate system resolved to global coordinates: its origin and unit axes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
@@ -750,6 +841,93 @@ mod tests {
             definition: SystemDefinition::OffsetRotation { offset, angles },
             ..CoordinateSystem::new(name)
         }
+    }
+
+    #[test]
+    fn a_system_is_laid_into_the_model_plane_keeping_its_x_direction() {
+        // Turned about z by 30 degrees and tilted about x, raised above the plane.
+        let tilted = turned("CS", None, [1.0, 2.0, 3.0], [20.0, 0.0, 30.0]);
+        assert!(!tilted.lies_in_plane(&[]));
+        let flat = tilted.laid_in_plane(&[]).unwrap();
+        assert!(flat.lies_in_plane(&[]));
+        let x = tilted.frame(&[]).axes().unwrap()[0];
+        let along = x[1].atan2(x[0]).to_degrees();
+        let SystemDefinition::OffsetRotation { offset, angles } = flat.definition else {
+            panic!("{:?}", flat.definition);
+        };
+        assert_eq!(offset, [1.0, 2.0, 0.0]);
+        assert_eq!(angles[..2], [0.0, 0.0]);
+        assert!((angles[2] - along).abs() < 1e-9, "{angles:?} {along}");
+        // Upside down: z along -Z, so x stays and y turns over.
+        let flipped =
+            CoordinateSystem::from_points("CS", [0.0; 3], [0.0, 2.0, 0.0], [1.0, 0.0, 0.0]);
+        assert!(!flipped.lies_in_plane(&[]));
+        let flat = flipped.laid_in_plane(&[]).unwrap();
+        assert_eq!(
+            flat.definition,
+            SystemDefinition::ThreePoints {
+                origin: [0.0; 3],
+                point_x: [0.0, 2.0, 0.0],
+                point_xy: [-2.0, 0.0, 0.0]
+            }
+        );
+        // x normal to the plane: the direction of y turned back a quarter turn.
+        let standing =
+            CoordinateSystem::from_points("CS", [0.0; 3], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]);
+        let [x, y, z] = standing
+            .laid_in_plane(&[])
+            .unwrap()
+            .frame(&[])
+            .axes()
+            .unwrap();
+        assert!(close(x, [1.0, 0.0, 0.0]) && close(y, [0.0, 1.0, 0.0]));
+        assert!(close(z, [0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn a_system_laid_into_the_plane_keeps_a_base_in_the_plane_only() {
+        let flat_base = turned("A", None, [5.0, 0.0, 0.0], [0.0, 0.0, 90.0]);
+        let tilted_base = turned("B", None, [0.0; 3], [45.0, 0.0, 0.0]);
+        let mut cs = turned("C", Some(flat_base.id), [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]);
+        let systems = vec![flat_base.clone(), tilted_base.clone(), cs.clone()];
+        assert!(flat_base.lies_in_plane(&systems));
+        assert!(!tilted_base.lies_in_plane(&systems));
+        assert!(cs.lies_in_plane(&systems));
+        let kept = cs.laid_in_plane(&systems).unwrap();
+        assert_eq!(kept.base, Some(flat_base.id));
+        assert_eq!(kept.definition, cs.definition);
+        // In the tilted base it is given in the global system instead, where it lies.
+        cs.base = Some(tilted_base.id);
+        let systems = vec![flat_base, tilted_base, cs.clone()];
+        let at = cs.frame(&systems).origin;
+        let laid = cs.laid_in_plane(&systems).unwrap();
+        assert_eq!(laid.base, None);
+        assert!(laid.lies_in_plane(&systems));
+        assert!(close(laid.frame(&systems).origin, [at[0], at[1], 0.0]));
+    }
+
+    #[test]
+    fn the_plane_form_keeps_only_in_plane_values() {
+        let mut cs =
+            CoordinateSystem::from_points("CS", [1.0, 1.0, 4.0], [3.0, 1.0, 2.0], [0.0, 0.0, 9.0]);
+        cs.to_plane_form();
+        assert_eq!(
+            cs.definition,
+            SystemDefinition::ThreePoints {
+                origin: [1.0, 1.0, 0.0],
+                point_x: [3.0, 1.0, 0.0],
+                point_xy: [1.0, 3.0, 0.0]
+            }
+        );
+        let mut cs = turned("CS", None, [1.0, 2.0, 3.0], [10.0, 20.0, 30.0]);
+        cs.to_plane_form();
+        assert_eq!(
+            cs.definition,
+            SystemDefinition::OffsetRotation {
+                offset: [1.0, 2.0, 0.0],
+                angles: [0.0, 0.0, 30.0]
+            }
+        );
     }
 
     #[test]

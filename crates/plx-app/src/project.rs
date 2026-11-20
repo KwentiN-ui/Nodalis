@@ -556,6 +556,7 @@ impl RefineBlock {
             return Err(problem);
         }
         let mesh = primitive.generate(space, &primitive.label().to_uppercase());
+        let mesh = with_ids_of(mesh, &self.model.mesh);
         let count = mesh.element_count();
         self.generated = Some(primitive.fingerprint(space));
         self.model = LinkedModel {
@@ -1958,6 +1959,18 @@ impl Node {
     }
 }
 
+/// A mesh made anew from the parameters of a block, with the ids of the parts of the mesh
+/// it made `before`: the same objects to the analyses that take it, so that a new mesh takes
+/// the place of the old one there and what picked its part keeps it.
+fn with_ids_of(mut mesh: plx_mesh::FeMesh, before: &plx_mesh::FeMesh) -> plx_mesh::FeMesh {
+    if mesh.parts.len() == before.parts.len() {
+        for (part, old) in mesh.parts.iter_mut().zip(&before.parts) {
+            part.id = old.id;
+        }
+    }
+    mesh
+}
+
 impl MeshBlock {
     /// Makes its mesh from its parameters; returns the number of elements, or why it cannot
     /// be made.
@@ -1967,6 +1980,7 @@ impl MeshBlock {
             return Err(problem);
         }
         let mesh = primitive.generate(self.space, &primitive.label().to_uppercase());
+        let mesh = with_ids_of(mesh, &self.model.mesh);
         let count = mesh.element_count();
         self.generated = Some(primitive.fingerprint(self.space));
         self.model.mesh = mesh;
@@ -7367,6 +7381,23 @@ impl ProjectApp {
         }
     }
 
+    /// The Geometry links to `target` stop bringing the geometry objects `deleted` there, see
+    /// [`leave_out_deleted`].
+    fn leave_out_deleted(&mut self, target: u64, deleted: &[(plx_model::Id, String)]) {
+        let all = std::mem::take(&mut self.links);
+        let (all, lines) = leave_out_deleted(all, &self.nodes, target, deleted);
+        self.links = all;
+        if lines.is_empty() {
+            return;
+        }
+        let name = self.name_of(target);
+        for line in lines {
+            self.output
+                .push(format!("{name} {line}: it was deleted there."));
+        }
+        self.sync_due = true;
+    }
+
     /// Removes the links that `remove` picks; the targets keep their copies. A target that
     /// loses its last results link is no submodel any more.
     fn unlink(&mut self, remove: impl Fn(&Link) -> bool) {
@@ -8793,6 +8824,7 @@ impl ProjectApp {
                         self.in_project = true;
                     }
                 }
+                Request::Deleted(objects) => self.leave_out_deleted(id, &objects),
                 // Unlinking what a state link took makes the analysis independent.
                 Request::Unlink(path) => {
                     self.exclude(None, Some(&(id, path.clone())));
@@ -8804,6 +8836,86 @@ impl ProjectApp {
             }
         }
     }
+}
+
+/// The links `all` with those to `target` no longer bringing the geometry objects `deleted`
+/// there, by id with their names, and lines on what they no longer bring: the link of a part goes, a link of a whole file gives way to links
+/// of its other parts, and a link of a whole block leaves them out, see
+/// [`links::left_out`], or goes once it brings nothing else.
+fn leave_out_deleted(
+    all: Vec<Link>,
+    nodes: &[Node],
+    target: u64,
+    deleted: &[(plx_model::Id, String)],
+) -> (Vec<Link>, Vec<String>) {
+    if deleted.is_empty() {
+        return (all, Vec::new());
+    }
+    let named = |name: &str| deleted.iter().any(|(_, n)| n.eq_ignore_ascii_case(name));
+    let mut kept = Vec::with_capacity(all.len());
+    let mut lines = Vec::new();
+    for mut link in all {
+        if link.target != target || link.item.first().map(String::as_str) != Some(links::GEOMETRY) {
+            kept.push(link);
+            continue;
+        }
+        let source = nodes.iter().find(|n| n.id == link.source);
+        let from = source.map(|n| n.name.clone()).unwrap_or_default();
+        if links::is_geometry_part(&link) {
+            if named(&link.item[1]) {
+                lines.push(format!("no longer takes {} from {from}", link.item[1]));
+            } else {
+                kept.push(link);
+            }
+            continue;
+        }
+        // A file is linked part by part: the parts deleted are left out.
+        if let Some(file) = source.and_then(Node::as_file)
+            && file.model.geometry.is_some()
+        {
+            let (gone, others): (Vec<&String>, Vec<&String>) =
+                file.parts.iter().partition(|p| named(p));
+            if gone.is_empty() {
+                kept.push(link);
+                continue;
+            }
+            for part in gone {
+                lines.push(format!("no longer takes {part} from {from}"));
+            }
+            for part in others {
+                kept.push(Link {
+                    item: vec![links::GEOMETRY.to_owned(), part.clone()],
+                    ..link.clone()
+                });
+            }
+            continue;
+        }
+        let Some(data) = source.and_then(Node::link_data) else {
+            kept.push(link);
+            continue;
+        };
+        // The objects of the source, by id.
+        let objects = links::objects(data);
+        let hit: Vec<&(plx_model::Id, String)> = (deleted.iter())
+            .filter(|(id, _)| objects.contains(id))
+            .collect();
+        if hit.is_empty() {
+            kept.push(link);
+            continue;
+        }
+        for (id, name) in hit {
+            let key = links::key(*id);
+            if !link.excluded.contains(&key) {
+                link.excluded.push(key);
+                lines.push(format!("no longer takes {name} from {from}"));
+            }
+        }
+        let left = (objects.iter()).any(|&o| !link.excluded.contains(&links::key(o)));
+        if left {
+            kept.push(link);
+        }
+    }
+    (kept, lines)
 }
 
 /// Reads a project file for the project window.
@@ -14385,6 +14497,89 @@ mod tests {
             item: vec![links::GEOMETRY.to_owned()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_new_mesh_of_a_mesh_block_takes_the_place_of_the_one_an_analysis_took() {
+        let mut nodes = vec![
+            made_box(),
+            Node::analysis(1, "Analysis-1".into(), ProjectAnalysis::default()),
+        ];
+        let take = |nodes: &mut Vec<Node>| {
+            let copy = links::MeshCopy::of(nodes[0].link_data().unwrap());
+            nodes[1].closed_model_mut().unwrap().take_objects(copy);
+            nodes[1].as_analysis().unwrap().data.clone().unwrap()
+        };
+        let first = take(&mut nodes);
+        assert_eq!(first.mesh.parts.len(), 1);
+        let id = first.mesh.parts[0].id;
+        assert!(first.origins.is_linked(id), "{:?}", first.origins);
+        // New divisions make a new mesh, which replaces the one taken, under the same id.
+        let primitive = &mut nodes[0].as_mesh_mut().unwrap().primitive;
+        assert!(primitive.set("nx", plx_model::ParamValue::Count(20)));
+        assert!(nodes[0].generate().is_ok());
+        let second = take(&mut nodes);
+        assert_eq!(second.mesh.parts.len(), 1, "{:?}", second.origins);
+        assert_eq!(second.mesh.parts[0].id, id);
+        assert_eq!(second.mesh.element_count(), 80);
+        assert!(second.origins.is_linked(id));
+    }
+
+    #[test]
+    fn deleting_a_linked_object_in_an_analysis_ends_its_link() {
+        let nodes = vec![
+            made_box(),
+            Node::analysis(1, "Analysis-1".into(), ProjectAnalysis::default()),
+        ];
+        let id = nodes[0].link_data().unwrap().mesh.parts[0].id;
+        let link = mesh_link(2, 1);
+        let other = Link {
+            item: vec![links::SETUP.to_owned()],
+            ..mesh_link(2, 1)
+        };
+        let all = vec![link.clone(), other.clone()];
+        // Another object, or another analysis, leaves the links alone.
+        let unknown = [(plx_model::Id::new(), "BOX".to_owned())];
+        let (kept, lines) = leave_out_deleted(all.clone(), &nodes, 1, &unknown);
+        assert_eq!((kept, lines.len()), (all.clone(), 0));
+        let deleted = [(id, "BOX".to_owned())];
+        let (kept, _) = leave_out_deleted(all.clone(), &nodes, 3, &deleted);
+        assert_eq!(kept, all);
+        // The box is all the block gives: its link goes, the other link stays.
+        let (kept, lines) = leave_out_deleted(all, &nodes, 1, &deleted);
+        assert_eq!(kept, [other]);
+        assert_eq!(lines, ["no longer takes BOX from Box"]);
+    }
+
+    #[test]
+    fn a_link_of_a_whole_block_leaves_out_the_objects_deleted_in_the_target() {
+        let mut mesh = MeshPrimitive::default_box().generate(ModelSpace::ThreeD, "A");
+        let other = MeshPrimitive::default_box().generate(ModelSpace::ThreeD, "B");
+        mesh.append_keeping(other);
+        let (a, b) = (mesh.parts[0].id, mesh.parts[1].id);
+        let data = ProjectAnalysis {
+            id: 3,
+            name: "Source".into(),
+            mesh,
+            ..Default::default()
+        };
+        let nodes = vec![
+            Node::read(ProjectNode::Analysis(Box::new(data))),
+            Node::analysis(1, "Analysis-1".into(), ProjectAnalysis::default()),
+        ];
+        let (kept, lines) =
+            leave_out_deleted(vec![mesh_link(3, 1)], &nodes, 1, &[(a, "A".to_owned())]);
+        assert_eq!(lines, ["no longer takes A from Source"]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(links::left_out(&kept[0]), [a]);
+        // The copy the link brings has B alone.
+        let mut copy = links::MeshCopy::of(nodes[0].link_data().unwrap());
+        copy.leave_out(&links::left_out(&kept[0])).unwrap();
+        assert_eq!(copy.mesh.parts.len(), 1);
+        assert_eq!(copy.mesh.parts[0].id, b);
+        // Once B is deleted too, the link brings nothing and goes.
+        let (kept, _) = leave_out_deleted(kept, &nodes, 1, &[(b, "B".to_owned())]);
+        assert!(kept.is_empty());
     }
 
     #[test]

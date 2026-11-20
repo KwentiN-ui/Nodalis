@@ -118,6 +118,9 @@ pub struct FeatureDialog {
     /// point when the dialog opened: the constraint follows a changed selection if it had
     /// the same faces.
     linked: Option<(usize, Region)>,
+    /// The edited coordinate system did not lie in the plane of the 2D model and was laid
+    /// into it when the dialog opened.
+    laid_in_plane: bool,
 }
 
 /// Height of the path plot until the dialog is resized, and the least it shrinks to.
@@ -229,6 +232,21 @@ impl FeatureDialog {
             }
             _ => (None, None),
         };
+        // A 2D model only knows systems in its plane: one that is not, e.g. from a file of
+        // a 3D model, is laid into it.
+        let mut draft = draft;
+        let mut laid_in_plane = false;
+        if let Draft::CoordinateSystem(system) = &mut draft
+            && model.fe.properties.space.is_2d()
+        {
+            let systems = systems_with(&model.fe, index, system);
+            if !system.lies_in_plane(&systems)
+                && let Some(flat) = system.laid_in_plane(&systems)
+            {
+                *system = flat;
+                laid_in_plane = true;
+            }
+        }
         Self {
             results,
             draft,
@@ -246,6 +264,7 @@ impl FeatureDialog {
             plotted: false,
             coupling,
             linked,
+            laid_in_plane,
         }
     }
 
@@ -435,6 +454,9 @@ impl FeatureDialog {
                         _ => *point_xy = local,
                     }
                 }
+                if model.fe.properties.space.is_2d() {
+                    c.to_plane_form();
+                }
             }
             (Draft::Path(p), Slot::Start) => p.start = PointRef::Coordinates(picked),
             (Draft::Path(p), _) => p.end = PointRef::Coordinates(picked),
@@ -576,6 +598,14 @@ impl FeatureDialog {
             }
             Draft::CoordinateSystem(system) => {
                 name_row(ui, &mut system.name);
+                if self.laid_in_plane {
+                    ui.label("");
+                    ui.colored_label(
+                        crate::style::warning(),
+                        "Did not lie in the x-y plane of the 2D model and was laid into it.",
+                    );
+                    ui.end_row();
+                }
                 system_rows(
                     ui,
                     system,
@@ -1304,16 +1334,28 @@ fn system_rows(
     speed: Coordinates,
 ) {
     let fe = &model.fe;
+    // A 2D model only has systems in its x-y plane: given by their origin and the direction
+    // of their x axis there, turned about z only.
+    let planar = fe.properties.space.is_2d();
+    // In the plane a cylindrical system is a polar one about its origin.
+    let kind_label = |kind: CoordinateSystemKind| match kind {
+        CoordinateSystemKind::Cylindrical if planar => "Polar",
+        _ => kind.label(),
+    };
     ui.label("Type");
     crate::layout::wrapped_row(ui, |ui| {
         for kind in CoordinateSystemKind::ALL {
-            ui.radio_value(&mut system.kind, kind, kind.label());
+            ui.radio_value(&mut system.kind, kind, kind_label(kind));
         }
     });
     ui.end_row();
     if system.kind == CoordinateSystemKind::Cylindrical {
         ui.label("");
-        ui.weak("The z axis is the cylinder axis; local directions r, theta, z.");
+        if planar {
+            ui.weak("About the origin in the x-y plane; local directions r and theta.");
+        } else {
+            ui.weak("The z axis is the cylinder axis; local directions r, theta, z.");
+        }
         ui.end_row();
     }
 
@@ -1327,7 +1369,11 @@ fn system_rows(
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut base, None, plx_model::GLOBAL);
             // Not the system itself nor one given in it, which would make a loop.
-            for other in systems.iter().filter(|o| !system.is_base_of(o, &systems)) {
+            // In 2D only systems in the plane, in which the system stays in it.
+            let candidates = (systems.iter())
+                .filter(|o| !system.is_base_of(o, &systems))
+                .filter(|o| !planar || o.lies_in_plane(&systems));
+            for other in candidates {
                 let label = if other.moves(&systems) {
                     format!("{} (moving)", other.name)
                 } else {
@@ -1367,36 +1413,59 @@ fn system_rows(
     }
     if system.base.is_some() {
         ui.label("");
+        let axes = if planar { "x and y" } else { "x, y and z" };
         ui.weak(format!(
-            "Coordinates and turns along the x, y and z axes of {}.",
+            "Coordinates and turns along the {axes} axes of {}.",
             fe.system_name(system.base)
         ));
         ui.end_row();
     }
+    let dims = if planar { 2 } else { 3 };
     match &mut system.definition {
         SystemDefinition::ThreePoints {
             origin,
             point_x,
             point_xy,
         } => {
-            point_rows(ui, "Origin", Slot::Origin, origin, picking, speed);
-            point_rows(ui, "Point on x axis", Slot::PointX, point_x, picking, speed);
             point_rows(
                 ui,
-                "Point in xy plane",
-                Slot::PointXy,
-                point_xy,
+                "Origin",
+                Slot::Origin,
+                &mut origin[..dims],
                 picking,
                 speed,
             );
+            point_rows(
+                ui,
+                "Point on x axis",
+                Slot::PointX,
+                &mut point_x[..dims],
+                picking,
+                speed,
+            );
+            if !planar {
+                point_rows(
+                    ui,
+                    "Point in xy plane",
+                    Slot::PointXy,
+                    point_xy,
+                    picking,
+                    speed,
+                );
+            }
         }
         SystemDefinition::OffsetRotation { offset, angles } => {
             ui.label(RichText::new("Offset").strong());
             ui.end_row();
-            coordinate_rows(ui, offset, speed);
+            coordinate_rows(ui, &mut offset[..dims], speed);
             ui.label(RichText::new("Rotation").strong());
             ui.end_row();
-            for (k, axis) in ["about x", "about y'", "about z''"].into_iter().enumerate() {
+            let turns: &[(usize, &str)] = if planar {
+                &[(2, "about z")]
+            } else {
+                &[(0, "about x"), (1, "about y'"), (2, "about z''")]
+            };
+            for &(k, axis) in turns {
                 ui.label(format!("    {axis}"));
                 ui.add(
                     numeric::drag_value(&mut angles[k])
@@ -1406,10 +1475,15 @@ fn system_rows(
                 );
                 ui.end_row();
             }
-            ui.label("");
-            ui.weak("Turned about x first, then about the turned y, then about the turned z.");
-            ui.end_row();
+            if !planar {
+                ui.label("");
+                ui.weak("Turned about x first, then about the turned y, then about the turned z.");
+                ui.end_row();
+            }
         }
+    }
+    if planar {
+        system.to_plane_form();
     }
 
     // Fixed in space, or moving with a selection.
@@ -1674,7 +1748,7 @@ fn point_rows(
     ui: &mut Ui,
     label: &str,
     slot: Slot,
-    point: &mut [f64; 3],
+    point: &mut [f64],
     picking: &mut Option<Slot>,
     speed: Coordinates,
 ) {
@@ -1691,8 +1765,10 @@ fn pick_button(ui: &mut Ui, slot: Slot, picking: &mut Option<Slot>) {
     }
 }
 
-fn coordinate_rows(ui: &mut Ui, point: &mut [f64; 3], speed: Coordinates) {
-    for (k, axis) in ["X", "Y", "Z"].into_iter().enumerate() {
+/// Rows of the coordinates X, Y, Z, or of the first ones of a shorter `point`: X and Y of
+/// a point in the plane of a 2D model.
+fn coordinate_rows(ui: &mut Ui, point: &mut [f64], speed: Coordinates) {
+    for (k, axis) in ["X", "Y", "Z"].into_iter().enumerate().take(point.len()) {
         ui.label(format!("    {axis}"));
         ui.add(speed.field(&mut point[k]));
         ui.end_row();
@@ -2004,6 +2080,71 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Runs the dialog for one frame.
+    fn show_once(dialog: &mut FeatureDialog, model: &Model) {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            dialog.show(ui.ctx(), model, None);
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn a_2d_model_lays_an_edited_system_into_its_plane_and_keeps_it_there() {
+        let mut model = Model::new(std::path::Path::new("test.inp"), FeMesh::default());
+        model.fe.properties.space = plx_model::ModelSpace::PlaneStress;
+        let tilted = CoordinateSystem {
+            definition: SystemDefinition::OffsetRotation {
+                offset: [1.0, 2.0, 3.0],
+                angles: [0.0, 40.0, 0.0],
+            },
+            ..CoordinateSystem::new("CS")
+        };
+        model.fe.coordinate_systems.push(tilted);
+        let item = FeatureItem {
+            kind: FeatureKind::CoordinateSystem,
+            index: 0,
+        };
+        let mut dialog = FeatureDialog::edit(item, None, &model).unwrap();
+        assert!(dialog.laid_in_plane);
+        let Draft::CoordinateSystem(system) = &mut dialog.draft else {
+            unreachable!()
+        };
+        assert_eq!(
+            system.definition,
+            SystemDefinition::OffsetRotation {
+                offset: [1.0, 2.0, 0.0],
+                angles: [0.0, 0.0, 0.0]
+            }
+        );
+        // Values out of the plane, which the dialog does not show, are put back.
+        system.definition = SystemDefinition::OffsetRotation {
+            offset: [1.0, 2.0, 5.0],
+            angles: [10.0, 0.0, 30.0],
+        };
+        show_once(&mut dialog, &model);
+        let Draft::CoordinateSystem(system) = &dialog.draft else {
+            unreachable!()
+        };
+        assert!(system.lies_in_plane(&[]));
+        assert_eq!(
+            system.definition,
+            SystemDefinition::OffsetRotation {
+                offset: [1.0, 2.0, 0.0],
+                angles: [0.0, 0.0, 30.0]
+            }
+        );
+        // A new system lies in the plane as it is; a 3D model keeps a tilted one.
+        let new = FeatureDialog::create(FeatureKind::CoordinateSystem, None, &model);
+        assert!(!new.laid_in_plane);
+        model.fe.properties.space = plx_model::ModelSpace::ThreeD;
+        assert!(
+            !FeatureDialog::edit(item, None, &model)
+                .unwrap()
+                .laid_in_plane
+        );
     }
 
     #[test]

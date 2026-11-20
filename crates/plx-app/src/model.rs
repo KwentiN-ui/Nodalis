@@ -2787,25 +2787,22 @@ impl Model {
         self.mesh.elements().first().is_some_and(|e| e.is_plane())
     }
 
-    /// Renames a part as CalculiX needs it: upper case, unique among parts, sets and
-    /// surfaces. Sections, boundary conditions and loads on the part refer to it by id and
+    /// Renames a part: any text, unique among parts, sets and surfaces regardless of case.
+    /// Sections, boundary conditions and loads on the part refer to it by id and
     /// stay on it.
     pub fn rename_part(&mut self, index: usize, name: &str) -> Result<(), String> {
-        let name = name.trim().to_ascii_uppercase();
+        // Any text: the solver never sees it, the export derives its own labels.
+        let name = name.trim().to_owned();
         if name.is_empty() {
             return Err("The name must not be empty.".into());
-        }
-        if name.len() > 80 {
-            return Err("The name must be at most 80 characters long.".into());
-        }
-        if !(name.chars()).all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            return Err("Allowed are letters without accents, digits, _ and -.".into());
         }
         let current = self.parts.get(index).ok_or("The part no longer exists.")?;
         if current.name == name {
             return Ok(());
         }
-        if self.mesh.name_in_use(&name) {
+        // A part, set or surface of the same name regardless of case would share its name
+        // with this one; a change of case alone keeps it its own.
+        if !current.name.eq_ignore_ascii_case(&name) && self.mesh.name_in_use(&name) {
             return Err(format!("The name {name} is already used."));
         }
         if self.history.follows() {
@@ -3503,13 +3500,14 @@ mod tests {
             kind: SectionKind::Solid,
         });
         assert!(model.rename_part(0, "").is_err());
-        assert!(model.rename_part(0, "zwei wörter").is_err());
+        assert!(model.rename_part(0, "  ").is_err());
         assert!(model.rename_part(0, &second.to_lowercase()).is_err());
-        assert_eq!(model.rename_part(0, " Platte-1 "), Ok(()));
-        assert_eq!(model.parts[0].name, "PLATTE-1");
-        assert_eq!(model.mesh.parts[0].name, "PLATTE-1");
+        let typed = "Platte, oben (Ø 40 mm) – Stütze";
+        assert_eq!(model.rename_part(0, &format!(" {typed} ")), Ok(()));
+        assert_eq!(model.parts[0].name, typed);
+        assert_eq!(model.mesh.parts[0].name, typed);
         assert_eq!(model.mesh.parts[0].id, id);
-        assert!(model.mesh.element_sets.contains_key("PLATTE-1"));
+        assert!(model.mesh.element_sets.contains_key(typed));
         assert!(!model.mesh.element_sets.contains_key(&first));
         assert_eq!(
             model.fe.sections[0].region,
@@ -3517,9 +3515,11 @@ mod tests {
         );
         assert_eq!(
             model.fe.sections[0].region.describe(&model.fe, &model.mesh),
-            "PLATTE-1"
+            typed
         );
-        assert_eq!(model.rename_part(0, "platte-1"), Ok(()));
+        // A change of case alone is the part's own name.
+        assert_eq!(model.rename_part(0, &typed.to_uppercase()), Ok(()));
+        assert_eq!(model.parts[0].name, typed.to_uppercase());
     }
 
     #[test]

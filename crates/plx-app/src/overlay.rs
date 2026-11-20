@@ -164,7 +164,7 @@ pub fn draw(
     if let Some(origin) = overlay.global_origin {
         let center = project(camera, rect, origin);
         if rect.contains(center) {
-            triad(&painter, camera, center, 36.0, false);
+            triad(&painter, camera, center, 36.0, false, planar);
         }
     }
     if let Some([a, b]) = overlay.axis {
@@ -208,7 +208,7 @@ pub fn draw(
         draw_path(&painter, &points);
     }
     for feature in &overlay.features {
-        draw_feature(&painter, camera, rect, feature);
+        draw_feature(&painter, camera, rect, feature, planar);
     }
     if let Some(([a, b], name)) = &overlay.result_path {
         let (a, b) = (project(camera, rect, *a), project(camera, rect, *b));
@@ -243,7 +243,7 @@ pub fn draw(
             free.max.x = free.max.x.min(panel.left()).max(free.min.x + 2.0 * TRIAD);
         }
         let corner = triad_center(free);
-        triad(&painter, camera, corner, TRIAD, true);
+        triad(&painter, camera, corner, TRIAD, true, planar);
         if !planar {
             clicked.axis = triad_buttons(ui, &painter, camera, corner, TRIAD);
         }
@@ -721,7 +721,15 @@ const PATH_COLOR: Color32 = Color32::from_rgb(200, 0, 160);
 const FEATURE_COLOR: Color32 = Color32::from_rgb(0, 110, 160);
 const SELECTED_FEATURE: Color32 = Color32::RED;
 
-fn draw_feature(painter: &Painter, camera: &Camera, rect: Rect, feature: &FeatureMark) {
+/// `planar` for the view of a 2D model, onto whose plane coordinate systems are drawn
+/// without their z axis, which points out of the screen.
+fn draw_feature(
+    painter: &Painter,
+    camera: &Camera,
+    rect: Rect,
+    feature: &FeatureMark,
+    planar: bool,
+) {
     match feature {
         FeatureMark::Point {
             position,
@@ -761,19 +769,16 @@ fn draw_feature(painter: &Painter, camera: &Camera, rect: Rect, feature: &Featur
             }
             let [x, y, z] = *axes;
             let name_below = if *cylindrical {
-                Some(cylinder_gizmo(painter, camera, center, *axes))
+                Some(cylinder_gizmo(painter, camera, center, *axes, planar))
             } else {
-                arrows(
-                    painter,
-                    camera,
-                    center,
-                    30.0,
-                    &[
-                        (x, "x", crate::style::lift(Color32::from_rgb(255, 0, 0))),
-                        (y, "y", crate::style::lift(Color32::from_rgb(0, 200, 0))),
-                        (z, "z", crate::style::lift(Color32::from_rgb(0, 0, 255))),
-                    ],
-                );
+                let mut shown = vec![
+                    (x, "x", crate::style::lift(Color32::from_rgb(255, 0, 0))),
+                    (y, "y", crate::style::lift(Color32::from_rgb(0, 200, 0))),
+                ];
+                if !planar {
+                    shown.push((z, "z", crate::style::lift(Color32::from_rgb(0, 0, 255))));
+                }
+                arrows(painter, camera, center, 30.0, &shown);
                 None
             };
             let color = if *selected {
@@ -830,9 +835,10 @@ fn draw_feature(painter: &Painter, camera: &Camera, rect: Rect, feature: &Featur
 }
 
 /// Axes X, Y, Z as arrows in screen space, drawn back to front; `full` adds the centre
-/// sphere and the shorter, faint negative axes.
-fn triad(painter: &Painter, camera: &Camera, center: Pos2, length: f32, full: bool) {
-    let axes = [
+/// sphere and the shorter, faint negative axes. `planar` leaves out Z, which points out of
+/// the screen in the view of a 2D model.
+fn triad(painter: &Painter, camera: &Camera, center: Pos2, length: f32, full: bool, planar: bool) {
+    let mut axes = vec![
         (Vec3::X, "X", Color32::from_rgb(255, 0, 0)),
         (Vec3::Y, "Y", Color32::from_rgb(0, 230, 0)),
         (
@@ -841,10 +847,13 @@ fn triad(painter: &Painter, camera: &Camera, center: Pos2, length: f32, full: bo
             crate::style::lift(Color32::from_rgb(0, 0, 255)),
         ),
     ];
+    if planar {
+        axes.pop();
+    }
     let screen = |axis: Vec3| vec2(axis.dot(camera.right()), -axis.dot(camera.up()));
     if full {
         let grey = Color32::from_rgba_unmultiplied(90, 90, 90, 128);
-        for (axis, _, _) in axes {
+        for &(axis, _, _) in &axes {
             let end = center - screen(axis) * length * 2.0 / 3.0;
             painter.line_segment([center, end], Stroke::new(2.0, grey));
         }
@@ -879,9 +888,16 @@ fn ring_points(
 
 /// A cylindrical system: its axis as a line through the origin with an arrow along +z, a
 /// ring about the axis with an arrowhead in the tangential direction (from x towards y),
-/// and an arrow in the radial direction along x, where the angle is zero. Returns the lowest
-/// point it draws on, for the name below it.
-fn cylinder_gizmo(painter: &Painter, camera: &Camera, center: Pos2, axes: [Vec3; 3]) -> f32 {
+/// and an arrow in the radial direction along x, where the angle is zero. `planar` draws a
+/// polar system in the view of a 2D model: without the axis, which points out of the
+/// screen. Returns the lowest point it draws on, for the name below it.
+fn cylinder_gizmo(
+    painter: &Painter,
+    camera: &Camera,
+    center: Pos2,
+    axes: [Vec3; 3],
+    planar: bool,
+) -> f32 {
     let [x, y, z] = axes;
     let screen = |axis: Vec3| vec2(axis.dot(camera.right()), -axis.dot(camera.up()));
     let axial = crate::style::lift(Color32::from_rgb(0, 0, 255));
@@ -890,13 +906,15 @@ fn cylinder_gizmo(painter: &Painter, camera: &Camera, center: Pos2, axes: [Vec3;
     const RADIUS: f32 = 32.0;
     // The axis runs on through the origin to the back: dashed, as it is a line, not a
     // direction.
-    let back = center - screen(z) * 48.0;
-    painter.add(egui::Shape::dashed_line(
-        &[center, back],
-        Stroke::new(1.5, axial),
-        4.0,
-        3.0,
-    ));
+    if !planar {
+        let back = center - screen(z) * 48.0;
+        painter.add(egui::Shape::dashed_line(
+            &[center, back],
+            Stroke::new(1.5, axial),
+            4.0,
+            3.0,
+        ));
+    }
     // The full ring, faint, under the arcs and arrows drawn on it.
     let ring = ring_points(camera, center, [x, y], RADIUS, 0.0, std::f32::consts::TAU);
     let faint =
@@ -926,7 +944,9 @@ fn cylinder_gizmo(painter: &Painter, camera: &Camera, center: Pos2, axes: [Vec3;
     let tangential_label =
         (out.length() > 0.05).then(|| center + out * RADIUS + out.normalized() * 6.0);
     arrows(painter, camera, center, RADIUS, &[(x, "radial", radial)]);
-    arrows(painter, camera, center, 56.0, &[(z, "axial", axial)]);
+    if !planar {
+        arrows(painter, camera, center, 56.0, &[(z, "axial", axial)]);
+    }
     if let Some(pos) = tangential_label {
         // Anchored on the side towards the ring, so the long word reaches away from it.
         let side = |d: f32| match d {
@@ -939,7 +959,12 @@ fn cylinder_gizmo(painter: &Painter, camera: &Camera, center: Pos2, axes: [Vec3;
         bottom = bottom.max(pos.y + if n.y > 0.4 { 16.0 } else { 8.0 });
     }
     // The tips of the radial and axial arrows with their labels.
-    for (axis, length) in [(x, RADIUS), (z, 56.0)] {
+    let tips: &[(Vec3, f32)] = if planar {
+        &[(x, RADIUS)]
+    } else {
+        &[(x, RADIUS), (z, 56.0)]
+    };
+    for &(axis, length) in tips {
         let v = screen(axis);
         bottom = bottom.max(center.y + v.y * length + v.y.signum() * 9.0 + 8.0);
     }

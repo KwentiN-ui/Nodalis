@@ -101,6 +101,29 @@ selection of the model.
 #screenshot("cylindrical-coordinate-system.png", [A cylindrical coordinate system in the bore of a
   plate, its axis along global Z, beside the rectangular triad of the global origin])
 
+==== Coordinate systems in 2D models <coordinate-systems-2d>
+
+In a 2D model (plane stress, plane strain, axisymmetric) a coordinate system lies in the x-y
+plane of the model: its z axis is the global Z axis, normal to the plane, and only its x and y
+axes can be turned. The dialog only asks for what that leaves:
+
+- #ui("Three points"): X and Y of the #ui("Origin") and of the #ui("Point on x axis"). The y
+  axis follows a quarter turn on from the x axis; there is no #ui("Point in xy plane").
+- #ui("Offset and rotation"): X and Y of the #ui("Offset") and one turn #ui("about z").
+- #ui("Polar") stands for a cylindrical system: polar about its origin in the plane, with the
+  directions radial and tangential. The 3D view draws it with its ring and radial arrow, but
+  without the axis, which points out of the screen; a rectangular system shows its x and y
+  arrows only.
+- #ui("Base system") offers only systems that lie in the plane, so that the new one stays in
+  it.
+
+A system that does not lie in the plane, e.g. from the file of a 3D model, is laid into it when
+its dialog opens: its origin keeps its X and Y and its x axis its direction in the plane. The
+dialog says so; the system changes only when the dialog is closed with #ui("OK").
+
+#screenshot("coordinate-system-2d.png", [A polar coordinate system in a plane stress model,
+  given by offset and one turn about z])
+
 A moving system is marked everywhere it appears: the tree shows it with an orange turning arrow
 and #ui("(moving)") after its name, the 3D view with an orange ring about its origin, and the
 lists that offer coordinate systems (loads, remote points, field outputs) name it with
