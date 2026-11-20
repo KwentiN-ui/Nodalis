@@ -587,7 +587,7 @@ mod tests {
         let key = distribution.add_variable().key;
         distribution.variables[1].name = "h".into();
         fe.distributions.push(distribution);
-        let item = ItemRef::Distribution("Wedge".into());
+        let item = ItemRef::Distribution(fe.distributions[0].id);
         assert_eq!(
             fe.exposable(&item),
             [Field::Variable(1), Field::Variable(key)]
@@ -598,11 +598,10 @@ mod tests {
         assert!(fe.set_value(&path, 250.0));
         assert_eq!(fe.distributions[0].variables[1].value, 250.0);
         assert_eq!(fe.value_at(&path), Some(250.0));
-        // Renaming the variable keeps the parameter; renaming the distribution moves it.
+        // Renaming the variable or the distribution keeps the parameter.
         fe.distributions[0].variables[1].name = "height".into();
         assert_eq!(fe.value_at(&path), Some(250.0));
         fe.distributions[0].name = "Ramp".into();
-        fe.rename_exposed(&item, "Ramp");
         assert_eq!(fe.value_at(&fe.exposed(exposed).unwrap().path), Some(250.0));
     }
 

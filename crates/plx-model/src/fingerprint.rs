@@ -397,8 +397,9 @@ mod tests {
         let mesh = FeMesh::default();
         let mut fe = FeModel::default();
         let mut step = Step::new_static("Step-1");
+        let id = crate::Id::new();
         let field = |file: &str| crate::DefinedField {
-            id: crate::Id::new(),
+            id,
             distribution: None,
             name: "Temperatures".into(),
             active: true,

@@ -418,8 +418,9 @@ mod tests {
     #[test]
     fn variables_keep_their_order() {
         let mut output = HistoryOutput::node("NH_Output-1", Region::Nodes(vec![1]));
-        output.variables = vec!["U".into(), "XX".into(), "RF".into(), "U".into()];
+        use HistoryVariable as V;
+        output.variables = vec![V::Displacements, V::Stresses, V::ReactionForces, V::Displacements];
         output.normalize_variables();
-        assert_eq!(output.variables, ["RF", "U"]);
+        assert_eq!(output.variables, [V::ReactionForces, V::Displacements]);
     }
 }

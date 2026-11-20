@@ -24,7 +24,6 @@ pub struct Section {
     pub region: Region,
     /// Thickness of plane stress and plane strain elements; other models ignore it.
     pub thickness: f64,
-    /// Projects saved before beams existed hold solid sections.
     pub kind: SectionKind,
     /// The coordinate system whose axes x, y, z are the material axes 1, 2, 3 of an
     /// anisotropic material of a solid section, and the print axes of an infill section
@@ -446,26 +445,5 @@ mod tests {
             shell.rejects(&element("S8R", ElementShape::Quad8), None),
             None
         );
-    }
-
-    #[test]
-    fn beam_sections_name_their_cross_section() {
-        let text = r#"(cross_section: Some(5), orientation: Automatic, offset: (0.0, 0.5))"#;
-        let beam: BeamSection = ron::from_str(text).unwrap();
-        assert_eq!(beam.cross_section.map(|id| id.raw()), Some(5));
-        // A beam section saved with its own profile reads without a cross-section, which
-        // the model checks then ask for.
-        let text = r#"(profile: Rect(a: 1.0, b: 2.0), orientation: Automatic)"#;
-        let beam: BeamSection = ron::from_str(text).unwrap();
-        assert_eq!(beam.cross_section, None);
-    }
-
-    #[test]
-    fn sections_of_old_projects_are_solid() {
-        let text = r#"(name: "S", material: Some(3), region: Parts([7]))"#;
-        let section: Section = ron::from_str(text).unwrap();
-        assert_eq!(section.kind, SectionKind::Solid);
-        // One millimetre, in SI units.
-        assert_eq!(section.thickness, 1e-3);
     }
 }

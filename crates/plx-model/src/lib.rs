@@ -179,7 +179,7 @@ pub const PROJECT_FORMAT: u32 = 57;
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FeModel {
-    /// Model space and unit system; projects saved before they existed are 3D.
+    /// Model space and unit system.
     pub properties: ModelProperties,
     pub materials: Vec<Material>,
     pub sections: Vec<Section>,
@@ -839,8 +839,7 @@ pub struct Step {
     pub loads: Vec<Load>,
     /// The history outputs of the model the step prints, by id, in their order.
     pub history_outputs: Vec<Id>,
-    /// Temperatures prescribed for the step; steps saved before
-    /// they existed have none.
+    /// Temperatures prescribed for the step.
     pub defined_fields: Vec<DefinedField>,
     /// Contact regions and pairs switched on or off, or given another friction, from this
     /// step on.

@@ -1116,7 +1116,7 @@ mod tests {
             }],
             ..FeModel::default()
         };
-        let item = ItemRef::Material("Oil".into());
+        let item = ItemRef::Material(fe.materials[0].id);
         assert_eq!(fe.exposable(&item), vec![Field::Viscosity]);
         let path = ValuePath::new(item.clone(), Field::Viscosity);
         assert_eq!(
@@ -1173,8 +1173,8 @@ mod tests {
         let mut fe = model();
         let force = ValuePath::new(
             ItemRef::Load {
-                step: "Step-1".into(),
-                name: "Force-1".into(),
+                step: fe.steps[0].id,
+                item: fe.steps[0].loads[0].id,
             },
             Field::Y,
         );
@@ -1186,11 +1186,11 @@ mod tests {
         assert!(fe.set_value(&force, -250.0));
         assert!(!fe.set_value(&force, -250.0));
         assert_eq!(fe.value_at(&force), Some(-250.0));
-        let young = ValuePath::new(ItemRef::Material("Steel".into()), Field::Young);
+        let young = ValuePath::new(ItemRef::Material(fe.materials[0].id), Field::Young);
         // Steel has no elasticity: nothing to expose there.
         assert_eq!(fe.value_at(&young), None);
         assert!(!fe.set_value(&young, 2e11));
-        let missing = ValuePath::new(ItemRef::Material("Copper".into()), Field::Density);
+        let missing = ValuePath::new(ItemRef::Material(crate::Id::new()), Field::Density);
         assert_eq!(fe.value_at(&missing), None);
     }
 
@@ -1215,10 +1215,10 @@ mod tests {
             },
         });
         let load = ItemRef::Load {
-            step: "Step-1".into(),
-            name: "Force-1".into(),
+            step: fe.steps[0].id,
+            item: fe.steps[0].loads[0].id,
         };
-        let spin = ItemRef::InitialCondition("Spin".into());
+        let spin = ItemRef::InitialCondition(fe.initial_conditions[0].id);
         for item in [&load, &spin] {
             let exposable = fe.exposable(item);
             for field in [Field::Speed, Field::LocationY, Field::AxisZ] {
@@ -1253,8 +1253,8 @@ mod tests {
                 amplitude: None,
             });
         let item = ItemRef::BoundaryCondition {
-            step: "Step-1".into(),
-            name: "Remote-1".into(),
+            step: fe.steps[0].id,
+            item: fe.steps[0].boundary_conditions[0].id,
         };
         let exposable = fe.exposable(&item);
         for field in [
@@ -1301,8 +1301,9 @@ mod tests {
             elements: vec![1],
         });
         let mut fe = FeModel::default();
+        let id = crate::Id::new();
         let operation = |transform| crate::MeshOperation {
-            id: crate::Id::new(),
+            id,
             name: "Transform-1".into(),
             parts: vec![a],
             kind: MeshOperationKind::Transform(transform),
@@ -1310,7 +1311,7 @@ mod tests {
         let shift = operation(MeshTransform::Translate([0.5, 0.0, 0.0]));
         fe.set_mesh_operations(&mut mesh, vec![shift]);
         assert_eq!(mesh.node(2), Some([1.5, 0.0, 0.0]));
-        let item = ItemRef::MeshOperation("Transform-1".into());
+        let item = ItemRef::MeshOperation(id);
         assert_eq!(fe.exposable(&item), Field::VECTOR);
         let x = ValuePath::new(item.clone(), Field::X);
         assert_eq!(fe.value_at(&x), Some(0.5));
@@ -1395,13 +1396,13 @@ mod tests {
             operations: Vec::new(),
             input: None,
         };
-        let item = ItemRef::MeshSetup("Meshing_Parameters-1".into());
+        let item = ItemRef::MeshSetup(geometry.mesh_items[0].id);
         let exposable = geometry.exposable(&item);
         assert_eq!(exposable.len(), 8);
         assert!(
             exposable.contains(&Field::MaxElementSize) && exposable.contains(&Field::Hexahedra)
         );
-        let local = ItemRef::MeshSetup("Local_Mesh_Size-1".into());
+        let local = ItemRef::MeshSetup(geometry.mesh_items[1].id);
         assert_eq!(
             geometry.exposable(&local),
             [Field::ElementSize, Field::Depth]
@@ -1443,29 +1444,27 @@ mod tests {
         assert!(geometry.set_value(&default, 3.0));
         assert_eq!(geometry.meshing.elements_per_curvature, 3.0);
         // Gone with the item.
-        let gone = ValuePath::new(ItemRef::MeshSetup("Other".into()), Field::MaxElementSize);
+        let gone = ValuePath::new(ItemRef::MeshSetup(crate::Id::new()), Field::MaxElementSize);
         assert_eq!(geometry.value_at(&gone), None);
         assert!(!geometry.set_value(&gone, 1.0));
     }
 
+    /// The parameters refer to their items by id: renaming the item or its step keeps
+    /// them, the name of a new one comes from the item.
     #[test]
-    fn exposed_parameters_follow_renamed_items() {
+    fn exposed_parameters_keep_renamed_items() {
         let mut fe = model();
         let item = ItemRef::Load {
-            step: "Step-1".into(),
-            name: "Force-1".into(),
+            step: fe.steps[0].id,
+            item: fe.steps[0].loads[0].id,
         };
-        let key = fe.expose(ValuePath::new(item.clone(), Field::Y));
-        assert_eq!(fe.expose(ValuePath::new(item.clone(), Field::Y)), key);
+        let key = fe.expose(ValuePath::new(item, Field::Y));
+        assert_eq!(fe.expose(ValuePath::new(item, Field::Y)), key);
         assert_eq!(fe.exposed(key).unwrap().name, "Force-1 Y");
-        fe.rename_exposed(&item, "Load-A");
-        fe.rename_exposed(&ItemRef::Step("Step-1".into()), "Pull");
-        assert_eq!(
-            fe.exposed(key).unwrap().path.item,
-            ItemRef::Load {
-                step: "Pull".into(),
-                name: "Load-A".into()
-            }
-        );
+        fe.steps[0].loads[0].name = "Load-A".into();
+        fe.steps[0].name = "Pull".into();
+        let path = fe.exposed(key).unwrap().path.clone();
+        assert_eq!(fe.item_name(&path.item), Some("Load-A"));
+        assert_eq!(fe.value_at(&path), Some(-100.0));
     }
 }

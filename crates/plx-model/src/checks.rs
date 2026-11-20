@@ -4938,6 +4938,7 @@ mod tests {
         };
         model.steps[0].loads.push(bolt);
         let mut second = model.steps[0].clone();
+        second.id = crate::Id::new();
         second.name = "Step-2".into();
         let LoadKind::PreTension { lock, .. } = &mut second.loads[1].kind else {
             unreachable!()
@@ -6120,8 +6121,8 @@ mod tests {
             name: "Twist".into(),
             path: crate::ValuePath::new(
                 crate::ItemRef::BoundaryCondition {
-                    step: "Step-1".into(),
-                    name: "Fixed-1".into(),
+                    step: model.steps[0].id,
+                    item: model.steps[0].boundary_conditions[0].id,
                 },
                 crate::Field::RotationX,
             ),

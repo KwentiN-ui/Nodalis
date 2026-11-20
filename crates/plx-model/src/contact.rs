@@ -937,15 +937,6 @@ mod tests {
     }
 
     #[test]
-    fn constraints_saved_before_hiding_are_visible() {
-        let text = r#"RigidBody((name: "Rigid_Body-1", region: Parts([]), reference_point: 7))"#;
-        let mut constraint: Constraint = ron::from_str(text).unwrap();
-        assert!(constraint.visible());
-        *constraint.visible_mut().unwrap() = false;
-        assert!(!constraint.visible());
-    }
-
-    #[test]
     fn swapping_turns_regions_and_a_pair_name_around() {
         let mut pair = ContactPair::new("BEAM_to_DISC", None);
         pair.master = Region::Surface("TOP".into());
