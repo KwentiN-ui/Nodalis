@@ -63,7 +63,7 @@ struct Item {
     dofs: [Option<u32>; 3],
     column: usize,
     value: f64,
-    amplitude: Option<String>,
+    amplitude: Option<plxs_core::AmplitudeId>,
 }
 
 impl FollowerLoads {
@@ -103,7 +103,7 @@ impl FollowerLoads {
                     dofs: item_dofs,
                     column,
                     value: load.value,
-                    amplitude: load.amplitude.clone(),
+                    amplitude: load.amplitude,
                 });
             }
         }
@@ -142,7 +142,7 @@ impl FollowerLoads {
             .map(|g| {
                 (g.items.iter())
                     .map(|item| {
-                        let amplitude = item.amplitude.as_deref();
+                        let amplitude = item.amplitude;
                         item.value * amplitude_factor(model, step, amplitude, time, total, period)
                     })
                     .collect()

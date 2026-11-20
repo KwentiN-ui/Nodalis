@@ -62,6 +62,20 @@ fn lowered(mesh: &FeMesh, model: &FeModel) -> ir::Analysis {
     lower_unvalidated(mesh, model, "").unwrap().analysis
 }
 
+/// The amplitude labelled `name` in `analysis`, with its handle.
+fn amplitude_named<'a>(
+    analysis: &'a ir::Analysis,
+    name: &str,
+) -> (ir::AmplitudeId, &'a ir::Amplitude) {
+    let index = (analysis.model.amplitudes.iter())
+        .position(|a| a.name == name)
+        .unwrap_or_else(|| panic!("no amplitude {name}"));
+    (
+        ir::AmplitudeId::at(index),
+        &analysis.model.amplitudes[index],
+    )
+}
+
 /// The coordinates of `node` in `analysis`.
 fn coordinates(analysis: &ir::Analysis, node: NodeId) -> [f64; 3] {
     let nodes = &analysis.model.nodes;
@@ -2646,8 +2660,8 @@ fn an_excitation_writes_its_force_and_signal() {
     let (mesh, model) = excited_cantilever(0.01, 10, sine);
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
-        "*Amplitude, Name=SIGNAL_STEP-1_EXCITATION-1, Shape=Sine\n0, 0.01, 1000, 90\n",
-        "*Cload, op=New, Amplitude=SIGNAL_STEP-1_EXCITATION-1\nINTERNAL_SELECTION-1_EXCITATION-1, 3, -100\n",
+        "*Amplitude, Name=STEP-1_EXCITATION-1, Shape=Sine\n0, 0.01, 1000, 90\n",
+        "*Cload, op=New, Amplitude=STEP-1_EXCITATION-1\nINTERNAL_SELECTION-1_EXCITATION-1, 3, -100\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in\n{text}");
     }
@@ -2660,10 +2674,7 @@ fn an_excitation_writes_its_force_and_signal() {
         (dynamic.increments.initial.unwrap() - 5e-5).abs() < 1e-12,
         "{dynamic:?}"
     );
-    let amplitude = analysis
-        .model
-        .amplitude("SIGNAL_STEP-1_EXCITATION-1")
-        .unwrap();
+    let amplitude = amplitude_named(&analysis, "Step-1_Excitation-1").1;
     assert!((amplitude.value(0.0) - 1.0).abs() < 1e-12);
 
     let chirp = plx_model::Signal::Chirp {
@@ -11856,7 +11867,7 @@ fn the_analysis_knows_the_items_it_came_from() {
         Some(ModelItem::Section(0))
     );
     assert_eq!(
-        origins.get(&ir::ItemRef::Material("STEEL".into())),
+        origins.get(&ir::ItemRef::Material(ir::MaterialId(0))),
         Some(ModelItem::Material(0))
     );
 }
@@ -12314,32 +12325,35 @@ fn each_degree_of_freedom_follows_its_own_table() {
     };
     d.values[0] = Some(0.25);
     let analysis = lowered(&mesh, &model);
-    let names = ["TABLE_STEP-1_MOVE_U2", "TABLE_STEP-1_MOVE_U3"];
+    let names = ["Step-1_Move_U2", "Step-1_Move_U3"];
     for (name, points) in names.iter().zip([
         vec![(0.0, 0.0), (1.0, 0.0), (2.0, 4.0)],
         vec![(0.0, 0.0), (1.0, -0.8), (2.0, 0.8)],
     ]) {
-        let amplitude = analysis.model.amplitude(name).expect(name);
+        let amplitude = amplitude_named(&analysis, name).1;
         assert!(!amplitude.total_time);
         assert_eq!(amplitude.points, points);
     }
     let boundaries = &analysis.steps[0].boundaries;
     let moved: Vec<_> = (boundaries.iter())
         .filter(|b| b.region != NodeRef::Set("FIX".into()))
-        .map(|b| (b.first_dof, b.last_dof, b.value, b.amplitude.clone()))
+        .map(|b| (b.first_dof, b.last_dof, b.value, b.amplitude))
         .collect();
+    let id = |name| Some(amplitude_named(&analysis, name).0);
     assert_eq!(
         moved,
         [
-            (1, 1, Some(0.25), Some("HALF".to_string())),
-            (2, 2, Some(1.0), Some(names[0].to_string())),
-            (3, 3, Some(1.0), Some(names[1].to_string())),
+            (1, 1, Some(0.25), id("Half")),
+            (2, 2, Some(1.0), id(names[0])),
+            (3, 3, Some(1.0), id(names[1])),
         ]
     );
     // The amplitudes of the tables point back to the boundary condition.
     let origins = lower_unvalidated(&mesh, &model, "").unwrap().origins;
     assert_eq!(
-        origins.get(&ir::ItemRef::Amplitude(names[0].into())),
+        origins.get(&ir::ItemRef::Amplitude(
+            amplitude_named(&analysis, names[0]).0
+        )),
         Some(ModelItem::BoundaryCondition(0, 1))
     );
     // Points that go back in time are refused.
@@ -12363,16 +12377,10 @@ fn force_components_follow_their_own_tables() {
     let (mesh, model) = cantilever(force);
     let analysis = lowered(&mesh, &model);
     let loads: Vec<_> = (analysis.steps[0].loads.concentrated.iter())
-        .map(|l| (l.dof, l.value, l.amplitude.clone()))
+        .map(|l| (l.dof, l.value, l.amplitude))
         .collect();
-    assert_eq!(
-        loads,
-        [
-            (1, 10.0, None),
-            (3, 1.0, Some("TABLE_STEP-1_FORCE-1_F3".to_string())),
-        ]
-    );
-    let table = analysis.model.amplitude("TABLE_STEP-1_FORCE-1_F3").unwrap();
+    let (id, table) = amplitude_named(&analysis, "Step-1_Force-1_F3");
+    assert_eq!(loads, [(1, 10.0, None), (3, 1.0, Some(id))]);
     assert_eq!(table.points[1], (0.5, -200.0));
 }
 
@@ -13583,7 +13591,7 @@ fn infill_sections_lie_between_their_core_and_the_solid_part() {
     let names: Vec<&str> = (lowered.model.materials.iter())
         .map(|m| m.name.as_str())
         .collect();
-    assert!(names.iter().any(|n| n.ends_with("_WALL2")), "{names:?}");
+    assert!(names.iter().any(|n| n.ends_with("_Wall2")), "{names:?}");
     let with_walls = tip_deflection("infill-walls", infill(printed));
     assert!(
         core_only.abs() > with_walls.abs(),
@@ -14027,4 +14035,54 @@ fn solver_swings_a_plane_strip_with_a_tip_mass_and_its_inertia_about_z() {
     );
     let turned = run(mass * 400.0).unwrap();
     assert!(turned < 0.97 * plain, "{turned} Hz vs {plain} Hz");
+}
+
+/// Materials and amplitudes whose names differ only in characters an input file cannot
+/// hold stay apart: each section gets its own material, each load its own amplitude, also
+/// in the exported input file.
+#[test]
+fn items_with_similar_names_stay_apart() {
+    let (mesh, mut model) = cantilever(tip_force());
+    let mut other = model.materials[0].clone();
+    other.id = plx_model::Id::new();
+    other.name = "Steel 2".into();
+    other.elastic = Some(Elastic {
+        young: 70_000.0,
+        poisson: 0.33,
+    });
+    let mut third = other.clone();
+    third.id = plx_model::Id::new();
+    third.name = "Steel_2".into();
+    third.elastic = Some(Elastic {
+        young: 1.0,
+        poisson: 0.1,
+    });
+    model.materials.push(other.clone());
+    model.materials.push(third);
+    model.sections[0].material = Some(other.id);
+    let analysis = lowered(&mesh, &model);
+    let material = analysis.model.sections[0].kind.material().unwrap();
+    let elastic = analysis
+        .model
+        .material(material)
+        .unwrap()
+        .elastic
+        .as_ref()
+        .unwrap();
+    assert_eq!(elastic.rows[0].young, 70_000.0);
+    assert_eq!(analysis.model.materials.len(), 3);
+    // The text names them apart, and reads back with the section on the right one.
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Material, Name=STEEL_2\n"), "{text}");
+    assert!(text.contains("*Material, Name=STEEL_2-2\n"), "{text}");
+    let again = plxs_input::read_inp_str(&text, None).unwrap().analysis;
+    let material = again.model.sections[0].kind.material().unwrap();
+    let elastic = again
+        .model
+        .material(material)
+        .unwrap()
+        .elastic
+        .as_ref()
+        .unwrap();
+    assert_eq!(elastic.rows[0].young, 70_000.0);
 }

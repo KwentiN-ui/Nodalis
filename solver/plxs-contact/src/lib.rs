@@ -81,7 +81,7 @@ pub struct Pair {
     pub mortar: bool,
     pub slave_name: String,
     pub master_name: String,
-    pub interaction: String,
+    pub interaction: plxs_core::InteractionId,
     pub law: Law,
     /// Friction as defined with the interaction and as currently in force (`*CHANGE
     /// FRICTION`).
@@ -453,7 +453,7 @@ fn element_young(model: &Model, element: u32) -> Option<f64> {
         plxs_core::section::SectionKind::Shell { material, .. } => material,
         _ => return None,
     };
-    let material = model.material(name)?;
+    let material = model.material(*name)?;
     plxs_materials::LinearElastic::of(material, 0.0)
         .ok()
         .map(|e| e.young)
@@ -469,13 +469,14 @@ impl ContactModel {
         let young_default = first_young(model);
         for (index, pair) in model.contact.pairs.iter().enumerate() {
             let keyword = "*CONTACT PAIR";
-            let interaction = model
-                .contact
-                .interactions
-                .iter()
-                .find(|i| i.name == pair.interaction)
+            let interaction = (model.contact.interactions)
+                .get(pair.interaction.index())
                 .ok_or_else(|| {
-                    Error::undefined(keyword, "surface interaction", &pair.interaction)
+                    Error::undefined(
+                        keyword,
+                        "surface interaction",
+                        format!("#{}", pair.interaction.0),
+                    )
                 })?;
             let master = ContactFace::surface_faces(model, keyword, &pair.master)?;
             if master.is_empty() {
@@ -656,7 +657,7 @@ impl ContactModel {
                 mortar,
                 slave_name: pair.slave.clone(),
                 master_name: pair.master.clone(),
-                interaction: pair.interaction.clone(),
+                interaction: pair.interaction,
                 law,
                 base_friction: friction,
                 friction,
@@ -861,7 +862,7 @@ impl ContactModel {
                 } => {
                     let mut found = false;
                     for pair in &mut self.pairs {
-                        if &pair.interaction == interaction {
+                        if pair.interaction == *interaction {
                             let young = pair.base_friction.map_or(0.0, |f| 2.0 * f.stick);
                             pair.friction = FrictionLaw::resolve(Some(friction), young);
                             found = true;
@@ -869,7 +870,8 @@ impl ContactModel {
                     }
                     if !found {
                         warnings.push(format!(
-                            "*CHANGE FRICTION: no contact pair uses interaction {interaction}"
+                            "*CHANGE FRICTION: no contact pair uses interaction #{}",
+                            interaction.0
                         ));
                     }
                 }

@@ -29,7 +29,7 @@ pub const EXTENSION: &str = "ndlr";
 
 /// The first bytes of a `.ndlr` file; the last two count the format, which is not converted:
 /// results of another format are solved again.
-const MAGIC: &[u8; 8] = b"PLXRES\x00\x08";
+const MAGIC: &[u8; 8] = b"PLXRES\x00\x09";
 
 /// What a run of the built-in solver computed, as Nodalis keeps it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -541,8 +541,7 @@ pub fn from_source(solved: &SolverResults, source: Arc<dyn ArraySource>) -> Solv
         let material = (element.section)
             .and_then(|s| model.sections.get(s as usize))
             .and_then(|s| s.kind.material())
-            .and_then(|name| model.materials.iter().position(|m| m.name == name))
-            .map_or(1, |i| i as i32 + 1);
+            .map_or(1, |material| material.index() as i32 + 1);
         let added = import.mesh.add_element(Element {
             id: element.id,
             type_name: type_name.to_string(),

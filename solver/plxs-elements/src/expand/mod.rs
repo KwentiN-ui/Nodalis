@@ -619,7 +619,9 @@ impl Expander {
                 && converted.insert(s)
             {
                 let section = &mut self.analysis.model.sections[s as usize];
-                let material = section.kind.material().unwrap_or_default().to_string();
+                let Some(material) = section.kind.material() else {
+                    continue;
+                };
                 section.kind = SectionKind::Solid {
                     material,
                     thickness: None,

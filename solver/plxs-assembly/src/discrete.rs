@@ -436,7 +436,7 @@ fn element_young(model: &Model, element: u32) -> Option<f64> {
     let SectionKind::Solid { material, .. } = &section.kind else {
         return None;
     };
-    plxs_materials::LinearElastic::of(model.material(material)?, 0.0)
+    plxs_materials::LinearElastic::of(model.material(*material)?, 0.0)
         .ok()
         .map(|e| e.young)
 }

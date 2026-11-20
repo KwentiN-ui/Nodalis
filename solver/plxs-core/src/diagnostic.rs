@@ -22,10 +22,10 @@ pub enum Severity {
 pub enum ItemRef {
     /// An element by its id.
     Element(u32),
-    /// A material by its name.
-    Material(String),
-    /// An amplitude by its name.
-    Amplitude(String),
+    /// A material.
+    Material(crate::MaterialId),
+    /// An amplitude.
+    Amplitude(crate::AmplitudeId),
     /// A section by its index in `Model::sections`.
     Section(usize),
     /// A tie by its name.

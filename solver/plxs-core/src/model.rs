@@ -127,16 +127,16 @@ impl Model {
             .collect();
     }
 
-    pub fn material(&self, name: &str) -> Option<&Material> {
-        self.materials.iter().find(|m| m.name == name)
+    pub fn material(&self, id: crate::MaterialId) -> Option<&Material> {
+        self.materials.get(id.index())
     }
 
-    pub fn orientation(&self, name: &str) -> Option<&crate::section::Orientation> {
-        self.orientations.iter().find(|o| o.name == name)
+    pub fn orientation(&self, id: crate::OrientationId) -> Option<&crate::section::Orientation> {
+        self.orientations.get(id.index())
     }
 
-    pub fn amplitude(&self, name: &str) -> Option<&Amplitude> {
-        self.amplitudes.iter().find(|a| a.name == name)
+    pub fn amplitude(&self, id: crate::AmplitudeId) -> Option<&Amplitude> {
+        self.amplitudes.get(id.index())
     }
 
     /// The node ids a reference stands for: the node itself or the members of the set.

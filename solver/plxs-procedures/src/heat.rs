@@ -1078,13 +1078,9 @@ fn displacements(ctx: &ProcedureContext<'_>) -> Vec<f64> {
 /// (constant beyond them), at the mean temperature of the link's nodes for tables with
 /// several temperatures.
 fn conductance(model: &Model, link: &ThermalLink, t: &[f64]) -> f64 {
-    let Some(interaction) = model.contact.pairs.get(link.pair).and_then(|pair| {
-        model
-            .contact
-            .interactions
-            .iter()
-            .find(|i| i.name == pair.interaction)
-    }) else {
+    let Some(interaction) = (model.contact.pairs.get(link.pair))
+        .and_then(|pair| model.contact.interactions.get(pair.interaction.index()))
+    else {
         return 0.0;
     };
     match &interaction.gap_conductance {
