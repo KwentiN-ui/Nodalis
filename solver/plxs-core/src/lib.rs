@@ -48,8 +48,8 @@ pub use diagnostic::{Diagnostic, DiagnosticCode, ItemRef, Severity};
 pub use element::{Element, ElementFamily, ElementType};
 pub use error::{Convergence, Divergence, Error, Failure, Result, Stop};
 pub use handle::{
-    AmplitudeId, ElementSetId, InteractionId, MaterialId, NodeSetId, OrientationId, SurfaceId,
-    TieId,
+    AmplitudeId, ElementSetId, InteractionId, JointId, MaterialId, NodeSetId, OrientationId,
+    SurfaceId, TieId,
 };
 pub use material::Material;
 pub use mesh::{ElementId, NodeId, Nodes, Sets, Surface, SurfaceFace};

@@ -29,7 +29,7 @@ pub const EXTENSION: &str = "ndlr";
 
 /// The first bytes of a `.ndlr` file; the last two count the format, which is not converted:
 /// results of another format are solved again.
-const MAGIC: &[u8; 8] = b"PLXRES\x00\x0c";
+const MAGIC: &[u8; 8] = b"PLXRES\x00\x0d";
 
 /// What a run of the built-in solver computed, as Nodalis keeps it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

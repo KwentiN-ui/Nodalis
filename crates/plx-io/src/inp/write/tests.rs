@@ -7372,6 +7372,12 @@ fn a_step_prints_only_the_history_outputs_it_lists() {
         .map(|s| s.outputs.node_print.len())
         .collect();
     assert_eq!(printed, [1, 0, 1]);
+    // The requests carry the output's id to the history they print.
+    let origins: Vec<Option<u64>> = (analysis.steps.iter())
+        .flat_map(|s| &s.outputs.node_print)
+        .map(|r| r.origin)
+        .collect();
+    assert_eq!(origins, [Some(id.raw()); 2]);
 }
 
 #[test]
@@ -11175,10 +11181,10 @@ fn switched_bonded_regions_become_tied_contacts() {
     assert!(ignored(&model));
 }
 
-/// CalculiX reads names of at most 80 characters: the sets of a region with a long name are
-/// shortened, and the `.dat` file read beside the input file shows the full name again.
+/// The exported text keeps every name at most 80 characters long, even for a region with a
+/// long name; the lowering itself no longer shortens names.
 #[test]
-fn long_set_names_are_shortened_and_restored_in_the_history_output() {
+fn long_set_names_fit_the_exported_text() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Frictionless);
     let long = "Bonded - SPUR_GEAR__20_TEETH, SPUR_GEAR__60_TEETH-2 to SPUR_GEAR__20_TEETH-2";
     model.contact_regions[0].name = long.to_string();
@@ -11192,7 +11198,6 @@ fn long_set_names_are_shortened_and_restored_in_the_history_output() {
             assert!(value.len() <= 80, "{line}");
         }
     }
-    assert!(text.contains(super::SHORTENED_NAME), "{text}");
     for behavior in [
         plx_model::ContactBehavior::Bonded,
         plx_model::ContactBehavior::Frictional { mu: 0.2 },
@@ -11208,13 +11213,6 @@ fn long_set_names_are_shortened_and_restored_in_the_history_output() {
             }
         }
     }
-    let Some(dat) = run_dat("lange-namen", &text) else {
-        return;
-    };
-    let import = crate::dat::parse_dat(&crate::dat::restore_shortened_names(&dat, &text));
-    let names: Vec<&String> = import.sets.iter().map(|s| &s.name).collect();
-    let expected = "BONDED_-_SPUR_GEAR__20_TEETH__SPUR_GEAR__60_TEETH-2_TO_SPUR_GEAR__20_TEETH-2";
-    assert!(names.iter().any(|n| *n == expected), "{names:?}");
 }
 
 /// A name made from the definition follows the type of the region; a name of the user

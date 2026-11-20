@@ -931,6 +931,9 @@ pub struct HistoryOutput {
     /// The nodes are the rotation nodes of reference points: their displacements are
     /// rotations, their forces moments.
     pub rotations: bool,
+    /// The item of the project the output was made for, which the history it prints
+    /// carries along ([`crate::results::HistoryBlock::origin`]); the solver does not read it.
+    pub origin: Option<u64>,
 }
 
 /// The set of a history output: a node set for `*NODE PRINT`, an element set for

@@ -141,6 +141,7 @@ pub fn history_blocks(
             .sum::<f64>()
             .sqrt();
         out.push(HistoryBlock {
+            origin: request.origin,
             step,
             increment,
             quantity: HistoryQuantity::ContactStatistics,

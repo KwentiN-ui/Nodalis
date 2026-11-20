@@ -15,7 +15,7 @@ Geometry, FE Model and Results workspaces it has these entries; importing is on 
   [Save Project As ... (#key("Ctrl+Shift+S"))], [Saves the project under a new name.],
   [Save Project Without Results ...], [Saves a copy without the results the analyses keep
     (@bind-result).],
-  [Export > CalculiX Input File ...], [Writes the input file exactly as #ui("Solve") would
+  [Export > CalculiX Input File ...], [Writes the analysis as a CalculiX input file
     (@export-inp).],
   [Export > Deformed Mesh (.inp) ...], [Writes the displayed deformed mesh of the current result
     as a mesh-only input file (@export-deformed).],

@@ -3005,6 +3005,7 @@ impl Reader {
             _ => None,
         };
         let output = HistoryOutput {
+            origin: None,
             set,
             variables,
             frequency: k.integer("FREQUENCY")?.unwrap_or(1),
