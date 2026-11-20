@@ -14231,3 +14231,144 @@ fn items_with_similar_names_stay_apart() {
         .unwrap();
     assert_eq!(elastic.rows[0].young, 70_000.0);
 }
+
+/// A load on the point of a displacement, `Region::RemotePoint(id)` of the boundary
+/// condition `bc`.
+fn load_on_point(bc: &BoundaryCondition, kind: LoadKind) -> Load {
+    Load {
+        id: named("On_Point-1"),
+        name: "On_Point-1".into(),
+        region: Region::RemotePoint(bc.id),
+        kind,
+        ..tip_force()
+    }
+}
+
+/// A moment on the rigid point of a displacement that holds nothing bends the cantilever
+/// like a remote moment on the same face: the reactions balance it.
+#[test]
+fn solver_bends_the_cantilever_by_a_moment_on_the_point_of_a_displacement() {
+    let m = 10_000.0;
+    let bc = remote_with([None; 6], |r| r.behavior = Behavior::Rigid);
+    let load = load_on_point(&bc, LoadKind::Moment([0.0, 0.0, m]));
+    let (mesh, mut model) = remote_cantilever(bc);
+    model.steps[0].loads.push(load);
+    assert!(
+        model.invalid_items(&mesh).is_empty(),
+        "{:?}",
+        model.invalid_items(&mesh)
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // The moment on the rotation node, after the reference node 100 of the point.
+    assert!(text.contains("*Cload, op=New\n101, 3, 10000\n"), "{text}");
+    let Some(frd) = run_solver("moment-on-bc-point", &text) else {
+        return;
+    };
+    let (reaction, sum) = clamped_reactions(&mesh, &frd);
+    assert!((reaction - m).abs() < 1e-3 * m, "{reaction} != {m}");
+    assert!(sum.iter().all(|f| f.abs() < 1e-6 * m), "{sum:?}");
+}
+
+/// A force on the point of a displacement in a turned coordinate system acts in global
+/// directions: the point's degrees of freedom are in the turned ones, the force is turned
+/// into them.
+#[test]
+fn solver_pushes_the_point_of_a_turned_displacement_in_global_directions() {
+    let bc = remote_with([None; 6], |r| {
+        r.behavior = Behavior::Rigid;
+        r.system = Some(named("Turned"));
+    });
+    let load = load_on_point(&bc, LoadKind::force([0.0, 100.0, 0.0]));
+    let (mesh, mut model) = remote_cantilever(bc);
+    turned_system(&mut model);
+    model.steps[0].loads.push(load);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let Some(frd) = run_solver("force-on-turned-bc-point", &text) else {
+        return;
+    };
+    let (_, sum) = clamped_reactions(&mesh, &frd);
+    assert!(
+        sum[0].abs() < 1e-3 && (sum[1] + 100.0).abs() < 1e-3 && sum[2].abs() < 1e-3,
+        "{sum:?}"
+    );
+}
+
+/// A remote force on the point of a displacement acts on that point and makes none of its
+/// own.
+#[test]
+fn a_remote_force_on_the_point_of_a_displacement_acts_on_that_point() {
+    let bc = remote_with([None; 6], |r| r.behavior = Behavior::Rigid);
+    let mut load = remote_force(|r| {
+        r.force = [0.0, -100.0, 0.0];
+        r.moment = [0.0, 0.0, 1000.0];
+    });
+    load.region = Region::RemotePoint(bc.id);
+    let (mesh, mut model) = remote_cantilever(bc);
+    model.steps[0].loads.push(load);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("*Rigid body").count(), 1, "{text}");
+    assert!(
+        text.contains("*Cload, op=New\n100, 2, -100\n101, 3, 1000\n"),
+        "{text}"
+    );
+}
+
+/// In a plane model a moment turns the rigid point of a displacement about z, the third
+/// degree of freedom of its rotation node: a strip held at its left end and loaded by a
+/// moment at the point of its right end takes it back at the left end.
+#[test]
+fn solver_turns_the_point_of_a_displacement_of_a_plane_model_by_a_moment() {
+    let m = 100.0;
+    let mesh = rectangle(0.0, 10.0, 2.0, 5, 2);
+    let mut model = plane_model(
+        ModelSpace::PlaneStress,
+        1.0,
+        vec![(nodes_at(&mesh, 0, 0.0), [Some(0.0); 6])],
+        LoadKind::force([0.0, 0.0, 0.0]),
+        Region::Nodes(vec![1]),
+    );
+    model.steps[0].loads.clear();
+    let mut bc = remote("Free-1", [None; 6]);
+    bc.region = Region::Nodes(nodes_at(&mesh, 0, 10.0));
+    let mut load = load_on_point(&bc, LoadKind::Moment([0.0, 0.0, m]));
+    load.region = Region::RemotePoint(bc.id);
+    model.steps[0].boundary_conditions.push(bc);
+    model.steps[0].loads.push(load);
+    assert!(
+        model.invalid_items(&mesh).is_empty(),
+        "{:?}",
+        model.invalid_items(&mesh)
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Cload, op=New\n57, 3, 100\n"), "{text}");
+    let Some(frd) = run_solver("moment-2d-bc-point", &text) else {
+        return;
+    };
+    let mut reaction = 0.0;
+    for node in nodes_at(&mesh, 0, 0.0) {
+        let [x, y, _] = mesh.node(node).unwrap();
+        let f = ["F1", "F2"].map(|c| node_value(&frd, "FORC", c, node));
+        reaction += x * f[1] - (y - 1.0) * f[0];
+    }
+    assert!((reaction + m).abs() < 1e-6 * m, "{reaction} != {}", -m);
+}
+
+/// Nodes of 2D elements have no rotations: a moment on them is a problem, on a point not.
+#[test]
+fn a_moment_of_a_plane_model_needs_a_point() {
+    let mesh = rectangle(0.0, 10.0, 2.0, 5, 2);
+    let model = plane_model(
+        ModelSpace::PlaneStress,
+        1.0,
+        vec![(nodes_at(&mesh, 0, 0.0), [Some(0.0); 6])],
+        LoadKind::Moment([0.0, 0.0, 1.0]),
+        Region::Nodes(nodes_at(&mesh, 0, 10.0)),
+    );
+    let problems = model.invalid_items(&mesh);
+    assert!(
+        problems
+            .iter()
+            .any(|p| format!("{p:?}").contains("moment acts at")),
+        "{problems:?}"
+    );
+}

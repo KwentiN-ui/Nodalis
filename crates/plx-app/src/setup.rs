@@ -213,6 +213,17 @@ pub(crate) const SUPPORT_SOURCES: &[Source] = &[
     Source::Surface,
     Source::ReferencePoint,
 ];
+/// Nodes, or a point of a rigid body, a displacement or a remote force: for point loads.
+pub(crate) const POINT_LOAD_SOURCES: &[Source] = &[
+    Source::Selection,
+    Source::NodeSet,
+    Source::Surface,
+    Source::ReferencePoint,
+    Source::RemotePoint,
+];
+/// A point of a rigid body, a displacement or a remote force: for a moment in a 2D model,
+/// whose nodes have no rotations.
+pub(crate) const POINT_SOURCES: &[Source] = &[Source::ReferencePoint, Source::RemotePoint];
 /// Faces, edges, points or whole parts: for a heat flow, which spreads over them.
 pub(crate) const FLUX_SOURCES: &[Source] = &[
     Source::Selection,
@@ -1052,7 +1063,38 @@ fn component_rows(
     period: f64,
     units: UnitSystem,
 ) {
+    component_rows_of(
+        ui,
+        values,
+        &(0..3).collect::<Vec<_>>(),
+        tables,
+        labels,
+        fields,
+        quantity,
+        load_name,
+        period,
+        units,
+    );
+}
+
+/// The rows of [`component_rows`] for the components `shown` alone.
+#[allow(clippy::too_many_arguments)]
+fn component_rows_of(
+    ui: &mut Ui,
+    values: &mut [f64],
+    shown: &[usize],
+    tables: &mut [Option<plx_model::ValueTable>; 3],
+    labels: &[&str],
+    fields: &[Field],
+    quantity: Quantity,
+    load_name: &str,
+    period: f64,
+    units: UnitSystem,
+) {
     for (c, value) in values.iter_mut().enumerate() {
+        if !shown.contains(&c) {
+            continue;
+        }
         let (label, field) = (labels[c], fields[c]);
         ui.label(label);
         let start = *value;
@@ -1115,14 +1157,14 @@ fn remote_force_rows(
         ui.weak("An axisymmetric model takes no moment.");
         ui.end_row();
     }
-    if region.reference_point().is_some() {
+    if region.is_point() {
         system_row(ui, &mut remote.system, &model.fe);
         ui.label("");
         ui.add(
             egui::Label::new(
                 egui::RichText::new(
-                    "Acts at the reference point, which drives its rigid body; directions of \
-                     the coordinate system at the point.",
+                    "Acts at the point, which drives its region; directions of the \
+                     coordinate system at the point.",
                 )
                 .weak(),
             )
@@ -2534,9 +2576,14 @@ fn load_picks(kind: &LoadKind, fe: &FeModel) -> (&'static [Source], Target) {
         return (WALL_SOURCES, face_target(fe));
     }
     match load_target(kind) {
+        // In a 2D model a moment acts on a point alone.
+        LoadTarget::Nodes if matches!(kind, LoadKind::Moment(_)) && fe.properties.space.is_2d() => {
+            (POINT_SOURCES, Target::Nodes)
+        }
         // A force picks faces, edges or points of the geometry, like a boundary condition.
-        // Forces and moments also act on the reference point of a rigid body.
-        LoadTarget::Nodes if !kind.is_thermal() => (SUPPORT_SOURCES, Target::Nodes),
+        // Forces and moments also act on the reference point of a rigid body or the point of
+        // a displacement or remote force.
+        LoadTarget::Nodes if !kind.is_thermal() => (POINT_LOAD_SOURCES, Target::Nodes),
         // A heat flow picks faces, edges or points too, or whole parts to flow into.
         LoadTarget::Nodes => (FLUX_SOURCES, Target::Nodes),
         LoadTarget::Faces => (FACE_SOURCES, face_target(fe)),
@@ -3838,28 +3885,29 @@ impl Editor {
                 let load_name = load.name.clone();
                 match &mut load.kind {
                     LoadKind::Moment(moment) => {
-                        if two_d {
-                            ui.label("");
-                            ui.weak("Moments need a 3D model.");
-                            ui.end_row();
-                        } else {
-                            component_rows(
-                                ui,
-                                moment,
-                                &mut load.tables,
-                                &Directions::of(&model.fe, load.system).moments(),
-                                &Field::VECTOR,
-                                Quantity::Moment,
-                                &load_name,
-                                period,
-                                units,
-                            );
-                        }
-                        ui.label("");
-                        ui.weak(
-                            "Acts at the reference point of a rigid body, or at every node of \
-                             the region that has rotations (beams, shells).",
+                        // A 2D model turns about z alone, at a point.
+                        let shown: &[usize] = if two_d { &[2] } else { &[0, 1, 2] };
+                        component_rows_of(
+                            ui,
+                            moment,
+                            shown,
+                            &mut load.tables,
+                            &Directions::of(&model.fe, load.system).moments(),
+                            &Field::VECTOR,
+                            Quantity::Moment,
+                            &load_name,
+                            period,
+                            units,
                         );
+                        ui.label("");
+                        ui.weak(if two_d {
+                            "Acts about z at a reference point or at the point of a \
+                             displacement or remote force."
+                        } else {
+                            "Acts at a reference point, at the point of a displacement or \
+                             remote force, or at every node of the region that has rotations \
+                             (beams, shells)."
+                        });
                         ui.end_row();
                         let nlgeom = step_kind.is_some_and(|k| model.fe.step_nlgeom(k));
                         direction_rows(ui, &mut load.system, &mut load.follower, &model.fe, nlgeom);

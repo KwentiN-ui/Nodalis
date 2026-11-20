@@ -59,7 +59,7 @@ body or point mass (@point-mass), otherwise the model check (@model-check) repor
 - A #ui("Force") on the point pulls the whole body with the given force.
 - A #ui("Moment") load (`MX`, `MY`, `MZ`, written as `*CLOAD` on the rotational degrees of
   freedom 4 to 6) turns the body about the point. Moments can also act on nodes of beams or
-  shells, which have rotations of their own, and need a 3D model.
+  shells, which have rotations of their own. A 2D model takes `MZ` alone, at a point.
 
 #screenshot("moment-load.png", [Moment on the reference point of a rigid body])
 
