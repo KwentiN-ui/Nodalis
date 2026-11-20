@@ -14,12 +14,12 @@ use plx_model::{
     Active, AmplitudeTime, BeamProfile, BeamSection, BoundaryKind, BuckleStep,
     ComplexFrequencyStep, Constraint, ContactMethod, ContactPair, ContactScale, Damping,
     DefinedFieldKind, DynamicMethod, DynamicStep, FeModel, FieldResult, Formulation, FrequencyStep,
-    GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, HistoryVariable, Id, IncrementPlan,
-    InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModelItem, ModelSpace,
-    MovingFrame, NodeTie, Origins, OutputDimension, Quantity, RayleighFit, Region, RemoteBehavior,
-    RemoteDof, Sampler, Section, SectionKind, SectorDisplay, SensitivityStep, StaticStep,
-    SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, TableOwner, Tie,
-    Totals, UnitSystem, ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
+    GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, HistoryVariable, Id,
+    IncrementPlan, InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModelItem,
+    ModelSpace, MovingFrame, NodeTie, Origins, OutputDimension, Quantity, RayleighFit, Region,
+    RemoteBehavior, RemoteDof, Sampler, Section, SectionKind, SectorDisplay, SensitivityStep,
+    StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction,
+    TableOwner, Tie, Totals, UnitSystem, ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
 };
 use plxs_core as ir;
 use plxs_core::mesh::{ElementRef, NodeRef};
@@ -5722,7 +5722,11 @@ fn history_output(
     if output.variables.is_empty() {
         return Ok(Vec::new());
     }
-    let names: Vec<&str> = output.variables.iter().map(|&v| history_variable(v)).collect();
+    let names: Vec<&str> = output
+        .variables
+        .iter()
+        .map(|&v| history_variable(v))
+        .collect();
     let card = match &output.kind {
         HistoryKind::Node {
             region: region @ (Region::ReferencePoint(_) | Region::RemotePoint(_)),

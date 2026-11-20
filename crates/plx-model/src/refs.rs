@@ -4,9 +4,9 @@
 
 use crate::{
     Amplitude, Bolt, BoundaryCondition, BoundaryKind, Constraint, ContactDetection, ContactPair,
-    ContactRegion, CrossSection, Distribution, FeModel, HistoryKind, Id,
-    InitialCondition, Load, LoadKind, Material, MeshOperation, MeshSet, PlaneSource,
-    PointDefinition, PointRef, Region, Section, SectionKind, Step, SurfaceInteraction, Tie,
+    ContactRegion, CrossSection, Distribution, FeModel, HistoryKind, Id, InitialCondition, Load,
+    LoadKind, Material, MeshOperation, MeshSet, PlaneSource, PointDefinition, PointRef, Region,
+    Section, SectionKind, Step, SurfaceInteraction, Tie,
 };
 
 impl FeModel {
@@ -136,7 +136,11 @@ impl FeModel {
         (features.or_else(items).map(String::as_str))
             .or_else(|| self.contact_name(id))
             .or_else(|| self.remote_item_name(id))
-            .or_else(|| (self.constraints.iter()).find(|c| c.id() == id).map(Constraint::name))
+            .or_else(|| {
+                (self.constraints.iter())
+                    .find(|c| c.id() == id)
+                    .map(Constraint::name)
+            })
     }
 
     /// The name of the item of the id, or a note that it is missing, for the GUI.

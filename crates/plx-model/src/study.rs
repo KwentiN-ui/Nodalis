@@ -36,12 +36,9 @@ pub struct DesignPoint {
     pub inputs: Vec<f64>,
     /// A value per output column, in the units its source stores it in; `None` while not
     /// solved.
-    #[serde(default)]
     pub outputs: Vec<Option<f64>>,
-    #[serde(default)]
     pub run: PointRun,
     /// How long it took to solve.
-    #[serde(default)]
     pub seconds: f64,
     /// The elements of the largest mesh it was solved on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,14 +145,10 @@ pub enum FillMode {
 /// The columns and points of a study, with the operations of its table.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct StudyTable {
-    #[serde(default)]
     pub inputs: Vec<StudyColumn>,
-    #[serde(default)]
     pub outputs: Vec<StudyColumn>,
-    #[serde(default)]
     pub points: Vec<DesignPoint>,
     /// The index of the current point.
-    #[serde(default)]
     pub current: usize,
 }
 

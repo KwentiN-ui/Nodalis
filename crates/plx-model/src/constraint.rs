@@ -18,7 +18,6 @@ pub struct NodeTie {
     /// The internal identity others refer to; the user sees only the name.
     pub id: crate::Id,
     pub name: String,
-    #[serde(default = "crate::active")]
     pub active: bool,
     pub region: Region,
     /// Ties the rotations too, a rigid joint between beams; a hinge otherwise. Nodes
@@ -56,16 +55,13 @@ pub struct RigidBody {
     /// The internal identity others refer to; the user sees only the name.
     pub id: crate::Id,
     pub name: String,
-    #[serde(default = "crate::active")]
     pub active: bool,
     /// Hidden constraints have no symbol in the 3D view unless selected.
-    #[serde(default = "crate::active")]
     pub visible: bool,
     pub region: Region,
     /// The reference point ([`crate::ReferencePoint`]) the body is driven by.
     pub reference_point: crate::Id,
     /// Whether the selection keeps its shape or the point follows its mean motion.
-    #[serde(default)]
     pub behavior: RemoteBehavior,
 }
 
@@ -93,17 +89,14 @@ pub struct PointMass {
     /// The internal identity others refer to; the user sees only the name.
     pub id: crate::Id,
     pub name: String,
-    #[serde(default = "crate::active")]
     pub active: bool,
     /// Hidden constraints have no symbol in the 3D view unless selected.
-    #[serde(default = "crate::active")]
     pub visible: bool,
     /// The selection that carries the mass; unused when a rigid body couples the point.
     pub region: Region,
     /// The reference point ([`crate::ReferencePoint`]) the mass sits at.
     pub reference_point: crate::Id,
     /// How the selection carries the point.
-    #[serde(default)]
     pub behavior: RemoteBehavior,
     pub mass: f64,
     /// The rotary inertia about the point, `None` for a mass without one.
@@ -280,10 +273,8 @@ pub struct Spring {
     /// The internal identity others refer to; the user sees only the name.
     pub id: crate::Id,
     pub name: String,
-    #[serde(default = "crate::active")]
     pub active: bool,
     /// Hidden constraints have no symbol in the 3D view unless selected.
-    #[serde(default = "crate::active")]
     pub visible: bool,
     /// The two ends. With a selection on both, the first gets the springs and the second
     /// is the surface they end on.
@@ -294,7 +285,6 @@ pub struct Spring {
     pub stiffness: [f64; 3],
     /// Rotational stiffness about the global axes in moment per radian, for springs between
     /// points and ground only ([`Spring::takes_rotations`]).
-    #[serde(default)]
     pub rotational: [f64; 3],
     pub per_area: bool,
     /// The whole stiffness acts at every node instead of being spread over the nodes.
@@ -542,10 +532,8 @@ pub struct Joint {
     /// The internal identity others refer to; the user sees only the name.
     pub id: crate::Id,
     pub name: String,
-    #[serde(default = "crate::active")]
     pub active: bool,
     /// Hidden constraints have no symbol in the 3D view unless selected.
-    #[serde(default = "crate::active")]
     pub visible: bool,
     pub ends: [SpringEnd; 2],
     pub kind: JointKind,
@@ -555,13 +543,11 @@ pub struct Joint {
     pub behavior: crate::RemoteBehavior,
     /// Coordinate system of the location and the joint directions; `None` is the global
     /// one.
-    #[serde(default)]
     pub system: Option<crate::Id>,
     /// Coordinates of the joint in `system`; `None` is the centre of the first end (of the
     /// second with ground as the first).
     pub location: Option<[f64; 3]>,
     /// The joint axis (3D only; a joint in a plane turns about the normal of the plane).
-    #[serde(default)]
     pub axis: JointAxis,
 }
 
@@ -679,13 +665,10 @@ impl crate::FeModel {
 pub struct CompressionOnly {
     /// The internal identity a contact history output refers to; the user sees only the
     /// name.
-    #[serde(default)]
     pub id: crate::Id,
     pub name: String,
-    #[serde(default = "crate::active")]
     pub active: bool,
     /// Hidden constraints have no symbol in the 3D view unless selected.
-    #[serde(default = "crate::active")]
     pub visible: bool,
     pub region: Region,
     /// Distance the surface can move away before the support takes load.
@@ -698,11 +681,9 @@ pub struct CompressionOnly {
     pub tensile_force: Option<f64>,
     /// Stiffness and tensile force act at every node instead of being spread over the
     /// nodes by area.
-    #[serde(default)]
     pub each_node: bool,
     /// The support pushes the surface outwards, from inside the material, instead of
     /// pushing onto it from outside.
-    #[serde(default)]
     pub flipped: bool,
     /// Distance by which the ground node of each gap lies outside the surface.
     pub offset: f64,

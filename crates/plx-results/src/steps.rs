@@ -193,7 +193,6 @@ pub struct IncrementRecord {
     pub step_time: f64,
     pub total_time: f64,
     /// Integrated explicitly (a step with automatic switching).
-    #[serde(default)]
     pub explicit: bool,
 }
 

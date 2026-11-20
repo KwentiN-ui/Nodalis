@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 pub struct Project {
     pub format: u32,
     /// The blocks of the project schematic: analyses and the sources of data they take.
-    #[serde(default)]
     pub nodes: Vec<ProjectNode>,
     /// Data one block takes from another.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -33,7 +32,6 @@ pub struct Project {
     pub compact: Vec<u64>,
     /// The unit system the project shows and takes its values in. Only what is shown changes
     /// with it: every value is stored in SI units ([`plx_model::STORED`]).
-    #[serde(default)]
     pub units: plx_model::UnitSystem,
 }
 
@@ -211,7 +209,6 @@ impl ProjectNode {
 pub struct TransformBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     pub transform: plx_mesh::MeshTransform,
 }
@@ -221,7 +218,6 @@ pub struct TransformBlock {
 pub struct CadOperationBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     pub operation: plx_model::CadOperation,
     /// The geometry as last made, kept so that the project opens and meshes without making
@@ -240,13 +236,11 @@ pub struct CadOperationBlock {
 pub struct MeshBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     /// The model space of the analyses that link it.
     pub space: plx_model::ModelSpace,
     pub primitive: plx_model::MeshPrimitive,
     /// The mesh as last made.
-    #[serde(default)]
     pub mesh: FeMesh,
     /// Fingerprint of the parameters the mesh was made from, see
     /// [`plx_model::MeshPrimitive::fingerprint`]; the mesh is out of date once it differs.
@@ -261,26 +255,15 @@ pub struct MeshBlock {
 pub struct RefineMesh {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default = "one")]
     pub factor: f64,
     /// The mesh as last made from the divisions of a mesh block; the mesh of geometry is
     /// made by the analysis it goes to, and the link brings it again.
-    #[serde(default)]
     pub mesh: FeMesh,
     /// Fingerprint of the divisions and the factor the mesh was made from, see
     /// [`plx_model::MeshPrimitive::fingerprint`]; the mesh is out of date once it differs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated: Option<u64>,
-}
-
-fn one() -> f64 {
-    1.0
-}
-
-fn first() -> u32 {
-    1
 }
 
 /// A block that gives the mesh of the analysis whose step results are linked to it, each
@@ -291,24 +274,19 @@ fn first() -> u32 {
 pub struct DeformedMesh {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     /// What the displacements are multiplied by.
-    #[serde(default = "one")]
     pub factor: f64,
     /// The increment of the step, or its mode for a buckling or frequency step, counted
     /// from 1.
-    #[serde(default = "first")]
     pub increment: u32,
     /// The mesh as last made, with the sets and element types of the analysis it comes
     /// from, kept so that the project opens without reading the results again.
-    #[serde(default)]
     pub mesh: FeMesh,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mesh_sets: Vec<plx_model::MeshSet>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub element_types: Vec<plx_model::PartElementType>,
-    #[serde(default)]
     pub space: plx_model::ModelSpace,
     /// Fingerprint of the results, the mesh and the numbers the mesh was made from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -324,7 +302,6 @@ pub struct DeformedMesh {
 pub struct MeasureBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     pub kind: plx_model::MeasureKind,
     /// The value as last computed, and the fingerprint of the results and the definition it
@@ -347,9 +324,7 @@ pub struct MeasureBlock {
 pub struct StudyBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub table: plx_model::StudyTable,
 }
 
@@ -359,7 +334,6 @@ pub struct StudyBlock {
 pub struct ParameterSet {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     pub parameters: Vec<plx_model::Parameter>,
 }
@@ -373,13 +347,10 @@ pub struct ParameterSet {
 pub struct FileSource {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     /// The file; a relative path is taken from the folder of the project file.
-    #[serde(default)]
     pub path: String,
     /// The unit system the numbers of an input file and the lengths of geometry are in.
-    #[serde(default)]
     pub units: plx_model::UnitSystem,
     /// The content of the file kept in the project; `None` for an external file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -473,9 +444,7 @@ impl EmbeddedFile {
 pub struct Note {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub text: String,
 }
 
@@ -485,19 +454,14 @@ pub struct Note {
 pub struct MathBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub operation: plx_model::MathOp,
     /// What its numbers are; `None` until a link gives it the kind of the other end. Of a
     /// product or quotient, the kind of its result.
-    #[serde(default)]
     pub kind: Option<plx_model::ValueKind>,
     /// Of a product or quotient, the kinds of A and B; `None` while open.
-    #[serde(default)]
     pub operands: [Option<plx_model::ValueKind>; 2],
     /// The values of its inputs, in SI units.
-    #[serde(default)]
     pub values: Vec<f64>,
 }
 
@@ -506,15 +470,11 @@ pub struct MathBlock {
 pub struct SwitchBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     /// What its choices are; `None` until a link gives it the kind of the other end.
-    #[serde(default)]
     pub kind: Option<plx_model::ValueKind>,
-    #[serde(default)]
     pub index: f64,
     /// The choices, in SI units.
-    #[serde(default)]
     pub choices: Vec<f64>,
 }
 
@@ -524,12 +484,9 @@ pub struct SwitchBlock {
 pub struct FormulaBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub formula: String,
     /// The values of its inputs a, b, c, ... in SI units, for those no link gives.
-    #[serde(default)]
     pub values: Vec<f64>,
 }
 
@@ -539,17 +496,10 @@ pub struct FormulaBlock {
 pub struct PlotBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub kind: plx_model::PlotKind,
     /// The bins of a histogram.
-    #[serde(default = "default_bins")]
     pub bins: u32,
-}
-
-fn default_bins() -> u32 {
-    10
 }
 
 /// A Preview block: what is linked to it, drawn in the block: a small picture of a mesh
@@ -559,7 +509,6 @@ fn default_bins() -> u32 {
 pub struct Preview {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
 }
 
@@ -572,11 +521,9 @@ pub struct Preview {
 pub struct NodeGroup {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     /// The ids of the blocks right inside it: its Group Input and Group Output blocks, and
     /// groups in it with their own blocks.
-    #[serde(default)]
     pub nodes: Vec<u64>,
     /// What it takes, in the order of its pins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -591,7 +538,6 @@ pub struct NodeGroup {
 pub struct GroupEnd {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
 }
 
@@ -626,10 +572,8 @@ pub struct GroupPin {
 pub struct Frame {
     pub label: String,
     /// The tint of the frame, red, green and blue.
-    #[serde(default)]
     pub color: [u8; 3],
     /// The ids of the blocks in the frame.
-    #[serde(default)]
     pub nodes: Vec<u64>,
 }
 
@@ -639,11 +583,9 @@ pub struct Frame {
 pub struct MeshExport {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     /// The file to write: an input file for CalculiX. A relative path is taken from the
     /// folder of the project file.
-    #[serde(default)]
     pub path: String,
     /// Fingerprint of the mesh and the path as last written; nothing is written while it
     /// is the same.
@@ -658,9 +600,7 @@ pub struct MeshExport {
 pub struct CampbellBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub setup: plx_model::campbell::Setup,
     /// The speeds of the last sweep with their modes, in the order they were computed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -679,9 +619,7 @@ pub struct CampbellBlock {
 pub struct MaterialSet {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub materials: Vec<plx_model::Material>,
     /// Fields of the materials exposed as parameters, which value links set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -693,9 +631,7 @@ pub struct MaterialSet {
 pub struct CrossSectionSet {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub cross_sections: Vec<plx_model::CrossSection>,
     /// Dimensions of the cross-sections exposed as parameters, which value links set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -710,13 +646,10 @@ pub struct ProjectAnalysis {
     pub id: u64,
     pub name: String,
     /// Position of its block in the project schematic.
-    #[serde(default)]
     pub position: [f32; 2],
     /// CAD geometry the mesh is generated from; analyses made from an input file have none.
-    #[serde(default)]
     pub geometry: Option<Geometry>,
     pub mesh: FeMesh,
-    #[serde(default)]
     pub model: FeModel,
     /// What each part of the mesh is the mesh of: a part of the geometry or an imported
     /// mesh, which is a geometry object of its own ([`plx_model::PartOrigins`]).
@@ -770,7 +703,6 @@ pub struct BoundResults {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<u64>,
     /// The solver reported errors but wrote results.
-    #[serde(default)]
     pub with_errors: bool,
     pub files: Vec<BoundFile>,
     /// The results of the built-in solver, a `.ndlr` file ([`plx_results::SolverResults`]),
@@ -974,7 +906,7 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
 
 /// The oldest format that can still be opened. While Nodalis is being designed, a new
 /// format is not converted: older projects are refused.
-pub const FIRST_PROJECT_FORMAT: u32 = 56;
+pub const FIRST_PROJECT_FORMAT: u32 = 57;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]

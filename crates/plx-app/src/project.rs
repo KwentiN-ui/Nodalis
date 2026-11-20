@@ -2803,7 +2803,11 @@ impl ProjectApp {
 
     /// What a measure block measures, in words, with the names of the analysis it reads.
     fn measure_description(&self, id: u64) -> String {
-        let Some(measure) = self.nodes.iter().find(|n| n.id == id).and_then(Node::as_measure)
+        let Some(measure) = self
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .and_then(Node::as_measure)
         else {
             return String::new();
         };

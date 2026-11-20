@@ -16,7 +16,6 @@ pub struct Geometry {
     /// Meshing parameters of the parts that no Meshing Parameters item covers.
     pub meshing: MeshingParameters,
     /// The mesh setup items.
-    #[serde(default)]
     pub mesh_items: Vec<MeshSetupItem>,
     /// Names of the parts, the solids and then the faces outside them, once a part was
     /// deleted: Gmsh numbers the parts that stay anew, while their names must stay. Empty
@@ -597,7 +596,6 @@ pub enum MeshSetupKind {
         /// The depth below the faces to which the size holds inside the solid, so that a
         /// layer of that thickness (the walls of an infill section) gets elements of the
         /// size; 0 for the faces alone.
-        #[serde(default)]
         depth: f64,
     },
     /// Gmsh's meshing algorithms for some parts.

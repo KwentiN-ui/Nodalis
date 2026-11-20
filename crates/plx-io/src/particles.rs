@@ -16,7 +16,8 @@ use plx_model::particle_flow::{
     BoxSide, Flow, FlowBoundary, FlowKind, FlowProperty, ParticleFlowStep,
 };
 use plx_model::{
-    Constraint, ContactBehavior, FeModel, HistoryKind, HistoryVariable, Material, ModelItem, ModelSpace, StepKind,
+    Constraint, ContactBehavior, FeModel, HistoryKind, HistoryVariable, Material, ModelItem,
+    ModelSpace, StepKind,
 };
 use plx_results::particles::{HistoryRequest, TemperatureRequest, WallRequest, set_name};
 use plxs_core::particles::{

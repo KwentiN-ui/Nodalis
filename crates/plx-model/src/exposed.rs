@@ -17,9 +17,18 @@ use crate::{
 /// each step, with values of its own there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ItemRef {
-    Load { step: Id, item: Id },
-    BoundaryCondition { step: Id, item: Id },
-    DefinedField { step: Id, item: Id },
+    Load {
+        step: Id,
+        item: Id,
+    },
+    BoundaryCondition {
+        step: Id,
+        item: Id,
+    },
+    DefinedField {
+        step: Id,
+        item: Id,
+    },
     Material(Id),
     Section(Id),
     CrossSection(Id),
@@ -454,8 +463,7 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 .filter(|c| c.kind == crate::CoordinateSystemKind::Cylindrical)
                 .map(|c| Some(c.id))
                 .collect();
-            let bc =
-                (step_of(fe, step)?.boundary_conditions.iter_mut()).find(|b| b.id == item)?;
+            let bc = (step_of(fe, step)?.boundary_conditions.iter_mut()).find(|b| b.id == item)?;
             match (&mut bc.kind, field) {
                 (BoundaryKind::Temperature(t), Field::Value) => real(t, Quantity::Temperature),
                 (BoundaryKind::Flow(flow), Field::Value) => match &mut flow.kind {
@@ -924,12 +932,10 @@ impl FeModel {
             ItemRef::Material(id) => fe.materials.push(self.material(id)?.clone()),
             ItemRef::Section(id) => fe.sections.push(self.section(id)?.clone()),
             ItemRef::CrossSection(id) => fe.cross_sections.push(self.cross_section(id)?.clone()),
-            ItemRef::InitialCondition(id) => {
-                fe.initial_conditions.push(self.initial_condition(id)?.clone())
-            }
-            ItemRef::MeshOperation(id) => {
-                fe.mesh_operations.push(self.mesh_operation(id)?.clone())
-            }
+            ItemRef::InitialCondition(id) => fe
+                .initial_conditions
+                .push(self.initial_condition(id)?.clone()),
+            ItemRef::MeshOperation(id) => fe.mesh_operations.push(self.mesh_operation(id)?.clone()),
             ItemRef::Distribution(id) => fe.distributions.push(self.distribution(id)?.clone()),
             ItemRef::MeshSetup(_) | ItemRef::DefaultMeshing => return None,
         }
@@ -942,14 +948,16 @@ impl FeModel {
     pub fn item_name(&self, item: &ItemRef) -> Option<&str> {
         let step = |id: Id| self.steps.iter().find(|s| s.id == id);
         Some(match *item {
-            ItemRef::Load { step: s, item } => {
-                &step(s)?.loads.iter().find(|l| l.id == item)?.name
-            }
+            ItemRef::Load { step: s, item } => &step(s)?.loads.iter().find(|l| l.id == item)?.name,
             ItemRef::BoundaryCondition { step: s, item } => {
-                &(step(s)?.boundary_conditions.iter()).find(|b| b.id == item)?.name
+                &(step(s)?.boundary_conditions.iter())
+                    .find(|b| b.id == item)?
+                    .name
             }
             ItemRef::DefinedField { step: s, item } => {
-                &(step(s)?.defined_fields.iter()).find(|d| d.id == item)?.name
+                &(step(s)?.defined_fields.iter())
+                    .find(|d| d.id == item)?
+                    .name
             }
             ItemRef::Material(id) => &self.material(id)?.name,
             ItemRef::Section(id) => &self.section(id)?.name,
@@ -1024,10 +1032,8 @@ impl FeModel {
             return false;
         }
         let valid =
-            (copy.mesh_operations.iter().find(|o| o.id == id)).is_some_and(|o| {
-                match &o.kind {
-                    MeshOperationKind::Transform(t) => t.problem().is_none(),
-                }
+            (copy.mesh_operations.iter().find(|o| o.id == id)).is_some_and(|o| match &o.kind {
+                MeshOperationKind::Transform(t) => t.problem().is_none(),
             });
         if valid {
             self.set_mesh_operations(mesh, copy.mesh_operations);

@@ -233,10 +233,6 @@ impl SplitKeep {
     }
 }
 
-fn yes() -> bool {
-    true
-}
-
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
@@ -258,7 +254,6 @@ pub struct CadOperation {
     pub keep: SplitKeep,
     /// Solids split in two stay one part of the FE model, a compound part of their pieces,
     /// which are tied where they were cut; otherwise each piece is a part of its own.
-    #[serde(default = "yes")]
     pub compound: bool,
     /// Which faces a defeaturing removes.
     #[serde(default, skip_serializing_if = "is_default")]

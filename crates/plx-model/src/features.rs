@@ -17,10 +17,8 @@ pub struct ReferencePoint {
     /// Position in global coordinates: as entered, or computed from the definition and kept
     /// up to date by [`FeModel::update_reference_points`].
     pub position: [f64; 3],
-    #[serde(default)]
     pub definition: PointDefinition,
     /// A hidden point has no mark in the 3D view unless selected.
-    #[serde(default = "crate::active")]
     pub visible: bool,
 }
 
@@ -189,7 +187,6 @@ pub struct Plane {
     pub name: String,
     pub source: PlaneSource,
     /// A hidden plane has no mark in the 3D view unless selected.
-    #[serde(default = "crate::active")]
     pub visible: bool,
 }
 

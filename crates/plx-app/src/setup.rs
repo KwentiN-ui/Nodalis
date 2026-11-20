@@ -2649,7 +2649,9 @@ impl Editor {
                     Some(pair),
                 );
                 // The contact forces too, summed over the slave side.
-                output.variables.push(plx_model::HistoryVariable::ContactForces);
+                output
+                    .variables
+                    .push(plx_model::HistoryVariable::ContactForces);
                 output.normalize_variables();
                 let region = history_region(&output.kind, fe, &FeMesh::default());
                 Draft::HistoryOutput(step, output, region)

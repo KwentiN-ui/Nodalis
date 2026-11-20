@@ -1078,13 +1078,9 @@ struct MeshFile {
     pub(crate) node_ids: Vec<NodeId>,
     pub(crate) coords: Vec<[f64; 3]>,
     elements: Vec<(ElementId, String, Vec<NodeId>)>,
-    #[serde(default)]
     node_sets: BTreeMap<String, Vec<NodeId>>,
-    #[serde(default)]
     element_sets: BTreeMap<String, Vec<ElementId>>,
-    #[serde(default)]
     surfaces: BTreeMap<String, SurfaceDefinition>,
-    #[serde(default)]
     parts: Vec<Part>,
     #[serde(default, skip_serializing_if = "CadMap::is_empty")]
     cad: CadMap,

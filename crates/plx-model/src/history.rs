@@ -14,7 +14,6 @@ pub struct HistoryOutput {
     pub id: crate::Id,
     pub name: String,
     /// A deactivated history output is left out of the input file.
-    #[serde(default = "crate::active")]
     pub active: bool,
     pub kind: HistoryKind,
     /// What it prints, in the order of [`HistoryKind::choices`].
@@ -239,7 +238,10 @@ impl HistoryOutput {
             name: name.into(),
             active: true,
             kind: HistoryKind::Node { region },
-            variables: vec![HistoryVariable::ReactionForces, HistoryVariable::Displacements],
+            variables: vec![
+                HistoryVariable::ReactionForces,
+                HistoryVariable::Displacements,
+            ],
             totals: Totals::No,
         }
     }

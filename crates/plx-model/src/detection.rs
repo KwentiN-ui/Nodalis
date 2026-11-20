@@ -36,7 +36,6 @@ pub struct ContactDetection {
     #[serde(default, skip_serializing_if = "PartFilter::is_all")]
     pub scope: PartFilter,
     /// Largest gap between surfaces that touch; `None` derives it from the model size.
-    #[serde(default)]
     pub tolerance: Option<f64>,
     /// Largest angle between the surfaces facing each other, in degrees.
     pub angle_deg: f64,
@@ -192,7 +191,6 @@ pub struct DetectionFilter {
     /// Free edges of shells and membranes.
     pub shell_edge: bool,
     /// Ends of beams and trusses of different parts at one point, tied as node ties.
-    #[serde(default = "crate::active")]
     pub line_end: bool,
 }
 

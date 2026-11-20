@@ -168,104 +168,18 @@ use std::path::{Path, PathBuf};
 use plx_mesh::{CadEntity, NodeId};
 use serde::{Deserialize, Serialize};
 
-/// Version of the project file format written by this build.
-/// Format 2 holds several analyses; projects of format 1 had one model and are not read.
-/// Format 3 stores all values in SI units ([`STORED`]) and gives each analysis its own model
-/// space and unit system. Format 4 adds state links: an analysis that continues the steps of
-/// another one. Format 5 holds blocks of several kinds, the analyses among them, in place of
-/// the analyses alone. Format 6 lets the results of a step go to an input of a step of the
-/// setup (`["Setup", "Steps", step, "Temperatures"]`) in place of a step of the results.
-/// Format 7 drops the fixed boundary condition, a displacement holding all degrees of freedom
-/// at zero takes its place. Format 8 drops the concentrated force and the surface traction for
-/// the force, which acts on faces, edges or points and optionally at each node. Format 9 gives
-/// numbers a physical quantity, format 10 replaces the optimizer by the parameter study.
-/// Format 11 adds notes, frames and compact blocks to the schematic, format 12 the Math and
-/// Switch blocks; formats 10 and 11 read as they are. Format 13 records the signatures of
-/// the geometry's entities, to find them again in changed shapes; format 12 reads as it is,
-/// without them. Format 14 drops the user keywords of the keyword editor; older formats read
-/// without them. Format 15 merges the remote displacement into the displacement, which
-/// chooses how it is written from its selection; older formats are refused. Format 16 gives
-/// the equation solver of a step only the choice Direct or Iterative; older formats are
-/// refused. Format 17 adds the remote force; format 16 reads as it is. Format 18 gives the
-/// items of the model an internal id ([`Id`]) and lets items refer to each other by it in
-/// place of their names, so that renaming keeps the references; older formats are refused.
-/// Format 19 replaces the perturbation switches of the frequency, buckle and modal dynamic
-/// steps by the [`Base`] they are computed about; older formats are refused. Format 20 keeps
-/// the history outputs once in the model ([`FeModel::history_outputs`]) and lets the steps
-/// list those they print by id; older formats are refused. Format 21 replaces the field
-/// extreme of a Measure block by the values of the field over a region, a series that a
-/// Math block reduces, and adds the Plot and Mesh Preview blocks; older formats are refused.
-/// Format 22 adds node groups; format 21 reads as it is. Format 23 adds the Thicken Shell
-/// Mesh item of the mesh setup; formats 21 and 22 read as they are. Format 24 adds the
-/// compound parts of the geometry ([`CompoundPart`]) and the bodies of mesh parts; formats 21
-/// to 23 read as they are. Format 25 adds the splits of the CAD Operation block
-/// ([`CadOperationKind::SplitPlane`], [`CadOperationKind::HoleRing`]); formats 21 to 24 read as
-/// they are. Format 26 adds the thread of a bolt ([`Bolt::thread`]) and the amplitude of its
-/// steps ([`BoltChange::amplitude`]); formats 21 to 25 read as they are. Format 27 lets contact
-/// detections choose their parts by filters and give the pairs they find their type by rules
-/// ([`ContactRule`]), and adds part groups ([`PartGroup`]); formats 21 to 26 read as they are.
-/// Format 28 merges the concentrated, surface and body flux into one total heat flow
-/// ([`LoadKind::Flux`]); formats 21 to 27 read as they are unless a step has one of those
-/// loads. Format 29 adds the defeaturing of the CAD Operation block
-/// ([`CadOperationKind::Defeature`]); formats 21 to 28 read as they are. Format 30 adds the
-/// Transform block of the project schematic; formats 21 to 29 read as they are. Format 31
-/// adds anisotropic elasticity ([`Material::anisotropic`]), the orientation of sections
-/// ([`Section::orientation`]) and infill sections ([`SectionKind::Infill`]); formats 21 to
-/// 30 read as they are. Format 32 gives coordinate systems a base system, a definition by
-/// three points or by offset and rotation ([`SystemDefinition`]) and a selection they move
-/// with ([`CoordinateSystem::attached`]); formats 21 to 31 read as they are unless they have
-/// coordinate systems. Format 33 adds the Formula block of the project schematic; formats 21
-/// to 32 read as they are. Format 34 adds suppressed parts of the geometry
-/// ([`Geometry::suppressed`]); formats 21 to 33 read as they are. Format 35 gives a bolt its
-/// surface instead of the two sides of a cut ([`Bolt::surface`]); formats 21 to 34 read as
-/// they are unless they have bolts. Format 36 lets a File block keep its file in the project
-/// (embedded); formats 21 to 35 read as they are. Format 37 drops the preload of a bolt: its
-/// steps set it ([`BoltChange`]), an adjustment adds to the length at the end of the previous
-/// step; formats 21 to 36 read as they are unless they have bolts. Format 38 adds point
-/// masses ([`PointMass`]); formats 21 to 37 read as they are. Format 39 gives the project one
-/// unit system its schematic shows values in, in place of one for each block; formats 21 to
-/// 38 read as they are, in the default units. Format 40 gives distributions a coordinate
-/// system and named variables ([`Distribution::system`], [`Distribution::variables`]);
-/// formats 21 to 39 read as they are. Format 41 gives a distribution its own length unit
-/// ([`Distribution::length`]), so that changing the project's units leaves its factors as
-/// they are; formats 21 to 40 read as they are, in millimeters. Format 42 binds every mesh to
-/// a geometry object: the origin of each part of the mesh is recorded
-/// ([`PartOrigins`]), imported meshes are geometry objects of their own; older projects are
-/// refused. Format 43 has one kind of link for geometry and meshes: a Geometry link brings
-/// geometry objects with the meshes they have, and an analysis can mesh a part itself
-/// ([`Geometry::own_meshes`]); older projects are refused. Format 44 gives the parts of the
-/// geometry ids ([`Geometry::ids`]), so that an analysis follows a part renamed where its
-/// link comes from, and marks linked shapes and sets; older projects are refused. Format 45
-/// keeps the content of files, such as results, in a binary part behind the text of the
-/// project file instead of base64 in the text; older projects are refused. Format 46 adds
-/// the Particle Flow step and the flow of materials ([`particle_flow`]); format 45 reads as
-/// it is. Format 47 adds the heat of the Particle Flow step and the temperature table of the
-/// flow of materials; older formats read as they are. Format 48 adds the granular flow;
-/// older formats read as they are. Format 49 adds grain mixtures of two sizes to the
-/// granular flow; older formats read as they are. Format 50 replaces the one temperature
-/// table of factors of the flow with a table of values per value of the flow law
-/// ([`particle_flow::FlowTables`]); older formats read as they are, without their table.
-/// Format 51 adds the Flow boundary conditions and one default side of the Particle Flow
-/// step; older steps take the default side. Format 52 exposes the numbers of the mesh setup
-/// ([`ItemRef::MeshSetup`], [`ItemRef::DefaultMeshing`]); older formats read as they are.
-/// Format 53 adds the loads of the walls of a Particle Flow step that steps of other
-/// analyses take ([`LoadKind::WallLoads`]); older formats read as they are. Format 54 adds
-/// the torsion constant of general profiles and the shear factor of sketched ones; older
-/// general profiles read without a torsion constant, which the dialog asks for, older
-/// sketches with the shear factor 5/6. Format 55 replaces the field outputs of the steps
-/// with one of the analysis ([`FeModel::field_output`]) that holds only what goes beyond
-/// the results every step writes; the field outputs of older steps are dropped.
-/// Format 56 gives the parts of the mesh ids ([`plx_mesh::Part::id`]) and has everything
-/// refer to them by id instead of by name: regions of whole parts, element types, part
-/// filters, mesh operations and compound parts, so that renaming a part keeps every
-/// reference to it; older projects are refused.
-pub const PROJECT_FORMAT: u32 = 56;
+/// Version of the project file format written by this build. Projects of other formats are
+/// not converted: older ones are refused (`plx_io::project::FIRST_PROJECT_FORMAT`).
+///
+/// Format 57: every item of the model has an internal id ([`Id`]) and every reference
+/// between items, exposed parameters and Measure blocks included, is by id; history
+/// variables are typed ([`HistoryVariable`]).
+pub const PROJECT_FORMAT: u32 = 57;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FeModel {
     /// Model space and unit system; projects saved before they existed are 3D.
-    #[serde(default)]
     pub properties: ModelProperties,
     pub materials: Vec<Material>,
     pub sections: Vec<Section>,
@@ -273,17 +187,12 @@ pub struct FeModel {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cross_sections: Vec<CrossSection>,
     /// Springs, supports and ties.
-    #[serde(default)]
     pub constraints: Vec<Constraint>,
-    #[serde(default)]
     pub surface_interactions: Vec<SurfaceInteraction>,
-    #[serde(default)]
     pub contact_pairs: Vec<ContactPair>,
     /// Surfaces glued to each other (`*TIE`), shown among the contact pairs.
-    #[serde(default)]
     pub ties: Vec<Tie>,
     /// Ends of beams and trusses tied node to node, shown among the contact pairs.
-    #[serde(default)]
     pub node_ties: Vec<NodeTie>,
     /// Surfaces in contact by the behavior the user wants, written as the ties and contact
     /// pairs they stand for ([`FeModel::lower_contacts`]).
@@ -296,20 +205,17 @@ pub struct FeModel {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub part_groups: Vec<PartGroup>,
     /// Settings shared by the contact regions.
-    #[serde(default)]
     pub contact_defaults: ContactDefaults,
     /// Bolts preloaded across a cut through their shank, written as the pre-tension loads
     /// and ties they stand for ([`FeModel::lower_bolts`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bolts: Vec<Bolt>,
     /// Time curves boundary conditions and loads refer to by id.
-    #[serde(default)]
     pub amplitudes: Vec<Amplitude>,
     /// Factors over the model that pressures and temperatures refer to by id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub distributions: Vec<Distribution>,
     /// State of the model before the first step, such as its initial temperature.
-    #[serde(default)]
     pub initial_conditions: Vec<InitialCondition>,
     pub steps: Vec<Step>,
     /// What the steps write for the Results beyond the standard results of their kinds.
@@ -317,27 +223,19 @@ pub struct FeModel {
     pub field_output: FieldOutput,
     /// Values printed into the `.dat` file, each once for the model; the steps list those
     /// they print ([`Step::history_outputs`]).
-    #[serde(default)]
     pub history_outputs: Vec<HistoryOutput>,
     /// The features: points and coordinate systems other items refer to by id.
-    #[serde(default)]
     pub reference_points: Vec<ReferencePoint>,
-    #[serde(default)]
     pub coordinate_systems: Vec<CoordinateSystem>,
-    #[serde(default)]
     pub planes: Vec<Plane>,
     /// Results on planes; not part of the input file.
-    #[serde(default)]
     pub result_planes: Vec<ResultPlane>,
     /// Straight paths results are read on; not part of the input file.
-    #[serde(default)]
     pub result_paths: Vec<ResultPath>,
     /// Node sets, element sets and surfaces the user defined by a selection; their members
     /// are written into the mesh's sets.
-    #[serde(default)]
     pub mesh_sets: Vec<MeshSet>,
     /// Element types the user chose for parts instead of those the mesh came with.
-    #[serde(default)]
     pub element_types: Vec<PartElementType>,
     /// Changes of the mesh parts applied after meshing, such as transforms, in order; the
     /// mesh has them applied.
@@ -935,17 +833,14 @@ pub struct Step {
     pub id: crate::Id,
     pub name: String,
     /// A deactivated step is written to the input file as a comment only.
-    #[serde(default = "active")]
     pub active: bool,
     pub kind: StepKind,
     pub boundary_conditions: Vec<BoundaryCondition>,
     pub loads: Vec<Load>,
     /// The history outputs of the model the step prints, by id, in their order.
-    #[serde(default)]
     pub history_outputs: Vec<Id>,
     /// Temperatures prescribed for the step; steps saved before
     /// they existed have none.
-    #[serde(default)]
     pub defined_fields: Vec<DefinedField>,
     /// Contact regions and pairs switched on or off, or given another friction, from this
     /// step on.
@@ -1453,11 +1348,9 @@ pub struct FrequencyStep {
     /// Lowest and highest nodal diameter of a cyclic symmetric model
     /// (`*SELECT CYCLIC SYMMETRY MODES, NMIN=, NMAX=`); `None` is CalculiX's 0 and the
     /// highest one the sectors allow.
-    #[serde(default)]
     pub nodal_diameters: Option<[u32; 2]>,
     /// How the shifted systems of the eigenvalue iteration are solved. Iterative needs no
     /// lower frequency bound (the shift must stay below the spectrum).
-    #[serde(default)]
     pub solver: LinearSolverChoice,
 }
 
@@ -1469,7 +1362,6 @@ pub struct FrequencyStep {
 pub struct DynamicStep {
     /// How the response is computed: direct integration of all equations, or the
     /// superposition of a number of eigenmodes (linear models).
-    #[serde(default)]
     pub method: DynamicMethod,
     /// Length of the step in time.
     pub duration: f64,
@@ -1477,7 +1369,6 @@ pub struct DynamicStep {
     pub frames: u32,
     /// Also a frame whenever a contact closes or opens and at the sub-steps of an impact,
     /// between the evenly spaced frames (direct integration only).
-    #[serde(default = "default_true")]
     pub event_frames: bool,
     pub damping: Damping,
     pub time_step: TimeStep,
@@ -1488,26 +1379,18 @@ pub struct DynamicStep {
     pub solver: LinearSolverChoice,
     /// Large displacements and rotations (`NLGEOM`): Newton iterations in every time step,
     /// rigid bodies turn by finite angles. Off, the motion is linear (small deformations).
-    #[serde(default)]
     pub large_deformations: bool,
     /// Explicit integration: the stable time step mass scaling raises the elements to
     /// (they get the mass that needs); `None` scales nothing.
-    #[serde(default)]
     pub mass_scaling: Option<f64>,
     /// Automatic method: implicit time steps shorter than this multiple of the stable
     /// explicit time step go on explicitly; `None` takes the default
     /// ([`DynamicStep::DEFAULT_SWITCH_FACTOR`]), 0 never switches.
-    #[serde(default)]
     pub switch_factor: Option<f64>,
     /// Explicit integration: expanded shells keep the whole inertia of their thickness
     /// modes. Off (the default), the solver raises it so that the thickness does not set
     /// the time step (selective mass scaling; translations unchanged).
-    #[serde(default)]
     pub full_shell_inertia: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl Default for DynamicStep {
@@ -1629,7 +1512,6 @@ pub enum DynamicMethod {
         modes: u32,
         /// What the modes are computed about: the unloaded model, or the state the steps
         /// before leave with its stress stiffening (a perturbation of a preload).
-        #[serde(default)]
         base: Base,
     },
     /// Explicit integration (central differences, lumped mass): many small time steps
@@ -1783,15 +1665,9 @@ pub struct SteadyStateDynamicsStep {
     pub time_upper: f64,
     pub damping: Option<ModalDamping>,
     /// Number of eigenmodes the response is superposed from.
-    #[serde(default = "default_modes")]
     pub modes: u32,
     /// What the eigenmodes are computed about.
-    #[serde(default)]
     pub base: Base,
-}
-
-fn default_modes() -> u32 {
-    SteadyStateDynamicsStep::DEFAULT_MODES
 }
 
 impl Default for SteadyStateDynamicsStep {
@@ -1930,12 +1806,10 @@ pub struct ComplexFrequencyStep {
     pub axis: [f64; 3],
     /// A coordinate system whose z axis is the rotation axis, through its origin; `None`
     /// takes [`ComplexFrequencyStep::point`] and [`ComplexFrequencyStep::axis`].
-    #[serde(default)]
     pub system: Option<Id>,
     /// The elements that rotate (parts or an element set); no parts picked: the whole
     /// model. Centrifugal forces, stress stiffening, spin softening and Coriolis forces act
     /// on these elements only.
-    #[serde(default = "whole_model")]
     pub region: Region,
     /// Stress stiffening and spin softening by the centrifugal forces: the eigenmodes are
     /// those of the structure preloaded by the rotation. Off, they are those at standstill
@@ -1944,7 +1818,6 @@ pub struct ComplexFrequencyStep {
     /// What the step is computed about: the unloaded model with only its rotation, or the
     /// state the steps before leave with the rotation added (a bolt preload stiffening the
     /// rotor as well).
-    #[serde(default)]
     pub base: Base,
     /// Number of eigenmodes the complex modes are combined from; at least
     /// [`ComplexFrequencyStep::num_frequencies`].
@@ -2034,7 +1907,6 @@ pub struct BuckleStep {
     /// (`*STEP, PERTURBATION`).
     pub base: Base,
     /// How the reference solution and the systems of the eigenvalue iteration are solved.
-    #[serde(default)]
     pub solver: LinearSolverChoice,
 }
 
@@ -2285,15 +2157,12 @@ pub struct BoundaryCondition {
     pub id: crate::Id,
     pub name: String,
     /// A deactivated boundary condition is left out of the input file and the 3D view.
-    #[serde(default = "active")]
     pub active: bool,
     /// Hidden ones have no symbol in the 3D view unless selected.
-    #[serde(default = "active")]
     pub visible: bool,
     pub region: Region,
     pub kind: BoundaryKind,
     /// Amplitude the values follow over time; `None` is CalculiX's default ramp or step.
-    #[serde(default)]
     pub amplitude: Option<Id>,
     /// Distribution the value is scaled by over the region; `None` is the same value
     /// everywhere.
@@ -2331,7 +2200,6 @@ pub enum BoundaryKind {
         /// Beams lying on the plane are cut in half by it: the solver gets half their
         /// section (area, second moments, torsion and so mass), see
         /// [`FeModel::halved_beams`]. Loads on them the user halves.
-        #[serde(default = "crate::active")]
         halve_beams: bool,
     },
     /// Of a Particle Flow step: what sides of its box or faces of the model (edges in 2D)
@@ -2433,20 +2301,16 @@ pub struct Load {
     pub id: crate::Id,
     pub name: String,
     /// A deactivated load is left out of the input file and the 3D view.
-    #[serde(default = "active")]
     pub active: bool,
     /// Hidden ones have no symbol in the 3D view unless selected.
-    #[serde(default = "active")]
     pub visible: bool,
     pub region: Region,
     pub kind: LoadKind,
     /// Amplitude the value follows over time, of a film or radiation its sink temperature;
     /// `None` is CalculiX's default ramp or step.
-    #[serde(default)]
     pub amplitude: Option<Id>,
     /// Amplitude of the film coefficient or the emissivity (`FILM AMPLITUDE`,
     /// `RADIATION AMPLITUDE`); other loads have none.
-    #[serde(default)]
     pub factor_amplitude: Option<Id>,
     /// A time table per component of the value (force and moment x, y, z; the pressure)
     /// that replaces the component: it follows the table over the step time instead of
@@ -2703,7 +2567,6 @@ pub struct InitialCondition {
     /// The internal identity others refer to; the user sees only the name.
     pub id: crate::Id,
     pub name: String,
-    #[serde(default = "active")]
     pub active: bool,
     pub region: Region,
     pub kind: InitialConditionKind,
@@ -2775,7 +2638,6 @@ pub struct DefinedField {
     pub id: crate::Id,
     pub name: String,
     /// A deactivated field is left out of the input file.
-    #[serde(default = "active")]
     pub active: bool,
     /// The nodes that take the value; a field read from a file covers all nodes of the
     /// file and ignores the region.
@@ -2783,7 +2645,6 @@ pub struct DefinedField {
     pub kind: DefinedFieldKind,
     /// Amplitude a value follows over time; `None` is CalculiX's default ramp. A field
     /// read from a file has none.
-    #[serde(default)]
     pub amplitude: Option<Id>,
     /// Distribution the value is scaled by over the region; `None` is the same value
     /// everywhere.
@@ -2830,11 +2691,6 @@ impl FeModel {
         files.dedup();
         files
     }
-}
-
-/// Items of projects saved before they could be deactivated are active.
-pub(crate) fn active() -> bool {
-    true
 }
 
 /// Next free default name such as "Material-2": new items are numbered per kind.

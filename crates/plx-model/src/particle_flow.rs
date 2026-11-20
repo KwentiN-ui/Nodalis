@@ -227,7 +227,6 @@ pub struct FlowBoundary {
     pub kind: FlowKind,
     /// The sides of the box it makes this, besides the faces of its region: x min, x max,
     /// y min, y max, z min, z max.
-    #[serde(default)]
     pub sides: [bool; 6],
     /// Of an inlet: the filled part whose material, temperature and gravity the material
     /// fed has; `None` takes the part its faces lie on, at a side of the box the filled

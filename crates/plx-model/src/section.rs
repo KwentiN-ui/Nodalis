@@ -23,10 +23,8 @@ pub struct Section {
     pub material: Option<crate::Id>,
     pub region: Region,
     /// Thickness of plane stress and plane strain elements; other models ignore it.
-    #[serde(default = "unit_thickness")]
     pub thickness: f64,
     /// Projects saved before beams existed hold solid sections.
-    #[serde(default)]
     pub kind: SectionKind,
     /// The coordinate system whose axes x, y, z are the material axes 1, 2, 3 of an
     /// anisotropic material of a solid section, and the print axes of an infill section
@@ -251,13 +249,10 @@ pub fn membrane_type(shell_type: &str) -> Option<&'static str> {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BeamSection {
     /// The [`crate::CrossSection`] of the model the beam has; `None` until one is chosen.
-    #[serde(default)]
     pub cross_section: Option<crate::Id>,
-    #[serde(default)]
     pub orientation: BeamOrientation,
     /// Offset of the beam axis from the nodes in the 1- and 2-direction, in multiples of
     /// the profile's thickness in that direction (`OFFSET1`, `OFFSET2`).
-    #[serde(default)]
     pub offset: [f64; 2],
 }
 

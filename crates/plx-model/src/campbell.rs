@@ -86,7 +86,6 @@ pub struct Setup {
     /// Upper end of the frequency axis in Hz; 0 fits the axis to the modes.
     pub max_frequency: f64,
     /// The frame of reference of the diagram.
-    #[serde(default)]
     pub frame: Frame,
 }
 

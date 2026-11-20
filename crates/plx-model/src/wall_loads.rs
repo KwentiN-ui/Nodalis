@@ -18,7 +18,6 @@ pub struct WallLoads {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub walls: Vec<String>,
     /// Which time of the run.
-    #[serde(default)]
     pub time: WallLoadTime,
 }
 

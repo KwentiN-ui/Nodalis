@@ -86,7 +86,6 @@ pub struct SavedPathPlot {
     pub y_label: String,
     pub y_range: Option<[f64; 2]>,
     /// The plot of a hot spot of that name rather than of a path.
-    #[serde(default)]
     pub hot_spot: bool,
     /// The plot of a history output table rather than of a path, with its values.
     #[serde(default, skip_serializing_if = "Option::is_none")]

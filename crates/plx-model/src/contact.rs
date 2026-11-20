@@ -251,7 +251,6 @@ pub struct ContactPair {
     pub id: crate::Id,
     pub name: String,
     /// A deactivated contact pair is written to the input file as a comment only.
-    #[serde(default = "crate::active")]
     pub active: bool,
     /// Name of the surface interaction.
     pub interaction: Option<crate::Id>,
@@ -473,7 +472,6 @@ pub struct Tie {
     /// The internal identity others refer to; the user sees only the name.
     pub id: crate::Id,
     pub name: String,
-    #[serde(default = "crate::active")]
     pub active: bool,
     /// Distance within which slave nodes are tied; `None` lets the solver choose.
     pub position_tolerance: Option<f64>,
@@ -483,7 +481,6 @@ pub struct Tie {
     pub slave: Region,
     /// Makes the tie the cyclic symmetry of a sector: the slave side is the master side
     /// rotated by one sector about the axis (`*TIE, CYCLIC SYMMETRY`).
-    #[serde(default)]
     pub cyclic: Option<CyclicSymmetry>,
 }
 

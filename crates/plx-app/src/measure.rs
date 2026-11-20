@@ -188,8 +188,8 @@ pub fn evaluate_expanded(
             component,
             whole,
         } => {
-            let output = (sources.output(*output))
-                .ok_or("the analysis has no such history output")?;
+            let output =
+                (sources.output(*output)).ok_or("the analysis has no such history output")?;
             let dat = dat.ok_or("the run printed no history output")?;
             let set = &output.name;
             let history = (dat.sets.iter())
@@ -606,7 +606,9 @@ impl MeasureEditor {
                     .width(200.0)
                     .show_ui(ui, |ui| {
                         for o in &outputs {
-                            if ui.selectable_label(Some(o.id) == *output, &o.name).clicked()
+                            if ui
+                                .selectable_label(Some(o.id) == *output, &o.name)
+                                .clicked()
                                 && Some(o.id) != *output
                             {
                                 *output = Some(o.id);

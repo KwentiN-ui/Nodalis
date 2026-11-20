@@ -19,15 +19,12 @@ pub struct Distribution {
     /// The coordinate system the equation takes its coordinates in and the points are given
     /// in; `None` for the global one. A moving system counts where it is in the undeformed
     /// model.
-    #[serde(default)]
     pub system: Option<crate::Id>,
     /// Named numbers the equation can use, each of which can be exposed as a parameter.
-    #[serde(default)]
     pub variables: Vec<DistributionVariable>,
     /// The unit the equation takes its coordinates in and the points file gives them in. It
     /// belongs to the distribution, so that changing the project's units does not change the
     /// factors.
-    #[serde(default)]
     pub length: LengthUnit,
 }
 

@@ -113,7 +113,6 @@ pub struct CoordinateSystem {
     /// moves.
     pub attached: Option<Region>,
     /// A hidden system has no mark in the 3D view unless selected.
-    #[serde(default = "crate::active")]
     pub visible: bool,
 }
 
