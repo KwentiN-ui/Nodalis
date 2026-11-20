@@ -89,9 +89,15 @@ pub enum WriteError {
     /// Something of the model the solver does not compute, such as massless contact.
     #[error("{item}: {reason}")]
     Unsupported { item: String, reason: String },
-    /// An error that arose lowering the item `owner` of the model, see [`WriteError::of`].
+    /// An error that arose lowering the item `owner` of the model, in step `step` for an
+    /// item of a step (the same item acts in several steps, by the same id); see
+    /// [`WriteError::of`].
     #[error("{error}")]
-    Of { owner: Id, error: Box<WriteError> },
+    Of {
+        owner: Id,
+        step: Option<Id>,
+        error: Box<WriteError>,
+    },
 }
 
 impl WriteError {
@@ -130,15 +136,38 @@ impl WriteError {
             WriteError::Of { .. } => self,
             error => WriteError::Of {
                 owner,
+                step: None,
                 error: Box::new(error),
             },
         }
     }
 
-    /// The error itself and the item it arose in.
-    fn owned(self) -> (Self, Option<Id>) {
+    /// The error as one of lowering step `step`: of an item of the step it names, or of the
+    /// step itself.
+    pub fn in_step(self, step: Id) -> Self {
         match self {
-            WriteError::Of { owner, error } => (*error, Some(owner)),
+            WriteError::Of {
+                owner,
+                step: None,
+                error,
+            } => WriteError::Of {
+                owner,
+                step: Some(step),
+                error,
+            },
+            WriteError::Of { .. } => self,
+            error => WriteError::Of {
+                owner: step,
+                step: Some(step),
+                error: Box::new(error),
+            },
+        }
+    }
+
+    /// The error itself, the item it arose in and the step of that item.
+    fn owned(self) -> (Self, Option<(Id, Option<Id>)>) {
+        match self {
+            WriteError::Of { owner, step, error } => (*error, Some((owner, step))),
             error => (error, None),
         }
     }
@@ -188,6 +217,16 @@ pub(crate) fn by(owner: Id) -> impl FnOnce(WriteError) -> WriteError {
     move |error| error.of(owner)
 }
 
+/// [`of`] for an item of step `step`.
+fn of_in<T>(step: Id, owner: Id, error: WriteError) -> Result<T, WriteError> {
+    Err(error.of(owner).in_step(step))
+}
+
+/// [`by`] for an item of step `step`.
+fn by_in(owner: Id, step: Id) -> impl FnOnce(WriteError) -> WriteError {
+    move |error| error.of(owner).in_step(step)
+}
+
 /// An error of the model with the item of the tree it is about, so that the GUI can point
 /// at it. `item` is `None` when the error is about something the lowering derived (a tie of
 /// a contact region's detection) that has no item of its own.
@@ -204,7 +243,7 @@ impl ModelError {
         let (mut error, owner) = error.owned();
         error.name_reference(model);
         Self {
-            item: owner.and_then(|id| model.item_with_id(id)),
+            item: owner.and_then(|(id, step)| model.item_with_id(id, step)),
             error,
         }
     }
@@ -845,7 +884,7 @@ fn lower_model_owned(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Bu
                 pair_surfaces: &pair_surfaces,
                 model,
             };
-            lower_step(&mut sets, step, &context).map_err(by(step.id))
+            lower_step(&mut sets, step, &context).map_err(|e| e.in_step(step.id))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -1089,9 +1128,9 @@ fn transforms(
 fn submodel(
     model: &FeModel,
     handles: &mut Handles,
-    node_sets: &[(String, Id, String)],
+    node_sets: &[(String, Id, Id, String)],
 ) -> Result<Option<ir::constraints::Submodel>, WriteError> {
-    let Some((_, id, first)) = node_sets.first() else {
+    let Some((_, id, step, first)) = node_sets.first() else {
         return Ok(None);
     };
     let input = (model.properties.submodel_input())
@@ -1101,11 +1140,12 @@ fn submodel(
                 item: first.clone(),
             }
             .of(*id)
+            .in_step(*step)
         })?;
     Ok(Some(ir::constraints::Submodel {
         global: ir::handover::Source::Path(input.into()),
         node_sets: (node_sets.iter())
-            .map(|(set, _, _)| handles.node_set(set))
+            .map(|(set, ..)| handles.node_set(set))
             .collect(),
         global_elset: None,
     }))
@@ -1326,7 +1366,9 @@ struct Sets<'a> {
     cut_originals: BTreeMap<NodeId, NodeId>,
     /// Node sets of submodel boundary conditions, with the first boundary condition naming
     /// each; `*SUBMODEL` lists them.
-    submodel_sets: Vec<(String, Id, String)>,
+    /// The node sets of submodel boundary conditions, with the condition's id, the id of
+    /// its step and its name.
+    submodel_sets: Vec<(String, Id, Id, String)>,
     /// Reference and rotation node of each reference point an active rigid body is driven
     /// by, and the node set holding the reference node once something refers to it.
     reference_nodes: BTreeMap<Id, ReferenceNodes>,
@@ -1845,7 +1887,8 @@ fn amplitudes(
         for table in step.tables() {
             let (item, item_id, label) = table_owner(step, &table);
             if let Some(reason) = table.table.points_problem() {
-                return of(
+                return of_in(
+                    step.id,
                     item_id,
                     WriteError::InvalidAmplitude {
                         item: item.to_owned(),
@@ -1881,7 +1924,7 @@ fn amplitudes(
                     item: load.name.clone(),
                     reason,
                 })
-                .map_err(by(load.id))?;
+                .map_err(by_in(load.id, step.id))?;
             let times = &loads.times;
             for k in 0..times.len() {
                 let before = if k == 0 { 0.0 } else { times[k - 1] };
@@ -1914,7 +1957,8 @@ fn amplitudes(
                 continue;
             };
             if let Some(reason) = excitation.signal.problem(dynamic.duration) {
-                return of(
+                return of_in(
+                    step.id,
                     load.id,
                     WriteError::InvalidAmplitude {
                         item: load.name.clone(),
@@ -2786,7 +2830,7 @@ fn constraints(
                     item: bc.name.clone(),
                     reason,
                 })
-                .map_err(by(bc.id))?;
+                .map_err(by_in(bc.id, step.id))?;
             let nodes = remote_point(
                 RemoteSource {
                     item: &bc.name,
@@ -2804,7 +2848,7 @@ fn constraints(
                 model,
                 generated,
             )
-            .map_err(by(bc.id))?;
+            .map_err(by_in(bc.id, step.id))?;
             (sets.remote_names.entry(bc.id)).or_insert((nodes, behavior));
         }
     }
@@ -2832,7 +2876,7 @@ fn constraints(
                 item: load.name.clone(),
                 reason,
             })
-            .map_err(by(model.steps[s].loads[i].id))?;
+            .map_err(by_in(model.steps[s].loads[i].id, model.steps[s].id))?;
         let nodes = remote_point(
             RemoteSource {
                 item: &load.name,
@@ -2850,7 +2894,7 @@ fn constraints(
             model,
             generated,
         )
-        .map_err(by(model.steps[s].loads[i].id))?;
+        .map_err(by_in(model.steps[s].loads[i].id, model.steps[s].id))?;
         (sets.remote_names.entry(load.id)).or_insert((nodes, force.behavior));
     }
     // Joints, after the points of boundary conditions and remote forces they may connect.
@@ -4293,6 +4337,7 @@ fn step_block<'f>(
     context: &StepContext,
     moving: impl Fn(usize) -> Option<&'f MovingFrame>,
 ) -> Result<StepParts, WriteError> {
+    let step_id = step.id;
     let &StepContext {
         extra_boundary,
         space,
@@ -4579,8 +4624,9 @@ fn step_block<'f>(
                     item.submodel_step = Some(step.max(1));
                     items.push(item);
                 }
-                if !sets.submodel_sets.iter().any(|(s, _, _)| *s == set) {
-                    sets.submodel_sets.push((set, bc.id, bc.name.clone()));
+                if !sets.submodel_sets.iter().any(|(s, ..)| *s == set) {
+                    sets.submodel_sets
+                        .push((set, bc.id, step_id, bc.name.clone()));
                 }
             }
             BoundaryKind::Symmetry { normal, .. } => {

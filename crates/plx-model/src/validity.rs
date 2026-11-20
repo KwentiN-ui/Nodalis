@@ -47,12 +47,18 @@ pub struct Invalid {
 
 impl FeModel {
     /// The item of the tree with id `id`, for an error of the lowering that names the item
-    /// it was lowering.
-    pub fn item_with_id(&self, id: crate::Id) -> Option<ModelItem> {
+    /// it was lowering: in the step with id `step` first, since an item of a step acts in
+    /// the steps after it by the same id.
+    pub fn item_with_id(&self, id: crate::Id, step: Option<crate::Id>) -> Option<ModelItem> {
         fn at<T>(items: &[T], id: crate::Id, of: impl Fn(&T) -> crate::Id) -> Option<usize> {
             items.iter().position(|x| of(x) == id)
         }
-        for (s, step) in self.steps.iter().enumerate() {
+        let first = (self.steps.iter()).position(|s| Some(s.id) == step);
+        let order = first
+            .into_iter()
+            .chain((0..self.steps.len()).filter(|&s| Some(s) != first));
+        for s in order {
+            let step = &self.steps[s];
             if step.id == id {
                 return Some(ModelItem::Step(s));
             }
