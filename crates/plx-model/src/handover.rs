@@ -260,7 +260,7 @@ impl FeModel {
         match kind {
             StepKind::SteadyStateDynamics(settings) => {
                 uses.push(match &self.properties.stored_modes {
-                    Some(file) => format!("Eigenmodes linked from {}", file.display()),
+                    Some(file) => format!("Eigenmodes linked from {}", file.label()),
                     None => format!("Its own {} eigenmodes", settings.modes),
                 });
             }

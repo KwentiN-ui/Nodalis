@@ -598,7 +598,7 @@ pub fn after_flow(
             if let plx_model::LoadKind::WallLoads(w) = &mut load.kind
                 && w.file().is_none()
             {
-                w.file = walls.to_owned();
+                w.file = plx_model::ResultsFile::File(walls.to_owned());
             }
         }
     }

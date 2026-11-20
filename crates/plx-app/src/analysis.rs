@@ -267,7 +267,8 @@ pub fn stage_global_results(
             .and_then(|()| std::fs::copy(&source, &target))
             .map_err(|e| format!("Global results {} not copied: {e}", source.display()))?;
     }
-    fe.properties.global_results = Some(target);
+    fe.properties.global_results =
+        (fe.properties.global_results.as_ref()).map(|g| g.with_path(target));
     Ok(())
 }
 
@@ -372,23 +373,29 @@ pub fn stage_linked_results(
     dir: &std::path::Path,
     name: &str,
 ) -> Result<Option<InitialTemperatures>, String> {
-    if let Some(modes) = &fe.properties.stored_modes {
-        if !modes.is_file() {
+    if let Some(stored) = &fe.properties.stored_modes {
+        let Some(modes) = stored.path().filter(|p| p.is_file()) else {
             return Err(format!(
                 "The eigenmodes {} are gone: solve the analysis they come from again.",
-                modes.display()
+                stored.label()
             ));
-        }
+        };
         let target = dir.join(format!("{name}.eig"));
-        if *modes != target {
+        if modes != target {
             std::fs::create_dir_all(dir)
                 .and_then(|()| std::fs::copy(modes, &target))
                 .map_err(|e| format!("Eigenmodes {} not copied: {e}", modes.display()))?;
         }
     }
-    let Some((file, step)) = &fe.properties.initial_temperatures else {
+    let Some((linked, step)) = &fe.properties.initial_temperatures else {
         return Ok(None);
     };
+    let file = (linked.path()).ok_or_else(|| {
+        format!(
+            "Initial temperatures not read: {}",
+            linked.missing().unwrap_or_default()
+        )
+    })?;
     let results =
         plx_io::frd::read_frd(file).map_err(|e| format!("Initial temperatures not read: {e}"))?;
     let temperatures = (results.increments.iter().rev())
@@ -1275,7 +1282,7 @@ mod tests {
         solve_as(&source, &dir.join("Modes"), "Modes", &Default::default());
         let mut target = cubes();
         target.fe.steps = vec![modal];
-        target.fe.properties.stored_modes = Some(dir.join("Modes/Modes.eig"));
+        target.fe.properties.stored_modes = Some(dir.join("Modes/Modes.eig").into());
         solve_as(&target, &dir.join("Shake"), "Shake", &Default::default());
         let alone = results(&dir.join("Shake/Shake.ndlr"));
         let joint = results(&dir.join("Both/Both.ndlr"));
@@ -1305,7 +1312,7 @@ mod tests {
         let solved = plx_results::SolverResults::read(&dir.join("Thermal/Thermal.ndlr")).unwrap();
         plx_io::solver::export_calculix(&solved, &dir.join("Thermal/Thermal.frd")).unwrap();
         let mut fe = cubes().fe;
-        fe.properties.initial_temperatures = Some((dir.join("Thermal/Thermal.frd"), 1));
+        fe.properties.initial_temperatures = Some((dir.join("Thermal/Thermal.frd").into(), 1));
         let initial = stage_linked_results(&fe, &dir, "Start").unwrap().unwrap();
         assert_eq!(initial.values.len(), 16);
         let value = |node: u32| initial.values.iter().find(|(n, _)| *n == node).unwrap().1;

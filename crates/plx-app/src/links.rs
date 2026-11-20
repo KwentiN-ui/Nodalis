@@ -1027,6 +1027,8 @@ pub fn apply_results(
         return false;
     };
     let step = target_step(link).unwrap_or_default().to_owned();
+    // The model keeps where the results come from; the copy for the run is not saved.
+    let file = plx_model::ResultsFile::linked(link.source, file);
     match kind {
         ResultsUse::Submodel => apply_submodel(fe, &step, global, file),
         ResultsUse::WallLoads => apply_wall_loads(fe, mesh, &step, made_id(link), file),
@@ -1077,7 +1079,7 @@ fn apply_wall_loads(
     mesh: &FeMesh,
     step: &str,
     id: plx_model::Id,
-    file: PathBuf,
+    file: plx_model::ResultsFile,
 ) -> bool {
     let Some(step) = fe.steps.iter_mut().find(|s| key(s.id) == step) else {
         return false;
@@ -1094,7 +1096,7 @@ fn apply_wall_loads(
     }
     // The parts of the walls: by id, or by name in a mesh of the analysis's own.
     let mut parts: Vec<plx_model::Id> = Vec::new();
-    if let Ok(loads) = plx_results::wall_loads::WallLoads::read(&file) {
+    if let Some(Ok(loads)) = file.path().map(plx_results::wall_loads::WallLoads::read) {
         for wall in &loads.walls {
             let found = (wall.parts.iter()).filter_map(|(id, name)| {
                 (mesh.parts.iter().any(|p| p.id == *id))
@@ -1805,7 +1807,12 @@ pub fn global_step_number(fe: &FeModel, step: &str) -> Option<u32> {
 
 /// Makes `fe` a submodel whose step `step` reads the results of global step `global` from
 /// `results`; returns whether anything changed.
-pub fn apply_submodel(fe: &mut FeModel, step: &str, global: u32, results: PathBuf) -> bool {
+pub fn apply_submodel(
+    fe: &mut FeModel,
+    step: &str,
+    global: u32,
+    results: plx_model::ResultsFile,
+) -> bool {
     let mut changed = false;
     if fe.properties.kind != ModelKind::Submodel {
         fe.properties.kind = ModelKind::Submodel;
@@ -3242,7 +3249,10 @@ mod tests {
             1,
             "modes.eig".into()
         ));
-        assert_eq!(target.properties.stored_modes, Some("modes.eig".into()));
+        // The model keeps the analysis the modes come from; the file is only for the run.
+        let stored = target.properties.stored_modes.as_ref().unwrap();
+        assert_eq!(stored.analysis(), Some(modes.source));
+        assert_eq!(stored.path(), Some(std::path::Path::new("modes.eig")));
         clear_results(&mut target, &temperature, false);
         clear_results(&mut target, &modes, false);
         assert!(target.result_files().is_empty());
@@ -3322,8 +3332,11 @@ mod tests {
             panic!("not a wall load");
         };
         assert_eq!(
-            (w.file.clone(), w.time),
-            (dir.join("new.walls"), plx_model::WallLoadTime::OverTime)
+            (w.file.path(), w.time),
+            (
+                Some(dir.join("new.walls").as_path()),
+                plx_model::WallLoadTime::OverTime
+            )
         );
         clear_results(&mut target, &link, false);
         assert!(target.steps[0].loads.is_empty());
