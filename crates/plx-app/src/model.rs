@@ -2272,9 +2272,15 @@ impl Model {
 
     /// What the element edges of the meshes of the parts of the geometry display `view` are
     /// made of, from this FE model: the mesh of a part of the geometry, of its compound
-    /// only its body, or an imported mesh. Parts whose mesh is out of date, among the parts
-    /// of the mesh `stale`, have none: it no longer fits their geometry.
-    pub fn mesh_overlay_source(&self, view: &Model, stale: &[String]) -> MeshOverlaySource {
+    /// only its body, or an imported mesh. The mesh of a part whose mesh is out of date,
+    /// among the parts of the mesh `stale`, stays until it is meshed again and is drawn
+    /// faded, see [`MeshOverlay::stale`]; with `stale_shown` false it is left out.
+    pub fn mesh_overlay_source(
+        &self,
+        view: &Model,
+        stale: &[String],
+        stale_shown: bool,
+    ) -> MeshOverlaySource {
         let mesh = &self.mesh;
         let geometry = self.geometry.as_ref();
         let fe_part =
@@ -2283,19 +2289,20 @@ impl Model {
             .map(|part| {
                 let name = part.name.as_str();
                 let fe_name = geometry.map_or(name, |g| g.fe_part_name(name));
-                if stale.iter().any(|s| s.eq_ignore_ascii_case(fe_name)) {
+                let stale = stale.iter().any(|s| s.eq_ignore_ascii_case(fe_name));
+                if stale && !stale_shown {
                     return None;
                 }
                 let index = fe_part(fe_name)?;
                 let bodies = &mesh.parts[index].bodies;
                 if bodies.is_empty() {
-                    return Some((index, None));
+                    return Some((index, None, stale));
                 }
                 let body = bodies.iter().find(|b| b.name.eq_ignore_ascii_case(name))?;
                 let elements = (body.elements.iter())
                     .filter_map(|&id| mesh.element_index(id))
                     .collect();
-                Some((index, Some(elements)))
+                Some((index, Some(elements), stale))
             })
             .collect();
         MeshOverlaySource {
@@ -3246,6 +3253,10 @@ fn smooth_angle(info: &PartInfo) -> f64 {
     }
 }
 
+/// Opacity of the element edges of an out-of-date mesh over the geometry, fainter than
+/// [`plx_render::MESH_EDGE_OPACITY`] so that it reads as the mesh that no longer fits.
+const STALE_MESH_EDGE_OPACITY: f32 = 0.2;
+
 /// The element edges of the mesh of a geometry object, drawn over its faces in the Geometry
 /// view: lines between `positions`, relative to the origin of the geometry display.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -3253,12 +3264,25 @@ pub struct MeshOverlay {
     pub positions: Vec<[f32; 3]>,
     /// Pairs of indices into `positions`.
     pub edges: Vec<u32>,
+    /// The mesh is out of date, e.g. after a change of the mesh setup: it is kept until the
+    /// part is meshed again and drawn faded in the colour of the wireframe.
+    pub stale: bool,
 }
 
 impl MeshOverlay {
     /// Adds the edges to `mesh` as its mesh edges, moved by `offset`: drawn where the view
-    /// shows mesh edges, not with Edges Only.
+    /// shows mesh edges, not with Edges Only. An out-of-date mesh is added as faded lines.
     fn append_to(&self, mesh: &mut RenderMesh, offset: Vec3) {
+        if self.stale {
+            let vertex = |i: u32| Vertex {
+                position: (Vec3::from(self.positions[i as usize]) + offset).to_array(),
+                normal: [0.0; 3],
+                color: [0.0; 3],
+                scalar: STALE_MESH_EDGE_OPACITY,
+            };
+            (mesh.wireframe_edges).extend(self.edges.iter().map(|&i| vertex(i)));
+            return;
+        }
         let base = mesh.vertices.len() as u32;
         mesh.vertices.extend(self.positions.iter().map(|p| Vertex {
             position: (Vec3::from(*p) + offset).to_array(),
@@ -3280,8 +3304,13 @@ pub struct MeshOverlaySource {
     origin: DVec3,
     /// Per part of the geometry display, the part of the mesh that is its mesh, with the
     /// elements (by index) of its body where the part of the mesh is a compound.
-    parts: Vec<Option<(usize, Option<HashSet<usize>>)>>,
+    parts: Vec<Option<OverlayPart>>,
 }
+
+/// The part of the mesh drawn over a part of a geometry display, see
+/// [`MeshOverlaySource`]: its index, the elements of its body where it is a compound, and
+/// whether its mesh is out of date.
+type OverlayPart = (usize, Option<HashSet<usize>>, bool);
 
 impl MeshOverlaySource {
     /// The element edges of each part of the geometry display that has a mesh.
@@ -3294,9 +3323,10 @@ impl MeshOverlaySource {
         } = self;
         (parts.into_iter())
             .map(|part| {
-                let (index, elements) = part?;
+                let (index, elements, stale) = part?;
                 let skin = skins.get(index)?;
-                let overlay = skin_overlay(&coords, skin, origin, elements.as_ref());
+                let mut overlay = skin_overlay(&coords, skin, origin, elements.as_ref());
+                overlay.stale = stale;
                 (!overlay.edges.is_empty()).then_some(overlay)
             })
             .collect()
@@ -4324,7 +4354,7 @@ mod tests {
         let second = mesh.parts[1].id;
         mesh.remove_parts(&[second]);
         model.set_mesh(mesh);
-        let overlays = model.mesh_overlay_source(&view, &[]).build();
+        let overlays = model.mesh_overlay_source(&view, &[], true).build();
         assert_eq!(overlays.len(), 2);
         let first = overlays[0].clone().expect("the meshed block has its edges");
         assert!(overlays[1].is_none());
@@ -4337,10 +4367,21 @@ mod tests {
         let meshes = view.render_meshes();
         assert_eq!(meshes[0].mesh_edges.len(), first.edges.len());
         assert!(meshes[1].mesh_edges.is_empty());
-        // An out-of-date mesh no longer fits its geometry and is not drawn.
+        // An out-of-date mesh, e.g. after a change of the mesh setup, stays until the part
+        // is meshed again and is drawn faded, not as the mesh edges.
         let name = model.mesh.parts[0].name.clone();
-        let stale = model.mesh_overlay_source(&view, &[name]).build();
-        assert!(stale.iter().all(Option::is_none));
+        let stale = model
+            .mesh_overlay_source(&view, std::slice::from_ref(&name), true)
+            .build();
+        let faded = stale[0].clone().expect("the out-of-date mesh is kept");
+        assert!(faded.stale && faded.edges == first.edges);
+        view.set_mesh_overlay(2, stale);
+        let meshes = view.render_meshes();
+        assert!(meshes[0].mesh_edges.is_empty());
+        assert_eq!(meshes[0].wireframe_edges.len(), first.edges.len());
+        // With Edges Only it is not drawn, like an up-to-date mesh.
+        let hidden = model.mesh_overlay_source(&view, &[name], false).build();
+        assert!(hidden.iter().all(Option::is_none));
     }
 
     #[test]

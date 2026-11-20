@@ -8310,7 +8310,8 @@ impl Workbench {
     /// Draws the element edges of the meshed parts over the geometry in the Geometry
     /// workspace, so that it shows which parts are meshed and how. They are made on another
     /// thread, only while the workspace is shown and when the mesh or the geometry display
-    /// changed; a part whose mesh is out of date gets none.
+    /// changed; the mesh of a part that is out of date is drawn faded until it is meshed
+    /// again.
     fn update_mesh_overlay(&mut self, ctx: &egui::Context) {
         use std::sync::mpsc::TryRecvError;
         if let Some(job) = &self.mesh_overlay_job {
@@ -8340,6 +8341,9 @@ impl Workbench {
         hash.add_debug(&(mesh.node_count(), mesh.element_count()));
         hash.add_debug(&model.geometry.as_ref().map(|g| &g.compounds));
         hash.add_debug(&stale);
+        // An out-of-date mesh is drawn faded where the view shows mesh edges.
+        let stale_shown = self.viewport.options.mesh_edges;
+        hash.add_debug(&stale_shown);
         let names: Vec<&str> = view.parts.iter().map(|p| p.name.as_str()).collect();
         hash.add_debug(&names);
         hash.add_debug(&view.origin().to_array());
@@ -8348,7 +8352,7 @@ impl Workbench {
         if view.mesh_overlay_key() == Some(key) || running == Some(key) {
             return;
         }
-        let source = model.mesh_overlay_source(view, &stale);
+        let source = model.mesh_overlay_source(view, &stale, stale_shown);
         let (sender, overlays) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
         let spawned = std::thread::Builder::new()

@@ -14,14 +14,23 @@ switches to the FE Model workspace.
 
 The Geometry workspace shows the mesh too: a part that is meshed has its element edges drawn
 over its faces, so one sees which parts are meshed and how without switching to the FE Model
-workspace. Parts without a mesh, suppressed parts and parts whose mesh is out of date
-show only their geometry. #ui("Edges Only") on the #ui("View") tab hides the
+workspace. Parts without a mesh and suppressed parts show only their geometry.
+
+A changed setting in the mesh setup, such as a new size in the #ui("Meshing Parameters") or a
+#ui("Local Mesh Size"), does not delete a mesh: it makes the mesh of the parts it concerns out of
+date. The mesh stays, in the FE Model workspace as it is and in the Geometry workspace with faded
+element edges, until the part is meshed again with #ui("Mesh All Parts"), #ui("OK & Remesh"),
+#ui("Create Mesh") or the next #ui("Solve"). The app bar then says #ui("Mesh out of date for 1
+part"). Only a part that the geometry no longer has loses its mesh. #ui("Edges Only") on the #ui("View") tab hides the
 element edges, #ui("Mesh Edges") shows them again (@view). The edges are made in the
 background the first time the workspace is shown after meshing, so a large model does not
 hold up the view.
 
 #screenshot("geometry-mesh-edges.png", [Geometry workspace: the meshed part shows its element
   edges, the part without a mesh only its geometry])
+
+#screenshot("geometry-mesh-out-of-date.png", [Geometry workspace after a smaller maximum element
+  size: the mesh stays with faded element edges until the part is meshed again])
 
 Every part of the geometry that is not suppressed belongs to the FE model, meshed or not. The
 FE Model workspace lists a part without a mesh under #ui("Parts") in gray as
