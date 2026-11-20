@@ -304,6 +304,14 @@ pub fn merge_meshes(
                 ),
                 other => other,
             };
+            // The same mesh taken twice brings its sets twice: the second are other sets.
+            let written = copy.mesh.user_sets.contains_key(&set_item.id);
+            if out.mesh_sets.iter().any(|s| s.id == set_item.id) {
+                set_item.id = plx_model::Id::new();
+            }
+            if written {
+                (mesh.user_sets).insert(set_item.id, (set_item.kind, set_item.name.clone()));
+            }
             out.mesh_sets.push(set_item);
         }
         for mut element_type in copy.element_types {
@@ -1286,7 +1294,7 @@ pub fn take_objects(
     // What the FE model says about the link's meshes comes with them; its own stays.
     if cad_meshes || !mesh_sets.is_empty() || !element_types.is_empty() {
         // The sets the link brought last time go, the analysis' own stay; one whose name
-        // the link brings now is renamed.
+        // the link brings now is renamed, and the items on it keep it by id.
         let mut incoming_sets = mesh_sets;
         for set in &mut incoming_sets {
             set.linked = true;
@@ -1304,7 +1312,6 @@ pub fn take_objects(
                 .map(|n| format!("{old}-{n}"))
                 .find(|n| !taken(&incoming_sets, kind, n) && !taken(&own_sets, kind, n))
                 .unwrap_or_default();
-            fe.rename_set(kind, &old, &new);
             notes.push(format!(
                 "{} {old} renamed to {new}: the linked source has one of that name",
                 kind.label()

@@ -2797,7 +2797,7 @@ impl ProjectApp {
         (self.measure_link(id))
             .and_then(|l| self.nodes.iter().find(|n| n.id == l.source))
             .and_then(Node::link_data)
-            .map(|d| crate::measure::Sources::of(d.fe, measure_regions(&d)))
+            .map(|d| crate::measure::Sources::of(d.fe, d.mesh))
             .unwrap_or_default()
     }
 
@@ -2811,13 +2811,8 @@ impl ProjectApp {
         else {
             return String::new();
         };
-        let output = match measure.kind {
-            plx_model::MeasureKind::History { output, .. } => output,
-            _ => None,
-        };
         let sources = self.measure_sources(id);
-        let name = (sources.outputs.iter()).find(|o| Some(o.id) == output);
-        measure.kind.describe(name.map(|o| o.name.as_str()))
+        measure.kind.describe(|id| sources.name(id))
     }
 
     fn measured(&self, id: u64) -> Option<(&Node, u32, &plx_io::project::BoundResults)> {
@@ -10878,32 +10873,6 @@ fn export_rows(node: &Node, base: Option<&Path>, incoming: &[(Vec<String>, Strin
 /// The first part of the path of a parameter row of a mesh block.
 const PARAMETERS: &str = links::PARAMETERS;
 
-/// The regions a measure block can take its value in, by name, with their nodes on the mesh
-/// as it is now: the node sets of the mesh and of the model, and the regions of the boundary
-/// conditions and loads, such as "Fixed (boundary condition)". Those picked on the geometry
-/// or on the sides of a mesh block are found on each new mesh again.
-fn measure_regions(data: &links::Data) -> BTreeMap<String, Vec<plx_mesh::NodeId>> {
-    let mut regions: BTreeMap<String, Vec<plx_mesh::NodeId>> = data.mesh.node_sets.clone();
-    let mut add = |name: String, region: &plx_model::Region| {
-        let nodes = region.nodes(data.mesh);
-        if !nodes.is_empty() {
-            regions.entry(name).or_insert(nodes);
-        }
-    };
-    for set in &data.fe.mesh_sets {
-        add(set.name.clone(), &set.region);
-    }
-    for step in &data.fe.steps {
-        for bc in &step.boundary_conditions {
-            add(format!("{} (boundary condition)", bc.name), &bc.region);
-        }
-        for load in &step.loads {
-            add(format!("{} (load)", load.name), &load.region);
-        }
-    }
-    regions
-}
-
 /// The key of the factor of a refine mesh block, the parameter row it takes numbers at.
 /// Which mesh of an analysis counts for the fingerprint of the blocks a study runs.
 #[derive(Clone, Copy, PartialEq)]
@@ -14550,10 +14519,18 @@ mod tests {
                 fe: &fe,
                 origins: &Default::default(),
             };
-            let regions = measure_regions(&data);
+            let sources = crate::measure::Sources::of(data.fe, data.mesh);
+            let nodes = |name: &str| {
+                (sources.regions.iter())
+                    .find(|r| r.name == name)
+                    .map(|r| r.nodes.clone())
+            };
             // The face picked on the box is its side X+ on the coarse and the fine mesh.
-            assert_eq!(regions["Fixed (boundary condition)"], mesh.node_sets["X+"]);
-            assert!(regions.contains_key("X-"));
+            assert_eq!(
+                nodes("Fixed (boundary condition)").unwrap(),
+                mesh.node_sets["X+"]
+            );
+            assert!(nodes("X-").is_some());
         }
     }
 

@@ -19,11 +19,14 @@ pub enum Region {
     /// Picked element edges of 3D parts by their end nodes, e.g. the edge of a shell a
     /// surface traction acts on.
     Edges(Vec<[NodeId; 2]>),
-    /// A node set of the input file.
+    /// A user-defined set of the model ([`crate::MeshSet`]) by its id: renaming the set
+    /// keeps the region on it. Its members are those it wrote into the mesh.
+    Set(crate::Id),
+    /// A node set that came with the mesh, of an input file or a side of a mesh block.
     NodeSet(String),
-    /// An element set of the input file.
+    /// An element set that came with the mesh.
     ElementSet(String),
-    /// A surface of the input file.
+    /// A surface that came with the mesh.
     Surface(String),
     /// Faces, edges and vertices of the CAD geometry the mesh was generated from, picked
     /// on the geometry. They are found on the mesh again after remeshing.
@@ -53,8 +56,31 @@ impl Region {
         }
     }
 
+    /// The set of the mesh a [`Region::Set`] stands for, by its name; `None` for other regions
+    /// and for a user-defined set that wrote nothing into the mesh.
+    pub fn mesh_set(&self, mesh: &FeMesh) -> Option<Region> {
+        let Region::Set(id) = self else {
+            return None;
+        };
+        let (kind, name) = mesh.user_set(*id)?;
+        Some(Region::named(kind, name))
+    }
+
+    /// The region on the set of the mesh of the kind and name.
+    pub fn named(kind: crate::SetKind, name: &str) -> Region {
+        let name = name.to_owned();
+        match kind {
+            crate::SetKind::Nodes => Region::NodeSet(name),
+            crate::SetKind::Elements => Region::ElementSet(name),
+            crate::SetKind::Surface => Region::Surface(name),
+        }
+    }
+
     /// Elements of the region, for sections. Node and face selections have none.
     pub fn elements(&self, mesh: &FeMesh) -> Vec<ElementId> {
+        if let Region::Set(_) = self {
+            return (self.mesh_set(mesh)).map_or_else(Vec::new, |r| r.elements(mesh));
+        }
         let mut ids: BTreeSet<ElementId> = BTreeSet::new();
         match self {
             Region::Parts(parts) => {
@@ -70,7 +96,7 @@ impl Region {
                 ids.extend(mesh.cad_faces(entities).iter().map(|(e, _)| *e));
                 ids.extend(mesh.cad_line_elements(entities));
             }
-            Region::Nodes(_) | Region::NodeSet(_) | Region::Surface(_) => {}
+            Region::Nodes(_) | Region::NodeSet(_) | Region::Surface(_) | Region::Set(_) => {}
             Region::Edges(_) | Region::ReferencePoint(_) | Region::RemotePoint(_) => {}
         }
         ids.into_iter().collect()
@@ -78,6 +104,9 @@ impl Region {
 
     /// Nodes of the region in ascending order, for boundary conditions and point loads.
     pub fn nodes(&self, mesh: &FeMesh) -> Vec<NodeId> {
+        if let Region::Set(_) = self {
+            return (self.mesh_set(mesh)).map_or_else(Vec::new, |r| r.nodes(mesh));
+        }
         let mut ids: BTreeSet<NodeId> = BTreeSet::new();
         let element_nodes = |ids: &mut BTreeSet<NodeId>, elements: &[ElementId]| {
             for element in elements.iter().filter_map(|&e| mesh.element(e)) {
@@ -102,7 +131,7 @@ impl Region {
                 }
                 None => {}
             },
-            Region::ReferencePoint(_) | Region::RemotePoint(_) => {}
+            Region::ReferencePoint(_) | Region::RemotePoint(_) | Region::Set(_) => {}
         }
         ids.into_iter().collect()
     }
@@ -119,6 +148,7 @@ impl Region {
     /// Element faces of the region, for pressure loads.
     pub fn faces(&self, mesh: &FeMesh) -> Vec<(ElementId, u8)> {
         match self {
+            Region::Set(_) => (self.mesh_set(mesh)).map_or_else(Vec::new, |r| r.faces(mesh)),
             Region::Faces(faces) => faces.clone(),
             Region::Geometry(entities) => mesh.cad_faces(entities),
             Region::Surface(name) => match mesh.surfaces.get(name) {
@@ -160,6 +190,8 @@ impl Region {
             Region::NodeSet(name) | Region::ElementSet(name) | Region::Surface(name) => {
                 name.clone()
             }
+            Region::Set(id) => (model.mesh_set_by_id(*id))
+                .map_or_else(|| "(missing set)".into(), |s| s.name.clone()),
             Region::Geometry(entities) => describe_entities(entities),
             Region::ReferencePoint(id) => (model.reference_point(*id))
                 .map_or_else(|| "(missing reference point)".into(), |r| r.name.clone()),

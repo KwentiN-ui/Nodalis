@@ -5977,7 +5977,10 @@ impl Workbench {
                     .fe
                     .mesh_sets
                     .retain(|s| s.kind != kind || s.name != name);
-                model.edit_mesh_in_place(|mesh, _| kind.remove(mesh, name));
+                model.edit_mesh_in_place(|mesh, _| {
+                    kind.remove(mesh, name);
+                    (mesh.user_sets).retain(|_, (k, n)| *k != kind || n != name);
+                });
                 self.tree.selected = None;
                 self.editor = None;
                 self.highlighted = None;

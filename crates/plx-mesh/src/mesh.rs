@@ -152,12 +152,66 @@ pub struct FeMesh {
     pub node_sets: BTreeMap<String, Vec<NodeId>>,
     pub element_sets: BTreeMap<String, Vec<ElementId>>,
     pub surfaces: BTreeMap<String, SurfaceDefinition>,
+    /// The sets above that the model's user-defined sets wrote, by the id of the user-defined
+    /// set: regions refer to those by id, so that renaming a set keeps them.
+    pub user_sets: BTreeMap<Id, (SetKind, String)>,
     pub parts: Vec<Part>,
     /// Where the CAD entities lie, for a mesh generated from geometry.
     pub cad: CadMap,
 }
 
+/// What a set of the mesh holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SetKind {
+    Nodes,
+    Elements,
+    /// Element faces, in 2D models the edges of the plane elements.
+    Surface,
+}
+
+impl SetKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            SetKind::Nodes => "Node Set",
+            SetKind::Elements => "Element Set",
+            SetKind::Surface => "Surface",
+        }
+    }
+
+    /// The default name prefix.
+    pub fn prefix(self) -> &'static str {
+        match self {
+            SetKind::Nodes => "Node_Set",
+            SetKind::Elements => "Element_Set",
+            SetKind::Surface => "Surface",
+        }
+    }
+
+    /// Names of the mesh's sets of this kind.
+    pub fn names(self, mesh: &FeMesh) -> Vec<&str> {
+        match self {
+            SetKind::Nodes => mesh.node_sets.keys().map(String::as_str).collect(),
+            SetKind::Elements => mesh.element_sets.keys().map(String::as_str).collect(),
+            SetKind::Surface => mesh.surfaces.keys().map(String::as_str).collect(),
+        }
+    }
+
+    /// Takes the set of the name out of the mesh.
+    pub fn remove(self, mesh: &mut FeMesh, name: &str) -> bool {
+        match self {
+            SetKind::Nodes => mesh.node_sets.remove(name).is_some(),
+            SetKind::Elements => mesh.element_sets.remove(name).is_some(),
+            SetKind::Surface => mesh.surfaces.remove(name).is_some(),
+        }
+    }
+}
+
 impl FeMesh {
+    /// The kind and name of the set the user-defined set of the id wrote into the mesh.
+    pub fn user_set(&self, id: Id) -> Option<(SetKind, &str)> {
+        (self.user_sets.get(&id)).map(|(kind, name)| (*kind, name.as_str()))
+    }
+
     /// Adds a node or moves an existing one; returns true if the id was already defined.
     pub fn set_node(&mut self, id: NodeId, coords: [f64; 3]) -> bool {
         match self.node_lookup.get(&id) {
@@ -1081,6 +1135,8 @@ struct MeshFile {
     node_sets: BTreeMap<String, Vec<NodeId>>,
     element_sets: BTreeMap<String, Vec<ElementId>>,
     surfaces: BTreeMap<String, SurfaceDefinition>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    user_sets: BTreeMap<Id, (SetKind, String)>,
     parts: Vec<Part>,
     #[serde(default, skip_serializing_if = "CadMap::is_empty")]
     cad: CadMap,
@@ -1097,6 +1153,7 @@ impl From<FeMesh> for MeshFile {
             node_sets: mesh.node_sets,
             element_sets: mesh.element_sets,
             surfaces: mesh.surfaces,
+            user_sets: mesh.user_sets,
             parts: mesh.parts,
             cad: mesh.cad,
         }
@@ -1128,6 +1185,7 @@ impl TryFrom<MeshFile> for FeMesh {
         mesh.node_sets = file.node_sets;
         mesh.element_sets = file.element_sets;
         mesh.surfaces = file.surfaces;
+        mesh.user_sets = file.user_sets;
         mesh.parts = file.parts;
         mesh.cad = file.cad;
         Ok(mesh)

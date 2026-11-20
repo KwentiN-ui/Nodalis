@@ -162,7 +162,7 @@ impl FeModel {
             }
         };
         let region = |region: &mut Region, visit: &mut dyn FnMut(&mut Id)| match region {
-            Region::ReferencePoint(id) | Region::RemotePoint(id) => visit(id),
+            Region::ReferencePoint(id) | Region::RemotePoint(id) | Region::Set(id) => visit(id),
             _ => {}
         };
         let point = |point: &mut PointRef, visit: &mut dyn FnMut(&mut Id)| {

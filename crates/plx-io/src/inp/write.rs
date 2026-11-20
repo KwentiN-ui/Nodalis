@@ -1465,6 +1465,8 @@ impl<'a> Sets<'a> {
 
     /// Element set holding the elements of a region.
     fn element_set(&mut self, item: &str, region: &Region) -> Result<String, WriteError> {
+        let named = region.mesh_set(self.mesh);
+        let region = named.as_ref().unwrap_or(region);
         let members = match region {
             Region::ElementSet(set) => return Ok(set.clone()),
             Region::Parts(parts) if !parts.is_empty() => Members::Parts(
@@ -1517,6 +1519,8 @@ impl<'a> Sets<'a> {
 
     /// Node set holding the nodes of a region.
     fn node_set(&mut self, item: &str, region: &Region) -> Result<String, WriteError> {
+        let named = region.mesh_set(self.mesh);
+        let region = named.as_ref().unwrap_or(region);
         match region {
             Region::NodeSet(set) => return Ok(set.clone()),
             Region::ReferencePoint(point) => {
@@ -1541,6 +1545,8 @@ impl<'a> Sets<'a> {
     /// Surface of a contact or tie side: a surface of the input file, or one built from
     /// picked faces and named like `Internal_Selection-1_Tie-1_Master`.
     fn surface(&mut self, item: &str, side: &str, region: &Region) -> Result<String, WriteError> {
+        let named = region.mesh_set(self.mesh);
+        let region = named.as_ref().unwrap_or(region);
         match region {
             Region::Surface(surface) if self.mesh.surfaces.contains_key(surface) => {
                 Ok(surface.clone())
@@ -1584,6 +1590,8 @@ impl<'a> Sets<'a> {
 
     /// Element sets and face numbers of a face region, for pressure loads.
     fn face_sets(&mut self, item: &str, region: &Region) -> Result<Vec<(String, u8)>, WriteError> {
+        let named = region.mesh_set(self.mesh);
+        let region = named.as_ref().unwrap_or(region);
         match region {
             Region::Surface(surface) => {
                 if let Some((sides, _)) = self.surface_sets.get(surface) {
@@ -4779,7 +4787,8 @@ fn step_block<'f>(
             } => {
                 let faces = load.region.faces(sets.mesh);
                 let edges = load.region.edges(sets.mesh);
-                let bodies = matches!(load.region, Region::Parts(_) | Region::ElementSet(_));
+                let region = (load.region.mesh_set(sets.mesh)).unwrap_or(load.region.clone());
+                let bodies = matches!(region, Region::Parts(_) | Region::ElementSet(_));
                 let axisymmetric = space == ModelSpace::Axisymmetric;
                 // On points the nodes share the heat flow equally; with `each_node` every
                 // node of the region takes the whole of it.

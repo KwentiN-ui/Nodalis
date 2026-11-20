@@ -10,8 +10,15 @@ pub enum MeasureRegion {
     /// Every node of the results.
     #[default]
     All,
-    /// The nodes of a node set of the analysis' mesh.
+    /// The nodes of a node set that came with the analysis' mesh, such as a side of a mesh
+    /// block, by its name.
     NodeSet(String),
+    /// The nodes of a user-defined set of the analysis ([`crate::MeshSet`]).
+    Set(crate::Id),
+    /// The nodes of the region of a boundary condition of the analysis.
+    BoundaryCondition(crate::Id),
+    /// The nodes of the region of a load of the analysis.
+    Load(crate::Id),
 }
 
 /// What a Measure block computes from the results of a step: of its last increment, or of the
@@ -154,9 +161,9 @@ impl MeasureKind {
         true
     }
 
-    /// A short text of what it measures: "STRESS MISES in TIP"; `output` names the history
-    /// output of a measure of one.
-    pub fn describe(&self, output: Option<&str>) -> String {
+    /// A short text of what it measures: "STRESS MISES in TIP"; `name` names the items of the
+    /// analysis it refers to by id: its region or history output.
+    pub fn describe(&self, name: impl Fn(crate::Id) -> Option<String>) -> String {
         match self {
             Self::FieldValues {
                 field,
@@ -166,6 +173,11 @@ impl MeasureKind {
                 let region = match region {
                     MeasureRegion::All => String::new(),
                     MeasureRegion::NodeSet(set) => format!(" in {set}"),
+                    MeasureRegion::Set(id)
+                    | MeasureRegion::BoundaryCondition(id)
+                    | MeasureRegion::Load(id) => {
+                        format!(" in {}", name(*id).unwrap_or_else(|| "(deleted)".into()))
+                    }
                 };
                 format!("{field} {component}{region}")
             }
@@ -181,10 +193,11 @@ impl MeasureKind {
                 field,
                 component,
                 whole,
-                ..
+                output,
             } => {
                 let take = if *whole { "History of " } else { "" };
-                let output = output.unwrap_or("(no history output)");
+                let output =
+                    (output.and_then(&name)).unwrap_or_else(|| "(no history output)".into());
                 format!("{take}{field} {component} of {output}")
             }
             Self::Eigenfrequency { mode } => format!("Eigenfrequency of mode {mode}"),

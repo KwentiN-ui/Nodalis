@@ -32,12 +32,21 @@ impl Measured {
     }
 }
 
-/// What a measure refers to in the analysis whose results it reads: the node sets of its
-/// mesh and its history outputs.
+/// What a measure refers to in the analysis whose results it reads: the regions of its mesh
+/// and model and its history outputs.
 #[derive(Clone, Debug, Default)]
 pub struct Sources {
-    pub node_sets: BTreeMap<String, Vec<NodeId>>,
+    pub regions: Vec<RegionNodes>,
     pub outputs: Vec<OutputSet>,
+}
+
+/// A region a measure can take its values in, with its name and its nodes on the mesh as it
+/// is now.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegionNodes {
+    pub region: MeasureRegion,
+    pub name: String,
+    pub nodes: Vec<NodeId>,
 }
 
 /// A history output of the analysis, with the set of the history the results show it as.
@@ -49,8 +58,45 @@ pub struct OutputSet {
 }
 
 impl Sources {
-    /// What `fe` and its mesh offer.
-    pub fn of(fe: &plx_model::FeModel, node_sets: BTreeMap<String, Vec<NodeId>>) -> Self {
+    /// What `fe` and its mesh offer: the node sets of the mesh, the user-defined sets and the
+    /// regions of the boundary conditions and loads, such as "Fixed (boundary condition)".
+    /// Those picked on the geometry or on the sides of a mesh block are found on each new
+    /// mesh again.
+    pub fn of(fe: &plx_model::FeModel, mesh: &plx_mesh::FeMesh) -> Self {
+        let mut regions: Vec<RegionNodes> = (mesh.node_sets.iter())
+            .filter(|(name, _)| {
+                !(mesh.user_sets.values())
+                    .any(|(k, n)| *k == plx_model::SetKind::Nodes && n == *name)
+            })
+            .map(|(name, nodes)| RegionNodes {
+                region: MeasureRegion::NodeSet(name.clone()),
+                name: name.clone(),
+                nodes: nodes.clone(),
+            })
+            .collect();
+        let mut add = |region: MeasureRegion, name: String, of: &plx_model::Region| {
+            let nodes = of.nodes(mesh);
+            if !nodes.is_empty() && !regions.iter().any(|r| r.region == region) {
+                regions.push(RegionNodes {
+                    region,
+                    name,
+                    nodes,
+                });
+            }
+        };
+        for set in &fe.mesh_sets {
+            add(MeasureRegion::Set(set.id), set.name.clone(), &set.region);
+        }
+        for step in &fe.steps {
+            for bc in &step.boundary_conditions {
+                let name = format!("{} (boundary condition)", bc.name);
+                add(MeasureRegion::BoundaryCondition(bc.id), name, &bc.region);
+            }
+            for load in &step.loads {
+                let name = format!("{} (load)", load.name);
+                add(MeasureRegion::Load(load.id), name, &load.region);
+            }
+        }
         let outputs = (fe.history_outputs.iter())
             .map(|output| OutputSet {
                 id: output.id,
@@ -58,11 +104,34 @@ impl Sources {
                 set: plx_io::dat::history_set_name(fe, output),
             })
             .collect();
-        Self { node_sets, outputs }
+        Self { regions, outputs }
     }
 
     fn output(&self, id: Option<plx_model::Id>) -> Option<&OutputSet> {
         self.outputs.iter().find(|o| Some(o.id) == id)
+    }
+
+    fn region(&self, region: &MeasureRegion) -> Option<&RegionNodes> {
+        self.regions.iter().find(|r| r.region == *region)
+    }
+
+    /// The name of the region or history output of the id.
+    pub fn name(&self, id: plx_model::Id) -> Option<String> {
+        (self
+            .outputs
+            .iter()
+            .find(|o| o.id == id)
+            .map(|o| o.name.clone()))
+        .or_else(|| {
+            (self.regions.iter())
+                .find(|r| match r.region {
+                    MeasureRegion::Set(i)
+                    | MeasureRegion::BoundaryCondition(i)
+                    | MeasureRegion::Load(i) => i == id,
+                    _ => false,
+                })
+                .map(|r| r.name.clone())
+        })
     }
 }
 
@@ -113,9 +182,10 @@ pub fn evaluate_expanded(
             let values = component(field, name)?;
             let picked: Vec<f64> = match region {
                 MeasureRegion::All => values.iter().map(|&v| f64::from(v)).collect(),
-                MeasureRegion::NodeSet(set) => {
-                    let nodes = (sources.node_sets.get(set))
-                        .ok_or_else(|| format!("the mesh has no node set {set}"))?;
+                region => {
+                    let nodes = &(sources.region(region))
+                        .ok_or_else(|| "the analysis no longer has the region".to_owned())?
+                        .nodes;
                     (nodes.iter())
                         .flat_map(|&id| indices(id))
                         .filter_map(|index| values.get(index))
@@ -418,8 +488,8 @@ pub struct MeasureEditor {
     pub id: u64,
     name: String,
     kind: MeasureKind,
-    /// The node sets of the mesh of the results linked to it, to pick from.
-    node_sets: Vec<String>,
+    /// The regions of the analysis of the results linked to it, to pick from, by name.
+    regions: Vec<(MeasureRegion, String)>,
     /// The history outputs of the analysis of the results linked to it, to pick from.
     outputs: Vec<OutputSet>,
     /// The fields and components of the results linked to it, to pick from.
@@ -447,7 +517,9 @@ impl MeasureEditor {
             id,
             name: name.to_owned(),
             kind,
-            node_sets: sources.node_sets.into_keys().collect(),
+            regions: (sources.regions.into_iter())
+                .map(|r| (r.region, r.name))
+                .collect(),
             outputs: sources.outputs,
             choices: offered.map_or(Choices::Typed, Choices::Reading),
         }
@@ -553,17 +625,20 @@ impl MeasureEditor {
             } => {
                 field_and_component(ui, offered.map(|o| o.fields.as_slice()), field, component);
                 ui.label("Region");
-                let shown = match region {
+                let shown = match &*region {
                     MeasureRegion::All => "All nodes".to_owned(),
                     MeasureRegion::NodeSet(set) => set.clone(),
+                    other => (self.regions.iter())
+                        .find(|(r, _)| r == other)
+                        .map_or_else(|| "(deleted)".to_owned(), |(_, name)| name.clone()),
                 };
                 egui::ComboBox::from_id_salt("measure region")
                     .selected_text(shown)
                     .width(200.0)
                     .show_ui(ui, |ui| {
                         ui.selectable_value(region, MeasureRegion::All, "All nodes");
-                        for set in &self.node_sets {
-                            ui.selectable_value(region, MeasureRegion::NodeSet(set.clone()), set);
+                        for (choice, name) in &self.regions {
+                            ui.selectable_value(region, choice.clone(), name);
                         }
                     });
                 ui.end_row();
@@ -798,7 +873,11 @@ mod tests {
         assert!(max > 0.0);
         let first = frd.mesh.node_ids()[0];
         let sets = Sources {
-            node_sets: BTreeMap::from([("ONE".to_owned(), vec![first])]),
+            regions: vec![RegionNodes {
+                region: MeasureRegion::NodeSet("ONE".into()),
+                name: "ONE".into(),
+                nodes: vec![first],
+            }],
             ..Sources::default()
         };
         let in_set = MeasureKind::FieldValues {
@@ -869,7 +948,11 @@ mod tests {
         let expanded = plx_io::frd::expanded_nodes(&input, &frd.mesh);
         let step = frd.increments.last().unwrap().step;
         let sets = Sources {
-            node_sets: BTreeMap::from([("CLAMP".to_owned(), vec![1, 2, 3])]),
+            regions: vec![RegionNodes {
+                region: MeasureRegion::NodeSet("CLAMP".into()),
+                name: "CLAMP".into(),
+                nodes: vec![1, 2, 3],
+            }],
             ..Sources::default()
         };
         let measure = |kind: &MeasureKind| {

@@ -2443,6 +2443,7 @@ pub fn merge_parts(mesh: &FeMesh, mut part_meshes: Vec<FeMesh>) -> FeMesh {
             (name.clone(), nodes.collect())
         })
         .collect();
+    merged.user_sets = mesh.user_sets.clone();
     merged.element_sets = (mesh.element_sets.iter())
         .map(|(name, elements)| {
             let elements = elements.iter().copied().filter(|e| !removed.contains(e));
