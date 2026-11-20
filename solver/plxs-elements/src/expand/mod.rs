@@ -1426,13 +1426,12 @@ impl Expander {
         let family = original.element(ids[0]).map(|e| e.kind.family());
         match kind {
             // Shells: `P` is a pressure on the bottom face, acting along the normal.
-            DistributedLoadKind::Other { label, values }
-                if label == "P"
-                    && matches!(family, Some(ElementFamily::Shell | ElementFamily::Membrane)) =>
+            DistributedLoadKind::ShellPressure { value }
+                if matches!(family, Some(ElementFamily::Shell | ElementFamily::Membrane)) =>
             {
                 *kind = DistributedLoadKind::Pressure {
                     face: 1,
-                    value: values.first().copied().unwrap_or(0.0),
+                    value: *value,
                 };
             }
             DistributedLoadKind::Pressure { face, .. } if family == Some(ElementFamily::Beam) => {
