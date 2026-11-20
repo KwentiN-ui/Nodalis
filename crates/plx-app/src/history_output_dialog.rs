@@ -84,7 +84,7 @@ pub struct HistoryOutputDialog {
     size: SizeKind,
     elements: RegionDraft,
     hot_spot: Option<plx_model::Id>,
-    moving_load: Option<plx_model::Id>,
+    moving_load: Option<plx_model::Id<plx_model::Load>>,
     focus: &'static str,
     pub error: Option<String>,
     picker: Picker,
@@ -96,7 +96,7 @@ pub struct HistoryOutputDialog {
     /// Hot spots of the results and moving loads of the FE model, by id with their names;
     /// a moving load by the id of its first load.
     hot_spots: Vec<(plx_model::Id, String)>,
-    moving_loads: Vec<(plx_model::Id, String)>,
+    moving_loads: Vec<(plx_model::Id<plx_model::Load>, String)>,
 }
 
 impl HistoryOutputDialog {
@@ -541,7 +541,7 @@ impl HistoryOutputDialog {
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(moving_load, None, NO_MOVING_LOAD);
                                     for (id, name) in moving_loads {
-                                        ui.selectable_value(moving_load, Some(*id), name);
+                                        ui.selectable_value(moving_load, Some(id.cast()), name);
                                     }
                                 });
                             response.response.clicked()

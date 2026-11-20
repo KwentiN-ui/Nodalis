@@ -2488,7 +2488,7 @@ impl FeModel {
     /// Amplitudes that nothing refers to: a forgotten choice in a load or boundary condition
     /// leaves the model without the motion the amplitude was made for.
     fn check_amplitudes(&self, findings: &mut Vec<Finding>) {
-        let used: HashSet<crate::Id> = (self.steps.iter())
+        let used: HashSet<crate::Id<crate::Amplitude>> = (self.steps.iter())
             .flat_map(|step| {
                 let bcs = step.boundary_conditions.iter().map(|b| &b.amplitude);
                 let loads = (step.loads.iter()).flat_map(|l| [&l.amplitude, &l.factor_amplitude]);
@@ -3440,7 +3440,7 @@ impl FeModel {
 
     /// Degrees of freedom (0..6) the active boundary conditions of the step prescribe at a
     /// reference point.
-    fn point_dofs(&self, s: usize, point: crate::Id) -> Vec<usize> {
+    fn point_dofs(&self, s: usize, point: crate::Id<crate::ReferencePoint>) -> Vec<usize> {
         let step = &self.steps[s];
         let dofs = if self.properties.space.is_2d() { 2 } else { 6 };
         let mut out = Vec::new();
@@ -3762,7 +3762,7 @@ impl FeModel {
                 support(node, axes[dof % 3], dof >= 3);
             }
             // Springs to ground on the point hold it in the global directions.
-            for dof in self.spring_point_dofs(&Region::RemotePoint(bc.id)) {
+            for dof in self.spring_point_dofs(&Region::RemotePoint(bc.id.any())) {
                 support(node, axis(dof % 3), dof >= 3);
             }
         }
@@ -3779,7 +3779,7 @@ impl FeModel {
                 join(&mut ties, &tied, &[]);
                 join(&mut contacts, &tied, &[]);
                 let id = self.steps[s].loads[i].id;
-                let springs = self.spring_point_dofs(&Region::RemotePoint(id));
+                let springs = self.spring_point_dofs(&Region::RemotePoint(id.any()));
                 if let (false, Some(node)) =
                     (springs.is_empty(), nearest_node(mesh, &region, position))
                 {
@@ -5373,7 +5373,7 @@ mod tests {
         assert!(detail.ends_with(": rotation about Z free"), "{detail}");
         let mut spring = crate::Spring::new("Torsion");
         spring.ends = [
-            crate::SpringEnd::Region(Region::RemotePoint(hinge)),
+            crate::SpringEnd::Region(Region::RemotePoint(hinge.any())),
             crate::SpringEnd::World,
         ];
         spring.rotational = [0.0, 0.0, 100.0];

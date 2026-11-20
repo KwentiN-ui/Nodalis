@@ -128,7 +128,7 @@ impl StepCategory {
 pub struct StepRecord {
     /// The step of the FE model, by its id; `None` for results that do not name it (those
     /// of an input file).
-    pub step: Option<plx_model::Id>,
+    pub step: Option<plx_model::Id<plx_model::Step>>,
     pub name: String,
     pub category: StepCategory,
     /// Computed with large deformations.
@@ -212,7 +212,7 @@ pub struct IncrementRecord {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResultStep {
     /// The step of the FE model, see [`StepRecord::step`].
-    pub step: Option<plx_model::Id>,
+    pub step: Option<plx_model::Id<plx_model::Step>>,
     pub name: String,
     pub category: StepCategory,
     pub nlgeom: bool,

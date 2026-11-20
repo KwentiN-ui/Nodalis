@@ -52,7 +52,7 @@ pub struct RegionNodes {
 /// A history output of the analysis, with the set of the history the results show it as.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutputSet {
-    pub id: plx_model::Id,
+    pub id: plx_model::Id<plx_model::HistoryOutput>,
     pub name: String,
     pub set: String,
 }
@@ -107,7 +107,7 @@ impl Sources {
         Self { regions, outputs }
     }
 
-    fn output(&self, id: Option<plx_model::Id>) -> Option<&OutputSet> {
+    fn output(&self, id: Option<plx_model::Id<plx_model::HistoryOutput>>) -> Option<&OutputSet> {
         self.outputs.iter().find(|o| Some(o.id) == id)
     }
 
@@ -120,14 +120,14 @@ impl Sources {
         (self
             .outputs
             .iter()
-            .find(|o| o.id == id)
+            .find(|o| o.id.any() == id)
             .map(|o| o.name.clone()))
         .or_else(|| {
             (self.regions.iter())
                 .find(|r| match r.region {
-                    MeasureRegion::Set(i)
-                    | MeasureRegion::BoundaryCondition(i)
-                    | MeasureRegion::Load(i) => i == id,
+                    MeasureRegion::Set(i) => i.any() == id,
+                    MeasureRegion::BoundaryCondition(i) => i.any() == id,
+                    MeasureRegion::Load(i) => i.any() == id,
                     _ => false,
                 })
                 .map(|r| r.name.clone())
@@ -265,7 +265,7 @@ pub fn evaluate_expanded(
             // The built-in solver names the output a set comes from; a `.dat` file of
             // CalculiX only the set's name.
             let history = (dat.sets.iter())
-                .find(|s| s.output == Some(output.id))
+                .find(|s| s.output == Some(output.id.any()))
                 .or_else(|| {
                     (dat.sets.iter())
                         .find(|s| s.output.is_none() && s.name.eq_ignore_ascii_case(&output.set))

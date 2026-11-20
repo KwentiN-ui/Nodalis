@@ -11,7 +11,7 @@ use crate::{CompressionOnly, PointMass, Region, RigidBody, Spring, SpringEnd};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SurfaceInteraction {
     /// The internal identity other items refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     /// The interaction models in the order the user added them; each kind at most once.
     pub properties: Vec<InteractionProperty>,
@@ -248,12 +248,12 @@ impl ContactMethod {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContactPair {
     /// The internal identity other items refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     /// A deactivated contact pair is written to the input file as a comment only.
     pub active: bool,
     /// Name of the surface interaction.
-    pub interaction: Option<crate::Id>,
+    pub interaction: Option<crate::Id<crate::SurfaceInteraction>>,
     pub method: ContactMethod,
     /// Pairing only at the start of each increment; node to surface contact only.
     pub small_sliding: bool,
@@ -285,7 +285,10 @@ impl ContactPair {
         self.name = swapped_name(&self.name);
     }
 
-    pub fn new(name: impl Into<String>, interaction: Option<crate::Id>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        interaction: Option<crate::Id<SurfaceInteraction>>,
+    ) -> Self {
         Self {
             id: crate::Id::new(),
             name: name.into(),
@@ -315,11 +318,11 @@ pub enum Constraint {
 impl Constraint {
     pub fn id(&self) -> crate::Id {
         match self {
-            Constraint::Spring(c) => c.id,
-            Constraint::CompressionOnly(c) => c.id,
-            Constraint::RigidBody(c) => c.id,
-            Constraint::PointMass(c) => c.id,
-            Constraint::Joint(c) => c.id,
+            Constraint::Spring(c) => c.id.any(),
+            Constraint::CompressionOnly(c) => c.id.any(),
+            Constraint::RigidBody(c) => c.id.any(),
+            Constraint::PointMass(c) => c.id.any(),
+            Constraint::Joint(c) => c.id.any(),
         }
     }
 
@@ -462,7 +465,7 @@ pub struct Coupling<'a> {
     pub name: &'a str,
     pub active: bool,
     pub region: &'a Region,
-    pub reference_point: crate::Id,
+    pub reference_point: crate::Id<crate::ReferencePoint>,
     pub behavior: crate::RemoteBehavior,
 }
 
@@ -470,7 +473,7 @@ pub struct Coupling<'a> {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Tie {
     /// The internal identity others refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub active: bool,
     /// Distance within which slave nodes are tied; `None` lets the solver choose.

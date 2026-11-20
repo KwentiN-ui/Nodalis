@@ -49,9 +49,13 @@ impl FeModel {
     /// The item of the tree with id `id`, for an error of the lowering that names the item
     /// it was lowering: in the step with id `step` first, since an item of a step acts in
     /// the steps after it by the same id.
-    pub fn item_with_id(&self, id: crate::Id, step: Option<crate::Id>) -> Option<ModelItem> {
-        fn at<T>(items: &[T], id: crate::Id, of: impl Fn(&T) -> crate::Id) -> Option<usize> {
-            items.iter().position(|x| of(x) == id)
+    pub fn item_with_id(
+        &self,
+        id: crate::Id,
+        step: Option<crate::Id<crate::Step>>,
+    ) -> Option<ModelItem> {
+        fn at<T, U>(items: &[T], id: crate::Id, of: impl Fn(&T) -> crate::Id<U>) -> Option<usize> {
+            items.iter().position(|x| of(x).any() == id)
         }
         let first = (self.steps.iter()).position(|s| Some(s.id) == step);
         let order = first
@@ -59,7 +63,7 @@ impl FeModel {
             .chain((0..self.steps.len()).filter(|&s| Some(s) != first));
         for s in order {
             let step = &self.steps[s];
-            if step.id == id {
+            if step.id.any() == id {
                 return Some(ModelItem::Step(s));
             }
             if let Some(i) = at(&step.boundary_conditions, id, |b| b.id) {
@@ -71,7 +75,11 @@ impl FeModel {
             if let Some(i) = at(&step.defined_fields, id, |f| f.id) {
                 return Some(ModelItem::DefinedField(s, i));
             }
-            if let Some(i) = self.step_history_outputs(s).iter().position(|o| o.id == id) {
+            if let Some(i) = self
+                .step_history_outputs(s)
+                .iter()
+                .position(|o| o.id.any() == id)
+            {
                 return Some(ModelItem::HistoryOutput(s, i));
             }
         }
@@ -422,12 +430,12 @@ impl FeModel {
     }
 
     /// The reference point, if the model does not have it.
-    fn missing_reference_point(&self, id: Id) -> Option<String> {
+    fn missing_reference_point(&self, id: Id<crate::ReferencePoint>) -> Option<String> {
         (self.reference_point(id).is_none()).then(|| "The reference point does not exist".into())
     }
 
     /// The rigid body that couples a reference point, if one does.
-    pub fn rigid_body_of(&self, point: Id) -> Option<&crate::RigidBody> {
+    pub fn rigid_body_of(&self, point: Id<crate::ReferencePoint>) -> Option<&crate::RigidBody> {
         self.constraints.iter().find_map(|c| match c {
             Constraint::RigidBody(body) if body.active && body.reference_point == point => {
                 Some(body)
@@ -549,7 +557,7 @@ impl FeModel {
     }
 
     /// The distribution reference, if the model does not have it.
-    fn missing_distribution(&self, reference: &Option<Id>) -> Option<String> {
+    fn missing_distribution(&self, reference: &Option<Id<crate::Distribution>>) -> Option<String> {
         (*reference)
             .filter(|&id| self.distribution(id).is_none())
             .map(|_| "The distribution does not exist".into())
@@ -558,7 +566,7 @@ impl FeModel {
     /// The first of the amplitude references the model does not have.
     fn missing_amplitude<'a>(
         &self,
-        references: impl IntoIterator<Item = &'a Option<Id>>,
+        references: impl IntoIterator<Item = &'a Option<Id<crate::Amplitude>>>,
     ) -> Option<String> {
         (references.into_iter().flatten())
             .find(|&&id| self.amplitude(id).is_none())

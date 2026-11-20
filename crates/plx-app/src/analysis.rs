@@ -364,30 +364,26 @@ impl InitialTemperatures {
     }
 }
 
-/// Prepares what the model takes from the results of other analyses: the stored eigenmodes
-/// are copied to `<name>.eig`, where the solver reads them; the initial temperatures are
-/// read from their results file.
+/// Reads what the model takes from the results of other analyses for a run of the built-in
+/// solver: the file of the stored eigenmodes, which the solver reads where it is, and the
+/// initial temperatures, read from their results file.
 pub fn stage_linked_results(
     fe: &plx_model::FeModel,
-    dir: &std::path::Path,
-    name: &str,
-) -> Result<Option<InitialTemperatures>, String> {
-    if let Some(stored) = &fe.properties.stored_modes {
-        let Some(modes) = stored.path().filter(|p| p.is_file()) else {
-            return Err(format!(
-                "The eigenmodes {} are gone: solve the analysis they come from again.",
-                stored.label()
-            ));
-        };
-        let target = dir.join(format!("{name}.eig"));
-        if modes != target {
-            std::fs::create_dir_all(dir)
-                .and_then(|()| std::fs::copy(modes, &target))
-                .map_err(|e| format!("Eigenmodes {} not copied: {e}", modes.display()))?;
-        }
-    }
+) -> Result<(Option<std::path::PathBuf>, Option<InitialTemperatures>), String> {
+    let modes = match &fe.properties.stored_modes {
+        None => None,
+        Some(stored) => match stored.path().filter(|p| p.is_file()) {
+            Some(modes) => Some(modes.to_path_buf()),
+            None => {
+                return Err(format!(
+                    "The eigenmodes {} are gone: solve the analysis they come from again.",
+                    stored.label()
+                ));
+            }
+        },
+    };
     let Some((linked, step)) = &fe.properties.initial_temperatures else {
-        return Ok(None);
+        return Ok((modes, None));
     };
     let file = (linked.path()).ok_or_else(|| {
         format!(
@@ -406,12 +402,13 @@ pub fn stage_linked_results(
                 file.display()
             )
         })?;
-    Ok(Some(InitialTemperatures {
+    let initial = InitialTemperatures {
         source: format!("step {step} of {}", file.display()),
         values: (results.mesh.node_ids().iter().copied())
             .zip(temperatures.values.get().iter().map(|&t| f64::from(t)))
             .collect(),
-    }))
+    };
+    Ok((modes, Some(initial)))
 }
 
 impl Analysis {
@@ -437,7 +434,7 @@ impl Analysis {
         }
         // What the run solves, before anything of the run (linked results) is added.
         // A suppressed geometry object takes part in nothing, with its geometry and its mesh.
-        let mut active = model.active();
+        let active = model.active();
         let prints = crate::solve_fingerprint::fingerprints(&active);
         let heading = format!("Nodalis: {}", model.file_name());
         let job_name = job_name(name);
@@ -451,8 +448,10 @@ impl Analysis {
                 prints,
             );
         }
-        stage_global_results(active.fe_mut(), work_dir, &job_name)?;
-        let initial = stage_linked_results(active.fe(), work_dir, &job_name)?;
+        // What other analyses hand over is read here and given to the solver as values,
+        // or, for eigenmodes, as the file where it is: nothing is copied into the work
+        // directory.
+        let (modes, initial) = stage_linked_results(active.fe())?;
         // The sets of the analyses that continue from its states go into the input file too.
         // The model check reads the whole input with its steps: it checks every step's
         // supports.
@@ -466,6 +465,19 @@ impl Analysis {
         if let Some(initial) = &initial {
             initial.apply(&mut lowered.analysis)?;
         }
+        if let Some(modes) = modes {
+            lowered.analysis.model.stored_modes = Some(plxs_core::handover::Source::Path(modes));
+        }
+        let mut files: Vec<std::path::PathBuf> = (fe.result_files().into_iter())
+            .map(std::path::Path::to_path_buf)
+            .collect();
+        files.extend(
+            fe.properties
+                .submodel_input()
+                .map(std::path::Path::to_path_buf),
+        );
+        plx_solve::handover::load(&mut lowered.analysis, &files)
+            .map_err(|e| format!("Analysis not set up: {e}"))?;
         let overlaps = std::mem::take(&mut lowered.resolved_overlaps);
         let step_lines = (fe.steps.iter())
             .filter(|s| s.active)
@@ -473,7 +485,6 @@ impl Analysis {
             .collect();
         let origins = lowered.origins.clone();
         let prepared = prepare(lowered, fe, &continuation.inherited_steps);
-        let copied = copy_result_files(fe, work_dir);
         let job = if check_model {
             Run::check_analysis(solver.threads, work_dir, &job_name, prepared)
         } else {
@@ -492,7 +503,6 @@ impl Analysis {
             },
             work_dir.display()
         )];
-        output.extend(copied);
         if let Some(initial) = &initial {
             output.push(format!("Initial temperatures: {}", initial.source));
         }
@@ -1312,7 +1322,7 @@ mod tests {
         plx_io::solver::export_calculix(&solved, &dir.join("Thermal/Thermal.frd")).unwrap();
         let mut fe = cubes().fe;
         fe.properties.initial_temperatures = Some((dir.join("Thermal/Thermal.frd").into(), 1));
-        let initial = stage_linked_results(&fe, &dir, "Start").unwrap().unwrap();
+        let initial = stage_linked_results(&fe).unwrap().1.unwrap();
         assert_eq!(initial.values.len(), 16);
         let value = |node: u32| initial.values.iter().find(|(n, _)| *n == node).unwrap().1;
         assert!((value(1) - 100.0).abs() < 1e-3 && (value(16) - 20.0).abs() < 1e-3);

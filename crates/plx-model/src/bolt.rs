@@ -17,7 +17,7 @@ use crate::{FeModel, Load, LoadKind, ModelItem, Region, Step, Tie};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Bolt {
     /// The internal identity other items refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub active: bool,
     /// Faces of the bolt that take in its shank: the cylindrical face of the shank, or the
@@ -89,11 +89,11 @@ impl BoltAction {
 /// and the amplitude its load or adjustment follows there.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BoltChange {
-    pub bolt: crate::Id,
+    pub bolt: crate::Id<crate::Bolt>,
     pub action: BoltAction,
     /// The amplitude of the load or adjustment; `None` is the step's default ramp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub amplitude: Option<crate::Id>,
+    pub amplitude: Option<crate::Id<crate::Amplitude>>,
 }
 
 /// Where a bolt is cut.
@@ -171,7 +171,7 @@ impl FeModel {
     }
 
     /// The amplitude the bolt's load or adjustment follows in the step `index`.
-    pub fn bolt_amplitude(&self, bolt: &Bolt, index: usize) -> Option<crate::Id> {
+    pub fn bolt_amplitude(&self, bolt: &Bolt, index: usize) -> Option<crate::Id<crate::Amplitude>> {
         (self.steps.get(index)?.bolt_changes.iter())
             .find(|c| c.bolt == bolt.id)?
             .amplitude
@@ -461,7 +461,7 @@ impl FeModel {
     }
 
     /// Drops the step changes of a bolt that is deleted.
-    pub fn remove_bolt_changes(&mut self, bolt: crate::Id) {
+    pub fn remove_bolt_changes(&mut self, bolt: crate::Id<Bolt>) {
         for step in &mut self.steps {
             step.bolt_changes.retain(|c| c.bolt != bolt);
         }

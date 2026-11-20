@@ -144,7 +144,7 @@ enum SetChoice {
     #[default]
     None,
     Mesh(String),
-    User(Id),
+    User(Id<plx_model::MeshSet>),
 }
 
 impl SetChoice {
@@ -155,7 +155,7 @@ impl SetChoice {
             .collect();
         (kind.names(mesh).into_iter())
             .map(|name| match user.get(&(kind, name)) {
-                Some(&id) => (SetChoice::User(id), name.to_owned()),
+                Some(&id) => (SetChoice::User(id.cast()), name.to_owned()),
                 None => (SetChoice::Mesh(name.to_owned()), name.to_owned()),
             })
             .collect()
@@ -331,7 +331,7 @@ impl RegionDraft {
                 draft.set = SetChoice::Mesh(set.clone());
             }
             Region::Set(id) => {
-                if let Some((kind, _)) = mesh.user_set(*id) {
+                if let Some((kind, _)) = mesh.user_set(id.any()) {
                     draft.source = set_source(kind);
                 }
                 draft.set = SetChoice::User(*id);
@@ -342,7 +342,7 @@ impl RegionDraft {
                 } else {
                     Source::PointMass
                 };
-                draft.point = Some(*point);
+                draft.point = Some(point.any());
             }
             Region::RemotePoint(point) => {
                 draft.source = Source::RemotePoint;
@@ -378,7 +378,7 @@ impl RegionDraft {
                 Region::NodeSet(_) => sources.contains(&Source::NodeSet),
                 Region::ElementSet(_) => sources.contains(&Source::ElementSet),
                 Region::Surface(_) => sources.contains(&Source::Surface),
-                Region::Set(id) => (mesh.user_set(*id))
+                Region::Set(id) => (mesh.user_set(id.any()))
                     .is_some_and(|(kind, _)| sources.contains(&set_source(kind))),
                 Region::ReferencePoint(_) => {
                     sources.contains(&Source::ReferencePoint)
@@ -414,9 +414,10 @@ impl RegionDraft {
                 SetChoice::None => Region::named(set_kind(self.source).unwrap(), ""),
             },
             // Without a point chosen the region is empty, see `is_empty`.
-            Source::ReferencePoint | Source::PointMass => {
-                (self.point).map_or(Region::Nodes(Vec::new()), Region::ReferencePoint)
-            }
+            Source::ReferencePoint | Source::PointMass => (self.point)
+                .map_or(Region::Nodes(Vec::new()), |p| {
+                    Region::ReferencePoint(p.cast())
+                }),
             Source::RemotePoint => {
                 (self.point).map_or(Region::Nodes(Vec::new()), Region::RemotePoint)
             }
@@ -819,9 +820,9 @@ impl RegionDraft {
             Source::ReferencePoint => {
                 let valid = self
                     .point
-                    .is_some_and(|id| fe.reference_point(id).is_some());
+                    .is_some_and(|id| fe.reference_point(id.cast()).is_some());
                 if !valid {
-                    self.point = fe.reference_points.first().map(|p| p.id);
+                    self.point = fe.reference_points.first().map(|p| p.id.any());
                     // Without reference points the first point of a remote displacement
                     // or force is offered in their place.
                     if self.point.is_none() && self.sources.contains(&Source::RemotePoint) {
@@ -834,8 +835,8 @@ impl RegionDraft {
             }
             Source::PointMass => {
                 let masses = point_masses(fe);
-                if !(masses.iter()).any(|&(point, _)| self.point == Some(point)) {
-                    self.point = masses.first().map(|&(point, _)| point);
+                if !(masses.iter()).any(|&(point, _)| self.point == Some(point.any())) {
+                    self.point = masses.first().map(|&(point, _)| point.any());
                 }
             }
             Source::NodeSet | Source::ElementSet | Source::Surface => {
@@ -855,7 +856,7 @@ impl RegionDraft {
             ui.weak("The model has no point masses (Connections > Constraint).");
         }
         let selected = (masses.iter())
-            .filter(|&&(point, _)| self.point == Some(point))
+            .filter(|&&(point, _)| self.point == Some(point.any()))
             .map(|&(_, name)| name)
             .collect::<Vec<_>>()
             .join(", ");
@@ -865,10 +866,10 @@ impl RegionDraft {
             .show_ui(ui, |ui| {
                 for &(point, name) in &masses {
                     if ui
-                        .selectable_label(self.point == Some(point), name)
+                        .selectable_label(self.point == Some(point.any()), name)
                         .clicked()
                     {
-                        self.point = Some(point);
+                        self.point = Some(point.any());
                     }
                 }
             });
@@ -879,7 +880,7 @@ impl RegionDraft {
     /// displacements and forces, listed by name and kept by id.
     fn point_ui(&mut self, ui: &mut Ui, model: &Model) {
         let points: Vec<(Id, &str)> = (model.fe.reference_points.iter())
-            .map(|p| (p.id, p.name.as_str()))
+            .map(|p| (p.id.any(), p.name.as_str()))
             .collect();
         let (remotes, forces) = if self.sources.contains(&Source::RemotePoint) {
             model.fe.remote_points(model.mesh())
@@ -895,7 +896,7 @@ impl RegionDraft {
             });
         }
         let selected = match (self.source, self.point) {
-            (Source::ReferencePoint, Some(id)) => (model.fe.reference_point(id))
+            (Source::ReferencePoint, Some(id)) => (model.fe.reference_point(id.cast()))
                 .map_or("(missing reference point)".to_string(), |p| p.name.clone()),
             (Source::RemotePoint, Some(id)) => model.fe.name_or_missing(Some(id)),
             _ => String::new(),
@@ -1819,7 +1820,10 @@ fn displacement_rows(
     ui: &mut Ui,
     remote: &mut Displacement,
     region: &Region,
-    item: Option<(plx_model::Id, plx_model::Id)>,
+    item: Option<(
+        plx_model::Id<plx_model::Step>,
+        plx_model::Id<plx_model::BoundaryCondition>,
+    )>,
     model: &Model,
     units: UnitSystem,
 ) {
@@ -1860,7 +1864,7 @@ fn displacement_rows(
 /// and whether the load follows the deformation.
 fn direction_rows(
     ui: &mut Ui,
-    system: &mut Option<Id>,
+    system: &mut Option<Id<plx_model::CoordinateSystem>>,
     follower: &mut bool,
     fe: &FeModel,
     nlgeom: bool,
@@ -1910,7 +1914,11 @@ fn direction_rows(
 }
 
 /// The coordinate system of a remote displacement or remote force.
-pub(crate) fn system_row(ui: &mut Ui, system: &mut Option<Id>, fe: &FeModel) {
+pub(crate) fn system_row(
+    ui: &mut Ui,
+    system: &mut Option<Id<plx_model::CoordinateSystem>>,
+    fe: &FeModel,
+) {
     ui.label("Coordinate system");
     crate::pick_item::system_combo(ui, "remote system", system, fe, 200.0);
     ui.end_row();
@@ -2309,7 +2317,7 @@ impl Directions {
     pub(crate) const RECTANGULAR: Self = Self { cylindrical: false };
 
     /// The directions of the system `system` of the model, the global one for `None`.
-    pub(crate) fn of(fe: &FeModel, system: Option<Id>) -> Self {
+    pub(crate) fn of(fe: &FeModel, system: Option<Id<plx_model::CoordinateSystem>>) -> Self {
         let cylindrical = (system.and_then(|id| fe.coordinate_system(id)))
             .is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
         Self { cylindrical }
@@ -2741,8 +2749,8 @@ impl Editor {
             NewItem::ContactHistoryOutput(step, contact) => {
                 fe.steps.get(step)?;
                 let pair = match contact {
-                    ContactItem::Region(i) => fe.contact_regions.get(i)?.id,
-                    ContactItem::Pair(i) => fe.contact_pairs.get(i)?.id,
+                    ContactItem::Region(i) => fe.contact_regions.get(i)?.id.any(),
+                    ContactItem::Pair(i) => fe.contact_pairs.get(i)?.id.any(),
                 };
                 let mut output = HistoryOutput::contact(
                     next_name("CH_Output", names(&fe.history_outputs, |h| &h.name)),
@@ -5138,7 +5146,7 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
     match *item {
         TreeItem::Material(i) => {
             if let Some(id) = fe.materials.get(i).map(|m| m.id) {
-                fe.forget_in_filters(id);
+                fe.forget_in_filters(id.any());
             }
             remove(&mut fe.materials, i)
         }
@@ -5181,8 +5189,8 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::SurfaceInteraction(i) => remove(&mut fe.surface_interactions, i),
         TreeItem::ContactPair(i) | TreeItem::ContactRegion(i) => {
             let id = match item {
-                TreeItem::ContactPair(_) => fe.contact_pairs.get(i).map(|p| p.id),
-                _ => fe.contact_regions.get(i).map(|r| r.id),
+                TreeItem::ContactPair(_) => fe.contact_pairs.get(i).map(|p| p.id.any()),
+                _ => fe.contact_regions.get(i).map(|r| r.id.any()),
             };
             let Some(id) = id else {
                 return false;
@@ -5205,7 +5213,7 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
                 return false;
             };
             fe.part_groups.remove(i);
-            fe.forget_in_filters(id);
+            fe.forget_in_filters(id.any());
             true
         }
         TreeItem::ContactDetection(i) => {
@@ -5406,9 +5414,12 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
                     if let Some(support) = fe.compression_only(*pair) {
                         return region_highlight(model, &support.region);
                     }
-                    (fe.contact_pair(*pair))
+                    (fe.contact_pair(pair.cast()))
                         .map(|c| [&c.master, &c.slave])
-                        .or_else(|| fe.contact_region(*pair).map(|r| [&r.side_a, &r.side_b]))
+                        .or_else(|| {
+                            fe.contact_region(pair.cast())
+                                .map(|r| [&r.side_a, &r.side_b])
+                        })
                 }
                 _ => None,
             }
@@ -8754,7 +8765,7 @@ fn infill_form(
 }
 
 /// The active point masses of the model with their reference points.
-fn point_masses(fe: &FeModel) -> Vec<(Id, &str)> {
+fn point_masses(fe: &FeModel) -> Vec<(Id<plx_model::ReferencePoint>, &str)> {
     (fe.constraints.iter())
         .filter_map(|c| match c {
             Constraint::PointMass(mass) if mass.active => {
@@ -9045,7 +9056,7 @@ mod tests {
             Region::Nodes(vec![1]),
             BoundaryKind::Displacement(plx_model::Displacement::rigid([Some(0.0); 6])),
         );
-        let point = Region::RemotePoint(remote.id);
+        let point = Region::RemotePoint(remote.id.any());
         let draft = RegionDraft::from_region(
             &point,
             HISTORY_NODE_SOURCES,
@@ -9062,7 +9073,7 @@ mod tests {
         fe.steps[0].boundary_conditions.push(remote);
         assert_eq!(
             fe.history_outputs[0].kind.region(),
-            Some(&Region::RemotePoint(id))
+            Some(&Region::RemotePoint(id.any()))
         );
         assert_eq!(fe.name_of(id), Some("Shaft"));
     }
@@ -9745,7 +9756,7 @@ mod tests {
             m.id = crate::test_ids::named(name);
             fe.materials.push(m);
         }
-        let section = |name: &str, material: Option<plx_model::Id>| Section {
+        let section = |name: &str, material: Option<plx_model::Id<plx_model::Material>>| Section {
             id: plx_model::Id::new(),
             orientation: None,
             name: name.into(),

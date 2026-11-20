@@ -618,7 +618,7 @@ impl MeshingParameters {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MeshSetupItem {
     /// The internal identity others refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub kind: MeshSetupKind,
 }

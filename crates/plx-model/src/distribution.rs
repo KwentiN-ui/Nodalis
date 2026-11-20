@@ -13,13 +13,13 @@ use crate::units::{LengthUnit, Quantity, UnitSystem};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Distribution {
     /// The internal identity other items refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub kind: DistributionKind,
     /// The coordinate system the equation takes its coordinates in and the points are given
     /// in; `None` for the global one. A moving system counts where it is in the undeformed
     /// model.
-    pub system: Option<crate::Id>,
+    pub system: Option<crate::Id<crate::CoordinateSystem>>,
     /// Named numbers the equation can use, each of which can be exposed as a parameter.
     pub variables: Vec<DistributionVariable>,
     /// The unit the equation takes its coordinates in and the points file gives them in. It

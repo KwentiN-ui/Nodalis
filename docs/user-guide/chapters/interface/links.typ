@@ -215,7 +215,9 @@ node).
   circular arrow, and #ui("Update Project") brings both up to date.
 - The project keeps which analysis the results come from, not the path of a result file, so
   moving the project or the work folder, or renaming either analysis, keeps the link. Before
-  the run, Nodalis copies the result files it needs next to the input file.
+  the run, the built-in solver is given the values (global results, temperatures) or reads
+  the eigenmodes where they are; nothing is copied next to the input file. An exported input
+  file gets copies of the result files next to it, where CalculiX reads them.
 - #ui("Unlink") takes back what the link set: the defined field, the eigenmodes or the initial
   temperatures.
 

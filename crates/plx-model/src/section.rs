@@ -17,10 +17,10 @@ use crate::{BeamProfile, InfillSection, Region};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Section {
     /// The internal identity others refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     /// The material of the section; `None` until one is chosen.
-    pub material: Option<crate::Id>,
+    pub material: Option<crate::Id<crate::Material>>,
     pub region: Region,
     /// Thickness of plane stress and plane strain elements; other models ignore it.
     pub thickness: f64,
@@ -29,7 +29,7 @@ pub struct Section {
     /// anisotropic material of a solid section, and the print axes of an infill section
     /// (z the build direction); `None`: the global axes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub orientation: Option<crate::Id>,
+    pub orientation: Option<crate::Id<crate::CoordinateSystem>>,
 }
 
 /// The default thickness of 2D sections, one millimetre in SI units, as values are
@@ -248,7 +248,7 @@ pub fn membrane_type(shell_type: &str) -> Option<&'static str> {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BeamSection {
     /// The [`crate::CrossSection`] of the model the beam has; `None` until one is chosen.
-    pub cross_section: Option<crate::Id>,
+    pub cross_section: Option<crate::Id<crate::CrossSection>>,
     pub orientation: BeamOrientation,
     /// Offset of the beam axis from the nodes in the 1- and 2-direction, in multiples of
     /// the profile's thickness in that direction (`OFFSET1`, `OFFSET2`).
