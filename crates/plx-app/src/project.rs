@@ -1441,7 +1441,11 @@ impl Node {
                 Block::Plot(PlotBlock::new(plot.kind, plot.bins)),
             ),
             ProjectNode::Preview(preview) => {
-                Self::new(preview.id, preview.name, Block::Preview(Box::default()))
+                let block = PreviewBlock {
+                    size: preview.size.map(|[x, y]| egui::vec2(x, y)),
+                    ..Default::default()
+                };
+                Self::new(preview.id, preview.name, Block::Preview(Box::new(block)))
             }
             ProjectNode::Group(group) => {
                 Self::new(group.id, group.name.clone(), Block::Group(Box::new(group)))
@@ -1612,7 +1616,12 @@ impl Node {
                 bins: plot.bins,
             }),
             // It keeps no mesh: the link brings it again.
-            Block::Preview(_) => ProjectNode::Preview(file::Preview { id, name, position }),
+            Block::Preview(preview) => ProjectNode::Preview(file::Preview {
+                id,
+                name,
+                position,
+                size: preview.size.map(|s| [s.x, s.y]),
+            }),
             Block::Group(group) => ProjectNode::Group(file::NodeGroup {
                 id,
                 name,
@@ -1716,7 +1725,10 @@ impl Node {
             Block::Switch(switch) => Block::Switch(switch.clone()),
             Block::Formula(formula) => Block::Formula(formula.clone()),
             Block::Plot(plot) => Block::Plot(PlotBlock::new(plot.kind, plot.bins)),
-            Block::Preview(_) => Block::Preview(Box::default()),
+            Block::Preview(preview) => Block::Preview(Box::new(PreviewBlock {
+                size: preview.size,
+                ..Default::default()
+            })),
             // A group is copied with its blocks, see [`ProjectApp::duplicate_group`].
             Block::Group(_) | Block::GroupInput | Block::GroupOutput => return None,
         };
@@ -2167,6 +2179,8 @@ enum Action {
     /// The kind of plot of a Plot block, or the bins of its histogram, changed in its block.
     SetPlotKind(u64, plx_model::PlotKind),
     SetBins(u64, u32),
+    /// The size of the picture of a Preview block, dragged at its corner.
+    SetPreviewSize(u64, egui::Vec2),
     /// Put the blocks into a new group, or the blocks of the groups back where they are.
     Group(Vec<u64>),
     Ungroup(Vec<u64>),
@@ -6387,6 +6401,7 @@ impl ProjectApp {
                     number: n.as_number().map(|(b, switch)| (b.clone(), switch)),
                     plot: self.plot_view(n),
                     picture: self.picture(n.id),
+                    picture_size: (n.as_preview()).map_or(visualize::PICTURE, PreviewBlock::size),
                     has_shape: visualize::preview_shape(n, &self.links).is_some(),
                     preview_linked: self.links.iter().any(|l| l.target == n.id),
                     picture_failure: self.picture_failure(n.id),
@@ -8223,6 +8238,7 @@ impl ProjectApp {
             | Action::AddPreview(_)
             | Action::SetPlotKind(..)
             | Action::SetBins(..)
+            | Action::SetPreviewSize(..)
             | Action::Group(_)
             | Action::Ungroup(_) => Vec::new(),
         })
@@ -8448,6 +8464,7 @@ impl ProjectApp {
             }
             Action::SetPlotKind(id, kind) => self.set_plot_kind(id, kind),
             Action::SetBins(id, bins) => self.set_bins(id, bins),
+            Action::SetPreviewSize(id, size) => self.set_preview_size(id, size),
             Action::Toggle(id, path) => {
                 if let Some(node) = self.node(id)
                     && !node.expanded.remove(&path)
@@ -9332,6 +9349,8 @@ struct BlockView {
     /// Of a Preview block, the picture of its mesh or geometry once drawn, whether anything
     /// is linked to it, whether it has a mesh or geometry, why the geometry could not be drawn, and the numbers it shows.
     picture: Option<egui::TextureId>,
+    /// The size of the picture of a Preview block in points.
+    picture_size: egui::Vec2,
     has_shape: bool,
     preview_linked: bool,
     picture_failure: Option<String>,
@@ -13048,14 +13067,20 @@ impl SnarlViewer<u64> for Viewer {
                     self.show_plot(ui, view);
                 }
             }
-            Kind::Preview => self.show_preview(
-                ui,
-                block.picture,
-                block.preview_linked,
-                block.has_shape,
-                block.picture_failure.as_deref(),
-                block.preview.as_ref(),
-            ),
+            Kind::Preview => {
+                let resized = self.show_preview(
+                    ui,
+                    block.picture_size,
+                    block.picture,
+                    block.preview_linked,
+                    block.has_shape,
+                    block.picture_failure.as_deref(),
+                    block.preview.as_ref(),
+                );
+                if let Some(size) = resized {
+                    self.actions.push(Action::SetPreviewSize(id, size));
+                }
+            }
             _ => {}
         }
     }

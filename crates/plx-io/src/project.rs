@@ -510,6 +510,9 @@ pub struct Preview {
     pub id: u64,
     pub name: String,
     pub position: [f32; 2],
+    /// The size of its picture in points, as dragged at its corner; `None` the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<[f32; 2]>,
 }
 
 /// A node group: blocks of the schematic put together into one block, which opens into a
@@ -1967,6 +1970,7 @@ mod tests {
                 id: 2,
                 name: "Beam".into(),
                 position: [0.0, 250.0],
+                size: Some([320.0, 200.0]),
             }),
             measure(
                 3,
@@ -2004,11 +2008,13 @@ mod tests {
                 id: 10,
                 name: "Peak Stress".into(),
                 position: [980.0, 240.0],
+                size: None,
             }),
             ProjectNode::Preview(Preview {
                 id: 11,
                 name: "Deflection".into(),
                 position: [980.0, -60.0],
+                size: None,
             }),
         ]);
         let link = |source, item: &[&str], target, slot: &[&str]| Link {
