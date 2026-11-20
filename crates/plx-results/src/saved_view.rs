@@ -75,7 +75,8 @@ pub enum SavedAnnotation {
 /// The plot of a result path and where it is drawn.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedPathPlot {
-    pub path: String,
+    /// The result path or hot spot the plot is of; `None` for the plot of a table.
+    pub of: Option<plx_model::Id>,
     /// Top left corner relative to that of the view, in points, once moved.
     pub offset: Option<[f32; 2]>,
     pub size: [f32; 2],
@@ -85,7 +86,7 @@ pub struct SavedPathPlot {
     pub x_label: String,
     pub y_label: String,
     pub y_range: Option<[f64; 2]>,
-    /// The plot of a hot spot of that name rather than of a path.
+    /// The plot of a hot spot rather than of a path.
     pub hot_spot: bool,
     /// The plot of a history output table rather than of a path, with its values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,6 +97,7 @@ pub struct SavedPathPlot {
 /// curve, row by row. Missing values are NaN.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedTablePlot {
+    pub title: String,
     pub x_label: String,
     pub x: Vec<f64>,
     pub curves: Vec<(String, Vec<f64>)>,

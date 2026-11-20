@@ -5114,8 +5114,8 @@ S
                     plx_results::saved_view::SavedAnnotation::Distance([1, 99]),
                 ],
                 path_plots: vec![
-                    crate::path_plot::PathPlot::new("Path-1".into()).saved(),
-                    crate::path_plot::PathPlot::hot_spot("Hot_Spot-1".into()).saved(),
+                    crate::path_plot::PathPlot::new(plx_model::Id::new()).saved(),
+                    crate::path_plot::PathPlot::hot_spot(plx_model::Id::new()).saved(),
                     crate::path_plot::PathPlot::table(
                         crate::xy_plot::XyData {
                             title: "SP_A.STRESSES.MISES".into(),

@@ -31,9 +31,6 @@ pub struct HotSpotDialog {
     located: Located,
     /// The button to show or remove the plot in the 3D view was clicked.
     plot_toggled: bool,
-    /// Name of the hot spot when its plot was put into the 3D view, by which the plot refers
-    /// to it while the dialog is open.
-    plot_key: Option<String>,
     /// Height of the dialog's rows other than the plot in the last frame.
     rows_height: Option<f32>,
     /// The plot was drawn in the last frame.
@@ -74,20 +71,16 @@ impl HotSpotDialog {
             picker: Picker::default(),
             located: Located::default(),
             plot_toggled: false,
-            plot_key: None,
             rows_height: None,
             plotted: false,
             plotted_node: None,
         }
     }
 
-    /// The name by which a plot in the 3D view refers to the edited hot spot: its name when
-    /// the plot was added, else its stored name, or for a new one the name entered.
-    pub fn plot_name(&self, existing: &[HotSpot]) -> String {
-        let stored = self.edit.and_then(|i| existing.get(i));
-        (self.plot_key.clone())
-            .or_else(|| stored.map(|h| h.name.clone()))
-            .unwrap_or_else(|| self.hot_spot.name.clone())
+    /// The id by which a plot in the 3D view refers to the edited hot spot, which a rename
+    /// keeps.
+    pub fn plot_id(&self) -> plx_model::Id {
+        self.hot_spot.id
     }
 
     /// The toe node whose path the plot shows, the one the 3D view draws.
@@ -98,10 +91,6 @@ impl HotSpotDialog {
     /// Whether the plot is to be shown or removed in the 3D view; resets the request.
     pub fn take_plot_toggle(&mut self) -> bool {
         std::mem::take(&mut self.plot_toggled)
-    }
-
-    pub fn set_plot_key(&mut self, name: String) {
-        self.plot_key = Some(name);
     }
 
     pub fn edit(existing: &[HotSpot], index: usize, mesh: &plx_mesh::FeMesh) -> Option<Self> {
@@ -182,7 +171,8 @@ impl HotSpotDialog {
             plx_model::next_name("Hot_Spot", self.taken.iter().map(String::as_str));
         self.toe = RegionDraft::new(NODE_SOURCES, Target::Nodes);
         self.error = None;
-        self.plot_key = None;
+        // The next one is another hot spot, not a copy of the one created.
+        self.hot_spot.id = plx_model::Id::new();
     }
 
     pub fn show(&mut self, ctx: &egui::Context, model: &Model) -> DialogAction<HotSpot> {
@@ -311,8 +301,7 @@ impl HotSpotDialog {
         );
         self.plotted = true;
         self.plotted_node = Some(plot.node);
-        let shown = (model.path_plots.iter())
-            .any(|p| p.is_hot_spot(&self.plot_name(&model.hot_spots.definitions)));
+        let shown = (model.path_plots.iter()).any(|p| p.is_hot_spot(self.plot_id()));
         ui.horizontal(|ui| {
             let label = if shown {
                 "Remove from View"
