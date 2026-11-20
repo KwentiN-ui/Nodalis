@@ -216,19 +216,122 @@ pub struct ResultField {
     pub values: Vec<Vec<f64>>,
 }
 
-/// A block of the `.dat` file: a quantity for a set at a time, one row per node, element or
-/// integration point.
+/// History values of an increment: a quantity of a source at a time, one row per node,
+/// element, integration point or mode (the id first, 0 for totals and tables).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistoryBlock {
     pub step: u32,
     pub increment: u32,
-    /// The heading as CalculiX writes it (`displacements (vx,vy,vz) for set TIP and time ...`
-    /// without the time), which `plx-io::dat` recognises.
-    pub quantity: String,
-    pub set: String,
+    pub quantity: HistoryQuantity,
+    pub source: HistorySource,
+    /// The total time; 0 for the tables of a step.
     pub time: f64,
-    /// Rows: the id (node, element, or 0 for totals) and the values.
+    /// Rows: the id (node, element, mode, or 0 for totals) and the values. Values at
+    /// integration points and contact faces start with the point or face number.
     pub rows: Vec<(u32, Vec<f64>)>,
+}
+
+/// What a history block is of.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistorySource {
+    /// The step itself: its tables (eigenvalues, design responses), the energies of the
+    /// model and the contact values of all pairs a request addresses.
+    Step,
+    Nodes(crate::NodeSetId),
+    Elements(crate::ElementSetId),
+    /// The contact on a slave surface against its master, or against the ground of a
+    /// compression only support.
+    Contact {
+        slave: crate::SurfaceId,
+        master: Option<crate::SurfaceId>,
+    },
+    /// A group the model has no set for: the material and walls of a particle flow, the
+    /// design responses of a sensitivity step.
+    Named(String),
+}
+
+/// The quantity of a history block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistoryQuantity {
+    Displacements,
+    Velocities,
+    Forces,
+    TotalForce,
+    /// The displacements of the rotation node of a reference point: its rotations.
+    Rotations,
+    AngularVelocities,
+    /// The forces of the rotation node of a reference point: its moments.
+    Moments,
+    TotalMoment,
+    Temperatures,
+    HeatGeneration,
+    TotalHeatGeneration,
+    /// Per integration point: qx, qy, qz.
+    HeatFlux,
+    /// Per integration point: xx, yy, zz, xy, xz, yz.
+    Stresses,
+    Strains,
+    EquivalentPlasticStrain,
+    InternalEnergyDensity,
+    Volume,
+    TotalVolume,
+    ModelInternalEnergy,
+    ModelKineticEnergy,
+    ModelExternalWork,
+    ModelDampingDissipation,
+    /// The mean and highest temperature of particles.
+    ParticleTemperature,
+    /// The heat a wall gave the particles.
+    WallHeat,
+    /// The number of contact elements in force.
+    ContactElements,
+    /// Normal, first and second tangential; `faces`: by slave element and face, otherwise
+    /// by slave node.
+    RelativeContactDisplacement {
+        faces: bool,
+    },
+    ContactStress {
+        faces: bool,
+    },
+    ContactSpringEnergy {
+        faces: bool,
+    },
+    /// Four rows: force and moment about the origin, centre and mean normal, moment about
+    /// the centre, area with normal and shear force.
+    ContactStatistics,
+    /// Mode, eigenvalue, omega, frequency, imaginary frequency.
+    Eigenvalues,
+    ParticipationFactors,
+    EffectiveModalMass,
+    TotalEffectiveMass,
+    BucklingFactors,
+    ComplexEigenvalues,
+    /// By nodal diameter and mode.
+    CyclicEigenvalues,
+    TurningDirection,
+    CyclicTurningDirection,
+    /// The value and gradient length of each design response; the source names them.
+    DesignResponses,
+}
+
+impl HistoryQuantity {
+    /// Whether the block is a table of the step rather than values of an increment.
+    pub fn is_table(self) -> bool {
+        use HistoryQuantity as Q;
+        matches!(
+            self,
+            Q::Eigenvalues
+                | Q::ParticipationFactors
+                | Q::EffectiveModalMass
+                | Q::TotalEffectiveMass
+                | Q::BucklingFactors
+                | Q::ComplexEigenvalues
+                | Q::CyclicEigenvalues
+                | Q::TurningDirection
+                | Q::CyclicTurningDirection
+                | Q::DesignResponses
+        )
+    }
 }
 
 #[cfg(test)]

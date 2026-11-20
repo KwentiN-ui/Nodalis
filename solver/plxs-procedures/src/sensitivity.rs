@@ -42,14 +42,15 @@ use std::collections::HashMap;
 use plxs_assembly::dofs::amplitude_factor;
 use plxs_assembly::{ElementTable, Spc, assemble_stiffness};
 use plxs_core::mesh::ElementRef;
-use plxs_core::results::{HistoryBlock, IncrementKind, ResultField, ResultsIncrement};
+use plxs_core::results::{
+    HistoryBlock, HistoryQuantity, HistorySource, IncrementKind, ResultField, ResultsIncrement,
+};
 use plxs_core::step::{DistributedLoadKind, Procedure as ProcedureKind, Sensitivity};
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
 use plxs_elements::SolidElement;
 use plxs_elements::shape::{face_rule, face_shape};
 use plxs_linalg::{LinearSolver, SparseMatrix};
 use plxs_output::StaRow;
-use plxs_output::dat::DESIGN_RESPONSE_TABLE;
 use rayon::prelude::*;
 
 use crate::fields::node_order;
@@ -1161,8 +1162,8 @@ impl Procedure for SensitivityProcedure {
                 ctx.results.history.push(HistoryBlock {
                     step: ctx.step_number,
                     increment: 0,
-                    quantity: DESIGN_RESPONSE_TABLE.to_string(),
-                    set: name.to_string(),
+                    quantity: HistoryQuantity::DesignResponses,
+                    source: HistorySource::Named(name.to_string()),
                     time: 0.0,
                     rows: vec![(0, vec![value, length])],
                 });
@@ -1175,8 +1176,8 @@ impl Procedure for SensitivityProcedure {
             ctx.results.history.push(HistoryBlock {
                 step: ctx.step_number,
                 increment: 0,
-                quantity: DESIGN_RESPONSE_TABLE.to_string(),
-                set: table_names.join(","),
+                quantity: HistoryQuantity::DesignResponses,
+                source: HistorySource::Named(table_names.join(",")),
                 time: 0.0,
                 rows: table_rows,
             });

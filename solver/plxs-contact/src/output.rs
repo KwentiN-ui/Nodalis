@@ -6,7 +6,7 @@
 //! squares fit, averaged where faces share a node; node-to-face values are the nodes' own.
 //! No CalculiX code was consulted.
 
-use plxs_core::results::HistoryBlock;
+use plxs_core::results::{HistoryBlock, HistoryQuantity, HistorySource};
 use plxs_core::step::HistoryOutput;
 
 use crate::geometry::{cross, dot, norm, normalized, scale};
@@ -141,11 +141,11 @@ pub fn history_blocks(
     time: f64,
 ) -> Vec<HistoryBlock> {
     let mut out = Vec::new();
-    let block = |quantity: &str, set: &str, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
+    let block = |quantity, source, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
         step,
         increment,
-        quantity: quantity.to_string(),
-        set: set.to_string(),
+        quantity,
+        source,
         time,
         rows,
     };
@@ -163,11 +163,7 @@ pub fn history_blocks(
         let pair = &contact.pairs[i];
         pair.mortar_nodes.is_empty() && pair.points.iter().any(|p| p.face.is_some())
     };
-    let slave = if pairs.iter().any(|&i| by_face(i)) {
-        "slave element+face"
-    } else {
-        "slave node"
-    };
+    let faces = pairs.iter().any(|&i| by_face(i));
     let elements = |f: &dyn Fn(&crate::Pair, &crate::PointResult, usize) -> Vec<f64>| {
         let mut rows = Vec::new();
         for &i in &pairs {
@@ -204,24 +200,24 @@ pub fn history_blocks(
                     .map(|&i| evaluation.points[i].iter().filter(|r| r.element).count())
                     .sum::<usize>();
                 out.push(block(
-                    "total number of contact elements",
-                    "",
+                    HistoryQuantity::ContactElements,
+                    HistorySource::Step,
                     vec![(0, vec![n as f64])],
                 ));
             }
             "CDIS" => out.push(block(
-                &format!("relative contact displacement ({slave},normal,tang1,tang2)"),
-                "",
+                HistoryQuantity::RelativeContactDisplacement { faces },
+                HistorySource::Step,
                 elements(&|_, r, _| vec![r.state.gap, r.tangential[0], r.tangential[1]]),
             )),
             "CSTR" => out.push(block(
-                &format!("contact stress ({slave},press,tang1,tang2)"),
-                "",
+                HistoryQuantity::ContactStress { faces },
+                HistorySource::Step,
                 elements(&|_, r, _| vec![r.state.pressure, r.shear[0], r.shear[1]]),
             )),
             "CELS" => out.push(block(
-                &format!("contact spring energy ({slave},energy)"),
-                "",
+                HistoryQuantity::ContactSpringEnergy { faces },
+                HistorySource::Step,
                 elements(&|_, r, _| vec![r.energy]),
             )),
             "CF" => {
@@ -266,11 +262,11 @@ pub fn history_blocks(
                         force[2] - normal_force * normal[2],
                     ]);
                     out.push(block(
-                        &format!(
-                            "statistics for slave set {}, master set {}",
-                            pair.slave_name, pair.master_name
-                        ),
-                        "",
+                        HistoryQuantity::ContactStatistics,
+                        HistorySource::Contact {
+                            slave: pair.slave_surface,
+                            master: Some(pair.master_surface),
+                        },
                         vec![
                             (
                                 0,

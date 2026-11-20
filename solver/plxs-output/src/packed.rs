@@ -894,8 +894,8 @@ mod tests {
             history: vec![HistoryBlock {
                 step: 1,
                 increment: 1,
-                quantity: "displacements".into(),
-                set: "TIP".into(),
+                quantity: plxs_core::results::HistoryQuantity::Displacements,
+                source: plxs_core::results::HistorySource::Named("TIP".into()),
                 time: 1.0,
                 rows: vec![(7, vec![1.5, -2.0, f64::MIN_POSITIVE])],
             }],

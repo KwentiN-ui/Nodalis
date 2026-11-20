@@ -41,6 +41,7 @@ use plxs_assembly::{
     rotate_concentrated_loads,
 };
 use plxs_core::mesh::NodeRef;
+use plxs_core::results::HistorySource;
 use plxs_core::results::{IncrementKind, ResultField, ResultsIncrement};
 use plxs_core::state::{IntegrationPointField, NodalField};
 use plxs_core::step::{Dynamic, Procedure as ProcedureKind};
@@ -422,7 +423,7 @@ impl DynamicProcedure {
         });
         let mut f_prev = f0;
         // Energies of the whole model, when a history output asks for them.
-        let energy_requests = energy_requests(ctx.model, step);
+        let energy_requests = energy_requests(step);
         let (mut external_work, mut dissipation) = (0.0, 0.0);
         let mut stresses = ctx.table.layout.field(6);
         let mut strains = ctx.table.layout.field(6);
@@ -703,15 +704,19 @@ pub(crate) struct Energies {
 
 /// The variables (`ALLIE`, `ALLKE`, `ALLWK`, `ALLVD`) of each `*EL PRINT` of the step that
 /// asks for energies of the model, with its set.
-pub(crate) fn energy_requests(model: &plxs_core::Model, step: &Step) -> Vec<(String, Vec<String>)> {
+pub(crate) fn energy_requests(step: &Step) -> Vec<(HistorySource, Vec<String>)> {
     (step.outputs.el_print.iter())
         .filter_map(|request| {
             let variables: Vec<String> = (request.variables.iter())
                 .map(|v| v.trim().to_ascii_uppercase())
                 .filter(|v| ["ALLIE", "ALLKE", "ALLWK", "ALLVD"].contains(&v.as_str()))
                 .collect();
-            let set = (request.set).map_or("", |set| model.sets.history_set_name(set));
-            (!variables.is_empty()).then(|| (set.to_string(), variables))
+            let source = match request.set {
+                Some(plxs_core::step::HistorySet::Nodes(set)) => HistorySource::Nodes(set),
+                Some(plxs_core::step::HistorySet::Elements(set)) => HistorySource::Elements(set),
+                None => HistorySource::Step,
+            };
+            (!variables.is_empty()).then_some((source, variables))
         })
         .collect()
 }
@@ -719,23 +724,24 @@ pub(crate) fn energy_requests(model: &plxs_core::Model, step: &Step) -> Vec<(Str
 /// One history block per requested energy, a single total row each.
 pub(crate) fn write_energies(
     results: &mut plxs_core::Results,
-    requests: &[(String, Vec<String>)],
+    requests: &[(HistorySource, Vec<String>)],
     energies: &Energies,
     (step, increment, time): (u32, u32, f64),
 ) {
     for (set, variables) in requests {
         for variable in variables {
+            use plxs_core::results::HistoryQuantity as Q;
             let (quantity, value) = match variable.as_str() {
-                "ALLIE" => ("total model internal energy", energies.internal),
-                "ALLKE" => ("total model kinetic energy", energies.kinetic),
-                "ALLWK" => ("total model external work", energies.external_work),
-                _ => ("total model damping dissipation", energies.dissipation),
+                "ALLIE" => (Q::ModelInternalEnergy, energies.internal),
+                "ALLKE" => (Q::ModelKineticEnergy, energies.kinetic),
+                "ALLWK" => (Q::ModelExternalWork, energies.external_work),
+                _ => (Q::ModelDampingDissipation, energies.dissipation),
             };
             results.history.push(plxs_core::results::HistoryBlock {
                 step,
                 increment,
-                quantity: quantity.into(),
-                set: set.clone(),
+                quantity,
+                source: set.clone(),
                 time,
                 rows: vec![(0, vec![value])],
             });

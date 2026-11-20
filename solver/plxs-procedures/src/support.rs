@@ -5,7 +5,7 @@
 use plxs_assembly::discrete::{SupportPoints, support_points};
 use plxs_core::Model;
 use plxs_core::contact::CompressionOnly;
-use plxs_core::results::HistoryBlock;
+use plxs_core::results::{HistoryBlock, HistoryQuantity, HistorySource};
 use plxs_core::step::HistoryOutput;
 
 /// Opening and pressure of the gap at every point of a surface.
@@ -140,12 +140,11 @@ pub fn history_blocks(
         out.push(HistoryBlock {
             step,
             increment,
-            quantity: format!(
-                "statistics for slave set {}, master set {}",
-                model.sets.surface_name(support.surface),
-                GROUND
-            ),
-            set: String::new(),
+            quantity: HistoryQuantity::ContactStatistics,
+            source: HistorySource::Contact {
+                slave: support.surface,
+                master: None,
+            },
             time,
             rows: vec![
                 (0, [force, moment].concat()),
@@ -157,9 +156,6 @@ pub fn history_blocks(
     }
     out
 }
-
-/// The master of a compression only surface in the statistics: the ground it rests on.
-pub const GROUND: &str = "GROUND";
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [

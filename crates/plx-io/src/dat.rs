@@ -982,5 +982,8 @@ fn add_stress_components(set: &mut HistorySet) {
     }
 }
 
+mod blocks;
+pub use blocks::import_blocks;
+
 #[cfg(test)]
 mod tests;

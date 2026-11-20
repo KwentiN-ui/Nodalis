@@ -21,12 +21,13 @@
 use std::sync::Arc;
 
 use plxs_assembly::{Spc, assemble_mass};
+use plxs_core::results::HistoryQuantity;
 use plxs_core::results::{IncrementKind, ModeKind, ResultField, ResultsIncrement};
 use plxs_core::state::{NodalField, StoredModes};
 use plxs_core::step::Frequency;
 use plxs_core::{Error, Progress, ProgressEvent, Result, Step};
 use plxs_linalg::{Pattern, SparseMatrix, Unknowns};
-use plxs_output::{EigenTable, StaRow, imaginary_field_name};
+use plxs_output::{StaRow, imaginary_field_name};
 
 use crate::eigen::{
     increment_results, lanczos_modes, preload_displacements, reference_stiffness, restrict_to_free,
@@ -282,31 +283,31 @@ pub(crate) fn cyclic_frequency(
         write_table(
             ctx.results,
             ctx.step_number,
-            EigenTable::CYCLIC_EIGENVALUES,
+            HistoryQuantity::CyclicEigenvalues,
             eigen_rows,
         );
         write_table(
             ctx.results,
             ctx.step_number,
-            EigenTable::PARTICIPATION,
+            HistoryQuantity::ParticipationFactors,
             participation_rows,
         );
         write_table(
             ctx.results,
             ctx.step_number,
-            EigenTable::EFFECTIVE_MODAL_MASS,
+            HistoryQuantity::EffectiveModalMass,
             modal_mass_rows,
         );
         write_table(
             ctx.results,
             ctx.step_number,
-            EigenTable::TOTAL_EFFECTIVE_MASS,
+            HistoryQuantity::TotalEffectiveMass,
             vec![(0, total_effective)],
         );
         write_table(
             ctx.results,
             ctx.step_number,
-            EigenTable::CYCLIC_TURNING_DIRECTION,
+            HistoryQuantity::CyclicTurningDirection,
             turning_rows,
         );
     }

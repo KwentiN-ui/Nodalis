@@ -325,7 +325,7 @@ impl Procedure for ModalDynamicsProcedure {
         // Energies of the whole model, when a history output asks for them; stresses for
         // the increments whose fields are written, or every one when a history output
         // prints them.
-        let energy_requests = energy_requests(ctx.model, step);
+        let energy_requests = energy_requests(step);
         let (mut external_work, mut dissipation) = (0.0, 0.0);
         let history_stresses = step.outputs.el_print.iter().any(|request| {
             request.set.is_some()

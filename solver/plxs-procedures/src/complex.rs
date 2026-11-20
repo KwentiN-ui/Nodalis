@@ -624,22 +624,22 @@ impl Procedure for ComplexFrequencyProcedure {
                 fields,
             });
         }
-        let table_block = |quantity: &str, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
+        let table_block = |quantity, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
             step: ctx.step_number,
             increment: 0,
-            quantity: quantity.to_string(),
-            set: String::new(),
+            quantity,
+            source: plxs_core::results::HistorySource::Step,
             time: 0.0,
             rows,
         };
         ctx.results.history.push(table_block(
-            plxs_output::EigenTable::COMPLEX_EIGENVALUES,
+            plxs_core::results::HistoryQuantity::ComplexEigenvalues,
             eigen_rows,
         ));
         if rotation.is_some() {
             turning_rows.push((0, axis.to_vec()));
             ctx.results.history.push(table_block(
-                plxs_output::EigenTable::TURNING_DIRECTION,
+                plxs_core::results::HistoryQuantity::TurningDirection,
                 turning_rows,
             ));
         }
