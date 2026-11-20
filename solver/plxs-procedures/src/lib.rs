@@ -1,10 +1,11 @@
-//! Procedures of the Nodalis solver: what a step computes. M1: linear static analysis
-//! (`*STATIC` without `NLGEOM`). M2: heat transfer and temperature-displacement steps
+//! Procedures of the Nodalis solver: what a step computes. Linear static analysis
+//! (`*STATIC` without `NLGEOM`), heat transfer and temperature-displacement steps
 //! ([`heat`], [`thermal`]), nonlinear static (`NLGEOM`, plastic and creeping materials,
 //! [`nonlinear`]) and `*VISCO`, `*FREQUENCY` and `*BUCKLE` ([`eigen`]), `*DYNAMIC`
-//! ([`dynamic`]; with `NLGEOM`, nonlinear materials or contact [`nonlinear_dynamic`]), modal dynamics, steady state dynamics and complex frequency ([`modal`],
-//! [`complex`]), `*SENSITIVITY` ([`sensitivity`], T17). The remaining procedures follow in
-//! M3 (concept section 4.5).
+//! ([`dynamic`]; with `NLGEOM`, nonlinear materials or contact [`nonlinear_dynamic`]),
+//! modal dynamics, steady state dynamics and complex frequency ([`modal`], [`complex`]),
+//! `*SENSITIVITY` ([`sensitivity`]) and explicit dynamics ([`explicit_dynamic`],
+//! [`hybrid_dynamic`]).
 //!
 //! A procedure works on a [`ProcedureContext`]: the model, its element table, the assembled
 //! stiffness matrix and solver, the state it starts from, and the results it appends to.

@@ -5108,7 +5108,6 @@ fn sensitivity_step(
                 kind: "LINEAR".into(),
                 radius,
             }),
-            objectives: Vec::new(),
         },
     )))
 }

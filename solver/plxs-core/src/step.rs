@@ -205,11 +205,11 @@ impl Procedure {
     }
 }
 
-/// The equation solver CalculiX is asked for (`SOLVER=`); the own solver maps the names to
-/// its automatic choice, its direct and its iterative solver, see [`Self::mode`].
+/// The equation solver a step asks for by CalculiX's names (`SOLVER=`); the solver maps
+/// them to its automatic choice, its direct and its iterative solver, see [`Self::mode`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EquationSolver {
-    /// No `SOLVER=`: CalculiX takes its default; the own solver chooses automatically.
+    /// No `SOLVER=`: the solver chooses automatically.
     #[default]
     Default,
     Spooles,
@@ -505,8 +505,6 @@ pub struct Sensitivity {
     pub nlgeom: bool,
     pub responses: Vec<DesignResponse>,
     pub filter: Option<Filter>,
-    /// `*OBJECTIVE`, written by older Nodalis versions; names of the responses.
-    pub objectives: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

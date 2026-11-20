@@ -2,7 +2,7 @@
 //! all families at one place ([`shape`]) and the solid elements ([`solid`]). Plane stress,
 //! plane strain and axisymmetric elements ([`plane`]) are expanded into solids as CalculiX
 //! does, and so are shells, membranes, beams and trusses ([`expand`]). Springs and gaps
-//! follow in later milestones (concept section 4.1). Heat conduction on the solids lives in
+//! are assembled in `plxs_assembly::discrete`. Heat conduction on the solids lives in
 //! [`heat`].
 //!
 //! Sources: the CalculiX manual for node, face and integration-point conventions; textbooks
