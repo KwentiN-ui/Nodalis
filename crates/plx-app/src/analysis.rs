@@ -320,8 +320,7 @@ pub fn step_records(
         match records.iter_mut().find(|(m, _)| *m == model) {
             Some((_, record)) => record.solver_steps.push(number),
             None => {
-                let mut record =
-                    plx_results::steps::StepRecord::new(&step.name, &step.kind, vec![number]);
+                let mut record = plx_results::steps::StepRecord::of(step, vec![number]);
                 // Hyperelastic materials switch NLGEOM on.
                 record.nlgeom |= lowered.analysis.steps[index].nlgeom;
                 record.inherited_from = (inherited.iter())
@@ -544,7 +543,7 @@ impl Analysis {
             item: e.item,
         })?;
         let step = &fe.steps[lowered.step];
-        let mut record = plx_results::steps::StepRecord::new(&step.name, &step.kind, vec![1]);
+        let mut record = plx_results::steps::StepRecord::of(step, vec![1]);
         record.nlgeom = true;
         let mut output = Vec::new();
         let text = plx_solve::particles::describe(&lowered.model);

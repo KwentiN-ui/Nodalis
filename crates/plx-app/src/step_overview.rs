@@ -172,8 +172,8 @@ fn tree_item(fe: &FeModel, s: usize, key: &StepItemKey) -> Option<TreeItem> {
             step.boundary_conditions.iter().position(|b| b.id == *id)?,
         ),
         StepItemKey::Load(id) => TreeItem::Load(s, step.loads.iter().position(|l| l.id == *id)?),
-        StepItemKey::DefinedField(name) => {
-            TreeItem::DefinedField(s, step.defined_fields.iter().position(|f| f.name == *name)?)
+        StepItemKey::DefinedField(id) => {
+            TreeItem::DefinedField(s, step.defined_fields.iter().position(|f| f.id == *id)?)
         }
         StepItemKey::HistoryOutput(id) => {
             TreeItem::HistoryOutput(s, step.history_outputs.iter().position(|h| h == id)?)
@@ -192,7 +192,7 @@ pub fn step_item_key(fe: &FeModel, item: &TreeItem) -> Option<(usize, StepItemKe
         TreeItem::Load(s, i) => (s, StepItemKey::Load(fe.steps.get(s)?.loads.get(i)?.id)),
         TreeItem::DefinedField(s, i) => (
             s,
-            StepItemKey::DefinedField(fe.steps.get(s)?.defined_fields.get(i)?.name.clone()),
+            StepItemKey::DefinedField(fe.steps.get(s)?.defined_fields.get(i)?.id),
         ),
         TreeItem::HistoryOutput(s, i) => (
             s,

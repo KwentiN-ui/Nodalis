@@ -7,6 +7,8 @@ use plxs_core::{
     TieId,
 };
 
+use crate::normalized_name;
+use plxs_core::Error;
 use plxs_core::amplitude::{Amplitude, Signal};
 use plxs_core::constraints::{
     CyclicSymmetryModel, Equation, EquationTerm, Joint, RigidBody, RigidBodyNodes, Submodel, Tie,
@@ -33,7 +35,6 @@ use plxs_core::step::{
     ModalDynamics, OutputDimension, OutputVariable, Procedure, Radiate, Rayleigh, RestartWrite,
     Sensitivity, SolverMode, Static, SteadyStateDynamics, Step, Totals, Visco,
 };
-use plxs_core::{Error, normalized_name};
 
 use crate::Reading;
 use crate::lexer::{Keyword, Line, split_fields};

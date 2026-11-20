@@ -29,13 +29,13 @@ impl OverviewGroup {
     }
 }
 
-/// The step item a row stands for, the same in every step: boundary conditions and loads
-/// and history outputs by their id, defined fields, which have none, by their name.
+/// The step item a row stands for, the same in every step by its id: boundary conditions,
+/// loads, defined fields and history outputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StepItemKey {
     BoundaryCondition(Id<crate::BoundaryCondition>),
     Load(Id<crate::Load>),
-    DefinedField(String),
+    DefinedField(Id<crate::DefinedField>),
     HistoryOutput(Id<crate::HistoryOutput>),
 }
 
@@ -310,7 +310,7 @@ impl FeModel {
                     step.boundary_conditions.retain(|b| b.id != *id)
                 }
                 StepItemKey::Load(id) => step.loads.retain(|l| l.id != *id),
-                StepItemKey::DefinedField(name) => step.defined_fields.retain(|f| f.name != *name),
+                StepItemKey::DefinedField(id) => step.defined_fields.retain(|f| f.id != *id),
                 StepItemKey::HistoryOutput(id) => step.history_outputs.retain(|h| h != id),
             }
             if step_items(&self.history_outputs, step).len() < before {
@@ -335,8 +335,8 @@ fn step_items(outputs: &[crate::HistoryOutput], step: &Step) -> Vec<(StepItemKey
     let boundaries = (step.boundary_conditions.iter())
         .map(|b| (StepItemKey::BoundaryCondition(b.id), b.name.clone()));
     let loads = (step.loads.iter()).map(|l| (StepItemKey::Load(l.id), l.name.clone()));
-    let fields = (step.defined_fields.iter())
-        .map(|f| (StepItemKey::DefinedField(f.name.clone()), f.name.clone()));
+    let fields =
+        (step.defined_fields.iter()).map(|f| (StepItemKey::DefinedField(f.id), f.name.clone()));
     let history = (step.history_outputs.iter())
         .filter_map(|id| outputs.iter().find(|o| o.id == *id))
         .map(|h| (StepItemKey::HistoryOutput(h.id), h.name.clone()));
@@ -375,8 +375,8 @@ fn find_item<'a>(
             .find(|b| b.id == *id)
             .map(Item::Boundary),
         StepItemKey::Load(id) => (step.loads.iter()).find(|l| l.id == *id).map(Item::Load),
-        StepItemKey::DefinedField(name) => (step.defined_fields.iter())
-            .find(|f| f.name == *name)
+        StepItemKey::DefinedField(id) => (step.defined_fields.iter())
+            .find(|f| f.id == *id)
             .map(Item::Field),
         StepItemKey::HistoryOutput(id) => (step.history_outputs.contains(id))
             .then(|| outputs.iter().find(|o| o.id == *id))

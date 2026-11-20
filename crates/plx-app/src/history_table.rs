@@ -1217,6 +1217,7 @@ mod tests {
         // Field output only at the end of each step.
         let increments = vec![increment(1, 2, 1.0), increment(2, 2, 3.0)];
         let record = |name: &str, steps: &[u32]| StepRecord {
+            step: None,
             name: name.into(),
             category: StepCategory::Static,
             nlgeom: false,
