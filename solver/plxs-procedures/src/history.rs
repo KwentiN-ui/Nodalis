@@ -17,6 +17,7 @@ pub fn write_table(
     rows: Vec<(u32, Vec<f64>)>,
 ) {
     results.history.push(HistoryBlock {
+        origin: None,
         step: step_number,
         increment: 0,
         quantity,
@@ -130,6 +131,7 @@ pub fn write_history_with_velocities(
                 };
             let rows = integration_point_rows(model, table, elements, field, reorder);
             results.history.push(HistoryBlock {
+                origin: request.origin,
                 step: step_number,
                 increment,
                 quantity,
@@ -182,6 +184,7 @@ pub fn write_history_with_velocities(
         };
         for variable in &request.variables {
             let block = |quantity, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
+                origin: request.origin,
                 step: step_number,
                 increment,
                 quantity,
@@ -239,6 +242,7 @@ fn write_volumes(
         .collect();
     let total: f64 = rows.iter().map(|r| r.1[0]).sum();
     let block = |quantity, rows| HistoryBlock {
+        origin: request.origin,
         step,
         increment,
         quantity,
@@ -309,7 +313,8 @@ pub fn write_thermal_history(
     heat_generation: &[f64],
     flux: Option<&IntegrationPointField>,
 ) {
-    let block = |quantity, source, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
+    let block = |quantity, source, rows: Vec<(u32, Vec<f64>)>, origin| HistoryBlock {
+        origin,
         step: step_number,
         increment,
         quantity,
@@ -335,20 +340,28 @@ pub fn write_thermal_history(
             match variable {
                 plxs_core::step::OutputVariable::Temperatures if request.totals != Totals::Only => {
                     let rows = rows_of(temperatures);
-                    (results.history).push(block(HistoryQuantity::Temperatures, set.clone(), rows));
+                    (results.history).push(block(
+                        HistoryQuantity::Temperatures,
+                        set.clone(),
+                        rows,
+                        request.origin,
+                    ));
                 }
                 plxs_core::step::OutputVariable::ReactionHeatFlows => {
                     let rows = rows_of(heat_generation);
                     let sum: f64 = rows.iter().map(|r| r.1[0]).sum();
                     if request.totals != Totals::Only {
                         let quantity = HistoryQuantity::HeatGeneration;
-                        results.history.push(block(quantity, set.clone(), rows));
+                        results
+                            .history
+                            .push(block(quantity, set.clone(), rows, request.origin));
                     }
                     if request.totals != Totals::No {
                         results.history.push(block(
                             HistoryQuantity::TotalHeatGeneration,
                             set.clone(),
                             vec![(0, vec![sum])],
+                            request.origin,
                         ));
                     }
                 }
@@ -378,6 +391,11 @@ pub fn write_thermal_history(
             .map(|(id, v)| (id, v[..4].to_vec()))
             .collect();
         let source = HistorySource::Elements(handle);
-        (results.history).push(block(HistoryQuantity::HeatFlux, source, rows));
+        (results.history).push(block(
+            HistoryQuantity::HeatFlux,
+            source,
+            rows,
+            request.origin,
+        ));
     }
 }

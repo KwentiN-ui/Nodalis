@@ -636,6 +636,7 @@ impl Procedure for ComplexFrequencyProcedure {
             });
         }
         let table_block = |quantity, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
+            origin: None,
             step: ctx.step_number,
             increment: 0,
             quantity,
