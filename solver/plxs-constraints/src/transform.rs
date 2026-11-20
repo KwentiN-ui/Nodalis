@@ -82,10 +82,15 @@ pub fn rotation(transform: &Transform, x: [f64; 3]) -> Option<Rotation> {
 pub fn node_rotations(model: &Model, warnings: &mut Vec<String>) -> HashMap<u32, Rotation> {
     let mut rotations = HashMap::new();
     for transform in &model.constraints.transforms {
-        let Some(nodes) = model.sets.node_sets.get(&transform.nset) else {
+        let Some(nodes) = model
+            .sets
+            .node_sets
+            .get(transform.nset.index())
+            .map(|s| &s.nodes)
+        else {
             warnings.push(format!(
-                "*WARNING in *TRANSFORM: node set {} does not exist",
-                transform.nset
+                "*WARNING in *TRANSFORM: node set #{} does not exist",
+                transform.nset.0
             ));
             continue;
         };
@@ -99,7 +104,7 @@ pub fn node_rotations(model: &Model, warnings: &mut Vec<String>) -> HashMap<u32,
                 }
                 None => warnings.push(format!(
                     "*WARNING in *TRANSFORM: the points of the system of node set {} are degenerate",
-                    transform.nset
+                    model.sets.node_set_name(transform.nset)
                 )),
             }
         }
@@ -115,7 +120,7 @@ mod tests {
     fn rectangular_system_from_two_points() {
         // Manual example: x' = global y, y' = global z.
         let t = Transform {
-            nset: "N".into(),
+            nset: plxs_core::NodeSetId(0),
             kind: TransformKind::Rectangular,
             a: [0.0, 1.0, 0.0],
             b: [0.0, 0.0, 1.0],
@@ -130,7 +135,7 @@ mod tests {
     #[test]
     fn cylindrical_system_is_radial_tangential_axial() {
         let t = Transform {
-            nset: "N".into(),
+            nset: plxs_core::NodeSetId(0),
             kind: TransformKind::Cylindrical,
             a: [0.0, 0.0, 0.0],
             b: [0.0, 0.0, 1.0],

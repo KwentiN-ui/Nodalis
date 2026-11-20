@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::mesh::NodeId;
 
-/// A section on an element set. `elset` is upper case.
+/// A section on an element set.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Section {
-    pub elset: String,
+    pub elset: crate::ElementSetId,
     pub kind: SectionKind,
 }
 

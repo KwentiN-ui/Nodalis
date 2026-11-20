@@ -1384,7 +1384,9 @@ S
         let _ = std::fs::remove_dir_all(&dir);
         // A load on a set the lowering left out.
         let mut cube = prepared(CUBE);
-        cube.analysis.model.sets.node_sets.remove("PULL");
+        let sets = &mut cube.analysis.model.sets;
+        let pull = sets.node_set_named("PULL").unwrap();
+        sets.node_sets.truncate(pull.index());
         let mut check = Run::check_analysis(1, &dir, "Check", cube.clone()).unwrap();
         assert_eq!(check.wait(), JobStatus::Failed);
         let found = check.diagnostics().unwrap();
@@ -1397,7 +1399,10 @@ S
         let mut run = Run::start_analysis(1, &dir, "Run", cube).unwrap();
         assert_eq!(run.wait(), JobStatus::Failed);
         let output = run.new_output();
-        assert!(output.iter().any(|l| l.contains("PULL")), "{output:#?}");
+        assert!(
+            output.iter().any(|l| l.contains("node set #")),
+            "{output:#?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

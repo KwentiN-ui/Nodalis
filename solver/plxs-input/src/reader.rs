@@ -2,7 +2,10 @@
 
 use std::collections::HashSet;
 
-use plxs_core::{AmplitudeId, InteractionId, MaterialId, OrientationId};
+use plxs_core::{
+    AmplitudeId, ElementSetId, InteractionId, MaterialId, NodeSetId, OrientationId, SurfaceId,
+    TieId,
+};
 
 use plxs_core::amplitude::{Amplitude, Signal};
 use plxs_core::constraints::{
@@ -26,9 +29,9 @@ use plxs_core::step::{
     Controls, CyclicModes, DampingRatio, DefaultAmplitude, DefinedField, DefinedFieldKind,
     DesignResponse, DistributedFlux, DistributedLoad, DistributedLoadKind, Dynamic, EquationSolver,
     ExplicitControls, FieldOutput, Film, Filter, FluxKind, Follower, Frequency, HeatTransfer,
-    HistoryOutput, Incrementation, Integration, ModalDamping, ModalDynamics, OutputDimension,
-    Procedure, Radiate, Rayleigh, RestartWrite, Sensitivity, Static, SteadyStateDynamics, Step,
-    Totals, Visco,
+    HistoryOutput, HistorySet, Incrementation, Integration, ModalDamping, ModalDynamics,
+    OutputDimension, Procedure, Radiate, Rayleigh, RestartWrite, Sensitivity, Static,
+    SteadyStateDynamics, Step, Totals, Visco,
 };
 use plxs_core::{Error, normalized_name};
 
@@ -144,6 +147,10 @@ enum Kind {
     Orientation,
     Amplitude,
     Interaction,
+    NodeSet,
+    ElementSet,
+    Surface,
+    Tie,
 }
 
 impl Kind {
@@ -153,6 +160,10 @@ impl Kind {
             Kind::Orientation => "orientation",
             Kind::Amplitude => "amplitude",
             Kind::Interaction => "surface interaction",
+            Kind::NodeSet => "node set",
+            Kind::ElementSet => "element set",
+            Kind::Surface => "surface",
+            Kind::Tie => "tie",
         }
     }
 }
@@ -191,6 +202,22 @@ impl Names {
         add(
             Kind::Interaction,
             &mut model.contact.interactions.iter().map(|i| &i.name),
+        );
+        add(
+            Kind::NodeSet,
+            &mut model.sets.node_sets.iter().map(|s| &s.name),
+        );
+        add(
+            Kind::ElementSet,
+            &mut model.sets.element_sets.iter().map(|s| &s.name),
+        );
+        add(
+            Kind::Surface,
+            &mut model.sets.surfaces.iter().map(|s| &s.name),
+        );
+        add(
+            Kind::Tie,
+            &mut model.constraints.ties.iter().map(|t| &t.name),
         );
         names
     }
@@ -334,6 +361,27 @@ impl Reader {
                 });
                 model.contact.interactions.len()
             }
+            Kind::NodeSet => model.sets.add_node_set(name.clone(), []).index() + 1,
+            Kind::ElementSet => model.sets.add_element_set(name.clone(), []).index() + 1,
+            // A surface used before its definition: the definition gives it its kind.
+            Kind::Surface => {
+                (model.sets)
+                    .add_surface(name.clone(), plxs_core::mesh::Surface::Node(Vec::new()))
+                    .index()
+                    + 1
+            }
+            Kind::Tie => {
+                model.constraints.ties.push(plxs_core::constraints::Tie {
+                    name: name.clone(),
+                    slave: plxs_core::SurfaceId(u32::MAX),
+                    master: plxs_core::SurfaceId(u32::MAX),
+                    position_tolerance: None,
+                    adjust: true,
+                    cyclic_symmetry: false,
+                    multistage: false,
+                });
+                model.constraints.ties.len()
+            }
         } as u32
             - 1;
         self.names.slots.insert((kind, name.clone()), index);
@@ -353,6 +401,12 @@ impl Reader {
         index
     }
 
+    /// The slot of `name` of `kind` if it has been defined.
+    fn defined(&self, kind: Kind, name: &str) -> Option<u32> {
+        let &index = self.names.slots.get(&(kind, name.to_string()))?;
+        self.names.defined.contains(&(kind, index)).then_some(index)
+    }
+
     fn material_ref(&mut self, name: String, keyword: &str) -> MaterialId {
         MaterialId(self.slot(Kind::Material, name, keyword, ""))
     }
@@ -363,6 +417,47 @@ impl Reader {
 
     fn interaction_ref(&mut self, name: String, keyword: &str) -> InteractionId {
         InteractionId(self.slot(Kind::Interaction, name, keyword, ""))
+    }
+
+    /// The node set `name` (upper case) as `keyword` uses it; `context` names the use for
+    /// the error of a set never defined.
+    fn node_set_ref(&mut self, name: &str, keyword: &str, context: &str) -> NodeSetId {
+        NodeSetId(self.slot(Kind::NodeSet, normalized_name(name), keyword, context))
+    }
+
+    fn element_set_ref(&mut self, name: &str, keyword: &str, context: &str) -> ElementSetId {
+        ElementSetId(self.slot(Kind::ElementSet, normalized_name(name), keyword, context))
+    }
+
+    fn surface_ref(&mut self, name: &str, keyword: &str) -> SurfaceId {
+        SurfaceId(self.slot(Kind::Surface, normalized_name(name), keyword, ""))
+    }
+
+    /// What an undefined set of the current step says beside its name.
+    fn step_context(&self) -> String {
+        (self.steps.step.as_ref()).map_or(String::new(), |step| format!("step {}", step.name))
+    }
+
+    /// A node or a node set: a number is a node.
+    fn node_ref(&mut self, text: &str, keyword: &str) -> NodeRef {
+        match text.trim().parse::<NodeId>() {
+            Ok(id) => NodeRef::Node(id),
+            Err(_) => {
+                let context = self.step_context();
+                NodeRef::Set(self.node_set_ref(text, keyword, &context))
+            }
+        }
+    }
+
+    /// An element or an element set: a number is an element.
+    fn element_ref(&mut self, text: &str, keyword: &str) -> ElementRef {
+        match text.trim().parse::<ElementId>() {
+            Ok(id) => ElementRef::Element(id),
+            Err(_) => {
+                let context = self.step_context();
+                ElementRef::Set(self.element_set_ref(text, keyword, &context))
+            }
+        }
     }
 
     /// The amplitude named by the parameter `parameter` of `k`, if any.
@@ -514,7 +609,8 @@ impl Reader {
             ids.push(id);
         }
         if let Some(nset) = nset {
-            self.model().sets.add_nodes(&nset, ids);
+            let set = NodeSetId(self.define(Kind::NodeSet, nset, "*NODE"));
+            self.model().sets.add_nodes(set, ids);
         }
         Ok(())
     }
@@ -570,7 +666,8 @@ impl Reader {
             )));
         }
         if let Some(elset) = elset {
-            self.model().sets.add_elements(&elset, ids);
+            let set = ElementSetId(self.define(Kind::ElementSet, elset, "*ELEMENT"));
+            self.model().sets.add_elements(set, ids);
         }
         Ok(())
     }
@@ -592,15 +689,16 @@ impl Reader {
                     Ok(id) => ids.push(id),
                     Err(_) => {
                         let other = normalized_name(field);
-                        let Some(members) = self.model().sets.node_sets.get(&other).cloned() else {
+                        let Some(set) = self.defined(Kind::NodeSet, &other) else {
                             return Err(Error::undefined("*NSET", "node set", other));
                         };
-                        ids.extend(members);
+                        ids.extend_from_slice(self.model().sets.nodes(NodeSetId(set)));
                     }
                 }
             }
         }
-        self.model().sets.add_nodes(&name, ids);
+        let set = NodeSetId(self.define(Kind::NodeSet, name, "*NSET"));
+        self.model().sets.add_nodes(set, ids);
         Ok(())
     }
 
@@ -621,16 +719,16 @@ impl Reader {
                     Ok(id) => ids.push(id),
                     Err(_) => {
                         let other = normalized_name(field);
-                        let Some(members) = self.model().sets.element_sets.get(&other).cloned()
-                        else {
+                        let Some(set) = self.defined(Kind::ElementSet, &other) else {
                             return Err(Error::undefined("*ELSET", "element set", other));
                         };
-                        ids.extend(members);
+                        ids.extend_from_slice(self.model().sets.elements(ElementSetId(set)));
                     }
                 }
             }
         }
-        self.model().sets.add_elements(&name, ids);
+        let set = ElementSetId(self.define(Kind::ElementSet, name, "*ELSET"));
+        self.model().sets.add_elements(set, ids);
         Ok(())
     }
 
@@ -656,14 +754,12 @@ impl Reader {
                         Ok(element) => faces.push(SurfaceFace { element, face }),
                         Err(_) => {
                             let set = normalized_name(f[0]);
-                            let Some(members) = self.model().sets.element_sets.get(&set).cloned()
-                            else {
+                            let Some(set) = self.defined(Kind::ElementSet, &set) else {
                                 return Err(Error::undefined("*SURFACE", "element set", set));
                             };
+                            let members = self.model().sets.elements(ElementSetId(set));
                             faces.extend(
-                                members
-                                    .into_iter()
-                                    .map(|element| SurfaceFace { element, face }),
+                                members.iter().map(|&element| SurfaceFace { element, face }),
                             );
                         }
                     }
@@ -678,11 +774,10 @@ impl Reader {
                             Ok(id) => nodes.push(id),
                             Err(_) => {
                                 let set = normalized_name(field);
-                                let Some(members) = self.model().sets.node_sets.get(&set).cloned()
-                                else {
+                                let Some(set) = self.defined(Kind::NodeSet, &set) else {
                                     return Err(Error::undefined("*SURFACE", "node set", set));
                                 };
-                                nodes.extend(members);
+                                nodes.extend_from_slice(self.model().sets.nodes(NodeSetId(set)));
                             }
                         }
                     }
@@ -691,7 +786,8 @@ impl Reader {
             }
             other => return Err(k.error(format!("TYPE={other} is not supported"))),
         };
-        self.model().sets.surfaces.insert(name, surface);
+        let id = self.define(Kind::Surface, name, "*SURFACE");
+        self.model().sets.surfaces[id as usize].surface = surface;
         Ok(())
     }
 
@@ -964,14 +1060,26 @@ impl Reader {
 
     // ----- Sections ---------------------------------------------------------------------
 
-    fn section_names(&mut self, k: &Keyword) -> Result<(String, MaterialId), Error> {
-        let Some(elset) = k.value("ELSET").map(normalized_name) else {
-            return Err(k.error("no ELSET given"));
-        };
+    fn section_names(&mut self, k: &Keyword) -> Result<(ElementSetId, MaterialId), Error> {
+        let elset = self.section_set(k)?;
         let Some(material) = k.value("MATERIAL").map(normalized_name) else {
             return Err(k.error("no MATERIAL given"));
         };
         Ok((elset, self.material_ref(material, &k.name)))
+    }
+
+    /// The element set of a section, `ELSET=`.
+    fn section_set(&mut self, k: &Keyword) -> Result<ElementSetId, Error> {
+        let Some(elset) = k.value("ELSET") else {
+            return Err(k.error("no ELSET given"));
+        };
+        Ok(self.element_set_ref(elset, &k.name, ""))
+    }
+
+    /// The element set of the parameter `parameter` of `k`, if given.
+    fn element_set_parameter(&mut self, k: &Keyword, parameter: &str) -> Option<ElementSetId> {
+        let name = k.value(parameter)?;
+        Some(self.element_set_ref(name, &k.name, ""))
     }
 
     fn solid_section(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
@@ -1171,9 +1279,7 @@ impl Reader {
         if k.has("ORIENTATION") {
             return Err(k.error("ORIENTATION is not supported"));
         }
-        let Some(elset) = k.value("ELSET").map(normalized_name) else {
-            return Err(k.error("no ELSET given"));
-        };
+        let elset = self.section_set(k)?;
         let Some(first) = data.first() else {
             return Err(k.error("no data"));
         };
@@ -1236,9 +1342,7 @@ impl Reader {
 
     fn gap(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
         k.check_parameters(&["ELSET"])?;
-        let Some(elset) = k.value("ELSET").map(normalized_name) else {
-            return Err(k.error("no ELSET given"));
-        };
+        let elset = self.section_set(k)?;
         let Some(d) = data.first() else {
             return Err(k.error("no data"));
         };
@@ -1287,7 +1391,7 @@ impl Reader {
                 }
                 for t in f.chunks(3) {
                     terms.push(EquationTerm {
-                        node: node_ref(t[0]),
+                        node: self.node_ref(t[0], &k.name),
                         dof: parse_number(k, d, t[1])? as u8,
                         coefficient: parse_number(k, d, t[2])?,
                     });
@@ -1306,8 +1410,8 @@ impl Reader {
     fn rigid_body(&mut self, k: &Keyword) -> Result<(), Error> {
         k.check_parameters(&["NSET", "ELSET", "REF NODE", "ROT NODE"])?;
         let nodes = match (k.value("NSET"), k.value("ELSET")) {
-            (Some(n), None) => RigidBodyNodes::NodeSet(normalized_name(n)),
-            (None, Some(e)) => RigidBodyNodes::ElementSet(normalized_name(e)),
+            (Some(n), None) => RigidBodyNodes::NodeSet(self.node_set_ref(n, &k.name, "")),
+            (None, Some(e)) => RigidBodyNodes::ElementSet(self.element_set_ref(e, &k.name, "")),
             _ => return Err(k.error("either NSET or ELSET is needed")),
         };
         let Some(reference_node) = k.integer("REF NODE")? else {
@@ -1350,12 +1454,15 @@ impl Reader {
         if !values[0].is_finite() || values[0] < 0.0 {
             return Err(data_error(k, line, "the mass must not be negative"));
         }
+        let elset = self.element_set_parameter(k, "ELSET");
+        let name = (k.value("NAME").map(normalized_name))
+            .map(|name| ElementSetId(self.define(Kind::ElementSet, name, "*POINT MASS")));
         self.model().point_masses.push(plxs_core::PointMass {
             node,
             mass: values[0],
             inertia,
-            elset: k.value("ELSET").map(normalized_name),
-            name: k.value("NAME").map(normalized_name),
+            elset,
+            name,
         });
         Ok(())
     }
@@ -1435,15 +1542,18 @@ impl Reader {
         if f.len() != 2 {
             return Err(data_error(k, d, "the slave and master surface are needed"));
         }
-        self.model().constraints.ties.push(Tie {
+        let slave = self.surface_ref(f[0], &k.name);
+        let master = self.surface_ref(f[1], &k.name);
+        let tie = self.define(Kind::Tie, name.clone(), &k.name) as usize;
+        self.model().constraints.ties[tie] = Tie {
             name,
-            slave: normalized_name(f[0]),
-            master: normalized_name(f[1]),
+            slave,
+            master,
             position_tolerance: k.number("POSITION TOLERANCE")?,
             adjust: k.value("ADJUST") != Some("NO"),
             cyclic_symmetry: k.has("CYCLIC SYMMETRY"),
             multistage: k.has("MULTISTAGE"),
-        });
+        };
         Ok(())
     }
 
@@ -1455,6 +1565,7 @@ impl Reader {
         let Some(tie) = k.value("TIE").map(normalized_name) else {
             return Err(k.error("TIE is needed"));
         };
+        let tie = TieId(self.slot(Kind::Tie, tie, &k.name, ""));
         let Some(d) = data.first() else {
             return Err(k.error("two points on the axis are needed"));
         };
@@ -1462,12 +1573,13 @@ impl Reader {
         if v.len() < 6 {
             return Err(data_error(k, d, "two points on the axis are needed"));
         }
+        let elset = self.element_set_parameter(k, "ELSET");
         self.model().constraints.cyclic_symmetry = Some(CyclicSymmetryModel {
             sectors,
             ngraph: k.integer("NGRAPH")?.unwrap_or(1),
             tie,
             axis: [[v[0], v[1], v[2]], [v[3], v[4], v[5]]],
-            elset: k.value("ELSET").map(normalized_name),
+            elset,
             check: k.value("CHECK") != Some("NO"),
         });
         Ok(())
@@ -1475,9 +1587,10 @@ impl Reader {
 
     fn transform(&mut self, k: &Keyword, data: &[Data<'_>]) -> Result<(), Error> {
         k.check_parameters(&["NSET", "TYPE"])?;
-        let Some(nset) = k.value("NSET").map(normalized_name) else {
+        let Some(nset) = k.value("NSET") else {
             return Err(k.error("no NSET given"));
         };
+        let nset = self.node_set_ref(nset, &k.name, "");
         let kind = match k.value("TYPE").unwrap_or("R") {
             "R" => TransformKind::Rectangular,
             "C" => TransformKind::Cylindrical,
@@ -1509,12 +1622,15 @@ impl Reader {
         };
         let mut node_sets = Vec::new();
         for d in data {
-            node_sets.extend(d.fields().into_iter().map(normalized_name));
+            for set in d.fields() {
+                node_sets.push(self.node_set_ref(set, &k.name, ""));
+            }
         }
+        let global_elset = self.element_set_parameter(k, "GLOBAL ELSET");
         self.model().constraints.submodel = Some(Submodel {
             input: input.to_string(),
             node_sets,
-            global_elset: k.value("GLOBAL ELSET").map(normalized_name),
+            global_elset,
         });
         Ok(())
     }
@@ -1686,7 +1802,7 @@ impl Reader {
         };
         let adjust = k.value("ADJUST").map(|v| match v.parse::<f64>() {
             Ok(distance) => Adjust::Distance(distance),
-            Err(_) => Adjust::NodeSet(normalized_name(v)),
+            Err(_) => Adjust::NodeSet(self.node_set_ref(v, &k.name, "")),
         });
         let Some(d) = data.first() else {
             return Err(k.error("the slave and master surface are needed"));
@@ -1695,13 +1811,15 @@ impl Reader {
         if f.len() != 2 {
             return Err(data_error(k, d, "the slave and master surface are needed"));
         }
+        let slave = self.surface_ref(f[0], &k.name);
+        let master = self.surface_ref(f[1], &k.name);
         self.model().contact.pairs.push(ContactPair {
             interaction,
             kind,
             small_sliding: k.has("SMALL SLIDING"),
             adjust,
-            slave: normalized_name(f[0]),
-            master: normalized_name(f[1]),
+            slave,
+            master,
         });
         Ok(())
     }
@@ -1710,9 +1828,10 @@ impl Reader {
     /// see [`plxs_core::contact::CompressionOnly`].
     fn compression_only(&mut self, k: &Keyword) -> Result<(), Error> {
         k.check_parameters(&["SURFACE", "CLEARANCE", "STIFFNESS", "FLIP"])?;
-        let Some(surface) = k.value("SURFACE").map(normalized_name) else {
+        let Some(surface) = k.value("SURFACE") else {
             return Err(k.error("SURFACE is needed"));
         };
+        let surface = self.surface_ref(surface, &k.name);
         let stiffness = k.number("STIFFNESS")?;
         if stiffness.is_some_and(|s| s <= 0.0 || s.is_nan()) {
             return Err(k.error("STIFFNESS must be positive"));
@@ -1736,9 +1855,11 @@ impl Reader {
         else {
             return Err(k.error("MASTER, SLAVE and VALUE are needed"));
         };
+        let master = self.surface_ref(master, &k.name);
+        let slave = self.surface_ref(slave, &k.name);
         self.model().contact.clearances.push(Clearance {
-            master: normalized_name(master),
-            slave: normalized_name(slave),
+            master,
+            slave,
             value,
         });
         Ok(())
@@ -1798,10 +1919,8 @@ impl Reader {
                         return Err(data_error(k, d, "node or set and temperature needed"));
                     }
                     let value = parse_number(k, d, f[1])?;
-                    self.model()
-                        .initial
-                        .temperatures
-                        .push((node_ref(f[0]), value));
+                    let region = self.node_ref(f[0], &k.name);
+                    self.model().initial.temperatures.push((region, value));
                 }
             }
             Some(kind @ ("VELOCITY" | "DISPLACEMENT")) => {
@@ -1816,7 +1935,7 @@ impl Reader {
                     }
                     let dof = parse_number(k, d, f[1])? as u8;
                     let value = parse_number(k, d, f[2])?;
-                    let entry = (node_ref(f[0]), dof, value);
+                    let entry = (self.node_ref(f[0], &k.name), dof, value);
                     if kind == "VELOCITY" {
                         self.model().initial.velocities.push(entry);
                     } else {
@@ -1849,7 +1968,8 @@ impl Reader {
         let Some(d) = data.first() else {
             return Err(k.error("the node set is needed"));
         };
-        let nset = normalized_name(d.fields().first().copied().unwrap_or_default());
+        let nset = d.fields().first().copied().unwrap_or_default();
+        let nset = self.node_set_ref(nset, &k.name, "");
         self.model().design_variables = Some(DesignVariables { nset });
         Ok(())
     }
@@ -2321,10 +2441,8 @@ impl Reader {
         };
         let f = d.fields();
         let kind = normalized_name(f[0]);
-        let elset = f
-            .get(1)
-            .filter(|s| !s.is_empty())
-            .map(|s| normalized_name(s));
+        let elset =
+            (f.get(1).filter(|s| !s.is_empty())).map(|set| self.element_set_ref(set, &k.name, ""));
         let mut values = Vec::new();
         for v in f.iter().skip(2) {
             values.push(parse_number(k, d, v)?);
@@ -2420,7 +2538,7 @@ impl Reader {
                 _ => None,
             };
             new.push(Boundary {
-                region: node_ref(f[0]),
+                region: self.node_ref(f[0], &k.name),
                 first_dof,
                 last_dof: last_dof.max(first_dof),
                 value,
@@ -2453,7 +2571,7 @@ impl Reader {
             (Some(_), Some(_)) => {
                 return Err(k.error("FOLLOWER and FOLLOWER ROTATION exclude each other"));
             }
-            (Some(nodes), None) => Some(Follower::Nodes(node_ref(nodes))),
+            (Some(nodes), None) => Some(Follower::Nodes(self.node_ref(nodes, &k.name))),
             (None, Some(node)) => match node.trim().parse::<NodeId>() {
                 Ok(id) => Some(Follower::Rotation(id)),
                 Err(_) => return Err(k.error("FOLLOWER ROTATION needs a node number")),
@@ -2477,7 +2595,7 @@ impl Reader {
                 ));
             }
             new.push(ConcentratedLoad {
-                region: node_ref(f[0]),
+                region: self.node_ref(f[0], &k.name),
                 dof: parse_number(k, d, f[1])? as u8,
                 value: parse_number(k, d, f[2])?,
                 amplitude,
@@ -2544,7 +2662,7 @@ impl Reader {
                     DistributedLoadKind::Other { label, values }
                 };
             new.push(DistributedLoad {
-                region: element_ref(f[0]),
+                region: self.element_ref(f[0], &k.name),
                 kind,
                 amplitude,
                 load_case,
@@ -2565,7 +2683,7 @@ impl Reader {
                 return Err(data_error(k, d, "node or set, 11 and value needed"));
             }
             new.push(ConcentratedFlux {
-                region: node_ref(f[0]),
+                region: self.node_ref(f[0], &k.name),
                 value: parse_number(k, d, f[2])?,
                 amplitude,
             });
@@ -2592,7 +2710,7 @@ impl Reader {
                 return Err(data_error(k, d, format!("label {label} is not supported")));
             };
             new.push(DistributedFlux {
-                region: element_ref(f[0]),
+                region: self.element_ref(f[0], &k.name),
                 kind,
                 value: parse_number(k, d, f[2])?,
                 amplitude,
@@ -2624,7 +2742,7 @@ impl Reader {
             }
             let face = parse_face_label(k, d, f[1], 'F')?;
             new.push(Film {
-                region: element_ref(f[0]),
+                region: self.element_ref(f[0], &k.name),
                 face,
                 sink_temperature: parse_number(k, d, f[2])?,
                 coefficient: parse_number(k, d, f[3])?,
@@ -2665,7 +2783,7 @@ impl Reader {
             let cavity = label.ends_with("CR");
             let face = parse_face_label(k, d, label.trim_end_matches("CR"), 'R')?;
             new.push(Radiate {
-                region: element_ref(f[0]),
+                region: self.element_ref(f[0], &k.name),
                 face,
                 cavity,
                 sink_temperature: parse_number(k, d, f[2])?,
@@ -2706,7 +2824,7 @@ impl Reader {
                     if f.len() < 2 {
                         return Err(data_error(k, d, "node or set and temperature needed"));
                     }
-                    values.push((node_ref(f[0]), parse_number(k, d, f[1])?));
+                    values.push((self.node_ref(f[0], &k.name), parse_number(k, d, f[1])?));
                 }
                 DefinedFieldKind::Temperature(values)
             }
@@ -2734,17 +2852,18 @@ impl Reader {
                 }
                 ContactChange::ContactPair {
                     add,
-                    slave: normalized_name(f[0]),
-                    master: normalized_name(f[1]),
+                    slave: self.surface_ref(f[0], &k.name),
+                    master: self.surface_ref(f[1], &k.name),
                 }
             }
             Some("ELEMENT") => {
                 let Some(d) = data.first() else {
                     return Err(k.error("the element set is needed"));
                 };
+                let set = d.fields().first().copied().unwrap_or_default();
                 ContactChange::Elements {
                     add,
-                    elset: normalized_name(d.fields().first().copied().unwrap_or_default()),
+                    elset: self.element_set_ref(set, &k.name, ""),
                 }
             }
             _ => return Err(k.error("TYPE=CONTACT PAIR or TYPE=ELEMENT is needed")),
@@ -2795,10 +2914,11 @@ impl Reader {
         for d in data {
             variables.extend(d.fields().into_iter().map(|v| v.to_ascii_uppercase()));
         }
+        let nset = (k.value("NSET")).map(|set| self.node_set_ref(set, &k.name, ""));
         let output = FieldOutput {
             variables,
             frequency: k.integer("FREQUENCY")?.unwrap_or(1),
-            nset: k.value("NSET").map(normalized_name),
+            nset,
             last_iterations: k.has("LAST ITERATIONS"),
             contact_elements: k.has("CONTACT ELEMENTS"),
             output: match k.value("OUTPUT") {
@@ -2836,11 +2956,13 @@ impl Reader {
             "MASTER",
         ])?;
         let set = match kind {
-            FileKind::Node => k.value("NSET"),
-            FileKind::Element => k.value("ELSET"),
+            FileKind::Node => {
+                (k.value("NSET")).map(|set| HistorySet::Nodes(self.node_set_ref(set, &k.name, "")))
+            }
+            FileKind::Element => (k.value("ELSET"))
+                .map(|set| HistorySet::Elements(self.element_set_ref(set, &k.name, ""))),
             FileKind::Contact => None,
-        }
-        .map(normalized_name);
+        };
         if set.is_none() && kind != FileKind::Contact {
             return Err(k.error("the set is needed"));
         }
@@ -2848,6 +2970,14 @@ impl Reader {
         for d in data {
             variables.extend(d.fields().into_iter().map(|v| v.to_ascii_uppercase()));
         }
+        let surfaces = match (kind, k.value("SLAVE"), k.value("MASTER")) {
+            (FileKind::Contact, Some(slave), master) => Some((
+                self.surface_ref(slave, &k.name),
+                // A compression only surface: its master is the ground.
+                master.map(|master| self.surface_ref(master, &k.name)),
+            )),
+            _ => None,
+        };
         let output = HistoryOutput {
             set,
             variables,
@@ -2859,16 +2989,7 @@ impl Reader {
             },
             global: k.value("GLOBAL") != Some("NO"),
             time_points: k.value("TIME POINTS").map(normalized_name),
-            surfaces: match (kind, k.value("SLAVE"), k.value("MASTER")) {
-                (FileKind::Contact, Some(slave), Some(master)) => {
-                    Some((normalized_name(slave), normalized_name(master)))
-                }
-                // A compression only surface: its master is the ground.
-                (FileKind::Contact, Some(slave), None) => {
-                    Some((normalized_name(slave), String::new()))
-                }
-                _ => None,
-            },
+            surfaces,
         };
         let card = match kind {
             FileKind::Node => Card::NodePrint(output),
@@ -3000,20 +3121,6 @@ fn generated(k: &Keyword, d: &Data<'_>, f: &[&str]) -> Result<Vec<u32>, Error> {
         _ => 1,
     };
     Ok((first..=last).step_by(step as usize).collect())
-}
-
-fn node_ref(text: &str) -> NodeRef {
-    match text.trim().parse::<NodeId>() {
-        Ok(id) => NodeRef::Node(id),
-        Err(_) => NodeRef::Set(normalized_name(text)),
-    }
-}
-
-fn element_ref(text: &str) -> ElementRef {
-    match text.trim().parse::<ElementId>() {
-        Ok(id) => ElementRef::Element(id),
-        Err(_) => ElementRef::Set(normalized_name(text)),
-    }
 }
 
 /// `S4` -> 4, `SPOS` -> 2, `SNEG` -> 1 of a surface definition.

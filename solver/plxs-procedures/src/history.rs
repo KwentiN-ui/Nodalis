@@ -91,12 +91,13 @@ pub fn write_history_with_velocities(
     // The Nodalis writer puts `*EL PRINT` before `*NODE PRINT`, and CalculiX prints the
     // blocks in request order; the element blocks come first here as well.
     for request in &step.outputs.el_print {
-        let Some(set) = request.set.as_deref() else {
+        let Some(plxs_core::step::HistorySet::Elements(handle)) = request.set else {
             continue;
         };
-        let Some(elements) = model.sets.element_sets.get(set) else {
+        let Some(found) = model.sets.element_sets.get(handle.index()) else {
             continue;
         };
+        let (set, elements) = (found.name.as_str(), &found.elements);
         for variable in &request.variables {
             if variable.trim().eq_ignore_ascii_case("EVOL") {
                 write_volumes(
@@ -155,12 +156,13 @@ pub fn write_history_with_velocities(
     let velocities = velocities.map(|v| table.reported_displacements(v));
     let (u, forces) = &table.reported(model, u, forces);
     for request in &step.outputs.node_print {
-        let Some(set) = request.set.as_deref() else {
+        let Some(plxs_core::step::HistorySet::Nodes(handle)) = request.set else {
             continue;
         };
-        let Some(nodes) = model.sets.node_sets.get(set) else {
+        let Some(found) = model.sets.node_sets.get(handle.index()) else {
             continue;
         };
+        let (set, nodes) = (found.name.as_str(), &found.nodes);
         let rows_of = |values: &[f64]| -> Vec<(u32, Vec<f64>)> {
             nodes
                 .iter()
@@ -322,12 +324,13 @@ pub fn write_thermal_history(
         rows,
     };
     for request in &step.outputs.node_print {
-        let Some(set) = request.set.as_deref() else {
+        let Some(plxs_core::step::HistorySet::Nodes(handle)) = request.set else {
             continue;
         };
-        let Some(nodes) = model.sets.node_sets.get(set) else {
+        let Some(found) = model.sets.node_sets.get(handle.index()) else {
             continue;
         };
+        let (set, nodes) = (found.name.as_str(), &found.nodes);
         let rows_of = |values: &[f64]| -> Vec<(u32, Vec<f64>)> {
             nodes
                 .iter()
@@ -363,12 +366,13 @@ pub fn write_thermal_history(
         return;
     };
     for request in &step.outputs.el_print {
-        let Some(set) = request.set.as_deref() else {
+        let Some(plxs_core::step::HistorySet::Elements(handle)) = request.set else {
             continue;
         };
-        let Some(elements) = model.sets.element_sets.get(set) else {
+        let Some(found) = model.sets.element_sets.get(handle.index()) else {
             continue;
         };
+        let (set, elements) = (found.name.as_str(), &found.elements);
         if !request
             .variables
             .iter()

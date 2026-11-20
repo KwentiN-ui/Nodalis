@@ -158,16 +158,20 @@ pub fn normalized(a: [f64; 3]) -> [f64; 3] {
 
 impl ContactFace {
     /// The faces of an element surface, in the order of the surface definition.
-    pub fn surface_faces(model: &Model, keyword: &str, name: &str) -> Result<Vec<ContactFace>> {
-        let surface = model
-            .sets
-            .surfaces
-            .get(name)
-            .ok_or_else(|| Error::undefined(keyword, "surface", name))?;
+    pub fn surface_faces(
+        model: &Model,
+        keyword: &str,
+        id: plxs_core::SurfaceId,
+    ) -> Result<Vec<ContactFace>> {
+        let surface = (model.sets.surface(id))
+            .ok_or_else(|| Error::undefined(keyword, "surface", format!("#{}", id.0)))?;
         let Surface::Element(faces) = surface else {
             return Err(Error::input(
                 keyword,
-                format!("surface {name} must consist of element faces"),
+                format!(
+                    "surface {} must consist of element faces",
+                    model.sets.surface_name(id)
+                ),
             ));
         };
         let mut out = Vec::with_capacity(faces.len());
@@ -735,12 +739,9 @@ impl FaceGrid {
 }
 
 /// The nodes of a surface (element faces or nodes), dense, unique, in order.
-pub fn surface_nodes(model: &Model, keyword: &str, name: &str) -> Result<Vec<u32>> {
-    let surface = model
-        .sets
-        .surfaces
-        .get(name)
-        .ok_or_else(|| Error::undefined(keyword, "surface", name))?;
+pub fn surface_nodes(model: &Model, keyword: &str, id: plxs_core::SurfaceId) -> Result<Vec<u32>> {
+    let surface = (model.sets.surface(id))
+        .ok_or_else(|| Error::undefined(keyword, "surface", format!("#{}", id.0)))?;
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     match surface {
@@ -754,7 +755,7 @@ pub fn surface_nodes(model: &Model, keyword: &str, name: &str) -> Result<Vec<u32
             }
         }
         Surface::Element(_) => {
-            for face in ContactFace::surface_faces(model, keyword, name)? {
+            for face in ContactFace::surface_faces(model, keyword, id)? {
                 for n in face.nodes {
                     if seen.insert(n) {
                         out.push(n);

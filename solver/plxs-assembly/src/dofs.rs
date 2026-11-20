@@ -140,7 +140,7 @@ impl Spc {
     fn nodes(model: &Model, boundary: &Boundary) -> Vec<u32> {
         match &boundary.region {
             NodeRef::Node(id) => vec![*id],
-            NodeRef::Set(name) => model.sets.node_sets.get(name).cloned().unwrap_or_default(),
+            NodeRef::Set(set) => model.sets.nodes(*set).to_vec(),
         }
     }
 

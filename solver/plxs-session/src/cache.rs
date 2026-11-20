@@ -30,7 +30,7 @@ use plxs_output::spool::Spool;
 
 use crate::restart::{self, Fnv};
 
-const RESULTS_MAGIC: &[u8; 8] = b"PLXSSTP5";
+const RESULTS_MAGIC: &[u8; 8] = b"PLXSSTP6";
 
 /// Where the cache of a job is and which solver build it belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,9 +60,9 @@ impl StepCache {
         h.write_u64(self.salt);
         part(&mut h, &model.nodes);
         part(&mut h, &model.elements);
-        // What refers to sets, surfaces and amplitudes by name; those it names count by
-        // their definitions.
-        let definitions = bytes(&(
+        // What refers to sets, surfaces and amplitudes by handle; those it refers to count
+        // by their definitions.
+        let definitions = &(
             &model.materials,
             &model.sections,
             &model.constraints,
@@ -71,8 +71,8 @@ impl StepCache {
             &model.physical,
             &model.design_variables,
             &model.restart_read,
-        ));
-        named.referenced(&mut h, &definitions);
+        );
+        named.referenced(&mut h, definitions);
         file(&mut h, model.stored_modes_file.as_deref());
         if let Some(submodel) = &model.constraints.submodel {
             file(&mut h, Some(&work_dir.join(&submodel.input)));
@@ -82,7 +82,7 @@ impl StepCache {
         for step in &analysis.steps {
             let mut h = Fnv::new();
             h.write_u64(key);
-            named.referenced(&mut h, &bytes(step));
+            named.referenced(&mut h, step);
             for field in &step.fields {
                 if let DefinedFieldKind::TemperatureFile { file: name, .. } = &field.kind {
                     file(&mut h, Some(&work_dir.join(name)));
@@ -255,46 +255,35 @@ fn bytes(value: &impl Serialize) -> Vec<u8> {
 }
 
 /// The sets, surfaces and amplitudes of a model: items the model and the steps refer to by
-/// name. Each counts only where it is referred to, so that the sets and amplitudes the
+/// handle. Each counts only where it is referred to, so that the sets and amplitudes the
 /// steps after a step define (the model holds them all) leave its key as it was.
-struct Named {
-    /// The name as it is encoded where it is referred to, and the definition.
-    items: Vec<(Vec<u8>, Vec<u8>)>,
+struct Named<'a> {
+    model: &'a plxs_core::Model,
 }
 
-impl Named {
-    fn of(model: &plxs_core::Model) -> Self {
-        let mut items = Vec::new();
-        let mut add = |kind: u8, name: &str, definition: Vec<u8>| {
-            let mut definition = definition;
-            definition.insert(0, kind);
-            items.push((bytes(&name), definition));
-        };
-        let sets = &model.sets;
-        for (name, ids) in &sets.node_sets {
-            add(0, name, bytes(ids));
-        }
-        for (name, ids) in &sets.element_sets {
-            add(1, name, bytes(ids));
-        }
-        for (name, surface) in &sets.surfaces {
-            add(2, name, bytes(surface));
-        }
-        for amplitude in &model.amplitudes {
-            add(3, &amplitude.name, bytes(amplitude));
-        }
-        Named { items }
+impl<'a> Named<'a> {
+    fn of(model: &'a plxs_core::Model) -> Self {
+        Named { model }
     }
 
-    /// Hashes `encoded` (an item in postcard encoding) and the definitions of the items it
-    /// names. A name is found as a string is encoded; a string that only looks like a name
-    /// adds an item that does not matter, which costs a step taken over, never a wrong one.
-    fn referenced(&self, h: &mut Fnv, encoded: &[u8]) {
-        h.write(encoded);
-        for (name, definition) in &self.items {
-            if encoded.windows(name.len()).any(|w| w == name.as_slice()) {
-                h.write(name);
-                h.write(definition);
+    /// Hashes `value` and the definitions of the items it refers to.
+    fn referenced(&self, h: &mut Fnv, value: &impl Serialize) {
+        h.write(&bytes(value));
+        let (sets, amplitudes) = (&self.model.sets, &self.model.amplitudes);
+        for (kind, index) in plxs_core::handle::referenced(value) {
+            let i = index as usize;
+            let definition = match kind {
+                "NodeSetId" => sets.node_sets.get(i).map(bytes),
+                "ElementSetId" => sets.element_sets.get(i).map(bytes),
+                "SurfaceId" => sets.surfaces.get(i).map(bytes),
+                "AmplitudeId" => amplitudes.get(i).map(bytes),
+                // The rest is part of the model's definitions.
+                _ => None,
+            };
+            if let Some(definition) = definition {
+                h.write(kind.as_bytes());
+                h.write_u32(index);
+                h.write(&definition);
             }
         }
     }

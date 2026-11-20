@@ -1,6 +1,6 @@
 //! Nodes, sets and surfaces. Elements are in [`crate::element`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -67,25 +67,158 @@ impl Nodes {
     }
 }
 
-/// Node sets, element sets and surfaces by their (upper case) names. Sets keep the order of
-/// definition without duplicates; CalculiX's `GENERATE` ranges are expanded when read.
+/// Node sets, element sets and surfaces, referred to by their handles ([`crate::NodeSetId`],
+/// [`crate::ElementSetId`], [`crate::SurfaceId`]): the index in their list. Sets keep the
+/// order of definition without duplicates; CalculiX's `GENERATE` ranges are expanded when
+/// read. Names are labels only.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Sets {
-    pub node_sets: BTreeMap<String, Vec<NodeId>>,
-    pub element_sets: BTreeMap<String, Vec<ElementId>>,
-    pub surfaces: BTreeMap<String, Surface>,
+    pub node_sets: Vec<NodeSet>,
+    pub element_sets: Vec<ElementSet>,
+    pub surfaces: Vec<NamedSurface>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NodeSet {
+    /// Label for messages and the input file.
+    pub name: String,
+    pub nodes: Vec<NodeId>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ElementSet {
+    /// Label for messages and the input file.
+    pub name: String,
+    pub elements: Vec<ElementId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NamedSurface {
+    /// Label for messages and the input file.
+    pub name: String,
+    pub surface: Surface,
 }
 
 impl Sets {
-    /// Appends ids to a node set, creating it when new; ids already in the set are skipped.
-    pub fn add_nodes(&mut self, name: &str, ids: impl IntoIterator<Item = NodeId>) {
-        let set = self.node_sets.entry(name.to_string()).or_default();
-        append_unique(set, ids);
+    /// The members of a node set, none for a handle out of range.
+    pub fn nodes(&self, id: crate::NodeSetId) -> &[NodeId] {
+        self.node_sets.get(id.index()).map_or(&[], |s| &s.nodes)
     }
 
-    pub fn add_elements(&mut self, name: &str, ids: impl IntoIterator<Item = ElementId>) {
-        let set = self.element_sets.entry(name.to_string()).or_default();
-        append_unique(set, ids);
+    /// The members of an element set, none for a handle out of range.
+    pub fn elements(&self, id: crate::ElementSetId) -> &[ElementId] {
+        (self.element_sets.get(id.index())).map_or(&[], |s| &s.elements)
+    }
+
+    pub fn surface(&self, id: crate::SurfaceId) -> Option<&Surface> {
+        self.surfaces.get(id.index()).map(|s| &s.surface)
+    }
+
+    pub fn node_set_name(&self, id: crate::NodeSetId) -> &str {
+        self.node_sets.get(id.index()).map_or("?", |s| &s.name)
+    }
+
+    pub fn element_set_name(&self, id: crate::ElementSetId) -> &str {
+        (self.element_sets.get(id.index())).map_or("?", |s| &s.name)
+    }
+
+    pub fn surface_name(&self, id: crate::SurfaceId) -> &str {
+        self.surfaces.get(id.index()).map_or("?", |s| &s.name)
+    }
+
+    /// The name of the set of a history output.
+    pub fn history_set_name(&self, set: crate::step::HistorySet) -> &str {
+        match set {
+            crate::step::HistorySet::Nodes(set) => self.node_set_name(set),
+            crate::step::HistorySet::Elements(set) => self.element_set_name(set),
+        }
+    }
+
+    /// A new node set.
+    pub fn add_node_set(
+        &mut self,
+        name: impl Into<String>,
+        ids: impl IntoIterator<Item = NodeId>,
+    ) -> crate::NodeSetId {
+        let mut nodes = Vec::new();
+        append_unique(&mut nodes, ids);
+        self.node_sets.push(NodeSet {
+            name: name.into(),
+            nodes,
+        });
+        crate::NodeSetId::at(self.node_sets.len() - 1)
+    }
+
+    /// A new element set.
+    pub fn add_element_set(
+        &mut self,
+        name: impl Into<String>,
+        ids: impl IntoIterator<Item = ElementId>,
+    ) -> crate::ElementSetId {
+        let mut elements = Vec::new();
+        append_unique(&mut elements, ids);
+        self.element_sets.push(ElementSet {
+            name: name.into(),
+            elements,
+        });
+        crate::ElementSetId::at(self.element_sets.len() - 1)
+    }
+
+    /// A new surface.
+    pub fn add_surface(&mut self, name: impl Into<String>, surface: Surface) -> crate::SurfaceId {
+        self.surfaces.push(NamedSurface {
+            name: name.into(),
+            surface,
+        });
+        crate::SurfaceId::at(self.surfaces.len() - 1)
+    }
+
+    /// Appends ids to a node set; ids already in the set are skipped.
+    pub fn add_nodes(&mut self, id: crate::NodeSetId, ids: impl IntoIterator<Item = NodeId>) {
+        if let Some(set) = self.node_sets.get_mut(id.index()) {
+            append_unique(&mut set.nodes, ids);
+        }
+    }
+
+    pub fn add_elements(
+        &mut self,
+        id: crate::ElementSetId,
+        ids: impl IntoIterator<Item = ElementId>,
+    ) {
+        if let Some(set) = self.element_sets.get_mut(id.index()) {
+            append_unique(&mut set.elements, ids);
+        }
+    }
+
+    /// The node set labelled `name`, the first of them. For readers of input files and
+    /// tests: references hold handles.
+    pub fn node_set_named(&self, name: &str) -> Option<crate::NodeSetId> {
+        (self.node_sets.iter().position(|s| s.name == name)).map(crate::NodeSetId::at)
+    }
+
+    /// The element set labelled `name`, see [`Self::node_set_named`].
+    pub fn element_set_named(&self, name: &str) -> Option<crate::ElementSetId> {
+        (self.element_sets.iter().position(|s| s.name == name)).map(crate::ElementSetId::at)
+    }
+
+    /// The surface labelled `name`, see [`Self::node_set_named`].
+    pub fn surface_named(&self, name: &str) -> Option<crate::SurfaceId> {
+        (self.surfaces.iter().position(|s| s.name == name)).map(crate::SurfaceId::at)
+    }
+
+    /// The members of the node set labelled `name`, see [`Self::node_set_named`].
+    pub fn named_nodes(&self, name: &str) -> Option<&Vec<NodeId>> {
+        (self.node_sets.iter().find(|s| s.name == name)).map(|s| &s.nodes)
+    }
+
+    /// The members of the element set labelled `name`, see [`Self::node_set_named`].
+    pub fn named_elements(&self, name: &str) -> Option<&Vec<ElementId>> {
+        (self.element_sets.iter().find(|s| s.name == name)).map(|s| &s.elements)
+    }
+
+    /// The surface labelled `name`, see [`Self::node_set_named`].
+    pub fn named_surface(&self, name: &str) -> Option<&Surface> {
+        (self.surfaces.iter().find(|s| s.name == name)).map(|s| &s.surface)
     }
 }
 
@@ -118,34 +251,41 @@ pub struct SurfaceFace {
     pub face: u8,
 }
 
-/// Where a boundary condition, load or output applies: a single node or element, or a set
-/// by name. Names are upper case.
+/// Where a boundary condition, load or output applies: a single node or element, or a set.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeRef {
     Node(NodeId),
-    Set(String),
+    Set(crate::NodeSetId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ElementRef {
     Element(ElementId),
-    Set(String),
+    Set(crate::ElementSetId),
 }
 
-impl std::fmt::Display for NodeRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl NodeRef {
+    /// The node or the name of the set, for messages.
+    pub fn describe(&self, sets: &Sets) -> String {
         match self {
-            NodeRef::Node(id) => write!(f, "{id}"),
-            NodeRef::Set(name) => f.write_str(name),
+            NodeRef::Node(id) => id.to_string(),
+            NodeRef::Set(set) => match sets.node_sets.get(set.index()) {
+                Some(set) => set.name.clone(),
+                None => format!("#{}", set.0),
+            },
         }
     }
 }
 
-impl std::fmt::Display for ElementRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl ElementRef {
+    /// The element or the name of the set, for messages.
+    pub fn describe(&self, sets: &Sets) -> String {
         match self {
-            ElementRef::Element(id) => write!(f, "{id}"),
-            ElementRef::Set(name) => f.write_str(name),
+            ElementRef::Element(id) => id.to_string(),
+            ElementRef::Set(set) => match sets.element_sets.get(set.index()) {
+                Some(set) => set.name.clone(),
+                None => format!("#{}", set.0),
+            },
         }
     }
 }

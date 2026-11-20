@@ -68,8 +68,8 @@ pub struct ContactPair {
     /// `ADJUST=<value>` moves slave nodes within the distance on to the master surface,
     /// `ADJUST=<nset>` those of the set.
     pub adjust: Option<Adjust>,
-    pub slave: String,
-    pub master: String,
+    pub slave: crate::SurfaceId,
+    pub master: crate::SurfaceId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,15 +84,15 @@ pub enum ContactKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Adjust {
     Distance(f64),
-    NodeSet(String),
+    NodeSet(crate::NodeSetId),
 }
 
 /// `*CLEARANCE`: an initial clearance between the surfaces of a pair, overriding their
 /// distance in the mesh.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Clearance {
-    pub master: String,
-    pub slave: String,
+    pub master: crate::SurfaceId,
+    pub slave: crate::SurfaceId,
     pub value: f64,
 }
 
@@ -103,8 +103,8 @@ pub struct Clearance {
 /// load (their consistent share of a pressure is negative) and the stresses checkered.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompressionOnly {
-    /// Upper case name of the element surface.
-    pub surface: String,
+    /// The element surface.
+    pub surface: crate::SurfaceId,
     /// Distance the surface can move towards the ground before the support takes load.
     pub clearance: f64,
     /// Stiffness per area (pressure per closure); `None`: practically rigid, see the

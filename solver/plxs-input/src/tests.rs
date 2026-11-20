@@ -62,7 +62,7 @@ fn every_example_of_testdata_reads() {
         );
         for (name, nodes) in &plx.mesh.node_sets {
             assert_eq!(
-                model.sets.node_sets.get(name),
+                model.sets.named_nodes(name),
                 Some(nodes),
                 "{}: set {name}",
                 file.display()
@@ -102,7 +102,7 @@ fn every_fixture_of_the_corpus_reads() {
                 .filter(|&n| plx.mesh.node_index(n).is_some())
                 .collect();
             assert_eq!(
-                model.sets.node_sets.get(name),
+                model.sets.named_nodes(name),
                 Some(&nodes),
                 "{}: set {name}",
                 file.display()
@@ -115,7 +115,7 @@ fn every_fixture_of_the_corpus_reads() {
                 .filter(|&e| model.element_index(e).is_some())
                 .collect();
             assert_eq!(
-                model.sets.element_sets.get(name),
+                model.sets.named_elements(name),
                 Some(&plx_elements),
                 "{}: set {name}",
                 file.display()
@@ -352,7 +352,8 @@ fn names_are_upper_case_and_references_resolve() {
     ))
     .unwrap();
     let step = &analysis.steps[0];
-    assert_eq!(step.boundaries[0].region, NodeRef::Set("FIX".into()));
+    let fix = analysis.model.sets.node_set_named("FIX").unwrap();
+    assert_eq!(step.boundaries[0].region, NodeRef::Set(fix));
     assert_eq!(
         amplitude_label(&analysis, step.loads.concentrated[0].amplitude),
         Some("RAMP")
@@ -411,7 +412,10 @@ fn equations_and_generated_sets_are_read() {
 *Step\n*Static\n*Boundary\nFIX, 1, 3\n*End step\n",
     ))
     .unwrap();
-    assert_eq!(analysis.model.sets.node_sets["GEN"], [1, 3, 5, 7]);
+    assert_eq!(
+        analysis.model.sets.named_nodes("GEN").unwrap(),
+        &[1, 3, 5, 7]
+    );
     let equation = &analysis.model.constraints.equations[0];
     assert_eq!(equation.terms.len(), 3);
     assert_eq!(equation.terms[2].coefficient, -0.5);
@@ -508,11 +512,6 @@ fn every_fixture_renders_as_text_that_reads_back_the_same() {
             .analysis;
         first.model.stored_modes_file = None;
         let text = super::render(&first);
-        assert!(
-            super::unwritable_names(&first).is_empty(),
-            "{}",
-            file.display()
-        );
         let again = match read_inp_str(&text, None) {
             Ok(reading) => reading.analysis,
             Err(e) => {

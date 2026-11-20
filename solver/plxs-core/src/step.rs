@@ -512,7 +512,7 @@ pub struct DesignResponse {
     pub name: String,
     /// `EIGENFREQUENCY`, `MASS`, `STRAINENERGY`, `STRESS`, `MISESSTRESS`, ...
     pub kind: String,
-    pub elset: Option<String>,
+    pub elset: Option<crate::ElementSetId>,
     /// Further data (reference stress for `STRESS` and the like).
     pub data: Vec<f64>,
 }
@@ -682,11 +682,14 @@ pub enum ContactChange {
     /// `*MODEL CHANGE, TYPE=CONTACT PAIR, ADD|REMOVE` with the slave and master surface.
     ContactPair {
         add: bool,
-        slave: String,
-        master: String,
+        slave: crate::SurfaceId,
+        master: crate::SurfaceId,
     },
     /// `*MODEL CHANGE, TYPE=ELEMENT, ADD|REMOVE`, not written by Nodalis.
-    Elements { add: bool, elset: String },
+    Elements {
+        add: bool,
+        elset: crate::ElementSetId,
+    },
     /// `*CHANGE FRICTION, INTERACTION=` with the new `*FRICTION` values.
     Friction {
         interaction: crate::InteractionId,
@@ -713,7 +716,7 @@ pub struct FieldOutput {
     /// `FREQUENCY=`: every n-th increment (0 or 1: every one).
     pub frequency: u32,
     /// `FREQUENCYF=` of fluids, ignored.
-    pub nset: Option<String>,
+    pub nset: Option<crate::NodeSetId>,
     pub last_iterations: bool,
     pub contact_elements: bool,
     /// `OUTPUT=2D|3D`: whether 2D, shell and beam results are written on the original
@@ -739,17 +742,25 @@ pub enum OutputDimension {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistoryOutput {
     /// Node set, element set, or `None` for contact print.
-    pub set: Option<String>,
+    pub set: Option<HistorySet>,
     pub variables: Vec<String>,
     pub frequency: u32,
     pub totals: Totals,
     pub global: bool,
     pub time_points: Option<String>,
     /// `*CONTACT PRINT, SLAVE=, MASTER=`: the slave and master surface of the pair the
-    /// statistics (`CF`) are printed for (upper case); `None` for all pairs. An empty master
-    /// (`SLAVE=` alone) names a `*COMPRESSION ONLY` surface, which rests on the ground.
+    /// statistics (`CF`) are printed for; `None` for all pairs. No master (`SLAVE=` alone)
+    /// names a `*COMPRESSION ONLY` surface, which rests on the ground.
     #[serde(default)]
-    pub surfaces: Option<(String, String)>,
+    pub surfaces: Option<(crate::SurfaceId, Option<crate::SurfaceId>)>,
+}
+
+/// The set of a history output: a node set for `*NODE PRINT`, an element set for
+/// `*EL PRINT`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistorySet {
+    Nodes(crate::NodeSetId),
+    Elements(crate::ElementSetId),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

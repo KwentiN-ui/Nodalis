@@ -152,7 +152,7 @@ pub fn temperature_spc(
         let target = boundary.value.unwrap_or(0.0);
         let nodes = match &boundary.region {
             NodeRef::Node(id) => vec![*id],
-            NodeRef::Set(name) => model.sets.node_sets.get(name).cloned().unwrap_or_default(),
+            NodeRef::Set(set) => model.sets.nodes(*set).to_vec(),
         };
         for node in nodes {
             let Some(index) = model.nodes.index(node) else {
@@ -288,7 +288,7 @@ pub fn heat_loads(
         ));
         let ids = match &load.region {
             NodeRef::Node(id) => vec![*id],
-            NodeRef::Set(name) => model.sets.node_sets.get(name).cloned().unwrap_or_default(),
+            NodeRef::Set(set) => model.sets.nodes(*set).to_vec(),
         };
         for id in ids {
             if let Some(index) = model.nodes.index(id) {
