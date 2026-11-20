@@ -179,7 +179,7 @@ pub fn merge_geometries(inputs: &[Geometry]) -> Result<MergedGeometry, GmshError
     };
     geometry.ensure_ids();
     // The members keep their ids; those of parts that went leave the compounds.
-    let known: Vec<plx_model::Id> = geometry.ids.iter().map(|p| p.id).collect();
+    let known: Vec<plx_model::PartRef> = geometry.ids.iter().map(|p| p.id).collect();
     for compound in &mut geometry.compounds {
         compound.parts.retain(|p| known.contains(p));
     }

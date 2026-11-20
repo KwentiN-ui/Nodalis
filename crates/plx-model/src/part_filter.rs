@@ -14,7 +14,7 @@ use crate::{FeModel, Region};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PartTerm {
     /// The part of this id, see [`plx_mesh::Part::id`].
-    Part(crate::Id),
+    Part(crate::PartRef),
     /// Parts whose name matches the pattern, ignoring case: `*` stands for any text and `?`
     /// for one character; a pattern without them matches names containing it.
     Pattern(String),
@@ -57,7 +57,7 @@ impl PartGroup {
 /// sections, gathered once for the many filters of a detection.
 #[derive(Clone, Debug, Default)]
 pub struct PartContext {
-    pub ids: Vec<crate::Id>,
+    pub ids: Vec<crate::PartRef>,
     pub names: Vec<String>,
     pub materials: Vec<BTreeSet<crate::Id<crate::Material>>>,
     groups: HashMap<crate::Id<PartGroup>, PartFilter>,
@@ -92,7 +92,7 @@ impl PartFilter {
     }
 
     /// The filter of these parts by id.
-    pub fn parts(ids: impl IntoIterator<Item = crate::Id>) -> Self {
+    pub fn parts(ids: impl IntoIterator<Item = crate::PartRef>) -> Self {
         Self {
             include: ids.into_iter().map(PartTerm::Part).collect(),
             exclude: Vec::new(),
@@ -158,7 +158,7 @@ impl PartFilter {
 
     /// Replaces the part `old` by the parts `new` in its terms, as when parts are merged or
     /// a compound part is made or dissolved.
-    pub fn replace_part(&mut self, old: crate::Id, new: &[crate::Id]) {
+    pub fn replace_part(&mut self, old: crate::PartRef, new: &[crate::PartRef]) {
         for terms in [&mut self.include, &mut self.exclude] {
             if let Some(at) = terms.iter().position(|t| *t == PartTerm::Part(old)) {
                 terms.splice(at..=at, new.iter().map(|&n| PartTerm::Part(n)));
@@ -260,7 +260,7 @@ impl FeModel {
     /// The parts of `mesh` as filters see them: their names, the materials of their
     /// sections and the part groups of the model; the parts `left_out` they never take.
     pub fn part_context(&self, mesh: &FeMesh, left_out: &crate::LeftOut) -> PartContext {
-        let index: HashMap<crate::Id, usize> = (mesh.parts.iter().enumerate())
+        let index: HashMap<crate::PartRef, usize> = (mesh.parts.iter().enumerate())
             .map(|(i, p)| (p.id, i))
             .collect();
         let mut materials = vec![BTreeSet::new(); mesh.parts.len()];
@@ -304,7 +304,7 @@ impl FeModel {
     }
 
     /// Part filters naming the part `old` name the parts `new`.
-    pub(crate) fn replace_part_in_filters(&mut self, old: crate::Id, new: &[crate::Id]) {
+    pub(crate) fn replace_part_in_filters(&mut self, old: crate::PartRef, new: &[crate::PartRef]) {
         let filters = (self.contact_detections.iter_mut())
             .flat_map(|d| {
                 std::iter::once(&mut d.scope)

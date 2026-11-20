@@ -29,7 +29,7 @@ struct Meshing {
     parameters: MeshingParameters,
     items: Vec<MeshSetupItem>,
     compounds: Vec<plx_model::CompoundPart>,
-    suppressed: Vec<plx_model::Id>,
+    suppressed: Vec<plx_model::PartRef>,
 }
 
 impl Meshing {

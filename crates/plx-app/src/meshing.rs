@@ -996,7 +996,7 @@ impl MeshItemEditor {
                 if thicken.parts.is_empty() {
                     return Err("No shell part selected.".into());
                 }
-                let name = |id: &plx_model::Id| {
+                let name = |id: &plx_model::PartRef| {
                     (self.part_ids.iter().find(|p| p.id == *id))
                         .map_or_else(|| id.to_string(), |p| p.name.clone())
                 };
@@ -1286,7 +1286,7 @@ pub fn entities_highlight(view: &Model, entities: &BTreeSet<CadEntity>) -> Highl
 /// How a stored mesh setup item shows on the geometry; `ids` are the parts of the geometry
 /// with their ids, which the item keeps them by.
 pub fn item_highlight(view: &Model, kind: &MeshSetupKind, ids: &[plx_model::PartId]) -> Highlight {
-    let holds = |parts: &[plx_model::Id], name: &str| {
+    let holds = |parts: &[plx_model::PartRef], name: &str| {
         (ids.iter()).any(|p| parts.contains(&p.id) && p.name.eq_ignore_ascii_case(name))
     };
     match kind {

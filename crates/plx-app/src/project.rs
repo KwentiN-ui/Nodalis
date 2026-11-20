@@ -7383,7 +7383,7 @@ impl ProjectApp {
 
     /// The Geometry links to `target` stop bringing the geometry objects `deleted` there, see
     /// [`leave_out_deleted`].
-    fn leave_out_deleted(&mut self, target: u64, deleted: &[(plx_model::Id, String)]) {
+    fn leave_out_deleted(&mut self, target: u64, deleted: &[(plx_model::PartRef, String)]) {
         let all = std::mem::take(&mut self.links);
         let (all, lines) = leave_out_deleted(all, &self.nodes, target, deleted);
         self.links = all;
@@ -8846,7 +8846,7 @@ fn leave_out_deleted(
     all: Vec<Link>,
     nodes: &[Node],
     target: u64,
-    deleted: &[(plx_model::Id, String)],
+    deleted: &[(plx_model::PartRef, String)],
 ) -> (Vec<Link>, Vec<String>) {
     if deleted.is_empty() {
         return (all, Vec::new());
@@ -8896,7 +8896,7 @@ fn leave_out_deleted(
         };
         // The objects of the source, by id.
         let objects = links::objects(data);
-        let hit: Vec<&(plx_model::Id, String)> = (deleted.iter())
+        let hit: Vec<&(plx_model::PartRef, String)> = (deleted.iter())
             .filter(|(id, _)| objects.contains(id))
             .collect();
         if hit.is_empty() {
@@ -10191,7 +10191,7 @@ fn take_refine_input(nodes: &mut [Node], links: &[Link], id: u64) {
                 }
                 // The parts of the geometry are meshed anew with the finer sizes by the
                 // analysis the geometry goes to: their meshes are not given on.
-                let cad: Vec<plx_model::Id> = (copy.origins.iter())
+                let cad: Vec<plx_model::PartRef> = (copy.origins.iter())
                     .filter(|&(id, _)| copy.origins.is_cad(id))
                     .map(|(id, _)| id)
                     .collect();

@@ -2334,7 +2334,7 @@ fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
     // The two lines of the rope, which reach out beyond the sheave; the edges left of the
     // revolved rectangle are lines too.
     let mesh = &display.mesh;
-    let lines: Vec<plx_model::Id> = (mesh.parts.iter())
+    let lines: Vec<plx_model::PartRef> = (mesh.parts.iter())
         .filter(|p| {
             (p.elements.iter().filter_map(|&e| mesh.element(e)))
                 .flat_map(|e| e.nodes.iter().filter_map(|&n| mesh.node(n)))

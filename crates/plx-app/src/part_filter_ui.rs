@@ -160,7 +160,7 @@ fn add_menu(
         ui.data_mut(|d| d.insert_temp(text_id, text.clone()));
         let pattern = text.trim();
         if !pattern.is_empty() {
-            let matching: Vec<(plx_model::Id, &str)> = (context.ids.iter().zip(&context.names))
+            let matching: Vec<(plx_model::PartRef, &str)> = (context.ids.iter().zip(&context.names))
                 .filter(|(_, n)| plx_model::name_matches(pattern, n))
                 .map(|(&id, n)| (id, n.as_str()))
                 .collect();
@@ -246,11 +246,11 @@ fn selected_parts_id() -> egui::Id {
 }
 
 /// Tells the filter menus the ids of the parts selected in the 3D view or the tree.
-pub fn set_selected_parts(ctx: &egui::Context, ids: Vec<plx_model::Id>) {
+pub fn set_selected_parts(ctx: &egui::Context, ids: Vec<plx_model::PartRef>) {
     ctx.data_mut(|d| d.insert_temp(selected_parts_id(), ids));
 }
 
-fn selected_parts(ctx: &egui::Context) -> Vec<plx_model::Id> {
+fn selected_parts(ctx: &egui::Context) -> Vec<plx_model::PartRef> {
     ctx.data(|d| d.get_temp(selected_parts_id()))
         .unwrap_or_default()
 }

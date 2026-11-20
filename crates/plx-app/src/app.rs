@@ -81,7 +81,7 @@ pub enum Request {
     Unlink(Vec<String>),
     /// The geometry objects deleted in the analysis, by id with their names: the links that
     /// brought them no longer do, so that they do not come back.
-    Deleted(Vec<(plx_model::Id, String)>),
+    Deleted(Vec<(plx_model::PartRef, String)>),
     /// Open the Campbell block of this analysis, made and linked first if it has none.
     Campbell,
     /// Close the analysis shown in the project window: its data goes back to the project.
@@ -1547,9 +1547,10 @@ pub(crate) fn apply_compounds(model: &mut Model, before: &[plx_model::CompoundPa
     }
     let after = geometry.compounds.clone();
     let members = geometry.compound_members();
-    let before_members: Vec<(plx_model::Id, String, Vec<plx_model::Id>)> = (before.iter())
-        .map(|c| (c.id, c.name.clone(), c.parts.clone()))
-        .collect();
+    let before_members: Vec<(plx_model::PartRef, String, Vec<plx_model::PartRef>)> = (before
+        .iter())
+    .map(|c| (c.id, c.name.clone(), c.parts.clone()))
+    .collect();
     model.edit_mesh(|mesh, fe| {
         // The mesh operations name what they moved, see below.
         let operations = fe.mesh_operations.clone();
@@ -6210,7 +6211,7 @@ impl Workbench {
             return;
         }
         let name = names.join(", ");
-        let deleted: Vec<(plx_model::Id, String)> = (names.iter())
+        let deleted: Vec<(plx_model::PartRef, String)> = (names.iter())
             .filter_map(|n| Some((model.object_id(n)?, n.clone())))
             .collect();
         let cad: Vec<String> = (names.iter())
@@ -6234,7 +6235,7 @@ impl Workbench {
         }
         // The parts of the FE model that go whole: the selections that picked them simply
         // lose them.
-        let gone: Vec<plx_model::Id> = (model.mesh().parts.iter())
+        let gone: Vec<plx_model::PartRef> = (model.mesh().parts.iter())
             .filter(|p| {
                 plx_model::part_bodies(p)
                     .iter()
@@ -6858,9 +6859,10 @@ impl Workbench {
         editor.set_global_sources(&self.incoming.global_sources);
         // A contact detection searches the geometry, if there is one to search; its derived
         // tolerance is worked out again only when the parts searched change.
-        let picked: Vec<plx_model::Id> = (self.tree.selected_parts(TreeView::FeModel).into_iter())
-            .filter_map(|p| model.mesh().parts.get(p).map(|p| p.id))
-            .collect();
+        let picked: Vec<plx_model::PartRef> =
+            (self.tree.selected_parts(TreeView::FeModel).into_iter())
+                .filter_map(|p| model.mesh().parts.get(p).map(|p| p.id))
+                .collect();
         crate::part_filter_ui::set_selected_parts(ctx, picked);
         let scope = (editor.detection_filter()).and_then(|filter| {
             let display = crate::connections::detection_display(model, self.geometry.as_ref())?;

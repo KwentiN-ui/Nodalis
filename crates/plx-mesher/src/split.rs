@@ -28,7 +28,7 @@ pub(crate) struct Split {
 /// A compound part with its members by name, while a split names the pieces; their ids
 /// are given once the geometry has them, see [`NamedCompound::with_ids`].
 pub(crate) struct NamedCompound {
-    pub(crate) id: plx_model::Id,
+    pub(crate) id: plx_model::PartRef,
     pub(crate) name: String,
     pub(crate) parts: Vec<String>,
 }

@@ -261,7 +261,7 @@ pub struct CadOperation {
     /// The parts a split by plane cuts, by their ids in the input; the others stay as they
     /// are. All parts when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parts: Vec<crate::Id>,
+    pub parts: Vec<crate::PartRef>,
     /// The global axis, 0 to 2 for x to z, a split plane is tilted about, through the point
     /// of the plane its offset gives.
     #[serde(default, skip_serializing_if = "is_default")]

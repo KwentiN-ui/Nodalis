@@ -231,7 +231,7 @@ pub struct FlowBoundary {
     /// Of an inlet: the filled part whose material, temperature and gravity the material
     /// fed has; `None` takes the part its faces lie on, at a side of the box the filled
     /// part nearest to it. The part is a part of the mesh, by id.
-    pub like: Option<crate::Id>,
+    pub like: Option<crate::PartRef>,
 }
 
 impl Default for FlowBoundary {

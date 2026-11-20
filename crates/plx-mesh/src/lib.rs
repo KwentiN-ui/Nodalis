@@ -22,7 +22,8 @@ pub use element::{ElementFamily, ElementShape, FaceTopology};
 pub use line_joints::{LineJoint, find_line_joints};
 pub use locate::{PointLocation, SNAP};
 pub use mesh::{
-    Body, Element, ElementId, FeMesh, Fnv, Id, MeshError, NodeId, Part, SetKind, SurfaceDefinition,
+    Body, Element, ElementId, FeMesh, Fnv, Id, MeshError, NodeId, Part, PartRef, SetKind,
+    SurfaceDefinition,
 };
 pub use orient::orient_outward;
 pub use skin::{

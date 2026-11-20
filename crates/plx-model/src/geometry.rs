@@ -39,11 +39,11 @@ pub struct Geometry {
     /// The suppressed parts, by id: meshing and the CAD tools leave them alone, as if they
     /// were not there, until they are unsuppressed. A mesh they have already stays.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub suppressed: Vec<crate::Id>,
+    pub suppressed: Vec<crate::PartRef>,
     /// The parts this analysis meshes itself although a link brings their mesh with them,
     /// by id: the link's mesh of them is left out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub own_meshes: Vec<crate::Id>,
+    pub own_meshes: Vec<crate::PartRef>,
     /// The identity of each part with its name: everything referring to a part of the
     /// geometry, its suppression, the mesh setup and the compounds, does so by the id, so
     /// that renaming the part keeps it. An analysis taking the geometry through a link takes
@@ -80,7 +80,7 @@ pub struct GeometryOperation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PartId {
     pub name: String,
-    pub id: crate::Id,
+    pub id: crate::PartRef,
 }
 
 /// Cut faces of a cyclic symmetric sector, whose meshes have to match: the slave faces are
@@ -105,15 +105,15 @@ pub struct PeriodicFaces {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompoundPart {
     /// The id of the part of the FE model it becomes, see [`plx_mesh::Part::id`].
-    pub id: crate::Id,
+    pub id: crate::PartRef,
     pub name: String,
     /// The parts of the geometry it joins, by their ids ([`Geometry::ids`]).
-    pub parts: Vec<crate::Id>,
+    pub parts: Vec<crate::PartRef>,
 }
 
 impl CompoundPart {
     /// A new compound part of the parts of the geometry `parts`, by id.
-    pub fn new(name: impl Into<String>, parts: Vec<crate::Id>) -> Self {
+    pub fn new(name: impl Into<String>, parts: Vec<crate::PartRef>) -> Self {
         Self {
             id: crate::Id::new(),
             name: name.into(),
@@ -159,12 +159,12 @@ impl Geometry {
     }
 
     /// The compound part holding the part of the id `part`, by index.
-    pub fn compound_of_id(&self, part: crate::Id) -> Option<usize> {
+    pub fn compound_of_id(&self, part: crate::PartRef) -> Option<usize> {
         (self.compounds.iter()).position(|c| c.parts.contains(&part))
     }
 
     /// The compound part of the id `id`, by index.
-    pub fn compound_with_id(&self, id: crate::Id) -> Option<usize> {
+    pub fn compound_with_id(&self, id: crate::PartRef) -> Option<usize> {
         (self.compounds.iter()).position(|c| c.id == id)
     }
 
@@ -201,7 +201,7 @@ impl Geometry {
 
     /// The compounds as the mesh joins its parts, as (id, name, members), see
     /// [`plx_mesh::FeMesh::compose_compounds`].
-    pub fn compound_members(&self) -> Vec<(crate::Id, String, Vec<crate::Id>)> {
+    pub fn compound_members(&self) -> Vec<(crate::PartRef, String, Vec<crate::PartRef>)> {
         (self.compounds.iter())
             .map(|c| (c.id, c.name.clone(), c.parts.clone()))
             .collect()
@@ -225,12 +225,12 @@ impl Geometry {
     }
 
     /// Whether `parts`, by id, hold the part named `part`.
-    pub fn holds(&self, parts: &[crate::Id], part: &str) -> bool {
+    pub fn holds(&self, parts: &[crate::PartRef], part: &str) -> bool {
         self.part_id(part).is_some_and(|id| parts.contains(&id))
     }
 
     /// The names of the parts `ids`, of those that are there.
-    pub fn part_names_of(&self, ids: &[crate::Id]) -> Vec<String> {
+    pub fn part_names_of(&self, ids: &[crate::PartRef]) -> Vec<String> {
         (ids.iter())
             .filter_map(|&id| self.part_name(id))
             .map(str::to_owned)
@@ -255,14 +255,14 @@ impl Geometry {
     }
 
     /// The id of the part `name`, if it has one, see [`Geometry::ids`].
-    pub fn part_id(&self, name: &str) -> Option<crate::Id> {
+    pub fn part_id(&self, name: &str) -> Option<crate::PartRef> {
         (self.ids.iter())
             .find(|p| p.name.eq_ignore_ascii_case(name))
             .map(|p| p.id)
     }
 
     /// The name of the part of the id `id`.
-    pub fn part_name(&self, id: crate::Id) -> Option<&str> {
+    pub fn part_name(&self, id: crate::PartRef) -> Option<&str> {
         (self.ids.iter())
             .find(|p| p.id == id)
             .map(|p| p.name.as_str())
@@ -270,7 +270,7 @@ impl Geometry {
 
     /// The ids of the parts `names`, giving parts without one an id: for picking parts by
     /// the names the meshes and Gmsh show.
-    pub fn part_ids_of(&mut self, names: &[String]) -> Vec<crate::Id> {
+    pub fn part_ids_of(&mut self, names: &[String]) -> Vec<crate::PartRef> {
         (names.iter())
             .map(|name| match self.part_id(name) {
                 Some(id) => id,
@@ -344,8 +344,8 @@ impl Geometry {
     /// read anew from a file, whose parts have new ids, keep them the same parts to what
     /// refers to them, as [`plx_mesh::FeMesh::adopt_ids`] does for a mesh. Returns the ids
     /// changed, as (old, new), for the meshes of the parts; compounds follow here.
-    pub fn adopt_ids(&mut self, before: &Geometry) -> Vec<(crate::Id, crate::Id)> {
-        let known = |id: crate::Id, list: &[PartId]| list.iter().any(|p| p.id == id);
+    pub fn adopt_ids(&mut self, before: &Geometry) -> Vec<(crate::PartRef, crate::PartRef)> {
+        let known = |id: crate::PartRef, list: &[PartId]| list.iter().any(|p| p.id == id);
         let mut changed = Vec::new();
         for index in 0..self.ids.len() {
             let entry = &self.ids[index];
@@ -403,7 +403,7 @@ impl Geometry {
 
     /// Takes parts out of their compounds; compounds left empty go.
     pub fn remove_from_compounds(&mut self, parts: &[String]) {
-        let ids: Vec<crate::Id> = parts.iter().filter_map(|p| self.part_id(p)).collect();
+        let ids: Vec<crate::PartRef> = parts.iter().filter_map(|p| self.part_id(p)).collect();
         for compound in &mut self.compounds {
             compound.parts.retain(|p| !ids.contains(p));
         }
@@ -549,7 +549,7 @@ impl Geometry {
 }
 
 /// Adds `ids` to `list`, or takes them out of it; true if that changed anything.
-fn set_ids(list: &mut Vec<crate::Id>, ids: &[crate::Id], add: bool) -> bool {
+fn set_ids(list: &mut Vec<crate::PartRef>, ids: &[crate::PartRef], add: bool) -> bool {
     let before = list.len();
     if add {
         for id in ids {
@@ -628,7 +628,7 @@ pub enum MeshSetupKind {
     /// Own meshing parameters for some parts.
     MeshingParameters {
         /// The parts, by id.
-        parts: Vec<crate::Id>,
+        parts: Vec<crate::PartRef>,
         parameters: MeshingParameters,
     },
     /// A smaller element size on faces and edges.
@@ -644,7 +644,7 @@ pub enum MeshSetupKind {
     /// Gmsh's meshing algorithms for some parts.
     TetrahedralGmsh {
         /// The parts, by id.
-        parts: Vec<crate::Id>,
+        parts: Vec<crate::PartRef>,
         algorithm_2d: Algorithm2d,
         algorithm_3d: Algorithm3d,
     },
@@ -667,7 +667,7 @@ impl MeshSetupKind {
     }
 
     /// [`MeshSetupKind::parts`] to change.
-    pub fn parts_mut(&mut self) -> Option<&mut Vec<crate::Id>> {
+    pub fn parts_mut(&mut self) -> Option<&mut Vec<crate::PartRef>> {
         match self {
             MeshSetupKind::MeshingParameters { parts, .. }
             | MeshSetupKind::TetrahedralGmsh { parts, .. } => Some(parts),
@@ -679,7 +679,7 @@ impl MeshSetupKind {
 
     /// The parts the item applies to; `None` for a local mesh size, which applies to faces
     /// and edges of any part.
-    pub fn parts(&self) -> Option<&[crate::Id]> {
+    pub fn parts(&self) -> Option<&[crate::PartRef]> {
         match self {
             MeshSetupKind::MeshingParameters { parts, .. }
             | MeshSetupKind::TetrahedralGmsh { parts, .. } => Some(parts),
@@ -698,7 +698,7 @@ impl MeshSetupKind {
 #[serde(default)]
 pub struct ExtrudeMesh {
     /// The parts meshed this way, by id.
-    pub parts: Vec<crate::Id>,
+    pub parts: Vec<crate::PartRef>,
     /// The source faces; empty to find for each part a face it is an extrusion of.
     pub faces: Vec<i32>,
     pub algorithm_2d: Algorithm2d,
@@ -727,7 +727,7 @@ impl Default for ExtrudeMesh {
 #[serde(default)]
 pub struct ThickenShellMesh {
     /// The shell parts thickened, by id.
-    pub parts: Vec<crate::Id>,
+    pub parts: Vec<crate::PartRef>,
     pub thickness: f64,
     /// Layers of elements through the thickness.
     pub layers: u32,
@@ -1015,7 +1015,7 @@ mod tests {
 
     #[test]
     fn a_later_tetrahedral_item_takes_a_part_back_from_an_extrusion() {
-        let extrude = |parts: &[crate::Id]| MeshSetupItem {
+        let extrude = |parts: &[crate::PartRef]| MeshSetupItem {
             id: crate::Id::new(),
             name: "Extrude_Mesh-1".into(),
             kind: MeshSetupKind::ExtrudeMesh(ExtrudeMesh {

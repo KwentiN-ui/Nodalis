@@ -38,14 +38,14 @@ pub struct WallSeries {
     pub name: String,
     /// The FE parts it is made of, by id and with their names: an analysis meshing the
     /// parts itself finds them by name.
-    pub parts: Vec<(plx_model::Id, String)>,
+    pub parts: Vec<(plx_model::PartRef, String)>,
     /// One per time of [`WallLoads::times`].
     pub frames: Vec<WallFrame>,
 }
 
 impl WallSeries {
     /// The wall `id` named `name` of the parts `parts`, without frames yet.
-    pub fn new(id: plx_model::Id, name: &str, parts: Vec<(plx_model::Id, String)>) -> Self {
+    pub fn new(id: plx_model::Id, name: &str, parts: Vec<(plx_model::PartRef, String)>) -> Self {
         Self {
             id,
             name: name.into(),

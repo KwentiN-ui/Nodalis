@@ -56,7 +56,7 @@ impl LimitBasis {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum LimitItem {
     /// A part of the mesh, by id.
-    Part(plx_model::Id),
+    Part(plx_model::PartRef),
     /// An element set of the mesh an input file defines, by its name there.
     ElementSet(String),
     /// All elements.

@@ -121,7 +121,7 @@ pub struct FieldOutputDialog {
     /// Limit values per part, per element set and for all elements.
     part_limits: Vec<(String, f64)>,
     /// The ids of the parts of [`Self::part_limits`].
-    part_ids: Vec<plx_model::Id>,
+    part_ids: Vec<plx_model::PartRef>,
     set_limits: Vec<(String, f64)>,
     all_limit: f64,
     tab: Tab,

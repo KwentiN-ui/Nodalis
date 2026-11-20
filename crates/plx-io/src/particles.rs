@@ -580,7 +580,7 @@ pub fn after_flow(
             region.active = false;
         }
     }
-    let filled_ids: Vec<plx_model::Id> = (mesh.parts.iter())
+    let filled_ids: Vec<plx_model::PartRef> = (mesh.parts.iter())
         .filter(|p| lowered.bodies.contains(&p.name))
         .map(|p| p.id)
         .collect();
@@ -1550,10 +1550,10 @@ mod tests {
     };
 
     /// The id of the test parts called `name`: the same for all of them.
-    fn id(name: &str) -> plx_model::Id {
+    fn id(name: &str) -> plx_model::PartRef {
         use std::collections::HashMap;
         use std::sync::{LazyLock, Mutex};
-        static IDS: LazyLock<Mutex<HashMap<String, plx_model::Id>>> =
+        static IDS: LazyLock<Mutex<HashMap<String, plx_model::PartRef>>> =
             LazyLock::new(Default::default);
         *(IDS.lock().unwrap().entry(name.into())).or_default()
     }

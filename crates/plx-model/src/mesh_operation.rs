@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use plx_mesh::{ElementId, FaceRenumbering, FeMesh, MeshTransform};
 
-use crate::Id;
+use crate::PartRef;
 use serde::{Deserialize, Serialize};
 
 use crate::FeModel;
@@ -21,7 +21,7 @@ pub struct MeshOperation {
     pub name: String,
     /// The mesh parts it changes, by id ([`plx_mesh::Part::id`]): parts, bodies of compound
     /// parts, and compound parts.
-    pub parts: Vec<Id>,
+    pub parts: Vec<crate::PartRef>,
     pub kind: MeshOperationKind,
 }
 
@@ -43,7 +43,7 @@ impl MeshOperationKind {
 impl MeshOperation {
     /// Whether it names the part or body `id`, or with `compound` the compound part that
     /// joins it.
-    fn names(&self, id: Id, compound: Option<Id>) -> bool {
+    fn names(&self, id: crate::PartRef, compound: Option<crate::PartRef>) -> bool {
         (self.parts.iter()).any(|&n| n == id || compound == Some(n))
     }
 
@@ -63,9 +63,9 @@ impl MeshOperation {
     pub fn elements(
         &self,
         mesh: &FeMesh,
-        compounds: &[(Id, String, Vec<Id>)],
+        compounds: &[(PartRef, String, Vec<PartRef>)],
     ) -> BTreeSet<ElementId> {
-        let compound_of = |part: Id| {
+        let compound_of = |part: PartRef| {
             (compounds.iter())
                 .find(|(_, _, members)| members.contains(&part))
                 .map(|(id, _, _)| *id)
@@ -85,7 +85,11 @@ impl MeshOperation {
 
     /// Applies the operation to what of `mesh` it names, see [`Self::elements`]; returns
     /// where the faces of elements went that it turned inside out.
-    pub fn apply(&self, mesh: &mut FeMesh, compounds: &[(Id, String, Vec<Id>)]) -> FaceRenumbering {
+    pub fn apply(
+        &self,
+        mesh: &mut FeMesh,
+        compounds: &[(PartRef, String, Vec<PartRef>)],
+    ) -> FaceRenumbering {
         let elements = self.elements(mesh, compounds);
         match &self.kind {
             MeshOperationKind::Transform(transform) => {
@@ -122,7 +126,11 @@ impl FeModel {
     /// Applies the mesh operations to a mesh made anew, e.g. the meshes of parts Gmsh just
     /// made: each operation acts on those of its parts the mesh has, see
     /// [`MeshOperation::elements`] for `compounds`.
-    pub fn apply_mesh_operations(&self, mesh: &mut FeMesh, compounds: &[(Id, String, Vec<Id>)]) {
+    pub fn apply_mesh_operations(
+        &self,
+        mesh: &mut FeMesh,
+        compounds: &[(PartRef, String, Vec<PartRef>)],
+    ) {
         for operation in &self.mesh_operations {
             operation.apply(mesh, compounds);
         }
@@ -136,10 +144,10 @@ impl FeModel {
     pub fn follow_compounds_in_mesh_operations(
         &mut self,
         operations: Vec<MeshOperation>,
-        before: &[(Id, String, Vec<Id>)],
-        after: &[(Id, String, Vec<Id>)],
+        before: &[(PartRef, String, Vec<PartRef>)],
+        after: &[(PartRef, String, Vec<PartRef>)],
     ) {
-        let same = |id: Id, members: &[Id]| {
+        let same = |id: PartRef, members: &[PartRef]| {
             (after.iter()).any(|(n, _, m)| *n == id && m.as_slice() == members)
         };
         self.mesh_operations = operations;
@@ -180,7 +188,11 @@ impl FeModel {
     }
 
     /// Mesh operations on the part `old` act on the parts `new`, as when parts are merged.
-    pub(crate) fn replace_part_in_mesh_operations(&mut self, old: Id, new: &[Id]) {
+    pub(crate) fn replace_part_in_mesh_operations(
+        &mut self,
+        old: crate::PartRef,
+        new: &[crate::PartRef],
+    ) {
         for operation in &mut self.mesh_operations {
             if let Some(at) = operation.parts.iter().position(|&n| n == old) {
                 operation.parts.splice(at..=at, new.iter().copied());

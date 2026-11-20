@@ -2884,7 +2884,7 @@ impl FeModel {
                 ),
             ));
         }
-        let whole: HashSet<crate::Id> = (self.sections.iter())
+        let whole: HashSet<crate::PartRef> = (self.sections.iter())
             .filter_map(|s| match &s.region {
                 crate::Region::Parts(ids) => Some(ids.iter().copied()),
                 _ => None,

@@ -66,7 +66,7 @@ fn read_inp_str(
 
 /// The id of the test parts called `name`, in any case, the same for all of them: a test
 /// refers to a part by its name, also before the mesh is made.
-fn part_named(name: &str) -> plx_model::Id {
+fn part_named(name: &str) -> plx_model::PartRef {
     named(&format!("part:{}", name.to_ascii_uppercase()))
 }
 

@@ -11,7 +11,7 @@ use crate::{FeModel, ModelSpace};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartElementType {
     /// The part by id, see [`plx_mesh::Part::id`].
-    pub part: crate::Id,
+    pub part: crate::PartRef,
     /// The CalculiX type; its shape tells which elements of the part it is for. Plane
     /// elements follow the model space: `CPE4R` is written as `CAX4R` in an axisymmetric
     /// model.
@@ -55,7 +55,7 @@ pub fn element_type_options(shape: ElementShape, space: ModelSpace) -> Vec<Strin
 impl FeModel {
     /// The element type chosen for the elements of the shape in the part, in the model's
     /// space.
-    pub fn element_type(&self, part: crate::Id, shape: ElementShape) -> Option<String> {
+    pub fn element_type(&self, part: crate::PartRef, shape: ElementShape) -> Option<String> {
         (self.element_types.iter())
             .find(|c| c.part == part && c.shape() == Some(shape))
             .map(|c| self.properties.space.element_type(&c.type_name, shape))
@@ -63,7 +63,7 @@ impl FeModel {
 
     /// Chooses the element type of the elements of its shape in the part; false for a name
     /// the solver has no shape for.
-    pub fn set_element_type(&mut self, part: crate::Id, type_name: &str) -> bool {
+    pub fn set_element_type(&mut self, part: crate::PartRef, type_name: &str) -> bool {
         let type_name = type_name.trim().to_ascii_uppercase();
         let Some(shape) = ElementShape::from_type_name(&type_name) else {
             return false;
@@ -138,7 +138,7 @@ impl FeModel {
 
     /// Moves the element types chosen for the part `old` to the part `new`, as when parts
     /// are merged into `new`: merged parts keep the choices of the part merged into.
-    pub(crate) fn move_element_types(&mut self, old: crate::Id, new: crate::Id) {
+    pub(crate) fn move_element_types(&mut self, old: crate::PartRef, new: crate::PartRef) {
         let kept: Vec<Option<ElementShape>> = (self.element_types.iter())
             .filter(|c| c.part == new)
             .map(PartElementType::shape)

@@ -1100,14 +1100,15 @@ impl Picker {
 /// The parts are kept by id ([`plx_mesh::Part::id`]), with their names for the row.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PartPicks {
-    history: History<plx_model::Id>,
-    names: std::collections::BTreeMap<plx_model::Id, String>,
+    history: History<plx_model::PartRef>,
+    names: std::collections::BTreeMap<plx_model::PartRef, String>,
 }
 
 impl PartPicks {
     /// The parts `parts` picked, as (id, name).
-    pub fn from_parts(parts: impl IntoIterator<Item = (plx_model::Id, String)>) -> Self {
-        let names: std::collections::BTreeMap<plx_model::Id, String> = parts.into_iter().collect();
+    pub fn from_parts(parts: impl IntoIterator<Item = (plx_model::PartRef, String)>) -> Self {
+        let names: std::collections::BTreeMap<plx_model::PartRef, String> =
+            parts.into_iter().collect();
         Self {
             history: History::from_items(names.keys().copied()),
             names,
@@ -1115,7 +1116,7 @@ impl PartPicks {
     }
 
     /// The parts of the ids `ids` of `mesh` picked.
-    pub fn from_ids(ids: &[plx_model::Id], mesh: &plx_mesh::FeMesh) -> Self {
+    pub fn from_ids(ids: &[plx_model::PartRef], mesh: &plx_mesh::FeMesh) -> Self {
         Self::from_parts(ids.iter().map(|&id| {
             let name = mesh.part_name(id).unwrap_or("(deleted)");
             (id, name.to_owned())
@@ -1123,7 +1124,7 @@ impl PartPicks {
     }
 
     /// The ids of the picked parts.
-    pub fn ids(&self) -> BTreeSet<plx_model::Id> {
+    pub fn ids(&self) -> BTreeSet<plx_model::PartRef> {
         self.history.items()
     }
 

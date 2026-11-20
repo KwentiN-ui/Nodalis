@@ -11,7 +11,7 @@ use plx_model::{Geometry, GeometryOperation};
 pub fn run(
     input: Geometry,
     mut operations: Vec<GeometryOperation>,
-    suppressed: &[plx_model::Id],
+    suppressed: &[plx_model::PartRef],
 ) -> (Geometry, Vec<String>) {
     let input = input.without_operations();
     if operations.is_empty() {
