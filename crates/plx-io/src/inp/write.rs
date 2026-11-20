@@ -14,12 +14,12 @@ use plx_model::{
     Active, AmplitudeTime, BeamProfile, BeamSection, BoundaryKind, BuckleStep,
     ComplexFrequencyStep, Constraint, ContactMethod, ContactPair, ContactScale, Damping,
     DefinedFieldKind, DynamicMethod, DynamicStep, FeModel, FieldResult, Formulation, FrequencyStep,
-    GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Id, IncrementPlan,
-    InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModelItem, ModelSpace,
-    MovingFrame, NodeTie, Origins, OutputDimension, Quantity, RayleighFit, Region, RemoteBehavior,
-    RemoteDof, Sampler, Section, SectionKind, SectorDisplay, SensitivityStep, StaticStep,
-    SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, TableOwner, Tie,
-    Totals, UnitSystem, ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
+    GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, HistoryVariable, Id,
+    IncrementPlan, InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModelItem,
+    ModelSpace, MovingFrame, NodeTie, Origins, OutputDimension, Quantity, RayleighFit, Region,
+    RemoteBehavior, RemoteDof, Sampler, Section, SectionKind, SectorDisplay, SensitivityStep,
+    StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction,
+    TableOwner, Tie, Totals, UnitSystem, ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
 };
 use plxs_core as ir;
 use plxs_core::mesh::{ElementRef, NodeRef};
@@ -530,6 +530,11 @@ impl Built {
 /// The name of a set, surface, material or amplitude as the solver compares it.
 fn ir_name(name: &str) -> String {
     normalized_name(name)
+}
+
+/// The name of an item as the solver prints it, e.g. the set of a history output.
+pub fn solver_name(item: &str) -> String {
+    ir_name(&name(item))
 }
 
 /// The handles of the sets and surfaces by their names in the lowering: the names are
@@ -1478,6 +1483,8 @@ impl<'a> Sets<'a> {
 
     /// Element set holding the elements of a region.
     fn element_set(&mut self, item: &str, region: &Region) -> Result<String, WriteError> {
+        let named = region.mesh_set(self.mesh);
+        let region = named.as_ref().unwrap_or(region);
         let members = match region {
             Region::ElementSet(set) => return Ok(set.clone()),
             Region::Parts(parts) if !parts.is_empty() => Members::Parts(
@@ -1530,6 +1537,8 @@ impl<'a> Sets<'a> {
 
     /// Node set holding the nodes of a region.
     fn node_set(&mut self, item: &str, region: &Region) -> Result<String, WriteError> {
+        let named = region.mesh_set(self.mesh);
+        let region = named.as_ref().unwrap_or(region);
         match region {
             Region::NodeSet(set) => return Ok(set.clone()),
             Region::ReferencePoint(point) => {
@@ -1554,6 +1563,8 @@ impl<'a> Sets<'a> {
     /// Surface of a contact or tie side: a surface of the input file, or one built from
     /// picked faces and named like `Internal_Selection-1_Tie-1_Master`.
     fn surface(&mut self, item: &str, side: &str, region: &Region) -> Result<String, WriteError> {
+        let named = region.mesh_set(self.mesh);
+        let region = named.as_ref().unwrap_or(region);
         match region {
             Region::Surface(surface) if self.mesh.surfaces.contains_key(surface) => {
                 Ok(surface.clone())
@@ -1597,6 +1608,8 @@ impl<'a> Sets<'a> {
 
     /// Element sets and face numbers of a face region, for pressure loads.
     fn face_sets(&mut self, item: &str, region: &Region) -> Result<Vec<(String, u8)>, WriteError> {
+        let named = region.mesh_set(self.mesh);
+        let region = named.as_ref().unwrap_or(region);
         match region {
             Region::Surface(surface) => {
                 if let Some((sides, _)) = self.surface_sets.get(surface) {
@@ -2560,8 +2573,6 @@ fn constraints(
         }
         match constraint {
             Constraint::Spring(_) | Constraint::CompressionOnly(_) | Constraint::Joint(_) => {}
-            // Moved to the model's node ties when the project was read.
-            Constraint::NodeTie(_) => {}
             Constraint::RigidBody(_) => {
                 let coupling = constraint.coupling().expect("a rigid body couples");
                 couple_point(
@@ -2576,11 +2587,6 @@ fn constraints(
             }
             // After the rigid bodies, whose points they may sit on.
             Constraint::PointMass(_) => {}
-            Constraint::Tie(t) => {
-                owners.resize(items.len(), None);
-                items.push(tie(sets, t)?);
-                owners.push(Some(ModelItem::Constraint(index)));
-            }
         }
     }
     // A point mass sits on the nodes of its reference point: those of the rigid body that
@@ -3836,10 +3842,10 @@ fn rigid_body(
     Ok(())
 }
 
-/// How the displacement boundary condition of the name in the step of the name is written.
-fn formulation(model: &FeModel, mesh: &FeMesh, step: &str, bc: &str) -> Option<Formulation> {
-    let s = model.steps.iter().position(|s| s.name == step)?;
-    let i = (model.steps[s].boundary_conditions.iter()).position(|b| b.name == bc)?;
+/// How the displacement boundary condition of the id in the step of the id is written.
+fn formulation(model: &FeModel, mesh: &FeMesh, step: Id, bc: Id) -> Option<Formulation> {
+    let s = model.step_index(step)?;
+    let i = (model.steps[s].boundary_conditions.iter()).position(|b| b.id == bc)?;
     model.formulation(mesh, s, i)
 }
 
@@ -4204,7 +4210,7 @@ fn step_block<'f>(
         }
         let on_point = sets.remote_names.contains_key(&bc.id)
             && matches!(
-                formulation(model, sets.mesh, &step.name, &bc.name),
+                formulation(model, sets.mesh, step.id, bc.id),
                 Some(Formulation::Point(_))
             );
         if let BoundaryKind::Displacement(remote) = &bc.kind
@@ -4251,7 +4257,7 @@ fn step_block<'f>(
                 item: bc.name.clone(),
                 reason,
             };
-            let form = formulation(model, sets.mesh, &step.name, &bc.name);
+            let form = formulation(model, sets.mesh, step.id, bc.id);
             let hold = node_frames::hold(model, sets.mesh, bc, form, dofs).map_err(invalid)?;
             if let Some(hold) = hold.filter(|h| !h.submodel) {
                 let (own, rest): (Vec<NodeId>, Vec<NodeId>) = (bc.region.nodes(sets.mesh))
@@ -4722,7 +4728,8 @@ fn step_block<'f>(
             } => {
                 let faces = load.region.faces(sets.mesh);
                 let edges = load.region.edges(sets.mesh);
-                let bodies = matches!(load.region, Region::Parts(_) | Region::ElementSet(_));
+                let region = (load.region.mesh_set(sets.mesh)).unwrap_or(load.region.clone());
+                let bodies = matches!(region, Region::Parts(_) | Region::ElementSet(_));
                 let axisymmetric = space == ModelSpace::Axisymmetric;
                 // On points the nodes share the heat flow equally; with `each_node` every
                 // node of the region takes the whole of it.
@@ -5607,6 +5614,37 @@ fn node_print(
     }
 }
 
+/// The solver's name of a variable of a history output.
+fn history_variable(variable: HistoryVariable) -> &'static str {
+    use HistoryVariable as V;
+    match variable {
+        V::ReactionForces => "RF",
+        V::Displacements => "U",
+        V::Velocities => "V",
+        V::Temperatures => "NT",
+        V::ReactionHeatFlows => "RFL",
+        V::Stresses => "S",
+        V::Strains => "E",
+        V::MechanicalStrains => "ME",
+        V::PlasticStrain => "PEEQ",
+        V::HeatFlux => "HFL",
+        V::EnergyDensity => "ENER",
+        V::ElementInternalEnergy => "ELSE",
+        V::ElementKineticEnergy => "ELKE",
+        V::ElementVolume => "EVOL",
+        V::ElementHeatGeneration => "EBHE",
+        V::ContactDisplacements => "CDIS",
+        V::ContactStresses => "CSTR",
+        V::ContactEnergy => "CELS",
+        V::ContactElements => "CNUM",
+        V::ContactForces => "CF",
+        V::InternalEnergy => "ALLIE",
+        V::KineticEnergy => "ALLKE",
+        V::ExternalWork => "ALLWK",
+        V::DampingDissipation => "ALLVD",
+    }
+}
+
 /// The history output requests of a history output, which carry its id to the history they
 /// print; none without variables.
 fn history_output(
@@ -5632,7 +5670,11 @@ fn history_requests(
     if output.variables.is_empty() {
         return Ok(ir::step::Outputs::default());
     }
-    let names: Vec<&str> = output.variables.iter().map(String::as_str).collect();
+    let names: Vec<&str> = output
+        .variables
+        .iter()
+        .map(|&v| history_variable(v))
+        .collect();
     let mut outputs = ir::step::Outputs::default();
     match &output.kind {
         HistoryKind::Node {
@@ -5660,7 +5702,7 @@ fn history_requests(
         HistoryKind::Contact { pair } => {
             // Contact forces are summed over the slave surface of the pair.
             let mut request = node_print(None, &names, output.totals);
-            if output.variables.iter().any(|v| v == "CF") {
+            if output.variables.contains(&HistoryVariable::ContactForces) {
                 let (master, slave) =
                     (pair.and_then(|p| pair_surfaces.get(&p))).ok_or_else(|| {
                         WriteError::UnknownContactPair {
@@ -5751,8 +5793,8 @@ fn point_output(
     let ([reference, rotation], behavior) = point_nodes(sets, &output.name, region)?;
     let reactions = behavior == RemoteBehavior::Rigid;
     let printed: Vec<&str> = (output.variables.iter())
-        .map(String::as_str)
-        .filter(|&v| reactions || v != "RF")
+        .filter(|&&v| reactions || v != HistoryVariable::ReactionForces)
+        .map(|&v| history_variable(v))
         .collect();
     if printed.is_empty() {
         return Ok(ir::step::Outputs::default());

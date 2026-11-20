@@ -255,9 +255,10 @@ fn a_remeshed_part_replaces_its_old_mesh_and_leaves_the_others() {
     let old_first = whole.parts[0].elements.len();
 
     geometry.mesh_items.push(MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Meshing_Parameters-1".into(),
         kind: MeshSetupKind::MeshingParameters {
-            parts: vec!["SOLID-1".into()],
+            parts: geometry.part_id("SOLID-1").into_iter().collect(),
             parameters: MeshingParameters {
                 max_size: 1.25,
                 second_order: false,
@@ -386,6 +387,7 @@ fn local_mesh_sizes_refine_faces_and_edges() {
         })
         .unwrap();
     let local = |faces: Vec<i32>, edges: Vec<i32>, size| MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Local_Mesh_Size-1".into(),
         kind: MeshSetupKind::LocalMeshSize {
             faces,
@@ -447,9 +449,10 @@ fn every_gmsh_algorithm_gives_valid_tetrahedra() {
         (Algorithm2d::Automatic, Algorithm3d::Delaunay),
     ] {
         geometry.mesh_items = vec![MeshSetupItem {
+            id: plx_model::Id::new(),
             name: "Tetrahedral_Gmsh-1".into(),
             kind: MeshSetupKind::TetrahedralGmsh {
-                parts: vec!["SOLID-1".into()],
+                parts: geometry.part_id("SOLID-1").into_iter().collect(),
                 algorithm_2d,
                 algorithm_3d,
             },
@@ -501,7 +504,7 @@ fn rectangle(origin: [f64; 3], size: [f64; 2], radius: f64) -> Geometry {
         gmsh.write(&file.0)
     })
     .unwrap();
-    Geometry {
+    with_signatures(Geometry {
         compounds: Vec::new(),
         suppressed: Vec::new(),
         source: "rechteck.brep".into(),
@@ -516,7 +519,8 @@ fn rectangle(origin: [f64; 3], size: [f64; 2], radius: f64) -> Geometry {
         from_link: false,
         operations: Vec::new(),
         input: None,
-    }
+    })
+    .unwrap()
 }
 
 /// Signed area of a triangle or quadrilateral in the x-y plane, positive counter-clockwise.
@@ -611,9 +615,10 @@ fn thickened_shells_are_meshed_as_solids() {
     geometry.meshing.second_order = false;
     geometry.meshing.quad_dominated = true;
     geometry.mesh_items.push(MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Thicken_Shell_Mesh-1".into(),
         kind: MeshSetupKind::ThickenShellMesh(plx_model::ThickenShellMesh {
-            parts: vec!["SHELL-1".into()],
+            parts: geometry.part_id("SHELL-1").into_iter().collect(),
             thickness: 1.0,
             layers: 3,
             offset: 0.5,
@@ -824,6 +829,7 @@ fn edges_outside_faces_are_meshed_as_line_parts() {
     assert!(part.elements().iter().all(|e| e.type_name == "B31"));
     // A local mesh size on the edge refines it.
     geometry.mesh_items.push(plx_model::MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Local_Mesh_Size-1".into(),
         kind: plx_model::MeshSetupKind::LocalMeshSize {
             faces: vec![],
@@ -857,6 +863,7 @@ fn a_deleted_part_leaves_the_others_with_their_names_and_local_sizes() {
     })
     .unwrap();
     geometry.mesh_items.push(MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Local_Mesh_Size-1".into(),
         kind: MeshSetupKind::LocalMeshSize {
             faces: vec![first, second],
@@ -1050,6 +1057,7 @@ fn added_files_keep_the_old_parts_with_names_sizes_and_faces() {
     })
     .unwrap();
     geometry.mesh_items.push(MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Local_Mesh_Size-1".into(),
         kind: MeshSetupKind::LocalMeshSize {
             faces: vec![second],
@@ -1481,11 +1489,16 @@ fn part_names_are_calculix_names() {
     assert!(!is_default_name("OBEN"));
 }
 
-fn extrude_item(faces: Vec<i32>, layers: plx_model::ExtrudeLayers) -> MeshSetupItem {
+fn extrude_item(
+    geometry: &Geometry,
+    faces: Vec<i32>,
+    layers: plx_model::ExtrudeLayers,
+) -> MeshSetupItem {
     MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Extrude_Mesh-1".into(),
         kind: MeshSetupKind::ExtrudeMesh(plx_model::ExtrudeMesh {
-            parts: vec!["SOLID-1".into()],
+            parts: geometry.part_id("SOLID-1").into_iter().collect(),
             faces,
             layers,
             ..Default::default()
@@ -1549,6 +1562,7 @@ fn extruded_parts_are_meshed_with_hexahedra_in_layers() {
         geometry.meshing.second_order = second_order;
         // The source is found: the face with the hole, swept through the 10 mm.
         geometry.mesh_items = vec![extrude_item(
+            &geometry,
             vec![],
             plx_model::ExtrudeLayers::NumberOfElements(3),
         )];
@@ -1587,7 +1601,11 @@ fn extruded_parts_are_meshed_with_hexahedra_in_layers() {
 
     // Full-quad recombination gives hexahedra only; the layers follow the element size.
     geometry.meshing.second_order = false;
-    let mut item = extrude_item(vec![], plx_model::ExtrudeLayers::ScaleFactor(0.5));
+    let mut item = extrude_item(
+        &geometry,
+        vec![],
+        plx_model::ExtrudeLayers::ScaleFactor(0.5),
+    );
     if let MeshSetupKind::ExtrudeMesh(extrude) = &mut item.kind {
         extrude.recombination = plx_model::Recombination::BlossomFullQuad;
     }
@@ -1632,6 +1650,7 @@ fn source_faces_are_checked_to_be_an_end_of_an_extrusion() {
     let ends = flat_in(2);
     let (top, side) = (ends[0], flat_in(1)[0]);
     geometry.mesh_items = vec![extrude_item(
+        &geometry,
         vec![top],
         plx_model::ExtrudeLayers::NumberOfElements(2),
     )];
@@ -1643,6 +1662,7 @@ fn source_faces_are_checked_to_be_an_end_of_an_extrusion() {
     );
     // A long side face: the hole goes across the extrusion.
     geometry.mesh_items = vec![extrude_item(
+        &geometry,
         vec![side],
         plx_model::ExtrudeLayers::NumberOfElements(2),
     )];
@@ -1652,11 +1672,16 @@ fn source_faces_are_checked_to_be_an_end_of_an_extrusion() {
     assert!(error.contains("not an extrusion"), "{error}");
     // A later Tetrahedral Gmsh item for the part wins.
     geometry.mesh_items = vec![
-        extrude_item(vec![top], plx_model::ExtrudeLayers::NumberOfElements(2)),
+        extrude_item(
+            &geometry,
+            vec![top],
+            plx_model::ExtrudeLayers::NumberOfElements(2),
+        ),
         MeshSetupItem {
+            id: plx_model::Id::new(),
             name: "Tetrahedral_Gmsh-1".into(),
             kind: MeshSetupKind::TetrahedralGmsh {
-                parts: vec!["SOLID-1".into()],
+                parts: geometry.part_id("SOLID-1").into_iter().collect(),
                 algorithm_2d: Algorithm2d::default(),
                 algorithm_3d: Algorithm3d::default(),
             },
@@ -1687,9 +1712,10 @@ fn meshing_parameters_find_extrusions_and_keep_tetrahedra_for_the_rest() {
     );
     // A Tetrahedral Gmsh item for the part keeps it tetrahedral.
     geometry.mesh_items = vec![MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Tetrahedral_Gmsh-1".into(),
         kind: MeshSetupKind::TetrahedralGmsh {
-            parts: vec!["SOLID-1".into()],
+            parts: geometry.part_id("SOLID-1").into_iter().collect(),
             algorithm_2d: Algorithm2d::default(),
             algorithm_3d: Algorithm3d::default(),
         },
@@ -1968,6 +1994,7 @@ fn picked_entities_are_found_in_changed_and_renumbered_shapes() {
     assert_eq!(tags.keys().filter(|e| e.dim() == 1).count(), 24);
     // A local mesh size on the top face follows it, and the new mesh has it.
     new.mesh_items = vec![MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Local Mesh Size-1".into(),
         kind: MeshSetupKind::LocalMeshSize {
             faces: vec![old_top.tag()],
@@ -2326,6 +2353,7 @@ fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
         },
     };
     model.sections.push(plx_model::Section {
+        id: plx_model::Id::new(),
         orientation: None,
         name: "Rope".into(),
         material: None,
@@ -2497,6 +2525,8 @@ fn made_geometry(make: impl FnOnce(&Gmsh) -> Result<(), GmshError>) -> Geometry 
     .unwrap();
     with_signatures(Geometry {
         brep: std::fs::read_to_string(&file.0).unwrap(),
+        part_names: Vec::new(),
+        ids: Vec::new(),
         ..cube()
     })
     .unwrap()
@@ -2692,7 +2722,7 @@ fn a_split_of_chosen_parts_leaves_the_others_whole() {
     assert_eq!(names.len(), 2);
     let second = names[1].clone();
     let operation = plx_model::CadOperation {
-        parts: vec![second.clone()],
+        parts: input.part_id(&second).into_iter().collect(),
         ..split(SplitPlane, 4.0)
     };
     let once = apply_operation(&input, &operation, &[]).unwrap();
@@ -2719,14 +2749,14 @@ fn a_split_of_chosen_parts_leaves_the_others_whole() {
     // A plane beside the chosen part cuts nothing, though it runs through the other one.
     let beside = plx_model::CadOperation {
         plane: plx_model::SplitPlane::Global(plx_model::CoordinatePlane::Xz),
-        parts: vec![second.clone()],
+        parts: input.part_id(&second).into_iter().collect(),
         ..split(SplitPlane, 5.0)
     };
     let error = apply_operation(&input, &beside, &[]).unwrap_err();
     assert!(error.to_string().contains("none of the parts"), "{error}");
     // A part no longer there.
     let gone = plx_model::CadOperation {
-        parts: vec!["nothing".into()],
+        parts: vec![plx_model::Id::new()],
         ..split(SplitPlane, 4.0)
     };
     assert!(apply_operation(&input, &gone, &[]).is_err());
@@ -3021,9 +3051,10 @@ fn faces_get_quasi_structured_quadrilaterals_unless_an_algorithm_is_chosen() {
     assert!(structured.elements().iter().all(|e| e.type_name == "S4"));
 
     geometry.mesh_items.push(MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Gmsh".into(),
         kind: MeshSetupKind::TetrahedralGmsh {
-            parts: part_names(&geometry).unwrap(),
+            parts: geometry.ids.iter().map(|p| p.id).collect(),
             algorithm_2d: Algorithm2d::FrontalDelaunay,
             algorithm_3d: Default::default(),
         },
@@ -3043,6 +3074,7 @@ fn faces_get_quasi_structured_quadrilaterals_unless_an_algorithm_is_chosen() {
         .map(|(&edge, _)| edge)
         .unwrap();
     geometry.mesh_items.push(MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Hole".into(),
         kind: MeshSetupKind::LocalMeshSize {
             faces: Vec::new(),
@@ -3089,9 +3121,10 @@ fn spheres_are_meshed_whatever_algorithm_is_chosen() {
     });
     geometry.meshing.max_size = 3.0;
     geometry.mesh_items.push(MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Gmsh".into(),
         kind: MeshSetupKind::TetrahedralGmsh {
-            parts: part_names(&geometry).unwrap(),
+            parts: geometry.ids.iter().map(|p| p.id).collect(),
             algorithm_2d: Algorithm2d::FrontalQuads,
             algorithm_3d: Default::default(),
         },
@@ -3204,6 +3237,7 @@ fn stacks_of_extrusions_are_meshed_with_hexahedra_through_their_steps() {
     // Quadratic elements; an extrude mesh without source faces sets the layers.
     geometry.meshing.second_order = true;
     geometry.mesh_items = vec![extrude_item(
+        &geometry,
         Vec::new(),
         plx_model::ExtrudeLayers::NumberOfElements(3),
     )];
@@ -3252,6 +3286,7 @@ fn local_sizes_on_walls_and_rising_edges_refine_the_layers_of_a_stack() {
         .map(|(face, _)| face)
         .unwrap();
     geometry.mesh_items = vec![MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Local_Mesh_Size-1".into(),
         kind: MeshSetupKind::LocalMeshSize {
             faces: vec![wall],
@@ -3860,7 +3895,7 @@ fn suppressed_parts_are_left_alone_by_splits_and_cad_operations() {
     assert!(once.is_suppressed(&first));
     // Chosen, the suppressed part is not cut either.
     let chosen = plx_model::CadOperation {
-        parts: vec![first.clone()],
+        parts: input.part_id(&first).into_iter().collect(),
         ..split(SplitPlane, 4.0)
     };
     let error = apply_operation(&input, &chosen, &[]).unwrap_err();
@@ -3903,9 +3938,10 @@ fn a_detected_bonded_pin_with_play_passes_the_model_check() {
     let mut parameters = geometry.meshing;
     parameters.max_size = 0.5;
     geometry.mesh_items.push(MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Fine".into(),
         kind: MeshSetupKind::MeshingParameters {
-            parts: vec![pin],
+            parts: geometry.part_id(&pin).into_iter().collect(),
             parameters,
         },
     });

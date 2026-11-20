@@ -1680,9 +1680,9 @@ impl FeModel {
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
             if let BoundaryKind::Flow(flow) = &bc.kind {
                 let problem = flow.problem(!bc.region.is_empty()).or_else(|| {
-                    let like = flow.like.as_ref()?;
-                    (!mesh.parts.iter().any(|p| &p.name == like))
-                        .then(|| format!("The model has no part {like}."))
+                    let like = flow.like?;
+                    (!mesh.parts.iter().any(|p| p.id == like))
+                        .then(|| "The part whose material it feeds no longer exists.".to_owned())
                 });
                 if bc.active
                     && let Some(problem) = problem
@@ -3650,18 +3650,6 @@ impl FeModel {
                         support(node, normal, false);
                     }
                 }
-                Constraint::Tie(_) => {
-                    if let Some([master, slave]) = constraint.master_slave() {
-                        let (a, b) = (pieces(master), pieces(slave));
-                        join(&mut ties, &a, &b);
-                        join(&mut contacts, &a, &b);
-                    }
-                }
-                Constraint::NodeTie(c) => {
-                    let tied = pieces(&c.region);
-                    join(&mut ties, &tied, &[]);
-                    join(&mut contacts, &tied, &[]);
-                }
                 Constraint::Joint(joint) => {
                     let regions = |end: &crate::SpringEnd| -> Vec<Region> {
                         match end.region() {
@@ -3999,8 +3987,6 @@ impl FeModel {
         }
         for constraint in self.constraints.iter().filter(|c| c.active()) {
             match constraint {
-                // Moved to the node ties when the project was read.
-                Constraint::NodeTie(_) => {}
                 Constraint::Spring(c) => match c.acting_layout(|r| self.region_grounded(r)) {
                     Some(SpringLayout::SelectionToWorld { selection }) => {
                         for node in selection.nodes(mesh) {
@@ -4016,11 +4002,6 @@ impl FeModel {
                     }
                 },
                 Constraint::CompressionOnly(c) => mark(&c.region, &mut held_otherwise),
-                Constraint::Tie(_) => {
-                    for region in constraint.master_slave().into_iter().flatten() {
-                        mark(region, &mut held_otherwise);
-                    }
-                }
                 Constraint::RigidBody(_) | Constraint::PointMass(_) => {
                     if let Some(body) = constraint.coupling()
                         && !self.point_dofs(s, body.reference_point).is_empty()
@@ -4714,6 +4695,7 @@ mod tests {
         FeModel {
             materials: vec![steel],
             sections: vec![Section {
+                id: crate::Id::new(),
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(steel_id),
@@ -4956,6 +4938,7 @@ mod tests {
         };
         model.steps[0].loads.push(bolt);
         let mut second = model.steps[0].clone();
+        second.id = crate::Id::new();
         second.name = "Step-2".into();
         let LoadKind::PreTension { lock, .. } = &mut second.loads[1].kind else {
             unreachable!()
@@ -5171,6 +5154,7 @@ mod tests {
         let mesh = cubes(2, true);
         let mut model = model(&mesh);
         model.initial_conditions.push(crate::InitialCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Initial_Velocity-1".into(),
             active: true,
@@ -6042,6 +6026,7 @@ mod tests {
         let parts = mesh.part_ids();
         model.steps[0].loads.clear();
         model.initial_conditions.push(crate::InitialCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Initial_Temperature-1".into(),
             active: true,
@@ -6049,6 +6034,7 @@ mod tests {
             kind: crate::InitialConditionKind::Temperature(20.0),
         });
         model.steps[0].defined_fields.push(crate::DefinedField {
+            id: crate::Id::new(),
             distribution: None,
             name: "Defined_Temperature-1".into(),
             active: true,
@@ -6135,8 +6121,8 @@ mod tests {
             name: "Twist".into(),
             path: crate::ValuePath::new(
                 crate::ItemRef::BoundaryCondition {
-                    step: "Step-1".into(),
-                    name: "Fixed-1".into(),
+                    step: model.steps[0].id,
+                    item: model.steps[0].boundary_conditions[0].id,
                 },
                 crate::Field::RotationX,
             ),
@@ -6145,6 +6131,7 @@ mod tests {
         // A point in one step is the point of the boundary condition in all of them.
         model.exposed.clear();
         let mut second = model.steps[0].clone();
+        second.id = crate::Id::new();
         second.name = "Step-2".into();
         second.boundary_conditions[0].kind =
             BoundaryKind::displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]);

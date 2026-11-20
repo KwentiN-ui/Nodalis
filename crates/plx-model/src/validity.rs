@@ -746,6 +746,10 @@ impl Region {
                 .then(|| format!("Element Set {name} does not exist")),
             Region::Surface(name) => (!mesh.surfaces.contains_key(name))
                 .then(|| format!("Surface {name} does not exist")),
+            Region::Set(_) => match self.mesh_set(mesh) {
+                Some(set) => set.missing_reference(mesh),
+                None => Some("The set was deleted or finds nothing on the mesh".into()),
+            },
             Region::Nodes(nodes) => {
                 let missing = nodes.iter().filter(|&&n| mesh.node(n).is_none()).count();
                 (missing > 0).then(|| format!("{missing} nodes do not exist"))
@@ -873,6 +877,7 @@ mod tests {
                 ..Default::default()
             }],
             sections: vec![Section {
+                id: crate::Id::new(),
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(steel),

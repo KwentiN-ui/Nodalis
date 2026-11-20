@@ -121,6 +121,8 @@ pub enum MeshToolResult {
 
 pub struct MeshToolDialog {
     tool: MeshTool,
+    /// The id of the mesh operation: of the one edited, or of the new one.
+    id: plx_model::Id,
     /// Name of the mesh operation.
     name: String,
     /// The parts the mesh operation changes, by id.
@@ -146,6 +148,10 @@ impl MeshToolDialog {
                 .max(1e-9)
         });
         let operations = &model.fe.mesh_operations;
+        let id = match &tool {
+            MeshTool::Operation(index) => operations.get(*index).map(|o| o.id),
+            _ => None,
+        };
         let (name, parts, transform) = match &tool {
             MeshTool::Operation(index) => match operations.get(*index) {
                 Some(operation) => {
@@ -170,6 +176,7 @@ impl MeshToolDialog {
         };
         Self {
             tool,
+            id: id.unwrap_or_default(),
             name,
             parts,
             transform,
@@ -197,7 +204,7 @@ impl MeshToolDialog {
             return None;
         };
         let operation = model.fe.mesh_operations.get(index)?;
-        Some(ItemRef::MeshOperation(operation.name.clone()))
+        Some(ItemRef::MeshOperation(operation.id))
     }
 
     /// Draws the transform's form with the expose buttons of its numbers.
@@ -212,13 +219,14 @@ impl MeshToolDialog {
         let name = self.name.trim().to_owned();
         let draft = plx_model::FeModel {
             mesh_operations: vec![MeshOperation {
+                id: self.id,
                 name: name.clone(),
                 parts: Vec::new(),
                 kind: MeshOperationKind::Transform(self.transform.transform()),
             }],
             ..Default::default()
         };
-        scope.available = draft.exposable(&ItemRef::MeshOperation(name));
+        scope.available = draft.exposable(&ItemRef::MeshOperation(self.id));
         let transform = &mut self.transform;
         scope.show(ui, |ui| transform_form(ui, transform, two_d, units));
         self.expose = Some(scope);
@@ -336,10 +344,9 @@ impl MeshToolDialog {
         let result = self.run(model);
         match &result {
             Err(error) => self.error = Some(error.clone()),
-            // The exposed parameters follow the transform, under its new name.
             Ok(_) => {
                 if let Some(scope) = self.expose.take() {
-                    let item = ItemRef::MeshOperation(self.name.trim().to_owned());
+                    let item = ItemRef::MeshOperation(self.id);
                     scope.apply(&mut model.fe, None, &item);
                 }
             }
@@ -371,6 +378,7 @@ impl MeshToolDialog {
                     .filter(|p| self.parts.contains(p))
                     .collect();
                 let operation = MeshOperation {
+                    id: self.id,
                     name: name.clone(),
                     parts,
                     kind: MeshOperationKind::Transform(self.transform.transform()),

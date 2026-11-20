@@ -83,8 +83,8 @@ pub struct HistoryOutputDialog {
     unit: String,
     size: SizeKind,
     elements: RegionDraft,
-    hot_spot: String,
-    moving_load: Option<String>,
+    hot_spot: Option<plx_model::Id>,
+    moving_load: Option<plx_model::Id>,
     focus: &'static str,
     pub error: Option<String>,
     picker: Picker,
@@ -93,9 +93,10 @@ pub struct HistoryOutputDialog {
     /// `Set.Field.Component` of the history outputs an equation may use.
     history: Vec<String>,
     taken: Vec<String>,
-    /// Hot spots of the results and moving loads of the FE model, by name.
-    hot_spots: Vec<String>,
-    moving_loads: Vec<String>,
+    /// Hot spots of the results and moving loads of the FE model, by id with their names;
+    /// a moving load by the id of its first load.
+    hot_spots: Vec<(plx_model::Id, String)>,
+    moving_loads: Vec<(plx_model::Id, String)>,
 }
 
 impl HistoryOutputDialog {
@@ -134,10 +135,12 @@ impl HistoryOutputDialog {
             .map(|(f, c)| (f.clone(), vec![c[0].clone()]))
             .unwrap_or_default();
         let names = TYPES.map(|(_, prefix)| next_name(prefix, taken.iter().map(String::as_str)));
-        let hot_spots: Vec<String> = (view.hot_spot_reports.iter())
-            .map(|r| r.name.clone())
+        let hot_spots: Vec<(plx_model::Id, String)> = (view.hot_spot_reports.iter())
+            .map(|r| (r.id, r.name.clone()))
             .collect();
-        let moving_loads = view.moving_loads.iter().map(|m| m.load.clone()).collect();
+        let moving_loads = (view.moving_loads.iter())
+            .filter_map(|m| Some((*m.ids.first()?, m.load.clone())))
+            .collect();
         Self {
             edit: None,
             kind: FROM_FIELD,
@@ -149,7 +152,7 @@ impl HistoryOutputDialog {
             unit: "/".into(),
             size: SizeKind::Volume,
             elements: RegionDraft::new(SOLID_SOURCES, Target::Faces),
-            hot_spot: hot_spots.first().cloned().unwrap_or_default(),
+            hot_spot: hot_spots.first().map(|h| h.0),
             moving_load: None,
             focus: NAME,
             error: None,
@@ -203,8 +206,14 @@ impl HistoryOutputDialog {
                 hot_spot,
                 moving_load,
             } => {
-                dialog.hot_spot = hot_spot;
-                dialog.moving_load = moving_load;
+                dialog.hot_spot = Some(hot_spot);
+                // Shown as the first load of the moving load, whichever load it names.
+                dialog.moving_load = moving_load.map(|id| {
+                    (view.moving_loads.iter())
+                        .find(|m| m.ids.contains(&id))
+                        .and_then(|m| m.ids.first().copied())
+                        .unwrap_or(id)
+                });
                 HOT_SPOT
             }
         };
@@ -300,12 +309,12 @@ impl HistoryOutputDialog {
                 unit: self.unit.clone(),
             },
             HOT_SPOT => {
-                if self.hot_spot.is_empty() {
+                let Some(hot_spot) = self.hot_spot else {
                     return Err("There are no hot spots. Create one first.".into());
-                }
+                };
                 HistoryOutputKind::FromHotSpot {
-                    hot_spot: self.hot_spot.clone(),
-                    moving_load: self.moving_load.clone(),
+                    hot_spot,
+                    moving_load: self.moving_load,
                 }
             }
             _ => HistoryOutputKind::ElementSize {
@@ -501,17 +510,18 @@ impl HistoryOutputDialog {
                         let hot_spots = &self.hot_spots;
                         let hot_spot = &mut self.hot_spot;
                         row(ui, focus, HOT_SPOT_ROW, |ui| {
-                            let shown = if hot_spot.is_empty() {
-                                "(no hot spots)"
-                            } else {
-                                hot_spot.as_str()
+                            let shown = match hot_spot {
+                                None => "(no hot spots)",
+                                Some(id) => (hot_spots.iter())
+                                    .find(|h| h.0 == *id)
+                                    .map_or("(deleted)", |h| h.1.as_str()),
                             };
                             let response = egui::ComboBox::from_id_salt("history hot spot")
                                 .selected_text(shown)
                                 .width(crate::dock::fit_width(ui, 200.0))
                                 .show_ui(ui, |ui| {
-                                    for name in hot_spots {
-                                        ui.selectable_value(hot_spot, name.clone(), name);
+                                    for (id, name) in hot_spots {
+                                        ui.selectable_value(hot_spot, Some(*id), name);
                                     }
                                 });
                             response.response.clicked()
@@ -519,13 +529,19 @@ impl HistoryOutputDialog {
                         let moving_loads = &self.moving_loads;
                         let moving_load = &mut self.moving_load;
                         row(ui, focus, MOVING_LOAD_ROW, |ui| {
+                            let shown = match moving_load {
+                                None => NO_MOVING_LOAD,
+                                Some(id) => (moving_loads.iter())
+                                    .find(|m| m.0 == *id)
+                                    .map_or("(not in the FE model)", |m| m.1.as_str()),
+                            };
                             let response = egui::ComboBox::from_id_salt("history moving load")
-                                .selected_text(moving_load.as_deref().unwrap_or(NO_MOVING_LOAD))
+                                .selected_text(shown)
                                 .width(crate::dock::fit_width(ui, 200.0))
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(moving_load, None, NO_MOVING_LOAD);
-                                    for name in moving_loads {
-                                        ui.selectable_value(moving_load, Some(name.clone()), name);
+                                    for (id, name) in moving_loads {
+                                        ui.selectable_value(moving_load, Some(*id), name);
                                     }
                                 });
                             response.response.clicked()
@@ -656,12 +672,15 @@ mod tests {
             .map(|(id, _)| *id)
             .unwrap();
         let mut hot_spot = plx_results::hot_spot::HotSpot::new("Hot_Spot-1");
+        let hot_spot_id = hot_spot.id;
+        let crane = plx_model::Id::new();
         hot_spot.toe = Region::Nodes(vec![toe]);
         hot_spot.thickness = 10.0;
         model.hot_spots.definitions.push(hot_spot);
         let reports = crate::hot_spots::evaluate(&model);
         let stations = plx_model::LoadStations {
             load: "Crane-1".into(),
+            ids: vec![crane],
             steps: vec![(1, 50.0)],
         };
         let mesh = model.mesh().clone();
@@ -671,9 +690,9 @@ mod tests {
         let mut dialog = HistoryOutputDialog::create(view);
         dialog.kind = HOT_SPOT;
         assert_eq!(dialog.names[HOT_SPOT], "From_Hot_Spot-1");
-        assert_eq!(dialog.hot_spot, "Hot_Spot-1");
-        assert_eq!(dialog.moving_loads, ["Crane-1"]);
-        dialog.moving_load = Some("Crane-1".into());
+        assert_eq!(dialog.hot_spot, Some(hot_spot_id));
+        assert_eq!(dialog.moving_loads, [(crane, "Crane-1".to_string())]);
+        dialog.moving_load = Some(crane);
         let output = dialog.output().unwrap();
         view.set_history_output(None, output, &mesh).unwrap();
         let set = view.history.last().unwrap();
@@ -691,7 +710,7 @@ mod tests {
         // Deleting the hot spot breaks the output; editing keeps the choice.
         let edit = HistoryOutputDialog::edit(view, &mesh, 0).unwrap();
         assert_eq!(edit.kind, HOT_SPOT);
-        assert_eq!(edit.moving_load.as_deref(), Some("Crane-1"));
+        assert_eq!(edit.moving_load, Some(crane));
         let warnings = view.set_history_sources(Vec::new(), Vec::new(), &mesh);
         assert_eq!(warnings.map(|w| w.len()), Some(1));
     }

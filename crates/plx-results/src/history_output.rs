@@ -63,8 +63,10 @@ pub enum HistoryOutputKind {
     /// The values of a hot spot of the results by name; with a moving load of the FE model
     /// also the load's position in each step, to plot the stress over it.
     FromHotSpot {
-        hot_spot: String,
-        moving_load: Option<String>,
+        /// The hot spot, by id.
+        hot_spot: plx_model::Id,
+        /// The moving load whose position the values go with, by the id of one of its loads.
+        moving_load: Option<plx_model::Id>,
     },
 }
 
@@ -166,13 +168,14 @@ pub fn compute(
             hot_spot,
             moving_load,
         } => {
-            let report = (sources.hot_spots.iter().find(|r| r.name == *hot_spot))
-                .ok_or_else(|| format!("The hot spot {hot_spot} does not exist."))?;
+            let report = (sources.hot_spots.iter().find(|r| r.id == *hot_spot))
+                .ok_or_else(|| "The hot spot no longer exists.".to_string())?;
             let position = match moving_load {
                 Some(load) => {
-                    let stations = (sources.moving_loads.iter().find(|s| s.load == *load))
+                    let stations = (sources.moving_loads.iter())
+                        .find(|s| s.ids.contains(load))
                         .ok_or_else(|| {
-                            format!("The moving load {load} is in no active step of the FE model.")
+                            "The moving load is in no active step of the FE model.".to_string()
                         })?;
                     Some(moving_load_position(stations, increments))
                 }
@@ -753,7 +756,9 @@ mod tests {
                 },
             ],
         };
+        let (hot_spot, moving) = (plx_model::Id::new(), plx_model::Id::new());
         let report = HotSpotReport {
+            id: hot_spot,
             name: "Hot_Spot-1".into(),
             component: HotSpotComponent::Perpendicular,
             method: String::new(),
@@ -764,13 +769,14 @@ mod tests {
         };
         let stations = plx_model::LoadStations {
             load: "Moving-1".into(),
+            ids: vec![moving],
             steps: vec![(2, 100.0), (3, 200.0)],
         };
         let output = HistoryOutput {
             name: "Hot_Spot_History".into(),
             kind: HistoryOutputKind::FromHotSpot {
-                hot_spot: "Hot_Spot-1".into(),
-                moving_load: Some("Moving-1".into()),
+                hot_spot,
+                moving_load: Some(moving),
             },
         };
         let sources = Sources {
@@ -805,7 +811,7 @@ mod tests {
         // Without a moving load the stresses stand alone.
         let mut plain = output.clone();
         plain.kind = HistoryOutputKind::FromHotSpot {
-            hot_spot: "Hot_Spot-1".into(),
+            hot_spot,
             moving_load: None,
         };
         let set = compute(&plain, &increments, &mesh, sources).unwrap();
@@ -814,8 +820,8 @@ mod tests {
         // A hot spot or moving load that is gone is an error.
         let mut missing = output.clone();
         missing.kind = HistoryOutputKind::FromHotSpot {
-            hot_spot: "Hot_Spot-1".into(),
-            moving_load: Some("Moving-2".into()),
+            hot_spot,
+            moving_load: Some(plx_model::Id::new()),
         };
         assert!(compute(&missing, &increments, &mesh, sources).is_err());
         assert!(compute(&output, &increments, &mesh, Sources::default()).is_err());

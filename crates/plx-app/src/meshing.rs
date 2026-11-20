@@ -389,8 +389,10 @@ pub struct MeshItemEditor {
     face_parts: (BTreeSet<CadEntity>, Vec<String>),
     /// Names of the geometry's shell parts, the parts a thicken shell mesh takes.
     shells: BTreeSet<String>,
-    /// The name the edited item has in the geometry, for its exposed parameters.
-    original: Option<String>,
+    /// The parts of the geometry with their ids, which the item keeps them by.
+    part_ids: Vec<plx_model::PartId>,
+    /// The id of the edited item, for its exposed parameters.
+    original: Option<plx_model::Id>,
     /// The expose buttons of its numbers, see [`Self::set_linked`].
     expose: Option<expose::Scope>,
     /// The exposed parameters of the analysis that value links give, with where from.
@@ -412,7 +414,11 @@ impl MeshItemEditor {
         let kind = new_kind(0, geometry);
         let name = next_name(kind.type_name(), others.iter().map(String::as_str));
         Self {
-            draft: MeshSetupItem { name, kind },
+            draft: MeshSetupItem {
+                id: plx_model::Id::new(),
+                name,
+                kind,
+            },
             index: None,
             others,
             picks: History::default(),
@@ -424,6 +430,7 @@ impl MeshItemEditor {
             layer_text: ["0.2; 0.6; 0.2;".into(), "2; 4; 2;".into()],
             face_parts: Default::default(),
             shells: BTreeSet::new(),
+            part_ids: geometry.ids.clone(),
             original: None,
             expose: None,
             linked: Vec::new(),
@@ -460,12 +467,11 @@ impl MeshItemEditor {
             MeshSetupKind::ExtrudeMesh(extrude) if !extrude.faces.is_empty() => {
                 PartPicks::default()
             }
-            // The mesh setup keeps the parts by name; the display has them by the ids of
-            // the geometry.
-            kind => PartPicks::from_parts((kind.parts().unwrap_or_default().iter()).map(|name| {
-                let id = geometry.part_id(name).unwrap_or_default();
-                (id, name.clone())
-            })),
+            // The mesh setup keeps the parts by the ids of the geometry, as the display.
+            kind => PartPicks::from_parts(
+                (kind.parts().unwrap_or_default().iter())
+                    .map(|&id| (id, geometry.part_name(id).unwrap_or_default().to_owned())),
+            ),
         };
         let mut layer_text = ["0.2; 0.6; 0.2;".to_string(), "2; 4; 2;".to_string()];
         let mut source_faces = false;
@@ -488,7 +494,8 @@ impl MeshItemEditor {
             layer_text,
             face_parts: Default::default(),
             shells: BTreeSet::new(),
-            original: Some(geometry.mesh_items.get(index)?.name.clone()),
+            part_ids: geometry.ids.clone(),
+            original: Some(geometry.mesh_items.get(index)?.id),
             expose: None,
             linked: Vec::new(),
         })
@@ -578,7 +585,7 @@ impl MeshItemEditor {
                 });
             ui.separator();
             ui.strong("Properties");
-            let item = self.original.clone().map(ItemRef::MeshSetup);
+            let item = self.original.map(ItemRef::MeshSetup);
             let available = self.exposable();
             let mut kept = self.expose.take();
             let linked = std::mem::take(&mut self.linked);
@@ -693,16 +700,20 @@ impl MeshItemEditor {
         match &mut self.draft.kind {
             MeshSetupKind::MeshingParameters { parts, .. }
             | MeshSetupKind::TetrahedralGmsh { parts, .. } => {
-                *parts = self.parts.names().into_iter().collect();
+                *parts = self.parts.ids().into_iter().collect();
             }
             MeshSetupKind::ThickenShellMesh(thicken) => {
-                thicken.parts = self.parts.names().into_iter().collect();
+                thicken.parts = self.parts.ids().into_iter().collect();
             }
             MeshSetupKind::ExtrudeMesh(extrude) if source_faces => {
-                extrude.parts = self.face_parts.1.clone();
+                let ids = &self.part_ids;
+                extrude.parts = (self.face_parts.1.iter())
+                    .filter_map(|name| ids.iter().find(|p| p.name.eq_ignore_ascii_case(name)))
+                    .map(|p| p.id)
+                    .collect();
             }
             MeshSetupKind::ExtrudeMesh(extrude) => {
-                extrude.parts = self.parts.names().into_iter().collect();
+                extrude.parts = self.parts.ids().into_iter().collect();
             }
             MeshSetupKind::LocalMeshSize { .. } => {}
         }
@@ -985,7 +996,13 @@ impl MeshItemEditor {
                 if thicken.parts.is_empty() {
                     return Err("No shell part selected.".into());
                 }
-                if let Some(solid) = (thicken.parts.iter()).find(|p| !self.shells.contains(*p)) {
+                let name = |id: &plx_model::Id| {
+                    (self.part_ids.iter().find(|p| p.id == *id))
+                        .map_or_else(|| id.to_string(), |p| p.name.clone())
+                };
+                if let Some(solid) =
+                    (thicken.parts.iter().map(name)).find(|p| !self.shells.contains(p))
+                {
                     return Err(format!(
                         "{solid} is no shell: only shells can be thickened."
                     ));
@@ -1111,7 +1128,7 @@ impl MeshItemEditor {
         if self.picks_entities() {
             entities_highlight(view, &self.picks.items())
         } else {
-            item_highlight(view, &self.draft.kind)
+            item_highlight(view, &self.draft.kind, &self.part_ids)
         }
     }
 }
@@ -1266,14 +1283,18 @@ pub fn entities_highlight(view: &Model, entities: &BTreeSet<CadEntity>) -> Highl
     }
 }
 
-/// How a stored mesh setup item shows on the geometry.
-pub fn item_highlight(view: &Model, kind: &MeshSetupKind) -> Highlight {
+/// How a stored mesh setup item shows on the geometry; `ids` are the parts of the geometry
+/// with their ids, which the item keeps them by.
+pub fn item_highlight(view: &Model, kind: &MeshSetupKind, ids: &[plx_model::PartId]) -> Highlight {
+    let holds = |parts: &[plx_model::Id], name: &str| {
+        (ids.iter()).any(|p| parts.contains(&p.id) && p.name.eq_ignore_ascii_case(name))
+    };
     match kind {
         MeshSetupKind::MeshingParameters { parts, .. }
         | MeshSetupKind::TetrahedralGmsh { parts, .. }
         | MeshSetupKind::ThickenShellMesh(ThickenShellMesh { parts, .. }) => Highlight {
             parts: (view.parts.iter().enumerate())
-                .filter(|(_, p)| parts.contains(&p.name))
+                .filter(|(_, p)| holds(parts, &p.name))
                 .map(|(i, _)| i)
                 .collect(),
             ..Highlight::default()
@@ -1290,7 +1311,7 @@ pub fn item_highlight(view: &Model, kind: &MeshSetupKind) -> Highlight {
         }
         MeshSetupKind::ExtrudeMesh(extrude) => Highlight {
             parts: (view.parts.iter().enumerate())
-                .filter(|(_, p)| extrude.parts.contains(&p.name))
+                .filter(|(_, p)| holds(&extrude.parts, &p.name))
                 .map(|(i, _)| i)
                 .collect(),
             ..Highlight::default()
@@ -1799,9 +1820,10 @@ fn mesh_without_netgen(
     }
     let mut geometry = request.geometry.clone();
     geometry.mesh_items.push(plx_model::MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Without Netgen".into(),
         kind: plx_model::MeshSetupKind::MeshingParameters {
-            parts: vec![part.to_string()],
+            parts: request.geometry.part_id(part).into_iter().collect(),
             // The parameters the part has, with the sizes before any refinement.
             parameters: plx_model::MeshingParameters {
                 optimize: false,
@@ -2197,9 +2219,10 @@ mod tests {
         // A part that cannot be meshed is told by name, and the others are meshed.
         geometry.set_suppressed(&["SOLID-1".into()], false);
         geometry.mesh_items.push(plx_model::MeshSetupItem {
+            id: plx_model::Id::new(),
             name: "Meshing_Parameters-1".into(),
             kind: plx_model::MeshSetupKind::MeshingParameters {
-                parts: vec!["SOLID-1".into()],
+                parts: geometry.part_id("SOLID-1").into_iter().collect(),
                 parameters: plx_model::MeshingParameters {
                     max_size: 0.0,
                     ..geometry.meshing
@@ -2339,7 +2362,7 @@ mod tests {
         };
         assert_eq!(
             (extrude.parts.as_slice(), extrude.faces.len()),
-            (&["SOLID-1".to_string()][..], 0)
+            (&[geometry.part_id("SOLID-1").unwrap()][..], 0)
         );
 
         // Selected faces: the top face, also when clicked close to an edge; its part follows.
@@ -2366,7 +2389,7 @@ mod tests {
                     .unwrap()
             ]
         );
-        assert_eq!(extrude.parts, vec!["SOLID-1".to_string()]);
+        assert_eq!(extrude.parts, vec![geometry.part_id("SOLID-1").unwrap()]);
         assert!(!editor.highlight(&view).faces.is_empty());
 
         // Multi-layered sizes are typed as a list.
@@ -2419,7 +2442,10 @@ mod tests {
         assert!(error.contains("no shell"), "{error}");
         editor.shells.insert("SOLID-1".into());
         let item = editor.finish().unwrap();
-        assert_eq!(item.kind.parts().unwrap(), ["SOLID-1"]);
+        assert_eq!(
+            item.kind.parts().unwrap(),
+            [geometry.part_id("SOLID-1").unwrap()]
+        );
         if let MeshSetupKind::ThickenShellMesh(thicken) = &mut editor.draft.kind {
             thicken.layers = 0;
         }
@@ -2454,9 +2480,13 @@ mod tests {
         let item = editor.finish().unwrap();
         assert!(matches!(
             &item.kind,
-            MeshSetupKind::MeshingParameters { parts, .. } if parts == &["SOLID-1"]
+            MeshSetupKind::MeshingParameters { parts, .. }
+                if parts == &[geometry.part_id("SOLID-1").unwrap()]
         ));
-        assert_eq!(item_highlight(&view, &item.kind).parts.len(), 1);
+        assert_eq!(
+            item_highlight(&view, &item.kind, &geometry.ids).parts.len(),
+            1
+        );
         // Ctrl+click takes it out again, as in every selection.
         editor.click(&view, Some((&hit, 0.5)), Operation::Subtract);
         assert!(editor.finish().is_err());

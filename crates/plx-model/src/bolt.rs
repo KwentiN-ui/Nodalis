@@ -19,7 +19,6 @@ pub struct Bolt {
     /// The internal identity other items refer to; the user sees only the name.
     pub id: crate::Id,
     pub name: String,
-    #[serde(default = "crate::active")]
     pub active: bool,
     /// Faces of the bolt that take in its shank: the cylindrical face of the shank, or the
     /// whole bolt with its head. Nodalis finds the shank among them and cuts it.

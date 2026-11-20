@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 pub const EXTENSION: &str = "walls";
 
 /// The first bytes of the file.
-const MAGIC: &[u8; 8] = b"NDLWALL1";
+const MAGIC: &[u8; 8] = b"NDLWALL2";
 
 /// The loads on the walls of a run.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -31,12 +31,28 @@ pub struct WallLoads {
 /// One wall over the frames.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WallSeries {
-    /// The name of the rigid body (or boundary condition) the wall is.
+    /// The id of the rigid body (or boundary condition) the wall is, by which the steps
+    /// taking the loads choose their walls.
+    pub id: plx_model::Id,
+    /// Its name, to show.
     pub name: String,
-    /// The names of the FE parts it is made of.
-    pub parts: Vec<String>,
+    /// The FE parts it is made of, by id and with their names: an analysis meshing the
+    /// parts itself finds them by name.
+    pub parts: Vec<(plx_model::Id, String)>,
     /// One per time of [`WallLoads::times`].
     pub frames: Vec<WallFrame>,
+}
+
+impl WallSeries {
+    /// The wall `id` named `name` of the parts `parts`, without frames yet.
+    pub fn new(id: plx_model::Id, name: &str, parts: Vec<(plx_model::Id, String)>) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            parts,
+            frames: Vec::new(),
+        }
+    }
 }
 
 /// Which time of the run the loads are taken at.
@@ -52,18 +68,13 @@ pub enum Pick {
 pub type PointLoads = Vec<([f64; 3], [f64; 3], [f64; 3])>;
 
 impl WallLoads {
-    pub fn new(cell: f64, space: Space, walls: Vec<(String, Vec<String>)>) -> Self {
+    /// The loads of the walls `walls`, without frames yet.
+    pub fn new(cell: f64, space: Space, walls: Vec<WallSeries>) -> Self {
         Self {
             cell,
             space,
             times: Vec::new(),
-            walls: (walls.into_iter())
-                .map(|(name, parts)| WallSeries {
-                    name,
-                    parts,
-                    frames: Vec::new(),
-                })
-                .collect(),
+            walls,
         }
     }
 
@@ -177,7 +188,11 @@ mod tests {
     use super::*;
 
     fn loads() -> WallLoads {
-        let mut loads = WallLoads::new(0.01, Space::Solid, vec![("Screw".into(), vec![])]);
+        let mut loads = WallLoads::new(
+            0.01,
+            Space::Solid,
+            vec![WallSeries::new(plx_model::Id::new(), "Screw", vec![])],
+        );
         for (t, f) in [(0.1, 1.0f32), (0.2, 3.0), (0.4, 5.0)] {
             loads.push(
                 t,

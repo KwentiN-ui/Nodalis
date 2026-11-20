@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HotSpot {
+    /// The internal identity history outputs refer to; the user sees only the name.
+    pub id: plx_model::Id,
     pub name: String,
     /// Nodes on the weld toe or at the notch; a path starts at each of them.
     pub toe: Region,
@@ -27,6 +29,7 @@ pub struct HotSpot {
 impl HotSpot {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: plx_model::Id::new(),
             name: name.into(),
             toe: Region::Nodes(Vec::new()),
             direction: [1.0, 0.0, 0.0],

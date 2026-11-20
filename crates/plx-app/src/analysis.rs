@@ -324,7 +324,7 @@ pub fn step_records(
                 // Hyperelastic materials switch NLGEOM on.
                 record.nlgeom |= lowered.analysis.steps[index].nlgeom;
                 record.inherited_from = (inherited.iter())
-                    .find(|(name, _)| *name == step.name)
+                    .find(|(key, _)| *key == crate::links::key(step.id))
                     .map(|(_, source)| source.clone());
                 // A probing step names the state it was computed about.
                 record.base = fe.step_handover(model).base_state();
@@ -574,7 +574,7 @@ impl Analysis {
             warnings: lowered.warnings,
             steps: vec![record],
             history: lowered.history,
-            wall_parts: lowered.wall_parts,
+            walls: lowered.walls,
         };
         let job = if check_model {
             output.push(format!(
@@ -947,6 +947,7 @@ mod tests {
                 ..Default::default()
             }],
             sections: vec![Section {
+                id: plx_model::Id::new(),
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("S235")),
@@ -1145,7 +1146,7 @@ mod tests {
         model.fe.steps[1].active = false;
         model.fe.steps[2].name = "Pull".into();
         let continuation = crate::links::Continuation {
-            inherited_steps: vec![("Preload".into(), "Assembly".into())],
+            inherited_steps: vec![(crate::links::key(model.fe.steps[0].id), "Assembly".into())],
             ..Default::default()
         };
         solve_as(&model, &dir.join("Steps"), "Steps", &continuation);

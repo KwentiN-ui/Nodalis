@@ -52,6 +52,30 @@ impl LimitBasis {
     }
 }
 
+/// What a limit value of a [`FieldOutputKind::Limit`] applies to.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum LimitItem {
+    /// A part of the mesh, by id.
+    Part(plx_model::Id),
+    /// An element set of the mesh an input file defines, by its name there.
+    ElementSet(String),
+    /// All elements.
+    All,
+}
+
+impl LimitItem {
+    /// The name of the item in `mesh`, for messages.
+    pub fn label(&self, mesh: &FeMesh) -> String {
+        match self {
+            LimitItem::Part(id) => (mesh.parts.iter())
+                .find(|p| p.id == *id)
+                .map_or_else(|| "a deleted part".into(), |p| p.name.clone()),
+            LimitItem::ElementSet(name) => name.clone(),
+            LimitItem::All => LimitBasis::AllElements.name().into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum FieldOutputKind {
     /// RATIO = value / limit and SAFETY_FACTOR = limit / value; a node in several items takes
@@ -60,8 +84,8 @@ pub enum FieldOutputKind {
         field: String,
         component: String,
         basis: LimitBasis,
-        /// Limit per part or element set name; for all elements one entry.
-        limits: Vec<(String, f64)>,
+        /// Limit per part or element set; for all elements one entry.
+        limits: Vec<(LimitItem, f64)>,
     },
     /// MAX, MIN and AVERAGE of a component over all increments, the same in every increment.
     Envelope { field: String, component: String },
@@ -70,7 +94,8 @@ pub enum FieldOutputKind {
     /// The field's components in a user coordinate system.
     CoordinateSystemTransform {
         field: String,
-        coordinate_system: String,
+        /// The system, by id.
+        coordinate_system: plx_model::Id,
     },
     /// The principal direction of a tensor field as a vector field: X, Y and Z of the unit
     /// vector, VALUE the principal value with its sign and ALL its magnitude.
@@ -133,26 +158,22 @@ fn element_nodes<'a>(
 }
 
 /// Limit of every node, NaN where none is given.
-fn node_limits(
-    mesh: &FeMesh,
-    basis: LimitBasis,
-    limits: &[(String, f64)],
-) -> Result<Vec<f64>, String> {
+fn node_limits(mesh: &FeMesh, limits: &[(LimitItem, f64)]) -> Result<Vec<f64>, String> {
     let mut node_limit = vec![f64::NAN; mesh.node_count()];
     for (item, limit) in limits {
         if *limit == 0.0 || !limit.is_finite() {
-            return Err(format!("The limit for {item} must not be 0."));
+            return Err(format!("The limit for {} must not be 0.", item.label(mesh)));
         }
-        let nodes = match basis {
-            LimitBasis::Parts => match mesh.parts.iter().find(|p| p.name == *item) {
+        let nodes = match item {
+            LimitItem::Part(id) => match mesh.parts.iter().find(|p| p.id == *id) {
                 Some(part) => element_nodes(mesh, &part.elements),
                 None => continue,
             },
-            LimitBasis::ElementSets => match mesh.element_sets.get(item) {
+            LimitItem::ElementSet(name) => match mesh.element_sets.get(name) {
                 Some(set) => element_nodes(mesh, set),
                 None => continue,
             },
-            LimitBasis::AllElements => (0..mesh.node_count()).collect(),
+            LimitItem::All => (0..mesh.node_count()).collect(),
         };
         for node in nodes {
             let slot = &mut node_limit[node];
@@ -386,10 +407,10 @@ pub fn compute(
         FieldOutputKind::Limit {
             field,
             component: name,
-            basis,
             limits,
+            ..
         } => {
-            let node_limit = node_limits(mesh, *basis, limits)?;
+            let node_limit = node_limits(mesh, limits)?;
             increments
                 .iter()
                 .map(|inc| {
@@ -498,10 +519,8 @@ pub fn compute(
             coordinate_system,
         } => {
             let system = (systems.iter())
-                .find(|s| s.name == *coordinate_system)
-                .ok_or_else(|| {
-                    format!("The coordinate system {coordinate_system} does not exist.")
-                })?;
+                .find(|s| s.id == *coordinate_system)
+                .ok_or_else(|| "The coordinate system no longer exists.".to_string())?;
             let rotations = system_rotations(system, systems, mesh)?;
             let attachment = system.attachment(systems);
             (increments.iter())
@@ -663,22 +682,26 @@ mod tests {
     #[test]
     fn limit_per_part_takes_the_smaller_limit_on_shared_nodes() {
         let mut incs = vec![increment(1, [100.0, 200.0, 0.0])];
+        let mesh = mesh();
         let output = FieldOutput {
             name: "Limit-1".into(),
             kind: FieldOutputKind::Limit {
                 field: "STRESS".into(),
                 component: "MISES".into(),
                 basis: LimitBasis::Parts,
-                limits: vec![("A".into(), 200.0), ("B".into(), 400.0)],
+                limits: vec![
+                    (LimitItem::Part(mesh.parts[0].id), 200.0),
+                    (LimitItem::Part(mesh.parts[1].id), 400.0),
+                ],
             },
         };
-        compute(&output, &mut incs, &mesh(), &[]).unwrap();
+        compute(&output, &mut incs, &mesh, &[]).unwrap();
         assert_eq!(values(&incs[0], "Limit-1", RATIO), [0.5, 1.0, 0.0]);
         let safety = values(&incs[0], "Limit-1", SAFETY_FACTOR);
         assert_eq!(&safety[..2], [2.0, 1.0]);
         assert!(safety[2].is_nan(), "no safety factor without stress");
         // Computing again replaces the field.
-        compute(&output, &mut incs, &mesh(), &[]).unwrap();
+        compute(&output, &mut incs, &mesh, &[]).unwrap();
         assert_eq!(incs[0].fields.len(), 2);
     }
 
@@ -691,7 +714,7 @@ mod tests {
                 field: "STRESS".into(),
                 component: "MISES".into(),
                 basis: LimitBasis::AllElements,
-                limits: vec![(LimitBasis::AllElements.name().into(), 0.0)],
+                limits: vec![(LimitItem::All, 0.0)],
             },
         };
         assert!(compute(&output, &mut incs, &mesh(), &[]).is_err());
@@ -794,11 +817,12 @@ mod tests {
         // x along global y, y along global -x.
         let mut system = CoordinateSystem::new("CS-1");
         system.set_points([0.0; 3], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]);
+        let id = system.id;
         let output = |field: &str, name: &str| FieldOutput {
             name: name.into(),
             kind: FieldOutputKind::CoordinateSystemTransform {
                 field: field.into(),
-                coordinate_system: "CS-1".into(),
+                coordinate_system: id,
             },
         };
         let systems = [system];
@@ -843,11 +867,12 @@ mod tests {
         }];
         let mut system = CoordinateSystem::new("CS-1");
         system.attached = Some(plx_model::Region::Nodes(vec![1, 2]));
+        let id = system.id;
         let output = |field: &str, name: &str| FieldOutput {
             name: name.into(),
             kind: FieldOutputKind::CoordinateSystemTransform {
                 field: field.into(),
-                coordinate_system: "CS-1".into(),
+                coordinate_system: id,
             },
         };
         let systems = [system];

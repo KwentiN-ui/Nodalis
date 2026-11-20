@@ -32,6 +32,22 @@ pub struct DatImport {
 /// Name of the set of values the solver prints for all contact elements.
 pub const ALL_CONTACT_ELEMENTS: &str = "ALL_CONTACT_ELEMENTS";
 
+/// The name of the history set the history output `output` of `model` is read as: that
+/// of the output, or for contact statistics that of its contact pair. This is where a
+/// reference to a history output by id meets the names of the printed history.
+pub fn history_set_name(model: &plx_model::FeModel, output: &plx_model::HistoryOutput) -> String {
+    let name = match &output.kind {
+        plx_model::HistoryKind::Contact { pair } => {
+            match pair.and_then(|p| model.contact_name(p)) {
+                Some(pair) => pair,
+                None => return ALL_CONTACT_ELEMENTS.to_owned(),
+            }
+        }
+        _ => &output.name,
+    };
+    crate::inp::solver_name(name)
+}
+
 pub fn read_dat(path: &Path) -> std::io::Result<DatImport> {
     let bytes = std::fs::read(path)?;
     Ok(parse_dat(&String::from_utf8_lossy(&bytes)))

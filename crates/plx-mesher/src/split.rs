@@ -71,9 +71,7 @@ pub(crate) fn split_by_plane(
     let (point, normal) = cut_plane(gmsh, operation, entities)?;
     let parts = parts(gmsh, input)?;
     // Only the chosen parts are cut, or all; never the suppressed ones.
-    let named = |name: &str| {
-        operation.parts.is_empty() || (operation.parts.iter()).any(|p| p.eq_ignore_ascii_case(name))
-    };
+    let named = |name: &str| operation.parts.is_empty() || input.holds(&operation.parts, name);
     let chosen = |name: &str| named(name) && !input.is_suppressed(name);
     if !parts.iter().any(|(_, name)| chosen(name)) {
         return Err(fail(if parts.iter().any(|(_, name)| named(name)) {

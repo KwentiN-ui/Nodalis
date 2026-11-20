@@ -29,7 +29,7 @@ struct Meshing {
     parameters: MeshingParameters,
     items: Vec<MeshSetupItem>,
     compounds: Vec<plx_model::CompoundPart>,
-    suppressed: Vec<String>,
+    suppressed: Vec<plx_model::Id>,
 }
 
 impl Meshing {
@@ -417,7 +417,12 @@ mod tests {
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
+            ids: (parts.iter())
+                .map(|&name| plx_model::PartId {
+                    name: name.into(),
+                    id: plx_model::Id::new(),
+                })
+                .collect(),
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -427,12 +432,14 @@ mod tests {
     /// The model with PART-1 meshed from a part of its geometry.
     fn meshed_model() -> Model {
         let mut model = model();
-        let geometry = geometry(&["PART-1"]);
+        let mut geometry = geometry(&["PART-1"]);
+        let part = model.object_id("PART-1").unwrap();
+        geometry.ids[0].id = part;
         let space = model.fe.properties.space;
         let input = plx_model::fingerprint::mesh_input(&geometry, &[], space, "PART-1");
         model.geometry = Some(geometry);
         let mut origins = PartOrigins::default();
-        origins.set_meshed("PART-1", input);
+        origins.set_meshed(part, input);
         model.set_origins(origins);
         record(&mut model);
         model
@@ -441,21 +448,22 @@ mod tests {
     #[test]
     fn a_mesh_read_without_geometry_is_an_imported_mesh() {
         let model = model();
-        assert!(model.origins().is_imported("PART-1"));
+        assert!(model.is_imported("PART-1"));
         assert!(model.origins().complete_for(model.mesh()));
     }
 
     #[test]
     fn a_deleted_mesh_comes_back_with_its_origin() {
         let mut model = meshed_model();
-        let made_from = model.origins().made_from("PART-1");
+        let id = model.object_id("PART-1").unwrap();
+        let made_from = model.origins().made_from(id);
         assert!(made_from.is_some());
         let part = model.mesh().part_id("PART-1").unwrap();
         model.edit_mesh(|mesh, _| mesh.remove_bodies(&[part]));
         record(&mut model);
-        assert_eq!(model.origins().get("PART-1"), None);
+        assert_eq!(model.origins().get(id), None);
         assert!(undo(&mut model));
-        assert_eq!(model.origins().made_from("PART-1"), made_from);
+        assert_eq!(model.origins().made_from(id), made_from);
         assert!(redo(&mut model));
         assert!(model.origins().is_empty());
     }
@@ -477,14 +485,15 @@ mod tests {
     #[test]
     fn a_renamed_part_of_the_geometry_is_renamed_with_its_mesh() {
         let mut model = meshed_model();
+        let id = model.object_id("PART-1").unwrap();
         model.rename_part(0, "BRACKET").unwrap();
         let geometry = model.geometry.as_ref().unwrap();
         assert_eq!(geometry.part_names, ["BRACKET"]);
         let space = model.fe.properties.space;
         let now = plx_model::fingerprint::mesh_input(geometry, &[], space, "BRACKET");
         // Still up to date: the part is not meshed again for its name.
-        assert_eq!(model.origins().made_from("BRACKET"), Some(now));
-        assert_eq!(model.origins().get("PART-1"), None);
+        assert_eq!(model.origins().made_from(id), Some(now));
+        assert_eq!(model.object_id("BRACKET"), Some(id));
     }
 
     #[test]

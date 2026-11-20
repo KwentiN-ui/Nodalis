@@ -25,12 +25,10 @@ pub struct ContactRegion {
     /// The internal identity other items refer to; the user sees only the name.
     pub id: crate::Id,
     pub name: String,
-    #[serde(default = "crate::active")]
     pub active: bool,
     pub side_a: Region,
     pub side_b: Region,
     pub behavior: ContactBehavior,
-    #[serde(default)]
     pub settings: ContactSettings,
     /// The contact detection that found the region; `None` for a region made by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]

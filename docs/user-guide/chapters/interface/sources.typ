@@ -874,8 +874,8 @@ A double-click on the block opens its editor:
     every new mesh of a parameter study.],
   [Node], [For a value at a node: its number.],
   [X, Y, Z], [For a value at a point: rows of the block itself, see below.],
-  [Set], [For a history output: the set of the history output, as written to the `.dat` file;
-    a list of the sets of the linked results.],
+  [History output], [For a history output: one of the history outputs of the analysis whose
+    results are linked, by its name in the tree. The block keeps it when it is renamed.],
   [Mode], [For an eigenfrequency: the mode, counted from 1, of a frequency step.],
 )
 

@@ -11,7 +11,7 @@ use plx_model::{Geometry, GeometryOperation};
 pub fn run(
     input: Geometry,
     mut operations: Vec<GeometryOperation>,
-    suppressed: &[String],
+    suppressed: &[plx_model::Id],
 ) -> (Geometry, Vec<String>) {
     let input = input.without_operations();
     if operations.is_empty() {
@@ -151,13 +151,14 @@ mod tests {
         (second.name.clone(), 0.5 * (min.x + max.x))
     }
 
-    fn split(name: &str, part: &str, x: f64) -> GeometryOperation {
+    fn split(name: &str, geometry: &Geometry, part: &str, x: f64) -> GeometryOperation {
         GeometryOperation {
             name: name.into(),
             operation: CadOperation {
                 kind: CadOperationKind::SplitPlane,
                 value: x,
-                parts: vec![part.into()],
+                // A part the geometry does not have is one that went.
+                parts: vec![geometry.part_id(part).unwrap_or_default()],
                 ..CadOperation::default()
             },
         }
@@ -174,7 +175,11 @@ mod tests {
         }
         let (input, first, x) = blocks();
         assert_eq!(part_count(&input), 2);
-        let (made, notes) = run(input.clone(), vec![split("Split-1", &first, x)], &[]);
+        let (made, notes) = run(
+            input.clone(),
+            vec![split("Split-1", &input, &first, x)],
+            &[],
+        );
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(part_count(&made), 3);
         assert_eq!(made.operations.len(), 1);
@@ -201,7 +206,7 @@ mod tests {
         let (input, _, x) = blocks();
         let (made, notes) = run(
             input.clone(),
-            vec![split("Split-1", "NO SUCH PART", x)],
+            vec![split("Split-1", &input, "NO SUCH PART", x)],
             &[],
         );
         assert_eq!(notes.len(), 1);
@@ -216,7 +221,11 @@ mod tests {
             return;
         }
         let (input, first, x) = blocks();
-        let (made, _) = run(input.clone(), vec![split("Split-1", &first, x)], &[]);
+        let (made, _) = run(
+            input.clone(),
+            vec![split("Split-1", &input, &first, x)],
+            &[],
+        );
         let mut own = Some(made.clone());
         let mut fe = plx_model::FeModel::default();
         // New shapes: the same blocks under another source name.
@@ -239,7 +248,11 @@ mod tests {
         // A new version of the shapes, the second block cut in the CAD program: the
         // operation cuts the first block of it again.
         let (second, middle) = second_block();
-        let (version, _) = run(input_of(&own, 0), vec![split("CAD", &second, middle)], &[]);
+        let (version, _) = run(
+            input_of(&own, 0),
+            vec![split("CAD", &input_of(&own, 0), &second, middle)],
+            &[],
+        );
         let mut own = Some(own);
         let copy = crate::links::MeshCopy::shapes(version.clone().without_operations());
         crate::links::take_objects(

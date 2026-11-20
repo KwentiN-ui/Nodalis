@@ -16,7 +16,8 @@ use plx_model::particle_flow::{
     BoxSide, Flow, FlowBoundary, FlowKind, FlowProperty, ParticleFlowStep,
 };
 use plx_model::{
-    Constraint, ContactBehavior, FeModel, HistoryKind, Material, ModelItem, ModelSpace, StepKind,
+    Constraint, ContactBehavior, FeModel, HistoryKind, HistoryVariable, Material, ModelItem,
+    ModelSpace, StepKind,
 };
 use plx_results::particles::{HistoryRequest, TemperatureRequest, WallRequest, set_name};
 use plxs_core::particles::{
@@ -55,8 +56,9 @@ pub struct LoweredParticles {
     /// The name of the FE part each body is filled from, in the order of
     /// [`ParticleModel::bodies`].
     pub bodies: Vec<String>,
-    /// The names of the FE parts of each wall, in the order of [`ParticleModel::walls`].
-    pub wall_parts: Vec<Vec<String>>,
+    /// The walls with their FE parts, in the order of [`ParticleModel::walls`], without
+    /// frames: the loads on them are written per wall.
+    pub walls: Vec<plx_results::wall_loads::WallSeries>,
     /// The rigid bodies of the model that are walls, by index of the constraints.
     pub rigid_walls: Vec<usize>,
     /// What the history outputs of the step ask for.
@@ -154,6 +156,7 @@ fn lower_whole(
             ));
         }
         walls.push(WallSource {
+            id: body.id,
             name: body.name.clone(),
             parts,
             constraint: Some(c),
@@ -173,6 +176,7 @@ fn lower_whole(
             continue;
         }
         walls.push(WallSource {
+            id: bc.id,
             name: bc.name.clone(),
             parts,
             constraint: None,
@@ -330,7 +334,14 @@ fn lower_whole(
                  temperature."
             ));
         }
-        wall_parts.push(parts.iter().map(|&p| mesh.parts[p].name.clone()).collect());
+        wall_parts.push(plx_results::wall_loads::WallSeries {
+            id: wall.id,
+            name: name.clone(),
+            parts: (parts.iter())
+                .map(|&p| (mesh.parts[p].id, mesh.parts[p].name.clone()))
+                .collect(),
+            frames: Vec::new(),
+        });
         model.walls.push(RigidWall {
             name: name.clone(),
             shape: shapes.surface(mesh, &parts),
@@ -472,13 +483,17 @@ fn lower_whole(
         for (shape, part) in shapes_of {
             // The material fed: the part named, the part of the faces, or at a side of the
             // box the filled part nearest to it.
-            let body = match (&flow.like, part) {
-                (Some(name), _) => bodies.iter().position(|n| n == name).ok_or_else(|| {
-                    error(
-                        format!("{}: part {name} is not filled with material.", bc.name),
-                        item,
-                    )
-                })?,
+            let body = match (flow.like, part) {
+                (Some(like), _) => (mesh.parts.iter().position(|p| p.id == like))
+                    .and_then(|index| body_part.iter().position(|&p| p == index))
+                    .ok_or_else(|| {
+                        let part = (mesh.parts.iter().find(|p| p.id == like))
+                            .map_or("it names", |p| p.name.as_str());
+                        error(
+                            format!("{}: the part {part} is not filled with material.", bc.name),
+                            item,
+                        )
+                    })?,
                 (None, Some(part)) => body_part.iter().position(|&p| p == part).unwrap_or(0),
                 (None, None) => nearest_body(&model, &shape),
             };
@@ -506,7 +521,7 @@ fn lower_whole(
         model,
         step: index,
         bodies,
-        wall_parts,
+        walls: wall_parts,
         rigid_walls: walls.iter().filter_map(|w| w.constraint).collect(),
         history,
         warnings,
@@ -613,8 +628,9 @@ fn history_request(
         let region = match &output.kind {
             HistoryKind::Energies => {
                 for variable in &output.variables {
-                    if !request.energies.contains(variable) {
-                        request.energies.push(variable.clone());
+                    let name = variable.code().to_owned();
+                    if !request.energies.contains(&name) {
+                        request.energies.push(name);
                     }
                 }
                 continue;
@@ -646,8 +662,11 @@ fn history_request(
             .filter(|(_, p)| parts.contains(p))
             .map(|(b, _)| b)
             .collect();
-        let asks = |v: &str| output.variables.iter().any(|x| x == v);
-        let (force, heat) = (asks("RF"), asks("RFL"));
+        let asks = |v: HistoryVariable| output.variables.contains(&v);
+        let (force, heat) = (
+            asks(HistoryVariable::ReactionForces),
+            asks(HistoryVariable::ReactionHeatFlows),
+        );
         if (force || heat) && hit.is_empty() {
             warnings.push(format!(
                 "{name}: RF and RFL are written for rigid bodies, by their reference point or \
@@ -668,7 +687,7 @@ fn history_request(
                 None => request.walls.push(WallRequest { wall, force, heat }),
             }
         }
-        if asks("NT") {
+        if asks(HistoryVariable::Temperatures) {
             if model.heat.is_none() {
                 warnings.push(format!(
                     "{name}: NT needs the heat of the step; it is left out."
@@ -685,9 +704,14 @@ fn history_request(
                 });
             }
         }
+        let written = [
+            HistoryVariable::ReactionForces,
+            HistoryVariable::ReactionHeatFlows,
+            HistoryVariable::Temperatures,
+        ];
         let other: Vec<&str> = (output.variables.iter())
-            .map(String::as_str)
-            .filter(|v| !["RF", "RFL", "NT"].contains(v))
+            .filter(|v| !written.contains(v))
+            .map(|v| v.code())
             .collect();
         if !other.is_empty() {
             warnings.push(format!(
@@ -703,6 +727,8 @@ fn history_request(
 /// What makes parts a wall: a rigid body (`constraint`), or a displacement boundary
 /// condition of the step that keeps their shape (`held`, its index).
 struct WallSource {
+    /// The id of the rigid body or boundary condition.
+    id: plx_model::Id,
     name: String,
     parts: BTreeSet<usize>,
     constraint: Option<usize>,
@@ -1613,6 +1639,7 @@ mod tests {
         }
         FeModel {
             sections: vec![Section {
+                id: plx_model::Id::new(),
                 orientation: None,
                 name: "Paste".into(),
                 material: Some(material.id),
@@ -1869,10 +1896,10 @@ mod tests {
         let mut fe = model(Some(6.0));
         let point = fe.reference_points[0].id;
         let mut torque = plx_model::HistoryOutput::node("Torque", Region::ReferencePoint(point));
-        torque.variables = vec!["RF".into(), "U".into()];
+        torque.variables = plx_model::history_variables(&["RF", "U"]);
         fe.put_history_output(0, torque);
         let mut energies = plx_model::HistoryOutput::energies("Energies");
-        energies.variables = vec!["ALLKE".into()];
+        energies.variables = plx_model::history_variables(&["ALLKE"]);
         fe.put_history_output(0, energies);
         fe.steps[0].loads.push(plx_model::Load::new(
             "Gravity",
@@ -2013,6 +2040,7 @@ mod tests {
             missing.message
         );
         fe.initial_conditions.push(plx_model::InitialCondition {
+            id: plx_model::Id::new(),
             name: "Cold".into(),
             active: true,
             region: Region::Parts(vec![id("Paste")]),

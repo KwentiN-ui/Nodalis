@@ -961,6 +961,7 @@ fn fill_rows(view: &StudyView, rules: &[FillRule], mode: FillMode) -> Vec<Vec<f6
     let mut table = plx_model::StudyTable::default();
     for (name, kind) in &view.inputs {
         table.inputs.push(plx_model::StudyColumn {
+            id: plx_model::Id::new(),
             name: name.clone(),
             kind: *kind,
         });

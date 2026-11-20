@@ -19,15 +19,12 @@ pub struct Distribution {
     /// The coordinate system the equation takes its coordinates in and the points are given
     /// in; `None` for the global one. A moving system counts where it is in the undeformed
     /// model.
-    #[serde(default)]
     pub system: Option<crate::Id>,
     /// Named numbers the equation can use, each of which can be exposed as a parameter.
-    #[serde(default)]
     pub variables: Vec<DistributionVariable>,
     /// The unit the equation takes its coordinates in and the points file gives them in. It
     /// belongs to the distribution, so that changing the project's units does not change the
     /// factors.
-    #[serde(default)]
     pub length: LengthUnit,
 }
 
@@ -590,22 +587,21 @@ mod tests {
         let key = distribution.add_variable().key;
         distribution.variables[1].name = "h".into();
         fe.distributions.push(distribution);
-        let item = ItemRef::Distribution("Wedge".into());
+        let item = ItemRef::Distribution(fe.distributions[0].id);
         assert_eq!(
             fe.exposable(&item),
             [Field::Variable(1), Field::Variable(key)]
         );
-        let path = ValuePath::new(item.clone(), Field::Variable(key));
+        let path = ValuePath::new(item, Field::Variable(key));
         let exposed = fe.expose(path.clone());
         assert_eq!(fe.exposed(exposed).unwrap().name, "Wedge h");
         assert!(fe.set_value(&path, 250.0));
         assert_eq!(fe.distributions[0].variables[1].value, 250.0);
         assert_eq!(fe.value_at(&path), Some(250.0));
-        // Renaming the variable keeps the parameter; renaming the distribution moves it.
+        // Renaming the variable or the distribution keeps the parameter.
         fe.distributions[0].variables[1].name = "height".into();
         assert_eq!(fe.value_at(&path), Some(250.0));
         fe.distributions[0].name = "Ramp".into();
-        fe.rename_exposed(&item, "Ramp");
         assert_eq!(fe.value_at(&fe.exposed(exposed).unwrap().path), Some(250.0));
     }
 

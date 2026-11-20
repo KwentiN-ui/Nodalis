@@ -596,7 +596,13 @@ impl AnalysisWindow {
     }
 
     /// Takes over the mesh a state link brings with the geometry it was meshed from.
-    pub fn apply_mesh(&mut self, mesh: crate::links::MeshCopy) {
+    pub fn apply_mesh(&mut self, mut mesh: crate::links::MeshCopy) {
+        let own = self
+            .workbench
+            .model
+            .as_ref()
+            .and_then(|m| m.geometry.as_ref());
+        mesh.adopt_ids(own);
         let crate::links::MeshCopy {
             geometry,
             mesh,
@@ -625,14 +631,8 @@ impl AnalysisWindow {
         let origins = origins.linked(model.origins());
         let mut own = model.geometry.take();
         // The FE model follows parts the source renamed; the mesh is the source's anyway.
-        let (mut scratch, mut scratch_origins) = (plx_mesh::FeMesh::default(), Default::default());
-        crate::links::follow_renames(
-            &mut own,
-            geometry.as_ref(),
-            &mut scratch,
-            &mut scratch_origins,
-            &mut model.fe,
-        );
+        let mut scratch = plx_mesh::FeMesh::default();
+        crate::links::follow_renames(&mut own, geometry.as_ref(), &mut scratch, &mut model.fe);
         // The mesh is the source's: of its shapes as they are, without operations here.
         let geometry = geometry.map(plx_model::Geometry::without_operations);
         crate::links::take_geometry(&mut own, geometry, false);
@@ -2058,7 +2058,7 @@ impl AnalysisWindow {
 
 /// What a worker restoring bound results sends back: the analysis, the directory and the
 /// results file written there.
-struct BoundWork(String, PathBuf, Result<PathBuf, String>);
+struct BoundWork(PathBuf, Result<PathBuf, String>);
 
 /// The global results of a submodel, read on a worker thread.
 type GlobalWork = Result<Box<model::GlobalModel>, String>;
@@ -2702,7 +2702,7 @@ impl Workbench {
                     let parts = self.geometry.as_ref().map(|g| g.parts.as_slice());
                     items.extend(
                         (parts.unwrap_or(&[]).iter().enumerate())
-                            .filter(|(_, p)| !p.imported || model.origins().is_linked(&p.name))
+                            .filter(|(_, p)| !p.imported || model.is_linked(&p.name))
                             .map(|(i, _)| TreeItem::Part(i)),
                     );
                     items
@@ -2710,7 +2710,7 @@ impl Workbench {
                 TreeView::Geometry => Vec::new(),
                 TreeView::FeModel if path[0] == crate::links::GEOMETRY => (model.parts.iter())
                     .enumerate()
-                    .filter(|(_, p)| model.origins().is_linked(&p.name))
+                    .filter(|(_, p)| model.is_linked(&p.name))
                     .map(|(i, _)| TreeItem::Part(i))
                     .collect(),
                 TreeView::FeModel => crate::links::tree_items(&model.fe, path),
@@ -2754,7 +2754,7 @@ impl Workbench {
             if let Some((path, source)) = linked {
                 refused = Some(format!(
                     "{} comes from {source}: change it there, or unlink it first.",
-                    crate::links::label(&path)
+                    crate::links::label(this.model.as_ref().map(|m| &m.fe), &path)
                 ));
                 true
             } else {
@@ -2786,14 +2786,10 @@ impl Workbench {
         let linked_mesh = |index: usize| {
             model
                 .and_then(|m| Some((m, m.mesh().parts.get(index)?)))
-                .is_some_and(|(m, p)| {
-                    plx_model::part_bodies(p)
-                        .iter()
-                        .any(|b| m.origins().is_linked(b))
-                })
+                .is_some_and(|(m, p)| plx_model::part_bodies(p).iter().any(|b| m.is_linked(b)))
         };
         let any_linked =
-            model.is_some_and(|m| m.origins().iter().any(|(n, _)| m.origins().is_linked(n)));
+            model.is_some_and(|m| m.origins().iter().any(|(id, _)| m.origins().is_linked(id)));
         let transform_linked = response.transform_part.is_some_and(linked_mesh);
         if transform_linked || (response.merge_parts && any_linked) {
             if refused.is_none() {
@@ -2836,7 +2832,7 @@ impl Workbench {
                 ui.label(format!(
                     "{} comes from the analysis {source}. Change it there, or unlink it: this \
                      analysis then keeps its own copy.",
-                    crate::links::label(path)
+                    crate::links::label(self.model.as_ref().map(|m| &m.fe), path)
                 ));
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
@@ -3965,10 +3961,10 @@ impl Workbench {
                 if remeshes {
                     remesh = Some(match &affected {
                         Some(parts) if !parts.is_empty() => Some(parts.clone()),
-                        _ => item.kind.parts().map(<[String]>::to_vec),
+                        _ => item.kind.parts().map(|ids| geometry.part_names_of(ids)),
                     });
                 }
-                let exposed = (editor.take_expose()).map(|s| (s, item.name.clone()));
+                let exposed = (editor.take_expose()).map(|s| (s, item.id));
                 let index = match index.filter(|&i| i < geometry.mesh_items.len()) {
                     Some(index) => {
                         geometry.mesh_items[index] = item;
@@ -3979,10 +3975,9 @@ impl Workbench {
                         geometry.mesh_items.len() - 1
                     }
                 };
-                // The numbers clicked to be exposed become parameters of the analysis, and
-                // those exposed follow the item under its new name.
-                if let Some((scope, name)) = exposed {
-                    scope.apply(fe, Some(geometry), &plx_model::ItemRef::MeshSetup(name));
+                // The numbers clicked to be exposed become parameters of the analysis.
+                if let Some((scope, id)) = exposed {
+                    scope.apply(fe, Some(geometry), &plx_model::ItemRef::MeshSetup(id));
                 }
                 self.tree.selected = Some((TreeView::Geometry, TreeItem::MeshItem(index)));
                 // The parts a local mesh size does not touch stay up to date.
@@ -4016,8 +4011,8 @@ impl Workbench {
         // Parts whose mesh a link brings: Mesh All leaves them as they come, a part meshed
         // on its own is meshed here from now on.
         let linked: Vec<String> = (model.origins().iter())
-            .filter(|(name, origin)| *origin == plx_model::PartOrigin::Linked && !name.is_empty())
-            .map(|(name, _)| name.to_owned())
+            .filter(|(_, origin)| *origin == plx_model::PartOrigin::Linked)
+            .filter_map(|(id, _)| model.geometry.as_ref()?.part_name(id).map(str::to_owned))
             .collect();
         if !linked.is_empty() {
             match &parts {
@@ -4442,7 +4437,7 @@ impl Workbench {
         std::thread::spawn(move || {
             let restored =
                 plx_io::project::restore_results(&bound, &dir).map_err(|e| e.to_string());
-            let _ = sender.send(BoundWork(bound.analysis, dir, restored));
+            let _ = sender.send(BoundWork(dir, restored));
         });
         self.bound_work = Some((model.path.clone(), receiver));
     }
@@ -4468,17 +4463,15 @@ impl Workbench {
         self.bound_work = None;
         let carried = self.carry_to_restored.take();
         match (work, model) {
-            (BoundWork(analysis, dir, Ok(file)), Some(model)) => {
-                self.output.push(format!(
-                    "Results of {analysis} restored to {}",
-                    dir.display()
-                ));
+            (BoundWork(dir, Ok(file)), Some(model)) => {
+                self.output
+                    .push(format!("Results restored to {}", dir.display()));
                 model.bound_results_file = Some(file.clone());
                 // New results of a solve take over what was defined on those before.
                 self.carried_settings = carried.map(|settings| (file.clone(), settings));
                 self.open_results = Some(file);
             }
-            (BoundWork(_, _, Err(error)), _) => {
+            (BoundWork(_, Err(error)), _) => {
                 self.output
                     .push(format!("Kept results not restored: {error}"));
             }
@@ -6007,7 +6000,10 @@ impl Workbench {
                     .fe
                     .mesh_sets
                     .retain(|s| s.kind != kind || s.name != name);
-                model.edit_mesh_in_place(|mesh, _| kind.remove(mesh, name));
+                model.edit_mesh_in_place(|mesh, _| {
+                    kind.remove(mesh, name);
+                    (mesh.user_sets).retain(|_, (k, n)| *k != kind || n != name);
+                });
                 self.tree.selected = None;
                 self.editor = None;
                 self.highlighted = None;
@@ -6213,7 +6209,7 @@ impl Workbench {
         }
         let name = names.join(", ");
         let cad: Vec<String> = (names.iter())
-            .filter(|n| !model.origins().is_imported(n))
+            .filter(|n| !model.is_imported(n))
             .cloned()
             .collect();
         // All in one go, so that Gmsh numbers the faces, edges and vertices anew once.
@@ -6308,14 +6304,14 @@ impl Workbench {
         let names: Vec<String> = (indices.iter())
             .filter_map(|&i| view.parts.get(i))
             .map(|p| p.name.clone())
-            .filter(|n| model.origins().is_cad(n))
+            .filter(|n| model.is_cad(n))
             .collect();
         if names.is_empty() {
             return;
         }
         // A part whose mesh a link brings is meshed here from now on.
         let linked: Vec<String> = (names.iter())
-            .filter(|n| model.origins().is_linked(n))
+            .filter(|n| model.is_linked(n))
             .cloned()
             .collect();
         if let Some(geometry) = &mut model.geometry {
@@ -6438,7 +6434,7 @@ impl Workbench {
             return;
         };
         let cad: Vec<String> = (names.iter())
-            .filter(|n| !model.origins().is_imported(n))
+            .filter(|n| !model.is_imported(n))
             .cloned()
             .collect();
         let mut changed = model.set_imported_suppressed(&names, suppressed);
@@ -6586,10 +6582,7 @@ impl Workbench {
             .flat_map(plx_model::part_bodies)
             .map(str::to_owned)
             .collect();
-        let imported = bodies
-            .iter()
-            .filter(|b| model.origins().is_imported(b))
-            .count();
+        let imported = bodies.iter().filter(|b| model.is_imported(b)).count();
         if imported == 0 {
             // Parts of the geometry: a compound part joins them.
             let indices: Vec<usize> = match &self.geometry {
@@ -6791,7 +6784,7 @@ impl Workbench {
             return;
         };
         let wanted: Vec<usize> = (model.mesh().parts.iter().enumerate())
-            .filter(|(_, p)| p.bodies.is_empty() && model.origins().is_imported(&p.name))
+            .filter(|(_, p)| p.bodies.is_empty() && model.is_imported(&p.name))
             .map(|(i, _)| i)
             .collect();
         let names: Vec<String> = (wanted.iter())
@@ -7037,9 +7030,9 @@ impl Workbench {
         let Some(view) = &mut self.geometry else {
             return;
         };
-        let items = (self.model.as_ref())
-            .and_then(|m| m.geometry.as_ref())
-            .map_or(&[][..], |g| g.mesh_items.as_slice());
+        let geometry = self.model.as_ref().and_then(|m| m.geometry.as_ref());
+        let items = geometry.map_or(&[][..], |g| g.mesh_items.as_slice());
+        let ids = geometry.map_or(&[][..], |g| g.ids.as_slice());
         let highlight = match (&self.mesh_item_editor, &self.tree.selected) {
             (Some(editor), _) => editor.highlight(view),
             (None, Some((TreeView::Geometry, TreeItem::Part(_)))) => {
@@ -7051,7 +7044,7 @@ impl Workbench {
             }
             (None, Some((TreeView::Geometry, TreeItem::MeshItem(index)))) => items
                 .get(*index)
-                .map(|item| crate::meshing::item_highlight(view, &item.kind))
+                .map(|item| crate::meshing::item_highlight(view, &item.kind, ids))
                 .unwrap_or_default(),
             // Without a selection, the faces and edges meshing failed on.
             _ => crate::meshing::entities_highlight(view, &self.mesh_failure),
@@ -9073,7 +9066,10 @@ fn keep_up_to_date(
     let affected: std::collections::BTreeSet<String> = (affected.iter())
         .flat_map(|p| now.parts_of_fe_part(p))
         .collect();
-    for (part, input) in inputs.made_from_mut() {
+    for (id, input) in inputs.made_from_mut() {
+        let Some(part) = now.part_name(id) else {
+            continue;
+        };
         if !affected.contains(part)
             && *input == plx_model::fingerprint::mesh_input(before, matching, space, part)
         {
@@ -9195,6 +9191,7 @@ mod tests {
             input: None,
         });
         model.fe.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: None,
@@ -9294,6 +9291,7 @@ mod tests {
             })
             .unwrap();
         let item = plx_model::MeshSetupItem {
+            id: plx_model::Id::new(),
             name: "Local_Mesh_Size-1".into(),
             kind: plx_model::MeshSetupKind::LocalMeshSize {
                 faces: vec![face],
@@ -9308,18 +9306,19 @@ mod tests {
         let mut now = before.clone();
         now.mesh_items.push(item);
         let mut inputs = plx_model::PartOrigins::default();
+        let id = |part: &str| before.part_id(part).unwrap();
         for part in ["SOLID-1", "SOLID-2"] {
             let made = plx_model::fingerprint::mesh_input(&before, &[], space, part);
-            inputs.set_meshed(part, made);
+            inputs.set_meshed(id(part), made);
         }
         keep_up_to_date(space, &[], &before, &now, &affected, &mut inputs);
         let current = |part: &str| plx_model::fingerprint::mesh_input(&now, &[], space, part);
-        assert_eq!(inputs.made_from("SOLID-1"), Some(current("SOLID-1")));
-        assert_ne!(inputs.made_from("SOLID-2"), Some(current("SOLID-2")));
+        assert_eq!(inputs.made_from(id("SOLID-1")), Some(current("SOLID-1")));
+        assert_ne!(inputs.made_from(id("SOLID-2")), Some(current("SOLID-2")));
         // A part that was out of date before stays so.
         let mut inputs = plx_model::PartOrigins::default();
-        inputs.set_meshed("SOLID-1", 7);
+        inputs.set_meshed(id("SOLID-1"), 7);
         keep_up_to_date(space, &[], &before, &now, &affected, &mut inputs);
-        assert_eq!(inputs.made_from("SOLID-1"), Some(7));
+        assert_eq!(inputs.made_from(id("SOLID-1")), Some(7));
     }
 }

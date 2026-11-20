@@ -220,16 +220,24 @@ pub fn mesh_input(
 ) -> u64 {
     let mut hash = Fnv::new();
     hash.add_str(&geometry.brep);
-    hash.add_debug(&geometry.part_names);
+    // The parts by id, in the order they bind to the solids, so that renaming a part
+    // leaves its mesh up to date.
+    let order: Vec<Option<crate::Id>> = (geometry.part_names.iter())
+        .map(|name| geometry.part_id(name))
+        .collect();
+    hash.add_debug(&order);
     hash.add_debug(&space);
-    hash.add_str(part);
+    match geometry.part_id(part) {
+        Some(id) => hash.add_debug(&id),
+        None => hash.add_str(&part.to_ascii_lowercase()),
+    }
     hash.add_debug(&geometry.parameters(part));
     hash.add_debug(&geometry.algorithms(part));
     for item in &geometry.mesh_items {
         // A local mesh size applies to faces and edges of any part.
         let applies = match &item.kind {
             MeshSetupKind::LocalMeshSize { .. } => true,
-            kind => (kind.parts().unwrap_or_default().iter()).any(|p| p.eq_ignore_ascii_case(part)),
+            kind => geometry.holds(kind.parts().unwrap_or_default(), part),
         };
         if applies {
             hash.add_debug(&item.kind);
@@ -239,9 +247,9 @@ pub fn mesh_input(
     // meet: joining a part into a compound, taking it out or changing the compound's
     // members leaves its mesh out of date. Without a compound the input stays what it was.
     if let Some(compound) = geometry.compound_of(part) {
-        let mut members: Vec<String> = (geometry.member_names(compound).iter())
-            .filter(|p| !geometry.is_suppressed(p))
-            .map(|p| p.to_ascii_lowercase())
+        let mut members: Vec<crate::Id> = (geometry.compounds[compound].parts.iter())
+            .filter(|&&p| !geometry.suppressed.contains(&p))
+            .copied()
             .collect();
         members.sort();
         hash.add_str("compound");
@@ -397,7 +405,9 @@ mod tests {
         let mesh = FeMesh::default();
         let mut fe = FeModel::default();
         let mut step = Step::new_static("Step-1");
+        let id = crate::Id::new();
         let field = |file: &str| crate::DefinedField {
+            id,
             distribution: None,
             name: "Temperatures".into(),
             active: true,
@@ -420,15 +430,17 @@ mod tests {
     #[test]
     fn meshing_settings_of_one_part_leave_the_others_up_to_date() {
         let mut geometry = geometry();
+        let ids = geometry.part_ids_of(&["Solid-1".into(), "Solid-2".into()]);
         let space = ModelSpace::default();
         let (a, b) = (
             mesh_input(&geometry, &[], space, "Solid-1"),
             mesh_input(&geometry, &[], space, "Solid-2"),
         );
         geometry.mesh_items.push(MeshSetupItem {
+            id: crate::Id::new(),
             name: "Meshing_Parameters-1".into(),
             kind: MeshSetupKind::MeshingParameters {
-                parts: vec!["Solid-1".into()],
+                parts: vec![ids[0]],
                 parameters: MeshingParameters {
                     max_size: 1.0,
                     ..Default::default()

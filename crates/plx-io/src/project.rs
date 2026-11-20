@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 pub struct Project {
     pub format: u32,
     /// The blocks of the project schematic: analyses and the sources of data they take.
-    #[serde(default)]
     pub nodes: Vec<ProjectNode>,
     /// Data one block takes from another.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -33,7 +32,6 @@ pub struct Project {
     pub compact: Vec<u64>,
     /// The unit system the project shows and takes its values in. Only what is shown changes
     /// with it: every value is stored in SI units ([`plx_model::STORED`]).
-    #[serde(default)]
     pub units: plx_model::UnitSystem,
 }
 
@@ -211,7 +209,6 @@ impl ProjectNode {
 pub struct TransformBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     pub transform: plx_mesh::MeshTransform,
 }
@@ -221,7 +218,6 @@ pub struct TransformBlock {
 pub struct CadOperationBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     pub operation: plx_model::CadOperation,
     /// The geometry as last made, kept so that the project opens and meshes without making
@@ -240,13 +236,11 @@ pub struct CadOperationBlock {
 pub struct MeshBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     /// The model space of the analyses that link it.
     pub space: plx_model::ModelSpace,
     pub primitive: plx_model::MeshPrimitive,
     /// The mesh as last made.
-    #[serde(default)]
     pub mesh: FeMesh,
     /// Fingerprint of the parameters the mesh was made from, see
     /// [`plx_model::MeshPrimitive::fingerprint`]; the mesh is out of date once it differs.
@@ -261,26 +255,15 @@ pub struct MeshBlock {
 pub struct RefineMesh {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default = "one")]
     pub factor: f64,
     /// The mesh as last made from the divisions of a mesh block; the mesh of geometry is
     /// made by the analysis it goes to, and the link brings it again.
-    #[serde(default)]
     pub mesh: FeMesh,
     /// Fingerprint of the divisions and the factor the mesh was made from, see
     /// [`plx_model::MeshPrimitive::fingerprint`]; the mesh is out of date once it differs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated: Option<u64>,
-}
-
-fn one() -> f64 {
-    1.0
-}
-
-fn first() -> u32 {
-    1
 }
 
 /// A block that gives the mesh of the analysis whose step results are linked to it, each
@@ -291,24 +274,19 @@ fn first() -> u32 {
 pub struct DeformedMesh {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     /// What the displacements are multiplied by.
-    #[serde(default = "one")]
     pub factor: f64,
     /// The increment of the step, or its mode for a buckling or frequency step, counted
     /// from 1.
-    #[serde(default = "first")]
     pub increment: u32,
     /// The mesh as last made, with the sets and element types of the analysis it comes
     /// from, kept so that the project opens without reading the results again.
-    #[serde(default)]
     pub mesh: FeMesh,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mesh_sets: Vec<plx_model::MeshSet>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub element_types: Vec<plx_model::PartElementType>,
-    #[serde(default)]
     pub space: plx_model::ModelSpace,
     /// Fingerprint of the results, the mesh and the numbers the mesh was made from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -324,7 +302,6 @@ pub struct DeformedMesh {
 pub struct MeasureBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     pub kind: plx_model::MeasureKind,
     /// The value as last computed, and the fingerprint of the results and the definition it
@@ -347,9 +324,7 @@ pub struct MeasureBlock {
 pub struct StudyBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub table: plx_model::StudyTable,
 }
 
@@ -359,7 +334,6 @@ pub struct StudyBlock {
 pub struct ParameterSet {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     pub parameters: Vec<plx_model::Parameter>,
 }
@@ -373,13 +347,10 @@ pub struct ParameterSet {
 pub struct FileSource {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     /// The file; a relative path is taken from the folder of the project file.
-    #[serde(default)]
     pub path: String,
     /// The unit system the numbers of an input file and the lengths of geometry are in.
-    #[serde(default)]
     pub units: plx_model::UnitSystem,
     /// The content of the file kept in the project; `None` for an external file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -473,9 +444,7 @@ impl EmbeddedFile {
 pub struct Note {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub text: String,
 }
 
@@ -485,19 +454,14 @@ pub struct Note {
 pub struct MathBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub operation: plx_model::MathOp,
     /// What its numbers are; `None` until a link gives it the kind of the other end. Of a
     /// product or quotient, the kind of its result.
-    #[serde(default)]
     pub kind: Option<plx_model::ValueKind>,
     /// Of a product or quotient, the kinds of A and B; `None` while open.
-    #[serde(default)]
     pub operands: [Option<plx_model::ValueKind>; 2],
     /// The values of its inputs, in SI units.
-    #[serde(default)]
     pub values: Vec<f64>,
 }
 
@@ -506,15 +470,11 @@ pub struct MathBlock {
 pub struct SwitchBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     /// What its choices are; `None` until a link gives it the kind of the other end.
-    #[serde(default)]
     pub kind: Option<plx_model::ValueKind>,
-    #[serde(default)]
     pub index: f64,
     /// The choices, in SI units.
-    #[serde(default)]
     pub choices: Vec<f64>,
 }
 
@@ -524,12 +484,9 @@ pub struct SwitchBlock {
 pub struct FormulaBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub formula: String,
     /// The values of its inputs a, b, c, ... in SI units, for those no link gives.
-    #[serde(default)]
     pub values: Vec<f64>,
 }
 
@@ -539,17 +496,10 @@ pub struct FormulaBlock {
 pub struct PlotBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub kind: plx_model::PlotKind,
     /// The bins of a histogram.
-    #[serde(default = "default_bins")]
     pub bins: u32,
-}
-
-fn default_bins() -> u32 {
-    10
 }
 
 /// A Preview block: what is linked to it, drawn in the block: a small picture of a mesh
@@ -559,7 +509,6 @@ fn default_bins() -> u32 {
 pub struct Preview {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
 }
 
@@ -572,11 +521,9 @@ pub struct Preview {
 pub struct NodeGroup {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     /// The ids of the blocks right inside it: its Group Input and Group Output blocks, and
     /// groups in it with their own blocks.
-    #[serde(default)]
     pub nodes: Vec<u64>,
     /// What it takes, in the order of its pins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -591,7 +538,6 @@ pub struct NodeGroup {
 pub struct GroupEnd {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
 }
 
@@ -626,10 +572,8 @@ pub struct GroupPin {
 pub struct Frame {
     pub label: String,
     /// The tint of the frame, red, green and blue.
-    #[serde(default)]
     pub color: [u8; 3],
     /// The ids of the blocks in the frame.
-    #[serde(default)]
     pub nodes: Vec<u64>,
 }
 
@@ -639,11 +583,9 @@ pub struct Frame {
 pub struct MeshExport {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
     /// The file to write: an input file for CalculiX. A relative path is taken from the
     /// folder of the project file.
-    #[serde(default)]
     pub path: String,
     /// Fingerprint of the mesh and the path as last written; nothing is written while it
     /// is the same.
@@ -658,9 +600,7 @@ pub struct MeshExport {
 pub struct CampbellBlock {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub setup: plx_model::campbell::Setup,
     /// The speeds of the last sweep with their modes, in the order they were computed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -679,9 +619,7 @@ pub struct CampbellBlock {
 pub struct MaterialSet {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub materials: Vec<plx_model::Material>,
     /// Fields of the materials exposed as parameters, which value links set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -693,9 +631,7 @@ pub struct MaterialSet {
 pub struct CrossSectionSet {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
     pub position: [f32; 2],
-    #[serde(default)]
     pub cross_sections: Vec<plx_model::CrossSection>,
     /// Dimensions of the cross-sections exposed as parameters, which value links set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -710,13 +646,10 @@ pub struct ProjectAnalysis {
     pub id: u64,
     pub name: String,
     /// Position of its block in the project schematic.
-    #[serde(default)]
     pub position: [f32; 2],
     /// CAD geometry the mesh is generated from; analyses made from an input file have none.
-    #[serde(default)]
     pub geometry: Option<Geometry>,
     pub mesh: FeMesh,
-    #[serde(default)]
     pub model: FeModel,
     /// What each part of the mesh is the mesh of: a part of the geometry or an imported
     /// mesh, which is a geometry object of its own ([`plx_model::PartOrigins`]).
@@ -743,7 +676,7 @@ pub struct Link {
     pub slot: Vec<String>,
     /// A state link (`["State", step]`): the steps of the source up to that step the target
     /// took last time, which come before its own steps. A link of a whole category: the
-    /// names of the items it took last time.
+    /// keys (ids) of the items it took last time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inherited: Vec<String>,
     /// A link of a whole category, which is a bundle of links of its items: the items the
@@ -758,8 +691,6 @@ pub struct Link {
 /// CalculiX as its files (`.frd`, history output in `.dat`, eigenmodes in `.eig`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BoundResults {
-    /// The analysis the results belong to.
-    pub analysis: String,
     /// Fingerprint of what the run solved, see [`plx_model::fingerprint::solve_input`];
     /// the results are out of date once the analysis' fingerprint differs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -770,7 +701,6 @@ pub struct BoundResults {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<u64>,
     /// The solver reported errors but wrote results.
-    #[serde(default)]
     pub with_errors: bool,
     pub files: Vec<BoundFile>,
     /// The results of the built-in solver, a `.ndlr` file ([`plx_results::SolverResults`]),
@@ -975,7 +905,7 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
 
 /// The oldest format that can still be opened. While Nodalis is being designed, a new
 /// format is not converted: older projects are refused.
-pub const FIRST_PROJECT_FORMAT: u32 = 56;
+pub const FIRST_PROJECT_FORMAT: u32 = 57;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
@@ -1048,7 +978,6 @@ fn parse_project(path: &Path, text: &str) -> Result<Project, ProjectError> {
     }
     let mut project: Project = ron::from_str(text).map_err(format_error)?;
     for analysis in project.analyses_mut() {
-        analysis.model.migrate();
         // Every part of the mesh belongs to a geometry object.
         analysis.origins.reconcile(&analysis.mesh);
     }
@@ -1058,13 +987,8 @@ fn parse_project(path: &Path, text: &str) -> Result<Project, ProjectError> {
 /// Reads the files of a finished analysis into [`BoundResults`]; files that do not exist are
 /// left out, the results file (`.frd` of CalculiX or `.ndlr` of the built-in solver) has to
 /// be there.
-pub fn bind_results(
-    analysis: &str,
-    files: &[PathBuf],
-    with_errors: bool,
-) -> Result<BoundResults, ProjectError> {
+pub fn bind_results(files: &[PathBuf], with_errors: bool) -> Result<BoundResults, ProjectError> {
     let mut bound = BoundResults {
-        analysis: analysis.to_owned(),
         input: None,
         steps: Vec::new(),
         with_errors,
@@ -1234,7 +1158,7 @@ fn file_name(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use plx_model::{
-        Algorithm2d, Algorithm3d, Constraint, ContactPair, Friction, InteractionProperty, Material,
+        Algorithm2d, Algorithm3d, ContactPair, Friction, InteractionProperty, Material,
         MeshSetupItem, MeshSetupKind, MeshingParameters, Region, Step, SurfaceBehavior,
         SurfaceInteraction, Tie,
     };
@@ -1393,6 +1317,7 @@ mod tests {
         let (pads, metal) = (ids(pads), ids(metal));
         for (name, material, parts) in [("Steel", steel, metal), ("Rubber", rubber, pads)] {
             model.sections.push(plx_model::Section {
+                id: plx_model::Id::new(),
                 orientation: None,
                 name: name.into(),
                 material: Some(material),
@@ -1513,6 +1438,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Solid_Section-1".into(),
             material: Some(steel),
@@ -1584,6 +1510,7 @@ mod tests {
         // A second step pressing harder, to show the contacts of a step.
         if std::env::var_os("PLX_CONTACT_DEMO_STEPS").is_some() {
             let mut second = step.clone();
+            second.id = plx_model::Id::new();
             second.name = "Step-2".into();
             second.loads[0].kind = plx_model::LoadKind::Pressure(10e6);
             model.steps.push(step);
@@ -1624,6 +1551,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
@@ -1697,6 +1625,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
             region: Region::Parts(mesh.ids_of(&["Lever"])),
@@ -1776,6 +1705,7 @@ mod tests {
                 ..Default::default()
             });
             model.sections.push(plx_model::Section {
+                id: plx_model::Id::new(),
                 name: "Solid_Section-1".into(),
                 material: model.materials.last().map(|m| m.id),
                 region: Region::Parts(mesh.ids_of(&["Block"])),
@@ -1881,6 +1811,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
@@ -1908,6 +1839,7 @@ mod tests {
             },
         ));
         let mut more = step.clone();
+        more.id = plx_model::Id::new();
         more.name = "More_Load".into();
         let mut modes = plx_model::Step::new_frequency("Modes");
         modes.boundary_conditions = step.boundary_conditions.clone();
@@ -1952,6 +1884,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
@@ -1985,8 +1918,9 @@ mod tests {
         model.steps = vec![step];
         let tip = plx_model::HistoryOutput::node("Tip", Region::Faces(top));
         let mut support = plx_model::HistoryOutput::node("Support", Region::Faces(bottom));
-        support.variables = vec!["RF".into()];
+        support.variables = plx_model::history_variables(&["RF"]);
         support.totals = plx_model::Totals::Only;
+        let (tip_id, support_id) = (tip.id, support.id);
         model.put_history_output(0, tip);
         model.put_history_output(0, support);
         let mut project = single(None, &mesh, &model, None);
@@ -1994,8 +1928,8 @@ mod tests {
             analysis.name = "Cantilever".into();
             analysis.position = [0.0, 0.0];
         }
-        let history = |set: &str, field: &str, component: &str| MeasureKind::History {
-            set: set.into(),
+        let history = |output, field: &str, component: &str| MeasureKind::History {
+            output: Some(output),
             field: field.into(),
             component: component.into(),
             whole: true,
@@ -2038,13 +1972,13 @@ mod tests {
                 3,
                 "Tip",
                 [260.0, -60.0],
-                history("TIP", "DISPLACEMENTS", "U2"),
+                history(tip_id, "DISPLACEMENTS", "U2"),
             ),
             measure(
                 4,
                 "Support",
                 [260.0, 90.0],
-                history("SUPPORT", "TOTAL_FORCE", "RF2"),
+                history(support_id, "TOTAL_FORCE", "RF2"),
             ),
             math(5, "Force", [500.0, 90.0], MathOp::Multiply, vec![0.0, -1.0]),
             plot(6, "Force over Deflection", [740.0, -60.0], PlotKind::Line),
@@ -2221,6 +2155,7 @@ mod tests {
             }
         }
         model.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
@@ -2362,6 +2297,7 @@ mod tests {
                 type_name: "C3D20".into(),
             }],
             mesh_operations: vec![plx_model::MeshOperation {
+                id: plx_model::Id::new(),
                 name: "Transform-1".into(),
                 parts: vec![plx_model::Id::new()],
                 kind: plx_model::MeshOperationKind::Transform(plx_mesh::MeshTransform::Rotate {
@@ -2374,7 +2310,7 @@ mod tests {
                 key: 1,
                 name: "Steel density".into(),
                 path: plx_model::ValuePath::new(
-                    plx_model::ItemRef::Material("Steel".into()),
+                    plx_model::ItemRef::Material(plx_model::Id::new()),
                     plx_model::Field::Density,
                 ),
             }],
@@ -2453,6 +2389,7 @@ mod tests {
                 ..plx_model::Amplitude::new("Amplitude-1")
             }],
             initial_conditions: vec![plx_model::InitialCondition {
+                id: plx_model::Id::new(),
                 distribution: None,
                 name: "Initial_Temperature-1".into(),
                 active: true,
@@ -2463,6 +2400,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("plx-project-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("block.ndl");
+        let solid = plx_model::Id::new();
         let geometry = Geometry {
             compounds: Vec::new(),
             suppressed: Vec::new(),
@@ -2471,6 +2409,7 @@ mod tests {
             meshing: MeshingParameters::for_diagonal(100.0),
             mesh_items: vec![
                 MeshSetupItem {
+                    id: plx_model::Id::new(),
                     name: "Local_Mesh_Size-1".into(),
                     kind: MeshSetupKind::LocalMeshSize {
                         faces: vec![3, 4],
@@ -2480,17 +2419,19 @@ mod tests {
                     },
                 },
                 MeshSetupItem {
+                    id: plx_model::Id::new(),
                     name: "Tetrahedral_Gmsh-1".into(),
                     kind: MeshSetupKind::TetrahedralGmsh {
-                        parts: vec!["SOLID-1".into()],
+                        parts: vec![solid],
                         algorithm_2d: Algorithm2d::Delaunay,
                         algorithm_3d: Algorithm3d::Hxt,
                     },
                 },
                 MeshSetupItem {
+                    id: plx_model::Id::new(),
                     name: "Extrude_Mesh-1".into(),
                     kind: MeshSetupKind::ExtrudeMesh(plx_model::ExtrudeMesh {
-                        parts: vec!["SOLID-1".into()],
+                        parts: vec![solid],
                         faces: vec![2],
                         layers: plx_model::ExtrudeLayers::MultiLayered {
                             sizes: vec![0.2, 0.8],
@@ -2504,7 +2445,10 @@ mod tests {
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
+            ids: vec![plx_model::PartId {
+                name: "SOLID-1".into(),
+                id: solid,
+            }],
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -2512,7 +2456,7 @@ mod tests {
         let mut saved = single(Some(&geometry), &mesh, &model, None);
         (saved.analyses_mut().next().unwrap())
             .origins
-            .set_meshed("SOLID-1", 42);
+            .set_meshed(solid, 42);
         // A second, empty analysis next to it.
         saved
             .nodes
@@ -2569,8 +2513,8 @@ mod tests {
         assert_eq!(project.mesh.node_sets, mesh.node_sets);
         // The origin of a part that the mesh does not have goes when the project is read.
         assert_eq!(
-            project.origins.made_from("SOLID-1"),
-            (project.mesh.parts.iter().any(|p| p.name == "SOLID-1")).then_some(42)
+            project.origins.made_from(solid),
+            (project.mesh.parts.iter().any(|p| p.id == solid)).then_some(42)
         );
 
         // The file starts with the length of its text in binary, which need not be UTF-8;
@@ -2617,7 +2561,7 @@ mod tests {
                 key: 1,
                 name: "Tube Radius".into(),
                 path: plx_model::ValuePath::new(
-                    plx_model::ItemRef::CrossSection("Tube".into()),
+                    plx_model::ItemRef::CrossSection(plx_model::Id::new()),
                     plx_model::Field::Radius,
                 ),
             }],
@@ -2651,7 +2595,7 @@ mod tests {
                 key: 1,
                 name: "Steel density".into(),
                 path: plx_model::ValuePath::new(
-                    plx_model::ItemRef::Material("Steel".into()),
+                    plx_model::ItemRef::Material(plx_model::Id::new()),
                     plx_model::Field::Density,
                 ),
             }],
@@ -2872,66 +2816,6 @@ mod tests {
     }
 
     #[test]
-    fn steps_of_older_projects_are_active() {
-        let mut step = Step::new_static("Step-1");
-        step.active = false;
-        let text = ron::to_string(&step).unwrap();
-        assert!(text.contains("active:false,"), "{text}");
-        let older: Step = ron::from_str(&text.replace("active:false,", "")).unwrap();
-        assert!(older.active);
-    }
-
-    #[test]
-    fn ties_of_older_projects_move_to_the_contact_pairs() {
-        // Ties and node ties were constraints; a project saved then still opens with them.
-        let mut tie = plx_model::NodeTie::new("Node_Tie-1");
-        tie.region = Region::Nodes(vec![3, 7]);
-        let older = FeModel {
-            constraints: vec![
-                Constraint::Tie(Tie::new("Tie-1")),
-                Constraint::NodeTie(tie.clone()),
-            ],
-            ..FeModel::default()
-        };
-        let mut model: FeModel = ron::from_str(&ron::to_string(&older).unwrap()).unwrap();
-        model.migrate();
-        assert_eq!(model.constraints, []);
-        assert_eq!(model.ties, [Tie::new("Tie-1")]);
-        assert_eq!(model.node_ties, [tie]);
-    }
-
-    #[test]
-    fn hot_spots_of_older_projects_are_skipped() {
-        // Hot spots were part of the FE model for a while; they are defined on the results
-        // now, and projects saved with them still open.
-        let text = ron::to_string(&FeModel::default()).unwrap();
-        let hot_spots = "hot_spots:[(name:\"Hot_Spot-1\",toe:Nodes([3,7]),\
-            direction:(1.0,0.0,0.0),thickness:10.0,extrapolation:Custom([2.0,6.0]),\
-            component:Perpendicular)],";
-        let older = text.replacen(
-            "reference_points:",
-            &format!("{hot_spots}reference_points:"),
-            1,
-        );
-        assert_ne!(older, text);
-        let model: FeModel = ron::from_str(&older).unwrap();
-        assert_eq!(model, FeModel::default());
-    }
-
-    #[test]
-    fn path_plots_saved_before_hot_spot_plots_still_load() {
-        let older = "(path:\"Path-1\",offset:None,size:(400.0,240.0),on_path:false,\
-            height:80.0,title:\"\",x_label:\"Distance\",y_label:\"\",y_range:None)";
-        let plot: plx_results::saved_view::SavedPathPlot = ron::from_str(older).unwrap();
-        assert!(!plot.hot_spot);
-        let saved = ron::to_string(&plot).unwrap();
-        assert_eq!(
-            ron::from_str::<plx_results::saved_view::SavedPathPlot>(&saved).unwrap(),
-            plot
-        );
-    }
-
-    #[test]
     fn table_plots_keep_missing_values() {
         let plot = plx_results::saved_view::SavedPathPlot {
             path: "SP_A.STRESSES.MISES".into(),
@@ -2972,7 +2856,7 @@ mod tests {
         std::fs::write(&frd, &text).unwrap();
         // No history output: the missing .dat is left out.
         let files = [frd.with_extension("dat"), frd.clone()];
-        let bound = bind_results("Analysis-1", &files, false).unwrap();
+        let bound = bind_results(&files, false).unwrap();
         assert_eq!(bound.files.len(), 1);
         assert_eq!(bound.size(), text.len() as u64);
         assert!(
@@ -2980,7 +2864,7 @@ mod tests {
             "{}",
             bound.stored_size()
         );
-        assert!(bind_results("Analysis-1", &[dir.join("missing.frd")], false).is_err());
+        assert!(bind_results(&[dir.join("missing.frd")], false).is_err());
 
         let path = dir.join("block.ndl");
         let model = FeModel::default();
@@ -3039,7 +2923,7 @@ mod tests {
         solved.model.nodes.insert(4, [1.0, 2.0, 3.0]);
         let path = dir.join("Analysis-1.ndlr");
         solved.write(&path).unwrap();
-        let bound = bind_results("Analysis-1", std::slice::from_ref(&path), false).unwrap();
+        let bound = bind_results(std::slice::from_ref(&path), false).unwrap();
         let file = bound.solver.as_ref().unwrap();
         // Compressed by its own format already: stored as it is, not deflated again.
         let written = std::fs::read(&path).unwrap();

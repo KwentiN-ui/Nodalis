@@ -4,8 +4,9 @@
 
 use crate::{
     Amplitude, Bolt, BoundaryCondition, BoundaryKind, Constraint, ContactDetection, ContactPair,
-    ContactRegion, CrossSection, Distribution, FeModel, HistoryKind, Id, Load, LoadKind, Material,
-    PlaneSource, PointDefinition, PointRef, Region, SectionKind, SurfaceInteraction,
+    ContactRegion, CrossSection, Distribution, FeModel, HistoryKind, Id, InitialCondition, Load,
+    LoadKind, Material, MeshOperation, MeshSet, PlaneSource, PointDefinition, PointRef, Region,
+    Section, SectionKind, Step, SurfaceInteraction, Tie,
 };
 
 impl FeModel {
@@ -53,6 +54,35 @@ impl FeModel {
         self.bolts.iter().find(|b| b.id == id)
     }
 
+    pub fn step(&self, id: Id) -> Option<&Step> {
+        self.steps.iter().find(|s| s.id == id)
+    }
+
+    /// The position of the step in the model's list of steps.
+    pub fn step_index(&self, id: Id) -> Option<usize> {
+        self.steps.iter().position(|s| s.id == id)
+    }
+
+    pub fn section(&self, id: Id) -> Option<&Section> {
+        self.sections.iter().find(|s| s.id == id)
+    }
+
+    pub fn initial_condition(&self, id: Id) -> Option<&InitialCondition> {
+        self.initial_conditions.iter().find(|c| c.id == id)
+    }
+
+    pub fn mesh_operation(&self, id: Id) -> Option<&MeshOperation> {
+        self.mesh_operations.iter().find(|o| o.id == id)
+    }
+
+    pub fn mesh_set_by_id(&self, id: Id) -> Option<&MeshSet> {
+        self.mesh_sets.iter().find(|s| s.id == id)
+    }
+
+    pub fn tie(&self, id: Id) -> Option<&Tie> {
+        self.ties.iter().find(|t| t.id == id)
+    }
+
     /// The first boundary condition with the id, of any step: the steps hold their own copies
     /// of a boundary condition that goes on, all with its id.
     pub fn boundary_condition(&self, id: Id) -> Option<&BoundaryCondition> {
@@ -95,10 +125,22 @@ impl FeModel {
                 .or_else(|| self.surface_interaction(id).map(|i| &i.name))
                 .or_else(|| self.contact_detection(id).map(|d| &d.name))
                 .or_else(|| self.bolt(id).map(|b| &b.name))
+                .or_else(|| self.step(id).map(|s| &s.name))
+                .or_else(|| self.section(id).map(|s| &s.name))
+                .or_else(|| self.initial_condition(id).map(|c| &c.name))
+                .or_else(|| self.mesh_operation(id).map(|o| &o.name))
+                .or_else(|| self.mesh_set_by_id(id).map(|s| &s.name))
+                .or_else(|| self.tie(id).map(|t| &t.name))
+                .or_else(|| self.history_output(id).map(|h| &h.name))
         };
         (features.or_else(items).map(String::as_str))
             .or_else(|| self.contact_name(id))
             .or_else(|| self.remote_item_name(id))
+            .or_else(|| {
+                (self.constraints.iter())
+                    .find(|c| c.id() == id)
+                    .map(Constraint::name)
+            })
     }
 
     /// The name of the item of the id, or a note that it is missing, for the GUI.
@@ -120,7 +162,7 @@ impl FeModel {
             }
         };
         let region = |region: &mut Region, visit: &mut dyn FnMut(&mut Id)| match region {
-            Region::ReferencePoint(id) | Region::RemotePoint(id) => visit(id),
+            Region::ReferencePoint(id) | Region::RemotePoint(id) | Region::Set(id) => visit(id),
             _ => {}
         };
         let point = |point: &mut PointRef, visit: &mut dyn FnMut(&mut Id)| {
@@ -298,7 +340,35 @@ impl FeModel {
         for d in &self.distributions {
             add("Distribution", &d.name, d.id);
         }
+        for s in &self.sections {
+            add("Section", &s.name, s.id);
+        }
+        for c in &self.initial_conditions {
+            add("InitialCondition", &c.name, c.id);
+        }
+        for o in &self.mesh_operations {
+            add("MeshOperation", &o.name, o.id);
+        }
+        for s in &self.mesh_sets {
+            add("MeshSet", &s.name, s.id);
+        }
+        for t in &self.ties {
+            add("Tie", &t.name, t.id);
+        }
+        for t in &self.node_ties {
+            add("NodeTie", &t.name, t.id);
+        }
+        for c in &self.constraints {
+            add("Constraint", c.name(), c.id());
+        }
+        for h in &self.history_outputs {
+            add("HistoryOutput", &h.name, h.id);
+        }
         for step in &self.steps {
+            add("Step", &step.name, step.id);
+            for f in &step.defined_fields {
+                add("DefinedField", &f.name, f.id);
+            }
             for b in &step.boundary_conditions {
                 add("BoundaryCondition", &b.name, b.id);
             }

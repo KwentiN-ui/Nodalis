@@ -26,8 +26,8 @@ pub struct PreparedParticles {
     pub steps: Vec<plx_results::steps::StepRecord>,
     /// The history the step's outputs ask for.
     pub history: HistoryRequest,
-    /// The names of the FE parts of each wall, for the loads on them FE steps take.
-    pub wall_parts: Vec<Vec<String>>,
+    /// The walls with their FE parts, for the loads on them FE steps take.
+    pub walls: Vec<plx_results::wall_loads::WallSeries>,
 }
 
 /// Makes the analysis of the FE steps with the loads on the walls of the file given.
@@ -305,18 +305,14 @@ impl Run {
                     warnings,
                     steps: records,
                     history: request,
-                    wall_parts,
+                    walls,
                     ..
                 } = prepared;
                 // The loads on the walls, beside the results.
                 let mut wall_loads = plx_results::wall_loads::WallLoads::new(
                     model.domain.cell,
                     model.domain.space,
-                    (model.walls.iter().enumerate())
-                        .map(|(w, wall)| {
-                            (wall.name.clone(), wall_parts.get(w).cloned().unwrap_or_default())
-                        })
-                        .collect(),
+                    walls,
                 );
                 let mut track = Convergence::default();
                 // Both callbacks of the solver report progress.
@@ -677,7 +673,7 @@ mod tests {
                 energies: vec!["ALLKE".into()],
                 ..Default::default()
             },
-            wall_parts: Vec::new(),
+            walls: Vec::new(),
         };
         let mut run = Run::start_particles(1, &dir, "drop", prepared, None).unwrap();
         assert_eq!(run.wait(), JobStatus::Completed, "{:?}", run.new_output());
@@ -740,7 +736,7 @@ mod tests {
             warnings: Vec::new(),
             steps: Vec::new(),
             history: HistoryRequest::default(),
-            wall_parts: Vec::new(),
+            walls: Vec::new(),
         };
         let mut run = Run::start_particles(1, &dir, "slosh", prepared, None).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(500));

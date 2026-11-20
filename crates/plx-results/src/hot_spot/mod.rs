@@ -83,6 +83,8 @@ impl IncrementValues {
 /// Evaluation of one definition over all increments of a results file.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HotSpotReport {
+    /// The id of the hot spot evaluated.
+    pub id: plx_model::Id,
     pub name: String,
     pub component: HotSpotComponent,
     pub method: String,
@@ -327,6 +329,7 @@ pub fn evaluate(
                 ));
             }
             HotSpotReport {
+                id: hot_spot.id,
                 name: hot_spot.name.clone(),
                 component: hot_spot.component,
                 method: hot_spot.extrapolation.label().to_string(),

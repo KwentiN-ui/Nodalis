@@ -1912,7 +1912,7 @@ impl Node {
         if status.mesh == status::CellState::OutOfDate || !status.stale_results.is_empty() {
             return true;
         }
-        match data.fe.steps.iter().position(|s| s.name == step) {
+        match links::step_index(data.fe, step) {
             // Results solved before they kept the fingerprints of their steps count whole.
             Some(index) if !bound.steps.is_empty() => {
                 bound.steps.get(index) != status.step_inputs.get(index)
@@ -1941,7 +1941,7 @@ impl Node {
             return 0;
         };
         (self.link_data())
-            .and_then(|data| data.fe.steps.iter().position(|s| s.name == step))
+            .and_then(|data| links::step_index(data.fe, step))
             .and_then(|index| bound.steps.get(index).copied())
             .or(bound.input)
             .unwrap_or_default()
@@ -2101,14 +2101,15 @@ enum Action {
         target: u64,
         slot: Vec<String>,
     },
-    /// A new analysis that continues `source` after `step`, its block at the position.
+    /// A new analysis that continues `source` after the step of the key `step`, its block at
+    /// the position.
     Continue {
         source: u64,
         step: String,
         position: egui::Pos2,
     },
-    /// Split the analysis after the step: the steps after it go to a new analysis that
-    /// continues it.
+    /// Split the analysis after the step of the key: the steps after it go to a new analysis
+    /// that continues it.
     Split(u64, String),
     /// Give the own steps of the analysis to the one it continues, and remove it.
     Merge(u64),
@@ -2661,27 +2662,16 @@ impl ProjectApp {
             ParameterSetResult::Ok(rows) => {
                 self.checkpoint(&[]);
                 self.parameter_set = None;
-                // Links follow a renamed parameter; those of a removed one go.
-                let kept: Vec<(String, String)> = (rows.iter())
-                    .filter_map(|(old, p)| Some((old.clone()?, p.name.clone())))
-                    .collect();
-                self.links.retain_mut(|link| {
-                    if link.source != id || !links::is_value(link) {
-                        return true;
-                    }
-                    let Some(name) = link.item.get(1) else {
-                        return false;
-                    };
-                    match kept.iter().find(|(old, _)| old == name) {
-                        Some((_, new)) => {
-                            link.item[1] = new.clone();
-                            true
-                        }
-                        None => false,
-                    }
+                // Links go by the ids of the parameters: a renamed one keeps its, those of a
+                // removed one go, given or taken.
+                let kept: Vec<String> = rows.iter().map(|p| links::key(p.id)).collect();
+                let gone = |path: &[String]| matches!(path, [cell, key] if cell == links::VALUE && !kept.contains(key));
+                self.links.retain(|link| {
+                    !(link.source == id && gone(&link.item)
+                        || link.target == id && gone(links::slot(link)))
                 });
                 if let Some(block) = self.node(id).and_then(Node::as_parameters_mut) {
-                    block.parameters = rows.into_iter().map(|(_, p)| p).collect();
+                    block.parameters = rows;
                 }
                 self.sync_due = true;
             }
@@ -2713,12 +2703,7 @@ impl ProjectApp {
         let Some(measure) = node.as_measure() else {
             return;
         };
-        let node_sets = self
-            .measure_link(id)
-            .and_then(|l| self.nodes.iter().find(|n| n.id == l.source))
-            .and_then(Node::link_data)
-            .map(|d| measure_regions(&d).into_keys().collect())
-            .unwrap_or_default();
+        let sources = self.measure_sources(id);
         let offered = (self.measured(id)).map(|(source, step, bound)| {
             let dir = self.measure_dir(id, source, bound, "-fields");
             crate::measure::read_offered(bound.clone(), step, dir)
@@ -2727,7 +2712,7 @@ impl ProjectApp {
             id,
             &node.name,
             measure.kind.clone(),
-            node_sets,
+            sources,
             offered,
         ));
     }
@@ -2797,6 +2782,30 @@ impl ProjectApp {
 
     /// The results a measure block measures: the analysis, the step's number for CalculiX
     /// and the results it keeps; `None` without a link or results.
+    /// What the analysis whose results a measure block reads offers it: node sets and
+    /// history outputs.
+    fn measure_sources(&self, id: u64) -> crate::measure::Sources {
+        (self.measure_link(id))
+            .and_then(|l| self.nodes.iter().find(|n| n.id == l.source))
+            .and_then(Node::link_data)
+            .map(|d| crate::measure::Sources::of(d.fe, d.mesh))
+            .unwrap_or_default()
+    }
+
+    /// What a measure block measures, in words, with the names of the analysis it reads.
+    fn measure_description(&self, id: u64) -> String {
+        let Some(measure) = self
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .and_then(Node::as_measure)
+        else {
+            return String::new();
+        };
+        let sources = self.measure_sources(id);
+        measure.kind.describe(|id| sources.name(id))
+    }
+
     fn measured(&self, id: u64) -> Option<(&Node, u32, &plx_io::project::BoundResults)> {
         let link = self.measure_link(id)?;
         let source = self.nodes.iter().find(|n| n.id == link.source)?;
@@ -2861,6 +2870,7 @@ impl ProjectApp {
         let units = self.units;
         for (id, key, result) in done {
             self.measuring.remove(&id);
+            let what = self.measure_description(id);
             let Some(node) = self.node(id) else {
                 continue;
             };
@@ -2880,7 +2890,7 @@ impl ProjectApp {
                     };
                     measure.series = measured.series;
                     measure.times = measured.times;
-                    format!("{name}: {} = {shown}", measure.kind.describe())
+                    format!("{name}: {what} = {shown}")
                 }
                 Err(why) => {
                     measure.value = None;
@@ -2923,15 +2933,12 @@ impl ProjectApp {
             else {
                 continue;
             };
-            let node_sets = (source.link_data())
-                .map(|d| measure_regions(&d))
-                .unwrap_or_default();
             let dir = self.measure_dir(id, source, bound, "");
             let job = crate::measure::Job {
                 kind,
                 step,
                 results: bound.clone(),
-                node_sets,
+                sources: self.measure_sources(id),
                 units,
                 dir,
             };
@@ -2982,8 +2989,8 @@ impl ProjectApp {
         }
     }
 
-    /// Applies a change of the editor of a study; its links follow renamed and removed
-    /// columns.
+    /// Applies a change of the editor of a study. Links go by the ids of the columns: a
+    /// renamed one keeps its, those of a removed one go.
     fn edit_study_table(&mut self, id: u64, edit: StudyEdit) {
         match edit {
             StudyEdit::Close => {
@@ -2996,8 +3003,7 @@ impl ProjectApp {
             _ => {}
         }
         self.checkpoint(&[]);
-        // A renamed column, input or not, with its old and new name; a removed one.
-        let mut renamed = None;
+        // A removed column, input or not.
         let mut removed = None;
         let mut added = None;
         let Some(study) = self.node(id).and_then(Node::as_study_mut) else {
@@ -3018,62 +3024,47 @@ impl ProjectApp {
             StudyEdit::RenameInput(column, ref name)
             | StudyEdit::RenameOutput(column, ref name) => {
                 let input = matches!(edit, StudyEdit::RenameInput(..));
-                let name = name.clone();
-                let new = table.unique_name(&name);
+                let new = table.unique_name(name);
                 let columns = if input {
                     &mut table.inputs
                 } else {
                     &mut table.outputs
                 };
                 if let Some(column) = columns.get_mut(column) {
-                    let old = std::mem::replace(&mut column.name, new.clone());
-                    renamed = Some((input, old, new));
+                    column.name = new;
                 }
             }
             StudyEdit::RemoveInput(column) => {
                 if let Some(c) = table.inputs.get(column) {
-                    removed = Some((true, c.name.clone()));
+                    removed = Some((true, links::key(c.id)));
                     table.remove_input(column);
                 }
             }
             StudyEdit::RemoveOutput(column) => {
                 if let Some(c) = table.outputs.get(column) {
-                    removed = Some((false, c.name.clone()));
+                    removed = Some((false, links::key(c.id)));
                     table.remove_output(column);
                 }
             }
             _ => {}
         }
-        let column_link = |link: &Link, input: bool, name: &str| {
+        let column_link = |link: &Link, input: bool, key: &str| {
             // The values of the column over all points, from the right pin of its row.
             if link.source == id
-                && matches!(link.item.as_slice(), [c, n] if c == links::VALUE && n == name)
+                && matches!(link.item.as_slice(), [c, k] if c == links::VALUE && k == key)
             {
                 return true;
             }
             if input {
                 link.source == id
-                    && matches!(link.item.as_slice(), [c, n] if c == links::LOOP && n == name)
+                    && matches!(link.item.as_slice(), [c, k] if c == links::LOOP && k == key)
             } else {
                 link.target == id
-                    && matches!(links::slot(link), [c, n] if c == links::OUTPUTS && n == name)
+                    && matches!(links::slot(link), [c, k] if c == links::OUTPUTS && k == key)
             }
         };
-        if let Some((input, old, new)) = renamed {
-            for link in &mut self.links {
-                if column_link(link, input, &old) {
-                    // The feedback of an input and the values of either kind of column
-                    // go by the name in their item.
-                    if input || (link.source == id && link.item[0] == links::VALUE) {
-                        link.item[1] = new.clone();
-                    } else {
-                        link.slot[1] = new.clone();
-                    }
-                }
-            }
-        }
-        if let Some((input, name)) = removed {
-            self.links.retain(|l| !column_link(l, input, &name));
+        if let Some((input, key)) = removed {
+            self.links.retain(|l| !column_link(l, input, &key));
         }
         if let Some(added) = added {
             let name = self.name_of(id);
@@ -3096,7 +3087,12 @@ impl ProjectApp {
                 .map(|c| (c.name.clone(), c.kind))
                 .collect(),
             outputs: (table.outputs.iter())
-                .map(|c| (c.name.clone(), self.output_shown(id, &c.name, 0.0).1))
+                .map(|c| {
+                    (
+                        c.name.clone(),
+                        self.output_shown(id, &links::key(c.id), 0.0).1,
+                    )
+                })
                 .collect(),
             points: (table.points.iter())
                 .map(|point| PointView {
@@ -3104,7 +3100,7 @@ impl ProjectApp {
                     outputs: (table.outputs.iter().enumerate())
                         .map(|(i, column)| {
                             (point.outputs.get(i).copied().flatten())
-                                .map(|v| self.output_shown(id, &column.name, v).0)
+                                .map(|v| self.output_shown(id, &links::key(column.id), v).0)
                         })
                         .collect(),
                     state: point.state(study.body, table.outputs.len()),
@@ -3118,17 +3114,17 @@ impl ProjectApp {
         }
     }
 
-    /// The link that gives the output column `name` of a study.
-    fn output_link(&self, id: u64, name: &str) -> Option<&Link> {
+    /// The link that gives the output column of `key` of a study.
+    fn output_link(&self, id: u64, key: &str) -> Option<&Link> {
         (self.links.iter()).find(|l| {
-            l.target == id && matches!(links::slot(l), [c, n] if c == links::OUTPUTS && n == name)
+            l.target == id && matches!(links::slot(l), [c, n] if c == links::OUTPUTS && n == key)
         })
     }
 
-    /// The value the output column `name` of a study reads now: that of an up-to-date
+    /// The value the output column of `key` of a study reads now: that of an up-to-date
     /// Measure block, or a number of another block.
-    fn output_value(&self, id: u64, name: &str) -> Option<f64> {
-        let link = self.output_link(id, name)?;
+    fn output_value(&self, id: u64, key: &str) -> Option<f64> {
+        let link = self.output_link(id, key)?;
         let source = self.nodes.iter().find(|n| n.id == link.source)?;
         match source.as_measure() {
             Some(measure) => {
@@ -3139,16 +3135,16 @@ impl ProjectApp {
     }
 
     /// An output of a study as text, in the units of its source.
-    fn shown_output(&self, id: u64, name: &str, value: f64) -> String {
-        let (value, unit) = self.output_shown(id, name, value);
+    fn shown_output(&self, id: u64, key: &str, value: f64) -> String {
+        let (value, unit) = self.output_shown(id, key, value);
         format!("{} {unit}", crate::results::format_value(value as f32))
             .trim()
             .to_owned()
     }
 
     /// An output of a study as its source shows it: the number and its unit.
-    fn output_shown(&self, id: u64, name: &str, value: f64) -> (f64, String) {
-        let source = (self.output_link(id, name))
+    fn output_shown(&self, id: u64, key: &str, value: f64) -> (f64, String) {
+        let source = (self.output_link(id, key))
             .and_then(|link| Some((self.nodes.iter().find(|n| n.id == link.source)?, link)));
         let quantity = |quantity, units: UnitSystem| {
             (
@@ -3298,8 +3294,8 @@ impl ProjectApp {
                 }
                 Block::Parameters(parameters) => {
                     for parameter in &parameters.parameters {
-                        print.add(format!("{}{:?}", parameter.name, parameter.kind).as_bytes());
-                        if !driven(links::VALUE, &parameter.name) {
+                        print.add(format!("{}{:?}", parameter.id, parameter.kind).as_bytes());
+                        if !driven(links::VALUE, &links::key(parameter.id)) {
                             print.add(&parameter.value.to_le_bytes());
                         }
                     }
@@ -3403,7 +3399,7 @@ impl ProjectApp {
         if self.busy() {
             return;
         }
-        let mut gone: Vec<(u64, bool, String)> = Vec::new();
+        let mut gone: Vec<(u64, bool, plx_model::Id, String)> = Vec::new();
         for node in &self.nodes {
             let Some(study) = node.as_study() else {
                 continue;
@@ -3412,40 +3408,41 @@ impl ProjectApp {
             for column in &study.table.outputs {
                 let linked = (self.links.iter()).any(|l| {
                     l.target == id
-                        && matches!(links::slot(l), [c, n] if c == links::OUTPUTS && *n == column.name)
+                        && matches!(links::slot(l), [c, n] if c == links::OUTPUTS && *n == links::key(column.id))
                 });
                 if !linked {
-                    gone.push((id, false, column.name.clone()));
+                    gone.push((id, false, column.id, column.name.clone()));
                 }
             }
             for column in &study.table.inputs {
                 let linked = (self.links.iter()).any(|l| {
                     l.source == id
-                        && matches!(l.item.as_slice(), [c, n] if c == links::LOOP && *n == column.name)
+                        && matches!(l.item.as_slice(), [c, n] if c == links::LOOP && *n == links::key(column.id))
                 });
                 if !linked {
-                    gone.push((id, true, column.name.clone()));
+                    gone.push((id, true, column.id, column.name.clone()));
                 }
             }
         }
-        for (id, input, name) in gone {
+        for (id, input, column, name) in gone {
+            let key = links::key(column);
             if let Some(table) = self
                 .node(id)
                 .and_then(Node::as_study_mut)
                 .map(|s| &mut s.table)
             {
                 if input {
-                    if let Some(column) = table.input(&name) {
+                    if let Some(column) = table.input(&key) {
                         table.remove_input(column);
                     }
-                } else if let Some(column) = table.output(&name) {
+                } else if let Some(column) = table.output(&key) {
                     table.remove_output(column);
                 }
             }
             // The values of the column over all points, from the right pin of its row.
             self.links.retain(|l| {
                 !(l.source == id
-                    && matches!(l.item.as_slice(), [c, n] if c == links::VALUE && *n == name))
+                    && matches!(l.item.as_slice(), [c, n] if c == links::VALUE && *n == key))
             });
             self.output.push(format!(
                 "{}: {} column {name} removed, as no wire is at it any more.",
@@ -3492,14 +3489,19 @@ impl ProjectApp {
              block on the empty pin below them to add a column.",
         )];
         for (i, column) in table.outputs.iter().enumerate() {
-            let path = vec![links::OUTPUTS.to_owned(), column.name.clone()];
+            let path = vec![links::OUTPUTS.to_owned(), links::key(column.id)];
             let linked_from = (incoming.get(&node.id).into_iter().flatten())
                 .find(|(slot, _)| *slot == path)
                 .map(|(_, source)| source.clone());
-            let value = (current.and_then(|p| p.outputs.get(i).copied().flatten()))
-                .map_or_else(String::new, |v| {
-                    format!("  {}", self.shown_output(node.id, &column.name, v))
-                });
+            let value = (current.and_then(|p| p.outputs.get(i).copied().flatten())).map_or_else(
+                String::new,
+                |v| {
+                    format!(
+                        "  {}",
+                        self.shown_output(node.id, &links::key(column.id), v)
+                    )
+                },
+            );
             rows.push(Row {
                 input: true,
                 output: true,
@@ -3546,7 +3548,7 @@ impl ProjectApp {
                 input: true,
                 output: true,
                 ..row(
-                    vec![links::LOOP.to_owned(), column.name.clone()],
+                    vec![links::LOOP.to_owned(), links::key(column.id)],
                     format!("{}{value}", column.name),
                     1,
                     NodeIcon::Setup,
@@ -3720,15 +3722,21 @@ impl ProjectApp {
                     return;
                 }
                 ctx.request_repaint();
-                let names: Vec<String> = (self.nodes.iter().find(|n| n.id == id))
+                let names: Vec<(String, String)> = (self.nodes.iter().find(|n| n.id == id))
                     .and_then(Node::as_study)
-                    .map(|s| s.table.outputs.iter().map(|c| c.name.clone()).collect())
+                    .map(|s| {
+                        (s.table.outputs.iter())
+                            .map(|c| (links::key(c.id), c.name.clone()))
+                            .collect()
+                    })
                     .unwrap_or_default();
-                let outputs: Vec<Option<f64>> =
-                    names.iter().map(|n| self.output_value(id, n)).collect();
+                let outputs: Vec<Option<f64>> = names
+                    .iter()
+                    .map(|(key, _)| self.output_value(id, key))
+                    .collect();
                 let shown: Vec<String> = (names.iter().zip(&outputs))
-                    .map(|(name, value)| match value {
-                        Some(v) => format!("{name} {}", self.shown_output(id, name, *v)),
+                    .map(|((key, name), value)| match value {
+                        Some(v) => format!("{name} {}", self.shown_output(id, key, *v)),
                         None => format!("{name} missing"),
                     })
                     .collect();
@@ -3847,8 +3855,8 @@ impl ProjectApp {
             }
             let value = self.slot_value(target, &slot).unwrap_or(0.0);
             if let Some(study) = self.node(source).and_then(Node::as_study_mut) {
-                let name = study.table.add_input(&label, kind, value);
-                return (vec![links::LOOP.to_owned(), name], slot);
+                let column = study.table.add_input(&label, kind, value);
+                return (vec![links::LOOP.to_owned(), links::key(column)], slot);
             }
         }
         if let [cell, name] = item.as_slice()
@@ -3865,8 +3873,8 @@ impl ProjectApp {
                 Some(name) => name.to_owned(),
             };
             if let Some(study) = self.node(target).and_then(Node::as_study_mut) {
-                let name = study.table.add_output(&label);
-                return (item, vec![links::OUTPUTS.to_owned(), name]);
+                let column = study.table.add_output(&label);
+                return (item, vec![links::OUTPUTS.to_owned(), links::key(column)]);
             }
         }
         (item, slot)
@@ -3883,7 +3891,7 @@ impl ProjectApp {
         }
         match slot {
             [cell, name] if cell == links::VALUE => (node.as_parameters()?.parameters.iter())
-                .find(|p| &p.name == name)
+                .find(|p| links::key(p.id) == *name)
                 .map(|p| p.value),
             [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => node.refinement(),
             [cell, key] if cell == links::PARAMETERS && node.as_deformed().is_some() => {
@@ -3943,9 +3951,9 @@ impl ProjectApp {
                 }
                 match slot.as_slice() {
                     [cell, name] if cell == links::VALUE => {
-                        if let Some(parameter) = (node.as_parameters_mut())
-                            .and_then(|p| p.parameters.iter_mut().find(|p| &p.name == name))
-                        {
+                        if let Some(parameter) = (node.as_parameters_mut()).and_then(|p| {
+                            p.parameters.iter_mut().find(|p| links::key(p.id) == *name)
+                        }) {
                             let value = parameter.kind.clean(value);
                             changed |= parameter.value != value;
                             parameter.value = value;
@@ -4011,7 +4019,7 @@ impl ProjectApp {
         self.sync_due = true;
     }
 
-    /// The number a block gives at `item`, `["Value", name]`.
+    /// The number a block gives at `item`, `["Value", key]`.
     fn value_of(&self, id: u64, item: &[String]) -> Option<f64> {
         let node = self.nodes.iter().find(|n| n.id == id)?;
         let [cell, name] = item else {
@@ -4036,7 +4044,7 @@ impl ProjectApp {
             return study.table.points.get(point)?.inputs.get(column).copied();
         }
         (node.as_parameters()?.parameters.iter())
-            .find(|p| &p.name == name)
+            .find(|p| links::key(p.id) == *name)
             .map(|p| p.value)
     }
 
@@ -6219,7 +6227,9 @@ impl ProjectApp {
                         link.target,
                         Continuation {
                             source: source.name.clone(),
-                            step: link.item.get(1).cloned().unwrap_or_default(),
+                            step: (source.link_data().zip(link.item.get(1)))
+                                .map(|(d, k)| links::step_name(d.fe, k))
+                                .unwrap_or_default(),
                             inherited: link.inherited.clone(),
                         },
                     );
@@ -6271,6 +6281,7 @@ impl ProjectApp {
                     (Kind::Measure, _) => measure_rows(
                         n,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
+                        self.measure_description(n.id),
                         self.measure_state(n.id),
                         self.measuring.contains_key(&n.id),
                         self.units,
@@ -6337,7 +6348,7 @@ impl ProjectApp {
                     space: n.space().unwrap_or_default(),
                     has_space: n.space().is_some(),
                     steps: (fe.into_iter().flat_map(|fe| &fe.steps))
-                        .map(|s| s.name.clone())
+                        .map(|s| (links::key(s.id), s.name.clone()))
                         .collect(),
                     continues,
                     rows,
@@ -6789,6 +6800,19 @@ impl ProjectApp {
         (self.nodes.iter().find(|n| n.id == id)).map_or_else(String::new, |n| n.name.clone())
     }
 
+    /// A path of the block `id` as text, see [`path_label`].
+    fn path_label(&self, id: u64, path: &[String]) -> String {
+        path_label(&self.nodes, id, path)
+    }
+
+    /// The name of the item of the key in a category of the setup of the block `id`.
+    fn entry_label(&self, id: u64, category: &str, key: &str) -> String {
+        (self.nodes.iter().find(|n| n.id == id))
+            .and_then(Node::link_data)
+            .and_then(|d| links::entry_name(d.fe, category, key))
+            .unwrap_or_else(|| key.to_owned())
+    }
+
     /// Links `item` of `source` to `slot` of `target`, in place of the links that fill the
     /// same part of the target.
     fn link(&mut self, source: u64, item: Vec<String>, target: u64, slot: Vec<String>) {
@@ -6834,9 +6858,7 @@ impl ProjectApp {
             let (Some(source_fe), Some(target_fe)) = (fe(source), fe(target)) else {
                 return;
             };
-            let step = item
-                .get(1)
-                .and_then(|n| source_fe.steps.iter().find(|s| &s.name == n));
+            let step = item.get(1).and_then(|k| links::results_step(&source_fe, k));
             let Some(step) = step else {
                 return;
             };
@@ -6845,8 +6867,8 @@ impl ProjectApp {
                 Err(why) => {
                     self.output.push(format!(
                         "Not linked: {} of {from} cannot go to {} of {to}: {why}.",
-                        links::label(&item),
-                        links::label(&slot)
+                        self.path_label(source, &item),
+                        self.path_label(target, &slot)
                     ));
                     return;
                 }
@@ -6862,7 +6884,7 @@ impl ProjectApp {
         };
         // An item of a category the target takes from the same source already: taken
         // again if it was left out.
-        if let [cell, category, name] = slot.as_slice()
+        if let [cell, category, key] = slot.as_slice()
             && cell == links::SETUP
             && !results
             && let Some(bundle) = self.links.iter_mut().find(|l| {
@@ -6872,7 +6894,11 @@ impl ProjectApp {
                     && links::setup_category(l) == Some(category)
             })
         {
-            let text = match bundle.excluded.iter().position(|n| n == name) {
+            let name = (self.nodes.iter().find(|n| n.id == source))
+                .and_then(Node::link_data)
+                .and_then(|d| links::entry_name(d.fe, category, key))
+                .unwrap_or_else(|| key.clone());
+            let text = match bundle.excluded.iter().position(|k| k == key) {
                 Some(at) => {
                     bundle.excluded.remove(at);
                     format!("{to} takes {name} from {from} again, with the rest of {category}.")
@@ -6955,20 +6981,21 @@ impl ProjectApp {
         for link in replaced {
             self.output.push(format!(
                 "{to} no longer takes {} from {}.",
-                links::label(&link.item),
+                self.path_label(link.source, &link.item),
                 self.name_of(link.source)
             ));
         }
         // An item a category link of another source offers too comes from here now.
-        if let [_, category, name] = slot.as_slice()
+        if let [_, category, key] = slot.as_slice()
             && !results
         {
+            let name = self.entry_label(source, category, key);
             let others: Vec<String> = (self.links.iter())
                 .filter(|l| {
                     l.target == target
                         && links::is_bundle(l)
                         && links::setup_category(l) == Some(category)
-                        && l.inherited.contains(name)
+                        && l.inherited.contains(key)
                 })
                 .map(|l| self.name_of(l.source))
                 .collect();
@@ -6978,7 +7005,11 @@ impl ProjectApp {
                 ));
             }
         }
-        let (what, step) = (links::label(&item), slot.get(2).map_or("", String::as_str));
+        let what = self.path_label(source, &item);
+        let step = (self.nodes.iter().find(|n| n.id == target))
+            .and_then(Node::link_data)
+            .zip(slot.get(2))
+            .map_or_else(String::new, |(d, k)| links::step_name(d.fe, k));
         let text = match new_usage {
             Some(links::ResultsUse::Submodel) => {
                 format!("{to} takes the displacements of {what} of {from} in {step} (submodel).")
@@ -7009,7 +7040,7 @@ impl ProjectApp {
                 self.parameter_label(target, &slot),
                 item.get(1).map_or("", String::as_str)
             ),
-            None => format!("{to} takes {} from {from}.", links::label(&item)),
+            None => format!("{to} takes {} from {from}.", self.path_label(source, &item)),
         };
         self.output.push(text);
         self.applied.retain(|(id, _), _| *id != target);
@@ -7039,12 +7070,14 @@ impl ProjectApp {
         for link in replaced {
             self.output.push(format!(
                 "{to} no longer measures {} of {}.",
-                links::label(&link.item),
+                self.path_label(link.source, &link.item),
                 self.name_of(link.source)
             ));
         }
-        self.output
-            .push(format!("{to} measures {} of {from}.", links::label(&item)));
+        self.output.push(format!(
+            "{to} measures {} of {from}.",
+            self.path_label(source, &item)
+        ));
         self.links.push(Link {
             source,
             target,
@@ -7065,14 +7098,14 @@ impl ProjectApp {
         for link in self.links.iter().filter(|l| replaced(l)) {
             self.output.push(format!(
                 "{to} no longer takes {} of {}.",
-                links::label(&link.item),
+                self.path_label(link.source, &link.item),
                 self.name_of(link.source)
             ));
         }
         self.links.retain(|l| !replaced(l));
         self.output.push(format!(
             "{to} deforms the mesh of {from} by the displacements of {}.",
-            links::label(&item)
+            self.path_label(source, &item)
         ));
         self.links.push(Link {
             source,
@@ -7134,13 +7167,16 @@ impl ProjectApp {
         for link in replaced {
             self.output.push(format!(
                 "{to} no longer takes {} from {}.",
-                links::label(&link.item),
+                self.path_label(link.source, &link.item),
                 self.name_of(link.source)
             ));
         }
+        let name = (self.nodes.iter().find(|n| n.id == source))
+            .and_then(Node::link_data)
+            .map_or_else(|| step.clone(), |d| links::step_name(d.fe, &step));
         self.output.push(format!(
-            "{to} continues {from} from the state after {step}: it takes the model of {from} \
-             and its steps up to {step}; its own steps follow."
+            "{to} continues {from} from the state after {name}: it takes the model of {from} \
+             and its steps up to {name}; its own steps follow."
         ));
         self.applied.retain(|(id, _), _| *id != target);
         self.links.push(Link {
@@ -7174,7 +7210,7 @@ impl ProjectApp {
         else {
             return;
         };
-        let Some(index) = fe.steps.iter().position(|s| s.name == step) else {
+        let Some(index) = links::step_index(&fe, &step) else {
             return;
         };
         if index + 1 >= fe.steps.len() {
@@ -7186,8 +7222,10 @@ impl ProjectApp {
             self.output.push(format!("Not split while {reason}."));
             return;
         }
-        let moved: Vec<String> = fe.steps[index + 1..]
-            .iter()
+        let moved: Vec<String> = (fe.steps[index + 1..].iter())
+            .map(|s| links::key(s.id))
+            .collect();
+        let moved_names: Vec<String> = (fe.steps[index + 1..].iter())
             .map(|s| s.name.clone())
             .collect();
         let position = (self.graph_node(id))
@@ -7212,10 +7250,11 @@ impl ProjectApp {
         let path = [links::SETUP.to_owned(), "Steps".to_owned()];
         self.set_steps(id, &kept, &path);
         self.output.push(format!(
-            "{} split after {step}: {} continues it with {}.",
+            "{} split after {}: {} continues it with {}.",
             self.name_of(id),
+            fe.steps[index].name,
             self.name_of(new),
-            moved.join(", ")
+            moved_names.join(", ")
         ));
     }
 
@@ -7240,7 +7279,7 @@ impl ProjectApp {
         let (Some(mut source), Some(target)) = (source, target) else {
             return;
         };
-        if source.steps.last().map(|s| &s.name) != link.item.get(1) {
+        if source.steps.last().map(|s| links::key(s.id)).as_ref() != link.item.get(1) {
             self.output.push(format!(
                 "Not merged: {name} continues {into} from a step before its last; only an \
                  analysis that continues from the last step can be merged into it."
@@ -7250,7 +7289,9 @@ impl ProjectApp {
         if !self.close_window(id) {
             return;
         }
-        let moved = links::merge_into(&mut source, &target, &link);
+        let moved: Vec<String> = (links::merge_into(&mut source, &target, &link).iter())
+            .map(|k| links::step_name(&source, k))
+            .collect();
         let path = [links::SETUP.to_owned(), "Steps".to_owned()];
         self.set_steps(link.source, &source, &path);
         // What took results or states of the merged analysis takes them from the other one.
@@ -7311,10 +7352,12 @@ impl ProjectApp {
             if link.inherited.contains(&name) && !link.excluded.contains(&name) {
                 link.excluded.push(name.clone());
                 link.inherited.retain(|n| *n != name);
-                left_out.push((link.source, link.target, name));
+                let category = link.item.get(1).cloned().unwrap_or_default();
+                left_out.push((link.source, link.target, category, name));
             }
         }
-        for (source, target, name) in left_out {
+        for (source, target, category, key) in left_out {
+            let name = self.entry_label(source, &category, &key);
             self.output.push(format!(
                 "{} no longer takes {name} from {}; it keeps its copy.",
                 self.name_of(target),
@@ -7334,7 +7377,7 @@ impl ProjectApp {
             self.output.push(format!(
                 "{} no longer takes {} from {}; it keeps its copy.",
                 self.name_of(target),
-                links::label(&link.item),
+                self.path_label(link.source, &link.item),
                 self.name_of(link.source)
             ));
             self.applied
@@ -7499,14 +7542,17 @@ impl ProjectApp {
                     (links::target_step(link), link.item.get(1))
             {
                 let node = self.nodes.iter().find(|n| n.id == link.source);
-                let displacements = node
-                    .filter(|n| n.as_file().is_none())
-                    .and_then(Node::link_data)
+                let data = node.and_then(Node::link_data);
+                let displacements = (data.as_ref())
+                    .filter(|_| node.is_some_and(|n| n.as_file().is_none()))
                     .and_then(|d| links::writes_displacements(d.fe, source_step));
+                let source_step = (data.as_ref())
+                    .and_then(|d| links::results_step(d.fe, source_step))
+                    .map_or_else(|| source_step.clone(), |s| s.name.clone());
                 incoming.global_sources.push(links::GlobalSource {
                     step: step.to_owned(),
                     source: source.clone(),
-                    source_step: source_step.clone(),
+                    source_step,
                     displacements,
                 });
             }
@@ -7606,7 +7652,7 @@ impl ProjectApp {
                         "{} cannot take the {} of {}: the meshes differ. Temperatures are \
                          taken node by node.",
                         target.name,
-                        links::label(&link.item),
+                        path_label(&self.nodes, link.source, &link.item),
                         source.name
                     );
                     if self.warned.insert(line.clone()) {
@@ -7702,7 +7748,7 @@ impl ProjectApp {
                         "{} cannot take the {} of {}: their meshes differ. Link the mesh, or \
                          continue from a state, so that both have the same nodes.",
                         target.name,
-                        links::label(&link.item),
+                        path_label(&self.nodes, link.source, &link.item),
                         source.name
                     );
                     if self.warned.insert(line.clone()) {
@@ -7948,7 +7994,8 @@ impl ProjectApp {
             let taken = match node.window_mut() {
                 Some(window) => {
                     let taken = window.apply_bundle(&fe, link, &names, &ahead);
-                    window.message(format!("{} taken from {source}", links::label(path)));
+                    let what = links::label(Some(&fe), path);
+                    window.message(format!("{what} taken from {source}"));
                     taken
                 }
                 None => {
@@ -7962,7 +8009,8 @@ impl ProjectApp {
             match payload {
                 Payload::Setup(fe) => {
                     window.apply_setup(&fe, path);
-                    window.message(format!("{} taken from {source}", links::label(path)));
+                    let what = links::label(Some(&fe), path);
+                    window.message(format!("{what} taken from {source}"));
                 }
                 Payload::Objects(copy) => {
                     window.apply_objects(*copy);
@@ -9116,7 +9164,9 @@ struct Bundle {
 /// The state link into an analysis: what it continues from and the steps it takes over.
 struct Continuation {
     source: String,
+    /// The name of the step it continues from.
     step: String,
+    /// The keys of the steps it takes over.
     inherited: Vec<String>,
 }
 
@@ -9131,8 +9181,9 @@ struct BlockView {
     space: ModelSpace,
     /// Whether the data it gives has a model space, `space`.
     has_space: bool,
-    /// Its steps, to split it after one, and the analysis it continues, to merge into.
-    steps: Vec<String>,
+    /// Its steps by key and name, to split it after one, and the analysis it continues, to
+    /// merge into.
+    steps: Vec<(String, String)>,
     continues: Option<String>,
     rows: Vec<Row>,
     loading: bool,
@@ -9204,14 +9255,14 @@ fn chain_marks(fe: &plx_model::FeModel, rows: &[Row]) -> HashMap<Vec<String>, Ch
     for results in [false, true] {
         let listed: Vec<(&Vec<String>, usize)> = (rows.iter())
             .filter_map(|row| {
-                let name = match row.path.as_slice() {
-                    [setup, steps, name] if !results && setup == links::SETUP => {
-                        (steps == links::STEPS).then_some(name)?
+                let key = match row.path.as_slice() {
+                    [setup, steps, key] if !results && setup == links::SETUP => {
+                        (steps == links::STEPS).then_some(key)?
                     }
-                    [group, name] if results && group == links::RESULTS => name,
+                    [group, key] if results && group == links::RESULTS => key,
                     _ => return None,
                 };
-                let index = fe.steps.iter().position(|s| &s.name == name)?;
+                let index = links::step_index(fe, key)?;
                 Some((&row.path, index))
             })
             .collect();
@@ -9249,12 +9300,12 @@ fn chain_marks(fe: &plx_model::FeModel, rows: &[Row]) -> HashMap<Vec<String>, Ch
     marks
 }
 
-/// Where the step `name` starts and what it passes on, for the tooltips of its rows.
-fn chain_tip(fe: Option<&plx_model::FeModel>, name: &str) -> String {
+/// Where the step of the key starts and what it passes on, for the tooltips of its rows.
+fn chain_tip(fe: Option<&plx_model::FeModel>, step: &str) -> String {
     let Some(fe) = fe else {
         return String::new();
     };
-    let Some(index) = fe.steps.iter().position(|s| s.name == name) else {
+    let Some(index) = links::step_index(fe, step) else {
         return String::new();
     };
     let handover = fe.step_handover(index);
@@ -9363,13 +9414,23 @@ fn exposed_rows(
         path.push(exposed.key.to_string());
         let gone = fe.value_in(geometry, &exposed.path).is_none();
         let item = &exposed.path.item;
+        let named = match item.is_meshing() {
+            true => geometry.and_then(|g| g.item_name(item)),
+            false => fe.item_name(item),
+        };
         let tip = if gone {
-            format!(
-                "{} '{}' no longer has this number: remove the parameter with a right-click, \
-                 or give the item its name again.",
-                item.noun(),
-                item.name()
-            )
+            match named {
+                Some(name) => format!(
+                    "{} '{name}' no longer has this number: remove the parameter with a \
+                     right-click.",
+                    item.noun(),
+                ),
+                None => format!(
+                    "The {} of this parameter no longer exists: remove the parameter with a \
+                     right-click.",
+                    item.noun().to_lowercase(),
+                ),
+            }
         } else {
             format!(
                 "{}: {} of {} '{}'. Drag a number of a Parameters block or a parameter study \
@@ -9377,7 +9438,7 @@ fn exposed_rows(
                 exposed.name,
                 exposed.path.field.label().to_lowercase(),
                 item.noun().to_lowercase(),
-                item.name()
+                named.unwrap_or_default()
             )
             .replace(":  of", ": the value of")
         };
@@ -9547,7 +9608,7 @@ fn block_rows(
             let path = vec![links::SETUP.to_owned(), category.to_owned()];
             let open = expanded.contains(&path);
             let entries = fe
-                .map(|fe| links::entries(fe, category))
+                .map(|fe| links::entry_names(fe, category))
                 .unwrap_or_default();
             let linked: Vec<&Bundle> = bundles.iter().filter(|b| b.path == path).collect();
             let mut tip = if category == "Initial Conditions" {
@@ -9591,12 +9652,12 @@ fn block_rows(
                 path: path.clone(),
             });
             if open {
-                for name in entries {
+                for (key, name) in entries {
                     let mut path = path.clone();
-                    path.push(name.clone());
+                    path.push(key.clone());
                     // A step has inputs for the results of other analyses below it.
                     let step = (category == links::STEPS)
-                        .then(|| fe.and_then(|fe| fe.steps.iter().find(|s| s.name == name)))
+                        .then(|| fe.and_then(|fe| links::step_of(fe, &key)))
                         .flatten();
                     let inputs = step.map(links::step_inputs).unwrap_or_default();
                     let step_open = expanded.contains(&path);
@@ -9605,7 +9666,7 @@ fn block_rows(
                             "{name}: drag to another analysis to link its definition. Open \
                              it for its inputs, or drop the results of a step of another \
                              analysis here: they go to the input that fits.{}",
-                            chain_tip(fe, &name)
+                            chain_tip(fe, &key)
                         )
                     } else {
                         format!("{name}: drag to another analysis to link it")
@@ -9684,13 +9745,14 @@ fn block_rows(
             ),
             path: path.clone(),
         });
-        for name in c.inherited.iter().filter(|_| open) {
+        for key in c.inherited.iter().filter(|_| open) {
             let mut path = path.clone();
-            path.push(name.clone());
+            path.push(key.clone());
+            let name = fe.map_or_else(|| key.clone(), |fe| links::step_name(fe, key));
             rows.push(Row {
                 text: name.clone(),
                 depth: 2,
-                icon: step_icon(fe, name),
+                icon: step_icon(fe, key),
                 state: None,
                 expander: None,
                 input: false,
@@ -9708,9 +9770,9 @@ fn block_rows(
         .map(|fe| fe.steps.as_slice())
         .unwrap_or_default()
         .iter()
-        .filter(|s| !taken.contains(&s.name))
+        .filter(|s| !taken.contains(&links::key(s.id)))
     {
-        let path = vec![links::RESULTS.to_owned(), step.name.clone()];
+        let path = vec![links::RESULTS.to_owned(), links::key(step.id)];
         let tip = if step.active {
             format!(
                 "Results of {}, what it produces: drag them to an input of a step under \
@@ -9718,7 +9780,7 @@ fn block_rows(
                  results), to the State row of another analysis, which continues from them, \
                  or to empty space to continue in a new analysis.{}",
                 step.name,
-                chain_tip(fe, &step.name)
+                chain_tip(fe, &links::key(step.id))
             )
         } else {
             format!("{} is deactivated and has no results", step.name)
@@ -9774,9 +9836,10 @@ fn collection_rows(
         ),
         path: path.clone(),
     }];
-    for name in names.into_iter().filter(|_| open) {
+    let items = links::entry_names(fe, title);
+    for (key, name) in items.into_iter().filter(|_| open) {
         let mut path = path.clone();
-        path.push(name.to_owned());
+        path.push(key);
         rows.push(Row {
             tip: format!("{name}: drag it to the {title} row of an analysis to link it"),
             text: name.to_owned(),
@@ -10016,11 +10079,10 @@ fn take_refine_input(nodes: &mut [Node], links: &[Link], id: u64) {
                 }
                 // The parts of the geometry are meshed anew with the finer sizes by the
                 // analysis the geometry goes to: their meshes are not given on.
-                let cad: Vec<String> = (copy.origins.iter())
-                    .filter(|(name, _)| copy.origins.is_cad(name))
-                    .map(|(name, _)| name.to_owned())
+                let cad: Vec<plx_model::Id> = (copy.origins.iter())
+                    .filter(|&(id, _)| copy.origins.is_cad(id))
+                    .map(|(id, _)| id)
                     .collect();
-                let cad = plx_model::body_ids(&copy.mesh, &cad);
                 copy.mesh.remove_bodies(&cad);
                 copy.origins.reconcile(&copy.mesh);
                 refine.model.data_mut().take_mesh(copy);
@@ -10159,18 +10221,18 @@ fn refusal(
         return Some(match (kind(item), kind(slot)) {
             (Some(given), Some(taken)) => format!(
                 "{} of {from} is {given} and {} of {to} takes {taken}.",
-                links::label(item),
-                links::label(slot),
+                path_label(nodes, source, item),
+                path_label(nodes, target, slot),
             ),
             (Some(given), None) => format!(
                 "{} of {from} is {given}, which {} of {to} does not take.",
-                links::label(item),
-                links::label(slot),
+                path_label(nodes, source, item),
+                path_label(nodes, target, slot),
             ),
             (None, _) => format!(
                 "{} of {from} gives nothing {} of {to} takes.",
-                links::label(item),
-                links::label(slot),
+                path_label(nodes, source, item),
+                path_label(nodes, target, slot),
             ),
         });
     }
@@ -10250,7 +10312,7 @@ fn refusal(
         .then(|| {
             format!(
                 "{to} reads numbers, and {} of {from} is none.",
-                links::label(item)
+                path_label(nodes, source, item)
             )
         });
     }
@@ -10295,17 +10357,40 @@ fn refusal(
         else {
             return Some(format!("{from} or {to} is still loading."));
         };
-        let step =
-            (item.get(1)).and_then(|n| source_data.fe.steps.iter().find(|s| &s.name == n))?;
+        let step = (item.get(1)).and_then(|k| links::results_step(source_data.fe, k))?;
         if let Err(why) = links::results_slot(step, target_data.fe, slot) {
             return Some(format!(
                 "{} of {from} cannot go to {} of {to}: {why}.",
-                links::label(item),
-                links::label(slot)
+                path_label(nodes, source, item),
+                path_label(nodes, target, slot)
             ));
         }
     }
     None
+}
+
+/// A path of the block `id` as text, with the names of the items and steps its keys stand
+/// for, see [`links::label`].
+fn path_label(nodes: &[Node], id: u64, path: &[String]) -> String {
+    let node = nodes.iter().find(|n| n.id == id);
+    // A parameter or a column of a study, named by its id.
+    if let (Some(node), [cell, key]) = (node, path)
+        && (cell == links::VALUE || cell == links::LOOP || cell == links::OUTPUTS)
+    {
+        let parameter = (node.as_parameters().into_iter())
+            .flat_map(|b| &b.parameters)
+            .find(|p| links::key(p.id) == *key)
+            .map(|p| &p.name);
+        let column = (node.as_study().into_iter())
+            .flat_map(|s| s.table.inputs.iter().chain(&s.table.outputs))
+            .find(|c| links::key(c.id) == *key)
+            .map(|c| &c.name);
+        if let Some(name) = parameter.or(column) {
+            return format!("{cell} > {name}");
+        }
+    }
+    let data = node.and_then(Node::link_data);
+    links::label(data.as_ref().map(|d| d.fe), path)
 }
 
 /// The label of the parameter row `slot`, `["Parameters", key]`, of a block.
@@ -10384,7 +10469,7 @@ fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
             table.inputs[table.input(name)?].kind
         }
         [cell, name] if cell == links::VALUE => (node.as_parameters()?.parameters.iter())
-            .find(|p| &p.name == name)
+            .find(|p| links::key(p.id) == *name)
             .map(|p| p.kind),
         // The Inputs row of a study adds a column of any kind; a column without one yet
         // takes any too.
@@ -10849,32 +10934,6 @@ fn export_rows(node: &Node, base: Option<&Path>, incoming: &[(Vec<String>, Strin
 /// The first part of the path of a parameter row of a mesh block.
 const PARAMETERS: &str = links::PARAMETERS;
 
-/// The regions a measure block can take its value in, by name, with their nodes on the mesh
-/// as it is now: the node sets of the mesh and of the model, and the regions of the boundary
-/// conditions and loads, such as "Fixed (boundary condition)". Those picked on the geometry
-/// or on the sides of a mesh block are found on each new mesh again.
-fn measure_regions(data: &links::Data) -> BTreeMap<String, Vec<plx_mesh::NodeId>> {
-    let mut regions: BTreeMap<String, Vec<plx_mesh::NodeId>> = data.mesh.node_sets.clone();
-    let mut add = |name: String, region: &plx_model::Region| {
-        let nodes = region.nodes(data.mesh);
-        if !nodes.is_empty() {
-            regions.entry(name).or_insert(nodes);
-        }
-    };
-    for set in &data.fe.mesh_sets {
-        add(set.name.clone(), &set.region);
-    }
-    for step in &data.fe.steps {
-        for bc in &step.boundary_conditions {
-            add(format!("{} (boundary condition)", bc.name), &bc.region);
-        }
-        for load in &step.loads {
-            add(format!("{} (load)", load.name), &load.region);
-        }
-    }
-    regions
-}
-
 /// The key of the factor of a refine mesh block, the parameter row it takes numbers at.
 /// Which mesh of an analysis counts for the fingerprint of the blocks a study runs.
 #[derive(Clone, Copy, PartialEq)]
@@ -10910,9 +10969,7 @@ fn study_analysis_print(data: links::Data, mesh: StudyMesh, driven: impl Fn(u32)
     let moved: Vec<usize> = (data.fe.exposed.iter())
         .filter(|e| driven(e.key))
         .filter_map(|e| match &e.path.item {
-            plx_model::ItemRef::MeshOperation(name) => {
-                data.fe.mesh_operations.iter().find(|o| &o.name == name)
-            }
+            plx_model::ItemRef::MeshOperation(id) => data.fe.mesh_operation(*id),
             _ => None,
         })
         .flat_map(|o| o.part_indices(data.mesh))
@@ -10958,7 +11015,7 @@ fn parameter_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
     };
     (block.parameters.iter().enumerate())
         .map(|(index, parameter)| Row {
-            path: vec![links::VALUE.to_owned(), parameter.name.clone()],
+            path: vec![links::VALUE.to_owned(), links::key(parameter.id)],
             text: parameter.name.clone(),
             depth: 0,
             icon: NodeIcon::Setup,
@@ -10968,7 +11025,9 @@ fn parameter_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
             output: true,
             linked_from: (incoming.iter())
                 .find(|(slot, _)| {
-                    slot.len() == 2 && slot[0] == links::VALUE && slot[1] == parameter.name
+                    slot.len() == 2
+                        && slot[0] == links::VALUE
+                        && slot[1] == links::key(parameter.id)
                 })
                 .map(|(_, source)| source.clone()),
             collection: false,
@@ -10990,6 +11049,7 @@ fn parameter_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
 fn measure_rows(
     node: &Node,
     incoming: &[(Vec<String>, String)],
+    what: String,
     state: CellState,
     busy: bool,
     units: UnitSystem,
@@ -11030,7 +11090,7 @@ fn measure_rows(
     };
     let what = row(
         &[],
-        measure.kind.describe(),
+        what,
         NodeIcon::Setup,
         "What the block measures; double-click the block to change it.".into(),
     );
@@ -11565,7 +11625,7 @@ fn shown_row(rows: &[Row], path: &[String]) -> Option<usize> {
 
 /// The symbol of the type of the step called `name`.
 fn step_icon(fe: Option<&plx_model::FeModel>, name: &str) -> NodeIcon {
-    (fe.and_then(|fe| fe.steps.iter().find(|s| s.name == name))).map_or(NodeIcon::Step, |s| {
+    (fe.and_then(|fe| links::step_of(fe, name))).map_or(NodeIcon::Step, |s| {
         NodeIcon::StepType(StepGlyph::from(&s.kind))
     })
 }
@@ -13550,7 +13610,7 @@ fn node_menu(
     ui: &mut egui::Ui,
     id: u64,
     kind: Kind,
-    steps: &[String],
+    steps: &[(String, String)],
     continues: Option<&str>,
     layout: &Layout,
     actions: &mut Vec<Action>,
@@ -13625,8 +13685,8 @@ fn node_menu(
     let split = steps.len() > 1;
     ui.add_enabled_ui(split, |ui| {
         ui.menu_button("Split After", |ui| {
-            for step in &steps[..steps.len().saturating_sub(1)] {
-                entry(ui, step, "", Action::Split(id, step.clone()));
+            for (key, name) in &steps[..steps.len().saturating_sub(1)] {
+                entry(ui, name, "", Action::Split(id, key.clone()));
             }
         })
         .response
@@ -14107,7 +14167,7 @@ mod tests {
         let path = vec![links::SETUP.to_owned(), "Materials".to_owned()];
         assert!(links::exists(data, &path));
         let mut steel = path.clone();
-        steel.push("Steel".into());
+        steel.push(links::key(set.materials[0].id));
         assert!(links::exists(data, &steel));
         assert!(links::compatible(&steel, &steel) && links::compatible(&path, &path));
         let mut target = plx_model::FeModel::default();
@@ -14141,7 +14201,8 @@ mod tests {
         assert_eq!(node.kind(), Kind::CrossSections);
         assert!(node.status().is_none(), "a source is not solved");
         // Its height is a parameter of the block, which a study sets.
-        let height = ValuePath::new(ItemRef::CrossSection("Girder".into()), Field::BeamB);
+        let girder = set.cross_sections[0].id;
+        let height = ValuePath::new(ItemRef::CrossSection(girder), Field::BeamB);
         let fe = node.exposing_fe_mut().unwrap();
         let key = fe.expose(height.clone());
         assert!(fe.set_value(&height, 0.05));
@@ -14154,7 +14215,7 @@ mod tests {
         ];
         assert!(links::exists(data, &path));
         let mut girder = path.clone();
-        girder.push("Girder".into());
+        girder.push(links::key(set.cross_sections[0].id));
         let mut target = plx_model::FeModel::default();
         links::apply_setup(&mut target, data.fe, &girder);
         assert_eq!(
@@ -14423,7 +14484,7 @@ mod tests {
         let space = ModelSpace::ThreeD;
         let mut origins = plx_model::PartOrigins::default();
         origins.set_meshed(
-            "SOLID-1",
+            plx_model::object_id(&mesh, "SOLID-1").unwrap(),
             plx_model::fingerprint::mesh_input(&geometry, &[], space, "SOLID-1"),
         );
         let mut model = plx_model::FeModel::default();
@@ -14521,10 +14582,44 @@ mod tests {
                 fe: &fe,
                 origins: &Default::default(),
             };
-            let regions = measure_regions(&data);
+            let sources = crate::measure::Sources::of(data.fe, data.mesh);
+            let nodes = |name: &str| {
+                (sources.regions.iter())
+                    .find(|r| r.name == name)
+                    .map(|r| r.nodes.clone())
+            };
             // The face picked on the box is its side X+ on the coarse and the fine mesh.
-            assert_eq!(regions["Fixed (boundary condition)"], mesh.node_sets["X+"]);
-            assert!(regions.contains_key("X-"));
+            assert_eq!(
+                nodes("Fixed (boundary condition)").unwrap(),
+                mesh.node_sets["X+"]
+            );
+            assert!(nodes("X-").is_some());
+        }
+    }
+
+    /// The path a link names a parameter or a column of a study by, `[cell, key]`, found
+    /// by its name among `nodes`; another name, such as `Result`, as it is.
+    fn named_path(nodes: &[Node]) -> impl Fn(&[&str]) -> Vec<String> + use<> {
+        let mut keys: Vec<(String, String)> = Vec::new();
+        for node in nodes {
+            for parameter in node.as_parameters().into_iter().flat_map(|b| &b.parameters) {
+                keys.push((parameter.name.clone(), links::key(parameter.id)));
+            }
+            let columns = (node.as_study().into_iter())
+                .flat_map(|s| s.table.inputs.iter().chain(&s.table.outputs));
+            for column in columns {
+                keys.push((column.name.clone(), links::key(column.id)));
+            }
+        }
+        move |path| {
+            (path.iter().enumerate())
+                .map(
+                    |(i, part)| match (keys.iter()).find(|(name, _)| i == 1 && name == part) {
+                        Some((_, key)) => key.clone(),
+                        None => (*part).to_owned(),
+                    },
+                )
+                .collect()
         }
     }
 
@@ -14542,7 +14637,8 @@ mod tests {
         let node = Node::read(ProjectNode::Parameters(set.clone()));
         assert_eq!(node.kind(), Kind::Parameters);
         let rows = parameter_rows(&node, &[]);
-        assert_eq!(rows[1].path, ["Value", "Cells"]);
+        assert_eq!(rows[1].path, ["Value", &links::key(set.parameters[1].id)]);
+        assert_eq!(rows[1].text, "Cells");
         // A parameter gives its value and takes one from another parameter.
         assert!(rows.iter().all(|r| r.output && r.input));
         let mut node = node;
@@ -14604,7 +14700,8 @@ mod tests {
         assert_eq!(rows.last().unwrap().path, [links::VALUE, RESULT]);
         assert!(rows.last().unwrap().output);
         let mut nodes = vec![parameters, math, switch];
-        let value = |name: &str| vec![links::VALUE.to_owned(), name.to_owned()];
+        let named = named_path(&nodes);
+        let value = |name: &str| named(&[links::VALUE, name]);
         let input = |key: &str| vec![links::PARAMETERS.to_owned(), key.to_owned()];
         // Without links, A and B of a product take numbers of any kind.
         assert_eq!(
@@ -14678,7 +14775,8 @@ mod tests {
             ..Default::default()
         }));
         let mut nodes = vec![parameters, math, sum];
-        let value = |name: &str| vec![links::VALUE.to_owned(), name.to_owned()];
+        let named = named_path(&nodes);
+        let value = |name: &str| named(&[links::VALUE, name]);
         let input = |key: &str| vec![links::PARAMETERS.to_owned(), key.to_owned()];
         let link = |item: Vec<String>, slot: Vec<String>, from_math: bool| Link {
             source: if from_math { 2 } else { 1 },
@@ -14785,7 +14883,8 @@ mod tests {
             math(4, MathOp::Multiply),
             math(5, MathOp::Divide),
         ];
-        let value = |name: &str| vec![links::VALUE.to_owned(), name.to_owned()];
+        let named = named_path(&nodes);
+        let value = |name: &str| named(&[links::VALUE, name]);
         let input = |key: &str| vec![links::PARAMETERS.to_owned(), key.to_owned()];
         let link = |source, item: Vec<String>, target, key: &str| Link {
             source,
@@ -14875,7 +14974,9 @@ mod tests {
             elements: vec![1],
         });
         let mut model = plx_model::FeModel::default();
+        let transform = plx_model::Id::new();
         let shift = plx_model::MeshOperation {
+            id: transform,
             name: "Transform-1".into(),
             parts: mesh.ids_of(&["A"]),
             kind: plx_model::MeshOperationKind::Transform(plx_mesh::MeshTransform::Translate([
@@ -14884,7 +14985,7 @@ mod tests {
         };
         model.set_mesh_operations(&mut mesh, vec![shift]);
         let path = plx_model::ValuePath::new(
-            plx_model::ItemRef::MeshOperation("Transform-1".into()),
+            plx_model::ItemRef::MeshOperation(transform),
             plx_model::Field::Y,
         );
         let key = model.expose(path.clone());
@@ -14928,14 +15029,12 @@ mod tests {
             system: None,
             follower: false,
         });
+        let item = plx_model::ItemRef::Load {
+            step: step.id,
+            item: step.loads[0].id,
+        };
         model.steps.push(step);
-        let force = plx_model::ValuePath::new(
-            plx_model::ItemRef::Load {
-                step: "Step-1".into(),
-                name: "Force-1".into(),
-            },
-            plx_model::Field::Y,
-        );
+        let force = plx_model::ValuePath::new(item, plx_model::Field::Y);
         let key = model.expose(force.clone());
         let data = ProjectAnalysis {
             model,
@@ -14963,11 +15062,12 @@ mod tests {
         assert_eq!(fe.value_at(&force), Some(-50.0));
         let nodes = vec![analysis, parameters];
         let slot = path(&["Parameters", &key.to_string()]);
+        let named = named_path(&nodes);
         assert_eq!(
-            refusal(&nodes, &[], 2, &path(&["Value", "Load"]), 1, &slot),
+            refusal(&nodes, &[], 2, &named(&["Value", "Load"]), 1, &slot),
             None
         );
-        let length = refusal(&nodes, &[], 2, &path(&["Value", "Width"]), 1, &slot).unwrap();
+        let length = refusal(&nodes, &[], 2, &named(&["Value", "Width"]), 1, &slot).unwrap();
         assert!(
             length.contains("a length") && length.contains("a force"),
             "{length}"
@@ -14988,7 +15088,8 @@ mod tests {
                 report: None,
             })),
         ));
-        let refused = |item: &[&str]| refusal(&nodes, &[], 3, &path(item), 1, &slot);
+        let named = named_path(&nodes[2..]);
+        let refused = |item: &[&str]| refusal(&nodes, &[], 3, &named(item), 1, &slot);
         assert_eq!(refused(&["Loop"]), None);
         assert_eq!(refused(&["Loop", "Any"]), None);
         assert!(refused(&["Loop", "Width"]).is_some());
@@ -15011,6 +15112,7 @@ mod tests {
         let rows = measure_rows(
             &node,
             &incoming,
+            String::new(),
             CellState::UpToDate,
             false,
             UnitSystem::default(),
@@ -15049,6 +15151,7 @@ mod tests {
         let rows = measure_rows(
             &node,
             &incoming,
+            String::new(),
             CellState::Missing,
             false,
             UnitSystem::default(),
@@ -15072,13 +15175,14 @@ mod tests {
         );
         let nodes = vec![node, parameters];
         let x = path(&["Parameters", "x"]);
+        let named = named_path(&nodes);
         assert_eq!(value_kind(&nodes, 5, &x), Some(ValueKind::LENGTH));
         assert_eq!(parameter_label(&nodes, 5, &x), "X");
         assert_eq!(
-            refusal(&nodes, &[], 2, &path(&["Value", "Length"]), 5, &x),
+            refusal(&nodes, &[], 2, &named(&["Value", "Length"]), 5, &x),
             None
         );
-        assert!(refusal(&nodes, &[], 2, &path(&["Value", "Load"]), 5, &x).is_some());
+        assert!(refusal(&nodes, &[], 2, &named(&["Value", "Load"]), 5, &x).is_some());
         // Another measure has no coordinates to link to.
         let mut extreme = nodes;
         if let Some(measure) = extreme[0].as_measure_mut() {
@@ -15089,6 +15193,7 @@ mod tests {
             measure_rows(
                 &extreme[0],
                 &[],
+                String::new(),
                 CellState::Missing,
                 false,
                 UnitSystem::default()
@@ -15191,31 +15296,34 @@ mod tests {
         // The analysis has a step to solve anew ...
         assert!(node.results_out_of_date());
         // ... but a submodel taking the results of the first step keeps them.
-        let link = |step: &str, input: &str| Link {
+        let keys: Vec<String> = (node.link_data().unwrap().fe.steps.iter())
+            .map(|s| links::key(s.id))
+            .collect();
+        let link = |step: usize, input: &str| Link {
             source: 1,
             target: 2,
-            item: vec![links::RESULTS.into(), step.into()],
+            item: vec![links::RESULTS.into(), keys[step].clone()],
             slot: ["Setup", "Steps", "Step-1", input]
                 .map(String::from)
                 .to_vec(),
             ..Default::default()
         };
-        assert!(!node.out_of_date_for(&link("Step-1", "Global results")));
-        assert!(node.out_of_date_for(&link("Step-2", "Global results")));
+        assert!(!node.out_of_date_for(&link(0, "Global results")));
+        assert!(node.out_of_date_for(&link(1, "Global results")));
         // Eigenmodes are written anew by every frequency step.
-        assert!(node.out_of_date_for(&link("Step-1", "Eigenmodes")));
+        assert!(node.out_of_date_for(&link(0, "Eigenmodes")));
         // A renamed first step keeps them: the solver computes the same.
         if let Some(data) = node.as_analysis_mut().and_then(|a| a.data.as_mut()) {
             data.model.steps[0].name = "Load".into();
         }
         refreshed(&mut node);
-        assert!(!node.out_of_date_for(&link("Load", "Global results")));
+        assert!(!node.out_of_date_for(&link(0, "Global results")));
         // A changed first step does not.
         if let Some(data) = node.as_analysis_mut().and_then(|a| a.data.as_mut()) {
             data.model.steps[0].active = false;
         }
         refreshed(&mut node);
-        assert!(node.out_of_date_for(&link("Load", "Global results")));
+        assert!(node.out_of_date_for(&link(0, "Global results")));
     }
 
     #[test]
@@ -15342,7 +15450,7 @@ mod tests {
             "Geometry of Plate is a geometry and Setup of Analysis-2 takes a setup."
         );
         // A number has no model space: it goes to a length of the mesh block.
-        let width = path(&["Value", "Width"]);
+        let width = named_path(&nodes)(&["Value", "Width"]);
         let slot = path(&["Parameters", "lx"]);
         assert_eq!(refusal(&nodes, &[], 5, &width, 3, &slot), None);
         assert!(refusal(&nodes, &[], 5, &width, 3, &path(&["Parameters", "nx"])).is_some());
@@ -15595,7 +15703,8 @@ mod tests {
         for group in [vec!["Setup", "Steps"], vec!["Results"]] {
             let mark = |step: &str| {
                 let mut path: Vec<String> = group.iter().map(|p| p.to_string()).collect();
-                path.push(step.to_owned());
+                let step = model.steps.iter().find(|s| s.name == step).unwrap();
+                path.push(links::key(step.id));
                 marks[&path]
             };
             // The state flows from Preload past Modes to Unload.
@@ -15611,7 +15720,7 @@ mod tests {
         }
         // The tooltip of a step row says where it starts.
         let row = (rows.iter())
-            .find(|r| r.path == ["Results", "Modes"])
+            .find(|r| r.path == ["Results".to_owned(), links::key(model.steps[1].id)])
             .unwrap();
         assert!(row.tip.contains("Base: End of Preload"), "{}", row.tip);
     }
@@ -15663,6 +15772,7 @@ mod tests {
         assert_ne!(print(&fine, &empty, StudyMesh::Remeshed), remeshed);
         let mut setup = coarse.clone();
         setup.mesh_items.push(plx_model::MeshSetupItem {
+            id: plx_model::Id::new(),
             name: "Local-1".into(),
             kind: plx_model::MeshSetupKind::LocalMeshSize {
                 faces: vec![1],
@@ -15717,9 +15827,10 @@ mod tests {
             brep: "shapes".into(),
             meshing: plx_model::MeshingParameters::default(),
             mesh_items: vec![plx_model::MeshSetupItem {
+                id: plx_model::Id::new(),
                 name: "Meshing_Parameters-1".into(),
                 kind: plx_model::MeshSetupKind::MeshingParameters {
-                    parts: vec!["PART_1".into()],
+                    parts: vec![crate::test_ids::named("PART_1")],
                     parameters: plx_model::MeshingParameters {
                         max_size: 0.03,
                         ..Default::default()
@@ -15730,17 +15841,20 @@ mod tests {
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
+            ids: vec![plx_model::PartId {
+                name: "PART_1".into(),
+                id: crate::test_ids::named("PART_1"),
+            }],
             from_link: false,
             operations: Vec::new(),
             input: None,
         };
         let path = plx_model::ValuePath::new(
-            plx_model::ItemRef::MeshSetup("Meshing_Parameters-1".into()),
+            plx_model::ItemRef::MeshSetup(geometry.mesh_items[0].id),
             plx_model::Field::MaxElementSize,
         );
         let mut model = plx_model::FeModel::default();
-        let key = model.expose(path.clone());
+        let key = model.expose_in(Some(&geometry), path.clone());
         let input = |g: &plx_model::Geometry| {
             plx_model::fingerprint::mesh_input(g, &[], Default::default(), "PART_1")
         };

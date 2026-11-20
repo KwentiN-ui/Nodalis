@@ -5,7 +5,7 @@
 //! need node or element sets for this; the input file writer derives them. Sets can still be
 //! defined in the Mesh branch of the tree, by a selection like any region.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use egui::Ui;
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
@@ -137,6 +137,50 @@ impl Source {
     }
 }
 
+/// A set a region is on: a user-defined set of the model, kept by id, or one that came with
+/// the mesh, by name.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum SetChoice {
+    #[default]
+    None,
+    Mesh(String),
+    User(Id),
+}
+
+impl SetChoice {
+    /// The sets of the mesh of the kind, with their names: user-defined ones by id.
+    fn all(kind: plx_model::SetKind, mesh: &FeMesh) -> Vec<(SetChoice, String)> {
+        let user: BTreeMap<(plx_model::SetKind, &str), Id> = (mesh.user_sets.iter())
+            .map(|(&id, (kind, name))| ((*kind, name.as_str()), id))
+            .collect();
+        (kind.names(mesh).into_iter())
+            .map(|name| match user.get(&(kind, name)) {
+                Some(&id) => (SetChoice::User(id), name.to_owned()),
+                None => (SetChoice::Mesh(name.to_owned()), name.to_owned()),
+            })
+            .collect()
+    }
+}
+
+/// The kind of set a set source picks.
+fn set_kind(source: Source) -> Option<plx_model::SetKind> {
+    match source {
+        Source::NodeSet => Some(plx_model::SetKind::Nodes),
+        Source::ElementSet => Some(plx_model::SetKind::Elements),
+        Source::Surface => Some(plx_model::SetKind::Surface),
+        _ => None,
+    }
+}
+
+/// The source that picks sets of the kind.
+fn set_source(kind: plx_model::SetKind) -> Source {
+    match kind {
+        plx_model::SetKind::Nodes => Source::NodeSet,
+        plx_model::SetKind::Elements => Source::ElementSet,
+        plx_model::SetKind::Surface => Source::Surface,
+    }
+}
+
 /// A region while it is edited in a dialog.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RegionDraft {
@@ -152,7 +196,7 @@ pub(crate) struct RegionDraft {
     /// faces they turn into those, so only one of the histories is in use at a time.
     geometry: History<CadEntity>,
     parts: PartPicks,
-    set: String,
+    set: SetChoice,
     /// The reference point, or the remote displacement or force whose point the region is.
     point: Option<Id>,
     /// Set by the confirm button next to "...": the selection is taken over and its window
@@ -225,7 +269,7 @@ impl RegionDraft {
             edges: History::default(),
             geometry: History::default(),
             parts: PartPicks::default(),
-            set: String::new(),
+            set: SetChoice::None,
             point: None,
             locked: false,
         }
@@ -273,7 +317,13 @@ impl RegionDraft {
                     Region::ElementSet(_) => Source::ElementSet,
                     _ => Source::Surface,
                 };
-                draft.set = set.clone();
+                draft.set = SetChoice::Mesh(set.clone());
+            }
+            Region::Set(id) => {
+                if let Some((kind, _)) = mesh.user_set(*id) {
+                    draft.source = set_source(kind);
+                }
+                draft.set = SetChoice::User(*id);
             }
             Region::ReferencePoint(point) => {
                 draft.source = if sources.contains(&Source::ReferencePoint) {
@@ -317,6 +367,8 @@ impl RegionDraft {
                 Region::NodeSet(_) => sources.contains(&Source::NodeSet),
                 Region::ElementSet(_) => sources.contains(&Source::ElementSet),
                 Region::Surface(_) => sources.contains(&Source::Surface),
+                Region::Set(id) => (mesh.user_set(*id))
+                    .is_some_and(|(kind, _)| sources.contains(&set_source(kind))),
                 Region::ReferencePoint(_) => {
                     sources.contains(&Source::ReferencePoint)
                         || sources.contains(&Source::PointMass)
@@ -345,9 +397,11 @@ impl RegionDraft {
                 Target::Lines => Region::Edges(self.edges.items().into_iter().collect()),
             },
             Source::Parts => Region::Parts(self.parts.ids().into_iter().collect()),
-            Source::NodeSet => Region::NodeSet(self.set.clone()),
-            Source::ElementSet => Region::ElementSet(self.set.clone()),
-            Source::Surface => Region::Surface(self.set.clone()),
+            Source::NodeSet | Source::ElementSet | Source::Surface => match &self.set {
+                SetChoice::User(id) => Region::Set(*id),
+                SetChoice::Mesh(name) => Region::named(set_kind(self.source).unwrap(), name),
+                SetChoice::None => Region::named(set_kind(self.source).unwrap(), ""),
+            },
             // Without a point chosen the region is empty, see `is_empty`.
             Source::ReferencePoint | Source::PointMass => {
                 (self.point).map_or(Region::Nodes(Vec::new()), Region::ReferencePoint)
@@ -382,7 +436,7 @@ impl RegionDraft {
                 self.point.is_none()
             }
             Source::World => false,
-            _ => self.set.is_empty(),
+            _ => self.set == SetChoice::None,
         }
     }
 
@@ -725,20 +779,20 @@ impl RegionDraft {
                     ui.weak("Fixed ground.");
                 }
                 Source::NodeSet | Source::ElementSet | Source::Surface => {
-                    let names: Vec<&String> = match self.source {
-                        Source::NodeSet => model.mesh().node_sets.keys().collect(),
-                        Source::ElementSet => model.mesh().element_sets.keys().collect(),
-                        _ => model.mesh().surfaces.keys().collect(),
-                    };
-                    if names.is_empty() {
+                    let kind = set_kind(self.source).unwrap();
+                    let choices = SetChoice::all(kind, model.mesh());
+                    if choices.is_empty() {
                         ui.weak("The mesh contains no such sets.");
                     }
+                    let selected = (choices.iter())
+                        .find(|(choice, _)| *choice == self.set)
+                        .map_or("", |(_, name)| name.as_str());
                     egui::ComboBox::from_id_salt("region set")
-                        .selected_text(self.set.as_str())
+                        .selected_text(selected)
                         .width(crate::dock::fit_width(ui, 200.0))
                         .show_ui(ui, |ui| {
-                            for name in names {
-                                ui.selectable_value(&mut self.set, name.clone(), name);
+                            for (choice, name) in &choices {
+                                ui.selectable_value(&mut self.set, choice.clone(), name);
                             }
                         });
                 }
@@ -774,13 +828,9 @@ impl RegionDraft {
                 }
             }
             Source::NodeSet | Source::ElementSet | Source::Surface => {
-                let mut names: Vec<&String> = match self.source {
-                    Source::NodeSet => mesh.node_sets.keys().collect(),
-                    Source::ElementSet => mesh.element_sets.keys().collect(),
-                    _ => mesh.surfaces.keys().collect(),
-                };
-                if !names.iter().any(|n| **n == self.set) {
-                    self.set = names.drain(..).next().cloned().unwrap_or_default();
+                let choices = SetChoice::all(set_kind(self.source).unwrap(), mesh);
+                if !choices.iter().any(|(choice, _)| *choice == self.set) {
+                    self.set = (choices.into_iter().next()).map_or(SetChoice::None, |(c, _)| c);
                 }
             }
             _ => {}
@@ -1332,6 +1382,9 @@ pub fn shown_faces(
 
 /// How a region is shown selected in the 3D view.
 pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
+    if let Some(set) = region.mesh_set(model.mesh()) {
+        return region_highlight(model, &set);
+    }
     let mut highlight = Highlight::default();
     match region {
         Region::Parts(ids) => {
@@ -1378,7 +1431,7 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
         }
         Region::Geometry(entities) => return crate::cad_selection::highlight(model, entities),
         // The point is drawn as a feature; the body it drives is the constraint's region.
-        Region::ReferencePoint(_) => {}
+        Region::ReferencePoint(_) | Region::Set(_) => {}
         // The point of a remote displacement exists only in the input file; its region shows.
         Region::RemotePoint(id) => {
             if let Some((region, _)) = model.fe.remote_point_of(model.mesh(), *id) {
@@ -1691,15 +1744,18 @@ fn flow_boundary_rows(
              nearest to it.",
         );
         let automatic = "Part it touches";
+        let parts = &model.mesh().parts;
+        let shown = match flow.like {
+            None => automatic,
+            Some(like) => (parts.iter().find(|p| p.id == like)).map_or("(missing)", |p| &p.name),
+        };
         egui::ComboBox::from_id_salt("flow like")
-            .selected_text(flow.like.as_deref().unwrap_or(automatic))
+            .selected_text(shown)
             .width(crate::dock::fit_width(ui, 200.0))
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut flow.like, None, automatic);
-                for part in &model.mesh().parts {
-                    let name = Some(part.name.clone());
-                    let label = part.name.clone();
-                    ui.selectable_value(&mut flow.like, name, label);
+                for part in parts {
+                    ui.selectable_value(&mut flow.like, Some(part.id), &part.name);
                 }
             });
         ui.end_row();
@@ -1721,7 +1777,7 @@ fn displacement_rows(
     ui: &mut Ui,
     remote: &mut Displacement,
     region: &Region,
-    names: (&str, &str),
+    item: Option<(plx_model::Id, plx_model::Id)>,
     model: &Model,
     units: UnitSystem,
 ) {
@@ -1736,7 +1792,7 @@ fn displacement_rows(
             }
         });
     ui.end_row();
-    let formulation = remote.formulation(fe, model.mesh(), region, names.0, names.1);
+    let formulation = remote.formulation(fe, model.mesh(), region, item);
     let point = matches!(formulation, Formulation::Point(_));
     ui.label("");
     let hint = egui::RichText::new(formulation_hint(remote, formulation, region, model));
@@ -2103,7 +2159,7 @@ fn submodel_rows(
     ui: &mut egui::Ui,
     dofs: &mut [bool; 6],
     two_d: bool,
-    step: &str,
+    step: (&str, &str),
     sources: &[crate::links::GlobalSource],
 ) {
     // Nodes of 2D models only move in the x-y plane.
@@ -2141,15 +2197,15 @@ struct Line {
     tone: Tone,
 }
 
-/// The rows that tell where the displacements of a submodel boundary condition in `step`
-/// come from, with their labels, and what keeps them from being read.
+/// The rows that tell where the displacements of a submodel boundary condition in `step`, its
+/// key and name, come from, with their labels, and what keeps them from being read.
 fn submodel_source_lines(
-    step: &str,
+    (key, step): (&str, &str),
     sources: &[crate::links::GlobalSource],
 ) -> Vec<(&'static str, Line)> {
     let line = |tone, text: String| Line { text, tone };
     let mut lines = Vec::new();
-    let Some(source) = sources.iter().find(|s| s.step == step) else {
+    let Some(source) = sources.iter().find(|s| s.step == key) else {
         let text = format!(
             "Nothing linked: in the project window, drag the results of a step of the global \
              analysis to the Global results row of {step}."
@@ -2551,6 +2607,7 @@ impl Editor {
             )),
             NewItem::Section => Draft::Section(
                 Section {
+                    id: plx_model::Id::new(),
                     orientation: None,
                     name: next_name("Solid_Section", names(&fe.sections, |s| &s.name)),
                     material: fe.materials.first().map(|m| m.id),
@@ -2564,6 +2621,7 @@ impl Editor {
                 let existing = names(&fe.initial_conditions, |i| &i.name);
                 Draft::InitialCondition(
                     InitialCondition {
+                        id: plx_model::Id::new(),
                         distribution: None,
                         name: next_name(TEMPERATURE, existing),
                         active: true,
@@ -2580,6 +2638,7 @@ impl Editor {
                 Draft::DefinedField(
                     step,
                     DefinedField {
+                        id: plx_model::Id::new(),
                         distribution: None,
                         name: next_name(DEFINED_TEMPERATURE, existing),
                         active: true,
@@ -2643,7 +2702,9 @@ impl Editor {
                     Some(pair),
                 );
                 // The contact forces too, summed over the slave side.
-                output.variables.push("CF".into());
+                output
+                    .variables
+                    .push(plx_model::HistoryVariable::ContactForces);
                 output.normalize_variables();
                 let region = history_region(&output.kind, fe, &FeMesh::default());
                 Draft::HistoryOutput(step, output, region)
@@ -3159,43 +3220,33 @@ impl Editor {
     /// a new one.
     fn original_item(&self, fe: &FeModel) -> Option<ItemRef> {
         let index = self.index?;
-        let step = |s: usize| fe.steps.get(s).map(|step| step.name.clone());
+        let step = |s: usize| fe.steps.get(s);
         Some(match &self.draft {
-            Draft::Material(_) => ItemRef::Material(fe.materials.get(index)?.name.clone()),
-            Draft::Section(..) => ItemRef::Section(fe.sections.get(index)?.name.clone()),
-            Draft::CrossSection(_) => {
-                ItemRef::CrossSection(fe.cross_sections.get(index)?.name.clone())
-            }
-            Draft::Step(..) => ItemRef::Step(step(index)?),
+            Draft::Material(_) => ItemRef::Material(fe.materials.get(index)?.id),
+            Draft::Section(..) => ItemRef::Section(fe.sections.get(index)?.id),
+            Draft::CrossSection(_) => ItemRef::CrossSection(fe.cross_sections.get(index)?.id),
+            Draft::Step(..) => ItemRef::Step(step(index)?.id),
             Draft::BoundaryCondition(s, ..) => ItemRef::BoundaryCondition {
-                name: fe
-                    .steps
-                    .get(*s)?
-                    .boundary_conditions
-                    .get(index)?
-                    .name
-                    .clone(),
-                step: step(*s)?,
+                step: step(*s)?.id,
+                item: step(*s)?.boundary_conditions.get(index)?.id,
             },
             Draft::Load(s, ..) => ItemRef::Load {
-                name: fe.steps.get(*s)?.loads.get(index)?.name.clone(),
-                step: step(*s)?,
+                step: step(*s)?.id,
+                item: step(*s)?.loads.get(index)?.id,
             },
             Draft::InitialCondition(..) => {
-                ItemRef::InitialCondition(fe.initial_conditions.get(index)?.name.clone())
+                ItemRef::InitialCondition(fe.initial_conditions.get(index)?.id)
             }
             Draft::DefinedField(s, ..) => ItemRef::DefinedField {
-                name: fe.steps.get(*s)?.defined_fields.get(index)?.name.clone(),
-                step: step(*s)?,
+                step: step(*s)?.id,
+                item: step(*s)?.defined_fields.get(index)?.id,
             },
-            Draft::Distribution(..) => {
-                ItemRef::Distribution(fe.distributions.get(index)?.name.clone())
-            }
+            Draft::Distribution(..) => ItemRef::Distribution(fe.distributions.get(index)?.id),
             _ => return None,
         })
     }
 
-    /// The item as the dialog has it now, by its new name, in a model of only that item; for
+    /// The item as the dialog has it now, in a model of only that item; for
     /// an item whose numbers can be exposed.
     fn draft_item(&self, fe: &FeModel) -> Option<(ItemRef, FeModel)> {
         let mut model = FeModel {
@@ -3204,39 +3255,40 @@ impl Editor {
             ..FeModel::default()
         };
         let step = |s: usize| {
-            let name = fe.steps.get(s)?.name.clone();
+            let step = fe.steps.get(s)?;
             Some(Step {
-                kind: fe.steps.get(s)?.kind.clone(),
-                ..Step::new_static(name)
+                id: step.id,
+                kind: step.kind.clone(),
+                ..Step::new_static(step.name.clone())
             })
         };
         let item = match &self.draft {
             Draft::Material(material) => {
                 model.materials.push(material.clone());
-                ItemRef::Material(material.name.clone())
+                ItemRef::Material(material.id)
             }
             Draft::Distribution(distribution, _) => {
                 model.distributions.push(distribution.clone());
-                ItemRef::Distribution(distribution.name.clone())
+                ItemRef::Distribution(distribution.id)
             }
             Draft::Section(section, _) => {
                 model.sections.push(section.clone());
-                ItemRef::Section(section.name.clone())
+                ItemRef::Section(section.id)
             }
             Draft::CrossSection(cross_section) => {
                 model.cross_sections.push(cross_section.clone());
-                ItemRef::CrossSection(cross_section.name.clone())
+                ItemRef::CrossSection(cross_section.id)
             }
             Draft::Step(own, _) => {
                 model.steps.push(own.clone());
-                ItemRef::Step(own.name.clone())
+                ItemRef::Step(own.id)
             }
             Draft::BoundaryCondition(s, bc, _) => {
                 let mut step = step(*s)?;
                 step.boundary_conditions.push(bc.clone());
                 let item = ItemRef::BoundaryCondition {
-                    step: step.name.clone(),
-                    name: bc.name.clone(),
+                    step: step.id,
+                    item: bc.id,
                 };
                 model.steps.push(step);
                 item
@@ -3245,22 +3297,22 @@ impl Editor {
                 let mut step = step(*s)?;
                 step.loads.push(load.clone());
                 let item = ItemRef::Load {
-                    step: step.name.clone(),
-                    name: load.name.clone(),
+                    step: step.id,
+                    item: load.id,
                 };
                 model.steps.push(step);
                 item
             }
             Draft::InitialCondition(condition, _) => {
                 model.initial_conditions.push(condition.clone());
-                ItemRef::InitialCondition(condition.name.clone())
+                ItemRef::InitialCondition(condition.id)
             }
             Draft::DefinedField(s, field, _) => {
                 let mut step = step(*s)?;
                 step.defined_fields.push(field.clone());
                 let item = ItemRef::DefinedField {
-                    step: step.name.clone(),
-                    name: field.name.clone(),
+                    step: step.id,
+                    item: field.id,
                 };
                 model.steps.push(step);
                 item
@@ -3634,13 +3686,14 @@ impl Editor {
                     }
                 }
                 if let BoundaryKind::Displacement(displacement) = &mut bc.kind {
-                    let step = model.fe.steps.get(*step).map_or("", |s| s.name.as_str());
-                    let names = (step, bc.name.as_str());
-                    displacement_rows(ui, displacement, &region.region(), names, model, units);
+                    let item = model.fe.steps.get(*step).map(|s| (s.id, bc.id));
+                    displacement_rows(ui, displacement, &region.region(), item, model, units);
                 }
                 if let BoundaryKind::Submodel { dofs, .. } = &mut bc.kind {
-                    let name = model.fe.steps.get(*step).map_or("", |s| s.name.as_str());
-                    submodel_rows(ui, dofs, two_d, name, &self.global_sources);
+                    let step = model.fe.steps.get(*step);
+                    let key = step.map(|s| crate::links::key(s.id)).unwrap_or_default();
+                    let name = step.map_or("", |s| s.name.as_str());
+                    submodel_rows(ui, dofs, two_d, (&key, name), &self.global_sources);
                 }
                 if let BoundaryKind::Symmetry {
                     normal,
@@ -4989,12 +5042,9 @@ impl Editor {
             Draft::Distribution(distribution, _) => put(&mut fe.distributions, index, distribution),
             Draft::MeshSet(mut set, region, replaces) => {
                 set.region = region.region();
-                // Items on the set follow a new name.
-                let old = (index.and_then(|i| fe.mesh_sets.get(i)))
-                    .map(|o| o.name.clone())
-                    .or(replaces);
-                if let Some(old) = old {
-                    fe.rename_set(set.kind, &old, &set.name);
+                // Items on a set of the input file now refer to the user-defined set.
+                if let Some(old) = replaces.filter(|_| index.is_none()) {
+                    fe.adopt_set(set.kind, &old, set.id);
                 }
                 put(&mut fe.mesh_sets, index, set);
             }
@@ -5326,7 +5376,7 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
         return highlight;
     }
     if let (Some(kind), Some(name)) = (crate::tree::set_kind(item), crate::tree::set_name(item)) {
-        return region_highlight(model, &kind.reference(name));
+        return region_highlight(model, &Region::named(kind, name));
     }
     item_region(fe, item)
         .map(|region| region_highlight(model, region))
@@ -5514,15 +5564,15 @@ fn history_output_form(
             };
             for row in choices.chunks(per_row) {
                 for &variable in row {
-                    let mut on = output.variables.iter().any(|v| v == variable);
+                    let mut on = output.variables.contains(&variable);
                     let checkbox = ui
-                        .checkbox(&mut on, variable)
-                        .on_hover_text(plx_model::output_variable_description(variable));
+                        .checkbox(&mut on, variable.code())
+                        .on_hover_text(variable.description());
                     if checkbox.changed() {
                         changed = true;
-                        output.variables.retain(|v| v != variable);
+                        output.variables.retain(|&v| v != variable);
                         if on {
-                            output.variables.push(variable.to_string());
+                            output.variables.push(variable);
                         }
                     }
                 }
@@ -8736,16 +8786,19 @@ mod tests {
         };
         let tones = |lines: &[(&str, Line)]| lines.iter().map(|(_, l)| l.tone).collect::<Vec<_>>();
         // Nothing linked to the step.
-        let lines = submodel_source_lines("Step-1", &[]);
+        let lines = submodel_source_lines(("Step-1", "Step-1"), &[]);
         assert_eq!(tones(&lines), [Tone::Error]);
         assert!(lines[0].1.text.contains("Global results row of Step-1"));
         let good = [source("Step-1", "Global", Some(true))];
-        let lines = submodel_source_lines("Step-1", &good);
+        let lines = submodel_source_lines(("Step-1", "Step-1"), &good);
         assert_eq!(lines[0].1.text, "Load of Global");
         assert_eq!(tones(&lines), [Tone::Plain, Tone::Weak]);
         assert!(lines[1].1.text.contains("end of Load"));
         // Mode shapes.
-        let lines = submodel_source_lines("Step-1", &[source("Step-1", "Global", Some(false))]);
+        let lines = submodel_source_lines(
+            ("Step-1", "Step-1"),
+            &[source("Step-1", "Global", Some(false))],
+        );
         assert_eq!(tones(&lines), [Tone::Plain, Tone::Error]);
         // Two global analyses.
         let both = [
@@ -8753,7 +8806,7 @@ mod tests {
             source("Step-2", "Other", Some(true)),
             source("Step-3", "Other", Some(true)),
         ];
-        let lines = submodel_source_lines("Step-1", &both);
+        let lines = submodel_source_lines(("Step-1", "Step-1"), &both);
         assert_eq!(tones(&lines), [Tone::Plain, Tone::Weak, Tone::Error]);
         assert!(
             lines[2]
@@ -9119,6 +9172,7 @@ mod tests {
             .apply(&mut fe);
         assert_eq!(fe.cross_sections[0].name, "Cross_Section-1");
         fe.sections.push(Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Beam_Section-1".into(),
             material: None,
@@ -9369,11 +9423,14 @@ mod tests {
         let mut editor =
             Editor::edit(&TreeItem::HistoryOutput(2, 0), &fe, &FeMesh::default()).unwrap();
         if let Draft::HistoryOutput(_, output, _) = &mut editor.draft {
-            output.variables = vec!["U".into()];
+            output.variables = plx_model::history_variables(&["U"]);
         }
         editor.apply(&mut fe);
         assert_eq!(fe.history_outputs.len(), 1);
-        assert_eq!(fe.step_history_outputs(0)[0].variables, ["U"]);
+        assert_eq!(
+            fe.step_history_outputs(0)[0].variables,
+            [plx_model::HistoryVariable::Displacements]
+        );
         // A Dynamic step prints the energies besides them.
         let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
         if let Draft::Step(step, _) = &mut editor.draft {
@@ -9509,9 +9566,6 @@ mod tests {
         assert!(swap_master_slave(&mut fe, &TreeItem::ContactPair(0)));
         assert_eq!(fe.contact_pairs[0].name, "B_to_A-1");
         assert_eq!(fe.contact_pairs[0].slave, Region::Surface("A".into()));
-        fe.constraints
-            .push(Constraint::Tie(plx_model::Tie::new("Tie-1")));
-        assert!(swap_master_slave(&mut fe, &TreeItem::Constraint(0)));
         assert!(!swap_master_slave(&mut fe, &TreeItem::Material(0)));
     }
 
@@ -9641,6 +9695,7 @@ mod tests {
             fe.materials.push(m);
         }
         let section = |name: &str, material: Option<plx_model::Id>| Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: name.into(),
             material,
@@ -9693,12 +9748,14 @@ mod tests {
         let elements = model.mesh().element_sets["Beam"].len();
         assert_eq!(elements, model.mesh().element_count());
 
-        // A section on the set follows its new name.
+        // A section on the set keeps it under its new name.
+        let beam = model.fe.mesh_set(SetKind::Elements, "Beam").unwrap().id;
         model.fe.sections.push(Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
-            region: Region::ElementSet("Beam".into()),
+            region: Region::Set(beam),
             thickness: 1.0,
             kind: SectionKind::Solid,
         });
@@ -9713,16 +9770,27 @@ mod tests {
         model.edit_mesh_in_place(|mesh, fe| fe.sync_mesh_sets(&sets, mesh));
         assert!(!model.mesh().element_sets.contains_key("Beam"));
         assert_eq!(model.mesh().element_sets["Cantilever"].len(), elements);
-        assert_eq!(
-            model.fe.sections[0].region,
-            Region::ElementSet("Cantilever".into())
-        );
+        let region = &model.fe.sections[0].region;
+        assert_eq!(region.elements(model.mesh()).len(), elements);
+        assert_eq!(region.describe(&model.fe, model.mesh()), "Cantilever");
 
-        // A node set of the input file keeps its nodes and becomes the user's.
+        // A node set of the input file keeps its nodes and becomes the user's; a boundary
+        // condition on it then refers to the user's set.
         let (name, nodes) = (model.mesh().node_sets.iter().next())
             .map(|(n, ids)| (n.clone(), ids.clone()))
             .unwrap();
         let item = TreeItem::NodeSet(name.clone());
+        model
+            .fe
+            .initial_conditions
+            .push(plx_model::InitialCondition {
+                id: plx_model::Id::new(),
+                name: "Initial-1".into(),
+                active: true,
+                region: Region::NodeSet(name.clone()),
+                kind: plx_model::InitialConditionKind::Temperature(20.0),
+                distribution: None,
+            });
         let editor = Editor::edit(&item, &model.fe, model.mesh()).unwrap();
         assert_eq!(editor.replaced_set(), Some((SetKind::Nodes, name.as_str())));
         assert_eq!(editor.validate_set(&model), Ok(()));
@@ -9734,6 +9802,12 @@ mod tests {
             Region::Nodes(nodes.clone())
         );
         assert_eq!(model.mesh().node_sets[&name], nodes);
+        let set = model.fe.mesh_set(SetKind::Nodes, &name).unwrap().id;
+        assert_eq!(model.fe.initial_conditions[0].region, Region::Set(set));
+        assert_eq!(
+            model.fe.initial_conditions[0].region.nodes(model.mesh()),
+            nodes
+        );
 
         // A new mesh gets the sets again.
         let mut mesh = model.mesh().clone();

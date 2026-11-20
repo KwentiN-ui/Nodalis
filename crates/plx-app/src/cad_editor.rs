@@ -106,6 +106,7 @@ impl CadOperationEditor {
         let picks = (operation.resolve(&input).unwrap_or_default().into_iter())
             .filter(|&e| operation.kind.picks(e))
             .collect();
+        let parts = input.part_names_of(&operation.parts);
         let mut editor = Self {
             id,
             name: name.to_owned(),
@@ -119,7 +120,7 @@ impl CadOperationEditor {
             plane: operation.plane,
             keep: operation.keep,
             compound: operation.compound,
-            parts: operation.parts.clone(),
+            parts,
             tilt_axis: operation.tilt_axis.min(2),
             tilt_angle: operation.tilt_angle,
             faces: operation.faces,
@@ -174,7 +175,9 @@ impl CadOperationEditor {
             keep: self.keep,
             compound: self.compound,
             faces: self.faces,
-            parts: self.split_parts().to_vec(),
+            parts: (self.split_parts().iter())
+                .filter_map(|name| self.input.part_id(name))
+                .collect(),
             tilt_axis: self.tilt_axis,
             tilt_angle: self.tilt_angle,
         }

@@ -129,16 +129,14 @@ pub fn analysis_status(
         Some(geometry) => (mesh.parts.iter())
             .filter_map(|part| {
                 // A compound part is out of date with any of its bodies.
-                let bodies: Vec<&str> = if part.bodies.is_empty() {
-                    vec![part.name.as_str()]
-                } else {
-                    part.bodies.iter().map(|b| b.name.as_str()).collect()
-                };
                 // Suppressed parts keep the mesh they have.
-                let stale = bodies.into_iter().any(|body| {
-                    !geometry.is_suppressed(body)
+                let stale = (plx_model::part_objects(part).into_iter()).any(|body| {
+                    let Some(name) = geometry.part_name(body) else {
+                        return false;
+                    };
+                    !geometry.suppressed.contains(&body)
                         && origins.made_from(body).is_some_and(|made_from| {
-                            fingerprint::mesh_input(geometry, &matching, space, body) != made_from
+                            fingerprint::mesh_input(geometry, &matching, space, name) != made_from
                         })
                 });
                 stale.then(|| part.name.clone())
@@ -156,7 +154,9 @@ pub fn analysis_status(
         for part in geometry.known_parts() {
             let fe_part = geometry.fe_part_name(part);
             if geometry.is_suppressed(part)
-                || origins.get(part).is_some()
+                || geometry
+                    .part_id(part)
+                    .is_some_and(|id| origins.get(id).is_some())
                 || stale_parts.iter().any(|p| p.eq_ignore_ascii_case(fe_part))
             {
                 continue;
@@ -321,7 +321,6 @@ mod tests {
 
     fn results(input: u64) -> BoundResults {
         BoundResults {
-            analysis: "Analysis-1".into(),
             input: Some(input),
             ..Default::default()
         }
@@ -461,15 +460,22 @@ mod tests {
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
+            ids: vec![plx_model::PartId {
+                name: part.clone(),
+                id: mesh.parts[0].id,
+            }],
             from_link: false,
             operations: Vec::new(),
             input: None,
         };
+        geometry.ensure_ids();
         let fe = FeModel::default();
         let space = fe.properties.space;
         let mut inputs = plx_model::PartOrigins::default();
-        inputs.set_meshed(&part, fingerprint::mesh_input(&geometry, &[], space, &part));
+        inputs.set_meshed(
+            mesh.parts[0].id,
+            fingerprint::mesh_input(&geometry, &[], space, &part),
+        );
         let status = |geometry: &Geometry| {
             analysis_status(
                 Some(geometry),
@@ -487,7 +493,7 @@ mod tests {
         assert_eq!(found.mesh, CellState::OutOfDate);
         assert_eq!(found.stale_parts, ["SOLID-2"]);
         // Suppressed, it takes part in nothing.
-        geometry.suppressed.push("SOLID-2".into());
+        geometry.set_suppressed(&["SOLID-2".into()], true);
         let found = status(&geometry);
         assert_eq!(found.mesh, CellState::UpToDate);
         assert!(found.stale_parts.is_empty());
@@ -508,7 +514,10 @@ mod tests {
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
+            ids: vec![plx_model::PartId {
+                name: part.clone(),
+                id: mesh.parts[0].id,
+            }],
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -516,7 +525,10 @@ mod tests {
         let fe = FeModel::default();
         let space = fe.properties.space;
         let mut inputs = plx_model::PartOrigins::default();
-        inputs.set_meshed(&part, fingerprint::mesh_input(&geometry, &[], space, &part));
+        inputs.set_meshed(
+            mesh.parts[0].id,
+            fingerprint::mesh_input(&geometry, &[], space, &part),
+        );
         let solved = results(crate::solve_fingerprint::solve_input(&mesh, &fe));
         let status = analysis_status(
             Some(&geometry),

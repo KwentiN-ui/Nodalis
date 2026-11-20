@@ -53,7 +53,7 @@ columns and the table of the design points:
 
 #fields(
   [P1, O1 ...], [The columns, with the kind of each input. A double-click on a name renames
-    it; #ui("Remove") removes the column and its links.],
+    it and keeps its links; #ui("Remove") removes the column and its links.],
   [Point], [The design points; the current one is marked.],
   [State], [#ui("not solved"), #ui("up to date"), #ui("out of date") once the blocks the
     study runs, the inputs of the point or the outputs changed since it was solved, or

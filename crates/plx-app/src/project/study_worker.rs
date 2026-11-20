@@ -30,7 +30,7 @@ pub(super) struct NumberStudy {
     links: Vec<(u64, Vec<String>, u64, Vec<String>)>,
     /// The numbers of sources outside the study, read when it started.
     fixed: HashMap<(u64, Vec<String>), f64>,
-    /// The names of the input columns, by index.
+    /// The keys of the input columns, as links name them, by index.
     inputs: Vec<String>,
     outputs: Vec<Source>,
     /// The points to evaluate and their inputs.
@@ -58,13 +58,13 @@ impl NumberStudy {
     /// The number `item` of the block `source` gives at a point with `inputs`.
     fn value(&self, source: u64, item: &[String], inputs: &[f64]) -> Option<f64> {
         if source == self.study {
-            let [cell, name] = item else {
+            let [cell, key] = item else {
                 return None;
             };
             if cell != links::LOOP {
                 return None;
             }
-            let column = self.inputs.iter().position(|n| n == name)?;
+            let column = self.inputs.iter().position(|n| n == key)?;
             return inputs.get(column).copied();
         }
         match self.blocks.iter().find(|(id, _)| *id == source) {
@@ -77,7 +77,7 @@ impl NumberStudy {
                 let [_, name] = item else {
                     return None;
                 };
-                (parameters.iter().find(|p| &p.name == name)).map(|p| p.value)
+                (parameters.iter().find(|p| links::key(p.id) == *name)).map(|p| p.value)
             }
             None => self.fixed.get(&(source, item.to_vec())).copied(),
         }
@@ -101,7 +101,9 @@ impl NumberStudy {
                         changed |= number.set(*switch, key, value);
                     }
                     (Pure::Parameters(parameters), [cell, name]) if cell == links::VALUE => {
-                        if let Some(parameter) = parameters.iter_mut().find(|p| &p.name == name) {
+                        if let Some(parameter) =
+                            parameters.iter_mut().find(|p| links::key(p.id) == *name)
+                        {
                             let value = parameter.kind.clean(value);
                             changed |= parameter.value != value;
                             parameter.value = value;
@@ -199,12 +201,14 @@ impl ProjectApp {
         let study = self.nodes.iter().find(|n| n.id == id)?.as_study()?;
         let table = &study.table;
         let outputs = (table.outputs.iter())
-            .map(|column| match self.output_link(id, &column.name) {
-                Some(link) if body.contains(&link.source) => {
-                    Source::Block(link.source, link.item.clone())
-                }
-                _ => Source::Fixed(self.output_value(id, &column.name)),
-            })
+            .map(
+                |column| match self.output_link(id, &links::key(column.id)) {
+                    Some(link) if body.contains(&link.source) => {
+                        Source::Block(link.source, link.item.clone())
+                    }
+                    _ => Source::Fixed(self.output_value(id, &links::key(column.id))),
+                },
+            )
             .collect();
         Some(NumberStudy {
             study: id,
@@ -213,7 +217,7 @@ impl ProjectApp {
                 .map(|l| (l.source, l.item.clone(), l.target, links::slot(l).to_vec()))
                 .collect(),
             fixed,
-            inputs: table.inputs.iter().map(|c| c.name.clone()).collect(),
+            inputs: table.inputs.iter().map(|c| links::key(c.id)).collect(),
             outputs,
             points: (points.iter())
                 .filter_map(|&p| Some((p, table.points.get(p)?.inputs.clone())))
@@ -302,21 +306,21 @@ mod tests {
             ..Default::default()
         }));
         let math = math.as_number().unwrap().0.clone();
+        let parameter = Parameter::new("Length", ValueKind::Factor, 0.0);
+        let length = links::key(parameter.id);
+        let column = links::key(plx_model::Id::new());
         let mut study = NumberStudy {
             study: 1,
             blocks: vec![
-                (
-                    2,
-                    Pure::Parameters(vec![Parameter::new("Length", ValueKind::Factor, 0.0)]),
-                ),
+                (2, Pure::Parameters(vec![parameter])),
                 (3, Pure::Number(math, false)),
             ],
             links: vec![
-                link(1, &[links::LOOP, "Length"], 2, &[links::VALUE, "Length"]),
-                link(2, &[links::VALUE, "Length"], 3, &[links::PARAMETERS, "a"]),
+                link(1, &[links::LOOP, &column], 2, &[links::VALUE, &length]),
+                link(2, &[links::VALUE, &length], 3, &[links::PARAMETERS, "a"]),
             ],
             fixed: HashMap::new(),
-            inputs: vec!["Length".into()],
+            inputs: vec![column.clone()],
             outputs: vec![
                 Source::Block(3, vec![links::VALUE.into(), RESULT.into()]),
                 Source::Fixed(Some(7.0)),
@@ -330,29 +334,29 @@ mod tests {
     #[test]
     fn the_columns_of_a_study_give_their_values_at_all_points() {
         let mut table = plx_model::StudyTable::default();
-        table.add_input("Length", Some(ValueKind::LENGTH), 0.01);
-        table.add_output("Area");
+        let length = links::key(table.add_input("Length", Some(ValueKind::LENGTH), 0.01));
+        let area = links::key(table.add_output("Area"));
         table.add_point();
         table.set_input(1, 0, 0.02);
         table.points[0].outputs = vec![Some(1e-4)];
         let value = |name: &str| vec![links::VALUE.to_owned(), name.to_owned()];
         assert_eq!(
-            series::study_values(&table, &value("Length")),
+            series::study_values(&table, &value(&length)),
             Some(vec![0.01, 0.02])
         );
         // A point without its output gives no number, so the columns stay paired.
-        let area = series::study_values(&table, &value("Area")).unwrap();
-        assert_eq!(area[0], 1e-4);
-        assert!(area[1].is_nan());
+        let values = series::study_values(&table, &value(&area)).unwrap();
+        assert_eq!(values[0], 1e-4);
+        assert!(values[1].is_nan());
         assert_eq!(series::study_values(&table, &value("Force")), None);
         // The rows of the columns give their values on the right; the inputs give to the
         // numbers they vary on the left.
-        let input = vec![links::LOOP.to_owned(), "Length".to_owned()];
-        assert_eq!(given_path(Kind::Study, &input), value("Length"));
+        let input = vec![links::LOOP.to_owned(), length.clone()];
+        assert_eq!(given_path(Kind::Study, &input), value(&length));
         assert!(is_loop_pin(Kind::Study, &input));
         assert!(is_loop_pin(Kind::Study, &[links::LOOP.to_owned()]));
-        let output = vec![links::OUTPUTS.to_owned(), "Area".to_owned()];
-        assert_eq!(given_path(Kind::Study, &output), value("Area"));
+        let output = vec![links::OUTPUTS.to_owned(), area.clone()];
+        assert_eq!(given_path(Kind::Study, &output), value(&area));
         assert!(!is_loop_pin(Kind::Study, &output));
         assert_eq!(given_path(Kind::Math, &input), input);
     }

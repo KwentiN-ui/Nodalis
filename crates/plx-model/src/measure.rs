@@ -10,8 +10,15 @@ pub enum MeasureRegion {
     /// Every node of the results.
     #[default]
     All,
-    /// The nodes of a node set of the analysis' mesh.
+    /// The nodes of a node set that came with the analysis' mesh, such as a side of a mesh
+    /// block, by its name.
     NodeSet(String),
+    /// The nodes of a user-defined set of the analysis ([`crate::MeshSet`]).
+    Set(crate::Id),
+    /// The nodes of the region of a boundary condition of the analysis.
+    BoundaryCondition(crate::Id),
+    /// The nodes of the region of a load of the analysis.
+    Load(crate::Id),
 }
 
 /// What a Measure block computes from the results of a step: of its last increment, or of the
@@ -40,14 +47,14 @@ pub enum MeasureKind {
         component: String,
         point: [f64; 3],
     },
-    /// A value of a history output (`.dat`), such as the total force of a set
-    /// (`TOTAL_FORCE` / `RF3`): of the last increment of the step, or with `whole` the
-    /// values of all its increments, a series that goes to Math and Plot blocks.
+    /// A value of a history output of the analysis, by its id ([`crate::HistoryOutput::id`]),
+    /// such as the total force of a set (`TOTAL_FORCE` / `RF3`): of the last increment of
+    /// the step, or with `whole` the values of all its increments, a series that goes to
+    /// Math and Plot blocks. `None` until one is chosen.
     History {
-        set: String,
+        output: Option<crate::Id>,
         field: String,
         component: String,
-        #[serde(default)]
         whole: bool,
     },
     /// The eigenfrequency of mode `mode`, counted from 1, of a frequency step.
@@ -84,7 +91,7 @@ impl MeasureKind {
                 point: [0.0; 3],
             },
             Self::History {
-                set: String::new(),
+                output: None,
                 field: "TOTAL_FORCE".into(),
                 component: "RF3".into(),
                 whole: false,
@@ -154,8 +161,9 @@ impl MeasureKind {
         true
     }
 
-    /// A short text of what it measures: "Maximum of STRESS MISES in TIP".
-    pub fn describe(&self) -> String {
+    /// A short text of what it measures: "STRESS MISES in TIP"; `name` names the items of the
+    /// analysis it refers to by id: its region or history output.
+    pub fn describe(&self, name: impl Fn(crate::Id) -> Option<String>) -> String {
         match self {
             Self::FieldValues {
                 field,
@@ -165,6 +173,11 @@ impl MeasureKind {
                 let region = match region {
                     MeasureRegion::All => String::new(),
                     MeasureRegion::NodeSet(set) => format!(" in {set}"),
+                    MeasureRegion::Set(id)
+                    | MeasureRegion::BoundaryCondition(id)
+                    | MeasureRegion::Load(id) => {
+                        format!(" in {}", name(*id).unwrap_or_else(|| "(deleted)".into()))
+                    }
                 };
                 format!("{field} {component}{region}")
             }
@@ -177,13 +190,15 @@ impl MeasureKind {
                 field, component, ..
             } => format!("{field} {component} at a point"),
             Self::History {
-                set,
                 field,
                 component,
                 whole,
+                output,
             } => {
                 let take = if *whole { "History of " } else { "" };
-                format!("{take}{field} {component} of {set}")
+                let output =
+                    (output.and_then(&name)).unwrap_or_else(|| "(no history output)".into());
+                format!("{take}{field} {component} of {output}")
             }
             Self::Eigenfrequency { mode } => format!("Eigenfrequency of mode {mode}"),
         }

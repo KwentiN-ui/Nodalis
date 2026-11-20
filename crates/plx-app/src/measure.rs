@@ -32,18 +32,121 @@ impl Measured {
     }
 }
 
+/// What a measure refers to in the analysis whose results it reads: the regions of its mesh
+/// and model and its history outputs.
+#[derive(Clone, Debug, Default)]
+pub struct Sources {
+    pub regions: Vec<RegionNodes>,
+    pub outputs: Vec<OutputSet>,
+}
+
+/// A region a measure can take its values in, with its name and its nodes on the mesh as it
+/// is now.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegionNodes {
+    pub region: MeasureRegion,
+    pub name: String,
+    pub nodes: Vec<NodeId>,
+}
+
+/// A history output of the analysis, with the set of the history the results show it as.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputSet {
+    pub id: plx_model::Id,
+    pub name: String,
+    pub set: String,
+}
+
+impl Sources {
+    /// What `fe` and its mesh offer: the node sets of the mesh, the user-defined sets and the
+    /// regions of the boundary conditions and loads, such as "Fixed (boundary condition)".
+    /// Those picked on the geometry or on the sides of a mesh block are found on each new
+    /// mesh again.
+    pub fn of(fe: &plx_model::FeModel, mesh: &plx_mesh::FeMesh) -> Self {
+        let mut regions: Vec<RegionNodes> = (mesh.node_sets.iter())
+            .filter(|(name, _)| {
+                !(mesh.user_sets.values())
+                    .any(|(k, n)| *k == plx_model::SetKind::Nodes && n == *name)
+            })
+            .map(|(name, nodes)| RegionNodes {
+                region: MeasureRegion::NodeSet(name.clone()),
+                name: name.clone(),
+                nodes: nodes.clone(),
+            })
+            .collect();
+        let mut add = |region: MeasureRegion, name: String, of: &plx_model::Region| {
+            let nodes = of.nodes(mesh);
+            if !nodes.is_empty() && !regions.iter().any(|r| r.region == region) {
+                regions.push(RegionNodes {
+                    region,
+                    name,
+                    nodes,
+                });
+            }
+        };
+        for set in &fe.mesh_sets {
+            add(MeasureRegion::Set(set.id), set.name.clone(), &set.region);
+        }
+        for step in &fe.steps {
+            for bc in &step.boundary_conditions {
+                let name = format!("{} (boundary condition)", bc.name);
+                add(MeasureRegion::BoundaryCondition(bc.id), name, &bc.region);
+            }
+            for load in &step.loads {
+                let name = format!("{} (load)", load.name);
+                add(MeasureRegion::Load(load.id), name, &load.region);
+            }
+        }
+        let outputs = (fe.history_outputs.iter())
+            .map(|output| OutputSet {
+                id: output.id,
+                name: output.name.clone(),
+                set: plx_io::dat::history_set_name(fe, output),
+            })
+            .collect();
+        Self { regions, outputs }
+    }
+
+    fn output(&self, id: Option<plx_model::Id>) -> Option<&OutputSet> {
+        self.outputs.iter().find(|o| Some(o.id) == id)
+    }
+
+    fn region(&self, region: &MeasureRegion) -> Option<&RegionNodes> {
+        self.regions.iter().find(|r| r.region == *region)
+    }
+
+    /// The name of the region or history output of the id.
+    pub fn name(&self, id: plx_model::Id) -> Option<String> {
+        (self
+            .outputs
+            .iter()
+            .find(|o| o.id == id)
+            .map(|o| o.name.clone()))
+        .or_else(|| {
+            (self.regions.iter())
+                .find(|r| match r.region {
+                    MeasureRegion::Set(i)
+                    | MeasureRegion::BoundaryCondition(i)
+                    | MeasureRegion::Load(i) => i == id,
+                    _ => false,
+                })
+                .map(|r| r.name.clone())
+        })
+    }
+}
+
 /// The value of `kind` in the results of step `step` (CalculiX's numbering, from 1): of its
-/// last increment, or of a mode. `node_sets` are those of the mesh the results belong to.
+/// last increment, or of a mode. `sources` are those of the analysis the results belong to.
 #[cfg(test)]
 pub fn evaluate(
     kind: &MeasureKind,
     step: u32,
     frd: &FrdImport,
     dat: Option<&plx_io::dat::DatImport>,
-    node_sets: &BTreeMap<String, Vec<NodeId>>,
+    sources: &Sources,
     units: UnitSystem,
 ) -> Result<Measured, String> {
-    evaluate_expanded(kind, step, frd, dat, node_sets, &BTreeMap::new(), units)
+    evaluate_expanded(kind, step, frd, dat, sources, &BTreeMap::new(), units)
 }
 
 /// The value of `kind` in the results of step `step` (CalculiX's numbering, from 1), as
@@ -56,7 +159,7 @@ pub fn evaluate_expanded(
     step: u32,
     frd: &FrdImport,
     dat: Option<&plx_io::dat::DatImport>,
-    node_sets: &BTreeMap<String, Vec<NodeId>>,
+    sources: &Sources,
     expanded: &BTreeMap<NodeId, Vec<NodeId>>,
     units: UnitSystem,
 ) -> Result<Measured, String> {
@@ -79,9 +182,10 @@ pub fn evaluate_expanded(
             let values = component(field, name)?;
             let picked: Vec<f64> = match region {
                 MeasureRegion::All => values.iter().map(|&v| f64::from(v)).collect(),
-                MeasureRegion::NodeSet(set) => {
-                    let nodes = (node_sets.get(set))
-                        .ok_or_else(|| format!("the mesh has no node set {set}"))?;
+                region => {
+                    let nodes = &(sources.region(region))
+                        .ok_or_else(|| "the analysis no longer has the region".to_owned())?
+                        .nodes;
                     (nodes.iter())
                         .flat_map(|&id| indices(id))
                         .filter_map(|index| values.get(index))
@@ -149,15 +253,18 @@ pub fn evaluate_expanded(
             }
         }
         MeasureKind::History {
-            set,
+            output,
             field,
             component,
             whole,
         } => {
-            let dat = dat.ok_or("the run printed no history output (.dat)")?;
+            let output =
+                (sources.output(*output)).ok_or("the analysis has no such history output")?;
+            let dat = dat.ok_or("the run printed no history output")?;
+            let set = &output.name;
             let history = (dat.sets.iter())
-                .find(|s| s.name.eq_ignore_ascii_case(set))
-                .ok_or_else(|| format!("no history output of {set}"))?;
+                .find(|s| s.name.eq_ignore_ascii_case(&output.set))
+                .ok_or_else(|| format!("the results have no history output {set}"))?;
             let rows: Vec<(usize, f64)> = (history.rows.iter().enumerate())
                 .filter(|(_, (s, _, _))| *s == step)
                 .map(|(row, &(_, _, time))| (row, time))
@@ -213,7 +320,7 @@ pub struct Job {
     pub kind: MeasureKind,
     pub step: u32,
     pub results: BoundResults,
-    pub node_sets: BTreeMap<String, Vec<NodeId>>,
+    pub sources: Sources,
     /// The units its messages give lengths in.
     pub units: UnitSystem,
     /// Where the files of CalculiX's results are written to be read; those of the built-in
@@ -244,7 +351,7 @@ fn run(job: &Job) -> Result<Measured, String> {
         job.step,
         &frd,
         read.history.as_ref(),
-        &job.node_sets,
+        &job.sources,
         &expanded,
         job.units,
     )
@@ -381,8 +488,10 @@ pub struct MeasureEditor {
     pub id: u64,
     name: String,
     kind: MeasureKind,
-    /// The node sets of the mesh of the results linked to it, to pick from.
-    node_sets: Vec<String>,
+    /// The regions of the analysis of the results linked to it, to pick from, by name.
+    regions: Vec<(MeasureRegion, String)>,
+    /// The history outputs of the analysis of the results linked to it, to pick from.
+    outputs: Vec<OutputSet>,
     /// The fields and components of the results linked to it, to pick from.
     choices: Choices,
 }
@@ -401,14 +510,17 @@ impl MeasureEditor {
         id: u64,
         name: &str,
         kind: MeasureKind,
-        node_sets: Vec<String>,
+        sources: Sources,
         offered: Option<Receiver<Result<Offered, String>>>,
     ) -> Self {
         Self {
             id,
             name: name.to_owned(),
             kind,
-            node_sets,
+            regions: (sources.regions.into_iter())
+                .map(|r| (r.region, r.name))
+                .collect(),
+            outputs: sources.outputs,
             choices: offered.map_or(Choices::Typed, Choices::Reading),
         }
     }
@@ -513,17 +625,20 @@ impl MeasureEditor {
             } => {
                 field_and_component(ui, offered.map(|o| o.fields.as_slice()), field, component);
                 ui.label("Region");
-                let shown = match region {
+                let shown = match &*region {
                     MeasureRegion::All => "All nodes".to_owned(),
                     MeasureRegion::NodeSet(set) => set.clone(),
+                    other => (self.regions.iter())
+                        .find(|(r, _)| r == other)
+                        .map_or_else(|| "(deleted)".to_owned(), |(_, name)| name.clone()),
                 };
                 egui::ComboBox::from_id_salt("measure region")
                     .selected_text(shown)
                     .width(200.0)
                     .show_ui(ui, |ui| {
                         ui.selectable_value(region, MeasureRegion::All, "All nodes");
-                        for set in &self.node_sets {
-                            ui.selectable_value(region, MeasureRegion::NodeSet(set.clone()), set);
+                        for (choice, name) in &self.regions {
+                            ui.selectable_value(region, choice.clone(), name);
                         }
                     });
                 ui.end_row();
@@ -544,14 +659,43 @@ impl MeasureEditor {
                 field_and_component(ui, offered.map(|o| o.fields.as_slice()), field, component);
             }
             MeasureKind::History {
-                set,
+                output,
                 field,
                 component,
                 whole,
             } => {
-                let sets: Option<Vec<String>> =
-                    offered.map(|o| o.history.iter().map(|(name, _)| name.clone()).collect());
-                if pick(ui, "Set", set, sets.as_deref())
+                // The history outputs the results have, or all of them before they are read.
+                let outputs: Vec<&OutputSet> = (self.outputs.iter())
+                    .filter(|o| offered.is_none_or(|of| of.history_fields(&o.set).is_some()))
+                    .collect();
+                let chosen = self.outputs.iter().find(|o| Some(o.id) == *output);
+                ui.label("History output");
+                let shown = match chosen {
+                    Some(o) if outputs.contains(&o) => egui::RichText::new(&o.name),
+                    Some(o) => egui::RichText::new(&o.name).color(ui.visuals().warn_fg_color),
+                    None => egui::RichText::new("(none)"),
+                };
+                let mut picked = false;
+                egui::ComboBox::from_id_salt("measure history output")
+                    .selected_text(shown)
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        for o in &outputs {
+                            if ui
+                                .selectable_label(Some(o.id) == *output, &o.name)
+                                .clicked()
+                                && Some(o.id) != *output
+                            {
+                                *output = Some(o.id);
+                                picked = true;
+                            }
+                        }
+                    });
+                ui.end_row();
+                let set = (self.outputs.iter())
+                    .find(|o| Some(o.id) == *output)
+                    .map_or("", |o| o.set.as_str());
+                if picked
                     && let Some(fields) = offered.and_then(|o| o.history_fields(set))
                     && !fields.iter().any(|(name, _)| name == field)
                     && let Some((first, components)) = fields.first()
@@ -680,7 +824,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("plx-measure-ndlr-{}", std::process::id()));
         let file = crate::solver_check::solve_beam_built_in(&dir.join("run"));
         let files = [file.clone(), file.with_extension("inp")];
-        let bound = plx_io::project::bind_results("Beam", &files, false).unwrap();
+        let bound = plx_io::project::bind_results(&files, false).unwrap();
         assert!(bound.solver.is_some());
         let restore = dir.join("restore");
         let job = Job {
@@ -691,7 +835,7 @@ mod tests {
             },
             step: 1,
             results: bound.clone(),
-            node_sets: BTreeMap::new(),
+            sources: Sources::default(),
             units: UnitSystem::Unitless,
             dir: restore.clone(),
         };
@@ -720,7 +864,7 @@ mod tests {
             step,
             &frd,
             None,
-            &BTreeMap::new(),
+            &Sources::default(),
             UnitSystem::default(),
         )
         .unwrap();
@@ -728,7 +872,14 @@ mod tests {
         let max = plx_model::MathOp::SeriesMax.reduce(&all.series).unwrap();
         assert!(max > 0.0);
         let first = frd.mesh.node_ids()[0];
-        let sets = BTreeMap::from([("ONE".to_owned(), vec![first])]);
+        let sets = Sources {
+            regions: vec![RegionNodes {
+                region: MeasureRegion::NodeSet("ONE".into()),
+                name: "ONE".into(),
+                nodes: vec![first],
+            }],
+            ..Sources::default()
+        };
         let in_set = MeasureKind::FieldValues {
             field: "STRESS".into(),
             component: "MISES".into(),
@@ -796,7 +947,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let expanded = plx_io::frd::expanded_nodes(&input, &frd.mesh);
         let step = frd.increments.last().unwrap().step;
-        let sets = BTreeMap::from([("CLAMP".to_owned(), vec![1, 2, 3])]);
+        let sets = Sources {
+            regions: vec![RegionNodes {
+                region: MeasureRegion::NodeSet("CLAMP".into()),
+                name: "CLAMP".into(),
+                nodes: vec![1, 2, 3],
+            }],
+            ..Sources::default()
+        };
         let measure = |kind: &MeasureKind| {
             evaluate_expanded(
                 kind,
@@ -861,13 +1019,21 @@ mod tests {
              \x20      2.0  4.0  6.0\n",
         );
         let frd = plx_io::frd::read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
+        let output = plx_model::Id::new();
         let mut kind = MeasureKind::History {
-            set: "TOP".into(),
+            output: Some(output),
             field: "TOTAL_FORCE".into(),
             component: "RF3".into(),
             whole: false,
         };
-        let sets = BTreeMap::new();
+        let sets = Sources {
+            outputs: vec![OutputSet {
+                id: output,
+                name: "Top".into(),
+                set: "TOP".into(),
+            }],
+            ..Sources::default()
+        };
         let last = evaluate(&kind, 1, &frd, Some(&dat), &sets, UnitSystem::default()).unwrap();
         assert_eq!(last, Measured::one(6.0));
         if let MeasureKind::History { whole, .. } = &mut kind {
@@ -883,7 +1049,7 @@ mod tests {
     fn a_measure_at_a_node_equals_the_measure_at_its_point() {
         let frd = plx_io::frd::read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
         let step = frd.increments.last().unwrap().step;
-        let sets = BTreeMap::new();
+        let sets = Sources::default();
         for (index, &node) in frd.mesh.node_ids().iter().enumerate().step_by(7) {
             let at_node = MeasureKind::NodeValue {
                 field: "DISP".into(),

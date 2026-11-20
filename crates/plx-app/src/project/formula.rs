@@ -735,13 +735,14 @@ mod tests {
     fn a_formula_combines_the_units_of_its_inputs() {
         let force = Parameter::new("F", ValueKind::Quantity(Quantity::Force), 100.0);
         let length = Parameter::new("L", ValueKind::LENGTH, 0.5);
+        let (f, l) = (links::key(force.id), links::key(length.id));
         let mut nodes = vec![
             parameters(1, vec![force, length]),
             formula(2, "a / b + 3[N/mm]", 2),
         ];
         let mut links = vec![
-            link(1, &["Value", "F"], 2, &["Parameters", "a"]),
-            link(1, &["Value", "L"], 2, &["Parameters", "b"]),
+            link(1, &["Value", &f], 2, &["Parameters", "a"]),
+            link(1, &["Value", &l], 2, &["Parameters", "b"]),
         ];
         numbers::refresh_kinds(&mut nodes, &mut links);
         let (block, _) = nodes[1].as_number_mut().unwrap();
@@ -773,14 +774,15 @@ mod tests {
     fn a_formula_result_linked_to_another_unit_says_so_and_keeps_the_link() {
         let force = Parameter::new("F", ValueKind::Quantity(Quantity::Force), 1.0);
         let length = Parameter::new("L", ValueKind::LENGTH, 1.0);
+        let (f, l) = (links::key(force.id), links::key(length.id));
         let mut nodes = vec![
             parameters(1, vec![force]),
             formula(2, "a", 1),
             parameters(3, vec![length]),
         ];
         let mut links = vec![
-            link(1, &["Value", "F"], 2, &["Parameters", "a"]),
-            link(2, &["Value", "Result"], 3, &["Value", "L"]),
+            link(1, &["Value", &f], 2, &["Parameters", "a"]),
+            link(2, &["Value", "Result"], 3, &["Value", &l]),
         ];
         numbers::refresh_kinds(&mut nodes, &mut links);
         assert_eq!(
@@ -802,7 +804,7 @@ mod tests {
             2,
             &path(&["Value", "Result"]),
             3,
-            &path(&["Value", "L"]),
+            &path(&["Value", &l]),
         );
         assert!(matches!(why, Some(Some(_))), "{why:?}");
     }

@@ -5,8 +5,10 @@
 //! of another, the submodel.
 //!
 //! A path names what is linked, as the block of the analysis lists it: `["Geometry"]`,
-//! one part of the geometry of a file `["Geometry", "BOLT"]`, `["Mesh"]`, `["Setup"]`, `["Setup", "Materials"]`, `["Setup", "Materials", "Steel"]` or
-//! `["Results", "Step-1"]`.
+//! one part of the geometry of a file `["Geometry", "BOLT"]`, `["Mesh"]`, `["Setup"]`,
+//! `["Setup", "Materials"]`, one item of a category `["Setup", "Materials", key]` or
+//! `["Results", key]`. An item or a step is named by its key, its id as text (see [`key`]),
+//! never by its name, so that renaming it keeps the links on it.
 //!
 //! Links are of two kinds. A reference link makes a row of the target the same as the row
 //! of the same path in the source: it goes from like to like, and the target cannot change
@@ -20,7 +22,7 @@
 //! parameter of another block, `["Parameters", key]`, such as the length of a mesh block.
 //! Like a reference, the parameter is then the same as the number and read-only.
 //!
-//! A state link, `["State", "Step-1"]`, makes the target continue the source: it takes the
+//! A state link, `["State", key]`, makes the target continue the source: it takes the
 //! source's model and its steps up to that step, then solves its own steps from the state
 //! the solver left after it.
 
@@ -35,6 +37,79 @@ use plx_model::{
 };
 
 use crate::tree::{CROSS_SECTIONS, TreeItem};
+
+/// The key that names an item of the setup or a step in a path: its id as text.
+pub fn key(id: plx_model::Id) -> String {
+    id.to_string()
+}
+
+/// The step of `fe` of the key, see [`key`].
+pub fn step_of<'a>(fe: &'a FeModel, step: &str) -> Option<&'a Step> {
+    fe.steps.iter().find(|s| key(s.id) == step)
+}
+
+/// The step a results link's item names: by key in an analysis; a results file has no ids,
+/// so its steps go by their names in the file.
+pub fn results_step<'a>(fe: &'a FeModel, step: &str) -> Option<&'a Step> {
+    step_of(fe, step).or_else(|| fe.steps.iter().find(|s| s.name == step))
+}
+
+/// The index of the step of `fe` of the key.
+pub fn step_index(fe: &FeModel, step: &str) -> Option<usize> {
+    fe.steps.iter().position(|s| key(s.id) == step)
+}
+
+/// The name of the step of the key, or the key itself, e.g. a step of a results file,
+/// which has no ids.
+pub fn step_name(fe: &FeModel, step: &str) -> String {
+    step_of(fe, step).map_or_else(|| step.to_owned(), |s| s.name.clone())
+}
+
+/// An item of a category of the setup, as links name and copy it.
+trait Entry {
+    fn key(&self) -> String;
+    fn label(&self) -> &str;
+}
+
+macro_rules! entries {
+    ($($t:ty),*) => {
+        $(impl Entry for $t {
+            fn key(&self) -> String {
+                key(self.id)
+            }
+            fn label(&self) -> &str {
+                &self.name
+            }
+        })*
+    };
+}
+
+entries!(
+    plx_model::ReferencePoint,
+    plx_model::CoordinateSystem,
+    plx_model::Plane,
+    plx_model::Material,
+    plx_model::CrossSection,
+    plx_model::Section,
+    plx_model::ContactRegion,
+    plx_model::SurfaceInteraction,
+    plx_model::ContactPair,
+    plx_model::Tie,
+    plx_model::NodeTie,
+    plx_model::Bolt,
+    plx_model::Amplitude,
+    plx_model::InitialCondition,
+    Step
+);
+
+impl Entry for plx_model::Constraint {
+    fn key(&self) -> String {
+        key(self.id())
+    }
+    fn label(&self) -> &str {
+        self.name()
+    }
+}
 
 pub const GEOMETRY: &str = "Geometry";
 pub const SETUP: &str = "Setup";
@@ -101,6 +176,42 @@ pub struct MeshCopy {
 }
 
 impl MeshCopy {
+    /// Takes the ids the analysis `own` geometry has for the parts of the same name that the
+    /// copy's geometry has under new ids, as when a file is read anew: with the meshes, their
+    /// origins and what the copy says about them, see [`Geometry::adopt_ids`].
+    pub fn adopt_ids(&mut self, own: Option<&Geometry>) {
+        let (Some(own), Some(shapes)) = (own, self.geometry.as_mut()) else {
+            return;
+        };
+        let changed = shapes.adopt_ids(own);
+        if changed.is_empty() {
+            return;
+        }
+        let new = |id: &mut plx_model::Id| {
+            if let Some((_, new)) = changed.iter().find(|(old, _)| old == id) {
+                *id = *new;
+            }
+        };
+        for part in &mut self.mesh.parts {
+            new(&mut part.id);
+            for body in &mut part.bodies {
+                new(&mut body.id);
+            }
+        }
+        self.origins.rekey(&changed);
+        for set in &mut self.mesh_sets {
+            if let plx_model::Region::Parts(ids) = &mut set.region {
+                ids.iter_mut().for_each(new);
+            }
+        }
+        for element_type in &mut self.element_types {
+            new(&mut element_type.part);
+        }
+        for operation in &mut self.mesh_operations {
+            operation.parts.iter_mut().for_each(new);
+        }
+    }
+
     /// CAD shapes without a mesh, such as some parts of a file.
     pub fn shapes(geometry: Geometry) -> Self {
         Self {
@@ -182,14 +293,25 @@ pub fn merge_meshes(
         }
         // The parts and bodies keep their ids, unless another copy has them already, as
         // when two links bring the same block: the second copy is other parts then.
+        // A part of the merged geometry takes the id the geometry gave it there, so that its
+        // origin stays on it.
         let mut ids: BTreeMap<plx_model::Id, plx_model::Id> = BTreeMap::new();
         for part in &copy.mesh.parts {
-            for id in std::iter::once(part.id).chain(part.bodies.iter().map(|b| b.id)) {
+            let objects = (std::iter::once((part.id, &part.name)))
+                .chain(part.bodies.iter().map(|b| (b.id, &b.name)));
+            for (id, name) in objects {
+                let renamed = (geometry_renamed.get(index))
+                    .and_then(|r| r.get(name))
+                    .unwrap_or(name);
+                let merged = (out.geometry.as_ref())
+                    .and_then(|g| g.part_id(renamed))
+                    .filter(|merged| !ids_used.contains(merged));
                 let new = if ids_used.insert(id) {
                     id
                 } else {
-                    plx_model::Id::new()
+                    merged.unwrap_or_default()
                 };
+                ids_used.insert(new);
                 ids.insert(id, new);
             }
         }
@@ -268,11 +390,6 @@ pub fn merge_meshes(
         // date only with them. Without a geometry of all, every part is an imported mesh.
         let has_geometry = out.geometry.is_some() && copy.geometry.is_some();
         for (body, origin) in copy.origins.iter() {
-            let name = (geometry_renamed.get(index))
-                .and_then(|r| r.get(body))
-                .or_else(|| parts.get(body))
-                .cloned()
-                .unwrap_or_else(|| body.to_owned());
             let origin = match origin {
                 PartOrigin::Meshed(_) | PartOrigin::Linked if has_geometry => PartOrigin::Linked,
                 imported @ PartOrigin::Imported { .. } => imported,
@@ -281,7 +398,7 @@ pub fn merge_meshes(
                     linked: false,
                 },
             };
-            out.origins.insert(&name, origin);
+            out.origins.insert(part(&body), origin);
         }
         for mut set_item in copy.mesh_sets {
             set_item.name = set(&set_item.name);
@@ -304,6 +421,14 @@ pub fn merge_meshes(
                 ),
                 other => other,
             };
+            // The same mesh taken twice brings its sets twice: the second are other sets.
+            let written = copy.mesh.user_sets.contains_key(&set_item.id);
+            if out.mesh_sets.iter().any(|s| s.id == set_item.id) {
+                set_item.id = plx_model::Id::new();
+            }
+            if written {
+                (mesh.user_sets).insert(set_item.id, (set_item.kind, set_item.name.clone()));
+            }
             out.mesh_sets.push(set_item);
         }
         for mut element_type in copy.element_types {
@@ -326,9 +451,23 @@ pub fn merge_meshes(
     (out, renamings)
 }
 
-/// The path as text, as the output pane names it: "Setup > Materials > Steel".
-pub fn label(path: &[String]) -> String {
-    path.join(" > ")
+/// The path as text, as the output pane names it: "Setup > Materials > Steel", with the
+/// names of the items and steps of `fe` its keys stand for.
+pub fn label(fe: Option<&FeModel>, path: &[String]) -> String {
+    let named = |i: usize, part: &String| -> String {
+        let Some(fe) = fe else {
+            return part.clone();
+        };
+        match (path, i) {
+            ([cell, category, item, ..], 2) if cell == SETUP => {
+                entry_name(fe, category, item).unwrap_or_else(|| item.clone())
+            }
+            ([cell, step], 1) if cell == RESULTS || cell == STATE => step_name(fe, step),
+            _ => part.clone(),
+        }
+    };
+    let parts: Vec<String> = path.iter().enumerate().map(|(i, p)| named(i, p)).collect();
+    parts.join(" > ")
 }
 
 /// Whether `path` is `prefix` or lies inside it.
@@ -553,14 +692,13 @@ pub fn filled_paths(link: &Link, source: &str) -> Vec<(Vec<String>, String)> {
 
 /// The index of the step of `source` a state link continues from.
 pub fn state_step(source: &FeModel, link: &Link) -> Option<usize> {
-    let name = link.item.get(1)?;
-    source.steps.iter().position(|s| &s.name == name)
+    step_index(source, link.item.get(1)?)
 }
 
 /// The steps of the target of a state link that are its own, not taken from the source.
 pub fn own_steps(target: &FeModel, link: &Link) -> Vec<Step> {
     (target.steps.iter())
-        .filter(|s| !link.inherited.contains(&s.name))
+        .filter(|s| !link.inherited.contains(&key(s.id)))
         .cloned()
         .collect()
 }
@@ -583,16 +721,15 @@ fn chain_fingerprint(fe: &FeModel, steps: &[Step]) -> u64 {
 /// continues from.
 pub fn chain_up_to_date(source: &FeModel, step: usize, target: &FeModel, link: &Link) -> bool {
     let chain = &source.steps[..=step];
-    let names: Vec<&String> = chain.iter().map(|s| &s.name).collect();
     let n = chain.len();
-    names == link.inherited.iter().collect::<Vec<_>>()
+    keys(chain) == link.inherited
         && target.steps.len() >= n
         && chain_fingerprint(source, chain) == chain_fingerprint(target, &target.steps[..n])
 }
 
 /// Makes `target` continue `source` after its step `step`: the setup but the steps is the
 /// source's, the steps are the source's up to `step` followed by the target's own. Returns
-/// the names of the steps taken, for [`Link::inherited`].
+/// the keys of the steps taken, for [`Link::inherited`].
 pub fn apply_chain(
     target: &mut FeModel,
     source: &FeModel,
@@ -606,14 +743,14 @@ pub fn apply_chain(
     target.properties.kind = source.properties.kind;
     target.properties.global_results = source.properties.global_results.clone();
     target.steps = source.steps[..=step].to_vec();
-    let inherited = names(&target.steps);
+    let inherited = keys(&target.steps);
     target.steps.extend(own);
     target.adopt_history_outputs(source);
     inherited
 }
 
-fn names(steps: &[Step]) -> Vec<String> {
-    steps.iter().map(|s| s.name.clone()).collect()
+fn keys(steps: &[Step]) -> Vec<String> {
+    steps.iter().map(|s| key(s.id)).collect()
 }
 
 /// Splits `fe` after its step `index`: returns it with the steps up to that one, and gives
@@ -628,10 +765,10 @@ pub fn split_after(fe: &FeModel, index: usize, new: &mut FeModel) -> FeModel {
 }
 
 /// Gives the own steps of `target`, which continues `source` after its last step, to
-/// `source`; returns their names.
+/// `source`; returns their keys.
 pub fn merge_into(source: &mut FeModel, target: &FeModel, link: &Link) -> Vec<String> {
     let own = own_steps(target, link);
-    let moved = names(&own);
+    let moved = keys(&own);
     source.steps.extend(own);
     source.adopt_history_outputs(target);
     moved
@@ -647,8 +784,8 @@ pub struct Continuation {
     /// The own steps of the analyses that continue it, after the index of the step of this
     /// one they follow: their sets go into its input file.
     pub dependent_steps: Vec<(usize, Vec<Step>)>,
-    /// The steps it takes over from the analysis it continues, by name, with the name of
-    /// that analysis.
+    /// The steps it takes over from the analysis it continues, by key, with the name of that
+    /// analysis.
     pub inherited_steps: Vec<(String, String)>,
 }
 
@@ -687,11 +824,11 @@ pub const STEP_INPUTS: [&str; 4] = [TEMPERATURES, EIGENMODES, GLOBAL_RESULTS, WA
 /// results row of the step, and what in it writes the displacements.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GlobalSource {
-    /// The step of the submodel that takes the results.
+    /// The step of the submodel that takes the results, by key.
     pub step: String,
     /// The global analysis, or the results file block.
     pub source: String,
-    /// The step of the source whose results are read.
+    /// The name of the step of the source whose results are read.
     pub source_step: String,
     /// Whether `source_step` writes the displacements of a load, rather than mode shapes,
     /// temperatures or sensitivities; `None` for a results file, whose model is not known.
@@ -701,7 +838,7 @@ pub struct GlobalSource {
 /// Whether `step` of `fe` writes the displacements of a load into its results; `None` for
 /// a step the model does not solve. Inactive steps are not solved.
 pub fn writes_displacements(fe: &FeModel, step: &str) -> Option<bool> {
-    let step = fe.steps.iter().find(|s| s.active && s.name == step)?;
+    let step = step_of(fe, step).filter(|s| s.active)?;
     Some(
         fe.field_results(step)
             .contains(&plx_model::FieldResult::Displacements),
@@ -787,6 +924,7 @@ pub fn results_slot(
     let thermal = source_step.kind.is_thermal();
     let particles = matches!(source_step.kind, StepKind::ParticleFlow(_));
     let source = &source_step.name;
+    let step_name = |step: &str| step_name(target, step);
     match slot {
         // The Global results row of a submodel's block: the step whose submodel boundary
         // conditions read them, else the first step.
@@ -801,7 +939,7 @@ pub fn results_slot(
             results_slot(
                 source_step,
                 target,
-                &path(&[SETUP, STEPS, &step.name, GLOBAL_RESULTS]),
+                &path(&[SETUP, STEPS, &key(step.id), GLOBAL_RESULTS]),
             )
         }
         [cell, category, rest @ ..]
@@ -819,9 +957,10 @@ pub fn results_slot(
             }
         }
         [cell, steps, step, input @ ..] if cell == SETUP && steps == STEPS && input.len() <= 1 => {
-            let Some(target_step) = target.steps.iter().find(|s| &s.name == step) else {
-                return Err(format!("there is no step {step}"));
+            let Some(target_step) = step_of(target, step) else {
+                return Err("there is no such step".to_owned());
             };
+            let name = step_name(step);
             let inputs = step_inputs(target_step);
             let modes = match &source_step.kind {
                 StepKind::Frequency(frequency) => Some(frequency.storage),
@@ -829,14 +968,14 @@ pub fn results_slot(
             };
             let input = match input.first().map(String::as_str) {
                 Some(input) if !inputs.contains(&input) => {
-                    return Err(format!("{step} has no input {input}"));
+                    return Err(format!("{name} has no input {input}"));
                 }
                 Some(input) => input,
                 // Dropped on the step: the input that fits.
                 None if particles && inputs.contains(&WALL_LOADS) => WALL_LOADS,
                 None if particles => {
                     return Err(format!(
-                        "{step} takes no loads, so no wall loads of {source}"
+                        "{name} takes no loads, so no wall loads of {source}"
                     ));
                 }
                 None if modes.is_some() && inputs.contains(&EIGENMODES) => EIGENMODES,
@@ -890,7 +1029,7 @@ pub fn apply_results(
     let step = target_step(link).unwrap_or_default().to_owned();
     match kind {
         ResultsUse::Submodel => apply_submodel(fe, &step, global, file),
-        ResultsUse::WallLoads => apply_wall_loads(fe, mesh, &step, file),
+        ResultsUse::WallLoads => apply_wall_loads(fe, mesh, &step, made_id(link), file),
         ResultsUse::Modes => {
             let changed = fe.properties.stored_modes.as_ref() != Some(&file);
             fe.properties.stored_modes = Some(file);
@@ -903,10 +1042,11 @@ pub fn apply_results(
             changed
         }
         ResultsUse::Temperature => {
-            let Some(step) = fe.steps.iter_mut().find(|s| s.name == step) else {
+            let Some(step) = fe.steps.iter_mut().find(|s| key(s.id) == step) else {
                 return false;
             };
             let field = DefinedField {
+                id: made_id(link),
                 distribution: None,
                 name: LINKED_TEMPERATURES.into(),
                 active: true,
@@ -914,7 +1054,7 @@ pub fn apply_results(
                 kind: DefinedFieldKind::TemperatureFromFile { file, step: global },
                 amplitude: None,
             };
-            match (step.defined_fields.iter_mut()).find(|f| f.name == LINKED_TEMPERATURES) {
+            match (step.defined_fields.iter_mut()).find(|f| f.id == field.id) {
                 Some(own) if own.kind == field.kind => false,
                 Some(own) => {
                     own.kind = field.kind;
@@ -932,11 +1072,17 @@ pub fn apply_results(
 /// Lets step `step` of `fe` take the loads on the walls in `file`: its load
 /// [`LINKED_WALL_LOADS`] reads them, made on the parts of the walls the first time. Returns
 /// whether anything changed.
-fn apply_wall_loads(fe: &mut FeModel, mesh: &FeMesh, step: &str, file: PathBuf) -> bool {
-    let Some(step) = fe.steps.iter_mut().find(|s| s.name == step) else {
+fn apply_wall_loads(
+    fe: &mut FeModel,
+    mesh: &FeMesh,
+    step: &str,
+    id: plx_model::Id,
+    file: PathBuf,
+) -> bool {
+    let Some(step) = fe.steps.iter_mut().find(|s| key(s.id) == step) else {
         return false;
     };
-    if let Some(load) = (step.loads.iter_mut()).find(|l| l.name == LINKED_WALL_LOADS) {
+    if let Some(load) = (step.loads.iter_mut()).find(|l| l.id == id) {
         return match &mut load.kind {
             plx_model::LoadKind::WallLoads(walls) if walls.file == file => false,
             plx_model::LoadKind::WallLoads(walls) => {
@@ -946,11 +1092,16 @@ fn apply_wall_loads(fe: &mut FeModel, mesh: &FeMesh, step: &str, file: PathBuf) 
             _ => false,
         };
     }
-    // The parts of the walls, which the run lists by name.
+    // The parts of the walls: by id, or by name in a mesh of the analysis's own.
     let mut parts: Vec<plx_model::Id> = Vec::new();
     if let Ok(loads) = plx_results::wall_loads::WallLoads::read(&file) {
         for wall in &loads.walls {
-            for part in wall.parts.iter().filter_map(|p| mesh.part_id(p)) {
+            let found = (wall.parts.iter()).filter_map(|(id, name)| {
+                (mesh.parts.iter().any(|p| p.id == *id))
+                    .then_some(*id)
+                    .or_else(|| mesh.part_id(name))
+            });
+            for part in found {
                 if !parts.contains(&part) {
                     parts.push(part);
                 }
@@ -958,7 +1109,7 @@ fn apply_wall_loads(fe: &mut FeModel, mesh: &FeMesh, step: &str, file: PathBuf) 
         }
     }
     step.loads.push(plx_model::Load {
-        id: plx_model::Id::new(),
+        id,
         name: LINKED_WALL_LOADS.into(),
         active: true,
         visible: true,
@@ -977,59 +1128,90 @@ fn apply_wall_loads(fe: &mut FeModel, mesh: &FeMesh, step: &str, file: PathBuf) 
     true
 }
 
+/// The id of the item the results link `link` makes in its target, a temperature field or a
+/// load: the same each time, so that the link finds it again also once it is renamed.
+fn made_id(link: &Link) -> plx_model::Id {
+    let mut seed = format!("{} {}", link.source, link.target);
+    for part in link
+        .item
+        .iter()
+        .chain([&"->".to_string()])
+        .chain(&link.slot)
+    {
+        seed.push(' ');
+        seed.push_str(part);
+    }
+    plx_model::Id::derived(&seed)
+}
+
 /// Takes back what a results link set in `fe`, once it is removed; `submodel` tells
 /// whether other links still make it a submodel.
 pub fn clear_results(fe: &mut FeModel, link: &Link, submodel: bool) {
+    let made = made_id(link);
     match ResultsUse::of(link) {
         Some(ResultsUse::Submodel) if !submodel => clear_submodel(fe),
         Some(ResultsUse::Modes) => fe.properties.stored_modes = None,
         Some(ResultsUse::InitialTemperatures) => fe.properties.initial_temperatures = None,
         Some(ResultsUse::Temperature) => {
             let step = target_step(link);
-            for s in fe
-                .steps
-                .iter_mut()
-                .filter(|s| Some(s.name.as_str()) == step)
-            {
-                s.defined_fields.retain(|f| f.name != LINKED_TEMPERATURES);
+            for s in (fe.steps.iter_mut()).filter(|s| Some(key(s.id).as_str()) == step) {
+                s.defined_fields.retain(|f| f.id != made);
             }
         }
         Some(ResultsUse::WallLoads) => {
             let step = target_step(link);
-            for s in (fe.steps.iter_mut()).filter(|s| Some(s.name.as_str()) == step) {
-                s.loads.retain(|l| l.name != LINKED_WALL_LOADS);
+            for s in (fe.steps.iter_mut()).filter(|s| Some(key(s.id).as_str()) == step) {
+                s.loads.retain(|l| l.id != made);
             }
         }
         _ => {}
     }
 }
 
-/// The names of the items of a category of the setup, as the tree lists them.
-pub fn entries(fe: &FeModel, category: &str) -> Vec<String> {
-    let names = |names: &mut dyn Iterator<Item = &str>| names.map(str::to_owned).collect();
-    match category {
-        "Features" => names(
-            &mut (fe.reference_points.iter().map(|p| p.name.as_str()))
-                .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()))
-                .chain(fe.planes.iter().map(|p| p.name.as_str())),
-        ),
-        "Materials" => names(&mut fe.materials.iter().map(|m| m.name.as_str())),
-        CROSS_SECTIONS => names(&mut fe.cross_sections.iter().map(|c| c.name.as_str())),
-        "Sections" => names(&mut fe.sections.iter().map(|s| s.name.as_str())),
-        "Constraints" => names(&mut fe.constraints.iter().map(|c| c.name())),
-        "Contacts" => names(
-            &mut (fe.contact_regions.iter().map(|r| r.name.as_str()))
-                .chain(fe.surface_interactions.iter().map(|s| s.name.as_str()))
-                .chain(fe.contact_pairs.iter().map(|c| c.name.as_str()))
-                .chain(fe.ties.iter().map(|t| t.name.as_str()))
-                .chain(fe.node_ties.iter().map(|t| t.name.as_str()))
-                .chain(fe.bolts.iter().map(|b| b.name.as_str())),
-        ),
-        "Amplitudes" => names(&mut fe.amplitudes.iter().map(|a| a.name.as_str())),
-        "Initial Conditions" => names(&mut fe.initial_conditions.iter().map(|c| c.name.as_str())),
-        "Steps" => names(&mut fe.steps.iter().map(|s| s.name.as_str())),
-        _ => Vec::new(),
+/// The items of a category of the setup, as the tree lists them: their keys (see [`key`])
+/// and names.
+pub fn entry_names(fe: &FeModel, category: &str) -> Vec<(String, String)> {
+    fn add<T: Entry>(out: &mut Vec<(String, String)>, items: &[T]) {
+        out.extend(items.iter().map(|i| (i.key(), i.label().to_owned())));
     }
+    let mut out = Vec::new();
+    match category {
+        "Features" => {
+            add(&mut out, &fe.reference_points);
+            add(&mut out, &fe.coordinate_systems);
+            add(&mut out, &fe.planes);
+        }
+        "Materials" => add(&mut out, &fe.materials),
+        CROSS_SECTIONS => add(&mut out, &fe.cross_sections),
+        "Sections" => add(&mut out, &fe.sections),
+        "Constraints" => add(&mut out, &fe.constraints),
+        "Contacts" => {
+            add(&mut out, &fe.contact_regions);
+            add(&mut out, &fe.surface_interactions);
+            add(&mut out, &fe.contact_pairs);
+            add(&mut out, &fe.ties);
+            add(&mut out, &fe.node_ties);
+            add(&mut out, &fe.bolts);
+        }
+        "Amplitudes" => add(&mut out, &fe.amplitudes),
+        "Initial Conditions" => add(&mut out, &fe.initial_conditions),
+        "Steps" => add(&mut out, &fe.steps),
+        _ => {}
+    }
+    out
+}
+
+/// The keys of the items of a category of the setup, see [`entry_names`].
+pub fn entries(fe: &FeModel, category: &str) -> Vec<String> {
+    entry_names(fe, category)
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// The name of the item of the key in a category of the setup.
+pub fn entry_name(fe: &FeModel, category: &str, key: &str) -> Option<String> {
+    (entry_names(fe, category).into_iter()).find_map(|(k, name)| (k == key).then_some(name))
 }
 
 /// Whether the analysis has what the path names, so that a link can take it.
@@ -1038,8 +1220,8 @@ pub fn exists(data: Data, path: &[String]) -> bool {
         [cell] if cell == GEOMETRY => data.geometry.is_some() || data.mesh.element_count() > 0,
         [cell] if cell == SETUP => true,
         [cell, category] if cell == SETUP => CATEGORIES.contains(&category.as_str()),
-        [cell, category, name] if cell == SETUP => entries(data.fe, category).contains(name),
-        [cell, step] if cell == RESULTS => data.fe.steps.iter().any(|s| &s.name == step),
+        [cell, category, item] if cell == SETUP => entries(data.fe, category).contains(item),
+        [cell, step] if cell == RESULTS => step_of(data.fe, step).is_some(),
         _ => false,
     }
 }
@@ -1062,7 +1244,8 @@ pub fn take_geometry(
 ) -> Option<TagMap> {
     let mut tags = None;
     *target = match (target.take(), source) {
-        (Some(own), Some(source)) => {
+        (Some(own), Some(mut source)) => {
+            source.adopt_ids(&own);
             tags = own.tags_in(&source);
             let mut taken = Geometry {
                 meshing: own.meshing,
@@ -1105,52 +1288,48 @@ pub fn take_geometry(
 }
 
 /// Renames what the analysis has of the parts the source renamed since the analysis took
-/// its shapes, found by the parts' ids ([`Geometry::renames_since`]): the part in its own
-/// geometry with its suppression and mesh setup, and its mesh. The items of the FE model
-/// refer to the part by id and stay on it. Returns the renames, as (old, new) names.
+/// its shapes, found by the parts' ids ([`Geometry::renames_since`]): the meshes of the
+/// parts. Its suppression, mesh setup, the origins of the meshes and the items of the FE
+/// model refer to the part by id and stay on it. Returns the renames, as (old, new) names.
 pub fn follow_renames(
     geometry: &mut Option<Geometry>,
     source: Option<&Geometry>,
     mesh: &mut FeMesh,
-    origins: &mut plx_model::PartOrigins,
     fe: &mut FeModel,
 ) -> Vec<(String, String)> {
     let (Some(own), Some(source)) = (geometry.as_mut(), source) else {
         return Vec::new();
     };
     let renames = source.renames_since(own);
-    // A mesh up to date stays so under the new name.
-    let (space, matching) = (fe.properties.space, fe.matching_faces());
-    let input = |geometry: &Geometry, name: &str| {
-        plx_model::fingerprint::mesh_input(geometry, &matching, space, name)
-    };
-    let up_to_date: Vec<bool> = (renames.iter())
-        .map(|(old, _)| origins.made_from(old) == Some(input(own, old)))
-        .collect();
-    // Through names of no part, so that parts that swap names keep theirs apart.
-    let parked: Vec<String> = (0..renames.len()).map(|i| format!("\u{1}{i}")).collect();
-    let steps = (renames.iter().zip(&parked))
-        .map(|((old, _), park)| (old.as_str(), park.as_str()))
-        .chain((renames.iter().zip(&parked)).map(|((_, new), park)| (park.as_str(), new.as_str())));
-    for (old, new) in steps.collect::<Vec<_>>() {
-        own.rename_part(old, new);
-        for index in 0..mesh.parts.len() {
-            if mesh.parts[index].name.eq_ignore_ascii_case(old) {
-                mesh.rename_part(index, new);
-            }
-            for body in &mut mesh.parts[index].bodies {
-                if body.name.eq_ignore_ascii_case(old) {
-                    body.name = new.to_owned();
-                }
-            }
-        }
-        fe.rename_element_set(old, new);
-        origins.rename(old, new);
+    if renames.is_empty() {
+        return renames;
     }
-    for ((_, new), up_to_date) in renames.iter().zip(up_to_date) {
-        if up_to_date {
-            origins.set_meshed(new, input(own, new));
+    let name_of = |id| source.part_name(id).map(str::to_owned);
+    // Through names of no part, so that parts that swap names keep their sets apart.
+    let renamed: Vec<(usize, String)> = (mesh.parts.iter().enumerate())
+        .filter_map(|(index, part)| Some((index, name_of(part.id)?)))
+        .filter(|(index, name)| *name != mesh.parts[*index].name)
+        .collect();
+    for (index, _) in &renamed {
+        mesh.rename_part(*index, &format!("\u{1}{index}"));
+    }
+    for (index, name) in &renamed {
+        mesh.rename_part(*index, name);
+    }
+    for index in 0..mesh.parts.len() {
+        for body in &mut mesh.parts[index].bodies {
+            if let Some(name) = name_of(body.id) {
+                body.name = name;
+            }
         }
+    }
+    // Through names of no set, so that parts that swap names keep their sets apart.
+    let parked: Vec<String> = (0..renames.len()).map(|i| format!("\u{1}{i}")).collect();
+    for ((old, _), park) in renames.iter().zip(&parked) {
+        fe.rename_element_set(old, park);
+    }
+    for ((_, new), park) in renames.iter().zip(&parked) {
+        fe.rename_element_set(park, new);
     }
     renames
 }
@@ -1180,7 +1359,9 @@ pub fn take_objects(
     fe: &mut FeModel,
     copy: MeshCopy,
 ) -> Taken {
-    use plx_model::{PartOrigin, part_bodies};
+    use plx_model::PartOrigin;
+    let mut copy = copy;
+    copy.adopt_ids(geometry.as_ref());
     let MeshCopy {
         geometry: shapes,
         mesh: mut incoming,
@@ -1191,8 +1372,8 @@ pub fn take_objects(
     } = copy;
     // What the analysis has of parts the source renamed takes their new names first.
     let mut mesh = mesh.clone();
-    let mut origins = origins.clone();
-    let renames = follow_renames(geometry, shapes.as_ref(), &mut mesh, &mut origins, fe);
+    let origins = origins.clone();
+    let renames = follow_renames(geometry, shapes.as_ref(), &mut mesh, fe);
     let (mesh, origins) = (&mesh, &origins);
     // The link's meshes of CAD parts come with the compound parts they were joined to.
     let cad_meshes = (incoming_origins.iter())
@@ -1212,38 +1393,35 @@ pub fn take_objects(
     let mut linked = incoming_origins.linked(origins);
     // An analysis whose operations change the shapes meshes them itself.
     let changed = geometry.is_some_and(|g| !g.operations.is_empty());
-    let cad_mesh = |b: &str| {
+    let cad_mesh = |b: plx_model::Id| {
         matches!(
             incoming_origins.get(b),
             Some(PartOrigin::Meshed(_) | PartOrigin::Linked)
         )
     };
-    let own: Vec<String> = (incoming.parts.iter().flat_map(part_bodies))
-        .filter(|b| geometry.is_some_and(|g| g.meshes_itself(b)) || (changed && cad_mesh(b)))
-        .map(str::to_owned)
+    let own: Vec<plx_model::Id> = (incoming.parts.iter().flat_map(plx_model::part_objects))
+        .filter(|&b| {
+            geometry.is_some_and(|g| g.own_meshes.contains(&b)) || (changed && cad_mesh(b))
+        })
         .collect();
     if !own.is_empty() {
-        let own = plx_model::body_ids(&incoming, &own);
         incoming.remove_bodies(&own);
     }
     linked.reconcile(&incoming);
     // Of what it had, its own meshes of parts still there that the link brings none of, and
     // the meshes it imported itself.
-    let brought = |name: &str| linked.get(name).is_some();
-    let known = |name: &str| {
-        geometry.is_some_and(|g| g.known_parts().iter().any(|p| p.eq_ignore_ascii_case(name)))
-    };
-    let keep = |name: &str| match origins.get(name) {
-        Some(PartOrigin::Meshed(_)) => known(name) && !brought(name),
-        Some(PartOrigin::Imported { linked: false, .. }) => !brought(name),
+    let brought = |id: plx_model::Id| linked.get(id).is_some();
+    let known = |id: plx_model::Id| geometry.is_some_and(|g| g.part_name(id).is_some());
+    let keep = |id: plx_model::Id| match origins.get(id) {
+        Some(PartOrigin::Meshed(_)) => known(id) && !brought(id),
+        Some(PartOrigin::Imported { linked: false, .. }) => !brought(id),
         _ => false,
     };
-    let dropped: Vec<String> = (mesh.parts.iter().flat_map(part_bodies))
-        .filter(|b| !keep(b))
-        .map(str::to_owned)
+    let dropped: Vec<plx_model::Id> = (mesh.parts.iter().flat_map(plx_model::part_objects))
+        .filter(|&b| !keep(b))
         .collect();
     let mut kept = mesh.clone();
-    kept.remove_bodies(&plx_model::body_ids(mesh, &dropped));
+    kept.remove_bodies(&dropped);
     if let Some(tags) = &tags {
         kept.cad = kept.cad.renumbered(tags);
     }
@@ -1257,18 +1435,23 @@ pub fn take_objects(
     } else {
         // The link's mesh keeps its numbers, so that results of the same mesh fit; the own
         // meshes keep theirs where the link's mesh leaves them free.
-        let names: Vec<String> = kept.parts.iter().map(|p| p.name.clone()).collect();
+        let old: Vec<plx_model::Id> = kept
+            .parts
+            .iter()
+            .flat_map(plx_model::part_objects)
+            .collect();
         let mut both = incoming;
-        let added = both.append_keeping(kept);
+        let first = both.parts.len();
+        both.append_keeping(kept);
+        // A part the link brings too takes another id in the mesh put together.
+        let new: Vec<plx_model::Id> = both.parts[first..]
+            .iter()
+            .flat_map(plx_model::part_objects)
+            .collect();
         let mut origins = linked;
-        for (old, new) in names.iter().zip(&added) {
-            if let Some(origin) = kept_origins.get(old) {
-                origins.insert(new, origin);
-            }
-        }
-        for (body, origin) in kept_origins.iter() {
-            if origins.get(body).is_none() {
-                origins.insert(body, origin);
+        for (old, new) in old.iter().zip(&new) {
+            if let Some(origin) = kept_origins.get(*old) {
+                origins.insert(*new, origin);
             }
         }
         origins.reconcile(&both);
@@ -1285,7 +1468,7 @@ pub fn take_objects(
     // What the FE model says about the link's meshes comes with them; its own stays.
     if cad_meshes || !mesh_sets.is_empty() || !element_types.is_empty() {
         // The sets the link brought last time go, the analysis' own stay; one whose name
-        // the link brings now is renamed.
+        // the link brings now is renamed, and the items on it keep it by id.
         let mut incoming_sets = mesh_sets;
         for set in &mut incoming_sets {
             set.linked = true;
@@ -1303,7 +1486,6 @@ pub fn take_objects(
                 .map(|n| format!("{old}-{n}"))
                 .find(|n| !taken(&incoming_sets, kind, n) && !taken(&own_sets, kind, n))
                 .unwrap_or_default();
-            fe.rename_set(kind, &old, &new);
             notes.push(format!(
                 "{} {old} renamed to {new}: the linked source has one of that name",
                 kind.label()
@@ -1318,7 +1500,7 @@ pub fn take_objects(
         fe.element_types = element_types;
         fe.element_types.extend(own_types);
         let own_operations: Vec<_> = (fe.mesh_operations.drain(..))
-            .filter(|own| !mesh_operations.iter().any(|o| o.name == own.name))
+            .filter(|own| !mesh_operations.iter().any(|o| o.id == own.id))
             .collect();
         let mut operations = mesh_operations;
         operations.extend(own_operations);
@@ -1400,52 +1582,48 @@ fn setup_fingerprint(hash: &mut Fnv, fe: &FeModel, path: &[String]) {
             }
         }
         [category] => category_fingerprint(hash, fe, category, None),
-        [category, name] => category_fingerprint(hash, fe, category, Some(name)),
+        [category, item] => category_fingerprint(hash, fe, category, Some(item)),
         _ => {}
     }
 }
 
-/// Hashes the items of a category, or only the one named. The global step of a submodel's
-/// boundary conditions is left out: a results link sets it in the target.
-fn category_fingerprint(hash: &mut Fnv, fe: &FeModel, category: &str, name: Option<&str>) {
-    fn add<T: std::fmt::Debug>(
-        hash: &mut Fnv,
-        items: &[T],
-        key: fn(&T) -> &str,
-        name: Option<&str>,
-    ) {
-        for item in items.iter().filter(|i| name.is_none_or(|n| key(i) == n)) {
-            hash.add_debug(item);
+/// Hashes the items of a category, or only the one of the key `item`. The global step of a
+/// submodel's boundary conditions is left out: a results link sets it in the target.
+fn category_fingerprint(hash: &mut Fnv, fe: &FeModel, category: &str, item: Option<&str>) {
+    fn add<T: std::fmt::Debug + Entry>(hash: &mut Fnv, items: &[T], item: Option<&str>) {
+        for i in items.iter().filter(|i| item.is_none_or(|k| i.key() == k)) {
+            hash.add_debug(i);
         }
     }
+    let name = item;
     hash.add_str(category);
     match category {
         "Features" => {
-            add(hash, &fe.reference_points, |p| &p.name, name);
-            add(hash, &fe.coordinate_systems, |c| &c.name, name);
-            add(hash, &fe.planes, |p| &p.name, name);
+            add(hash, &fe.reference_points, name);
+            add(hash, &fe.coordinate_systems, name);
+            add(hash, &fe.planes, name);
         }
-        "Materials" => add(hash, &fe.materials, |m| &m.name, name),
-        CROSS_SECTIONS => add(hash, &fe.cross_sections, |c| &c.name, name),
-        "Sections" => add(hash, &fe.sections, |s| &s.name, name),
-        "Constraints" => add(hash, &fe.constraints, |c| c.name(), name),
+        "Materials" => add(hash, &fe.materials, name),
+        CROSS_SECTIONS => add(hash, &fe.cross_sections, name),
+        "Sections" => add(hash, &fe.sections, name),
+        "Constraints" => add(hash, &fe.constraints, name),
         "Contacts" => {
-            add(hash, &fe.contact_regions, |r| &r.name, name);
+            add(hash, &fe.contact_regions, name);
             if name.is_none() {
                 hash.add_debug(&fe.contact_defaults);
                 hash.add_debug(&fe.contact_detections);
             }
-            add(hash, &fe.surface_interactions, |s| &s.name, name);
-            add(hash, &fe.contact_pairs, |c| &c.name, name);
-            add(hash, &fe.ties, |t| &t.name, name);
-            add(hash, &fe.node_ties, |t| &t.name, name);
-            add(hash, &fe.bolts, |b| &b.name, name);
+            add(hash, &fe.surface_interactions, name);
+            add(hash, &fe.contact_pairs, name);
+            add(hash, &fe.ties, name);
+            add(hash, &fe.node_ties, name);
+            add(hash, &fe.bolts, name);
         }
-        "Amplitudes" => add(hash, &fe.amplitudes, |a| &a.name, name),
-        "Initial Conditions" => add(hash, &fe.initial_conditions, |c| &c.name, name),
+        "Amplitudes" => add(hash, &fe.amplitudes, name),
+        "Initial Conditions" => add(hash, &fe.initial_conditions, name),
         "Steps" => {
             let mut steps: Vec<_> = (fe.steps.iter())
-                .filter(|s| name.is_none_or(|n| s.name == n))
+                .filter(|s| name.is_none_or(|k| key(s.id) == k))
                 .cloned()
                 .collect();
             for bc in steps.iter_mut().flat_map(|s| &mut s.boundary_conditions) {
@@ -1461,7 +1639,8 @@ fn category_fingerprint(hash: &mut Fnv, fe: &FeModel, category: &str, name: Opti
 }
 
 /// Copies what the path names from `source` into `target`: the setup or a category
-/// replaces the target's, an item replaces the target's item of the same name or is added.
+/// replaces the target's, an item replaces the target's copy of it, else its own item of the
+/// same name, or is added.
 /// Links of a category take its items with [`apply_bundle`] instead.
 pub fn apply_setup(target: &mut FeModel, source: &FeModel, path: &[String]) {
     match path {
@@ -1471,8 +1650,8 @@ pub fn apply_setup(target: &mut FeModel, source: &FeModel, path: &[String]) {
             }
         }
         [cell, category] if cell == SETUP => copy_category(target, source, category, Mode::All),
-        [cell, category, name] if cell == SETUP => {
-            copy_category(target, source, category, Mode::One(name))
+        [cell, category, item] if cell == SETUP => {
+            copy_category(target, source, category, Mode::One(item))
         }
         _ => {}
     }
@@ -1483,9 +1662,9 @@ pub fn apply_setup(target: &mut FeModel, source: &FeModel, path: &[String]) {
 enum Mode<'a> {
     /// All items, in place of the target's.
     All,
-    /// The item of this name.
+    /// The item of this key.
     One(&'a str),
-    /// The items of these names, see [`apply_bundle`].
+    /// The items of these keys, see [`apply_bundle`].
     Bundle {
         names: &'a [String],
         stale: &'a [String],
@@ -1494,16 +1673,22 @@ enum Mode<'a> {
 }
 
 fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: Mode) {
-    fn copy<T: Clone>(target: &mut Vec<T>, source: &[T], key: fn(&T) -> &str, mode: Mode) {
-        let named = |names: &[String], item: &T| names.iter().any(|n| n == key(item));
+    fn copy<T: Clone + Entry>(target: &mut Vec<T>, source: &[T], mode: Mode) {
+        let named = |keys: &[String], item: &T| keys.contains(&item.key());
+        // The target's copy of the item, else its own item of the same name, which the
+        // item takes the place of the first time.
+        let place = |target: &[T], item: &T| {
+            (target.iter().position(|own| own.key() == item.key()))
+                .or_else(|| target.iter().position(|own| own.label() == item.label()))
+        };
         match mode {
             Mode::All => *target = source.to_vec(),
-            Mode::One(name) => {
-                let Some(item) = source.iter().find(|i| key(i) == name) else {
+            Mode::One(key) => {
+                let Some(item) = source.iter().find(|i| i.key() == key) else {
                     return;
                 };
-                match target.iter_mut().find(|i| key(i) == name) {
-                    Some(own) => *own = item.clone(),
+                match place(target, item) {
+                    Some(at) => target[at] = item.clone(),
                     None => target.push(item.clone()),
                 }
             }
@@ -1514,7 +1699,7 @@ fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: M
             } => {
                 target.retain(|item| !named(stale, item));
                 for item in source.iter().filter(|item| named(names, item)) {
-                    match target.iter().position(|own| key(own) == key(item)) {
+                    match place(target, item) {
                         Some(at) => target[at] = item.clone(),
                         None => {
                             // Linked items come first, in the order of the links.
@@ -1536,41 +1721,20 @@ fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: M
     let before = target.item_ids();
     match category {
         "Features" => {
-            copy(
-                &mut target.reference_points,
-                &source.reference_points,
-                |p| &p.name,
-                name,
-            );
+            copy(&mut target.reference_points, &source.reference_points, name);
             copy(
                 &mut target.coordinate_systems,
                 &source.coordinate_systems,
-                |c| &c.name,
                 name,
             );
-            copy(&mut target.planes, &source.planes, |p| &p.name, name);
+            copy(&mut target.planes, &source.planes, name);
         }
-        "Materials" => copy(&mut target.materials, &source.materials, |m| &m.name, name),
-        CROSS_SECTIONS => copy(
-            &mut target.cross_sections,
-            &source.cross_sections,
-            |c| &c.name,
-            name,
-        ),
-        "Sections" => copy(&mut target.sections, &source.sections, |s| &s.name, name),
-        "Constraints" => copy(
-            &mut target.constraints,
-            &source.constraints,
-            |c| c.name(),
-            name,
-        ),
+        "Materials" => copy(&mut target.materials, &source.materials, name),
+        CROSS_SECTIONS => copy(&mut target.cross_sections, &source.cross_sections, name),
+        "Sections" => copy(&mut target.sections, &source.sections, name),
+        "Constraints" => copy(&mut target.constraints, &source.constraints, name),
         "Contacts" => {
-            copy(
-                &mut target.contact_regions,
-                &source.contact_regions,
-                |r| &r.name,
-                name,
-            );
+            copy(&mut target.contact_regions, &source.contact_regions, name);
             // The settings shared by all regions come with the whole category.
             if matches!(name, Mode::All | Mode::Bundle { .. }) {
                 target.contact_defaults = source.contact_defaults.clone();
@@ -1579,33 +1743,21 @@ fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: M
             copy(
                 &mut target.surface_interactions,
                 &source.surface_interactions,
-                |s| &s.name,
                 name,
             );
-            copy(
-                &mut target.contact_pairs,
-                &source.contact_pairs,
-                |c| &c.name,
-                name,
-            );
-            copy(&mut target.ties, &source.ties, |t| &t.name, name);
-            copy(&mut target.node_ties, &source.node_ties, |t| &t.name, name);
-            copy(&mut target.bolts, &source.bolts, |b| &b.name, name);
+            copy(&mut target.contact_pairs, &source.contact_pairs, name);
+            copy(&mut target.ties, &source.ties, name);
+            copy(&mut target.node_ties, &source.node_ties, name);
+            copy(&mut target.bolts, &source.bolts, name);
         }
-        "Amplitudes" => copy(
-            &mut target.amplitudes,
-            &source.amplitudes,
-            |a| &a.name,
-            name,
-        ),
+        "Amplitudes" => copy(&mut target.amplitudes, &source.amplitudes, name),
         "Initial Conditions" => copy(
             &mut target.initial_conditions,
             &source.initial_conditions,
-            |c| &c.name,
             name,
         ),
         "Steps" => {
-            copy(&mut target.steps, &source.steps, |s| &s.name, name);
+            copy(&mut target.steps, &source.steps, name);
             target.adopt_history_outputs(source);
             for (step, global) in global_steps {
                 set_global_step(target, &step, global);
@@ -1616,12 +1768,12 @@ fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: M
     target.follow_replaced(&before);
 }
 
-/// The global step each step's submodel boundary conditions read, by step name.
+/// The global step each step's submodel boundary conditions read, by step key.
 fn submodel_steps(fe: &FeModel) -> Vec<(String, u32)> {
     (fe.steps.iter())
         .filter_map(|step| {
             (step.boundary_conditions.iter()).find_map(|bc| match bc.kind {
-                BoundaryKind::Submodel { step: global, .. } => Some((step.name.clone(), global)),
+                BoundaryKind::Submodel { step: global, .. } => Some((key(step.id), global)),
                 _ => None,
             })
         })
@@ -1630,7 +1782,7 @@ fn submodel_steps(fe: &FeModel) -> Vec<(String, u32)> {
 
 fn set_global_step(fe: &mut FeModel, step: &str, global: u32) -> bool {
     let mut changed = false;
-    let Some(step) = fe.steps.iter_mut().find(|s| s.name == step) else {
+    let Some(step) = fe.steps.iter_mut().find(|s| key(s.id) == step) else {
         return false;
     };
     for bc in &mut step.boundary_conditions {
@@ -1647,7 +1799,7 @@ fn set_global_step(fe: &mut FeModel, step: &str, global: u32) -> bool {
 /// The number the solver gives a step of the global model in its results: the active steps
 /// counted from 1.
 pub fn global_step_number(fe: &FeModel, step: &str) -> Option<u32> {
-    let index = (fe.steps.iter().filter(|s| s.active)).position(|s| s.name == step)?;
+    let index = (fe.steps.iter().filter(|s| s.active)).position(|s| key(s.id) == step)?;
     u32::try_from(index + 1).ok()
 }
 
@@ -1832,7 +1984,7 @@ pub fn tree_items(fe: &FeModel, path: &[String]) -> Vec<TreeItem> {
         [cell] if cell == GEOMETRY => vec![TreeItem::Mesh],
         [cell] if cell == SETUP => CATEGORIES.iter().flat_map(|c| all(c)).collect(),
         [cell, category] if cell == SETUP => all(category),
-        [cell, category, name] if cell == SETUP => category_items(fe, category, Some(name)),
+        [cell, category, item] if cell == SETUP => category_items(fe, category, Some(item)),
         _ => Vec::new(),
     }
 }
@@ -1854,91 +2006,91 @@ fn category_groups(category: &str) -> Vec<TreeItem> {
     }
 }
 
-fn category_items(fe: &FeModel, category: &str, name: Option<&str>) -> Vec<TreeItem> {
-    let wanted = |n: &str| name.is_none_or(|m| m == n);
+fn category_items(fe: &FeModel, category: &str, item: Option<&str>) -> Vec<TreeItem> {
+    let wanted = |i: &dyn Entry| item.is_none_or(|k| k == i.key());
     let mut items = Vec::new();
     match category {
         "Features" => {
             for (i, p) in fe.reference_points.iter().enumerate() {
-                if wanted(&p.name) {
+                if wanted(p) {
                     items.push(TreeItem::ReferencePoint(i));
                 }
             }
             for (i, c) in fe.coordinate_systems.iter().enumerate() {
-                if wanted(&c.name) {
+                if wanted(c) {
                     items.push(TreeItem::CoordinateSystem(i));
                 }
             }
             for (i, p) in fe.planes.iter().enumerate() {
-                if wanted(&p.name) {
+                if wanted(p) {
                     items.push(TreeItem::Plane(i));
                 }
             }
         }
         "Materials" => items.extend(
             (fe.materials.iter().enumerate())
-                .filter(|(_, m)| wanted(&m.name))
+                .filter(|(_, m)| wanted(*m))
                 .map(|(i, _)| TreeItem::Material(i)),
         ),
         CROSS_SECTIONS => items.extend(
             (fe.cross_sections.iter().enumerate())
-                .filter(|(_, c)| wanted(&c.name))
+                .filter(|(_, c)| wanted(*c))
                 .map(|(i, _)| TreeItem::CrossSection(i)),
         ),
         "Sections" => items.extend(
             (fe.sections.iter().enumerate())
-                .filter(|(_, s)| wanted(&s.name))
+                .filter(|(_, s)| wanted(*s))
                 .map(|(i, _)| TreeItem::Section(i)),
         ),
         "Constraints" => items.extend(
             (fe.constraints.iter().enumerate())
-                .filter(|(_, c)| wanted(c.name()))
+                .filter(|(_, c)| wanted(*c))
                 .map(|(i, _)| TreeItem::Constraint(i)),
         ),
         "Contacts" => {
             items.extend(
                 (fe.contact_regions.iter().enumerate())
-                    .filter(|(_, r)| wanted(&r.name))
+                    .filter(|(_, r)| wanted(*r))
                     .map(|(i, _)| TreeItem::ContactRegion(i)),
             );
             items.extend(
                 (fe.surface_interactions.iter().enumerate())
-                    .filter(|(_, s)| wanted(&s.name))
+                    .filter(|(_, s)| wanted(*s))
                     .map(|(i, _)| TreeItem::SurfaceInteraction(i)),
             );
             items.extend(
                 (fe.contact_pairs.iter().enumerate())
-                    .filter(|(_, c)| wanted(&c.name))
+                    .filter(|(_, c)| wanted(*c))
                     .map(|(i, _)| TreeItem::ContactPair(i)),
             );
             items.extend(
                 (fe.ties.iter().enumerate())
-                    .filter(|(_, t)| wanted(&t.name))
+                    .filter(|(_, t)| wanted(*t))
                     .map(|(i, _)| TreeItem::Tie(i)),
             );
             items.extend(
                 (fe.node_ties.iter().enumerate())
-                    .filter(|(_, t)| wanted(&t.name))
+                    .filter(|(_, t)| wanted(*t))
                     .map(|(i, _)| TreeItem::NodeTie(i)),
             );
             items.extend(
                 (fe.bolts.iter().enumerate())
-                    .filter(|(_, b)| wanted(&b.name))
+                    .filter(|(_, b)| wanted(*b))
                     .map(|(i, _)| TreeItem::Bolt(i)),
             );
         }
         "Amplitudes" => items.extend(
             (fe.amplitudes.iter().enumerate())
-                .filter(|(_, a)| wanted(&a.name))
+                .filter(|(_, a)| wanted(*a))
                 .map(|(i, _)| TreeItem::Amplitude(i)),
         ),
         "Initial Conditions" => items.extend(
             (fe.initial_conditions.iter().enumerate())
-                .filter(|(_, c)| wanted(&c.name))
+                .filter(|(_, c)| wanted(*c))
                 .map(|(i, _)| TreeItem::InitialCondition(i)),
         ),
         "Steps" => {
-            for (s, step) in fe.steps.iter().enumerate().filter(|(_, s)| wanted(&s.name)) {
+            for (s, step) in fe.steps.iter().enumerate().filter(|(_, s)| wanted(*s)) {
                 items.push(TreeItem::Step(s));
                 for group in ["BCs", "Loads", "History Outputs", "Defined Fields"] {
                     items.push(TreeItem::StepGroup(s, group));
@@ -1959,8 +2111,8 @@ fn category_items(fe: &FeModel, category: &str, name: Option<&str>) -> Vec<TreeI
 
 /// The path a tree item belongs to, to find whether a link covers it.
 pub fn path_of(fe: &FeModel, item: &TreeItem) -> Option<Vec<String>> {
-    let entry = |category: &str, name: &str| {
-        Some(vec![SETUP.to_owned(), category.to_owned(), name.to_owned()])
+    let entry = |category: &str, item: &dyn Entry| {
+        Some(vec![SETUP.to_owned(), category.to_owned(), item.key()])
     };
     let category = |category: &str| Some(vec![SETUP.to_owned(), category.to_owned()]);
     match item {
@@ -1970,31 +2122,29 @@ pub fn path_of(fe: &FeModel, item: &TreeItem) -> Option<Vec<String>> {
         | TreeItem::ElementSet(_)
         | TreeItem::Surface(_) => Some(vec![GEOMETRY.to_owned()]),
         TreeItem::MeshItem(_) | TreeItem::MeshOperation(_) => Some(vec![GEOMETRY.to_owned()]),
-        TreeItem::Material(i) => entry("Materials", &fe.materials.get(*i)?.name),
-        TreeItem::CrossSection(i) => entry(CROSS_SECTIONS, &fe.cross_sections.get(*i)?.name),
-        TreeItem::Section(i) => entry("Sections", &fe.sections.get(*i)?.name),
-        TreeItem::Constraint(i) => entry("Constraints", fe.constraints.get(*i)?.name()),
-        TreeItem::SurfaceInteraction(i) => {
-            entry("Contacts", &fe.surface_interactions.get(*i)?.name)
-        }
-        TreeItem::ContactPair(i) => entry("Contacts", &fe.contact_pairs.get(*i)?.name),
-        TreeItem::ContactRegion(i) => entry("Contacts", &fe.contact_regions.get(*i)?.name),
-        TreeItem::Tie(i) => entry("Contacts", &fe.ties.get(*i)?.name),
-        TreeItem::NodeTie(i) => entry("Contacts", &fe.node_ties.get(*i)?.name),
-        TreeItem::Bolt(i) => entry("Contacts", &fe.bolts.get(*i)?.name),
-        TreeItem::Amplitude(i) => entry("Amplitudes", &fe.amplitudes.get(*i)?.name),
+        TreeItem::Material(i) => entry("Materials", fe.materials.get(*i)?),
+        TreeItem::CrossSection(i) => entry(CROSS_SECTIONS, fe.cross_sections.get(*i)?),
+        TreeItem::Section(i) => entry("Sections", fe.sections.get(*i)?),
+        TreeItem::Constraint(i) => entry("Constraints", fe.constraints.get(*i)?),
+        TreeItem::SurfaceInteraction(i) => entry("Contacts", fe.surface_interactions.get(*i)?),
+        TreeItem::ContactPair(i) => entry("Contacts", fe.contact_pairs.get(*i)?),
+        TreeItem::ContactRegion(i) => entry("Contacts", fe.contact_regions.get(*i)?),
+        TreeItem::Tie(i) => entry("Contacts", fe.ties.get(*i)?),
+        TreeItem::NodeTie(i) => entry("Contacts", fe.node_ties.get(*i)?),
+        TreeItem::Bolt(i) => entry("Contacts", fe.bolts.get(*i)?),
+        TreeItem::Amplitude(i) => entry("Amplitudes", fe.amplitudes.get(*i)?),
         TreeItem::InitialCondition(i) => {
-            entry("Initial Conditions", &fe.initial_conditions.get(*i)?.name)
+            entry("Initial Conditions", fe.initial_conditions.get(*i)?)
         }
-        TreeItem::ReferencePoint(i) => entry("Features", &fe.reference_points.get(*i)?.name),
-        TreeItem::CoordinateSystem(i) => entry("Features", &fe.coordinate_systems.get(*i)?.name),
-        TreeItem::Plane(i) => entry("Features", &fe.planes.get(*i)?.name),
+        TreeItem::ReferencePoint(i) => entry("Features", fe.reference_points.get(*i)?),
+        TreeItem::CoordinateSystem(i) => entry("Features", fe.coordinate_systems.get(*i)?),
+        TreeItem::Plane(i) => entry("Features", fe.planes.get(*i)?),
         TreeItem::Step(s)
         | TreeItem::StepGroup(s, _)
         | TreeItem::BoundaryCondition(s, _)
         | TreeItem::Load(s, _)
         | TreeItem::HistoryOutput(s, _)
-        | TreeItem::DefinedField(s, _) => entry("Steps", &fe.steps.get(*s)?.name),
+        | TreeItem::DefinedField(s, _) => entry("Steps", fe.steps.get(*s)?),
         TreeItem::Group(
             "Surface Interactions"
             | "Contact Pairs"
@@ -2053,12 +2203,13 @@ mod tests {
         let mut fe = FeModel::default();
         fe.steps.push(Step::new_static("Load"));
         fe.steps.push(Step::new_frequency("Shake"));
-        assert_eq!(writes_displacements(&fe, "Load"), Some(true));
+        let (load, shake) = (key(fe.steps[0].id), key(fe.steps[1].id));
+        assert_eq!(writes_displacements(&fe, &load), Some(true));
         // Mode shapes are no displacements of a load.
-        assert_eq!(writes_displacements(&fe, "Shake"), Some(false));
+        assert_eq!(writes_displacements(&fe, &shake), Some(false));
         // An inactive step is not solved.
         fe.steps[0].active = false;
-        assert_eq!(writes_displacements(&fe, "Load"), None);
+        assert_eq!(writes_displacements(&fe, &load), None);
     }
 
     /// A tetrahedron of one part `name`, its nodes from `first` on.
@@ -2097,24 +2248,36 @@ mod tests {
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
+            ids: (names.iter())
+                .map(|&name| plx_model::PartId {
+                    name: name.into(),
+                    id: plx_model::Id::new(),
+                })
+                .collect(),
             from_link: false,
             operations: Vec::new(),
             input: None,
         }
     }
 
+    /// The id of the geometry object `name` of `mesh`.
+    fn oid(mesh: &FeMesh, name: &str) -> plx_model::Id {
+        plx_model::object_id(mesh, name).unwrap()
+    }
+
     #[test]
     fn a_geometry_link_brings_objects_with_their_meshes() {
         use plx_model::{PartOrigin, PartOrigins};
         // The source: SOLID-1 meshed, SOLID-2 not, and a mesh without shapes.
+        let shapes = two_parts(&["SOLID-1", "SOLID-2"]);
         let mut mesh = tet_part("SOLID-1", 1, 0.0);
         mesh.append(tet_part("BLOCK", 1, 5.0));
+        shapes.stamp_ids(&mut mesh);
         let mut origins = PartOrigins::default();
-        origins.set_meshed("SOLID-1", 7);
+        origins.set_meshed(oid(&mesh, "SOLID-1"), 7);
         origins.reconcile(&mesh);
         let copy = || MeshCopy {
-            geometry: Some(two_parts(&["SOLID-1", "SOLID-2"])),
+            geometry: Some(shapes.clone()),
             mesh: mesh.clone(),
             origins: origins.clone(),
             mesh_sets: Vec::new(),
@@ -2131,8 +2294,10 @@ mod tests {
             copy(),
         );
         assert_eq!(taken.mesh.parts.len(), 2);
-        assert_eq!(taken.origins.get("SOLID-1"), Some(PartOrigin::Linked));
-        assert!(taken.origins.is_imported("BLOCK") && taken.origins.is_linked("BLOCK"));
+        let solid = oid(&taken.mesh, "SOLID-1");
+        assert_eq!(taken.origins.get(solid), Some(PartOrigin::Linked));
+        let block = oid(&taken.mesh, "BLOCK");
+        assert!(taken.origins.is_imported(block) && taken.origins.is_linked(block));
         // SOLID-2 has no mesh: the analysis meshes it.
         let status = |geometry: &Option<Geometry>, taken: &Taken| {
             crate::status::analysis_status(
@@ -2151,6 +2316,7 @@ mod tests {
         // meshed here from now on, as meshing them makes them.
         let mut own = taken.mesh.clone();
         own.append(tet_part("SOLID-2", 1, 10.0));
+        geometry.as_ref().unwrap().stamp_ids(&mut own);
         let mut own_origins = taken.origins.clone();
         let input = plx_model::fingerprint::mesh_input(
             geometry.as_ref().unwrap(),
@@ -2158,7 +2324,7 @@ mod tests {
             fe.properties.space,
             "SOLID-2",
         );
-        own_origins.set_meshed("SOLID-2", input);
+        own_origins.set_meshed(oid(&own, "SOLID-2"), input);
         own_origins.reconcile(&own);
         geometry
             .as_mut()
@@ -2172,10 +2338,11 @@ mod tests {
         let names: Vec<&str> = taken.mesh.parts.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["BLOCK", "SOLID-2", "PLATE"]);
         assert_eq!(
-            taken.origins.get("SOLID-2"),
+            taken.origins.get(oid(&taken.mesh, "SOLID-2")),
             Some(PartOrigin::Meshed(input))
         );
-        assert!(taken.origins.is_imported("PLATE") && !taken.origins.is_linked("PLATE"));
+        let plate = oid(&taken.mesh, "PLATE");
+        assert!(taken.origins.is_imported(plate) && !taken.origins.is_linked(plate));
         assert_eq!(status(&geometry, &taken).stale_parts, ["SOLID-1"]);
         // The link's mesh keeps its numbers, the own ones come after.
         assert_eq!(taken.mesh.elements()[0].nodes, [5, 6, 7, 8]);
@@ -2185,7 +2352,10 @@ mod tests {
             .unwrap()
             .set_own_meshes(&["SOLID-1".into()], false);
         let taken = take_objects(&mut geometry, &taken.mesh, &taken.origins, &mut fe, copy());
-        assert_eq!(taken.origins.get("SOLID-1"), Some(PartOrigin::Linked));
+        assert_eq!(
+            taken.origins.get(oid(&taken.mesh, "SOLID-1")),
+            Some(PartOrigin::Linked)
+        );
         assert!(status(&geometry, &taken).stale_parts.is_empty());
     }
 
@@ -2195,10 +2365,11 @@ mod tests {
         let mut shapes = two_parts(&["SOLID-1", "SOLID-2"]);
         shapes.ensure_ids();
         let source_set = MeshSet::new("Node_Set-1", SetKind::Nodes, Region::Nodes(vec![1]));
-        let copy = |shapes: &Geometry, mesh: FeMesh| {
+        let copy = |shapes: &Geometry, mut mesh: FeMesh| {
+            shapes.stamp_ids(&mut mesh);
             let mut origins = PartOrigins::default();
             for part in &mesh.parts {
-                origins.set_meshed(&part.name, 7);
+                origins.set_meshed(part.id, 7);
             }
             origins.reconcile(&mesh);
             MeshCopy {
@@ -2224,9 +2395,11 @@ mod tests {
         // The analysis meshes SOLID-2 itself, numbered after the linked mesh, and has a set
         // of its own on it, by the name of the source's set.
         let mut own = taken.mesh.clone();
-        own.append_keeping(tet_part("SOLID-2", 1, 10.0));
+        let mut solid_2 = tet_part("SOLID-2", 1, 10.0);
+        geometry.as_ref().unwrap().stamp_ids(&mut solid_2);
+        own.append_keeping(solid_2);
         let mut origins = taken.origins.clone();
-        origins.set_meshed("SOLID-2", 9);
+        origins.set_meshed(oid(&own, "SOLID-2"), 9);
         origins.reconcile(&own);
         let geometry_mut = geometry.as_mut().unwrap();
         geometry_mut.set_own_meshes(&["SOLID-2".into()], true);
@@ -2272,11 +2445,11 @@ mod tests {
         assert!(geometry.meshes_itself("WING") && geometry.is_suppressed("WING"));
         assert!(!geometry.meshes_itself("SOLID-2"));
         assert_eq!(
-            taken.origins.get("WING"),
+            taken.origins.get(oid(&taken.mesh, "WING")),
             Some(plx_model::PartOrigin::Meshed(9))
         );
         assert_eq!(
-            taken.origins.get("SOLID-2"),
+            taken.origins.get(oid(&taken.mesh, "SOLID-2")),
             Some(plx_model::PartOrigin::Linked)
         );
         // The own element set on it follows; the own node set by the name the source's set
@@ -2387,7 +2560,7 @@ mod tests {
                 mesh,
                 origins: {
                     let mut origins = plx_model::PartOrigins::default();
-                    origins.set_meshed("BLOCK", 7);
+                    origins.set_meshed(block, 7);
                     origins
                 },
                 mesh_sets: vec![plx_model::MeshSet::new(
@@ -2417,8 +2590,8 @@ mod tests {
         assert_ne!(mesh.parts[1].id, mesh.parts[0].id);
         assert_eq!(merged.element_types[1].part, mesh.parts[1].id);
         // Without a geometry of all, the parts are imported meshes.
-        assert!(merged.origins.is_imported("BLOCK"));
-        assert!(merged.origins.is_imported("BLOCK-2"));
+        assert!(merged.origins.is_imported(oid(mesh, "BLOCK")));
+        assert!(merged.origins.is_imported(oid(mesh, "BLOCK-2")));
         assert!(renamed[0].is_empty());
         assert_eq!(renamed[1]["BLOCK"], "BLOCK-2");
 
@@ -2435,7 +2608,10 @@ mod tests {
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
+            ids: vec![plx_model::PartId {
+                name: "BLOCK".into(),
+                id: crate::test_ids::named("BLOCK"),
+            }],
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -2452,10 +2628,10 @@ mod tests {
         let (merged, _) = merge_meshes(vec![meshed, block], Some(merged_geometry));
         assert!(merged.geometry.is_some());
         assert_eq!(
-            merged.origins.get("BLOCK"),
+            merged.origins.get(oid(&merged.mesh, "BLOCK")),
             Some(plx_model::PartOrigin::Linked)
         );
-        assert!(merged.origins.is_imported("BLOCK-2"));
+        assert!(merged.origins.is_imported(oid(&merged.mesh, "BLOCK-2")));
     }
 
     fn path(parts: &[&str]) -> Vec<String> {
@@ -2494,6 +2670,7 @@ mod tests {
         let mut own = shapes("old");
         own.meshing.max_size = 2.0;
         own.mesh_items.push(plx_model::MeshSetupItem {
+            id: plx_model::Id::new(),
             name: "Local Size-1".into(),
             kind: plx_model::MeshSetupKind::LocalMeshSize {
                 faces: vec![1],
@@ -2598,6 +2775,7 @@ mod tests {
             brep: brep.into(),
             meshing: Default::default(),
             mesh_items: vec![plx_model::MeshSetupItem {
+                id: plx_model::Id::new(),
                 name: "Local Size-1".into(),
                 kind: plx_model::MeshSetupKind::LocalMeshSize {
                     faces: vec![1, 2],
@@ -2681,12 +2859,22 @@ mod tests {
             materials: vec![material("Steel", 1.0), material("Rubber", 5.0)],
             ..Default::default()
         };
-        let steel = path(&["Setup", "Materials", "Steel"]);
+        let steel = vec![
+            SETUP.to_owned(),
+            "Materials".into(),
+            key(source.materials[0].id),
+        ];
         assert_ne!(fp(&source, &steel), fp(&target, &steel));
         apply_setup(&mut target, &source, &steel);
         let names: Vec<&str> = target.materials.iter().map(|m| m.name.as_str()).collect();
         assert_eq!(names, ["Steel", "Rubber"]);
         assert_eq!(fp(&source, &steel), fp(&target, &steel));
+        // Renamed in the source, it stays the item the link takes.
+        let mut renamed = source.clone();
+        renamed.materials[0].name = "S355".into();
+        apply_setup(&mut target, &renamed, &steel);
+        let names: Vec<&str> = target.materials.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["S355", "Rubber"]);
         apply_setup(&mut target, &source, &path(&["Setup", "Materials"]));
         assert_eq!(target.materials, source.materials);
     }
@@ -2731,12 +2919,10 @@ mod tests {
         let filled: Vec<Vec<String>> = (filled_paths(&link, "Source").into_iter())
             .map(|(p, _)| p)
             .collect();
+        let item = |m: &Material| vec![SETUP.to_owned(), "Materials".into(), key(m.id)];
         assert_eq!(
             filled,
-            [
-                path(&["Setup", "Materials", "Steel"]),
-                path(&["Setup", "Materials", "Aluminium"])
-            ]
+            [item(&source.materials[0]), item(&source.materials[1])]
         );
         // New items of the source follow, removed ones go.
         source.materials.push(material("Copper", 110_000.0));
@@ -2744,11 +2930,12 @@ mod tests {
         assert!(sync(&source, &mut target, &mut link));
         assert_eq!(names(&target), ["Steel", "Copper", "Rubber"]);
         // A left out item stays as a copy and is no longer taken.
-        link.excluded.push("Steel".into());
-        link.inherited.retain(|n| n != "Steel");
+        let steel = key(source.materials[0].id);
+        link.excluded.push(steel.clone());
+        link.inherited.retain(|n| *n != steel);
         source.materials[0].elastic = None;
         assert!(!sync(&source, &mut target, &mut link));
-        assert_eq!(link.inherited, ["Copper"]);
+        assert_eq!(link.inherited, [key(source.materials[1].id)]);
         assert!(target.materials[0].elastic.is_some());
         assert_eq!(names(&target), ["Steel", "Copper", "Rubber"]);
     }
@@ -2768,13 +2955,13 @@ mod tests {
             item: path(&["Setup", "Steps"]),
             ..Default::default()
         };
-        let preload = path(&["Preload"]);
+        let preload = keys(&first.steps);
         apply_bundle(&mut target, &first, &link(1), &preload, &[]);
         apply_bundle(
             &mut target,
             &second,
             &link(2),
-            &path(&["Service"]),
+            &keys(&second.steps),
             &preload,
         );
         let names: Vec<&str> = target.steps.iter().map(|s| s.name.as_str()).collect();
@@ -2800,24 +2987,15 @@ mod tests {
         let mut source = FeModel::default();
         source.steps.push(step);
         let mut target = source.clone();
-        assert!(apply_submodel(
-            &mut target,
-            "Step-1",
-            2,
-            "global.frd".into()
-        ));
+        let step = key(source.steps[0].id);
+        assert!(apply_submodel(&mut target, &step, 2, "global.frd".into()));
         assert_eq!(target.properties.kind, ModelKind::Submodel);
         // The steps still count as the same, and taking them anew keeps global step 2.
         let steps = path(&["Setup", "Steps"]);
         assert_eq!(fp(&source, &steps), fp(&target, &steps));
         apply_setup(&mut target, &source, &steps);
-        assert_eq!(submodel_steps(&target), [("Step-1".to_string(), 2)]);
-        assert!(!apply_submodel(
-            &mut target,
-            "Step-1",
-            2,
-            "global.frd".into()
-        ));
+        assert_eq!(submodel_steps(&target), [(step.clone(), 2)]);
+        assert!(!apply_submodel(&mut target, &step, 2, "global.frd".into()));
     }
 
     #[test]
@@ -2827,9 +3005,10 @@ mod tests {
             fe.steps.push(Step::new_static(name));
         }
         fe.steps[1].active = false;
-        assert_eq!(global_step_number(&fe, "Preload"), Some(1));
-        assert_eq!(global_step_number(&fe, "Service"), Some(2));
-        assert_eq!(global_step_number(&fe, "Off"), None);
+        let step = |i: usize| key(fe.steps[i].id);
+        assert_eq!(global_step_number(&fe, &step(0)), Some(1));
+        assert_eq!(global_step_number(&fe, &step(2)), Some(2));
+        assert_eq!(global_step_number(&fe, &step(1)), None);
     }
 
     #[test]
@@ -2900,14 +3079,14 @@ mod tests {
         let mut link = Link {
             source: 1,
             target: 2,
-            item: path(&["State", "Service"]),
+            item: vec![STATE.into(), key(source.steps[1].id)],
             slot: path(&["State"]),
             ..Default::default()
         };
         let step = state_step(&source, &link).unwrap();
         assert!(!chain_up_to_date(&source, step, &target, &link));
         link.inherited = apply_chain(&mut target, &source, step, &link);
-        assert_eq!(link.inherited, ["Preload", "Service"]);
+        assert_eq!(link.inherited, keys(&source.steps[..2]));
         let names: Vec<&str> = target.steps.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["Preload", "Service", "Unload"]);
         assert_eq!(target.materials, source.materials);
@@ -2925,15 +3104,18 @@ mod tests {
         assert!(
             filled
                 .iter()
-                .any(|(p, _)| *p == path(&["Setup", "Steps", "Bolts"]))
+                .any(|(p, _)| *p == path(&["Setup", "Steps", &key(source.steps[0].id)]))
         );
         assert!(filled.iter().any(|(p, _)| *p == path(&["Geometry"])));
         assert!(
             !filled
                 .iter()
-                .any(|(p, _)| covers(p, &path(&["Setup", "Steps", "Unload"])))
+                .any(|(p, _)| covers(p, &path(&["Setup", "Steps", &key(target.steps[2].id)])))
         );
-        assert_eq!(output_path(&link), path(&["Results", "Service"]));
+        assert_eq!(
+            output_path(&link),
+            path(&["Results", &key(source.steps[1].id)])
+        );
     }
 
     #[test]
@@ -2943,17 +3125,19 @@ mod tests {
         let mut target = FeModel::default();
         target.steps.push(Step::new_static("Load"));
         target.steps.push(Step::new_steady_state_dynamics("Shake"));
+        let (load, shake) = (key(target.steps[0].id), key(target.steps[1].id));
+        let (load, shake) = (load.as_str(), shake.as_str());
         let slot = |parts: &[&str]| results_slot(&heat, &target, &path(parts));
         // Dropped on a step, they go to the input of it that fits.
         assert_eq!(
-            slot(&["Setup", "Steps", "Load"]).unwrap(),
-            path(&["Setup", "Steps", "Load", "Temperatures"])
+            slot(&["Setup", "Steps", load]).unwrap(),
+            path(&["Setup", "Steps", load, "Temperatures"])
         );
         assert_eq!(
-            slot(&["Setup", "Steps", "Load", "Temperatures"]).unwrap(),
-            path(&["Setup", "Steps", "Load", "Temperatures"])
+            slot(&["Setup", "Steps", load, "Temperatures"]).unwrap(),
+            path(&["Setup", "Steps", load, "Temperatures"])
         );
-        assert!(slot(&["Setup", "Steps", "Load", "Eigenmodes"]).is_err());
+        assert!(slot(&["Setup", "Steps", load, "Eigenmodes"]).is_err());
         assert!(slot(&["Setup", "Steps", "Nowhere"]).is_err());
         assert_eq!(
             slot(&["Setup", "Initial Conditions"]).unwrap(),
@@ -2969,21 +3153,21 @@ mod tests {
             .is_err()
         );
         // Displacements of a static step drive a submodel.
-        let load = path(&["Setup", "Steps", "Load"]);
+        let load_path = path(&["Setup", "Steps", load]);
         assert_eq!(
-            results_slot(&static_step, &target, &load).unwrap(),
-            path(&["Setup", "Steps", "Load", "Global results"])
+            results_slot(&static_step, &target, &load_path).unwrap(),
+            path(&["Setup", "Steps", load, "Global results"])
         );
-        let temperatures = path(&["Setup", "Steps", "Load", "Temperatures"]);
+        let temperatures = path(&["Setup", "Steps", load, "Temperatures"]);
         assert!(results_slot(&static_step, &target, &temperatures).is_err());
         // Eigenmodes only when the frequency step stores them.
-        let shake = path(&["Setup", "Steps", "Shake"]);
-        assert!(results_slot(&frequency, &target, &shake).is_err());
+        let shake_path = path(&["Setup", "Steps", shake]);
+        assert!(results_slot(&frequency, &target, &shake_path).is_err());
         if let StepKind::Frequency(f) = &mut frequency.kind {
             f.storage = true;
         }
-        let modes = results_slot(&frequency, &target, &shake).unwrap();
-        assert_eq!(modes, path(&["Setup", "Steps", "Shake", "Eigenmodes"]));
+        let modes = results_slot(&frequency, &target, &shake_path).unwrap();
+        assert_eq!(modes, path(&["Setup", "Steps", shake, "Eigenmodes"]));
         assert_eq!(
             step_inputs(&target.steps[0]),
             ["Temperatures", "Wall loads", "Global results"]
@@ -2997,7 +3181,7 @@ mod tests {
         assert!(!compatible(&path(&["Mesh"]), &global));
         assert_eq!(
             results_slot(&static_step, &target, &global).unwrap(),
-            path(&["Setup", "Steps", "Load", "Global results"])
+            path(&["Setup", "Steps", load, "Global results"])
         );
         target.steps[1].boundary_conditions.push(BoundaryCondition {
             id: plx_model::Id::new(),
@@ -3014,11 +3198,11 @@ mod tests {
         });
         assert_eq!(
             results_slot(&static_step, &target, &global).unwrap(),
-            path(&["Setup", "Steps", "Shake", "Global results"])
+            path(&["Setup", "Steps", shake, "Global results"])
         );
         let submodel = Link {
             item: path(&["Results", "Preload"]),
-            slot: path(&["Setup", "Steps", "Shake", "Global results"]),
+            slot: path(&["Setup", "Steps", shake, "Global results"]),
             ..Default::default()
         };
         assert!(ends_at(&global, &submodel) && ends_at(&path(&["Setup", "Steps"]), &submodel));
@@ -3033,7 +3217,7 @@ mod tests {
         };
         let temperature = link(&["Results", "Heat"], temperatures);
         assert_eq!(ResultsUse::of(&temperature), Some(ResultsUse::Temperature));
-        assert_eq!(target_step(&temperature), Some("Load"));
+        assert_eq!(target_step(&temperature), Some(load));
         assert!(apply_results(
             &mut target,
             &FeMesh::default(),
@@ -3072,14 +3256,16 @@ mod tests {
         let mut target = FeModel::default();
         target.steps.push(Step::new_static("Load"));
         target.steps.push(Step::new_frequency("Modes"));
+        let (load, modes) = (key(target.steps[0].id), key(target.steps[1].id));
+        let (load_key, modes) = (load.as_str(), modes.as_str());
         // Dropped on a step that takes loads, they go to its Wall loads.
-        let load = path(&["Setup", "Steps", "Load"]);
-        let walls = path(&["Setup", "Steps", "Load", "Wall loads"]);
+        let load = path(&["Setup", "Steps", load_key]);
+        let walls = path(&["Setup", "Steps", load_key, "Wall loads"]);
         assert_eq!(results_slot(&flow, &target, &load).unwrap(), walls);
         assert_eq!(results_slot(&flow, &target, &walls).unwrap(), walls);
         // Not to a step without loads, nor as a submodel or temperatures.
-        assert!(results_slot(&flow, &target, &path(&["Setup", "Steps", "Modes"])).is_err());
-        let global = path(&["Setup", "Steps", "Load", "Global results"]);
+        assert!(results_slot(&flow, &target, &path(&["Setup", "Steps", modes])).is_err());
+        let global = path(&["Setup", "Steps", load_key, "Global results"]);
         assert!(results_slot(&flow, &target, &global).is_err());
         // Only a Particle Flow step gives wall loads.
         assert!(results_slot(&Step::new_static("Other"), &target, &walls).is_err());
@@ -3096,7 +3282,15 @@ mod tests {
         plx_results::wall_loads::WallLoads::new(
             0.01,
             Default::default(),
-            vec![("Screw".into(), vec!["SCREW".into(), "SHAFT".into()])],
+            // SCREW by its id, SHAFT meshed anew here by its name.
+            vec![plx_results::wall_loads::WallSeries::new(
+                plx_model::Id::new(),
+                "Screw",
+                vec![
+                    (mesh.parts[0].id, "Other name".into()),
+                    (plx_model::Id::new(), "SHAFT".into()),
+                ],
+            )],
         )
         .write(&file)
         .unwrap();
@@ -3189,6 +3383,7 @@ mod tests {
             fe.steps.push(Step::new_static(name));
         }
         let mut new = FeModel::default();
+        let names = |steps: &[Step]| steps.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
         let mut kept = split_after(&fe, 0, &mut new);
         assert_eq!(names(&kept.steps), ["Preload"]);
         assert_eq!(names(&new.steps), ["Service", "Unload"]);
@@ -3196,7 +3391,7 @@ mod tests {
         let mut link = Link {
             source: 1,
             target: 2,
-            item: path(&["State", "Preload"]),
+            item: vec!["State".into(), key(fe.steps[0].id)],
             slot: path(&["State"]),
             ..Default::default()
         };
@@ -3205,7 +3400,7 @@ mod tests {
         assert!(chain_up_to_date(&kept, 0, &new, &link));
         // Merging gives back what was split.
         let moved = merge_into(&mut kept, &new, &link);
-        assert_eq!(moved, ["Service", "Unload"]);
+        assert_eq!(moved, keys(&fe.steps[1..]));
         assert_eq!(kept.steps, fe.steps);
     }
 }

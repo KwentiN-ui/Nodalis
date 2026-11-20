@@ -10,12 +10,10 @@ use std::collections::BTreeSet;
 use egui::{Response, Ui};
 use plx_model::{FeModel, Field, Geometry, ItemRef, ValuePath};
 
-/// What the expose buttons of one dialog know: the item, which of its fields are exposed and
+/// What the expose buttons of one dialog know: which fields of the item are exposed and
 /// which of those a link gives, and the fields toggled while the dialog is open.
 #[derive(Clone, Debug, Default)]
 pub struct Scope {
-    /// The item as it is in the model, for its exposed fields; `None` for a new item.
-    pub item: Option<ItemRef>,
     /// Exposed fields of the item, each with the block a value link gives it from.
     exposed: Vec<(Field, Option<String>)>,
     /// Fields whose button was clicked, to be exposed or no longer exposed on OK.
@@ -42,7 +40,6 @@ impl Scope {
             })
             .collect();
         Self {
-            item,
             exposed,
             toggled: BTreeSet::new(),
             available: Vec::new(),
@@ -69,15 +66,12 @@ impl Scope {
         result
     }
 
-    /// Applies the toggles to the item, now named `item` in `fe` after the dialog's OK: fields
-    /// clicked on are exposed, those clicked off are no longer, unless a link gives them.
-    /// `geometry` holds the numbers of an item of the mesh setup.
+    /// Applies the toggles to the item `item` of `fe` after the dialog's OK: fields clicked
+    /// on are exposed, those clicked off are no longer, unless a link gives them. `geometry`
+    /// holds the numbers of an item of the mesh setup.
     pub fn apply(mut self, fe: &mut FeModel, geometry: Option<&Geometry>, item: &ItemRef) {
-        if let Some(old) = &self.item {
-            fe.rename_exposed(old, item.name());
-        }
         for field in std::mem::take(&mut self.toggled) {
-            let path = ValuePath::new(item.clone(), field);
+            let path = ValuePath::new(*item, field);
             let at = fe.exposed.iter().position(|e| e.path == path);
             match at {
                 Some(at) if self.linked(field).is_none() => {
@@ -85,7 +79,7 @@ impl Scope {
                 }
                 Some(_) => {}
                 None if fe.value_in(geometry, &path).is_some() => {
-                    fe.expose(path);
+                    fe.expose_in(geometry, path);
                 }
                 None => {}
             }

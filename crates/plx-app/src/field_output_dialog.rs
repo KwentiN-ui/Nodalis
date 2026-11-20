@@ -5,7 +5,7 @@ use egui::{RichText, Ui};
 use plx_mesh::FeMesh;
 use plx_model::next_name;
 use plx_results::Principal;
-use plx_results::field_output::{FieldOutput, FieldOutputKind, LimitBasis};
+use plx_results::field_output::{FieldOutput, FieldOutputKind, LimitBasis, LimitItem};
 
 use crate::numeric;
 use crate::results::ResultsView;
@@ -120,6 +120,8 @@ pub struct FieldOutputDialog {
     drafts: [FieldOutput; 6],
     /// Limit values per part, per element set and for all elements.
     part_limits: Vec<(String, f64)>,
+    /// The ids of the parts of [`Self::part_limits`].
+    part_ids: Vec<plx_model::Id>,
     set_limits: Vec<(String, f64)>,
     all_limit: f64,
     tab: Tab,
@@ -130,10 +132,10 @@ pub struct FieldOutputDialog {
     /// Names a new output may not take.
     taken: Vec<String>,
     /// Coordinate systems a field can be transformed into.
-    systems: Vec<String>,
+    systems: Vec<(plx_model::Id, String)>,
     /// The systems among them that move with a selection: displacements in them are taken
     /// relative to the system, other results in its moved directions.
-    moving_systems: Vec<String>,
+    moving_systems: Vec<plx_model::Id>,
     /// Tensor fields, whose principal directions can be computed.
     tensors: Vec<String>,
 }
@@ -153,12 +155,14 @@ impl FieldOutputDialog {
                 field,
                 component,
             } => {
-                let given = |item: &str| limits.iter().find(|(n, _)| n == item).map(|l| l.1);
+                let given = |item: &LimitItem| limits.iter().find(|(n, _)| n == item).map(|l| l.1);
                 match basis {
                     LimitBasis::Parts => (dialog.part_limits.iter_mut())
-                        .for_each(|(n, l)| *l = given(n).unwrap_or(*l)),
-                    LimitBasis::ElementSets => (dialog.set_limits.iter_mut())
-                        .for_each(|(n, l)| *l = given(n).unwrap_or(*l)),
+                        .zip(&dialog.part_ids)
+                        .for_each(|((_, l), &id)| *l = given(&LimitItem::Part(id)).unwrap_or(*l)),
+                    LimitBasis::ElementSets => (dialog.set_limits.iter_mut()).for_each(|(n, l)| {
+                        *l = given(&LimitItem::ElementSet(n.clone())).unwrap_or(*l)
+                    }),
                     LimitBasis::AllElements => {
                         dialog.all_limit = limits.first().map_or(0.0, |l| l.1);
                     }
@@ -227,12 +231,12 @@ impl FieldOutputDialog {
             .or_else(|| fields.first().map(|(f, c)| (f.clone(), c[0].clone())))
             .unwrap_or_default();
         let name = |prefix: &str| next_name(prefix, taken.iter().map(String::as_str));
-        let systems: Vec<String> = (view.coordinate_systems.iter())
-            .map(|c| c.name.clone())
+        let systems: Vec<(plx_model::Id, String)> = (view.coordinate_systems.iter())
+            .map(|c| (c.id, c.name.clone()))
             .collect();
-        let moving_systems: Vec<String> = (view.coordinate_systems.iter())
+        let moving_systems: Vec<plx_model::Id> = (view.coordinate_systems.iter())
             .filter(|c| c.moves(&view.coordinate_systems))
-            .map(|c| c.name.clone())
+            .map(|c| c.id)
             .collect();
         // Vectors and tensors can be transformed; STRESS or DISP first.
         let transformable = ["STRESS", "DISP"]
@@ -274,7 +278,7 @@ impl FieldOutputDialog {
                 name: name(TYPES[TRANSFORM].1),
                 kind: FieldOutputKind::CoordinateSystemTransform {
                     field: transformable,
-                    coordinate_system: systems.first().cloned().unwrap_or_default(),
+                    coordinate_system: systems.first().map(|s| s.0).unwrap_or_default(),
                 },
             },
             FieldOutput {
@@ -297,6 +301,7 @@ impl FieldOutputDialog {
             kind: LIMIT,
             drafts,
             part_limits: mesh.parts.iter().map(|p| (p.name.clone(), 0.0)).collect(),
+            part_ids: mesh.parts.iter().map(|p| p.id).collect(),
             set_limits: mesh.element_sets.keys().map(|n| (n.clone(), 0.0)).collect(),
             all_limit: 0.0,
             tab: Tab::Properties,
@@ -363,17 +368,26 @@ impl FieldOutputDialog {
             return Err("The name must not contain a dot.".into());
         }
         if let FieldOutputKind::Limit { basis, limits, .. } = &mut output.kind {
-            *limits = match basis {
+            let named: Vec<(String, f64)> = match basis {
                 LimitBasis::Parts => self.part_limits.clone(),
                 LimitBasis::ElementSets => self.set_limits.clone(),
                 LimitBasis::AllElements => {
                     vec![(LimitBasis::AllElements.name().to_string(), self.all_limit)]
                 }
             };
-            if limits.is_empty() {
+            if named.is_empty() {
                 return Err("There are no element sets the limit values could apply to.".into());
             }
-            if let Some((item, _)) = limits.iter().find(|(_, l)| *l == 0.0) {
+            *limits = match basis {
+                LimitBasis::Parts => (self.part_ids.iter().zip(&named))
+                    .map(|(&id, (_, l))| (LimitItem::Part(id), *l))
+                    .collect(),
+                LimitBasis::ElementSets => (named.iter())
+                    .map(|(n, l)| (LimitItem::ElementSet(n.clone()), *l))
+                    .collect(),
+                LimitBasis::AllElements => vec![(LimitItem::All, self.all_limit)],
+            };
+            if let Some((item, _)) = named.iter().find(|(_, l)| *l == 0.0) {
                 return Err(format!(
                     "Please enter a limit value other than 0 for {item} under Limit Values."
                 ));
@@ -513,9 +527,14 @@ impl FieldOutputDialog {
         let fields = &self.fields;
         let systems = &self.systems;
         let moving = &self.moving_systems;
-        let label = |name: &String| match moving.contains(name) {
-            true => format!("{name} (moving)"),
-            false => name.clone(),
+        let label = |id: &plx_model::Id| {
+            let name = (systems.iter())
+                .find(|s| s.0 == *id)
+                .map_or("", |s| s.1.as_str());
+            match moving.contains(id) {
+                true => format!("{name} (moving)"),
+                false => name.to_owned(),
+            }
         };
         let tensors = &self.tensors;
         let focus = &mut self.focus;
@@ -584,12 +603,8 @@ impl FieldOutputDialog {
                                 .selected_text(label(coordinate_system))
                                 .width(crate::dock::fit_width(ui, 180.0))
                                 .show_ui(ui, |ui| {
-                                    for name in systems {
-                                        ui.selectable_value(
-                                            coordinate_system,
-                                            name.clone(),
-                                            label(name),
-                                        );
+                                    for (id, _) in systems {
+                                        ui.selectable_value(coordinate_system, *id, label(id));
                                     }
                                 });
                             response.response.clicked()
@@ -891,13 +906,14 @@ mod tests {
     fn transform_offers_the_coordinate_systems_of_the_results() {
         let (mut view, mesh) = results();
         view.coordinate_systems = vec![plx_model::CoordinateSystem::new("CS-1")];
+        let id = view.coordinate_systems[0].id;
         let mut dialog = FieldOutputDialog::create(&view, &mesh);
         dialog.kind = TRANSFORM;
         let output = dialog.output().unwrap();
         assert!(matches!(
             output.kind,
-            FieldOutputKind::CoordinateSystemTransform { ref coordinate_system, .. }
-                if coordinate_system == "CS-1"
+            FieldOutputKind::CoordinateSystemTransform { coordinate_system, .. }
+                if coordinate_system == id
         ));
     }
 }

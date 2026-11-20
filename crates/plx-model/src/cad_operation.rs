@@ -233,10 +233,6 @@ impl SplitKeep {
     }
 }
 
-fn yes() -> bool {
-    true
-}
-
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
@@ -258,15 +254,14 @@ pub struct CadOperation {
     pub keep: SplitKeep,
     /// Solids split in two stay one part of the FE model, a compound part of their pieces,
     /// which are tied where they were cut; otherwise each piece is a part of its own.
-    #[serde(default = "yes")]
     pub compound: bool,
     /// Which faces a defeaturing removes.
     #[serde(default, skip_serializing_if = "is_default")]
     pub faces: DefeatureFaces,
-    /// The names of the parts a split by plane cuts; the others stay as they are. All parts
-    /// when empty.
+    /// The parts a split by plane cuts, by their ids in the input; the others stay as they
+    /// are. All parts when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parts: Vec<String>,
+    pub parts: Vec<crate::Id>,
     /// The global axis, 0 to 2 for x to z, a split plane is tilted about, through the point
     /// of the plane its offset gives.
     #[serde(default, skip_serializing_if = "is_default")]

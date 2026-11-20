@@ -158,6 +158,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
             ..Default::default()
         }],
         sections: vec![Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: Some(named("Steel")),
@@ -935,7 +936,7 @@ fn solver_moves_a_deformably_coupled_point_with_the_mean_of_its_face() {
     };
     let (_, mut model) = coupled_tip(RemoteBehavior::Deformable);
     let mut output = plx_model::HistoryOutput::node("Tip", Region::ReferencePoint(named("RP-1")));
-    output.variables = vec!["U".into()];
+    output.variables = plx_model::history_variables(&["U"]);
     model.put_history_output(0, output);
     let text = write_inp(&mesh, &model, "").unwrap();
     let name = "coupling-deformable";
@@ -1244,6 +1245,7 @@ fn a_remote_displacement_drives_its_region_from_a_point_at_its_centre() {
     (model.steps[0].boundary_conditions).push(remote("Remote-1", values));
     // A second step on the same region shares the point and its rigid body.
     let mut second = model.steps[0].clone();
+    second.id = plx_model::Id::new();
     second.name = "Step-2".into();
     second.boundary_conditions[1].name = "Remote-2".into();
     model.steps.push(second);
@@ -1342,6 +1344,7 @@ fn a_remote_force_acts_on_a_rigid_point_at_the_centre_of_its_region() {
     let (mesh, mut model) = cantilever(load);
     // The same load in a second step shares the point.
     let mut second = model.steps[0].clone();
+    second.id = plx_model::Id::new();
     second.name = "Step-2".into();
     model.steps.push(second);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -1762,6 +1765,7 @@ fn solver_carries_pressure_on_a_pretensioned_membrane() {
     // Step 1 stretches the flat strip, which has no lateral stiffness yet; step 2 adds the
     // pressure.
     let mut stretch_step = model.steps[0].clone();
+    stretch_step.id = plx_model::Id::new();
     stretch_step.name = "Step-0".into();
     stretch_step.loads.clear();
     for step in [&mut stretch_step, &mut model.steps[0]] {
@@ -1876,6 +1880,7 @@ fn a_pre_tension_load_cuts_the_mesh_and_ties_the_sides_by_equations() {
     let (mesh, mut model) = pre_tension(1000.0, false);
     // A second step keeps the bolt at its length instead of the force.
     let mut second = model.steps[0].clone();
+    second.id = plx_model::Id::new();
     second.name = "Step-2".into();
     second.loads[0].kind = LoadKind::PreTension {
         value: 0.0,
@@ -2100,6 +2105,7 @@ fn solver_keeps_the_preload_of_a_locked_bolt() {
     for (name, lock, expected) in [("verriegelt", true, force), ("gelockert", false, 0.0)] {
         let (mesh, mut model) = pre_tension(force, false);
         let mut second = model.steps[0].clone();
+        second.id = plx_model::Id::new();
         second.name = "Step-2".into();
         second.loads[0].kind = LoadKind::PreTension {
             value: 0.0,
@@ -2641,6 +2647,7 @@ fn solver_runs_short_dynamic_steps() {
     // The preload of a static step, released at the start of the dynamic step.
     let (mesh, mut model) = dynamic_cantilever(1e-4, 2.5e-5, None);
     let mut release = model.steps[0].clone();
+    release.id = plx_model::Id::new();
     release.name = "Release".into();
     release.loads[0].active = false;
     let mut preload = Step::new_static("Preload");
@@ -3382,6 +3389,7 @@ fn plane_model(
             ..Default::default()
         }],
         sections: vec![Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: Some(named("Steel")),
@@ -3820,6 +3828,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         ..Default::default()
     });
     model.sections.push(Section {
+        id: plx_model::Id::new(),
         orientation: None,
         name: "Section-1".into(),
         material: Some(named("Steel")),
@@ -4586,6 +4595,7 @@ fn blocks_model(
             ..Default::default()
         }],
         sections: vec![Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: Some(named("Steel")),
@@ -5109,7 +5119,7 @@ fn solver_reports_the_pressure_of_a_compression_only_support() {
         (model.contact_pair_choices().iter()).any(|(id, _)| *id == named("Compression_Only-1"))
     );
     let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Compression_Only-1")));
-    output.variables = vec!["CF".into()];
+    output.variables = plx_model::history_variables(&["CF"]);
     model.put_history_output(0, output);
     let text = write_inp(&blocks.mesh, &model, "").unwrap();
     assert!(
@@ -5234,6 +5244,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
             hyperelastic: None,
         }],
         sections: vec![Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Beam-1".into(),
             material: Some(named("Steel")),
@@ -6301,6 +6312,7 @@ fn writes_heat_transfer_keywords() {
     model.properties.absolute_zero = Some(-273.15);
     model.properties.stefan_boltzmann = Some(5.67e-11);
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -6410,6 +6422,7 @@ fn solver_conducts_heat_along_a_bar() {
 
 fn defined_temperature(name: &str, region: Region, value: f64) -> DefinedField {
     DefinedField {
+        id: plx_model::Id::new(),
         distribution: None,
         name: name.into(),
         active: true,
@@ -6421,6 +6434,7 @@ fn defined_temperature(name: &str, region: Region, value: f64) -> DefinedField {
 
 fn temperature_from_file(name: &str, file: &str, step: u32) -> DefinedField {
     DefinedField {
+        id: plx_model::Id::new(),
         distribution: None,
         name: name.into(),
         active: true,
@@ -6492,9 +6506,11 @@ fn a_step_takes_only_its_own_defined_temperatures() {
     let all = Region::Parts(mesh.ids_of(&["EALL"]));
     model.steps[0].defined_fields = vec![defined_temperature("Hot", all.clone(), 120.0)];
     let mut warm = model.steps[0].clone();
+    warm.id = plx_model::Id::new();
     warm.name = "Warm".into();
     warm.defined_fields = vec![defined_temperature("Warm", all.clone(), 60.0)];
     let mut cool = model.steps[0].clone();
+    cool.id = plx_model::Id::new();
     cool.name = "Cool".into();
     cool.defined_fields.clear();
     model.steps.push(warm);
@@ -6571,6 +6587,7 @@ fn solver_sets_temperatures_back_in_a_step_without_them() {
         Vec::new(),
     );
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -6593,6 +6610,7 @@ fn solver_sets_temperatures_back_in_a_step_without_them() {
         .collect();
     assert_all_close(&growth, 1e-5 * 100.0 * 100.0, 5e-3);
     let mut cool = model.steps[0].clone();
+    cool.id = plx_model::Id::new();
     cool.name = "Cool".into();
     cool.defined_fields.clear();
     model.steps.push(cool);
@@ -6629,6 +6647,7 @@ fn solver_strains_the_bar_by_the_temperatures_of_a_result_file() {
     );
     // CalculiX refuses a *Temperature without an initial temperature.
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -6734,6 +6753,7 @@ fn solver_cools_the_bar_by_radiation() {
     model.properties.stefan_boltzmann = Some(sigma);
     // Radiation is nonlinear; CalculiX iterates from the initial temperature.
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -6821,6 +6841,7 @@ fn solver_warms_the_bar_transiently() {
         Vec::new(),
     );
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -6909,6 +6930,7 @@ fn expand_bar(kind: StepKind, name: &str) -> String {
         Vec::new(),
     );
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -7278,6 +7300,7 @@ fn solver_scales_distributed_loads_and_displacements_by_amplitudes() {
     };
     settings.duration = 0.5;
     let mut second = model.steps[0].clone();
+    second.id = plx_model::Id::new();
     second.name = "Step-2".into();
     let StepKind::Static(settings) = &mut second.kind else {
         unreachable!()
@@ -7364,7 +7387,7 @@ fn history_outputs_become_print_keywords_with_their_sets() {
     nodes.totals = Totals::Yes;
     model.put_history_output(0, nodes);
     let mut elements = HistoryOutput::element("EH_Output-1", Region::Parts(mesh.ids_of(&["EALL"])));
-    elements.variables = vec!["S".into(), "EVOL".into()];
+    elements.variables = plx_model::history_variables(&["S", "EVOL"]);
     model.put_history_output(0, elements);
     let mut off = HistoryOutput::node("NH_Output-2", Region::NodeSet("FIX".into()));
     off.active = false;
@@ -7397,7 +7420,9 @@ fn contact_forces_need_an_active_contact_pair() {
     // Without contact forces no surfaces are needed.
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Contact print\nCDIS, CSTR\n"), "{text}");
-    output.variables.push("CF".into());
+    output
+        .variables
+        .push(plx_model::HistoryVariable::of_code("CF").unwrap());
     model.history_outputs[0] = output;
     assert_eq!(
         write_inp(&mesh, &model, ""),
@@ -7412,7 +7437,7 @@ fn contact_forces_need_an_active_contact_pair() {
 fn solver_prints_the_history_outputs_into_the_dat_file() {
     let (mesh, mut model) = cantilever(tip_force());
     let mut reactions = HistoryOutput::node("NH_Output-1", Region::NodeSet("FIX".into()));
-    reactions.variables = vec!["RF".into()];
+    reactions.variables = plx_model::history_variables(&["RF"]);
     reactions.totals = Totals::Only;
     model.put_history_output(0, reactions);
     model.put_history_output(
@@ -7420,7 +7445,7 @@ fn solver_prints_the_history_outputs_into_the_dat_file() {
         HistoryOutput::node("NH_Output-2", Region::Nodes(vec![99])),
     );
     let mut volume = HistoryOutput::element("EH_Output-1", Region::Parts(mesh.ids_of(&["EALL"])));
-    volume.variables = vec!["S".into(), "EVOL".into()];
+    volume.variables = plx_model::history_variables(&["S", "EVOL"]);
     volume.totals = Totals::Yes;
     model.put_history_output(0, volume);
     let Some(dat) = run_dat("historie", &write_inp(&mesh, &model, "").unwrap()) else {
@@ -7481,7 +7506,7 @@ fn solver_prints_the_contact_force_of_a_pair() {
     pair.slave = Region::Faces(upper);
     model.contact_pairs.push(pair);
     let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Contact_Pair-1")));
-    output.variables = ["CDIS", "CSTR", "CNUM", "CF"].map(String::from).to_vec();
+    output.variables = plx_model::history_variables(&["CDIS", "CSTR", "CNUM", "CF"]);
     model.put_history_output(0, output);
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains(
@@ -7521,6 +7546,7 @@ fn coasting_cantilever(kind: plx_model::InitialConditionKind) -> (FeMesh, FeMode
     step.boundary_conditions.clear();
     step.loads.clear();
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Velocity-1".into(),
         active: true,
@@ -7538,6 +7564,7 @@ fn initial_velocities_are_written() {
     model.initial_conditions[0].region = Region::NodeSet("FIX".into());
     let tip = mesh.node(99).unwrap();
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Angular_Velocity-1".into(),
         active: true,
@@ -7753,6 +7780,7 @@ fn a_complex_frequency_step_leaves_the_state_as_it_found_it() {
     let load = model.steps[0].clone();
     let (_, rotor) = rotor_analysis(100.0);
     let mut spin = rotor.steps[0].clone();
+    spin.id = plx_model::Id::new();
     spin.boundary_conditions = load.boundary_conditions.clone();
     let mut again = load.clone();
     again.name = "Again".into();
@@ -9294,6 +9322,7 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
         ("Section-2", "PLATE", plate_kind),
     ] {
         model.sections.push(Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: name.into(),
             material: Some(named("Steel")),
@@ -9448,6 +9477,7 @@ fn block_on_membrane(strip_is_master: bool) -> (FeMesh, FeModel) {
         ),
     ] {
         model.sections.push(Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: name.into(),
             material: Some(named("Steel")),
@@ -9799,7 +9829,7 @@ fn a_point_history_output_prints_its_reference_and_rotation_node() {
     );
     let mut temperatures =
         HistoryOutput::node("NH_Output-2", Region::ReferencePoint(named("RP-1")));
-    temperatures.variables = vec!["NT".into()];
+    temperatures.variables = plx_model::history_variables(&["NT"]);
     model.put_history_output(0, temperatures);
     let text = write_inp(&mesh, &model, "").unwrap();
     for expected in [
@@ -9877,7 +9907,7 @@ fn solver_prints_the_rotation_of_the_point_of_a_remote_force() {
         }));
         let mut output =
             HistoryOutput::node("NH_Output-1", Region::RemotePoint(named("Remote_Force-1")));
-        output.variables = vec!["U".into()];
+        output.variables = plx_model::history_variables(&["U"]);
         model.put_history_output(0, output);
         let text = write_inp(&mesh, &model, "").unwrap();
         assert!(
@@ -9930,7 +9960,7 @@ fn point_moment(
 ) -> Option<(f64, f64, f64)> {
     model.put_history_output(0, HistoryOutput::node("NH_Output-1", region));
     let mut clamp = HistoryOutput::node("NH_Output-2", Region::NodeSet("FIX".into()));
-    clamp.variables = vec!["RF".into()];
+    clamp.variables = plx_model::history_variables(&["RF"]);
     model.put_history_output(0, clamp);
     let dat = run_dat(name, &write_inp(mesh, &model, "").unwrap())?;
     let import = crate::dat::parse_dat(&dat);
@@ -10932,6 +10962,7 @@ fn solver_conducts_heat_across_contact_regions_in_coupled_steps() {
         amplitude: None,
     });
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial-1".into(),
         active: true,
@@ -10987,6 +11018,7 @@ fn no_separation_with_large_deformations_is_a_warning() {
 /// first and `extra`.
 fn next_step(model: &FeModel, name: &str, extra: Vec<BoundaryCondition>) -> Step {
     let mut step = model.steps[0].clone();
+    step.id = plx_model::Id::new();
     step.name = name.into();
     step.loads.clear();
     step.boundary_conditions.extend(extra);
@@ -11026,6 +11058,7 @@ fn solver_switches_contact_regions_off_and_on_in_steps() {
     free.set_contact_state(named("Region-1"), on, off);
     assert_eq!(free.contact_changes.len(), 1);
     let mut pressed = model.steps[0].clone();
+    pressed.id = plx_model::Id::new();
     pressed.name = "Step-3".into();
     pressed.set_contact_state(named("Region-1"), off, on);
     model.steps.push(free);
@@ -11068,6 +11101,7 @@ fn solver_changes_the_friction_of_a_region_in_a_step() {
     model.contact_regions.push(other);
     let top = push_top(&mut model, 0.004);
     let mut step = model.steps[0].clone();
+    step.id = plx_model::Id::new();
     step.name = "Step-2".into();
     if let BoundaryKind::Displacement(d) = &mut step.boundary_conditions[1].kind {
         d.values[0] = Some(0.008);
@@ -11155,7 +11189,7 @@ fn long_set_names_fit_the_exported_text() {
     let long = "Bonded - SPUR_GEAR__20_TEETH, SPUR_GEAR__60_TEETH-2 to SPUR_GEAR__20_TEETH-2";
     model.contact_regions[0].name = long.to_string();
     let mut output = HistoryOutput::contact("CH_Output-1", Some(model.contact_regions[0].id));
-    output.variables = ["CF".to_string()].to_vec();
+    output.variables = plx_model::history_variables(&["CF"]);
     model.put_history_output(0, output);
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in text.lines().filter(|l| !l.starts_with("**")) {
@@ -11270,6 +11304,7 @@ fn distributed_temperatures_are_written_per_node() {
     model.distributions.push(equation("Half", "=0.5"));
     model.steps[0].boundary_conditions[0].distribution = Some(named("Half"));
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: Some(named("Half")),
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -11314,6 +11349,7 @@ fn solver_strains_the_bar_by_a_distributed_temperature() {
         .distributions
         .push(equation("Gradient", "=(20 + x) / 120"));
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -11410,7 +11446,7 @@ fn solver_solves_a_part_held_only_by_contact_with_weak_springs() {
 fn solver_prints_the_contact_forces_of_a_bonded_region() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Bonded);
     let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Region-1")));
-    output.variables = ["CDIS", "CSTR", "CF"].map(String::from).to_vec();
+    output.variables = plx_model::history_variables(&["CDIS", "CSTR", "CF"]);
     model.put_history_output(0, output);
     let resolved = model.resolve_contacts(&mesh);
     assert!(
@@ -11464,7 +11500,7 @@ fn contact_outputs_of_regions_without_contact_elements_are_left_out() {
         let (mesh, mut model) = blocks_joined_by_region(0.0, behavior);
         model.contact_regions[0].settings.bonded_method = method;
         let mut output = HistoryOutput::contact("CH_Output-1", Some(named("Region-1")));
-        output.variables = ["CF".to_string()].to_vec();
+        output.variables = plx_model::history_variables(&["CF"]);
         model.put_history_output(0, output);
         let text = write_inp(&mesh, &model, "").unwrap();
         assert!(!text.contains("*Contact print"), "{behavior:?}");
@@ -11607,6 +11643,7 @@ fn shank_sectors(preload: f64, sectors: usize, head: usize) -> (FeMesh, FeModel)
     tip.region = Region::NodeSet("TIP".into());
     step.boundary_conditions.push(tip);
     let mut second = model.steps[0].clone();
+    second.id = plx_model::Id::new();
     second.name = "Step-2".into();
     model.steps.push(second);
     let mut bolt = plx_model::Bolt {
@@ -11862,7 +11899,7 @@ fn solver_prints_the_plastic_strain_and_energy_of_the_bar() {
     model.field_output.additional = vec![FieldResult::StrainEnergy];
     let mut elements =
         HistoryOutput::element("EH_Output-1", Region::ElementSet("TIP_ELEMENTS".into()));
-    elements.variables = vec!["S".into(), "PEEQ".into(), "ENER".into()];
+    elements.variables = plx_model::history_variables(&["S", "PEEQ", "ENER"]);
     model.put_history_output(0, elements);
     let mut nodes = HistoryOutput::node("NH_Output-1", Region::NodeSet("FIX".into()));
     nodes.totals = Totals::Yes;
@@ -11937,6 +11974,7 @@ fn the_analysis_knows_the_items_it_came_from() {
     use plx_model::ModelItem;
     let (mesh, mut model) = cantilever(tip_force());
     let mut second = model.steps[0].clone();
+    second.id = plx_model::Id::new();
     second.name = "Step-2".into();
     second.active = false;
     let mut third = second.clone();
@@ -11965,6 +12003,7 @@ fn a_lowering_error_names_its_item() {
     use plx_model::ModelItem;
     let (mesh, mut model) = cantilever(tip_force());
     let mut second = model.steps[0].clone();
+    second.id = plx_model::Id::new();
     second.name = "Step-2".into();
     second.loads[0].amplitude = Some(named("Gone"));
     model.steps.push(second);
@@ -11992,6 +12031,7 @@ fn fingerprints_count_what_the_solver_computes_with() {
     };
     let (mesh, mut model) = cantilever(tip_force());
     let mut second = model.steps[0].clone();
+    second.id = plx_model::Id::new();
     second.name = "Step-2".into();
     model.steps.push(second);
     let before = prints(&model, &mesh);
@@ -12032,6 +12072,7 @@ fn fingerprints_count_what_the_solver_computes_with() {
     let mut skipped = model.clone();
     skipped.steps.insert(1, {
         let mut step = model.steps[0].clone();
+        step.id = plx_model::Id::new();
         step.name = "Off".into();
         step.active = false;
         step
@@ -12067,6 +12108,7 @@ fn solver_turns_a_face_by_a_point_in_a_step_after_one_holding_its_nodes() {
     }
     model.steps[0].boundary_conditions.push(clamp.clone());
     let mut second = model.steps[0].clone();
+    second.id = plx_model::Id::new();
     second.name = "Step-2".into();
     let turn = &mut second.boundary_conditions[1];
     // The same nodes, picked differently: a point of its own.
@@ -12113,6 +12155,7 @@ fn an_error_of_a_point_names_the_boundary_condition_of_its_step() {
     }
     model.steps[0].boundary_conditions.push(clamp);
     let mut second = model.steps[0].clone();
+    second.id = plx_model::Id::new();
     second.name = "Step-2".into();
     let turn = &mut second.boundary_conditions[1];
     turn.region = Region::Surface("TIP".into());
@@ -12546,6 +12589,7 @@ fn solver_bends_the_beam_by_a_deformable_force_on_a_face_rigid_from_another_step
     };
     let (mesh, mut model) = cantilever(force(RemoteBehavior::Rigid));
     let mut second = model.steps[0].clone();
+    second.id = plx_model::Id::new();
     second.name = "Step-2".into();
     second.loads[0] = force(RemoteBehavior::Deformable);
     model.steps.push(second);
@@ -13714,6 +13758,7 @@ fn a_rope_on_a_symmetry_plane_touches_the_block_not_its_cut_face() {
     }
     let material = model.sections[0].material;
     model.sections.push(Section {
+        id: plx_model::Id::new(),
         orientation: None,
         name: "Block".into(),
         material,

@@ -42,6 +42,17 @@ impl Id {
         }
     }
 
+    /// The id an item made for `seed` always has, e.g. the item a link of the project makes
+    /// in the analysis it points to: the link finds it again by it, whatever it is renamed
+    /// to. In the upper half like the ids [`Id::new`] makes.
+    pub fn derived(seed: &str) -> Self {
+        // FNV-1a, the same in every version of the program.
+        let hash = (seed.bytes()).fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+        Self(hash | 1 << 63)
+    }
+
     /// The id of the number [`Self::raw`] gave, such as one the solver carried along.
     pub fn from_raw(raw: u64) -> Self {
         Self(raw)
@@ -66,6 +77,17 @@ impl std::fmt::Display for Id {
     }
 }
 
+impl std::str::FromStr for Id {
+    type Err = ();
+
+    /// Reads an id as [`Id`]'s `Display` writes it, `#` and the number in hex, e.g. from a
+    /// path of the project schematic that names an item.
+    fn from_str(text: &str) -> Result<Self, ()> {
+        let hex = text.strip_prefix('#').ok_or(())?;
+        u64::from_str_radix(hex, 16).map(Self).map_err(|_| ())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +104,7 @@ mod tests {
         let id = Id::new();
         let text = ron::to_string(&id).unwrap();
         assert_eq!(ron::from_str::<Id>(&text).unwrap(), id);
+        assert_eq!(id.to_string().parse(), Ok(id));
+        assert!("Step-1".parse::<Id>().is_err());
     }
 }

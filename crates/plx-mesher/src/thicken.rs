@@ -560,7 +560,7 @@ mod tests {
 
     fn item(thickness: f64, layers: u32, offset: f64) -> ThickenShellMesh {
         ThickenShellMesh {
-            parts: vec!["SHELL-1".into()],
+            parts: Vec::new(),
             thickness,
             layers,
             offset,

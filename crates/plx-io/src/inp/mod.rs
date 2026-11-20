@@ -20,8 +20,8 @@ use plx_model::{
 pub(crate) use write::write_inp_whole;
 pub use write::{
     LowerError, Lowered, ModelError, WriteError, lower, lower_unvalidated, lower_with_sets_of,
-    lower_with_sets_unvalidated, resolved_overlaps, write_deformed_mesh_inp, write_inp,
-    write_inp_with_sets_of,
+    lower_with_sets_unvalidated, resolved_overlaps, solver_name, write_deformed_mesh_inp,
+    write_inp, write_inp_with_sets_of,
 };
 
 use lines::{Keyword as KeywordLine, SourceLine, fields, is_keyword, parse_f64};
@@ -432,6 +432,7 @@ impl Reader {
                     // The model takes over no materials of the file.
                     let _ = material;
                     self.import.sections.push(Section {
+                        id: plx_model::Id::new(),
                         orientation: None,
                         name: set.clone(),
                         material: None,

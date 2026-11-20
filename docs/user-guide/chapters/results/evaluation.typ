@@ -317,8 +317,8 @@ and then `S_HS` (#key("Ctrl")-click), and choose #ui("Plot") (#key("Ctrl+P")).
 #screenshot("hot-spot-history-plot.png", [The table of a toe node near the fixed end of a
   cantilever and its hot spot stress plotted over the position of a wheel load driving out])
 
-The history output follows its hot spot: when the hot spot is changed, it is computed again; when
-the hot spot is deleted or renamed, or the moving load is no longer in an active step of the FE
+The history output follows its hot spot: when the hot spot is changed or renamed, it is computed
+again; when the hot spot is deleted, or the moving load is no longer in an active step of the FE
 model, it reports an error in the output pane and has no data until it is edited.
 
 #note[The position is that of the step. Within a step with several increments the loads are

@@ -4,8 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Quantity;
 use crate::units::Dimension;
+use crate::{Id, Quantity};
 
 /// What a number is, so that a value link joins like with like: a force goes to a force, a
 /// count of elements to a count.
@@ -100,9 +100,11 @@ impl ValueKind {
     }
 }
 
-/// A named number of a Parameters block, which value links give to other blocks.
+/// A named number of a Parameters block, which value links give to other blocks. Links
+/// name it by its id, so that renaming it keeps them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Parameter {
+    pub id: Id,
     pub name: String,
     pub kind: ValueKind,
     /// In SI units.
@@ -112,6 +114,7 @@ pub struct Parameter {
 impl Parameter {
     pub fn new(name: impl Into<String>, kind: ValueKind, value: f64) -> Self {
         Self {
+            id: Id::new(),
             name: name.into(),
             kind,
             value: kind.clean(value),

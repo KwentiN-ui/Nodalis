@@ -70,7 +70,8 @@ impl AnalysisWindow {
             3e-3
         };
         let parts = (chosen.iter())
-            .filter_map(|&i| Some(w.geometry.as_ref()?.parts.get(i)?.name.clone()))
+            .filter_map(|&i| w.geometry.as_ref()?.parts.get(i))
+            .filter_map(|p| geometry.part_id(&p.name))
             .collect();
         let operation = CadOperation {
             kind,
