@@ -2058,7 +2058,7 @@ impl AnalysisWindow {
 
 /// What a worker restoring bound results sends back: the analysis, the directory and the
 /// results file written there.
-struct BoundWork(String, PathBuf, Result<PathBuf, String>);
+struct BoundWork(PathBuf, Result<PathBuf, String>);
 
 /// The global results of a submodel, read on a worker thread.
 type GlobalWork = Result<Box<model::GlobalModel>, String>;
@@ -4437,7 +4437,7 @@ impl Workbench {
         std::thread::spawn(move || {
             let restored =
                 plx_io::project::restore_results(&bound, &dir).map_err(|e| e.to_string());
-            let _ = sender.send(BoundWork(bound.analysis, dir, restored));
+            let _ = sender.send(BoundWork(dir, restored));
         });
         self.bound_work = Some((model.path.clone(), receiver));
     }
@@ -4463,17 +4463,15 @@ impl Workbench {
         self.bound_work = None;
         let carried = self.carry_to_restored.take();
         match (work, model) {
-            (BoundWork(analysis, dir, Ok(file)), Some(model)) => {
-                self.output.push(format!(
-                    "Results of {analysis} restored to {}",
-                    dir.display()
-                ));
+            (BoundWork(dir, Ok(file)), Some(model)) => {
+                self.output
+                    .push(format!("Results restored to {}", dir.display()));
                 model.bound_results_file = Some(file.clone());
                 // New results of a solve take over what was defined on those before.
                 self.carried_settings = carried.map(|settings| (file.clone(), settings));
                 self.open_results = Some(file);
             }
-            (BoundWork(_, _, Err(error)), _) => {
+            (BoundWork(_, Err(error)), _) => {
                 self.output
                     .push(format!("Kept results not restored: {error}"));
             }

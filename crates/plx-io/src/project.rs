@@ -676,7 +676,7 @@ pub struct Link {
     pub slot: Vec<String>,
     /// A state link (`["State", step]`): the steps of the source up to that step the target
     /// took last time, which come before its own steps. A link of a whole category: the
-    /// names of the items it took last time.
+    /// keys (ids) of the items it took last time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inherited: Vec<String>,
     /// A link of a whole category, which is a bundle of links of its items: the items the
@@ -691,8 +691,6 @@ pub struct Link {
 /// CalculiX as its files (`.frd`, history output in `.dat`, eigenmodes in `.eig`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BoundResults {
-    /// The analysis the results belong to.
-    pub analysis: String,
     /// Fingerprint of what the run solved, see [`plx_model::fingerprint::solve_input`];
     /// the results are out of date once the analysis' fingerprint differs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -988,13 +986,8 @@ fn parse_project(path: &Path, text: &str) -> Result<Project, ProjectError> {
 /// Reads the files of a finished analysis into [`BoundResults`]; files that do not exist are
 /// left out, the results file (`.frd` of CalculiX or `.ndlr` of the built-in solver) has to
 /// be there.
-pub fn bind_results(
-    analysis: &str,
-    files: &[PathBuf],
-    with_errors: bool,
-) -> Result<BoundResults, ProjectError> {
+pub fn bind_results(files: &[PathBuf], with_errors: bool) -> Result<BoundResults, ProjectError> {
     let mut bound = BoundResults {
-        analysis: analysis.to_owned(),
         input: None,
         steps: Vec::new(),
         with_errors,
@@ -2862,7 +2855,7 @@ mod tests {
         std::fs::write(&frd, &text).unwrap();
         // No history output: the missing .dat is left out.
         let files = [frd.with_extension("dat"), frd.clone()];
-        let bound = bind_results("Analysis-1", &files, false).unwrap();
+        let bound = bind_results(&files, false).unwrap();
         assert_eq!(bound.files.len(), 1);
         assert_eq!(bound.size(), text.len() as u64);
         assert!(
@@ -2870,7 +2863,7 @@ mod tests {
             "{}",
             bound.stored_size()
         );
-        assert!(bind_results("Analysis-1", &[dir.join("missing.frd")], false).is_err());
+        assert!(bind_results(&[dir.join("missing.frd")], false).is_err());
 
         let path = dir.join("block.ndl");
         let model = FeModel::default();
@@ -2929,7 +2922,7 @@ mod tests {
         solved.model.nodes.insert(4, [1.0, 2.0, 3.0]);
         let path = dir.join("Analysis-1.ndlr");
         solved.write(&path).unwrap();
-        let bound = bind_results("Analysis-1", std::slice::from_ref(&path), false).unwrap();
+        let bound = bind_results(std::slice::from_ref(&path), false).unwrap();
         let file = bound.solver.as_ref().unwrap();
         // Compressed by its own format already: stored as it is, not deflated again.
         let written = std::fs::read(&path).unwrap();

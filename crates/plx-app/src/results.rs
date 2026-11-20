@@ -395,8 +395,7 @@ impl ResultsView {
                 field,
                 coordinate_system,
             }) => {
-                let system =
-                    (self.coordinate_systems.iter()).find(|c| c.name == *coordinate_system);
+                let system = (self.coordinate_systems.iter()).find(|c| c.id == *coordinate_system);
                 is_directional(field).then(|| axes_of(system))
             }
             Some(_) => None,

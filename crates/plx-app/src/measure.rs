@@ -824,7 +824,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("plx-measure-ndlr-{}", std::process::id()));
         let file = crate::solver_check::solve_beam_built_in(&dir.join("run"));
         let files = [file.clone(), file.with_extension("inp")];
-        let bound = plx_io::project::bind_results("Beam", &files, false).unwrap();
+        let bound = plx_io::project::bind_results(&files, false).unwrap();
         assert!(bound.solver.is_some());
         let restore = dir.join("restore");
         let job = Job {

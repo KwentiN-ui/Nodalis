@@ -56,8 +56,9 @@ pub struct LoweredParticles {
     /// The name of the FE part each body is filled from, in the order of
     /// [`ParticleModel::bodies`].
     pub bodies: Vec<String>,
-    /// The names of the FE parts of each wall, in the order of [`ParticleModel::walls`].
-    pub wall_parts: Vec<Vec<String>>,
+    /// The walls with their FE parts, in the order of [`ParticleModel::walls`], without
+    /// frames: the loads on them are written per wall.
+    pub walls: Vec<plx_results::wall_loads::WallSeries>,
     /// The rigid bodies of the model that are walls, by index of the constraints.
     pub rigid_walls: Vec<usize>,
     /// What the history outputs of the step ask for.
@@ -155,6 +156,7 @@ fn lower_whole(
             ));
         }
         walls.push(WallSource {
+            id: body.id,
             name: body.name.clone(),
             parts,
             constraint: Some(c),
@@ -174,6 +176,7 @@ fn lower_whole(
             continue;
         }
         walls.push(WallSource {
+            id: bc.id,
             name: bc.name.clone(),
             parts,
             constraint: None,
@@ -331,7 +334,14 @@ fn lower_whole(
                  temperature."
             ));
         }
-        wall_parts.push(parts.iter().map(|&p| mesh.parts[p].name.clone()).collect());
+        wall_parts.push(plx_results::wall_loads::WallSeries {
+            id: wall.id,
+            name: name.clone(),
+            parts: (parts.iter())
+                .map(|&p| (mesh.parts[p].id, mesh.parts[p].name.clone()))
+                .collect(),
+            frames: Vec::new(),
+        });
         model.walls.push(RigidWall {
             name: name.clone(),
             shape: shapes.surface(mesh, &parts),
@@ -511,7 +521,7 @@ fn lower_whole(
         model,
         step: index,
         bodies,
-        wall_parts,
+        walls: wall_parts,
         rigid_walls: walls.iter().filter_map(|w| w.constraint).collect(),
         history,
         warnings,
@@ -717,6 +727,8 @@ fn history_request(
 /// What makes parts a wall: a rigid body (`constraint`), or a displacement boundary
 /// condition of the step that keeps their shape (`held`, its index).
 struct WallSource {
+    /// The id of the rigid body or boundary condition.
+    id: plx_model::Id,
     name: String,
     parts: BTreeSet<usize>,
     constraint: Option<usize>,

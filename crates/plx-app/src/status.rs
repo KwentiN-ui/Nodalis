@@ -321,7 +321,6 @@ mod tests {
 
     fn results(input: u64) -> BoundResults {
         BoundResults {
-            analysis: "Analysis-1".into(),
             input: Some(input),
             ..Default::default()
         }

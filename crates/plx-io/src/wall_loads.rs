@@ -271,7 +271,7 @@ pub fn nodal_forces(
     }
     let surface = Surface::of(mesh, &faces);
     let walls: Vec<usize> = (0..loads.walls.len())
-        .filter(|&w| load.takes(&loads.walls[w].name))
+        .filter(|&w| load.takes(loads.walls[w].id))
         .collect();
     if walls.is_empty() {
         return Err("none of the walls it names is in the run".into());
@@ -336,6 +336,7 @@ fn length(a: [f64; 3]) -> f64 {
 mod tests {
     use super::*;
     use plx_mesh::{Element, ElementShape, Part};
+    use plx_results::wall_loads::WallSeries;
     use plxs_core::particles::{Space, WallFrame};
 
     /// A block of `n`³ eight-node bricks of edge `size / n`, one part "Plate".
@@ -398,7 +399,11 @@ mod tests {
         let mut loads = WallLoads::new(
             cell,
             Space::Solid,
-            vec![("Press".into(), vec!["Plate".into()])],
+            vec![WallSeries::new(
+                plx_model::Id::new(),
+                "Press",
+                vec![(plx_model::Id::new(), "Plate".into())],
+            )],
         );
         loads.push(1.0, &[frame]);
         loads
@@ -453,7 +458,11 @@ mod tests {
         frame.points.push([0.01, 0.01, 0.001]);
         frame.normals.push([0.0, 0.0, -1.0]);
         frame.forces.push([0.0, 0.0, 2.0]);
-        let mut loads = WallLoads::new(0.01, Space::Solid, vec![("Blade".into(), vec![])]);
+        let mut loads = WallLoads::new(
+            0.01,
+            Space::Solid,
+            vec![WallSeries::new(plx_model::Id::new(), "Blade", vec![])],
+        );
         loads.push(1.0, &[frame]);
         let region = Region::Parts(mesh.ids_of(&["Plate"]));
         let out = nodal_forces(&mesh, &region, &Default::default(), &loads).unwrap();

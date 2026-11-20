@@ -575,7 +575,7 @@ impl Analysis {
             warnings: lowered.warnings,
             steps: vec![record],
             history: lowered.history,
-            wall_parts: lowered.wall_parts,
+            walls: lowered.walls,
         };
         let job = if check_model {
             output.push(format!(

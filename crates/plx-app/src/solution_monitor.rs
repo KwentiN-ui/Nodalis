@@ -696,7 +696,7 @@ impl BackgroundSolve {
         };
         let mut files = vec![results_file.clone()];
         files.extend(extensions.iter().map(|e| results_file.with_extension(e)));
-        let (name, input) = (self.name.clone(), analysis.input);
+        let input = analysis.input;
         let steps = analysis.steps.clone();
         self.stopped_keeping = status == JobStatus::StoppedWithResults;
         // A stopped run's last step may not be finished, as that of a failed run.
@@ -705,7 +705,7 @@ impl BackgroundSolve {
             JobStatus::FailedWithResults | JobStatus::StoppedWithResults
         );
         std::thread::spawn(move || {
-            let bound = plx_io::project::bind_results(&name, &files, with_errors)
+            let bound = plx_io::project::bind_results(&files, with_errors)
                 .map(|mut bound| {
                     bound.input = Some(input);
                     bound.steps = steps;

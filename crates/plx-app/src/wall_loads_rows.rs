@@ -23,7 +23,7 @@ thread_local! {
 #[derive(Clone, Debug)]
 struct Summary {
     /// The walls of the run.
-    walls: Vec<String>,
+    walls: Vec<(plx_model::Id, String)>,
     end_time: f64,
     frames: usize,
     total: [f64; 3],
@@ -66,7 +66,9 @@ fn summary(
         let loads = plx_io::wall_loads::read(file)?;
         let mapped = plx_io::wall_loads::nodal_forces(model.mesh(), region, load, &loads);
         let mut summary = Summary {
-            walls: loads.walls.iter().map(|w| w.name.clone()).collect(),
+            walls: (loads.walls.iter())
+                .map(|w| (w.id, w.name.clone()))
+                .collect(),
             end_time: loads.end_time(),
             frames: loads.times.len(),
             total: [0.0; 3],
@@ -110,17 +112,17 @@ pub fn rows(ui: &mut Ui, load: &mut WallLoads, region: &Region, model: &Model, u
     {
         ui.label("Walls");
         ui.vertical(|ui| {
-            for name in &summary.walls {
-                let mut on = load.takes(name);
+            for (id, name) in &summary.walls {
+                let mut on = load.takes(*id);
                 if ui.checkbox(&mut on, name).changed() {
-                    let mut taken: Vec<String> = (summary.walls.iter())
-                        .filter(|w| load.takes(w))
-                        .cloned()
+                    let mut taken: Vec<plx_model::Id> = (summary.walls.iter())
+                        .map(|w| w.0)
+                        .filter(|&w| load.takes(w))
                         .collect();
                     if on {
-                        taken.push(name.clone());
+                        taken.push(*id);
                     } else {
-                        taken.retain(|w| w != name);
+                        taken.retain(|w| w != id);
                     }
                     load.walls = if taken.len() == summary.walls.len() {
                         Vec::new()

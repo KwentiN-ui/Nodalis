@@ -14,9 +14,9 @@ pub struct WallLoads {
     /// The file of the loads the run wrote (`.walls`), a copy for the analysis taking them;
     /// set by the link.
     pub file: PathBuf,
-    /// The walls taken, by the names of their rigid bodies; empty: all.
+    /// The walls taken, by the ids of their rigid bodies or boundary conditions; empty: all.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub walls: Vec<String>,
+    pub walls: Vec<crate::Id>,
     /// Which time of the run.
     pub time: WallLoadTime,
 }
@@ -58,8 +58,8 @@ impl WallLoads {
         (!self.file.as_os_str().is_empty()).then_some(self.file.as_path())
     }
 
-    /// Whether wall `name` is taken.
-    pub fn takes(&self, name: &str) -> bool {
-        self.walls.is_empty() || self.walls.iter().any(|w| w == name)
+    /// Whether the wall `id` is taken.
+    pub fn takes(&self, id: crate::Id) -> bool {
+        self.walls.is_empty() || self.walls.contains(&id)
     }
 }

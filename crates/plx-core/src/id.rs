@@ -42,6 +42,17 @@ impl Id {
         }
     }
 
+    /// The id an item made for `seed` always has, e.g. the item a link of the project makes
+    /// in the analysis it points to: the link finds it again by it, whatever it is renamed
+    /// to. In the upper half like the ids [`Id::new`] makes.
+    pub fn derived(seed: &str) -> Self {
+        // FNV-1a, the same in every version of the program.
+        let hash = (seed.bytes()).fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+        Self(hash | 1 << 63)
+    }
+
     /// The number behind the id, e.g. for a stable key in a map of the GUI.
     pub fn raw(self) -> u64 {
         self.0

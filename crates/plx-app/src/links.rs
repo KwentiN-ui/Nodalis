@@ -1029,7 +1029,7 @@ pub fn apply_results(
     let step = target_step(link).unwrap_or_default().to_owned();
     match kind {
         ResultsUse::Submodel => apply_submodel(fe, &step, global, file),
-        ResultsUse::WallLoads => apply_wall_loads(fe, mesh, &step, file),
+        ResultsUse::WallLoads => apply_wall_loads(fe, mesh, &step, made_id(link), file),
         ResultsUse::Modes => {
             let changed = fe.properties.stored_modes.as_ref() != Some(&file);
             fe.properties.stored_modes = Some(file);
@@ -1046,7 +1046,7 @@ pub fn apply_results(
                 return false;
             };
             let field = DefinedField {
-                id: plx_model::Id::new(),
+                id: made_id(link),
                 distribution: None,
                 name: LINKED_TEMPERATURES.into(),
                 active: true,
@@ -1054,7 +1054,7 @@ pub fn apply_results(
                 kind: DefinedFieldKind::TemperatureFromFile { file, step: global },
                 amplitude: None,
             };
-            match (step.defined_fields.iter_mut()).find(|f| f.name == LINKED_TEMPERATURES) {
+            match (step.defined_fields.iter_mut()).find(|f| f.id == field.id) {
                 Some(own) if own.kind == field.kind => false,
                 Some(own) => {
                     own.kind = field.kind;
@@ -1072,11 +1072,17 @@ pub fn apply_results(
 /// Lets step `step` of `fe` take the loads on the walls in `file`: its load
 /// [`LINKED_WALL_LOADS`] reads them, made on the parts of the walls the first time. Returns
 /// whether anything changed.
-fn apply_wall_loads(fe: &mut FeModel, mesh: &FeMesh, step: &str, file: PathBuf) -> bool {
+fn apply_wall_loads(
+    fe: &mut FeModel,
+    mesh: &FeMesh,
+    step: &str,
+    id: plx_model::Id,
+    file: PathBuf,
+) -> bool {
     let Some(step) = fe.steps.iter_mut().find(|s| key(s.id) == step) else {
         return false;
     };
-    if let Some(load) = (step.loads.iter_mut()).find(|l| l.name == LINKED_WALL_LOADS) {
+    if let Some(load) = (step.loads.iter_mut()).find(|l| l.id == id) {
         return match &mut load.kind {
             plx_model::LoadKind::WallLoads(walls) if walls.file == file => false,
             plx_model::LoadKind::WallLoads(walls) => {
@@ -1086,11 +1092,16 @@ fn apply_wall_loads(fe: &mut FeModel, mesh: &FeMesh, step: &str, file: PathBuf) 
             _ => false,
         };
     }
-    // The parts of the walls, which the run lists by name.
+    // The parts of the walls: by id, or by name in a mesh of the analysis's own.
     let mut parts: Vec<plx_model::Id> = Vec::new();
     if let Ok(loads) = plx_results::wall_loads::WallLoads::read(&file) {
         for wall in &loads.walls {
-            for part in wall.parts.iter().filter_map(|p| mesh.part_id(p)) {
+            let found = (wall.parts.iter()).filter_map(|(id, name)| {
+                (mesh.parts.iter().any(|p| p.id == *id))
+                    .then_some(*id)
+                    .or_else(|| mesh.part_id(name))
+            });
+            for part in found {
                 if !parts.contains(&part) {
                     parts.push(part);
                 }
@@ -1098,7 +1109,7 @@ fn apply_wall_loads(fe: &mut FeModel, mesh: &FeMesh, step: &str, file: PathBuf) 
         }
     }
     step.loads.push(plx_model::Load {
-        id: plx_model::Id::new(),
+        id,
         name: LINKED_WALL_LOADS.into(),
         active: true,
         visible: true,
@@ -1117,9 +1128,26 @@ fn apply_wall_loads(fe: &mut FeModel, mesh: &FeMesh, step: &str, file: PathBuf) 
     true
 }
 
+/// The id of the item the results link `link` makes in its target, a temperature field or a
+/// load: the same each time, so that the link finds it again also once it is renamed.
+fn made_id(link: &Link) -> plx_model::Id {
+    let mut seed = format!("{} {}", link.source, link.target);
+    for part in link
+        .item
+        .iter()
+        .chain([&"->".to_string()])
+        .chain(&link.slot)
+    {
+        seed.push(' ');
+        seed.push_str(part);
+    }
+    plx_model::Id::derived(&seed)
+}
+
 /// Takes back what a results link set in `fe`, once it is removed; `submodel` tells
 /// whether other links still make it a submodel.
 pub fn clear_results(fe: &mut FeModel, link: &Link, submodel: bool) {
+    let made = made_id(link);
     match ResultsUse::of(link) {
         Some(ResultsUse::Submodel) if !submodel => clear_submodel(fe),
         Some(ResultsUse::Modes) => fe.properties.stored_modes = None,
@@ -1127,13 +1155,13 @@ pub fn clear_results(fe: &mut FeModel, link: &Link, submodel: bool) {
         Some(ResultsUse::Temperature) => {
             let step = target_step(link);
             for s in (fe.steps.iter_mut()).filter(|s| Some(key(s.id).as_str()) == step) {
-                s.defined_fields.retain(|f| f.name != LINKED_TEMPERATURES);
+                s.defined_fields.retain(|f| f.id != made);
             }
         }
         Some(ResultsUse::WallLoads) => {
             let step = target_step(link);
             for s in (fe.steps.iter_mut()).filter(|s| Some(key(s.id).as_str()) == step) {
-                s.loads.retain(|l| l.name != LINKED_WALL_LOADS);
+                s.loads.retain(|l| l.id != made);
             }
         }
         _ => {}
@@ -3254,7 +3282,15 @@ mod tests {
         plx_results::wall_loads::WallLoads::new(
             0.01,
             Default::default(),
-            vec![("Screw".into(), vec!["SCREW".into(), "SHAFT".into()])],
+            // SCREW by its id, SHAFT meshed anew here by its name.
+            vec![plx_results::wall_loads::WallSeries::new(
+                plx_model::Id::new(),
+                "Screw",
+                vec![
+                    (mesh.parts[0].id, "Other name".into()),
+                    (plx_model::Id::new(), "SHAFT".into()),
+                ],
+            )],
         )
         .write(&file)
         .unwrap();
