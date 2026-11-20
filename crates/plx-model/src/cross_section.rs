@@ -17,7 +17,7 @@ pub const ROUND_POINTS: usize = 24;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CrossSection {
     /// The internal identity other items refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub profile: BeamProfile,
 }

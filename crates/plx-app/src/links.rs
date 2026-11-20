@@ -39,7 +39,7 @@ use plx_model::{
 use crate::tree::{CROSS_SECTIONS, TreeItem};
 
 /// The key that names an item of the setup or a step in a path: its id as text.
-pub fn key(id: plx_model::Id) -> String {
+pub fn key<T: ?Sized>(id: plx_model::Id<T>) -> String {
     id.to_string()
 }
 
@@ -445,12 +445,12 @@ pub fn merge_meshes(
                 other => other,
             };
             // The same mesh taken twice brings its sets twice: the second are other sets.
-            let written = copy.mesh.user_sets.contains_key(&set_item.id);
+            let written = copy.mesh.user_sets.contains_key(&set_item.id.any());
             if out.mesh_sets.iter().any(|s| s.id == set_item.id) {
                 set_item.id = plx_model::Id::new();
             }
             if written {
-                (mesh.user_sets).insert(set_item.id, (set_item.kind, set_item.name.clone()));
+                (mesh.user_sets).insert(set_item.id.any(), (set_item.kind, set_item.name.clone()));
             }
             out.mesh_sets.push(set_item);
         }
@@ -1126,7 +1126,7 @@ fn apply_wall_loads(
     fe: &mut FeModel,
     mesh: &FeMesh,
     step: &str,
-    id: plx_model::Id,
+    id: plx_model::Id<plx_model::Load>,
     file: plx_model::ResultsFile,
 ) -> bool {
     let Some(step) = fe.steps.iter_mut().find(|s| key(s.id) == step) else {
@@ -1180,7 +1180,7 @@ fn apply_wall_loads(
 
 /// The id of the item the results link `link` makes in its target, a temperature field or a
 /// load: the same each time, so that the link finds it again also once it is renamed.
-fn made_id(link: &Link) -> plx_model::Id {
+fn made_id<T: ?Sized>(link: &Link) -> plx_model::Id<T> {
     let mut seed = format!("{} {}", link.source, link.target);
     for part in link
         .item
@@ -1197,7 +1197,7 @@ fn made_id(link: &Link) -> plx_model::Id {
 /// Takes back what a results link set in `fe`, once it is removed; `submodel` tells
 /// whether other links still make it a submodel.
 pub fn clear_results(fe: &mut FeModel, link: &Link, submodel: bool) {
-    let made = made_id(link);
+    let made: plx_model::Id = made_id(link);
     match ResultsUse::of(link) {
         Some(ResultsUse::Submodel) if !submodel => clear_submodel(fe),
         Some(ResultsUse::Modes) => fe.properties.stored_modes = None,
@@ -1205,13 +1205,13 @@ pub fn clear_results(fe: &mut FeModel, link: &Link, submodel: bool) {
         Some(ResultsUse::Temperature) => {
             let step = target_step(link);
             for s in (fe.steps.iter_mut()).filter(|s| Some(key(s.id).as_str()) == step) {
-                s.defined_fields.retain(|f| f.id != made);
+                s.defined_fields.retain(|f| f.id != made.cast());
             }
         }
         Some(ResultsUse::WallLoads) => {
             let step = target_step(link);
             for s in (fe.steps.iter_mut()).filter(|s| Some(key(s.id).as_str()) == step) {
-                s.loads.retain(|l| l.id != made);
+                s.loads.retain(|l| l.id != made.cast());
             }
         }
         _ => {}

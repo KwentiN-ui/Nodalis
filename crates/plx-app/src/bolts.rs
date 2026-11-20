@@ -90,7 +90,7 @@ pub fn bolt_highlight(model: &Model, surface: &Region, thread: &Region) -> Highl
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoltStep {
     pub action: BoltAction,
-    pub amplitude: Option<Id>,
+    pub amplitude: Option<Id<plx_model::Amplitude>>,
 }
 
 impl Default for BoltStep {
@@ -250,7 +250,7 @@ fn step_rows(ui: &mut Ui, fe: &FeModel, steps: &mut [BoltStep], units: plx_model
 fn amplitude_choice(
     ui: &mut Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
-    amplitude: &mut Option<Id>,
+    amplitude: &mut Option<Id<plx_model::Amplitude>>,
     fe: &FeModel,
 ) {
     let text = match *amplitude {
@@ -322,7 +322,7 @@ fn exported_as(model: &Model, bolt: &Bolt) -> String {
 }
 
 /// What the bolt does in each step, for the dialog.
-pub fn step_actions(fe: &FeModel, bolt: Id) -> Vec<BoltStep> {
+pub fn step_actions(fe: &FeModel, bolt: Id<plx_model::Bolt>) -> Vec<BoltStep> {
     (fe.steps.iter())
         .map(|step| {
             (step.bolt_changes.iter())
@@ -338,7 +338,7 @@ pub fn step_actions(fe: &FeModel, bolt: Id) -> Vec<BoltStep> {
 
 /// Stores the steps of the dialog with the bolt: a change for each step that does not just
 /// lock it.
-pub fn set_step_actions(fe: &mut FeModel, bolt: Id, steps: &[BoltStep]) {
+pub fn set_step_actions(fe: &mut FeModel, bolt: Id<plx_model::Bolt>, steps: &[BoltStep]) {
     for step in fe.steps.iter_mut() {
         step.bolt_changes.retain(|c| c.bolt != bolt);
     }

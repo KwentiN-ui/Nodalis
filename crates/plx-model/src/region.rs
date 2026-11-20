@@ -21,7 +21,7 @@ pub enum Region {
     Edges(Vec<[NodeId; 2]>),
     /// A user-defined set of the model ([`crate::MeshSet`]) by its id: renaming the set
     /// keeps the region on it. Its members are those it wrote into the mesh.
-    Set(crate::Id),
+    Set(crate::Id<crate::MeshSet>),
     /// A node set that came with the mesh, of an input file or a side of a mesh block.
     NodeSet(String),
     /// An element set that came with the mesh.
@@ -34,7 +34,7 @@ pub enum Region {
     /// A reference point by its id, for boundary conditions and loads on a rigid body: the
     /// body's reference node, which exists only in the input file, so the region has no
     /// nodes of the mesh.
-    ReferencePoint(crate::Id),
+    ReferencePoint(crate::Id<crate::ReferencePoint>),
     /// The point of a remote displacement boundary condition or a remote force by the id of
     /// the boundary condition or load, for history outputs of its reaction forces and
     /// moments. Like a reference point it exists only in the input file.
@@ -62,7 +62,7 @@ impl Region {
         let Region::Set(id) = self else {
             return None;
         };
-        let (kind, name) = mesh.user_set(*id)?;
+        let (kind, name) = mesh.user_set(id.any())?;
         Some(Region::named(kind, name))
     }
 
@@ -219,7 +219,7 @@ impl Region {
     }
 
     /// The reference point the region stands for, if it is one.
-    pub fn reference_point(&self) -> Option<crate::Id> {
+    pub fn reference_point(&self) -> Option<crate::Id<crate::ReferencePoint>> {
         match self {
             Region::ReferencePoint(id) => Some(*id),
             _ => None,

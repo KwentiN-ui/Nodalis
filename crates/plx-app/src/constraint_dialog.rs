@@ -178,7 +178,7 @@ impl Location {
 #[derive(Clone, Debug)]
 pub(crate) struct NewPoint {
     /// The id the point gets, which the body refers to.
-    id: plx_model::Id,
+    id: plx_model::Id<ReferencePoint>,
     name: String,
     location: Location,
     /// Global coordinates in the stored units, for [`Location::Coordinates`].
@@ -911,7 +911,7 @@ enum PointUse {
 fn rigid_body_point_rows(
     ui: &mut Ui,
     model: &Model,
-    reference_point: &mut plx_model::Id,
+    reference_point: &mut plx_model::Id<plx_model::ReferencePoint>,
     new_point: &mut Option<Box<NewPoint>>,
     region: Option<&Region>,
     used: PointUse,

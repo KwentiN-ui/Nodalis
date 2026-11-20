@@ -95,7 +95,7 @@ pub struct InfillSection {
     /// stiffness in the layer.
     pub layer_factor: f64,
     /// The core material of [`InfillPattern::Custom`], in the print axes.
-    pub core_material: Option<crate::Id>,
+    pub core_material: Option<crate::Id<crate::Material>>,
 }
 
 impl InfillSection {

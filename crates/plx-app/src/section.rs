@@ -65,7 +65,7 @@ pub enum PlaneDefinition {
     /// A plane of the model's features, shifted along its normal; it follows the feature
     /// when that changes.
     Feature {
-        plane: plx_model::Id,
+        plane: plx_model::Id<plx_model::Plane>,
         offset: f64,
         /// A point on the feature's plane and its unit normal, as last resolved; `None` while
         /// the feature is missing or degenerate.

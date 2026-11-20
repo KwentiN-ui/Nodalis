@@ -103,11 +103,11 @@ impl SystemDefinition {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CoordinateSystem {
-    pub id: Id,
+    pub id: Id<Self>,
     pub name: String,
     pub kind: CoordinateSystemKind,
     /// The system the definition is given in; `None` for the global one.
-    pub base: Option<Id>,
+    pub base: Option<Id<CoordinateSystem>>,
     pub definition: SystemDefinition,
     /// The selection the system moves with; `None` keeps it fixed in space, unless its base
     /// moves.
@@ -281,7 +281,7 @@ impl CoordinateSystem {
     /// not resolve.
     pub fn placed_in(
         &self,
-        base: Option<Id>,
+        base: Option<Id<CoordinateSystem>>,
         definition: usize,
         systems: &[CoordinateSystem],
     ) -> Option<CoordinateSystem> {
@@ -832,7 +832,7 @@ mod tests {
 
     fn turned(
         name: &str,
-        base: Option<Id>,
+        base: Option<Id<CoordinateSystem>>,
         offset: [f64; 3],
         angles: [f64; 3],
     ) -> CoordinateSystem {

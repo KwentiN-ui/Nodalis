@@ -23,7 +23,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContactRegion {
     /// The internal identity other items refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub active: bool,
     pub side_a: Region,
@@ -32,7 +32,7 @@ pub struct ContactRegion {
     pub settings: ContactSettings,
     /// The contact detection that found the region; `None` for a region made by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detected_by: Option<crate::Id>,
+    pub detected_by: Option<crate::Id<crate::ContactDetection>>,
     /// Changed by the user after its detection: detecting again keeps it as it is.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub edited: bool,
@@ -551,7 +551,7 @@ struct Properties {
     conductivity: HashMap<ElementId, f64>,
     /// The distance each detection that found regions with an automatic tolerance searched
     /// within, by its id.
-    detections: HashMap<Id, f64>,
+    detections: HashMap<Id<crate::ContactDetection>, f64>,
     /// The nodes of the sides of the regions resolved, the only ones whose elements an
     /// adjustment to touch moves.
     side_nodes: HashSet<NodeId>,
@@ -698,7 +698,10 @@ impl FeModel {
     /// The contact pairs, the contact regions written as contact pairs and the compression
     /// only supports, which contact history outputs can print, by id and name.
     pub fn contact_pair_choices(&self) -> Vec<(Id, &str)> {
-        let pairs = self.contact_pairs.iter().map(|p| (p.id, p.name.as_str()));
+        let pairs = self
+            .contact_pairs
+            .iter()
+            .map(|p| (p.id.any(), p.name.as_str()));
         let regions = (self.contact_regions.iter())
             .filter(|r| match r.behavior {
                 // A bonded region left to Auto becomes a tied contact when its contact values
@@ -708,10 +711,10 @@ impl FeModel {
                 }
                 behavior => behavior.separates(),
             })
-            .map(|r| (r.id, r.name.as_str()));
+            .map(|r| (r.id.any(), r.name.as_str()));
         // A compression only support is a contact with the ground.
         let supports = self.constraints.iter().filter_map(|c| match c {
-            crate::Constraint::CompressionOnly(s) => Some((s.id, s.name.as_str())),
+            crate::Constraint::CompressionOnly(s) => Some((s.id.any(), s.name.as_str())),
             _ => None,
         });
         pairs.chain(regions).chain(supports).collect()
@@ -720,7 +723,7 @@ impl FeModel {
     /// The compression only support with an id.
     pub fn compression_only(&self, id: Id) -> Option<&crate::CompressionOnly> {
         self.constraints.iter().find_map(|c| match c {
-            crate::Constraint::CompressionOnly(s) if s.id == id => Some(s),
+            crate::Constraint::CompressionOnly(s) if s.id.any() == id => Some(s),
             _ => None,
         })
     }
@@ -1049,7 +1052,7 @@ impl FeModel {
                     // The pair keeps the region's id: history outputs and changes of the
                     // steps on the region go to it.
                     let mut pair = ContactPair::new(region.name.clone(), Some(interaction));
-                    pair.id = region.id;
+                    pair.id = region.id.cast();
                     pair.active = region.active;
                     pair.method = if item.node_to_surface {
                         ContactMethod::NodeToSurface
@@ -1072,10 +1075,10 @@ impl FeModel {
             origin.tie_regions.push(regions);
         }
         // Changes in the steps are kept for the contact pairs; ties and equations stay.
-        let pairs: BTreeSet<Id> = lowered.contact_pairs.iter().map(|p| p.id).collect();
+        let pairs: BTreeSet<Id> = lowered.contact_pairs.iter().map(|p| p.id.any()).collect();
         // Contact values are printed for contact pairs only; of a region written as a tie
         // or as equations there are none (see the model check).
-        let regions: BTreeSet<Id> = self.contact_regions.iter().map(|r| r.id).collect();
+        let regions: BTreeSet<Id> = self.contact_regions.iter().map(|r| r.id.any()).collect();
         for step in &mut lowered.steps {
             step.contact_changes.retain(|c| pairs.contains(&c.region));
         }
@@ -1085,7 +1088,8 @@ impl FeModel {
             }
             _ => true,
         });
-        let kept: BTreeSet<Id> = lowered.history_outputs.iter().map(|o| o.id).collect();
+        let kept: BTreeSet<Id<crate::HistoryOutput>> =
+            lowered.history_outputs.iter().map(|o| o.id).collect();
         for step in &mut lowered.steps {
             step.history_outputs.retain(|o| kept.contains(o));
         }

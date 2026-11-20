@@ -1298,10 +1298,10 @@ struct Sets<'a> {
     submodel_sets: Vec<(String, String)>,
     /// Reference and rotation node of each reference point an active rigid body is driven
     /// by, and the node set holding the reference node once something refers to it.
-    reference_nodes: BTreeMap<Id, ReferenceNodes>,
+    reference_nodes: BTreeMap<Id<plx_model::ReferencePoint>, ReferenceNodes>,
     /// The name (`*POINT MASS, NAME=`) of the point masses on each reference point, by which
     /// a gravity or centrifugal load on the point pulls them alone.
-    point_mass_names: BTreeMap<Id, String>,
+    point_mass_names: BTreeMap<Id<plx_model::ReferencePoint>, String>,
     /// Reference and rotation node of the point of each displacement written with a point,
     /// with its region; boundary conditions with the same region and point share it.
     remote_points: Vec<(Region, plx_model::Displacement, [NodeId; 2])>,
@@ -1326,7 +1326,7 @@ struct Sets<'a> {
     dofs: dofs::Dofs,
     /// Reference points fixed to the world ([`FeModel::point_grounded`]): their nodes in
     /// `reference_nodes` are held in every mechanical step where no displacement moves them.
-    grounded: Vec<Id>,
+    grounded: Vec<Id<plx_model::ReferencePoint>>,
     /// The handles of the sets and surfaces by name.
     handles: Handles,
 }
@@ -1528,7 +1528,11 @@ impl<'a> Sets<'a> {
     }
 
     /// The nodes of the rigid body a reference point drives.
-    fn reference_nodes(&mut self, item: &str, point: Id) -> Result<ReferenceNodes, WriteError> {
+    fn reference_nodes(
+        &mut self,
+        item: &str,
+        point: Id<plx_model::ReferencePoint>,
+    ) -> Result<ReferenceNodes, WriteError> {
         let Some(nodes) = self.reference_nodes.get(&point).cloned() else {
             return Err(WriteError::UnknownReferencePoint {
                 item: item.to_string(),
@@ -1669,7 +1673,7 @@ fn materials(
     model: &FeModel,
 ) -> (
     Vec<ir::material::Material>,
-    std::collections::HashMap<Id, ir::MaterialId>,
+    std::collections::HashMap<Id<plx_model::Material>, ir::MaterialId>,
 ) {
     use ir::material as m;
     let mut materials: Vec<m::Material> = Vec::new();
@@ -1862,7 +1866,7 @@ fn amplitudes(
                     points,
                     signal: None,
                 };
-                let key = AmplitudeKey::Walls(step.name.clone(), load.id, k);
+                let key = AmplitudeKey::Walls(step.name.clone(), load.id.any(), k);
                 ids.add(&mut amplitudes, key, amplitude);
             }
         }
@@ -1889,7 +1893,7 @@ fn amplitudes(
                 points: Vec::new(),
                 signal: Some(excitation.signal.to_ir(dynamic.duration)),
             };
-            let key = AmplitudeKey::Signal(step.name.clone(), load.id);
+            let key = AmplitudeKey::Signal(step.name.clone(), load.id.any());
             ids.add(&mut amplitudes, key, amplitude);
         }
     }
@@ -1907,7 +1911,7 @@ fn table_owner<'a>(step: &'a Step, table: &plx_model::StepTable) -> (&'a str, Id
     match table.owner {
         TableOwner::BoundaryCondition(i) => (
             &step.boundary_conditions[i].name,
-            step.boundary_conditions[i].id,
+            step.boundary_conditions[i].id.any(),
             DOF_TABLE_LABELS[table.component],
         ),
         TableOwner::Load(i) => {
@@ -1917,7 +1921,7 @@ fn table_owner<'a>(step: &'a Step, table: &plx_model::StepTable) -> (&'a str, Id
                 LoadKind::Pressure(_) => "P",
                 _ => FORCE_TABLE_LABELS[table.component],
             };
-            (&load.name, load.id, label)
+            (&load.name, load.id.any(), label)
         }
     }
 }
@@ -1927,7 +1931,7 @@ fn table_owner<'a>(step: &'a Step, table: &plx_model::StepTable) -> (&'a str, Id
 /// id, which a copied step shares with its source).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum AmplitudeKey {
-    User(Id),
+    User(Id<plx_model::Amplitude>),
     /// The time table of component `label` of a boundary condition or load.
     Table(String, Id, &'static str),
     /// Frame `frame` of wall loads.
@@ -1990,7 +1994,7 @@ fn displacement_values(
         None => displacement.values[d],
     });
     let amplitudes = std::array::from_fn(|d| match displacement.table(d) {
-        Some(_) => amplitudes.table(&step.name, bc.id, DOF_TABLE_LABELS[d]),
+        Some(_) => amplitudes.table(&step.name, bc.id.any(), DOF_TABLE_LABELS[d]),
         None => *amplitude,
     });
     (values, amplitudes)
@@ -2011,7 +2015,7 @@ fn load_components<const N: usize>(
         None => values[c],
     });
     let amplitudes = std::array::from_fn(|c| match load.table(c) {
-        Some(_) => amplitudes.table(&step.name, load.id, labels[c]),
+        Some(_) => amplitudes.table(&step.name, load.id.any(), labels[c]),
         None => *amplitude,
     });
     (values, amplitudes)
@@ -2021,7 +2025,7 @@ fn load_components<const N: usize>(
 fn amplitude_parameter(
     amplitudes: &AmplitudeIds,
     item: &str,
-    reference: &Option<Id>,
+    reference: &Option<Id<plx_model::Amplitude>>,
 ) -> Result<Option<ir::AmplitudeId>, WriteError> {
     let Some(reference) = reference else {
         return Ok(None);
@@ -2039,7 +2043,7 @@ fn amplitude_parameter(
 fn distribution(
     model: &FeModel,
     item: &str,
-    reference: &Option<Id>,
+    reference: &Option<Id<plx_model::Distribution>>,
 ) -> Result<Option<Sampler>, WriteError> {
     let Some(id) = *reference else {
         return Ok(None);
@@ -2162,7 +2166,7 @@ fn symmetry_nodes(mesh: &FeMesh, model: &FeModel) -> std::collections::HashSet<N
 fn sections(
     sets: &mut Sets,
     model: &FeModel,
-    material_ids: &std::collections::HashMap<Id, ir::MaterialId>,
+    material_ids: &std::collections::HashMap<Id<plx_model::Material>, ir::MaterialId>,
     materials: &mut Vec<ir::material::Material>,
     orientations: &mut Vec<ir::section::Orientation>,
 ) -> Result<SectionsAndProfiles, WriteError> {
@@ -2700,7 +2704,7 @@ fn constraints(
             if let Some(&(_, _, nodes)) = (sets.remote_points.iter())
                 .find(|(r, p, _)| *r == bc.region && p.same_point(remote))
             {
-                (sets.remote_names.entry(bc.id)).or_insert((nodes, behavior));
+                (sets.remote_names.entry(bc.id.any())).or_insert((nodes, behavior));
                 continue;
             }
             // An error is about the boundary condition of this step, whatever the others of
@@ -2733,7 +2737,7 @@ fn constraints(
                 model,
                 generated,
             )?;
-            (sets.remote_names.entry(bc.id)).or_insert((nodes, behavior));
+            (sets.remote_names.entry(bc.id.any())).or_insert((nodes, behavior));
         }
     }
     // A remote force drives its region from a point of its own the same way, or from the
@@ -2749,7 +2753,7 @@ fn constraints(
         if let Some(&(_, _, nodes)) =
             (sets.remote_points.iter()).find(|(r, p, _)| r == region && p.same_point(&spec))
         {
-            (sets.remote_names.entry(load.id)).or_insert((nodes, force.behavior));
+            (sets.remote_names.entry(load.id.any())).or_insert((nodes, force.behavior));
             continue;
         }
         *lowering = Some(s);
@@ -2779,7 +2783,7 @@ fn constraints(
             model,
             generated,
         )?;
-        (sets.remote_names.entry(load.id)).or_insert((nodes, force.behavior));
+        (sets.remote_names.entry(load.id.any())).or_insert((nodes, force.behavior));
     }
     *lowering = None;
     // Joints, after the points of boundary conditions and remote forces they may connect.
@@ -3460,7 +3464,7 @@ fn contact_pairs(
                 value,
             });
         }
-        surfaces.insert(pair.id, (master, slave));
+        surfaces.insert(pair.id.any(), (master, slave));
     }
     Ok((pairs, clearances, surfaces))
 }
@@ -3862,7 +3866,12 @@ fn rigid_body(
 }
 
 /// How the displacement boundary condition of the id in the step of the id is written.
-fn formulation(model: &FeModel, mesh: &FeMesh, step: Id, bc: Id) -> Option<Formulation> {
+fn formulation(
+    model: &FeModel,
+    mesh: &FeMesh,
+    step: Id<Step>,
+    bc: Id<plx_model::BoundaryCondition>,
+) -> Option<Formulation> {
     let s = model.step_index(step)?;
     let i = (model.steps[s].boundary_conditions.iter()).position(|b| b.id == bc)?;
     model.formulation(mesh, s, i)
@@ -4070,7 +4079,7 @@ fn follower(
 fn moving_system_follower(
     model: &FeModel,
     sets: &mut Sets,
-    system: Option<plx_model::Id>,
+    system: Option<plx_model::Id<plx_model::CoordinateSystem>>,
 ) -> Result<Option<ir::step::Follower>, WriteError> {
     let Some(region) = model.system_attachment(system) else {
         return Ok(None);
@@ -4278,7 +4287,7 @@ fn step_block<'f>(
         if !bc.active || !step.kind.supports_boundary(&bc.kind) {
             continue;
         }
-        let on_point = sets.remote_names.contains_key(&bc.id)
+        let on_point = sets.remote_names.contains_key(&bc.id.any())
             && matches!(
                 formulation(model, sets.mesh, step.id, bc.id),
                 Some(Formulation::Point(_))
@@ -4530,7 +4539,7 @@ fn step_block<'f>(
         }
         // An excitation follows its signal instead of an amplitude.
         let amplitude = match load.kind {
-            LoadKind::Excitation(_) => amplitudes.signal(&step.name, load.id),
+            LoadKind::Excitation(_) => amplitudes.signal(&step.name, load.id.any()),
             _ => amplitude_parameter(amplitudes, &load.name, &load.amplitude)?,
         };
         // The second amplitude of a film scales its coefficient, of radiation the emissivity.
@@ -4555,7 +4564,7 @@ fn step_block<'f>(
                 let mut items = Vec::new();
                 for (k, (time, mapped)) in sets_of_forces.into_iter().enumerate() {
                     let amplitude = match time {
-                        Some(_) => amplitudes.walls(&step.name, load.id, k),
+                        Some(_) => amplitudes.walls(&step.name, load.id.any(), k),
                         None => amplitude,
                     };
                     for (node, force) in mapped.forces {
@@ -4961,7 +4970,7 @@ fn contact_changes(
                 master: sets.surface_id(master),
             });
         }
-        let pair = model.contact_pair(change.region);
+        let pair = model.contact_pair(change.region.cast());
         let friction = pair
             .and_then(|p| model.surface_interaction(p.interaction?))
             .and_then(|i| {

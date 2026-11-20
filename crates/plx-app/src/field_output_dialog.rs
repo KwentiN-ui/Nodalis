@@ -132,10 +132,10 @@ pub struct FieldOutputDialog {
     /// Names a new output may not take.
     taken: Vec<String>,
     /// Coordinate systems a field can be transformed into.
-    systems: Vec<(plx_model::Id, String)>,
+    systems: Vec<(plx_model::Id<plx_model::CoordinateSystem>, String)>,
     /// The systems among them that move with a selection: displacements in them are taken
     /// relative to the system, other results in its moved directions.
-    moving_systems: Vec<plx_model::Id>,
+    moving_systems: Vec<plx_model::Id<plx_model::CoordinateSystem>>,
     /// Tensor fields, whose principal directions can be computed.
     tensors: Vec<String>,
 }
@@ -231,13 +231,15 @@ impl FieldOutputDialog {
             .or_else(|| fields.first().map(|(f, c)| (f.clone(), c[0].clone())))
             .unwrap_or_default();
         let name = |prefix: &str| next_name(prefix, taken.iter().map(String::as_str));
-        let systems: Vec<(plx_model::Id, String)> = (view.coordinate_systems.iter())
-            .map(|c| (c.id, c.name.clone()))
-            .collect();
-        let moving_systems: Vec<plx_model::Id> = (view.coordinate_systems.iter())
-            .filter(|c| c.moves(&view.coordinate_systems))
-            .map(|c| c.id)
-            .collect();
+        let systems: Vec<(plx_model::Id<plx_model::CoordinateSystem>, String)> =
+            (view.coordinate_systems.iter())
+                .map(|c| (c.id, c.name.clone()))
+                .collect();
+        let moving_systems: Vec<plx_model::Id<plx_model::CoordinateSystem>> =
+            (view.coordinate_systems.iter())
+                .filter(|c| c.moves(&view.coordinate_systems))
+                .map(|c| c.id)
+                .collect();
         // Vectors and tensors can be transformed; STRESS or DISP first.
         let transformable = ["STRESS", "DISP"]
             .into_iter()
@@ -527,7 +529,7 @@ impl FieldOutputDialog {
         let fields = &self.fields;
         let systems = &self.systems;
         let moving = &self.moving_systems;
-        let label = |id: &plx_model::Id| {
+        let label = |id: &plx_model::Id<plx_model::CoordinateSystem>| {
             let name = (systems.iter())
                 .find(|s| s.0 == *id)
                 .map_or("", |s| s.1.as_str());
