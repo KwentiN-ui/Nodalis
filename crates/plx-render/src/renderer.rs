@@ -97,7 +97,8 @@ pub struct LicDisplay {
     pub source: LicSource,
     /// Streak length to either side of a pixel, in pixels.
     pub length: u32,
-    /// Size of the noise grains in model units; never finer than a pixel.
+    /// Size of the noise grains on the screen in pixels, at least 1; the noise stays on the
+    /// model and refines when zooming in, so its grains keep about this size.
     pub grain: f32,
     pub contrast: f32,
     /// Share of the brightness the streaks set, 0 to 1.

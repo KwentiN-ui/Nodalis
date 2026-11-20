@@ -26,7 +26,7 @@ pub fn display(view: &ResultsView) -> Option<LicDisplay> {
     Some(LicDisplay {
         source,
         length: options.length,
-        grain: (options.grain / 100.0 * view.model_size()) as f32,
+        grain: options.grain as f32,
         contrast: options.contrast as f32,
         mix: options.mix as f32,
     })

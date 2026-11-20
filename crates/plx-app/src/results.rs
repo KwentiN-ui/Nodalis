@@ -359,11 +359,6 @@ impl ResultsView {
         }
     }
 
-    /// A typical length of the model, as the edge of a cube of its bounding volume.
-    pub fn model_size(&self) -> f64 {
-        self.model_size
-    }
-
     pub fn current_increment(&self) -> Option<&Increment> {
         self.increments.get(self.increment)
     }
