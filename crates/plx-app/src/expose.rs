@@ -69,15 +69,12 @@ impl Scope {
         result
     }
 
-    /// Applies the toggles to the item, now named `item` in `fe` after the dialog's OK: fields
-    /// clicked on are exposed, those clicked off are no longer, unless a link gives them.
-    /// `geometry` holds the numbers of an item of the mesh setup.
+    /// Applies the toggles to the item `item` of `fe` after the dialog's OK: fields clicked
+    /// on are exposed, those clicked off are no longer, unless a link gives them. `geometry`
+    /// holds the numbers of an item of the mesh setup.
     pub fn apply(mut self, fe: &mut FeModel, geometry: Option<&Geometry>, item: &ItemRef) {
-        if let Some(old) = &self.item {
-            fe.rename_exposed(old, item.name());
-        }
         for field in std::mem::take(&mut self.toggled) {
-            let path = ValuePath::new(item.clone(), field);
+            let path = ValuePath::new(*item, field);
             let at = fe.exposed.iter().position(|e| e.path == path);
             match at {
                 Some(at) if self.linked(field).is_none() => {
@@ -85,7 +82,7 @@ impl Scope {
                 }
                 Some(_) => {}
                 None if fe.value_in(geometry, &path).is_some() => {
-                    fe.expose(path);
+                    fe.expose_in(geometry, path);
                 }
                 None => {}
             }

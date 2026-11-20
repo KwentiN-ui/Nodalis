@@ -2712,12 +2712,7 @@ impl ProjectApp {
         let Some(measure) = node.as_measure() else {
             return;
         };
-        let node_sets = self
-            .measure_link(id)
-            .and_then(|l| self.nodes.iter().find(|n| n.id == l.source))
-            .and_then(Node::link_data)
-            .map(|d| measure_regions(&d).into_keys().collect())
-            .unwrap_or_default();
+        let sources = self.measure_sources(id);
         let offered = (self.measured(id)).map(|(source, step, bound)| {
             let dir = self.measure_dir(id, source, bound, "-fields");
             crate::measure::read_offered(bound.clone(), step, dir)
@@ -2726,7 +2721,7 @@ impl ProjectApp {
             id,
             &node.name,
             measure.kind.clone(),
-            node_sets,
+            sources,
             offered,
         ));
     }
@@ -2796,6 +2791,31 @@ impl ProjectApp {
 
     /// The results a measure block measures: the analysis, the step's number for CalculiX
     /// and the results it keeps; `None` without a link or results.
+    /// What the analysis whose results a measure block reads offers it: node sets and
+    /// history outputs.
+    fn measure_sources(&self, id: u64) -> crate::measure::Sources {
+        (self.measure_link(id))
+            .and_then(|l| self.nodes.iter().find(|n| n.id == l.source))
+            .and_then(Node::link_data)
+            .map(|d| crate::measure::Sources::of(d.fe, measure_regions(&d)))
+            .unwrap_or_default()
+    }
+
+    /// What a measure block measures, in words, with the names of the analysis it reads.
+    fn measure_description(&self, id: u64) -> String {
+        let Some(measure) = self.nodes.iter().find(|n| n.id == id).and_then(Node::as_measure)
+        else {
+            return String::new();
+        };
+        let output = match measure.kind {
+            plx_model::MeasureKind::History { output, .. } => output,
+            _ => None,
+        };
+        let sources = self.measure_sources(id);
+        let name = (sources.outputs.iter()).find(|o| Some(o.id) == output);
+        measure.kind.describe(name.map(|o| o.name.as_str()))
+    }
+
     fn measured(&self, id: u64) -> Option<(&Node, u32, &plx_io::project::BoundResults)> {
         let link = self.measure_link(id)?;
         let source = self.nodes.iter().find(|n| n.id == link.source)?;
@@ -2860,6 +2880,7 @@ impl ProjectApp {
         let units = self.units;
         for (id, key, result) in done {
             self.measuring.remove(&id);
+            let what = self.measure_description(id);
             let Some(node) = self.node(id) else {
                 continue;
             };
@@ -2879,7 +2900,7 @@ impl ProjectApp {
                     };
                     measure.series = measured.series;
                     measure.times = measured.times;
-                    format!("{name}: {} = {shown}", measure.kind.describe())
+                    format!("{name}: {what} = {shown}")
                 }
                 Err(why) => {
                     measure.value = None;
@@ -2922,15 +2943,12 @@ impl ProjectApp {
             else {
                 continue;
             };
-            let node_sets = (source.link_data())
-                .map(|d| measure_regions(&d))
-                .unwrap_or_default();
             let dir = self.measure_dir(id, source, bound, "");
             let job = crate::measure::Job {
                 kind,
                 step,
                 results: bound.clone(),
-                node_sets,
+                sources: self.measure_sources(id),
                 units,
                 dir,
             };
@@ -6270,6 +6288,7 @@ impl ProjectApp {
                     (Kind::Measure, _) => measure_rows(
                         n,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
+                        self.measure_description(n.id),
                         self.measure_state(n.id),
                         self.measuring.contains_key(&n.id),
                         self.units,
@@ -9359,13 +9378,23 @@ fn exposed_rows(
         path.push(exposed.key.to_string());
         let gone = fe.value_in(geometry, &exposed.path).is_none();
         let item = &exposed.path.item;
+        let named = match item.is_meshing() {
+            true => geometry.and_then(|g| g.item_name(item)),
+            false => fe.item_name(item),
+        };
         let tip = if gone {
-            format!(
-                "{} '{}' no longer has this number: remove the parameter with a right-click, \
-                 or give the item its name again.",
-                item.noun(),
-                item.name()
-            )
+            match named {
+                Some(name) => format!(
+                    "{} '{name}' no longer has this number: remove the parameter with a \
+                     right-click.",
+                    item.noun(),
+                ),
+                None => format!(
+                    "The {} of this parameter no longer exists: remove the parameter with a \
+                     right-click.",
+                    item.noun().to_lowercase(),
+                ),
+            }
         } else {
             format!(
                 "{}: {} of {} '{}'. Drag a number of a Parameters block or a parameter study \
@@ -9373,7 +9402,7 @@ fn exposed_rows(
                 exposed.name,
                 exposed.path.field.label().to_lowercase(),
                 item.noun().to_lowercase(),
-                item.name()
+                named.unwrap_or_default()
             )
             .replace(":  of", ": the value of")
         };
@@ -10906,9 +10935,7 @@ fn study_analysis_print(data: links::Data, mesh: StudyMesh, driven: impl Fn(u32)
     let moved: Vec<usize> = (data.fe.exposed.iter())
         .filter(|e| driven(e.key))
         .filter_map(|e| match &e.path.item {
-            plx_model::ItemRef::MeshOperation(name) => {
-                data.fe.mesh_operations.iter().find(|o| &o.name == name)
-            }
+            plx_model::ItemRef::MeshOperation(id) => data.fe.mesh_operation(*id),
             _ => None,
         })
         .flat_map(|o| o.part_indices(data.mesh))
@@ -10986,6 +11013,7 @@ fn parameter_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
 fn measure_rows(
     node: &Node,
     incoming: &[(Vec<String>, String)],
+    what: String,
     state: CellState,
     busy: bool,
     units: UnitSystem,
@@ -11026,7 +11054,7 @@ fn measure_rows(
     };
     let what = row(
         &[],
-        measure.kind.describe(),
+        what,
         NodeIcon::Setup,
         "What the block measures; double-click the block to change it.".into(),
     );
@@ -15008,6 +15036,7 @@ mod tests {
         let rows = measure_rows(
             &node,
             &incoming,
+            String::new(),
             CellState::UpToDate,
             false,
             UnitSystem::default(),
@@ -15046,6 +15075,7 @@ mod tests {
         let rows = measure_rows(
             &node,
             &incoming,
+            String::new(),
             CellState::Missing,
             false,
             UnitSystem::default(),
@@ -15086,6 +15116,7 @@ mod tests {
             measure_rows(
                 &extreme[0],
                 &[],
+                String::new(),
                 CellState::Missing,
                 false,
                 UnitSystem::default()

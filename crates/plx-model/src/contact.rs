@@ -314,6 +314,16 @@ pub enum Constraint {
 }
 
 impl Constraint {
+    pub fn id(&self) -> crate::Id {
+        match self {
+            Constraint::Spring(c) => c.id,
+            Constraint::CompressionOnly(c) => c.id,
+            Constraint::RigidBody(c) => c.id,
+            Constraint::PointMass(c) => c.id,
+            Constraint::Joint(c) => c.id,
+        }
+    }
+
     pub fn name(&self) -> &str {
         match self {
             Constraint::Spring(c) => &c.name,

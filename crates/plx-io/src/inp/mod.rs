@@ -20,7 +20,8 @@ use plx_model::{
 pub(crate) use write::write_inp_whole;
 pub use write::{
     LowerError, Lowered, ModelError, SHORTENED_NAME, WriteError, lower, lower_unvalidated,
-    lower_with_sets_of, lower_with_sets_unvalidated, resolved_overlaps, write_deformed_mesh_inp,
+    lower_with_sets_of, lower_with_sets_unvalidated, resolved_overlaps, solver_name,
+    write_deformed_mesh_inp,
     write_inp, write_inp_with_sets_of,
 };
 

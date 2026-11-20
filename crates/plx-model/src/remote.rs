@@ -125,20 +125,21 @@ impl FeModel {
             return None;
         };
         if displacement.behavior != Behavior::Automatic {
-            return Some(displacement.formulation(self, mesh, &bc.region, &step.name, &bc.name));
+            let item = Some((step.id, bc.id));
+            return Some(displacement.formulation(self, mesh, &bc.region, item));
         }
         let point = (self.steps.iter().filter(|other| other.active))
             .flat_map(|other| other.boundary_conditions.iter().map(move |b| (other, b)))
             .filter(|(other, b)| {
                 b.active
-                    && b.name == bc.name
+                    && b.id == bc.id
                     && b.region == bc.region
                     && other.kind.supports_boundary(&b.kind)
             })
             .chain(std::iter::once((step, bc)))
             .any(|(other, b)| match &b.kind {
                 BoundaryKind::Displacement(d) if d.behavior == Behavior::Automatic => matches!(
-                    d.formulation(self, mesh, &b.region, &other.name, &b.name),
+                    d.formulation(self, mesh, &b.region, Some((other.id, b.id))),
                     Formulation::Point(_)
                 ),
                 _ => false,
@@ -352,8 +353,8 @@ impl Displacement {
     }
 
     /// How this displacement alone is written; [`FeModel::formulation`] looks at the other
-    /// steps as well. `step` and `name` find exposed rotations, which count as turning:
-    /// the formulation does not change with a parameter.
+    /// steps as well. `item`, the step and the id of the boundary condition, finds exposed
+    /// rotations, which count as turning: the formulation does not change with a parameter.
     ///
     /// Automatically, the nodes are held directly when they have rotations of their own
     /// (beam and shell nodes), when the selection is a single node or a reference point,
@@ -365,8 +366,7 @@ impl Displacement {
         model: &FeModel,
         mesh: &FeMesh,
         region: &Region,
-        step: &str,
-        name: &str,
+        item: Option<(crate::Id, crate::Id)>,
     ) -> Formulation {
         let point = match self.behavior {
             Behavior::EachNode => return Formulation::Nodes,
@@ -389,8 +389,8 @@ impl Displacement {
             return Formulation::Nodes;
         }
         let exposed = (model.exposed.iter()).any(|e| {
-            matches!(&e.path.item, crate::ItemRef::BoundaryCondition { step: s, name: n }
-                if s == step && n == name)
+            matches!(e.path.item, crate::ItemRef::BoundaryCondition { step, item: bc }
+                if Some((step, bc)) == item)
                 && crate::Field::ROTATION.contains(&e.path.field)
         });
         let still = rotations.iter().all(|&d| self.still(d));

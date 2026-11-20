@@ -389,8 +389,8 @@ pub struct MeshItemEditor {
     face_parts: (BTreeSet<CadEntity>, Vec<String>),
     /// Names of the geometry's shell parts, the parts a thicken shell mesh takes.
     shells: BTreeSet<String>,
-    /// The name the edited item has in the geometry, for its exposed parameters.
-    original: Option<String>,
+    /// The id of the edited item, for its exposed parameters.
+    original: Option<plx_model::Id>,
     /// The expose buttons of its numbers, see [`Self::set_linked`].
     expose: Option<expose::Scope>,
     /// The exposed parameters of the analysis that value links give, with where from.
@@ -492,7 +492,7 @@ impl MeshItemEditor {
             layer_text,
             face_parts: Default::default(),
             shells: BTreeSet::new(),
-            original: Some(geometry.mesh_items.get(index)?.name.clone()),
+            original: Some(geometry.mesh_items.get(index)?.id),
             expose: None,
             linked: Vec::new(),
         })
@@ -582,7 +582,7 @@ impl MeshItemEditor {
                 });
             ui.separator();
             ui.strong("Properties");
-            let item = self.original.clone().map(ItemRef::MeshSetup);
+            let item = self.original.map(ItemRef::MeshSetup);
             let available = self.exposable();
             let mut kept = self.expose.take();
             let linked = std::mem::take(&mut self.linked);

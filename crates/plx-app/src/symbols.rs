@@ -613,7 +613,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
             // nodes spread over the region, like a rigid body's.
             Kind::Boundary(BoundaryKind::Displacement(ref remote))
                 if matches!(
-                    remote.formulation(&model.fe, model.mesh(), &item.region, "", ""),
+                    remote.formulation(&model.fe, model.mesh(), &item.region, None),
                     plx_model::Formulation::Point(_)
                 ) =>
             {

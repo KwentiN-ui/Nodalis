@@ -482,6 +482,11 @@ fn ir_name(name: &str) -> String {
     normalized_name(name)
 }
 
+/// The name of an item as the solver prints it, e.g. the set of a history output.
+pub fn solver_name(item: &str) -> String {
+    ir_name(&name(item))
+}
+
 /// The handles of the sets and surfaces by their names in the lowering: the names are
 /// unique there (see [`Sets::free_name`]), the solver model refers to the sets by these
 /// handles and keeps the names as labels. The members follow when the model is built.
@@ -3816,10 +3821,10 @@ fn rigid_body(
     Ok(())
 }
 
-/// How the displacement boundary condition of the name in the step of the name is written.
-fn formulation(model: &FeModel, mesh: &FeMesh, step: &str, bc: &str) -> Option<Formulation> {
-    let s = model.steps.iter().position(|s| s.name == step)?;
-    let i = (model.steps[s].boundary_conditions.iter()).position(|b| b.name == bc)?;
+/// How the displacement boundary condition of the id in the step of the id is written.
+fn formulation(model: &FeModel, mesh: &FeMesh, step: Id, bc: Id) -> Option<Formulation> {
+    let s = model.step_index(step)?;
+    let i = (model.steps[s].boundary_conditions.iter()).position(|b| b.id == bc)?;
     model.formulation(mesh, s, i)
 }
 
@@ -4189,7 +4194,7 @@ fn step_block<'f>(
         }
         let on_point = sets.remote_names.contains_key(&bc.id)
             && matches!(
-                formulation(model, sets.mesh, &step.name, &bc.name),
+                formulation(model, sets.mesh, step.id, bc.id),
                 Some(Formulation::Point(_))
             );
         if let BoundaryKind::Displacement(remote) = &bc.kind
@@ -4239,7 +4244,7 @@ fn step_block<'f>(
                 item: bc.name.clone(),
                 reason,
             };
-            let form = formulation(model, sets.mesh, &step.name, &bc.name);
+            let form = formulation(model, sets.mesh, step.id, bc.id);
             let hold = node_frames::hold(model, sets.mesh, bc, form, dofs).map_err(invalid)?;
             if let Some(hold) = hold.filter(|h| !h.submodel) {
                 let (own, rest): (Vec<NodeId>, Vec<NodeId>) = (bc.region.nodes(sets.mesh))

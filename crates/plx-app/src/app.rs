@@ -3939,7 +3939,7 @@ impl Workbench {
                         _ => item.kind.parts().map(<[String]>::to_vec),
                     });
                 }
-                let exposed = (editor.take_expose()).map(|s| (s, item.name.clone()));
+                let exposed = (editor.take_expose()).map(|s| (s, item.id));
                 let index = match index.filter(|&i| i < geometry.mesh_items.len()) {
                     Some(index) => {
                         geometry.mesh_items[index] = item;
@@ -3950,10 +3950,9 @@ impl Workbench {
                         geometry.mesh_items.len() - 1
                     }
                 };
-                // The numbers clicked to be exposed become parameters of the analysis, and
-                // those exposed follow the item under its new name.
-                if let Some((scope, name)) = exposed {
-                    scope.apply(fe, Some(geometry), &plx_model::ItemRef::MeshSetup(name));
+                // The numbers clicked to be exposed become parameters of the analysis.
+                if let Some((scope, id)) = exposed {
+                    scope.apply(fe, Some(geometry), &plx_model::ItemRef::MeshSetup(id));
                 }
                 self.tree.selected = Some((TreeView::Geometry, TreeItem::MeshItem(index)));
                 // The parts a local mesh size does not touch stay up to date.

@@ -7,60 +7,36 @@ use serde::{Deserialize, Serialize};
 use plx_mesh::{FeMesh, MeshTransform};
 
 use crate::{
-    BoundaryKind, DefinedFieldKind, FeModel, Geometry, InitialConditionKind, LoadKind,
+    BoundaryKind, DefinedFieldKind, FeModel, Geometry, Id, InitialConditionKind, LoadKind,
     MeshOperationKind, MeshSetupKind, MeshingParameters, Quantity, SectionKind, StepKind,
     ValueKind,
 };
 
-/// The item of the model a field belongs to, by its name, and of the step it is in.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// The item of the model a field belongs to, by its id, and the step it is in for the
+/// items of steps: a boundary condition, load or defined field that goes on keeps its id in
+/// each step, with values of its own there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ItemRef {
-    Load {
-        step: String,
-        name: String,
-    },
-    BoundaryCondition {
-        step: String,
-        name: String,
-    },
-    DefinedField {
-        step: String,
-        name: String,
-    },
-    Material(String),
-    Section(String),
-    CrossSection(String),
-    Step(String),
-    InitialCondition(String),
+    Load { step: Id, item: Id },
+    BoundaryCondition { step: Id, item: Id },
+    DefinedField { step: Id, item: Id },
+    Material(Id),
+    Section(Id),
+    CrossSection(Id),
+    Step(Id),
+    InitialCondition(Id),
     /// A mesh operation of Mesh > Mesh Operations, such as a transform.
-    MeshOperation(String),
+    MeshOperation(Id),
     /// A distribution, whose variables can be exposed.
-    Distribution(String),
+    Distribution(Id),
     /// A mesh setup item of the geometry, such as Meshing Parameters or a Local Mesh Size.
-    MeshSetup(String),
+    MeshSetup(Id),
     /// The default meshing parameters of the geometry, for the parts no Meshing Parameters
     /// item covers.
     DefaultMeshing,
 }
 
 impl ItemRef {
-    pub fn name(&self) -> &str {
-        match self {
-            Self::Load { name, .. }
-            | Self::BoundaryCondition { name, .. }
-            | Self::DefinedField { name, .. }
-            | Self::Material(name)
-            | Self::Section(name)
-            | Self::CrossSection(name)
-            | Self::Step(name)
-            | Self::InitialCondition(name)
-            | Self::MeshOperation(name)
-            | Self::Distribution(name)
-            | Self::MeshSetup(name) => name,
-            Self::DefaultMeshing => "Default meshing",
-        }
-    }
-
     /// What the item is, for messages: "Load", "Material".
     pub fn noun(&self) -> &'static str {
         match self {
@@ -79,33 +55,13 @@ impl ItemRef {
         }
     }
 
-    /// The same item after it was renamed.
-    pub fn renamed(&self, new: &str) -> Self {
-        let mut item = self.clone();
-        match &mut item {
-            Self::Load { name, .. }
-            | Self::BoundaryCondition { name, .. }
-            | Self::DefinedField { name, .. }
-            | Self::Material(name)
-            | Self::Section(name)
-            | Self::CrossSection(name)
-            | Self::Step(name)
-            | Self::InitialCondition(name)
-            | Self::MeshOperation(name)
-            | Self::Distribution(name)
-            | Self::MeshSetup(name) => new.clone_into(name),
-            Self::DefaultMeshing => {}
-        }
-        item
-    }
-
     /// The step the item is in, or the step itself.
-    pub fn step(&self) -> Option<&str> {
-        match self {
+    pub fn step(&self) -> Option<Id> {
+        match *self {
             Self::Load { step, .. }
             | Self::BoundaryCondition { step, .. }
-            | Self::DefinedField { step, .. } => Some(step),
-            Self::Step(name) => Some(name),
+            | Self::DefinedField { step, .. }
+            | Self::Step(step) => Some(step),
             _ => None,
         }
     }
@@ -113,21 +69,6 @@ impl ItemRef {
     /// Whether its numbers are of the geometry's mesh setup rather than of the FE model.
     pub fn is_meshing(&self) -> bool {
         matches!(self, Self::MeshSetup(_) | Self::DefaultMeshing)
-    }
-
-    /// The same item in the step renamed from `old` to `new`.
-    fn in_renamed_step(&mut self, old: &str, new: &str) {
-        match self {
-            Self::Load { step, .. }
-            | Self::BoundaryCondition { step, .. }
-            | Self::DefinedField { step, .. }
-            | Self::Step(step)
-                if step == old =>
-            {
-                new.clone_into(step)
-            }
-            _ => {}
-        }
     }
 }
 
@@ -442,11 +383,12 @@ impl ValuePath {
         Self { item, field }
     }
 
-    /// The name a new exposed parameter of it gets: "Force-1 X", "Pressure-1".
-    pub fn default_name(&self) -> String {
+    /// The name a new exposed parameter of it gets from the name of its item: "Force-1 X",
+    /// "Pressure-1".
+    pub fn default_name(&self, item: &str) -> String {
         match self.field.label() {
-            "" => self.item.name().to_owned(),
-            field => format!("{} {field}", self.item.name()),
+            "" => item.to_owned(),
+            field => format!("{item} {field}"),
         }
     }
 }
@@ -500,20 +442,20 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
     let real = |value: &'a mut f64, quantity: Quantity| {
         Some((Slot::Real(value), ValueKind::Quantity(quantity)))
     };
-    let step_named = |fe: &'a mut FeModel, step: &str| fe.steps.iter_mut().find(|s| s.name == step);
-    match &path.item {
-        ItemRef::Load { step, name } => {
-            let load = (step_named(fe, step)?.loads.iter_mut()).find(|l| &l.name == name)?;
+    let step_of = |fe: &'a mut FeModel, step: Id| fe.steps.iter_mut().find(|s| s.id == step);
+    match path.item {
+        ItemRef::Load { step, item } => {
+            let load = (step_of(fe, step)?.loads.iter_mut()).find(|l| l.id == item)?;
             load_slot(&mut load.kind, field)
         }
-        ItemRef::BoundaryCondition { step, name } => {
+        ItemRef::BoundaryCondition { step, item } => {
             // The angle of a location in a cylindrical system is in degrees, no quantity.
             let cylindrical: Vec<Option<crate::Id>> = (fe.coordinate_systems.iter())
                 .filter(|c| c.kind == crate::CoordinateSystemKind::Cylindrical)
                 .map(|c| Some(c.id))
                 .collect();
             let bc =
-                (step_named(fe, step)?.boundary_conditions.iter_mut()).find(|b| &b.name == name)?;
+                (step_of(fe, step)?.boundary_conditions.iter_mut()).find(|b| b.id == item)?;
             match (&mut bc.kind, field) {
                 (BoundaryKind::Temperature(t), Field::Value) => real(t, Quantity::Temperature),
                 (BoundaryKind::Flow(flow), Field::Value) => match &mut flow.kind {
@@ -535,16 +477,15 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 _ => None,
             }
         }
-        ItemRef::DefinedField { step, name } => {
-            let defined =
-                (step_named(fe, step)?.defined_fields.iter_mut()).find(|d| &d.name == name)?;
+        ItemRef::DefinedField { step, item } => {
+            let defined = (step_of(fe, step)?.defined_fields.iter_mut()).find(|d| d.id == item)?;
             match (&mut defined.kind, field) {
                 (DefinedFieldKind::Temperature(t), Field::Value) => real(t, Quantity::Temperature),
                 _ => None,
             }
         }
-        ItemRef::Material(name) => {
-            let material = fe.materials.iter_mut().find(|m| &m.name == name)?;
+        ItemRef::Material(id) => {
+            let material = fe.materials.iter_mut().find(|m| m.id == id)?;
             match field {
                 Field::Density => real(material.density.as_mut()?, Quantity::Density),
                 Field::Young => real(&mut material.elastic.as_mut()?.young, Quantity::Pressure),
@@ -566,8 +507,8 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 field => flow_slot(material, field),
             }
         }
-        ItemRef::Section(name) => {
-            let section = fe.sections.iter_mut().find(|s| &s.name == name)?;
+        ItemRef::Section(id) => {
+            let section = fe.sections.iter_mut().find(|s| s.id == id)?;
             match (&mut section.kind, field) {
                 (SectionKind::Solid, Field::Thickness) => {
                     real(&mut section.thickness, Quantity::Length)
@@ -589,8 +530,8 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 _ => None,
             }
         }
-        ItemRef::CrossSection(name) => {
-            let cross_section = fe.cross_sections.iter_mut().find(|c| &c.name == name)?;
+        ItemRef::CrossSection(id) => {
+            let cross_section = fe.cross_sections.iter_mut().find(|c| c.id == id)?;
             let dimension =
                 (cross_section.profile.dimensions_mut().into_iter()).find(|d| d.field == field)?;
             match dimension.quantity {
@@ -598,8 +539,8 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 None => Some((Slot::Real(dimension.value), ValueKind::Factor)),
             }
         }
-        ItemRef::Step(name) => {
-            let step = step_named(fe, name)?;
+        ItemRef::Step(id) => {
+            let step = step_of(fe, id)?;
             let increments = match &mut step.kind {
                 StepKind::Frequency(frequency) if field == Field::Modes => {
                     return Some((
@@ -647,8 +588,8 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 _ => None,
             }
         }
-        ItemRef::InitialCondition(name) => {
-            let condition = fe.initial_conditions.iter_mut().find(|c| &c.name == name)?;
+        ItemRef::InitialCondition(id) => {
+            let condition = fe.initial_conditions.iter_mut().find(|c| c.id == id)?;
             match (&mut condition.kind, field) {
                 (InitialConditionKind::Temperature(t), Field::Value) => {
                     real(t, Quantity::Temperature)
@@ -662,18 +603,18 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 _ => None,
             }
         }
-        ItemRef::MeshOperation(name) => {
-            let operation = fe.mesh_operations.iter_mut().find(|o| &o.name == name)?;
+        ItemRef::MeshOperation(id) => {
+            let operation = fe.mesh_operations.iter_mut().find(|o| o.id == id)?;
             match &mut operation.kind {
                 MeshOperationKind::Transform(transform) => transform_slot(transform, field),
             }
         }
         // The variables are numbers of the equation, in the units the equation takes them.
-        ItemRef::Distribution(name) => {
+        ItemRef::Distribution(id) => {
             let Field::Variable(key) = field else {
                 return None;
             };
-            let distribution = fe.distributions.iter_mut().find(|d| &d.name == name)?;
+            let distribution = fe.distributions.iter_mut().find(|d| d.id == id)?;
             let variable = distribution.variables.iter_mut().find(|v| v.key == key)?;
             Some((Slot::Real(&mut variable.value), ValueKind::Factor))
         }
@@ -688,10 +629,10 @@ fn meshing_slot_mut<'a>(
     path: &ValuePath,
 ) -> Option<(Slot<'a>, ValueKind)> {
     let field = path.field;
-    match &path.item {
+    match path.item {
         ItemRef::DefaultMeshing => parameters_slot(&mut geometry.meshing, field),
-        ItemRef::MeshSetup(name) => {
-            let item = geometry.mesh_items.iter_mut().find(|i| &i.name == name)?;
+        ItemRef::MeshSetup(id) => {
+            let item = geometry.mesh_items.iter_mut().find(|i| i.id == id)?;
             match &mut item.kind {
                 MeshSetupKind::MeshingParameters { parameters, .. } => {
                     parameters_slot(parameters, field)
@@ -768,6 +709,18 @@ impl Geometry {
         match meshing_slot_mut(self, path) {
             Some((slot, kind)) => slot.set(kind, value),
             None => false,
+        }
+    }
+
+    /// The name of an item of its mesh setup, for the GUI and the names of exposed
+    /// parameters; `None` for an item it does not have or one of the FE model.
+    pub fn item_name(&self, item: &ItemRef) -> Option<&str> {
+        match *item {
+            ItemRef::DefaultMeshing => Some("Default meshing"),
+            ItemRef::MeshSetup(id) => (self.mesh_items.iter())
+                .find(|i| i.id == id)
+                .map(|i| i.name.as_str()),
+            _ => None,
         }
     }
 
@@ -958,44 +911,55 @@ impl FeModel {
     /// without copying the whole model.
     fn item_copy(&self, item: &ItemRef) -> Option<FeModel> {
         let mut fe = FeModel::default();
-        match item {
-            ItemRef::BoundaryCondition { step, .. } => {
-                fe.steps
-                    .push(self.steps.iter().find(|s| &s.name == step)?.clone());
+        let step = |id: Id| self.steps.iter().find(|s| s.id == id).cloned();
+        match *item {
+            ItemRef::BoundaryCondition { step: id, .. } => {
+                fe.steps.push(step(id)?);
                 // A remote displacement's location depends on the kind of its system.
                 fe.coordinate_systems = self.coordinate_systems.clone();
             }
-            ItemRef::Load { step, .. }
-            | ItemRef::DefinedField { step, .. }
-            | ItemRef::Step(step) => {
-                fe.steps
-                    .push(self.steps.iter().find(|s| &s.name == step)?.clone());
+            ItemRef::Load { step: id, .. }
+            | ItemRef::DefinedField { step: id, .. }
+            | ItemRef::Step(id) => fe.steps.push(step(id)?),
+            ItemRef::Material(id) => fe.materials.push(self.material(id)?.clone()),
+            ItemRef::Section(id) => fe.sections.push(self.section(id)?.clone()),
+            ItemRef::CrossSection(id) => fe.cross_sections.push(self.cross_section(id)?.clone()),
+            ItemRef::InitialCondition(id) => {
+                fe.initial_conditions.push(self.initial_condition(id)?.clone())
             }
-            ItemRef::Material(name) => fe
-                .materials
-                .push(self.materials.iter().find(|m| &m.name == name)?.clone()),
-            ItemRef::Section(name) => fe
-                .sections
-                .push(self.sections.iter().find(|s| &s.name == name)?.clone()),
-            ItemRef::CrossSection(name) => fe
-                .cross_sections
-                .push(self.cross_section_named(name)?.clone()),
-            ItemRef::InitialCondition(name) => fe.initial_conditions.push(
-                (self.initial_conditions.iter())
-                    .find(|c| &c.name == name)?
-                    .clone(),
-            ),
-            ItemRef::MeshOperation(name) => fe.mesh_operations.push(
-                (self.mesh_operations.iter())
-                    .find(|o| &o.name == name)?
-                    .clone(),
-            ),
-            ItemRef::Distribution(name) => fe
-                .distributions
-                .push(self.distribution_named(name)?.clone()),
+            ItemRef::MeshOperation(id) => {
+                fe.mesh_operations.push(self.mesh_operation(id)?.clone())
+            }
+            ItemRef::Distribution(id) => fe.distributions.push(self.distribution(id)?.clone()),
             ItemRef::MeshSetup(_) | ItemRef::DefaultMeshing => return None,
         }
         Some(fe)
+    }
+
+    /// The name of the item, for the GUI and the names of exposed parameters; `None` when
+    /// the model does not have it. The items of the mesh setup are named by
+    /// [`Geometry::item_name`].
+    pub fn item_name(&self, item: &ItemRef) -> Option<&str> {
+        let step = |id: Id| self.steps.iter().find(|s| s.id == id);
+        Some(match *item {
+            ItemRef::Load { step: s, item } => {
+                &step(s)?.loads.iter().find(|l| l.id == item)?.name
+            }
+            ItemRef::BoundaryCondition { step: s, item } => {
+                &(step(s)?.boundary_conditions.iter()).find(|b| b.id == item)?.name
+            }
+            ItemRef::DefinedField { step: s, item } => {
+                &(step(s)?.defined_fields.iter()).find(|d| d.id == item)?.name
+            }
+            ItemRef::Material(id) => &self.material(id)?.name,
+            ItemRef::Section(id) => &self.section(id)?.name,
+            ItemRef::CrossSection(id) => &self.cross_section(id)?.name,
+            ItemRef::Step(id) => &step(id)?.name,
+            ItemRef::InitialCondition(id) => &self.initial_condition(id)?.name,
+            ItemRef::MeshOperation(id) => &self.mesh_operation(id)?.name,
+            ItemRef::Distribution(id) => &self.distribution(id)?.name,
+            ItemRef::MeshSetup(_) | ItemRef::DefaultMeshing => return None,
+        })
     }
 
     /// The number at `path`, in SI units; `None` when the item or field does not exist.
@@ -1049,7 +1013,7 @@ impl FeModel {
     /// that one on are undone and applied again. A value that makes the operation invalid,
     /// such as a scale factor of zero, is not taken.
     pub fn set_value_meshed(&mut self, mesh: &mut FeMesh, path: &ValuePath, value: f64) -> bool {
-        let ItemRef::MeshOperation(name) = &path.item else {
+        let ItemRef::MeshOperation(id) = path.item else {
             return self.set_value(path, value);
         };
         let mut copy = FeModel {
@@ -1060,7 +1024,7 @@ impl FeModel {
             return false;
         }
         let valid =
-            (copy.mesh_operations.iter().find(|o| &o.name == name)).is_some_and(|o| {
+            (copy.mesh_operations.iter().find(|o| o.id == id)).is_some_and(|o| {
                 match &o.kind {
                     MeshOperationKind::Transform(t) => t.problem().is_none(),
                 }
@@ -1089,22 +1053,33 @@ impl FeModel {
             .collect()
     }
 
-    /// Exposes the field at `path` as a parameter; returns its key, also when it was exposed
-    /// already.
+    /// Exposes the field at `path` as a parameter, named after its item; returns its key,
+    /// also when it was exposed already.
     pub fn expose(&mut self, path: ValuePath) -> u32 {
+        self.expose_in(None, path)
+    }
+
+    /// Exposes the field at `path` like [`Self::expose`]; `geometry` names the items of
+    /// the mesh setup.
+    pub fn expose_in(&mut self, geometry: Option<&Geometry>, path: ValuePath) -> u32 {
+        let item = match path.item.is_meshing() {
+            true => geometry.and_then(|g| g.item_name(&path.item)),
+            false => self.item_name(&path.item),
+        };
+        let item = item.unwrap_or(path.item.noun()).to_owned();
         if let Some(exposed) = self.exposed.iter().find(|e| e.path == path) {
             return exposed.key;
         }
         let key = self.exposed.iter().map(|e| e.key + 1).max().unwrap_or(1);
-        let base = match (&path.item, path.field) {
+        let base = match (path.item, path.field) {
             // "Pressure map p1"
-            (ItemRef::Distribution(name), Field::Variable(key)) => {
-                match self.distribution_named(name).and_then(|d| d.variable(key)) {
-                    Some(variable) => format!("{name} {}", variable.name),
-                    None => path.default_name(),
+            (ItemRef::Distribution(id), Field::Variable(key)) => {
+                match self.distribution(id).and_then(|d| d.variable(key)) {
+                    Some(variable) => format!("{item} {}", variable.name),
+                    None => path.default_name(&item),
                 }
             }
-            _ => path.default_name(),
+            _ => path.default_name(&item),
         };
         let mut name = base.clone();
         let mut n = 2;
@@ -1114,22 +1089,6 @@ impl FeModel {
         }
         self.exposed.push(Exposed { key, name, path });
         key
-    }
-
-    /// Lets the exposed parameters follow an item that was renamed.
-    pub fn rename_exposed(&mut self, old: &ItemRef, new: &str) {
-        if old.name() == new {
-            return;
-        }
-        let renamed = old.renamed(new);
-        let steps = matches!(old, ItemRef::Step(_));
-        for exposed in &mut self.exposed {
-            if &exposed.path.item == old {
-                exposed.path.item = renamed.clone();
-            } else if steps {
-                exposed.path.item.in_renamed_step(old.name(), new);
-            }
-        }
     }
 }
 

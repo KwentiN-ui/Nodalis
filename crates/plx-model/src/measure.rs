@@ -40,14 +40,14 @@ pub enum MeasureKind {
         component: String,
         point: [f64; 3],
     },
-    /// A value of a history output (`.dat`), such as the total force of a set
-    /// (`TOTAL_FORCE` / `RF3`): of the last increment of the step, or with `whole` the
-    /// values of all its increments, a series that goes to Math and Plot blocks.
+    /// A value of a history output of the analysis, by its id ([`crate::HistoryOutput::id`]),
+    /// such as the total force of a set (`TOTAL_FORCE` / `RF3`): of the last increment of
+    /// the step, or with `whole` the values of all its increments, a series that goes to
+    /// Math and Plot blocks. `None` until one is chosen.
     History {
-        set: String,
+        output: Option<crate::Id>,
         field: String,
         component: String,
-        #[serde(default)]
         whole: bool,
     },
     /// The eigenfrequency of mode `mode`, counted from 1, of a frequency step.
@@ -84,7 +84,7 @@ impl MeasureKind {
                 point: [0.0; 3],
             },
             Self::History {
-                set: String::new(),
+                output: None,
                 field: "TOTAL_FORCE".into(),
                 component: "RF3".into(),
                 whole: false,
@@ -154,8 +154,9 @@ impl MeasureKind {
         true
     }
 
-    /// A short text of what it measures: "Maximum of STRESS MISES in TIP".
-    pub fn describe(&self) -> String {
+    /// A short text of what it measures: "STRESS MISES in TIP"; `output` names the history
+    /// output of a measure of one.
+    pub fn describe(&self, output: Option<&str>) -> String {
         match self {
             Self::FieldValues {
                 field,
@@ -177,13 +178,14 @@ impl MeasureKind {
                 field, component, ..
             } => format!("{field} {component} at a point"),
             Self::History {
-                set,
                 field,
                 component,
                 whole,
+                ..
             } => {
                 let take = if *whole { "History of " } else { "" };
-                format!("{take}{field} {component} of {set}")
+                let output = output.unwrap_or("(no history output)");
+                format!("{take}{field} {component} of {output}")
             }
             Self::Eigenfrequency { mode } => format!("Eigenfrequency of mode {mode}"),
         }

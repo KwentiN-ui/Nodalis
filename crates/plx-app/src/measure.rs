@@ -32,18 +32,52 @@ impl Measured {
     }
 }
 
+/// What a measure refers to in the analysis whose results it reads: the node sets of its
+/// mesh and its history outputs.
+#[derive(Clone, Debug, Default)]
+pub struct Sources {
+    pub node_sets: BTreeMap<String, Vec<NodeId>>,
+    pub outputs: Vec<OutputSet>,
+}
+
+/// A history output of the analysis, with the set of the history the results show it as.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputSet {
+    pub id: plx_model::Id,
+    pub name: String,
+    pub set: String,
+}
+
+impl Sources {
+    /// What `fe` and its mesh offer.
+    pub fn of(fe: &plx_model::FeModel, node_sets: BTreeMap<String, Vec<NodeId>>) -> Self {
+        let outputs = (fe.history_outputs.iter())
+            .map(|output| OutputSet {
+                id: output.id,
+                name: output.name.clone(),
+                set: plx_io::dat::history_set_name(fe, output),
+            })
+            .collect();
+        Self { node_sets, outputs }
+    }
+
+    fn output(&self, id: Option<plx_model::Id>) -> Option<&OutputSet> {
+        self.outputs.iter().find(|o| Some(o.id) == id)
+    }
+}
+
 /// The value of `kind` in the results of step `step` (CalculiX's numbering, from 1): of its
-/// last increment, or of a mode. `node_sets` are those of the mesh the results belong to.
+/// last increment, or of a mode. `sources` are those of the analysis the results belong to.
 #[cfg(test)]
 pub fn evaluate(
     kind: &MeasureKind,
     step: u32,
     frd: &FrdImport,
     dat: Option<&plx_io::dat::DatImport>,
-    node_sets: &BTreeMap<String, Vec<NodeId>>,
+    sources: &Sources,
     units: UnitSystem,
 ) -> Result<Measured, String> {
-    evaluate_expanded(kind, step, frd, dat, node_sets, &BTreeMap::new(), units)
+    evaluate_expanded(kind, step, frd, dat, sources, &BTreeMap::new(), units)
 }
 
 /// The value of `kind` in the results of step `step` (CalculiX's numbering, from 1), as
@@ -56,7 +90,7 @@ pub fn evaluate_expanded(
     step: u32,
     frd: &FrdImport,
     dat: Option<&plx_io::dat::DatImport>,
-    node_sets: &BTreeMap<String, Vec<NodeId>>,
+    sources: &Sources,
     expanded: &BTreeMap<NodeId, Vec<NodeId>>,
     units: UnitSystem,
 ) -> Result<Measured, String> {
@@ -80,7 +114,7 @@ pub fn evaluate_expanded(
             let picked: Vec<f64> = match region {
                 MeasureRegion::All => values.iter().map(|&v| f64::from(v)).collect(),
                 MeasureRegion::NodeSet(set) => {
-                    let nodes = (node_sets.get(set))
+                    let nodes = (sources.node_sets.get(set))
                         .ok_or_else(|| format!("the mesh has no node set {set}"))?;
                     (nodes.iter())
                         .flat_map(|&id| indices(id))
@@ -149,15 +183,18 @@ pub fn evaluate_expanded(
             }
         }
         MeasureKind::History {
-            set,
+            output,
             field,
             component,
             whole,
         } => {
-            let dat = dat.ok_or("the run printed no history output (.dat)")?;
+            let output = (sources.output(*output))
+                .ok_or("the analysis has no such history output")?;
+            let dat = dat.ok_or("the run printed no history output")?;
+            let set = &output.name;
             let history = (dat.sets.iter())
-                .find(|s| s.name.eq_ignore_ascii_case(set))
-                .ok_or_else(|| format!("no history output of {set}"))?;
+                .find(|s| s.name.eq_ignore_ascii_case(&output.set))
+                .ok_or_else(|| format!("the results have no history output {set}"))?;
             let rows: Vec<(usize, f64)> = (history.rows.iter().enumerate())
                 .filter(|(_, (s, _, _))| *s == step)
                 .map(|(row, &(_, _, time))| (row, time))
@@ -213,7 +250,7 @@ pub struct Job {
     pub kind: MeasureKind,
     pub step: u32,
     pub results: BoundResults,
-    pub node_sets: BTreeMap<String, Vec<NodeId>>,
+    pub sources: Sources,
     /// The units its messages give lengths in.
     pub units: UnitSystem,
     /// Where the files of CalculiX's results are written to be read; those of the built-in
@@ -244,7 +281,7 @@ fn run(job: &Job) -> Result<Measured, String> {
         job.step,
         &frd,
         read.history.as_ref(),
-        &job.node_sets,
+        &job.sources,
         &expanded,
         job.units,
     )
@@ -383,6 +420,8 @@ pub struct MeasureEditor {
     kind: MeasureKind,
     /// The node sets of the mesh of the results linked to it, to pick from.
     node_sets: Vec<String>,
+    /// The history outputs of the analysis of the results linked to it, to pick from.
+    outputs: Vec<OutputSet>,
     /// The fields and components of the results linked to it, to pick from.
     choices: Choices,
 }
@@ -401,14 +440,15 @@ impl MeasureEditor {
         id: u64,
         name: &str,
         kind: MeasureKind,
-        node_sets: Vec<String>,
+        sources: Sources,
         offered: Option<Receiver<Result<Offered, String>>>,
     ) -> Self {
         Self {
             id,
             name: name.to_owned(),
             kind,
-            node_sets,
+            node_sets: sources.node_sets.into_keys().collect(),
+            outputs: sources.outputs,
             choices: offered.map_or(Choices::Typed, Choices::Reading),
         }
     }
@@ -544,14 +584,41 @@ impl MeasureEditor {
                 field_and_component(ui, offered.map(|o| o.fields.as_slice()), field, component);
             }
             MeasureKind::History {
-                set,
+                output,
                 field,
                 component,
                 whole,
             } => {
-                let sets: Option<Vec<String>> =
-                    offered.map(|o| o.history.iter().map(|(name, _)| name.clone()).collect());
-                if pick(ui, "Set", set, sets.as_deref())
+                // The history outputs the results have, or all of them before they are read.
+                let outputs: Vec<&OutputSet> = (self.outputs.iter())
+                    .filter(|o| offered.is_none_or(|of| of.history_fields(&o.set).is_some()))
+                    .collect();
+                let chosen = self.outputs.iter().find(|o| Some(o.id) == *output);
+                ui.label("History output");
+                let shown = match chosen {
+                    Some(o) if outputs.contains(&o) => egui::RichText::new(&o.name),
+                    Some(o) => egui::RichText::new(&o.name).color(ui.visuals().warn_fg_color),
+                    None => egui::RichText::new("(none)"),
+                };
+                let mut picked = false;
+                egui::ComboBox::from_id_salt("measure history output")
+                    .selected_text(shown)
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        for o in &outputs {
+                            if ui.selectable_label(Some(o.id) == *output, &o.name).clicked()
+                                && Some(o.id) != *output
+                            {
+                                *output = Some(o.id);
+                                picked = true;
+                            }
+                        }
+                    });
+                ui.end_row();
+                let set = (self.outputs.iter())
+                    .find(|o| Some(o.id) == *output)
+                    .map_or("", |o| o.set.as_str());
+                if picked
                     && let Some(fields) = offered.and_then(|o| o.history_fields(set))
                     && !fields.iter().any(|(name, _)| name == field)
                     && let Some((first, components)) = fields.first()

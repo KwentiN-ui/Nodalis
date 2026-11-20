@@ -1721,7 +1721,7 @@ fn displacement_rows(
     ui: &mut Ui,
     remote: &mut Displacement,
     region: &Region,
-    names: (&str, &str),
+    item: Option<(plx_model::Id, plx_model::Id)>,
     model: &Model,
     units: UnitSystem,
 ) {
@@ -1736,7 +1736,7 @@ fn displacement_rows(
             }
         });
     ui.end_row();
-    let formulation = remote.formulation(fe, model.mesh(), region, names.0, names.1);
+    let formulation = remote.formulation(fe, model.mesh(), region, item);
     let point = matches!(formulation, Formulation::Point(_));
     ui.label("");
     let hint = egui::RichText::new(formulation_hint(remote, formulation, region, model));
@@ -3162,43 +3162,33 @@ impl Editor {
     /// a new one.
     fn original_item(&self, fe: &FeModel) -> Option<ItemRef> {
         let index = self.index?;
-        let step = |s: usize| fe.steps.get(s).map(|step| step.name.clone());
+        let step = |s: usize| fe.steps.get(s);
         Some(match &self.draft {
-            Draft::Material(_) => ItemRef::Material(fe.materials.get(index)?.name.clone()),
-            Draft::Section(..) => ItemRef::Section(fe.sections.get(index)?.name.clone()),
-            Draft::CrossSection(_) => {
-                ItemRef::CrossSection(fe.cross_sections.get(index)?.name.clone())
-            }
-            Draft::Step(..) => ItemRef::Step(step(index)?),
+            Draft::Material(_) => ItemRef::Material(fe.materials.get(index)?.id),
+            Draft::Section(..) => ItemRef::Section(fe.sections.get(index)?.id),
+            Draft::CrossSection(_) => ItemRef::CrossSection(fe.cross_sections.get(index)?.id),
+            Draft::Step(..) => ItemRef::Step(step(index)?.id),
             Draft::BoundaryCondition(s, ..) => ItemRef::BoundaryCondition {
-                name: fe
-                    .steps
-                    .get(*s)?
-                    .boundary_conditions
-                    .get(index)?
-                    .name
-                    .clone(),
-                step: step(*s)?,
+                step: step(*s)?.id,
+                item: step(*s)?.boundary_conditions.get(index)?.id,
             },
             Draft::Load(s, ..) => ItemRef::Load {
-                name: fe.steps.get(*s)?.loads.get(index)?.name.clone(),
-                step: step(*s)?,
+                step: step(*s)?.id,
+                item: step(*s)?.loads.get(index)?.id,
             },
             Draft::InitialCondition(..) => {
-                ItemRef::InitialCondition(fe.initial_conditions.get(index)?.name.clone())
+                ItemRef::InitialCondition(fe.initial_conditions.get(index)?.id)
             }
             Draft::DefinedField(s, ..) => ItemRef::DefinedField {
-                name: fe.steps.get(*s)?.defined_fields.get(index)?.name.clone(),
-                step: step(*s)?,
+                step: step(*s)?.id,
+                item: step(*s)?.defined_fields.get(index)?.id,
             },
-            Draft::Distribution(..) => {
-                ItemRef::Distribution(fe.distributions.get(index)?.name.clone())
-            }
+            Draft::Distribution(..) => ItemRef::Distribution(fe.distributions.get(index)?.id),
             _ => return None,
         })
     }
 
-    /// The item as the dialog has it now, by its new name, in a model of only that item; for
+    /// The item as the dialog has it now, in a model of only that item; for
     /// an item whose numbers can be exposed.
     fn draft_item(&self, fe: &FeModel) -> Option<(ItemRef, FeModel)> {
         let mut model = FeModel {
@@ -3207,39 +3197,40 @@ impl Editor {
             ..FeModel::default()
         };
         let step = |s: usize| {
-            let name = fe.steps.get(s)?.name.clone();
+            let step = fe.steps.get(s)?;
             Some(Step {
-                kind: fe.steps.get(s)?.kind.clone(),
-                ..Step::new_static(name)
+                id: step.id,
+                kind: step.kind.clone(),
+                ..Step::new_static(step.name.clone())
             })
         };
         let item = match &self.draft {
             Draft::Material(material) => {
                 model.materials.push(material.clone());
-                ItemRef::Material(material.name.clone())
+                ItemRef::Material(material.id)
             }
             Draft::Distribution(distribution, _) => {
                 model.distributions.push(distribution.clone());
-                ItemRef::Distribution(distribution.name.clone())
+                ItemRef::Distribution(distribution.id)
             }
             Draft::Section(section, _) => {
                 model.sections.push(section.clone());
-                ItemRef::Section(section.name.clone())
+                ItemRef::Section(section.id)
             }
             Draft::CrossSection(cross_section) => {
                 model.cross_sections.push(cross_section.clone());
-                ItemRef::CrossSection(cross_section.name.clone())
+                ItemRef::CrossSection(cross_section.id)
             }
             Draft::Step(own, _) => {
                 model.steps.push(own.clone());
-                ItemRef::Step(own.name.clone())
+                ItemRef::Step(own.id)
             }
             Draft::BoundaryCondition(s, bc, _) => {
                 let mut step = step(*s)?;
                 step.boundary_conditions.push(bc.clone());
                 let item = ItemRef::BoundaryCondition {
-                    step: step.name.clone(),
-                    name: bc.name.clone(),
+                    step: step.id,
+                    item: bc.id,
                 };
                 model.steps.push(step);
                 item
@@ -3248,22 +3239,22 @@ impl Editor {
                 let mut step = step(*s)?;
                 step.loads.push(load.clone());
                 let item = ItemRef::Load {
-                    step: step.name.clone(),
-                    name: load.name.clone(),
+                    step: step.id,
+                    item: load.id,
                 };
                 model.steps.push(step);
                 item
             }
             Draft::InitialCondition(condition, _) => {
                 model.initial_conditions.push(condition.clone());
-                ItemRef::InitialCondition(condition.name.clone())
+                ItemRef::InitialCondition(condition.id)
             }
             Draft::DefinedField(s, field, _) => {
                 let mut step = step(*s)?;
                 step.defined_fields.push(field.clone());
                 let item = ItemRef::DefinedField {
-                    step: step.name.clone(),
-                    name: field.name.clone(),
+                    step: step.id,
+                    item: field.id,
                 };
                 model.steps.push(step);
                 item
@@ -3637,9 +3628,8 @@ impl Editor {
                     }
                 }
                 if let BoundaryKind::Displacement(displacement) = &mut bc.kind {
-                    let step = model.fe.steps.get(*step).map_or("", |s| s.name.as_str());
-                    let names = (step, bc.name.as_str());
-                    displacement_rows(ui, displacement, &region.region(), names, model, units);
+                    let item = model.fe.steps.get(*step).map(|s| (s.id, bc.id));
+                    displacement_rows(ui, displacement, &region.region(), item, model, units);
                 }
                 if let BoundaryKind::Submodel { dofs, .. } = &mut bc.kind {
                     let name = model.fe.steps.get(*step).map_or("", |s| s.name.as_str());

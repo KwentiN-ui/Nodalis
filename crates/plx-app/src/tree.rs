@@ -113,43 +113,39 @@ pub fn item_of(
     item: &plx_model::ItemRef,
 ) -> Option<TreeItem> {
     use plx_model::ItemRef;
-    let step = |name: &str| fe.steps.iter().position(|s| s.name == name);
-    Some(match item {
-        ItemRef::Load { step: s, name } => {
+    let step = |id| fe.step_index(id);
+    Some(match *item {
+        ItemRef::Load { step: s, item } => {
             let s = step(s)?;
-            TreeItem::Load(s, fe.steps[s].loads.iter().position(|l| &l.name == name)?)
+            TreeItem::Load(s, fe.steps[s].loads.iter().position(|l| l.id == item)?)
         }
-        ItemRef::BoundaryCondition { step: s, name } => {
+        ItemRef::BoundaryCondition { step: s, item } => {
             let s = step(s)?;
             let list = &fe.steps[s].boundary_conditions;
-            TreeItem::BoundaryCondition(s, list.iter().position(|b| &b.name == name)?)
+            TreeItem::BoundaryCondition(s, list.iter().position(|b| b.id == item)?)
         }
-        ItemRef::DefinedField { step: s, name } => {
+        ItemRef::DefinedField { step: s, item } => {
             let s = step(s)?;
             let list = &fe.steps[s].defined_fields;
-            TreeItem::DefinedField(s, list.iter().position(|d| &d.name == name)?)
+            TreeItem::DefinedField(s, list.iter().position(|d| d.id == item)?)
         }
-        ItemRef::Material(name) => {
-            TreeItem::Material(fe.materials.iter().position(|m| &m.name == name)?)
+        ItemRef::Material(id) => TreeItem::Material(fe.materials.iter().position(|m| m.id == id)?),
+        ItemRef::Section(id) => TreeItem::Section(fe.sections.iter().position(|s| s.id == id)?),
+        ItemRef::CrossSection(id) => {
+            TreeItem::CrossSection(fe.cross_sections.iter().position(|c| c.id == id)?)
         }
-        ItemRef::Section(name) => {
-            TreeItem::Section(fe.sections.iter().position(|s| &s.name == name)?)
+        ItemRef::Step(id) => TreeItem::Step(step(id)?),
+        ItemRef::InitialCondition(id) => {
+            TreeItem::InitialCondition((fe.initial_conditions.iter()).position(|c| c.id == id)?)
         }
-        ItemRef::CrossSection(name) => {
-            TreeItem::CrossSection(fe.cross_sections.iter().position(|c| &c.name == name)?)
+        ItemRef::MeshOperation(id) => {
+            TreeItem::MeshOperation((fe.mesh_operations.iter()).position(|o| o.id == id)?)
         }
-        ItemRef::Step(name) => TreeItem::Step(step(name)?),
-        ItemRef::InitialCondition(name) => TreeItem::InitialCondition(
-            (fe.initial_conditions.iter()).position(|c| &c.name == name)?,
-        ),
-        ItemRef::MeshOperation(name) => {
-            TreeItem::MeshOperation((fe.mesh_operations.iter()).position(|o| &o.name == name)?)
+        ItemRef::Distribution(id) => {
+            TreeItem::Distribution((fe.distributions.iter()).position(|d| d.id == id)?)
         }
-        ItemRef::Distribution(name) => {
-            TreeItem::Distribution((fe.distributions.iter()).position(|d| &d.name == name)?)
-        }
-        ItemRef::MeshSetup(name) => {
-            TreeItem::MeshItem((geometry?.mesh_items.iter()).position(|i| &i.name == name)?)
+        ItemRef::MeshSetup(id) => {
+            TreeItem::MeshItem((geometry?.mesh_items.iter()).position(|i| i.id == id)?)
         }
         ItemRef::DefaultMeshing => return None,
     })
