@@ -12852,6 +12852,101 @@ fn solver_carries_the_load_across_the_bodies_of_a_compound_part() {
     );
 }
 
+/// A block of C3D8 between the planes `xs`, `ys` and `zs`, numbered on from the mesh's
+/// nodes and elements; returns its elements.
+fn hex_block(mesh: &mut FeMesh, xs: &[f64], ys: &[f64], zs: &[f64]) -> Vec<ElementId> {
+    let first = mesh.node_ids().iter().copied().max().unwrap_or(0) + 1;
+    let (nx, ny) = (xs.len() as u32, ys.len() as u32);
+    let node = |i: u32, j: u32, k: u32| first + i + nx * (j + ny * k);
+    for (k, &z) in zs.iter().enumerate() {
+        for (j, &y) in ys.iter().enumerate() {
+            for (i, &x) in xs.iter().enumerate() {
+                mesh.set_node(node(i as u32, j as u32, k as u32), [x, y, z]);
+            }
+        }
+    }
+    let mut id = mesh.elements().iter().map(|e| e.id).max().unwrap_or(0);
+    let mut elements = Vec::new();
+    for k in 0..zs.len() as u32 - 1 {
+        for j in 0..ny - 1 {
+            for i in 0..nx - 1 {
+                id += 1;
+                let mut nodes = Vec::new();
+                for k in [k, k + 1] {
+                    nodes.extend([node(i, j, k), node(i + 1, j, k), node(i + 1, j + 1, k)]);
+                    nodes.push(node(i, j + 1, k));
+                }
+                mesh.add_element(plx_mesh::Element {
+                    id,
+                    type_name: "C3D8".into(),
+                    shape: plx_mesh::ElementShape::Hex8,
+                    nodes,
+                })
+                .unwrap();
+                elements.push(id);
+            }
+        }
+    }
+    elements
+}
+
+/// A plate on a block as the bodies of one compound part, the plate reaching beyond the
+/// block: the wide elements of the plate above the border of the block lie on it with their
+/// centres, their outer nodes far beyond it. Only the nodes on the block are tied, and the
+/// solver has no node to leave out as too far away.
+#[test]
+fn solver_ties_only_the_nodes_of_a_compound_body_that_lie_on_the_other() {
+    let mut mesh = FeMesh::default();
+    let lower = hex_block(&mut mesh, &[0.0, 4.0], &[0.0, 4.0], &[-4.0, 0.0]);
+    let mut xs = vec![1.0, 3.0, 4.9];
+    xs.extend((0..=20).map(|i| 5.0 + 0.1 * f64::from(i)));
+    let ys: Vec<f64> = (0..=4).map(f64::from).collect();
+    let upper = hex_block(&mut mesh, &xs, &ys, &[0.0, 0.5]);
+    let top: Vec<(ElementId, u8)> = upper.iter().map(|&e| (e, 2)).collect();
+    let mut part = plx_mesh::Part::new("BLOCK", [lower.clone(), upper.clone()].concat());
+    part.bodies = vec![
+        plx_mesh::Body {
+            name: "LOWER".into(),
+            elements: lower,
+        },
+        plx_mesh::Body {
+            name: "UPPER".into(),
+            elements: upper,
+        },
+    ];
+    mesh.parts.push(part);
+    let mut model = stacked_blocks(&mesh);
+    model.sections[0].region = Region::Parts(vec!["BLOCK".into()]);
+    let bottom: Vec<NodeId> = (mesh.node_ids().iter().zip(mesh.coords()))
+        .filter(|(_, c)| c[2] == -4.0)
+        .map(|(&id, _)| id)
+        .collect();
+    model.steps[0].boundary_conditions[0].region = Region::Nodes(bottom.clone());
+    model.steps[0].loads[0].region = Region::Faces(top);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("*Tie,").count(), 1, "{text}");
+    // The slave side is the 10 nodes of the plate at x = 1 and 3.
+    assert!(
+        text.contains("*Surface, Name=INTERNAL_SELECTION-1_BLOCK_LOWER_TO_UPPER_SLAVE, Type=Node"),
+        "{text}"
+    );
+    let Some(dir) = run_dir("compound-beyond") else {
+        return;
+    };
+    let (log, finished) = solve_in(&dir, "compound-beyond", &text);
+    assert!(finished, "{}", log.join("\n"));
+    assert!(
+        !log.iter().any(|l| l.contains("too far away")),
+        "{}",
+        log.join("\n")
+    );
+    let frd = read_frd(&dir.join("compound-beyond.frd")).unwrap();
+    remove_run_dir(&dir);
+    // The pressure of 10 on the plate of 6 x 4.
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!((reaction - 240.0).abs() < 0.1, "{reaction}");
+}
+
 /// The shell plate cut in two at x = 50, as a shell split by a plane: two bodies of one
 /// compound part with nodes of their own along the cut, tied edge to edge. It bends as the
 /// whole plate does.
