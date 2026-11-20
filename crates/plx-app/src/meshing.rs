@@ -1316,7 +1316,8 @@ pub fn set_worker(program: PathBuf) {
     let _ = WORKER.set(program);
 }
 
-/// What the worker meshes, written to `request.ron` in its folder.
+/// What a meshing job meshes, written to `request.ron` in the job's folder for all its
+/// workers.
 #[derive(Serialize, Deserialize)]
 struct WorkerRequest {
     /// Gmsh library of the program, so that both mesh alike.
@@ -1327,6 +1328,21 @@ struct WorkerRequest {
     matching: Vec<PeriodicFaces>,
     /// The parts to mesh, in order, as [`parts_to_mesh`] lists them.
     parts: Vec<String>,
+    /// The parts as the workers take them, see [`part_groups`]: places in `parts`.
+    #[serde(default)]
+    groups: Vec<Vec<usize>>,
+}
+
+/// What one worker does of a job, written to `task.ron` in the worker's own folder.
+#[derive(Serialize, Deserialize)]
+struct WorkerTask {
+    /// The job's folder, with `request.ron` and the marks of the groups taken.
+    job: PathBuf,
+    /// The parts it meshes first, as places in the request's parts: what is left of a
+    /// group whose worker crashed.
+    first: Vec<usize>,
+    /// Whether it then takes groups of the job, one after the other, until none is left.
+    take_groups: bool,
 }
 
 /// What became of one part in the worker, in `part-K.ron` for the K-th part of the request:
@@ -1356,6 +1372,24 @@ fn parts_to_mesh(geometry: &Geometry, parts: Option<Vec<String>>) -> Result<Vec<
     Ok((parts.into_iter())
         .filter(|p| !geometry.is_suppressed(p))
         .collect())
+}
+
+/// The parts as the workers of a job take them, as places in `parts`: each part on its own,
+/// but the parts of a compound part together, since its shells may be meshed as one, the
+/// first of them standing for the others.
+fn part_groups(geometry: &Geometry, parts: &[String]) -> Vec<Vec<usize>> {
+    let mut groups: Vec<(Option<usize>, Vec<usize>)> = Vec::new();
+    for (k, part) in parts.iter().enumerate() {
+        let compound = geometry.compound_of(part);
+        match groups
+            .iter_mut()
+            .find(|(of, _)| compound.is_some() && *of == compound)
+        {
+            Some((_, group)) => group.push(k),
+            None => groups.push((compound, vec![k])),
+        }
+    }
+    groups.into_iter().map(|(_, group)| group).collect()
 }
 
 /// Meshes the listed parts one after the other, with the cut faces of the cyclic symmetries
@@ -1423,6 +1457,10 @@ fn mesh_parts(
 /// Runs the meshing worker if the program was started as one, and returns its exit code;
 /// `None` for a normal start. The worker ends itself at once, see [`plx_solve::process::end`].
 ///
+/// It meshes the parts its task names and then takes groups of parts of the job, each by
+/// leaving a mark in the job's folder that only one worker can leave, until all are taken:
+/// the workers of a job so share the parts among themselves as they get done with them.
+///
 /// It tells in `current` which part Gmsh works on and leaves each part's outcome in a file of
 /// its own as soon as it has it, so that if Gmsh crashes, the program knows which part
 /// crashed it and keeps the parts meshed before. Gmsh's messages go to its standard output,
@@ -1438,30 +1476,60 @@ pub fn worker_main() -> Option<i32> {
     plx_solve::process::end_with(program);
     plx_mesher::log_to_terminal();
     let result: WorkerResult = (|| {
-        let text = std::fs::read_to_string(dir.join("request.ron")).map_err(|e| e.to_string())?;
+        let text = std::fs::read_to_string(dir.join(TASK)).map_err(|e| e.to_string())?;
+        let task: WorkerTask = ron::from_str(&text).map_err(|e| e.to_string())?;
+        let text = std::fs::read_to_string(task.job.join(REQUEST)).map_err(|e| e.to_string())?;
         let request: WorkerRequest = ron::from_str(&text).map_err(|e| e.to_string())?;
         if request.library.is_some() {
-            plx_mesher::set_library_path(request.library);
+            plx_mesher::set_library_path(request.library.clone());
         }
         let mut written = Ok(());
-        mesh_list(
-            &request.geometry,
-            &request.matching,
-            &request.parts,
-            &mut |k| {
-                let _ = std::fs::write(dir.join(CURRENT), k.to_string());
-            },
-            &mut |k, result| {
-                let outcome: PartOutcome = result.map(|g| (g.mesh, g.warnings));
-                if written.is_ok() {
-                    written = write_whole(&dir, &part_file(k), &outcome);
+        // The parts this worker is done with, for the progress shown.
+        let done = std::cell::Cell::new(0usize);
+        // Meshes the parts at the given places of the request.
+        let mut mesh = |places: &[usize]| {
+            let names: Vec<String> = (places.iter())
+                .filter_map(|&place| request.parts.get(place).cloned())
+                .collect();
+            mesh_list(
+                &request.geometry,
+                &request.matching,
+                &names,
+                &mut |k| {
+                    let _ =
+                        std::fs::write(dir.join(CURRENT), format!("{} {}", places[k], done.get()));
+                },
+                &mut |k, result| {
+                    done.set(done.get() + 1);
+                    let outcome: PartOutcome = result.map(|g| (g.mesh, g.warnings));
+                    if written.is_ok() {
+                        written = write_whole(&dir, &part_file(places[k]), &outcome);
+                    }
+                },
+            );
+        };
+        mesh(&task.first);
+        if task.take_groups {
+            for (g, group) in request.groups.iter().enumerate() {
+                if take_group(&task.job, g) {
+                    mesh(group);
                 }
-            },
-        );
+            }
+        }
         written
     })();
     let written = write_whole(&dir, RESULT, &result);
     plx_solve::process::end(if written.is_ok() { 0 } else { 1 })
+}
+
+/// Takes the `g`-th group of a job for the worker that asks: true for the first that asks,
+/// which leaves a mark in the job's folder, false for all after it.
+fn take_group(job: &Path, g: usize) -> bool {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(job.join(format!("group-{g}")))
+        .is_ok()
 }
 
 /// Writes `value` to `name` in `dir` under another name first, so that the program never
@@ -1473,10 +1541,17 @@ fn write_whole(dir: &Path, name: &str, value: &impl Serialize) -> Result<(), Str
     std::fs::rename(&temporary, dir.join(name)).map_err(|e| e.to_string())
 }
 
+/// The file of a job's [`WorkerRequest`], in the job's folder.
+const REQUEST: &str = "request.ron";
+
+/// The file of a worker's [`WorkerTask`], in its own folder.
+const TASK: &str = "task.ron";
+
 /// The file the worker leaves its result in, see [`WorkerResult`].
 const RESULT: &str = "result.ron";
 
-/// The file that holds the place in the request of the part Gmsh is meshing.
+/// The file that holds the place in the request of the part Gmsh is meshing and, after a
+/// space, how many parts the worker meshed before it.
 const CURRENT: &str = "current";
 
 /// The file Gmsh's messages go to.
@@ -1489,7 +1564,7 @@ fn part_file(k: usize) -> String {
     format!("part-{k}.ron")
 }
 
-/// A folder of its own for one worker, removed when dropped.
+/// A folder of its own for one worker or one job, removed when dropped.
 struct WorkerDir(PathBuf);
 
 impl WorkerDir {
@@ -1500,6 +1575,15 @@ impl WorkerDir {
         std::fs::create_dir_all(&dir)?;
         Ok(Self(dir))
     }
+
+    /// A folder with the request of a job in it.
+    fn of_job(request: &WorkerRequest) -> Result<Self, String> {
+        let dir = Self::new().map_err(|e| format!("No folder for the mesher: {e}"))?;
+        let text = ron::to_string(request).map_err(|e| e.to_string())?;
+        std::fs::write(dir.0.join(REQUEST), text)
+            .map_err(|e| format!("Cannot write the mesher's input: {e}"))?;
+        Ok(dir)
+    }
 }
 
 impl Drop for WorkerDir {
@@ -1508,9 +1592,49 @@ impl Drop for WorkerDir {
     }
 }
 
+/// The most worker processes a meshing job runs at the same time, from the settings;
+/// [`AUTOMATIC_PROCESSES`] for as many as the computer has cores.
+static PROCESSES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// [`set_processes`] for as many worker processes as the computer has cores.
+pub const AUTOMATIC_PROCESSES: u32 = 0;
+
+/// Sets the most worker processes a meshing job runs at the same time, for the jobs started
+/// from now on.
+pub fn set_processes(processes: u32) {
+    PROCESSES.store(processes, Ordering::Relaxed);
+}
+
+/// The worker processes of [`AUTOMATIC_PROCESSES`]: one per processor core.
+pub fn automatic_processes() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// The worker processes a job of so many groups of parts runs: one per group, up to the
+/// number set.
+fn worker_count(groups: usize) -> usize {
+    let most = match PROCESSES.load(Ordering::Relaxed) {
+        AUTOMATIC_PROCESSES => automatic_processes(),
+        set => set as usize,
+    };
+    most.min(groups).max(1)
+}
+
+/// What the workers of one job made so far, each of them adding to it.
+#[derive(Default)]
+struct Outcomes {
+    /// The parts done, by their place in the request: a mesh, or why it failed.
+    parts: Vec<(usize, Result<GeneratedMesh, String>)>,
+    /// Cancelled before all parts were done.
+    cancelled: bool,
+}
+
 /// Meshes in worker processes of `program` until they are done or `cancel` is set, which
-/// kills them. If Gmsh crashes on a part, the part is told as failed with where Gmsh was,
-/// and a new worker meshes the parts after it.
+/// kills them. The parts are meshed by several workers at the same time, see
+/// [`worker_count`], which take them group by group ([`part_groups`]) as they get done with
+/// the ones before: the parts of an assembly are independent of each other, and Gmsh
+/// meshes a part on one core. If Gmsh crashes on a part, the part is told as failed with
+/// where Gmsh was, and a new worker goes on in place of the one that crashed.
 fn mesh_in_worker(
     program: &Path,
     geometry: Geometry,
@@ -1520,59 +1644,152 @@ fn mesh_in_worker(
     progress: &dyn Fn(MeshProgress),
 ) -> Result<PartMeshes, String> {
     let parts = parts_to_mesh(&geometry, parts)?;
-    let total = parts.len();
-    let mut request = WorkerRequest {
+    let groups = part_groups(&geometry, &parts);
+    let workers = worker_count(groups.len());
+    let request = WorkerRequest {
         library: plx_mesher::library_path(),
         geometry,
         matching,
         parts,
+        groups,
     };
-    let mut generated = PartMeshes::default();
-    while !request.parts.is_empty() && !generated.cancelled {
-        // The parts before this worker's are done, meshed or failed.
-        let before = total - request.parts.len();
-        let parts = &request.parts;
-        let tell = |k: usize| {
-            progress(MeshProgress {
-                done: before + k,
-                total,
-                part: parts.get(k).cloned().unwrap_or_default(),
+    let job = WorkerDir::of_job(&request)?;
+    // The part each worker meshes now, and the parts it is done with.
+    let board: std::sync::Mutex<Vec<(Option<usize>, usize)>> =
+        std::sync::Mutex::new(vec![(None, 0); workers]);
+    let (sender, receiver) = std::sync::mpsc::channel::<MeshProgress>();
+    // One failing worker stops the others.
+    let failed = AtomicBool::new(false);
+    let stopped = || cancel.load(Ordering::Relaxed) || failed.load(Ordering::Relaxed);
+    let results: Vec<Result<Outcomes, String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|worker| {
+                let (request, job, board, sender) = (&request, &job.0, &board, sender.clone());
+                let (stopped, failed) = (&stopped, &failed);
+                scope.spawn(move || {
+                    let tell = |current: Option<usize>, done: usize| {
+                        let mut board = board.lock().unwrap_or_else(|e| e.into_inner());
+                        board[worker] = (current, done);
+                        let now: Vec<String> = (board.iter())
+                            .filter_map(|&(k, _)| request.parts.get(k?).cloned())
+                            .collect();
+                        let _ = sender.send(MeshProgress {
+                            done: board.iter().map(|&(_, done)| done).sum(),
+                            total: request.parts.len(),
+                            parts: now,
+                        });
+                    };
+                    let result = mesh_as_worker(program, request, job, stopped, &tell);
+                    if result.is_err() {
+                        failed.store(true, Ordering::Relaxed);
+                    }
+                    result
+                })
             })
-        };
-        let crashed = run_worker(program, &request, cancel, &tell, &mut generated)?;
-        let Some((k, message)) = crashed else {
-            break;
-        };
-        let part = request.parts[k].clone();
-        if !generated.cancelled {
-            mesh_without_netgen(program, &request, &part, message, cancel, &mut generated)?;
+            .collect();
+        drop(sender);
+        // Told from this thread, the one that was asked.
+        for now in receiver {
+            progress(now);
         }
-        // The parts after the one that crashed Gmsh, but not those meshed with others.
-        let meshed: Vec<&str> = (generated.meshes.iter())
-            .flat_map(|m| m.mesh.parts.iter().map(|p| p.name.as_str()))
-            .collect();
-        request.parts = (request.parts.iter().skip(k + 1))
-            .filter(|p| !meshed.iter().any(|m| m.eq_ignore_ascii_case(p)))
-            .cloned()
-            .collect();
+        (handles.into_iter())
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("A meshing thread stopped unexpectedly".into()))
+            })
+            .collect()
+    });
+    let mut all = Outcomes::default();
+    for result in results {
+        let outcomes = result?;
+        all.parts.extend(outcomes.parts);
+        all.cancelled |= outcomes.cancelled;
+    }
+    // In the order of the parts, whichever worker meshed them.
+    all.parts.sort_by_key(|(place, _)| *place);
+    let mut generated = PartMeshes {
+        cancelled: all.cancelled,
+        ..PartMeshes::default()
+    };
+    for (_, outcome) in all.parts {
+        match outcome {
+            Ok(mesh) => generated.meshes.push(mesh),
+            Err(message) => generated.failed.push(message),
+        }
     }
     Ok(generated)
 }
 
-/// Meshes `part`, on which Gmsh crashed with `message`, once more without the Netgen
-/// optimization, which is where Gmsh crashes most; the part fails with `message` if it
-/// crashes again or was not optimized anyway.
+/// One of the workers of a job: runs worker processes one after the other, a new one
+/// whenever Gmsh crashed the one before, until the job has no groups left to take. The part
+/// that crashed Gmsh is meshed once more without Netgen, and the new worker begins with
+/// what was left of its group.
+fn mesh_as_worker(
+    program: &Path,
+    request: &WorkerRequest,
+    job: &Path,
+    stopped: &dyn Fn() -> bool,
+    current: &dyn Fn(Option<usize>, usize),
+) -> Result<Outcomes, String> {
+    let mut outcomes = Outcomes::default();
+    let mut task = WorkerTask {
+        job: job.to_path_buf(),
+        first: Vec::new(),
+        take_groups: true,
+    };
+    loop {
+        let total = request.parts.len();
+        // The parts of the worker processes before this one count as done too.
+        let before = outcomes.parts.len();
+        let tell = |now: Option<usize>, done: usize| current(now, before + done);
+        let crashed = run_worker(program, &task, total, stopped, &tell, &mut outcomes);
+        current(None, outcomes.parts.len());
+        let Some((k, message)) = crashed? else {
+            break;
+        };
+        if outcomes.cancelled {
+            break;
+        }
+        mesh_without_netgen(program, request, k, message, stopped, &mut outcomes)?;
+        if outcomes.cancelled {
+            break;
+        }
+        // What is left of the group of the part that crashed Gmsh: the parts after it, but
+        // not those meshed with others.
+        let meshed: Vec<&str> = (outcomes.parts.iter())
+            .filter_map(|(_, outcome)| outcome.as_ref().ok())
+            .flat_map(|m| m.mesh.parts.iter().map(|p| p.name.as_str()))
+            .collect();
+        let group = (request.groups.iter()).find(|group| group.contains(&k));
+        task.first = (group.into_iter().flatten())
+            .skip_while(|&&place| place != k)
+            .skip(1)
+            .copied()
+            .filter(|&place| {
+                let part = &request.parts[place];
+                !meshed.iter().any(|m| m.eq_ignore_ascii_case(part))
+            })
+            .collect();
+    }
+    Ok(outcomes)
+}
+
+/// Meshes the part at place `k` of the request, on which Gmsh crashed with `message`, once
+/// more without the Netgen optimization, which is where Gmsh crashes most; the part fails
+/// with `message` if it crashes again or was not optimized anyway.
 fn mesh_without_netgen(
     program: &Path,
     request: &WorkerRequest,
-    part: &str,
+    k: usize,
     message: String,
-    cancel: &AtomicBool,
-    generated: &mut PartMeshes,
+    stopped: &dyn Fn() -> bool,
+    outcomes: &mut Outcomes,
 ) -> Result<(), String> {
+    let part = &request.parts[k];
     let parameters = request.geometry.parameters(part);
     if !parameters.optimize {
-        generated.failed.push(message);
+        outcomes.parts.push((k, Err(message)));
         return Ok(());
     }
     let mut geometry = request.geometry.clone();
@@ -1587,25 +1804,40 @@ fn mesh_without_netgen(
             },
         },
     });
+    // A job of its own, of the one part.
     let retry = WorkerRequest {
         library: request.library.clone(),
         geometry,
         matching: request.matching.clone(),
         parts: vec![part.to_string()],
+        groups: Vec::new(),
     };
-    let (meshes, failed) = (generated.meshes.len(), generated.failed.len());
-    run_worker(program, &retry, cancel, &|_| {}, generated)?;
+    let job = WorkerDir::of_job(&retry)?;
+    let task = WorkerTask {
+        job: job.0.clone(),
+        first: vec![0],
+        take_groups: false,
+    };
+    let mut again = Outcomes::default();
+    run_worker(program, &task, 1, stopped, &|_, _| {}, &mut again)?;
+    outcomes.cancelled |= again.cancelled;
     // Only the first failure is told, which is what the user meshed with.
-    generated.failed.truncate(failed);
-    match generated.meshes.get_mut(meshes) {
-        Some(mesh) => mesh.warnings.push(format!(
-            "{message}. It was meshed again without Optimize mesh (Netgen), which worked"
-        )),
-        None if generated.cancelled => generated.failed.push(message),
-        None => generated.failed.push(format!(
-            "{message}. Meshed again without Optimize mesh (Netgen), it failed as well"
-        )),
-    }
+    let mesh = (again.parts.into_iter()).find_map(|(_, outcome)| outcome.ok());
+    outcomes.parts.push((
+        k,
+        match mesh {
+            Some(mut mesh) => {
+                mesh.warnings.push(format!(
+                    "{message}. It was meshed again without Optimize mesh (Netgen), which worked"
+                ));
+                Ok(mesh)
+            }
+            None if outcomes.cancelled => Err(message),
+            None => Err(format!(
+                "{message}. Meshed again without Optimize mesh (Netgen), it failed as well"
+            )),
+        },
+    ));
     Ok(())
 }
 
@@ -1618,19 +1850,21 @@ fn unrefined(geometry: &Geometry, part: &str) -> plx_model::MeshingParameters {
     parameters
 }
 
-/// Runs one worker on `request` and adds what it made to `generated`; returns the place in
-/// the request of the part it crashed on, with the message that tells so. Cancelled, it
-/// keeps the parts finished before and marks `generated` cancelled.
+/// Runs one worker process on `task`, of a job of `total` parts, and adds what it made to
+/// `outcomes`; returns the place in the request of the part it crashed on, with the message
+/// that tells so. `current` hears which part it meshes and how many it meshed before. Once `stopped` says so, it is
+/// killed: the parts it finished before are kept and `outcomes` is marked cancelled.
 fn run_worker(
     program: &Path,
-    request: &WorkerRequest,
-    cancel: &AtomicBool,
-    starting: &dyn Fn(usize),
-    generated: &mut PartMeshes,
+    task: &WorkerTask,
+    total: usize,
+    stopped: &dyn Fn() -> bool,
+    current: &dyn Fn(Option<usize>, usize),
+    outcomes: &mut Outcomes,
 ) -> Result<Option<(usize, String)>, String> {
     let dir = WorkerDir::new().map_err(|e| format!("No folder for the mesher: {e}"))?;
-    let text = ron::to_string(request).map_err(|e| e.to_string())?;
-    std::fs::write(dir.0.join("request.ron"), text)
+    let text = ron::to_string(task).map_err(|e| e.to_string())?;
+    std::fs::write(dir.0.join(TASK), text)
         .map_err(|e| format!("Cannot write the mesher's input: {e}"))?;
     let log = std::fs::File::create(dir.0.join(GMSH_LOG))
         .map_err(|e| format!("Cannot write the mesher's log: {e}"))?;
@@ -1647,20 +1881,29 @@ fn run_worker(
         .spawn()
         .map_err(|e| format!("Cannot start the mesher: {e}"))?;
     let result = dir.0.join(RESULT);
+    // The part it works on and how many it meshed before.
+    let read_current = || {
+        let text = std::fs::read_to_string(dir.0.join(CURRENT)).ok()?;
+        let mut numbers = text.split_whitespace().map(str::parse::<usize>);
+        let place = numbers.next()?.ok().filter(|&c| c < total)?;
+        Some((place, numbers.next().and_then(Result::ok).unwrap_or(0)))
+    };
     let mut told = None;
+    let mut cancelled = false;
     // The result counts once it is there, whether or not the worker has ended yet.
     let (text, status) = loop {
         // Which part it works on now, for the progress shown.
-        let current = (std::fs::read_to_string(dir.0.join(CURRENT)).ok())
-            .and_then(|c| c.trim().parse::<usize>().ok());
-        if current.is_some() && current != told {
-            told = current;
-            starting(current.unwrap_or_default());
+        let now = read_current();
+        if let Some((place, done)) = now
+            && now != told
+        {
+            told = now;
+            current(Some(place), done);
         }
-        if cancel.load(Ordering::Relaxed) {
+        if stopped() {
             let _ = child.kill();
             let _ = child.wait();
-            generated.cancelled = true;
+            cancelled = true;
             break (None, None);
         }
         if let Ok(text) = std::fs::read_to_string(&result) {
@@ -1675,40 +1918,39 @@ fn run_worker(
             Err(e) => return Err(format!("The mesher could not be watched: {e}")),
         }
     };
-    // What it finished, in order, whether it ended well or not; parts meshed with an
-    // earlier one leave no file.
-    let mut last_read = None;
-    for k in 0..request.parts.len() {
+    outcomes.cancelled |= cancelled;
+    // What it finished, whether it ended well or not; parts meshed with an earlier one
+    // leave no file.
+    let mut finished = BTreeSet::new();
+    for k in 0..total {
         let Ok(text) = std::fs::read_to_string(dir.0.join(part_file(k))) else {
             continue;
         };
         let outcome: PartOutcome = ron::from_str(&text).map_err(|e| e.to_string())?;
-        match outcome {
-            Ok((mesh, warnings)) => generated.meshes.push(GeneratedMesh { mesh, warnings }),
-            Err(message) => generated.failed.push(message),
-        }
-        last_read = Some(k);
+        outcomes.parts.push((
+            k,
+            outcome.map(|(mesh, warnings)| GeneratedMesh { mesh, warnings }),
+        ));
+        finished.insert(k);
     }
     if let Some(text) = text {
         let result: WorkerResult = ron::from_str(&text).map_err(|e| e.to_string())?;
         return result.map(|()| None);
     }
-    if generated.cancelled {
+    if cancelled {
         return Ok(None);
     }
     let status = status.map_or_else(String::new, |s| format!(" ({s})"));
-    // The part it was meshing when it stopped, unless it stopped before or after the parts.
-    let current = (std::fs::read_to_string(dir.0.join(CURRENT)).ok())
-        .and_then(|c| c.trim().parse::<usize>().ok())
-        .filter(|&c| last_read.is_none_or(|l| c > l) && c < request.parts.len());
-    let Some(current) = current else {
+    // The part it was meshing when it stopped, unless it stopped before or between the
+    // parts.
+    let crashed = read_current().map(|(place, _)| place);
+    let Some(crashed) = crashed.filter(|c| !finished.contains(c)) else {
         return Err(format!("The mesher stopped unexpectedly{status}"));
     };
     let gmsh_log = std::fs::read_to_string(dir.0.join(GMSH_LOG)).unwrap_or_default();
     let place = (gmsh_log.lines().rev())
         .find_map(plx_mesher::meshing_step)
         .map_or_else(String::new, |step| format!(" while {step}"));
-    let part = &request.parts[current];
     // Gmsh's own words up to the crash, for a report of it.
     let kept = std::env::temp_dir().join(CRASH_LOG);
     let kept = match std::fs::write(&kept, &gmsh_log) {
@@ -1716,18 +1958,30 @@ fn run_worker(
         Err(_) => String::new(),
     };
     Ok(Some((
-        current,
-        format!("{part}: Gmsh crashed{place}{status}{kept}"),
+        crashed,
+        format!("Gmsh crashed{place}{status}{kept}"),
     )))
 }
 
-/// How far a meshing job is: the part it works on now, the parts done before it and all
+/// How far a meshing job is: the parts it works on now, the parts done before them and all
 /// it meshes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MeshProgress {
     pub done: usize,
     pub total: usize,
-    pub part: String,
+    /// The parts meshed now, one per worker process.
+    pub parts: Vec<String>,
+}
+
+impl MeshProgress {
+    /// The parts meshed now in a few words: the first, and how many more.
+    pub fn now(&self) -> String {
+        match &self.parts[..] {
+            [] => String::new(),
+            [part] => part.clone(),
+            [part, more @ ..] => format!("{part} and {} more", more.len()),
+        }
+    }
 }
 
 /// What a cancelled job reports.
@@ -1845,6 +2099,71 @@ mod tests {
     /// coordinates) at x, y.
     fn hit(view: &Model, x: f32, y: f32) -> Hit {
         view.pick(Vec3::new(x, y, 50.0), Vec3::NEG_Z).unwrap()
+    }
+
+    /// The program the tests of the worker processes start: built with the tests, next to
+    /// the folder of the test programs.
+    fn program() -> Option<PathBuf> {
+        let tests = std::env::current_exe().ok()?;
+        let name = format!("nodalis{}", std::env::consts::EXE_SUFFIX);
+        let program = tests.parent()?.parent()?.join(name);
+        program.is_file().then_some(program)
+    }
+
+    /// Several worker processes hand back the meshes one process makes, in the order of
+    /// the parts, and tell how far they are.
+    #[test]
+    fn worker_processes_mesh_the_parts_as_one_does() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/zwei_bloecke.step");
+        let loaded = match crate::model::load(&path, plx_model::UnitSystem::Unitless) {
+            Ok(loaded) => loaded,
+            Err(error) if std::env::var_os("NODALIS_REQUIRE_GMSH").is_none() => {
+                eprintln!("Gmsh not available, test skipped: {error}");
+                return;
+            }
+            Err(error) => panic!("Gmsh is required: {error}"),
+        };
+        let Some(program) = program() else {
+            eprintln!("The program is not built, test skipped");
+            return;
+        };
+        let mut geometry = loaded.model.geometry.unwrap();
+        geometry.meshing.max_size = 5.0;
+        let parts = parts_to_mesh(&geometry, None).unwrap();
+        assert_eq!(part_groups(&geometry, &parts), [[0], [1]]);
+        let alone = mesh_parts(&geometry, &[], None).unwrap();
+        let told = std::sync::Mutex::new(Vec::new());
+        let cancel = AtomicBool::new(false);
+        let tell = |progress: MeshProgress| told.lock().unwrap().push(progress);
+        let shared =
+            mesh_in_worker(&program, geometry.clone(), Vec::new(), None, &cancel, &tell).unwrap();
+        assert!(shared.failed.is_empty() && !shared.cancelled);
+        assert_eq!(shared.meshes.len(), 2);
+        for (one, other) in alone.meshes.iter().zip(&shared.meshes) {
+            assert_eq!(one.mesh.parts[0].name, other.mesh.parts[0].name);
+            assert_eq!(one.mesh.node_ids(), other.mesh.node_ids());
+            assert_eq!(one.mesh.coords(), other.mesh.coords());
+        }
+        let told = told.into_inner().unwrap();
+        let last = told.last().unwrap();
+        assert_eq!((last.done, last.total), (2, 2));
+        assert!(last.parts.is_empty());
+        assert!(told.iter().all(|p| p.done + p.parts.len() <= p.total));
+        // A cancelled job starts nothing and says so.
+        cancel.store(true, Ordering::Relaxed);
+        let none = mesh_in_worker(&program, geometry, Vec::new(), None, &cancel, &|_| {}).unwrap();
+        assert!(none.cancelled && none.meshes.is_empty());
+    }
+
+    #[test]
+    fn progress_names_the_first_part_and_counts_the_others() {
+        let mut progress = MeshProgress::default();
+        assert_eq!(progress.now(), "");
+        progress.parts = vec!["A".into()];
+        assert_eq!(progress.now(), "A");
+        progress.parts = vec!["A".into(), "B".into(), "C".into()];
+        assert_eq!(progress.now(), "A and 2 more");
     }
 
     #[test]

@@ -49,6 +49,7 @@ type Ierr = *mut c_int;
 
 gmsh_api! {
     initialize = "gmshInitialize": fn(c_int, *mut *mut c_char, c_int, c_int, Ierr);
+    finalize = "gmshFinalize": fn(Ierr);
     clear = "gmshClear": fn(Ierr);
     free = "gmshFree": fn(*mut c_void);
     write = "gmshWrite": fn(*const c_char, Ierr);

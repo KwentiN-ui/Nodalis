@@ -4364,3 +4364,24 @@ fn parts_meshed_after_others_get_the_mesh_they_get_alone() {
         assert_eq!(seen.len(), display.faces);
     }
 }
+
+/// After a part that failed, Gmsh starts anew and the next part gets the mesh it gets
+/// alone. (A mesher of Gmsh that gives up leaves Gmsh busy for good, and the parts after it
+/// came back without elements.)
+#[test]
+fn a_part_that_fails_leaves_the_next_one_its_mesh() {
+    if !gmsh_available() {
+        return;
+    }
+    let geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless)
+        .unwrap()
+        .geometry;
+    let names = part_names(&geometry).unwrap();
+    let alone = generate_part_mesh(&geometry, &names[1]).unwrap();
+    generate_part_mesh(&geometry, &names[0]).unwrap();
+    assert!(generate_part_mesh(&geometry, "no such part").is_err());
+    let after = generate_part_mesh(&geometry, &names[1]).unwrap();
+    assert_eq!(alone.mesh.node_ids(), after.mesh.node_ids());
+    assert_eq!(alone.mesh.coords(), after.mesh.coords());
+    assert_eq!(alone.mesh.elements(), after.mesh.elements());
+}

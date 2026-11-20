@@ -307,6 +307,9 @@ fn gpu_ui(ui: &mut egui::Ui, gpu: &mut bool) {
 pub struct Gmsh {
     /// The library file; empty to search next to the program and on the system.
     pub library: String,
+    /// The most worker processes that mesh parts at the same time;
+    /// [`crate::meshing::AUTOMATIC_PROCESSES`] for one per processor core.
+    pub processes: u32,
 }
 
 impl Gmsh {
@@ -726,6 +729,34 @@ impl SettingsWindow {
                     }
                     None => ui.weak("not yet"),
                 };
+                ui.end_row();
+                ui.label("Meshing processes");
+                ui.horizontal(|ui| {
+                    let processes = &mut self.draft.gmsh.processes;
+                    let mut automatic = *processes == crate::meshing::AUTOMATIC_PROCESSES;
+                    if ui.checkbox(&mut automatic, "Automatic").changed() {
+                        *processes = if automatic {
+                            crate::meshing::AUTOMATIC_PROCESSES
+                        } else {
+                            crate::meshing::automatic_processes() as u32
+                        };
+                    }
+                    if automatic {
+                        ui.weak(format!(
+                            "{} processes",
+                            crate::meshing::automatic_processes()
+                        ));
+                    } else {
+                        ui.add(egui::DragValue::new(processes).range(1..=256));
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "The parts of an assembly are meshed by several processes at the same \
+                     time, at most this many. Automatic takes one per processor core. Each \
+                     process reads the geometry and needs memory of its own: set fewer if \
+                     the memory runs out with large assemblies.",
+                );
                 ui.end_row();
             });
         ui.add(

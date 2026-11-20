@@ -32,11 +32,26 @@ suppressing a part in the Geometry workspace takes it out of the FE model.
 #screenshot("fe-model-unmeshed.png", [FE Model workspace: one part meshed, the other listed as
   not meshed])
 
+=== Meshing several parts at once <parallel-meshing>
+
+The parts of an assembly are meshed independently of each other, so Nodalis meshes several of
+them at the same time, each in a Gmsh process of its own: by default as many as the computer
+has processor cores, and never more than there are parts. The processes take the parts one
+after the other as they get done, so a few large parts do not hold up the many small ones.
+The bodies of a compound part (@compound-parts) are meshed together by one process. The
+meshes are the same as if the parts were meshed one by one, and they arrive in the FE model
+in the order of the parts.
+
+Every process reads the geometry and holds the mesh it works on in memory. If the memory runs
+out with a large assembly and a fine mesh, set fewer #ui("Meshing processes") under
+#menu("Edit", "Settings ...", "Gmsh") (@settings); 1 meshes the parts one after the other.
+
 === Cancelling the meshing <cancel-meshing>
 
-Gmsh runs in a separate process, so a meshing that takes too long, for example because the
+Gmsh runs in separate processes, so a meshing that takes too long, for example because the
 element size is too small, can be cancelled at any time. While it runs, the status bar shows
-the part being meshed, such as #ui("Part 8 of 89: NAME"), with a progress bar of the
+how far it is, such as #ui("12 of 89 parts done: NAME and 3 more") with the name of one of the
+parts being meshed (#ui("Part 1 of 2: NAME") while only one is), with a progress bar of the
 parts already meshed and a #ui("Cancel") button; #menu("Geometry", "Cancel") and the
 #ui("Stop") tile of the ribbon do the same. The mesher stops at once: the parts it has
 finished get their new mesh, and the others keep the mesh they had before. During

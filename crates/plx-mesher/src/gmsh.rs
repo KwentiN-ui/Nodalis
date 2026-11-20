@@ -171,6 +171,9 @@ pub fn with_gmsh<T>(f: impl FnOnce(&Gmsh) -> Result<T, GmshError>) -> Result<T, 
     gmsh.clear()?;
     gmsh.start_log()?;
     let result = f(gmsh);
+    if result.is_err() {
+        let _ = gmsh.restart();
+    }
     // The model is not needed any more; clearing frees its memory right away.
     let _ = gmsh.clear();
     result
@@ -202,8 +205,11 @@ pub fn with_kept_shapes<T>(
     }
     gmsh.start_log()?;
     let result = f(gmsh);
-    // Left in the model of all shapes, whatever `f` was doing when it ended.
-    if gmsh.close_part_model().is_ok() {
+    if result.is_err() {
+        // The shapes are read again for the next part.
+        let _ = gmsh.restart();
+    } else if gmsh.close_part_model().is_ok() {
+        // Left in the model of all shapes, whatever `f` was doing when it ended.
         state.kept = Some(shapes);
     }
     result
@@ -336,12 +342,28 @@ impl Gmsh {
             _ => return Err(GmshError::UnsupportedVersion { version }),
         }
         gmsh.info.version = version;
-        // Messages go to the log, and to the terminal only if asked for; STEP files are
-        // read in millimetres.
-        let terminal = TERMINAL.load(std::sync::atomic::Ordering::Relaxed);
-        gmsh.set_number("General.Terminal", f64::from(u8::from(terminal)))?;
-        gmsh.set_string("Geometry.OCCTargetUnit", "MM")?;
+        gmsh.set_up()?;
         Ok(gmsh)
+    }
+
+    /// The options Gmsh always runs with here: messages go to the log, and to the terminal
+    /// only if asked for; STEP files are read in millimetres.
+    fn set_up(&self) -> Result<(), GmshError> {
+        let terminal = TERMINAL.load(std::sync::atomic::Ordering::Relaxed);
+        self.set_number("General.Terminal", f64::from(u8::from(terminal)))?;
+        self.set_string("Geometry.OCCTargetUnit", "MM")
+    }
+
+    /// Starts Gmsh anew after it failed. A mesher of Gmsh that gives up with an error (such
+    /// as overlapping facets in the boundary of a volume) leaves Gmsh marked as busy
+    /// meshing, and every mesh asked for after that comes back empty at once ("I'm busy!
+    /// Ask me that later..."): the parts meshed after one that failed got no elements. Only
+    /// ending Gmsh takes the mark away.
+    fn restart(&self) -> Result<(), GmshError> {
+        self.call(|e| unsafe { (self.api.finalize)(e) })?;
+        self.initialize()?;
+        self.set_up()?;
+        self.clear()
     }
 
     pub fn info(&self) -> &LibraryInfo {
