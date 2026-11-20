@@ -62,15 +62,18 @@ pub fn contact_fields(
     u: &[f64],
     order: &[(u32, u32)],
 ) -> Vec<ResultField> {
-    let variables: Vec<String> = step
+    let variables: Vec<plxs_core::step::OutputVariable> = step
         .outputs
         .contact_file
         .iter()
-        .flat_map(|o| o.variables.iter().map(|v| v.trim().to_ascii_uppercase()))
+        .flat_map(|o| o.variables.iter().copied())
         .collect();
-    let has = |v: &str| variables.iter().any(|x| x == v);
+    let has = |v: plxs_core::step::OutputVariable| variables.contains(&v);
     let mut out = Vec::new();
-    if !has("CDIS") && !has("CSTR") && !has("CELS") {
+    if !has(plxs_core::step::OutputVariable::ContactDisplacements)
+        && !has(plxs_core::step::OutputVariable::ContactStresses)
+        && !has(plxs_core::step::OutputVariable::ContactEnergy)
+    {
         return out;
     }
     let supports = crate::support::nodal_values(model, u);
@@ -101,10 +104,13 @@ pub fn contact_fields(
         .filter(|&(_, i)| nodal.listed.as_ref().is_none_or(|l| l[i as usize]))
         .collect();
     let nodes: Vec<u32> = order.iter().map(|&(id, _)| id).collect();
-    if has("CDIS") || has("CSTR") {
+    if has(plxs_core::step::OutputVariable::ContactDisplacements)
+        || has(plxs_core::step::OutputVariable::ContactStresses)
+    {
         let names = ["COPEN", "CSLIP1", "CSLIP2", "CPRESS", "CSHEAR1", "CSHEAR2"];
         out.push(ResultField {
-            name: "CONTACT".into(),
+            quantity: plxs_core::results::FieldQuantity::Contact,
+            imaginary: false,
             components: names.iter().map(|s| s.to_string()).collect(),
             nodes: nodes.clone(),
             values: (0..6)
@@ -112,9 +118,10 @@ pub fn contact_fields(
                 .collect(),
         });
     }
-    if has("CELS") {
+    if has(plxs_core::step::OutputVariable::ContactEnergy) {
         out.push(ResultField {
-            name: "CELS".into(),
+            quantity: plxs_core::results::FieldQuantity::ContactEnergy,
+            imaginary: false,
             components: vec!["CELS".into()],
             nodes,
             values: vec![order.iter().map(|&(_, i)| energy[i as usize]).collect()],

@@ -353,7 +353,7 @@ impl Procedure for NonlinearDynamic {
             start_total,
             period,
             discrete: table.discrete.iter().collect(),
-            energies_wanted: !energy_requests(ctx.model, step).is_empty(),
+            energies_wanted: !energy_requests(step).is_empty(),
             has_contact,
             m_contact: None,
             event_frames: parameters.event_frames && has_contact,
@@ -500,7 +500,7 @@ impl Procedure for NonlinearDynamic {
         let carried_nodal = carried
             .as_ref()
             .map(|e| nodal_average_scalar(ctx.table, ctx.model, e));
-        let requests = energy_requests(ctx.model, step);
+        let requests = energy_requests(step);
 
         let maximum = increments
             .maximum
@@ -1021,7 +1021,10 @@ fn write_frame(
     setup: &Setup<'_>,
     state: &At,
     record: u32,
-    requests: &[(String, Vec<String>)],
+    requests: &[(
+        plxs_core::results::HistorySource,
+        Vec<plxs_core::step::OutputVariable>,
+    )],
     carried_nodal: Option<&[f64]>,
     fields: bool,
 ) {

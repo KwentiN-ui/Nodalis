@@ -197,7 +197,7 @@ fn solve(input: &str) -> HashMap<u32, [f64; 2]> {
         .unwrap_or_else(|e| panic!("{e}\n{input}"));
     let results = kept.expect("results").results;
     let field = (results.increments.last().unwrap().fields.iter())
-        .find(|f| f.name == "DISP")
+        .find(|f| f.key() == (plxs_core::results::FieldQuantity::Displacements, false))
         .unwrap();
     (field.nodes.iter().enumerate())
         .map(|(k, &id)| (id, [field.values[0][k], field.values[1][k]]))

@@ -42,14 +42,15 @@ use std::collections::HashMap;
 use plxs_assembly::dofs::amplitude_factor;
 use plxs_assembly::{ElementTable, Spc, assemble_stiffness};
 use plxs_core::mesh::ElementRef;
-use plxs_core::results::{HistoryBlock, IncrementKind, ResultField, ResultsIncrement};
+use plxs_core::results::{
+    HistoryBlock, HistoryQuantity, HistorySource, IncrementKind, ResultField, ResultsIncrement,
+};
 use plxs_core::step::{DistributedLoadKind, Procedure as ProcedureKind, Sensitivity};
 use plxs_core::{Error, Model, Progress, ProgressEvent, Result, Step};
 use plxs_elements::SolidElement;
 use plxs_elements::shape::{face_rule, face_shape};
 use plxs_linalg::{LinearSolver, SparseMatrix};
 use plxs_output::StaRow;
-use plxs_output::dat::DESIGN_RESPONSE_TABLE;
 use rayon::prelude::*;
 
 use crate::fields::node_order;
@@ -1069,9 +1070,13 @@ impl Procedure for SensitivityProcedure {
         let order = node_order(ctx.model);
         let dense_to_position: HashMap<u32, usize> =
             nodes.iter().enumerate().map(|(i, n)| (n.node, i)).collect();
-        let field_of = |name: &str, components: &[&str], per_component: &[&[f64]]| -> ResultField {
+        let field_of = |quantity: plxs_core::results::FieldQuantity,
+                        components: &[&str],
+                        per_component: &[&[f64]]|
+         -> ResultField {
             ResultField {
-                name: name.to_string(),
+                quantity,
+                imaginary: false,
                 components: components.iter().map(|c| c.to_string()).collect(),
                 nodes: order.iter().map(|&(id, _)| id).collect(),
                 values: per_component
@@ -1089,15 +1094,14 @@ impl Procedure for SensitivityProcedure {
         };
         let writes_sen = step.outputs.node_file.iter().any(|o| {
             o.variables
-                .iter()
-                .any(|v| v.trim().eq_ignore_ascii_case("SEN"))
+                .contains(&plxs_core::step::OutputVariable::Sensitivities)
         });
         let normals: Vec<Vec<f64>> = (0..3)
             .map(|k| nodes.iter().map(|n| n.normal[k]).collect())
             .collect();
         if writes_sen {
             let field = field_of(
-                "NORM",
+                plxs_core::results::FieldQuantity::DesignNormals,
                 &["NORMX", "NORMY", "NORMZ"],
                 &[&normals[0], &normals[1], &normals[2]],
             );
@@ -1122,15 +1126,19 @@ impl Procedure for SensitivityProcedure {
             };
             let filtered = normalized(&filtered);
             let (name, frd_name, value) = match kind {
-                ResponseKind::Mass => ("MASS", "SENMASS", mass_value(&requests[request].1)?),
+                ResponseKind::Mass => (
+                    "MASS",
+                    plxs_core::results::FieldQuantity::MassSensitivity,
+                    mass_value(&requests[request].1)?,
+                ),
                 ResponseKind::StrainEnergy => (
                     "STRAINENERGY",
-                    "SENENER",
+                    plxs_core::results::FieldQuantity::StrainEnergySensitivity,
                     energy_value(&requests[request].1),
                 ),
                 ResponseKind::Eigenfrequency => (
                     "EIGENFREQUENCY",
-                    "SENFREQ",
+                    plxs_core::results::FieldQuantity::FrequencySensitivity,
                     problem.eigenvalues[mode.unwrap()],
                 ),
             };
@@ -1161,8 +1169,8 @@ impl Procedure for SensitivityProcedure {
                 ctx.results.history.push(HistoryBlock {
                     step: ctx.step_number,
                     increment: 0,
-                    quantity: DESIGN_RESPONSE_TABLE.to_string(),
-                    set: name.to_string(),
+                    quantity: HistoryQuantity::DesignResponses,
+                    source: HistorySource::Named(name.to_string()),
                     time: 0.0,
                     rows: vec![(0, vec![value, length])],
                 });
@@ -1175,8 +1183,8 @@ impl Procedure for SensitivityProcedure {
             ctx.results.history.push(HistoryBlock {
                 step: ctx.step_number,
                 increment: 0,
-                quantity: DESIGN_RESPONSE_TABLE.to_string(),
-                set: table_names.join(","),
+                quantity: HistoryQuantity::DesignResponses,
+                source: HistorySource::Named(table_names.join(",")),
                 time: 0.0,
                 rows: table_rows,
             });

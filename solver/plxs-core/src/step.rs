@@ -820,7 +820,7 @@ impl Outputs {
 /// options.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FieldOutput {
-    pub variables: Vec<String>,
+    pub variables: Vec<OutputVariable>,
     /// `FREQUENCY=`: every n-th increment (0 or 1: every one).
     pub frequency: u32,
     /// `FREQUENCYF=` of fluids, ignored.
@@ -838,6 +838,73 @@ pub struct FieldOutput {
     pub time_points: Option<String>,
 }
 
+macro_rules! output_variables {
+    ($($(#[$doc:meta])* $variant:ident = $code:literal,)*) => {
+        /// What a field or history output asks for.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        pub enum OutputVariable {
+            $($(#[$doc])* $variant,)*
+        }
+
+        impl OutputVariable {
+            pub const ALL: &[OutputVariable] = &[$(OutputVariable::$variant,)*];
+
+            /// The keyword of the variable in `.inp` and `.dat` files (`U`, `S`).
+            pub fn code(self) -> &'static str {
+                match self {
+                    $(OutputVariable::$variant => $code,)*
+                }
+            }
+        }
+    };
+}
+
+output_variables! {
+    Displacements = "U",
+    Velocities = "V",
+    Accelerations = "A",
+    ReactionForces = "RF",
+    Temperatures = "NT",
+    ReactionHeatFlows = "RFL",
+    /// Amplitude and phase of the displacements of a steady state or complex mode.
+    DisplacementPhase = "PU",
+    Sensitivities = "SEN",
+    Stresses = "S",
+    /// Amplitude and phase of the stresses.
+    StressPhase = "PHS",
+    Strains = "E",
+    MechanicalStrains = "ME",
+    EquivalentPlasticStrain = "PEEQ",
+    StrainEnergyDensity = "ENER",
+    HeatFlux = "HFL",
+    /// The error estimate of the stresses.
+    StressError = "ERR",
+    /// Leaves out the error estimate written with the stresses.
+    NoStressError = "NOE",
+    ContactDisplacements = "CDIS",
+    ContactStresses = "CSTR",
+    ContactEnergy = "CELS",
+    ContactElements = "CNUM",
+    /// The force, moment, centre and area of the contact of a pair.
+    ContactStatistics = "CF",
+    ElementVolume = "EVOL",
+    ElementInternalEnergy = "ELSE",
+    ElementKineticEnergy = "ELKE",
+    ElementBodyHeating = "EBHE",
+    ModelInternalEnergy = "ALLIE",
+    ModelKineticEnergy = "ALLKE",
+    ModelExternalWork = "ALLWK",
+    ModelDampingDissipation = "ALLVD",
+}
+
+impl OutputVariable {
+    /// The variable of a keyword, in any case.
+    pub fn from_code(code: &str) -> Option<OutputVariable> {
+        let code = code.trim();
+        (Self::ALL.iter().copied()).find(|v| v.code().eq_ignore_ascii_case(code))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputDimension {
     #[default]
@@ -851,7 +918,7 @@ pub enum OutputDimension {
 pub struct HistoryOutput {
     /// Node set, element set, or `None` for contact print.
     pub set: Option<HistorySet>,
-    pub variables: Vec<String>,
+    pub variables: Vec<OutputVariable>,
     pub frequency: u32,
     pub totals: Totals,
     pub global: bool,
@@ -861,6 +928,9 @@ pub struct HistoryOutput {
     /// names a `*COMPRESSION ONLY` surface, which rests on the ground.
     #[serde(default)]
     pub surfaces: Option<(crate::SurfaceId, Option<crate::SurfaceId>)>,
+    /// The nodes are the rotation nodes of reference points: their displacements are
+    /// rotations, their forces moments.
+    pub rotations: bool,
 }
 
 /// The set of a history output: a node set for `*NODE PRINT`, an element set for

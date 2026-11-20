@@ -8,7 +8,7 @@ use std::path::Path;
 
 use plxs_core::progress::NoProgress;
 use plxs_core::results::Results;
-use plxs_output::dat::DESIGN_RESPONSE_TABLE;
+use plxs_core::results::{HistoryQuantity, HistorySource};
 use plxs_session::{Session, SessionOptions};
 use plxs_verify::report::format_reports;
 use plxs_verify::{corpus, fixtures_root, run_corpus};
@@ -56,13 +56,19 @@ fn solve(analysis: &plxs_core::Analysis) -> Results {
 
 /// The value of a design response from the `.dat` table of the last step.
 fn response(results: &Results, name: &str) -> f64 {
+    let names = |b: &plxs_core::results::HistoryBlock| match &b.source {
+        HistorySource::Named(names) if b.quantity == HistoryQuantity::DesignResponses => {
+            names.split(',').map(str::to_string).collect()
+        }
+        _ => Vec::new(),
+    };
     let block = results
         .history
         .iter()
         .rev()
-        .find(|b| b.quantity == DESIGN_RESPONSE_TABLE && b.set.split(',').any(|n| n == name))
+        .find(|b| names(b).iter().any(|n| n == name))
         .expect("design response table");
-    let row = block.set.split(',').position(|n| n == name).unwrap();
+    let row = names(block).iter().position(|n| n == name).unwrap();
     block.rows[row].1[0]
 }
 
@@ -72,7 +78,7 @@ fn field(results: &Results, name: &str, component: usize) -> (Vec<u32>, Vec<f64>
         .increments
         .iter()
         .flat_map(|i| &i.fields)
-        .find(|f| f.name == name)
+        .find(|f| f.frd_name() == name)
         .expect(name);
     (f.nodes.clone(), f.values[component].clone())
 }
