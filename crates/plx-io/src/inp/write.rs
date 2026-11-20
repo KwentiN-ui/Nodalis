@@ -942,7 +942,8 @@ fn lower_model_named(
             }
             ConstraintItem::Joint(joint) => {
                 if let Some(item) = owner.and_then(origin) {
-                    origins.insert(ir::ItemRef::Joint(joint.name.clone()), item);
+                    let id = ir::JointId::at(constraint_list.joints.len());
+                    origins.insert(ir::ItemRef::Joint(id), item);
                 }
                 constraint_list.joints.push(joint);
             }
@@ -950,6 +951,9 @@ fn lower_model_named(
             ConstraintItem::Tie(tie, cyclic) => {
                 // The cyclic symmetry refers to its tie.
                 let id = ir::TieId::at(constraint_list.ties.len());
+                if let Some(item) = owner.and_then(origin) {
+                    origins.insert(ir::ItemRef::Tie(id), item);
+                }
                 constraint_list.ties.push(tie);
                 if let Some(mut cyclic) = cyclic {
                     cyclic.tie = id;
@@ -959,11 +963,6 @@ fn lower_model_named(
         }
     }
     ir_model.point_masses = point_masses;
-    for (i, tie) in model.ties.iter().enumerate().filter(|(_, t)| t.active) {
-        if let Some(item) = origin(ModelItem::Tie(i)) {
-            origins.insert(ir::ItemRef::Tie(ir_name(&name(&tie.name))), item);
-        }
-    }
     let active_pairs = (model.contact_pairs.iter().enumerate()).filter(|(_, p)| p.active);
     for (index, (i, _)) in active_pairs.enumerate().take(contact_pairs.len()) {
         if let Some(item) = origin(ModelItem::ContactPair(i)) {
@@ -2595,7 +2594,11 @@ fn constraints(
             }
             // After the rigid bodies, whose points they may sit on.
             Constraint::PointMass(_) => {}
-            Constraint::Tie(t) => items.push(tie(sets, t)?),
+            Constraint::Tie(t) => {
+                owners.resize(items.len(), None);
+                items.push(tie(sets, t)?);
+                owners.push(Some(ModelItem::Constraint(index)));
+            }
         }
     }
     // A point mass sits on the nodes of its reference point: those of the rigid body that
@@ -2794,8 +2797,10 @@ fn constraints(
         items.push(item);
         owners.push(Some(ModelItem::Constraint(index)));
     }
-    for t in model.ties.iter().filter(|t| t.active) {
+    for (index, t) in model.ties.iter().enumerate().filter(|(_, t)| t.active) {
+        owners.resize(items.len(), None);
         items.push(tie(sets, t)?);
+        owners.push(Some(ModelItem::Tie(index)));
     }
     // A spring ending on a reference point no rigid body drives ends on ground there: a
     // node of its own at the point, which a displacement on the point moves.
