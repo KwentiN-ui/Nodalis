@@ -6,6 +6,7 @@
 //! [`FeModel::lower_contacts`] writes them as ties together with the user's regions. The
 //! user sees one part and no ties.
 
+use std::cell::OnceCell;
 use std::sync::Mutex;
 
 use std::collections::{BTreeSet, HashSet};
@@ -15,6 +16,7 @@ use plx_mesh::{
     SurfaceFaces, extract_part_skin, find_contact_pairs,
 };
 
+use crate::contact_check::FaceSearch;
 use crate::{ContactBehavior, ContactRegion, FeModel, Region, SideRoles};
 
 /// Feature angle of the skins searched, as the model's display uses.
@@ -130,12 +132,18 @@ impl FeModel {
                 // meet at a common edge) they are joined already; a tie there would tie the
                 // nodes to themselves. Only the faces across a gap or a mesh that does not
                 // match are tied.
+                // A side is the surfaces of one body, or of several the search joined.
+                let body = |surfaces: &BTreeSet<plx_mesh::SurfaceId>| -> BTreeSet<usize> {
+                    surfaces.iter().map(|s| s.0).collect()
+                };
                 let sides = [
                     Side {
+                        bodies: body(&item.master),
                         facing: apart(mesh, &a, &whole_b),
                         whole: apart(mesh, &whole_a, &whole_b),
                     },
                     Side {
+                        bodies: body(&item.slave),
                         facing: apart(mesh, &b, &whole_a),
                         whole: apart(mesh, &whole_b, &whole_a),
                     },
@@ -166,11 +174,24 @@ impl FeModel {
             })
             .collect();
         let masters = self.masters_of(&regions, mesh);
+        // The skin of each body, for the bodies lying between two others; found when a
+        // node is tied across a gap, which the bodies of most compound parts have none of.
+        let skin_of: Vec<OnceCell<FaceSearch>> = owner.iter().map(|_| OnceCell::new()).collect();
         let mut ties = Vec::new();
         for ((part, name, tolerance, sides), a_is_master) in found.into_iter().zip(masters) {
             let [a, b] = sides;
             let (master, slave) = if a_is_master { (a, b) } else { (b, a) };
-            let Some((master, slave)) = tied(mesh, master, slave.facing, tolerance) else {
+            let others: Vec<usize> = (0..owner.len())
+                .filter(|&i| owner[i] == part)
+                .filter(|i| !master.bodies.contains(i) && !slave.bodies.contains(i))
+                .collect();
+            let between = |p: [f64; 3], q: [f64; 3]| {
+                others.iter().any(|&i| {
+                    let skin = skin_of[i].get_or_init(|| FaceSearch::new(mesh, &faces.of_part(i)));
+                    lies_between(skin, p, q)
+                })
+            };
+            let Some((master, slave)) = tied(mesh, master, slave.facing, tolerance, between) else {
                 continue;
             };
             let mut region = ContactRegion::new(name, ContactBehavior::Bonded);
@@ -192,6 +213,8 @@ impl FeModel {
 
 /// One side of a pair of touching bodies.
 struct Side {
+    /// Its bodies, by their index among the bodies searched.
+    bodies: BTreeSet<usize>,
     /// The faces lying on the other side, see [`plx_mesh::facing_faces`].
     facing: Vec<(ElementId, u8)>,
     /// All faces of the surfaces that touch the other side.
@@ -203,6 +226,24 @@ struct Side {
 /// a quadratic face bulges away from that by a part of its size.
 const TOLERANCE_MARGIN: f64 = 1.5;
 
+/// How far beside a master face, relative to its size, a slave node still lies on it: the
+/// border of a round common face is a polygon of other corners in each of the two meshes,
+/// and the nodes of one lie a little outside the polygon of the other. At most
+/// [`BESIDE_TOLERANCE`] of the tolerance, as a master face may be much larger than the
+/// elements of the slave.
+const BESIDE: f64 = 0.15;
+const BESIDE_TOLERANCE: f64 = 0.5;
+
+/// How far beside a master face, relative to its distance, a slave node across a gap
+/// still lies above it: around an edge of the master, such as between the faces of a pin
+/// in its hole, the closest point is on the edge, and the way to it leans by up to the
+/// angle between the faces.
+const LEANING: f64 = 0.6;
+
+/// The gap, relative to the tolerance, from which a slave node counts as lying across a
+/// gap another body may lie in.
+const TOUCHING: f64 = 1e-6;
+
 /// The master faces and the slave side of the tie between two bodies, `None` where
 /// nothing is tied.
 ///
@@ -210,8 +251,16 @@ const TOLERANCE_MARGIN: f64 = 1.5;
 /// bodies do not cover each other fully, the faces along the border of the common area
 /// reach beyond the master, and their outer nodes have no master within the tolerance:
 /// the solver would leave them out and warn about each tie. So the slave side is the
-/// nodes within the tolerance of the master, as picked nodes where some of the faces'
-/// nodes are not.
+/// nodes lying on the master, as picked nodes where some of the faces' nodes do not.
+///
+/// A node lies on the master within the tolerance above or below one of its faces, not
+/// beside it: a node beside the border of the master, tied to the closest point of the
+/// border, would be held at a distance along the surfaces, which widens the joint by the
+/// tolerance all around and holds the slave against turning about the border.
+///
+/// A node across a gap another body of the compound lies in is not tied either
+/// (`between`, of the node and its closest point of the master): two bodies with a thin
+/// sheet between them are tied to the sheet, not to each other through it.
 ///
 /// A master face lies on the slave when its centre does, too, which a face larger than
 /// the area the slave touches it in does not: a small body on the corner of a large
@@ -222,33 +271,55 @@ fn tied(
     master: Side,
     slave: Vec<(ElementId, u8)>,
     tolerance: f64,
+    between: impl Fn([f64; 3], [f64; 3]) -> bool,
 ) -> Option<(Vec<(ElementId, u8)>, Region)> {
     let mut candidates = master.facing.clone();
     let facing: HashSet<(ElementId, u8)> = master.facing.iter().copied().collect();
     candidates.extend(master.whole.into_iter().filter(|f| !facing.contains(f)));
+    let search = FaceSearch::new(mesh, &candidates);
     let slave = Region::Faces(slave);
     let nodes = slave.nodes(mesh);
-    let points: Vec<[f64; 3]> = (nodes.iter())
-        .map(|&n| mesh.node(n).unwrap_or([f64::INFINITY; 3]))
-        .collect();
-    let nearest = crate::contact_check::nearest_faces(mesh, &candidates, &points, tolerance);
-    let mut faces: BTreeSet<(ElementId, u8)> = master.facing.into_iter().collect();
+    let mut faces: BTreeSet<(ElementId, u8)> = BTreeSet::new();
     let mut near = Vec::new();
-    for (&node, nearest) in nodes.iter().zip(nearest) {
-        if let Some((face, _)) = nearest {
-            faces.insert(candidates[face]);
-            near.push(node);
+    for &node in &nodes {
+        let Some(p) = mesh.node(node) else {
+            continue;
+        };
+        let Some(nearest) = search.nearest(p, tolerance) else {
+            continue;
+        };
+        let beside = (BESIDE * nearest.size).min(BESIDE_TOLERANCE * tolerance);
+        if nearest.lateral > beside.max(LEANING * nearest.distance) {
+            continue;
         }
+        if nearest.distance > TOUCHING * tolerance && between(p, nearest.point) {
+            continue;
+        }
+        faces.insert(candidates[nearest.face]);
+        near.push(node);
     }
     if near.is_empty() {
         return None;
     }
+    // The faces lying on the slave stay masters: the solver ties each node to the closest
+    // point of the curved faces, which may be on a neighbour of the nearest flat one.
+    faces.extend(facing);
     let slave = if near.len() == nodes.len() {
         slave
     } else {
         Region::Nodes(near)
     };
     Some((faces.into_iter().collect(), slave))
+}
+
+/// Whether the body of the skin lies between `p` and `q`: the point half way is in its
+/// material or on its skin. A body only touching one of the two points from the side is
+/// not between.
+fn lies_between(skin: &FaceSearch, p: [f64; 3], q: [f64; 3]) -> bool {
+    let middle = [0, 1, 2].map(|k| 0.5 * (p[k] + q[k]));
+    let gap = (0..3).map(|k| (q[k] - p[k]).powi(2)).sum::<f64>().sqrt();
+    (skin.nearest(middle, gap))
+        .is_some_and(|nearest| nearest.inside || nearest.distance <= 1e-6 * gap)
 }
 
 /// The faces of `faces` not lying on nodes of the elements of `other`: those whose corners
@@ -460,6 +531,55 @@ mod tests {
         }
         let tolerance = tie.position_tolerance.unwrap();
         assert!(gaps(&mesh, tie).iter().all(|&d| d <= tolerance));
+    }
+
+    #[test]
+    fn nodes_beside_the_master_are_not_tied() {
+        // A finely meshed plate half on a block of one element: its nodes a quarter beside
+        // the block are within the tolerance of the border of the block, but not on it.
+        let mut mesh = FeMesh::default();
+        let lower = block(&mut mesh, &[0.0, 4.0], &[0.0, 4.0], &[-4.0, 0.0]);
+        let xs = steps(2.0, 0.25, 16);
+        let upper = block(&mut mesh, &xs, &steps(0.0, 1.0, 4), &[0.0, 0.5]);
+        compound(&mut mesh, vec![lower, upper]);
+        let model = FeModel::default();
+        let (lowered, _) = model.lower_contacts(&mesh);
+        assert_eq!(lowered.ties.len(), 1);
+        let tie = &lowered.ties[0];
+        assert!(tie.position_tolerance.unwrap() > 0.25 * TOLERANCE_MARGIN);
+        let nodes = tie.slave.nodes(&mesh);
+        // The 9 x 5 nodes from x = 2 to 4.
+        assert_eq!(nodes.len(), 45);
+        assert!(nodes.iter().all(|&n| mesh.node(n).unwrap()[0] <= 4.0));
+    }
+
+    #[test]
+    fn bodies_are_not_tied_through_a_body_between_them() {
+        // A thin sheet between two blocks, thinner than the tolerance: the sheet is tied
+        // to both, the blocks are not tied to each other across it.
+        let mut mesh = FeMesh::default();
+        let unit = steps(0.0, 1.0, 4);
+        let left = block(&mut mesh, &[0.0, 4.0], &[0.0, 4.0], &[0.0, 4.0]);
+        let sheet = block(&mut mesh, &[4.0, 4.2], &unit, &unit);
+        let right = block(
+            &mut mesh,
+            &[4.2, 6.2, 8.2],
+            &[0.0, 2.0, 4.0],
+            &[0.0, 2.0, 4.0],
+        );
+        let of_sheet: HashSet<ElementId> = sheet.iter().copied().collect();
+        compound(&mut mesh, vec![left, sheet, right]);
+        let model = FeModel::default();
+        let ties = model.compound_ties(&mesh);
+        assert_eq!(ties.len(), 2, "{ties:?}");
+        for tie in &ties {
+            assert!(tie.region.settings.tolerance.unwrap() > 0.2);
+            let sides = [&tie.region.side_a, &tie.region.side_b];
+            let on_sheet = (sides.iter())
+                .filter(|side| (side.faces(&mesh).iter()).all(|(e, _)| of_sheet.contains(e)))
+                .count();
+            assert_eq!(on_sheet, 1, "{tie:?}");
+        }
     }
 
     #[test]

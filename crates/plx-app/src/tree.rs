@@ -576,6 +576,31 @@ pub fn paint_handover_arrow(painter: &egui::Painter, rect: egui::Rect) {
     );
 }
 
+/// The sign of the solution settings under a step: a stopwatch, for the time and
+/// increments the step runs through.
+pub fn paint_step_settings(painter: &egui::Painter, rect: egui::Rect) {
+    let color = crate::style::adapt(Color32::from_rgb(110, 140, 170));
+    let stroke = egui::Stroke::new(1.4, color);
+    let r = rect.width() * 0.3;
+    let c = egui::pos2(rect.center().x, rect.center().y + rect.height() * 0.06);
+    painter.circle_stroke(c, r, stroke);
+    // The crown on top.
+    let top = c.y - r;
+    painter.line_segment(
+        [egui::pos2(c.x, top), egui::pos2(c.x, top - r * 0.35)],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(c.x - r * 0.3, top - r * 0.4),
+            egui::pos2(c.x + r * 0.3, top - r * 0.4),
+        ],
+        stroke,
+    );
+    // The hand.
+    painter.line_segment([c, egui::pos2(c.x + r * 0.45, c.y - r * 0.55)], stroke);
+}
+
 /// Warning sign next to an item with findings; a click explains them.
 /// The mark of an item another analysis owns: two chain links.
 fn link_sign(ui: &mut Ui) -> Response {
@@ -1831,6 +1856,37 @@ impl Tree<'_> {
     /// ([`plx_model::Handover::summary`]), a note rather than an item. A double click opens
     /// the step, whose dialog shows the whole handover.
     fn handover_row(&mut self, ui: &mut Ui, step: usize, handover: &plx_model::Handover) {
+        let hover = format!(
+            "{}\nPasses on: {}\nDouble-click: open the step.",
+            handover.summary(),
+            handover.passes_on
+        );
+        self.note_row(ui, step, paint_handover_arrow, handover.summary(), hover);
+    }
+
+    /// The second row under a step: what decides how its solution runs, such as its
+    /// duration, frames and increments ([`plx_model::StepSettings`]); the details on hover.
+    fn settings_row(&mut self, ui: &mut Ui, step: usize, settings: &plx_model::StepSettings) {
+        if settings.line.is_empty() {
+            return;
+        }
+        let hover = format!(
+            "{}\nDouble-click: open the step.",
+            settings.details.join("\n")
+        );
+        self.note_row(ui, step, paint_step_settings, settings.line.clone(), hover);
+    }
+
+    /// A note under a step in gray italics, after a painted sign; a double click opens the
+    /// step.
+    fn note_row(
+        &mut self,
+        ui: &mut Ui,
+        step: usize,
+        sign: fn(&egui::Painter, egui::Rect),
+        text: String,
+        hover: String,
+    ) {
         let item = TreeItem::Step(step);
         if self.hidden(&item) {
             return;
@@ -1842,21 +1898,17 @@ impl Tree<'_> {
             let (rect, _) =
                 ui.allocate_exact_size(Vec2::splat(tree_icons::SIZE), egui::Sense::hover());
             if ui.is_rect_visible(rect) {
-                paint_handover_arrow(ui.painter(), rect);
+                sign(ui.painter(), rect);
             }
             ui.add_space(3.0);
-            let text = egui::RichText::new(handover.summary()).italics().weak();
+            let text = egui::RichText::new(text).italics().weak();
             let response = ui
                 .add(
                     egui::Label::new(text)
                         .selectable(false)
                         .sense(egui::Sense::click()),
                 )
-                .on_hover_text(format!(
-                    "{}\nPasses on: {}\nDouble-click: open the step.",
-                    handover.summary(),
-                    handover.passes_on
-                ));
+                .on_hover_text(hover);
             if response.double_clicked() {
                 self.response.open = Some(item);
             }
@@ -2749,6 +2801,7 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 let handover = fe.step_handover(s);
                 tree.branch(ui, TreeItem::Step(s), &label, true, |tree, ui| {
                     tree.handover_row(ui, s, &handover);
+                    tree.settings_row(ui, s, &fe.step_settings(s));
                     let outputs = (step.history_outputs.iter().enumerate())
                         .filter_map(|(i, &id)| Some((i, fe.history_output(id)?)))
                         .map(|(i, h)| (TreeItem::HistoryOutput(s, i), h.name.as_str()))
