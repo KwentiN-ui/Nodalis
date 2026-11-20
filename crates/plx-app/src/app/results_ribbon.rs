@@ -475,11 +475,11 @@ fn lic_options(ui: &mut egui::Ui, lic: &mut plx_results::display::LicOptions) {
             ui.add(
                 numeric::drag_value(&mut lic.grain)
                     .range(LicOptions::GRAIN)
-                    .speed(0.002),
+                    .speed(0.02),
             )
             .on_hover_text(
-                "Size of the noise grains in percent of the model size; never finer than a \
-                 pixel",
+                "Size of the noise grains on the screen in pixels; the noise refines when \
+                 zooming in, so the streaks stay sharp",
             );
             ui.end_row();
             ui.label("Contrast");

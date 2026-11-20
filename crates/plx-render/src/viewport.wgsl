@@ -18,7 +18,7 @@ struct Globals {
     // Colour of the wireframe of the undeformed shape in rgb.
     wireframe: vec4<f32>,
     // x: LIC source, 0 none, 1 vector, 2 tensor; y: principal value of a tensor, 0 to 2 from
-    // the largest, 3 the largest in magnitude; z: grain size in world units; w: size of a pixel in world units.
+    // the largest, 3 the largest in magnitude; z: grain size in pixels; w: size of a pixel in world units.
     lic: vec4<f32>,
     // x: streak length in pixels, y: contrast, z: mix.
     lic_params: vec4<f32>,
@@ -278,6 +278,29 @@ fn hash(cell: vec3<i32>) -> f32 {
     return f32(v.x >> 8u) / 16777215.0;
 }
 
+// Noise fixed on the model, so that it does not swim when the view turns, with grains of
+// about the same size on the screen at any zoom: two grids of the noise with grains a power
+// of two in world units, the coarser one to two times the grain size in pixels and the finer
+// half as large. Zooming in fades the finer grid in and the coarser one out, until the finer one
+// takes the place of the coarser one, so that nothing jumps. The blend keeps the spread of
+// a single grid. Each level hashes with its own seed, so that the grids do not repeat each
+// other.
+fn lic_noise(world: vec3<f32>) -> f32 {
+    let target_size = max(globals.lic.z, 1.0) * globals.lic.w;
+    let level = log2(target_size);
+    let coarse_level = floor(level) + 1.0;
+    let coarse = exp2(coarse_level);
+    let fine = 0.5 * coarse;
+    // Weight of the coarse grid: 1 where its grains are the grain size, 0 where they are
+    // twice it and the fine grid alone shows.
+    let wc = level - floor(level);
+    let wf = 1.0 - wc;
+    let a = hash(vec3<i32>(floor(world / fine)) ^ vec3<i32>(i32(coarse_level) * 7919));
+    let b = hash(vec3<i32>(floor(world / coarse)) ^ vec3<i32>((i32(coarse_level) + 1) * 7919));
+    let mixed = wf * a + wc * b - 0.5;
+    return mixed / sqrt(wf * wf + wc * wc) + 0.5;
+}
+
 fn lic_data(world: vec3<f32>, normal: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> vec4<f32> {
     let source = source_direction(a, b);
     // The streaks follow the direction within the surface; across it there is nothing to
@@ -291,9 +314,7 @@ fn lic_data(world: vec3<f32>, normal: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> 
     let projected = globals.view_proj * vec4<f32>(along, 0.0);
     let screen = vec2<f32>(projected.x * size.x, -projected.y * size.y);
     let len = length(screen);
-    // Noise fixed on the model, so that it does not swim when the view turns.
-    let grain = max(globals.lic.z, globals.lic.w);
-    let noise = hash(vec3<i32>(floor(world / grain)));
+    let noise = lic_noise(world);
     if mask <= 0.0 || len <= 0.0 {
         return vec4<f32>(0.0, 0.0, 0.0, noise);
     }
