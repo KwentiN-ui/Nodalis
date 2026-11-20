@@ -140,7 +140,9 @@ pub enum MeshError {
 
 /// Finite element mesh with nodes, elements, sets and parts.
 ///
-/// Set, surface and part names are stored upper case, because the solver treats them case-insensitively.
+/// Part names are any text, as the user or the CAD file gives them; sets and surfaces read
+/// from an input file are named upper case. Names are unique regardless of case, see
+/// [`FeMesh::name_in_use`]; the solver never sees them, the export derives its own labels.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(try_from = "MeshFile", into = "MeshFile")]
 pub struct FeMesh {
@@ -757,7 +759,7 @@ impl FeMesh {
         self.parts.iter().map(|p| p.id).collect()
     }
 
-    /// Whether a part, set or surface already has this name; the solver ignores case.
+    /// Whether a part, set or surface already has this name, regardless of case.
     pub fn name_in_use(&self, name: &str) -> bool {
         let same = |n: &String| n.eq_ignore_ascii_case(name);
         self.parts.iter().any(|p| same(&p.name))

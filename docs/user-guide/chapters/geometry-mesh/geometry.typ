@@ -18,9 +18,9 @@ selected at once. Gmsh with OpenCASCADE reads the files, so Gmsh must be availab
 - Default element sizes are derived from the size of the geometry: maximum 5 % and minimum 0.1 %
   of the bounding box diagonal.
 - Parts keep the names they have in the CAD program, as STEP files from Onshape, SolidWorks or
-  FreeCAD carry them, for solids and for surface parts alike. The names are made fit for
-  CalculiX: upper case, letters, digits, `-` and `_`, German umlauts written out (`Stütze`
-  becomes `STUETZE`). A name that is already taken gets a number appended (`OBEN-2`). Parts
+  FreeCAD carry them, for solids and for surface parts alike, exactly as written there, with
+  umlauts, blanks and case (`Stütze`). A name that is already taken, regardless of case, gets a
+  number appended (`oben-2`). Parts
   without a name in the file are called `SOLID-1`, `SHELL-1` or `LINE-1`.
 - Curves that lie outside any face become line parts. The pieces of a composite curve, a
   straight piece that runs on into an arc for example, stay one line part: pieces that meet end

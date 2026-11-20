@@ -224,6 +224,29 @@ impl MeshCopy {
         }
     }
 
+    /// The copy without the geometry objects `ids`, which the target leaves out, see
+    /// [`left_out`]: their shapes, numbered anew by Gmsh as on deleting them, and their meshes.
+    pub fn leave_out(&mut self, ids: &[plx_model::Id]) -> Result<(), String> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let cad: Vec<String> = (self.geometry.as_ref())
+            .map(|g| g.part_names_of(ids))
+            .unwrap_or_default();
+        if let Some(geometry) = self.geometry.as_mut()
+            && !cad.is_empty()
+        {
+            let (smaller, tags) =
+                plx_mesher::delete_parts_renumbered(geometry, &cad).map_err(|e| e.to_string())?;
+            self.mesh.cad = self.mesh.cad.renumbered(&tags);
+            self.geometry = smaller;
+        }
+        self.mesh.remove_bodies(ids);
+        self.origins.reconcile(&self.mesh);
+        self.element_types.retain(|t| !ids.contains(&t.part));
+        Ok(())
+    }
+
     pub fn of(data: Data) -> Self {
         Self {
             geometry: data.geometry.cloned().map(Geometry::without_operations),
@@ -533,6 +556,31 @@ pub fn output_path(link: &Link) -> Vec<String> {
     } else {
         link.item.clone()
     }
+}
+
+/// The geometry objects that a Geometry link of a whole source no longer brings, by id: the
+/// target deleted them, see [`MeshCopy::leave_out`].
+pub fn left_out(link: &Link) -> Vec<plx_model::Id> {
+    match link.item.as_slice() {
+        [cell] if cell == GEOMETRY => (link.excluded.iter())
+            .filter_map(|key| key.parse().ok())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The geometry objects the source of a Geometry link has, by id: its parts of the CAD
+/// geometry and its meshes without shapes.
+pub fn objects(data: Data) -> Vec<plx_model::Id> {
+    let mut ids: Vec<plx_model::Id> = (data.geometry.iter())
+        .flat_map(|g| g.part_names.iter().filter_map(|n| g.part_id(n)))
+        .collect();
+    for id in data.mesh.parts.iter().flat_map(plx_model::part_objects) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
 }
 
 /// Whether the link takes one part of the geometry of its source, `["Geometry", part]`, into
@@ -1409,7 +1457,18 @@ pub fn take_objects(
     if !own.is_empty() {
         incoming.remove_bodies(&own);
     }
-    linked.reconcile(&incoming);
+    // A mesh the source has no origin of, as a mesh block makes it, is a mesh without
+    // shapes that the link brings, as an imported mesh of the source would be.
+    for id in linked.reconcile(&incoming) {
+        let suppressed = origins.is_suppressed(id);
+        linked.insert(
+            id,
+            PartOrigin::Imported {
+                suppressed,
+                linked: true,
+            },
+        );
+    }
     // Of what it had, its own meshes of parts still there that the link brings none of, and
     // the meshes it imported itself.
     let brought = |id: plx_model::Id| linked.get(id).is_some();
