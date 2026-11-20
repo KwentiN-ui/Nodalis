@@ -316,8 +316,50 @@ pub fn facing_faces(
     distance: f64,
     angle_deg: f64,
 ) -> (Vec<ElementFace>, Vec<ElementFace>) {
+    SurfaceFaces::new(mesh, skins).facing(mesh, a, b, distance, angle_deg)
+}
+
+/// The faces of all surface patches of a mesh, found once for asking about many pairs of
+/// sides.
+pub struct SurfaceFaces(Vec<PatchFace>);
+
+impl SurfaceFaces {
+    pub fn new(mesh: &FeMesh, skins: &[PartSkin]) -> Self {
+        Self(patch_faces(mesh, skins))
+    }
+
+    /// [`surface_faces`] of the patches.
+    pub fn of(&self, surfaces: &BTreeSet<SurfaceId>) -> Vec<ElementFace> {
+        let mut faces: Vec<ElementFace> = (self.0.iter())
+            .filter(|f| surfaces.contains(&f.surface))
+            .map(|f| (f.element, f.face))
+            .collect();
+        faces.sort_unstable();
+        faces
+    }
+
+    /// [`facing_faces`] of two sides.
+    pub fn facing(
+        &self,
+        mesh: &FeMesh,
+        a: &BTreeSet<SurfaceId>,
+        b: &BTreeSet<SurfaceId>,
+        distance: f64,
+        angle_deg: f64,
+    ) -> (Vec<ElementFace>, Vec<ElementFace>) {
+        facing(&self.0, mesh, a, b, distance, angle_deg)
+    }
+}
+
+fn facing(
+    all: &[PatchFace],
+    mesh: &FeMesh,
+    a: &BTreeSet<SurfaceId>,
+    b: &BTreeSet<SurfaceId>,
+    distance: f64,
+    angle_deg: f64,
+) -> (Vec<ElementFace>, Vec<ElementFace>) {
     let coords = mesh.coords();
-    let all = patch_faces(mesh, skins);
     let side = |surfaces: &BTreeSet<SurfaceId>| -> Vec<&PatchFace> {
         all.iter()
             .filter(|f| surfaces.contains(&f.surface))

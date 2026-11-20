@@ -204,17 +204,31 @@ impl FeMesh {
         parts: &[usize],
         transform: &MeshTransform,
     ) -> FaceRenumbering {
-        for id in self.part_nodes(parts) {
+        let elements: BTreeSet<ElementId> = (parts.iter())
+            .filter_map(|&p| self.parts.get(p))
+            .flat_map(|p| p.elements.iter().copied())
+            .collect();
+        self.transform_elements(&elements, transform)
+    }
+
+    /// Moves the nodes of the elements by the transform, as [`Self::transform_parts`] does
+    /// those of parts: e.g. of some bodies of a compound part.
+    pub fn transform_elements(
+        &mut self,
+        elements: &BTreeSet<ElementId>,
+        transform: &MeshTransform,
+    ) -> FaceRenumbering {
+        let nodes: BTreeSet<NodeId> = (elements.iter())
+            .filter_map(|&e| self.element(e))
+            .flat_map(|e| e.nodes.iter().copied())
+            .collect();
+        for id in nodes {
             if let Some(index) = self.node_index(id) {
                 self.coords[index] = transform.apply(self.coords[index]);
             }
         }
         let mut renumbering = FaceRenumbering::new();
         if transform.inverts() {
-            let elements: BTreeSet<ElementId> = (parts.iter())
-                .filter_map(|&p| self.parts.get(p))
-                .flat_map(|p| p.elements.iter().copied())
-                .collect();
             for element in &mut self.elements {
                 if elements.contains(&element.id) {
                     let faces = element.invert();

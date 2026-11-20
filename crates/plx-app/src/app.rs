@@ -1447,6 +1447,7 @@ pub(crate) fn merge_part_meshes(
     // its own mesh; joined again after.
     mesh.split_compounds();
     let space = model.fe.properties.space;
+    let compounds = geometry.compound_members();
     let mut meshes = Vec::with_capacity(generated.meshes.len());
     for mut part in generated.meshes {
         space
@@ -1454,7 +1455,7 @@ pub(crate) fn merge_part_meshes(
             .map_err(|error| format!("Meshing failed: {error}"))?;
         // The mesh operations are part of making the mesh: a part meshed anew gets them
         // again rather than losing them.
-        model.fe.apply_mesh_operations(&mut part.mesh);
+        model.fe.apply_mesh_operations(&mut part.mesh, &compounds);
         // In shapes a link brings, a part meshed here is meshed here from now on, also when
         // the link brings a mesh of it later.
         if let Some(own) = model.geometry.as_mut().filter(|g| g.from_link) {
@@ -1498,7 +1499,7 @@ pub(crate) fn merge_part_meshes(
     }
     // All at once: merging part by part would copy the whole mesh for each part.
     mesh = plx_mesher::merge_parts(&mesh, meshes);
-    mesh.compose_compounds(&geometry.compound_members());
+    mesh.compose_compounds(&compounds);
     mesh.unshare_parts();
     model.set_mesh(mesh);
     let applied: Vec<&str> = (model.fe.mesh_operations.iter())
@@ -1539,7 +1540,12 @@ pub(crate) fn apply_compounds(model: &mut Model, before: &[plx_model::CompoundPa
     }
     let after = geometry.compounds.clone();
     let members = geometry.compound_members();
+    let before_members: Vec<(String, Vec<String>)> = (before.iter())
+        .map(|c| (c.name.clone(), c.parts.clone()))
+        .collect();
     model.edit_mesh(|mesh, fe| {
+        // The mesh operations name what they moved, see below.
+        let operations = fe.mesh_operations.clone();
         mesh.split_compounds();
         for old in before {
             if after.iter().any(|a| a.name == old.name) {
@@ -1560,6 +1566,7 @@ pub(crate) fn apply_compounds(model: &mut Model, before: &[plx_model::CompoundPa
                 fe.rename_part(part, &compound.name);
             }
         }
+        fe.follow_compounds_in_mesh_operations(operations, &before_members, &members);
     });
 }
 

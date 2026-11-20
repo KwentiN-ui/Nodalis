@@ -838,6 +838,18 @@ impl FeModel {
         }
     }
 
+    /// Of each of the regions, of the model or not yet, whether its side A is the master.
+    pub(crate) fn masters_of(&self, regions: &[ContactRegion], mesh: &FeMesh) -> Vec<bool> {
+        let properties = self.properties_of_elements(mesh, regions);
+        let formulation = self.contact_formulation().0;
+        (regions.iter())
+            .map(|region| {
+                self.resolve_with(region, mesh, &properties, formulation)
+                    .a_is_master
+            })
+            .collect()
+    }
+
     /// What a contact region, of the model or not yet, becomes in the input file and why.
     pub fn resolve_contact(&self, region: &ContactRegion, mesh: &FeMesh) -> Resolved {
         let properties = self.properties_of_elements(mesh, [region]);
@@ -1103,6 +1115,12 @@ fn unique_name(name: &str, taken: &[String]) -> String {
 /// The element faces of both regions, or the first region if either has none.
 fn union(a: &Region, b: &Region, mesh: &FeMesh) -> Region {
     let (fa, fb) = (a.faces(mesh), b.faces(mesh));
+    // A slave side of picked nodes (the bodies of a compound part where only some nodes of
+    // their faces lie on the master) has no faces: the nodes of both are tied.
+    if matches!(a, Region::Nodes(_)) || matches!(b, Region::Nodes(_)) {
+        let nodes: BTreeSet<NodeId> = a.nodes(mesh).into_iter().chain(b.nodes(mesh)).collect();
+        return Region::Nodes(nodes.into_iter().collect());
+    }
     if fa.is_empty() || fb.is_empty() {
         return a.clone();
     }

@@ -364,19 +364,23 @@ impl MeshToolDialog {
                 {
                     return Err(format!("The name {name} is already used."));
                 }
-                // The parts in the order of the mesh.
-                let parts: Vec<String> = (model.parts.iter())
-                    .map(|p| p.name.clone())
+                // The parts in the order of the mesh; bodies of compound parts it names
+                // since they were joined stay.
+                let parts: Vec<String> = (model.mesh().parts.iter())
+                    .flat_map(|p| std::iter::once(&p.name).chain(p.bodies.iter().map(|b| &b.name)))
                     .filter(|p| self.parts.contains(p))
+                    .cloned()
                     .collect();
                 let operation = MeshOperation {
                     name: name.clone(),
                     parts,
                     kind: MeshOperationKind::Transform(self.transform.transform()),
                 };
-                let nodes = model
-                    .mesh()
-                    .part_nodes(&operation.part_indices(model.mesh()))
+                let mesh = model.mesh();
+                let nodes = (operation.elements(mesh, &[]).iter())
+                    .filter_map(|&e| mesh.element(e))
+                    .flat_map(|e| e.nodes.iter().copied())
+                    .collect::<std::collections::BTreeSet<_>>()
                     .len();
                 if nodes == 0 {
                     return Err("The parts have no nodes.".into());
@@ -666,6 +670,122 @@ mod tests {
         assert!((min_x(&model, 0) - start).abs() < 1e-9);
         remesh(&mut model, None);
         assert!((min_x(&model, 0) - start).abs() < 1e-9);
+    }
+
+    /// A transform of a compound part names the compound, while Gmsh meshes the parts it
+    /// joins: meshed again, all of it or one of its parts, the compound is moved again, and
+    /// deleting the transform moves it back to where the geometry has it, not beyond.
+    #[test]
+    fn a_transform_of_a_compound_part_stays_when_it_is_meshed_again() {
+        let Some(mut model) = meshed_blocks() else {
+            return;
+        };
+        let start = [min_x(&model, 0), min_x(&model, 1)];
+        let geometry = model.geometry.as_mut().unwrap();
+        geometry.compounds.push(plx_model::CompoundPart {
+            name: "COMPOUND-1".into(),
+            parts: vec!["SOLID-1".into(), "SOLID-2".into()],
+        });
+        crate::app::apply_compounds(&mut model, &[]);
+        assert_eq!(model.parts.len(), 1);
+        let body_min_x = |model: &Model, body: usize| {
+            let part = &model.mesh().parts[0];
+            let elements = &part.bodies[body].elements;
+            (elements.iter())
+                .flat_map(|&e| model.mesh().element(e).unwrap().nodes.clone())
+                .map(|n| model.mesh().node(n).unwrap()[0])
+                .fold(f64::INFINITY, f64::min)
+        };
+        let moved = |model: &Model, by: f64| {
+            (0..2).all(|b| (body_min_x(model, b) - start[b] - by).abs() < 1e-9)
+        };
+        let mut dialog = MeshToolDialog::new(MeshTool::Transform(vec![0]), &model);
+        dialog.transform.translation = [100.0, 0.0, 0.0];
+        dialog.apply(&mut model).unwrap();
+        assert_eq!(model.fe.mesh_operations[0].parts, ["COMPOUND-1"]);
+        assert!(moved(&model, 100.0));
+
+        remesh(&mut model, Some(vec!["SOLID-1".into()]));
+        assert!(moved(&model, 100.0), "one body meshed again");
+        remesh(&mut model, None);
+        assert!(moved(&model, 100.0), "the compound meshed again");
+
+        let operations = Vec::new();
+        model.edit_mesh(|mesh, fe| fe.set_mesh_operations(mesh, operations));
+        assert!(moved(&model, 0.0), "deleted, back at the geometry");
+        remesh(&mut model, None);
+        assert!(moved(&model, 0.0));
+    }
+
+    /// A transform of one part keeps moving that part alone when it joins a compound part
+    /// with another, and when it leaves the compound again; meshed again it is moved again,
+    /// deleted it goes back to where the geometry has it.
+    #[test]
+    fn a_transform_of_a_part_stays_on_it_in_and_out_of_a_compound() {
+        let Some(mut model) = meshed_blocks() else {
+            return;
+        };
+        let start = [min_x(&model, 0), min_x(&model, 1)];
+        let mut dialog = MeshToolDialog::new(MeshTool::Transform(vec![0]), &model);
+        dialog.transform.translation = [100.0, 0.0, 0.0];
+        dialog.apply(&mut model).unwrap();
+        let body_min_x = |model: &Model, name: &str| {
+            let mesh = model.mesh();
+            let elements: Vec<u32> = (mesh.parts.iter())
+                .flat_map(|p| {
+                    let bodies = p.bodies.iter().filter(|b| b.name == name);
+                    let own = (p.name == name).then_some(&p.elements);
+                    bodies.map(|b| &b.elements).chain(own).flatten()
+                })
+                .copied()
+                .collect();
+            assert!(!elements.is_empty(), "{name} has elements");
+            (elements.iter())
+                .flat_map(|&e| mesh.element(e).unwrap().nodes.clone())
+                .map(|n| mesh.node(n).unwrap()[0])
+                .fold(f64::INFINITY, f64::min)
+        };
+        let moved = |model: &Model, by: [f64; 2]| {
+            let at = [body_min_x(model, "SOLID-1"), body_min_x(model, "SOLID-2")];
+            (0..2).all(|b| (at[b] - start[b] - by[b]).abs() < 1e-9)
+        };
+        assert!(moved(&model, [100.0, 0.0]));
+
+        // Joined with the other block.
+        let geometry = model.geometry.as_mut().unwrap();
+        geometry.compounds.push(plx_model::CompoundPart {
+            name: "COMPOUND-1".into(),
+            parts: vec!["SOLID-1".into(), "SOLID-2".into()],
+        });
+        crate::app::apply_compounds(&mut model, &[]);
+        assert_eq!(model.fe.mesh_operations[0].parts, ["SOLID-1"]);
+        assert!(moved(&model, [100.0, 0.0]));
+        remesh(&mut model, None);
+        assert!(moved(&model, [100.0, 0.0]), "meshed again in the compound");
+
+        // The compound transformed as well, then dissolved: both transforms stay on what
+        // they moved.
+        let mut dialog = MeshToolDialog::new(MeshTool::Transform(vec![0]), &model);
+        dialog.transform.translation = [10.0, 0.0, 0.0];
+        dialog.apply(&mut model).unwrap();
+        assert!(moved(&model, [110.0, 10.0]));
+        let before = model.geometry.as_ref().unwrap().compounds.clone();
+        model.geometry.as_mut().unwrap().compounds.clear();
+        crate::app::apply_compounds(&mut model, &before);
+        assert_eq!(model.parts.len(), 2);
+        assert_eq!(model.fe.mesh_operations[1].parts, ["SOLID-1", "SOLID-2"]);
+        remesh(&mut model, None);
+        assert!(
+            moved(&model, [110.0, 10.0]),
+            "meshed again without the compound"
+        );
+
+        // Deleted, the first transform takes back only its own part.
+        let operations = vec![model.fe.mesh_operations[1].clone()];
+        model.edit_mesh(|mesh, fe| fe.set_mesh_operations(mesh, operations));
+        assert!(moved(&model, [10.0, 10.0]));
+        remesh(&mut model, None);
+        assert!(moved(&model, [10.0, 10.0]));
     }
 
     /// The parts of the FE model: the meshed parts of the mesh and the unmeshed ones.

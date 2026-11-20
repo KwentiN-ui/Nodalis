@@ -2830,7 +2830,8 @@ fn tie(sets: &mut Sets, tie: &Tie) -> Result<ConstraintItem, WriteError> {
             .collect();
         let originals = originals.into_iter().collect();
         sets.node_surface(&tie.name, "Slave", &Region::Nodes(originals))?
-    } else if membrane_edges(sets.mesh, slave_region) {
+    } else if membrane_edges(sets.mesh, slave_region) || matches!(slave_region, Region::Nodes(_)) {
+        // Picked nodes: of the bodies of a compound part those that lie on the master.
         sets.node_surface(&tie.name, "Slave", slave_region)?
     } else {
         sets.surface(&tie.name, "Slave", slave_region)?
