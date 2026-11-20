@@ -76,6 +76,9 @@ pub enum TreeItem {
     DefinedField(usize, usize),
     /// Features of the FE model or of the shown results, by index.
     ReferencePoint(usize),
+    /// The global coordinate system, first among the coordinate systems; it can be hidden,
+    /// but not edited, renamed or deleted.
+    GlobalCoordinateSystem,
     CoordinateSystem(usize),
     Plane(usize),
     /// A result path of the shown results, by index.
@@ -812,6 +815,7 @@ fn has_properties(item: &TreeItem) -> bool {
             | TreeItem::StepGroup(..)
             | TreeItem::FieldOutputs
             | TreeItem::HistoryField(..)
+            | TreeItem::GlobalCoordinateSystem
     )
 }
 
@@ -984,6 +988,7 @@ fn shows_symbol_of(group: &TreeItem, item: &TreeItem) -> bool {
         | (TreeItem::StepGroup(s, "Loads"), TreeItem::Load(t, _)) => s == t,
         (TreeItem::Group(REFERENCE_POINTS), TreeItem::ReferencePoint(_))
         | (TreeItem::Group(COORDINATE_SYSTEMS), TreeItem::CoordinateSystem(_))
+        | (TreeItem::Group(COORDINATE_SYSTEMS), TreeItem::GlobalCoordinateSystem)
         | (TreeItem::Group(PLANES), TreeItem::Plane(_)) => true,
         _ => false,
     }
@@ -1200,6 +1205,10 @@ pub const LINKED_MESH_TIP: &str = "Takes the mesh of the part from the link that
     part again, in place of the mesh made here.";
 
 /// What a compound part is, for its tooltips.
+/// Tooltip of the global coordinate system in the tree.
+const GLOBAL_SYSTEM_TIP: &str = "The coordinate system of the model, with its triad at the \
+                                 origin. Hide it from the context menu.";
+
 pub const COMPOUND_TIP: &str = "Joins the parts into one part of the FE model. Each is \
     meshed on its own; where they touch, the solver input ties them, as a bonded contact \
     does.";
@@ -1458,6 +1467,17 @@ impl Tree<'_> {
                     {
                         self.response.suppress = Some((suppressed, false));
                     }
+                }
+            });
+        }
+        if item == TreeItem::GlobalCoordinateSystem {
+            response = response.on_hover_text(GLOBAL_SYSTEM_TIP);
+            let visible = self.symbols.get(&item) != Some(&false);
+            response.context_menu(|ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                let label = if visible { "Hide" } else { "Show" };
+                if ui.button(label).clicked() {
+                    (self.response.symbol_visibility).push((item.clone(), !visible));
                 }
             });
         }
@@ -1740,7 +1760,9 @@ impl Tree<'_> {
             TreeItem::CoordinateSystem(i) if self.moving_systems.contains(i) => {
                 TreeIcon::MovingCoordinateSystem
             }
-            TreeItem::CoordinateSystem(_) => TreeIcon::CoordinateSystem,
+            TreeItem::CoordinateSystem(_) | TreeItem::GlobalCoordinateSystem => {
+                TreeIcon::CoordinateSystem
+            }
             _ => dots,
         }
     }
@@ -2391,14 +2413,14 @@ impl Tree<'_> {
         });
     }
 
-    /// The features: reference points and coordinate systems, and planes.
+    /// The features: reference points and coordinate systems, and planes. The global
+    /// coordinate system is always there, so the features are too.
     fn features(&mut self, ui: &mut Ui, fe: &FeModel) {
         let open = !fe.reference_points.is_empty()
             || !fe.coordinate_systems.is_empty()
             || !fe.planes.is_empty();
-        if !open {
-            return;
-        }
+        self.symbols
+            .insert(TreeItem::GlobalCoordinateSystem, !fe.global_system_hidden);
         // Hidden features have no mark in the 3D view unless selected, like hidden symbols.
         for (i, point) in fe.reference_points.iter().enumerate() {
             self.symbols
@@ -2432,8 +2454,11 @@ impl Tree<'_> {
                     .filter(|(_, c)| c.moves(&fe.coordinate_systems))
                     .map(|(i, _)| i)
                     .collect();
-                let systems = (labels.iter().enumerate())
-                    .map(|(i, label)| (TreeItem::CoordinateSystem(i), label.as_str()))
+                let systems = std::iter::once((TreeItem::GlobalCoordinateSystem, GLOBAL_SYSTEM))
+                    .chain(
+                        (labels.iter().enumerate())
+                            .map(|(i, label)| (TreeItem::CoordinateSystem(i), label.as_str())),
+                    )
                     .collect();
                 tree.container(ui, COORDINATE_SYSTEMS, systems);
                 let planes = (fe.planes.iter().enumerate())
@@ -2826,6 +2851,8 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
 pub const HOT_SPOTS: &str = "Hot Spot Stresses";
 pub const REFERENCE_POINTS: &str = "Reference Points";
 pub const COORDINATE_SYSTEMS: &str = "Coordinate Systems";
+/// Name of the global coordinate system in the tree.
+pub const GLOBAL_SYSTEM: &str = "Global";
 pub const PLANES: &str = "Planes";
 /// Container of the result paths in the Results tree.
 pub const PATHS: &str = "Paths";

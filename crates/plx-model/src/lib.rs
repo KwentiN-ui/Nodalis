@@ -234,6 +234,11 @@ pub struct FeModel {
     /// The features: points and coordinate systems other items refer to by id.
     pub reference_points: Vec<ReferencePoint>,
     pub coordinate_systems: Vec<CoordinateSystem>,
+    /// The global coordinate system, listed first among the coordinate systems, has its
+    /// triad at the origin hidden in the 3D view. It is no item of its own: it cannot be
+    /// renamed or deleted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub global_system_hidden: bool,
     pub planes: Vec<Plane>,
     /// Results on planes; not part of the input file.
     pub result_planes: Vec<ResultPlane>,

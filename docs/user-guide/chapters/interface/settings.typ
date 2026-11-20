@@ -17,11 +17,12 @@ portable Windows version in the folder `Settings` next to `nodalis.exe` (@portab
     dark mode of the operating system and switches along with it. Icons, tree symbols, plots and
     annotations change with the theme; exported SVG plots and the images of the user guide stay
     light.],
-  [Global axes at the origin], [Draws a coordinate triad at the global origin (default on).],
   [Coordinate triad in the corner], [The clickable triad in the lower right (default on).],
   [Scale bar], [Shows a scale bar (default on).],
 )
 
+The triad at the global origin is not set here: it is the #ui("Global") coordinate system of the
+tree, hidden and shown from its context menu (@global-coordinate-system).
 Shell thickness, beam profiles and linked items are not set here: switch them on the #ui("View")
 tab, see @shell-section, @beam-profiles and @links. Those toggles are stored with the settings.
 

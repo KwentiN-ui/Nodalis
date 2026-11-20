@@ -68,8 +68,6 @@ impl Settings {
 pub struct Graphics {
     /// Light or dark colours, or as the operating system is set.
     pub theme: crate::style::ThemeChoice,
-    /// Axis triad at the global origin of the model.
-    pub global_axes: bool,
     /// Axis triad in the top right corner showing the view direction.
     pub view_triad: bool,
     pub scale_bar: bool,
@@ -92,7 +90,6 @@ impl Default for Graphics {
     fn default() -> Self {
         Self {
             theme: crate::style::ThemeChoice::System,
-            global_axes: true,
             view_triad: true,
             scale_bar: true,
             shell_thickness: true,
@@ -572,13 +569,16 @@ impl SettingsWindow {
                 .response
                 .on_hover_text("System follows the light or dark mode of the operating system.");
                 ui.add_space(4.0);
-                ui.checkbox(&mut g.global_axes, "Global axes at the origin");
                 ui.checkbox(
                     &mut g.view_triad,
                     "Coordinate triad in the corner (view direction)",
                 );
                 ui.checkbox(&mut g.scale_bar, "Scale bar");
                 ui.weak("Shell thickness, beam profiles and linked items are set on the View tab.");
+                ui.weak(
+                    "The axes at the global origin are the Global coordinate system of the \
+                     tree; hide them from its context menu.",
+                );
             }
             Page::PostProcessing => {
                 let p = &mut self.draft.post;
@@ -931,7 +931,6 @@ mod tests {
         let settings: Settings = ron::from_str("(post: (min_label: true))").unwrap();
         assert!(settings.post.min_label);
         assert!(settings.post.max_label);
-        assert!(settings.graphics.global_axes);
         assert!(settings.graphics.shell_thickness);
         assert!(settings.updates.check_at_startup);
         assert!(settings.graphics.checklist);

@@ -400,6 +400,7 @@ impl FeModel {
         FeModel {
             reference_points: self.reference_points.clone(),
             coordinate_systems: self.coordinate_systems.clone(),
+            global_system_hidden: self.global_system_hidden,
             planes: self.planes.clone(),
             ..FeModel::default()
         }
@@ -409,6 +410,7 @@ impl FeModel {
     pub fn same_shared_features(&self, other: &FeModel) -> bool {
         self.reference_points == other.reference_points
             && self.coordinate_systems == other.coordinate_systems
+            && self.global_system_hidden == other.global_system_hidden
             && self.planes == other.planes
     }
 
@@ -417,6 +419,7 @@ impl FeModel {
     pub fn set_shared_features(&mut self, source: &FeModel) {
         self.reference_points = source.reference_points.clone();
         self.coordinate_systems = source.coordinate_systems.clone();
+        self.global_system_hidden = source.global_system_hidden;
         self.planes = source.planes.clone();
     }
 
@@ -459,6 +462,7 @@ impl FeModel {
             &converted.coordinate_systems,
             |c| c.id,
         );
+        self.global_system_hidden = after.global_system_hidden;
         self.planes = merge(
             &self.planes,
             &before.planes,

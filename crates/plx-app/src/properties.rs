@@ -178,6 +178,7 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
         | TreeItem::HotSpot(_)
         | TreeItem::ReferencePoint(_)
         | TreeItem::CoordinateSystem(_)
+        | TreeItem::GlobalCoordinateSystem
         | TreeItem::ResultPath(_)
         | TreeItem::Plane(_)
         | TreeItem::ResultPlane(_)

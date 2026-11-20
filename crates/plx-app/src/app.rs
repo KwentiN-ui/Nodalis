@@ -777,7 +777,7 @@ impl AnalysisWindow {
     pub fn set_settings(&mut self, settings: &Settings) {
         if self.workbench.settings != *settings {
             self.workbench.settings = settings.clone();
-            // The overlay (global axes, labels, status block) is built from the settings.
+            // The overlay (labels, status block) is built from the settings.
             self.workbench.update_contour();
         }
     }
@@ -3069,6 +3069,12 @@ impl Workbench {
             }
             if view == TreeView::Results {
                 self.share_feature_edit(self.current_result, &before);
+            }
+            // The triad of the global coordinate system is part of the overlay.
+            if (response.symbol_visibility.iter())
+                .any(|(item, _)| *item == TreeItem::GlobalCoordinateSystem)
+            {
+                self.update_contour();
             }
         }
         if let (Some(item), Some(model)) = (response.swap_master_slave, self.model.as_mut()) {
@@ -8539,6 +8545,13 @@ impl Workbench {
             (legend.as_ref()).map(|legend| plx_render::ContourPalette::new(&legend.palette()));
         self.viewport.options.lic = view.and_then(crate::lic::display);
         let (graphics, post) = (&self.settings.graphics, &self.settings.post);
+        let global_hidden = match self.tree_view {
+            TreeView::Geometry => self
+                .model
+                .as_ref()
+                .is_some_and(|m| m.fe.global_system_hidden),
+            _ => model.fe.global_system_hidden,
+        };
         // The open transformation dialog shows the points and axis of the selected item.
         let transformation = (self.transformation_dialog.as_ref())
             .filter(|d| self.tree_view == TreeView::Results && d.result == self.current_result);
@@ -8580,7 +8593,9 @@ impl Workbench {
                 Some([min, _]) => section_marker("Min", min),
                 None => marker("Min", v.minimum()),
             }),
-            global_origin: graphics.global_axes.then(|| model.global_origin()),
+            // The global coordinate system is hidden from the Coordinate Systems of the
+            // tree; the geometry follows the FE model.
+            global_origin: (!global_hidden).then(|| model.global_origin()),
             show_scale_bar: graphics.scale_bar,
             length_unit: units.unit(plx_model::Quantity::Length),
             length_factor: Some(

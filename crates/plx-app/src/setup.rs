@@ -5288,9 +5288,13 @@ fn active_mut<'a>(fe: &'a mut FeModel, item: &TreeItem) -> Option<&'a mut bool> 
     }
 }
 
-/// Shows or hides the symbol of a constraint, boundary condition or load in the 3D view;
-/// returns false for other items.
+/// Shows or hides the symbol of a constraint, boundary condition, load or feature, or the
+/// triad of the global coordinate system, in the 3D view; returns false for other items.
 pub fn set_visible(fe: &mut FeModel, item: &TreeItem, visible: bool) -> bool {
+    if *item == TreeItem::GlobalCoordinateSystem {
+        fe.global_system_hidden = !visible;
+        return true;
+    }
     let shown = match *item {
         TreeItem::BoundaryCondition(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.boundary_conditions.get_mut(i))
