@@ -477,7 +477,7 @@ mod tests {
         assert!(model.parts[0].suppressed);
         let active = model.active();
         assert_eq!(active.mesh().element_count(), 0);
-        assert_eq!(active.left_out(), ["PART-1"]);
+        assert_eq!(active.left_out(), [model.mesh().parts[0].id]);
         // The mesh is kept for when it is unsuppressed.
         assert_eq!(model.mesh().element_count(), 1);
     }

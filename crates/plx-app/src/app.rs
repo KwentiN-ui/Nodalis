@@ -181,9 +181,9 @@ struct Workbench {
     mesh_overlay_job: Option<MeshOverlayJob>,
     /// Open dialog creating or editing an item of the FE model.
     editor: Option<Editor>,
-    /// The step new boundary conditions, loads, outputs and defined fields go into, by name;
-    /// `None` or a name no longer there means the last step.
-    active_step: Option<String>,
+    /// The step new boundary conditions, loads, outputs and defined fields go into, by id;
+    /// `None` or a step no longer there means the last step.
+    active_step: Option<plx_model::Id<plx_model::Step>>,
     /// The selection the active step last followed, so that it follows only a new one.
     step_selection: Option<TreeItem>,
     /// The open editors of the properties panel, the newest last; only one stays open.
@@ -1773,8 +1773,9 @@ impl AnalysisWindow {
             }
             if let Some(Show { view, step }) = self.show_when_loaded.take() {
                 self.workbench.set_tree_view(view);
-                if let (Some(name), Some(model)) = (step, &self.workbench.model)
-                    && let Some(i) = model.fe.steps.iter().position(|s| s.name == name)
+                if let (Some(step), Some(model)) = (step, &self.workbench.model)
+                    && let Some(step) = crate::links::results_step(&model.fe, &step)
+                    && let Some(i) = model.fe.steps.iter().position(|s| s.id == step.id)
                 {
                     self.workbench.tree.selected = Some((TreeView::FeModel, TreeItem::Step(i)));
                 }
@@ -3451,18 +3452,18 @@ impl Workbench {
     /// tree, else the last step.
     pub(crate) fn active_step(&self) -> Option<usize> {
         let steps = &self.setup_model()?.fe.steps;
-        (self.active_step.as_ref())
-            .and_then(|name| steps.iter().position(|s| &s.name == name))
+        (self.active_step)
+            .and_then(|id| steps.iter().position(|s| s.id == id))
             .or_else(|| steps.len().checked_sub(1))
     }
 
     /// Makes step `index` the active one.
     pub(crate) fn set_active_step(&mut self, index: usize) {
-        let name = (self.setup_model())
+        let id = (self.setup_model())
             .and_then(|m| m.fe.steps.get(index))
-            .map(|s| s.name.clone());
-        if name.is_some() {
-            self.active_step = name;
+            .map(|s| s.id);
+        if id.is_some() {
+            self.active_step = id;
         }
     }
 
@@ -9010,7 +9011,7 @@ fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
 }
 
 /// What the project window asks of a window it opens: the workspace, and a step to select
-/// in the FE Model tree.
+/// in the FE Model tree, by the key of its row (see [`crate::links::results_step`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Show {
     pub view: TreeView,

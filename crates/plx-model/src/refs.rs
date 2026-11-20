@@ -18,16 +18,8 @@ impl FeModel {
         self.distributions.iter().find(|d| d.id == id)
     }
 
-    pub fn distribution_named(&self, name: &str) -> Option<&Distribution> {
-        self.distributions.iter().find(|d| d.name == name)
-    }
-
     pub fn cross_section(&self, id: Id<CrossSection>) -> Option<&CrossSection> {
         self.cross_sections.iter().find(|c| c.id == id)
-    }
-
-    pub fn cross_section_named(&self, name: &str) -> Option<&CrossSection> {
-        self.cross_sections.iter().find(|c| c.name == name)
     }
 
     pub fn material(&self, id: Id<Material>) -> Option<&Material> {

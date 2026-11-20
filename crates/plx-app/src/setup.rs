@@ -3096,9 +3096,9 @@ impl Editor {
     }
 
     /// The name of the step this dialog creates, if it creates one.
-    pub fn new_step(&self) -> Option<String> {
+    pub fn new_step(&self) -> Option<plx_model::Id<Step>> {
         match &self.draft {
-            Draft::Step(step, _) if self.index.is_none() => Some(step.name.clone()),
+            Draft::Step(step, _) if self.index.is_none() => Some(step.id),
             _ => None,
         }
     }

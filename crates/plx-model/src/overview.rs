@@ -35,7 +35,7 @@ impl OverviewGroup {
 pub enum StepItemKey {
     BoundaryCondition(Id<crate::BoundaryCondition>),
     Load(Id<crate::Load>),
-    DefinedField(String),
+    DefinedField(Id<crate::DefinedField>),
     HistoryOutput(Id<crate::HistoryOutput>),
 }
 
@@ -310,7 +310,7 @@ impl FeModel {
                     step.boundary_conditions.retain(|b| b.id != *id)
                 }
                 StepItemKey::Load(id) => step.loads.retain(|l| l.id != *id),
-                StepItemKey::DefinedField(name) => step.defined_fields.retain(|f| f.name != *name),
+                StepItemKey::DefinedField(id) => step.defined_fields.retain(|f| f.id != *id),
                 StepItemKey::HistoryOutput(id) => step.history_outputs.retain(|h| h != id),
             }
             if step_items(&self.history_outputs, step).len() < before {
@@ -335,8 +335,8 @@ fn step_items(outputs: &[crate::HistoryOutput], step: &Step) -> Vec<(StepItemKey
     let boundaries = (step.boundary_conditions.iter())
         .map(|b| (StepItemKey::BoundaryCondition(b.id), b.name.clone()));
     let loads = (step.loads.iter()).map(|l| (StepItemKey::Load(l.id), l.name.clone()));
-    let fields = (step.defined_fields.iter())
-        .map(|f| (StepItemKey::DefinedField(f.name.clone()), f.name.clone()));
+    let fields =
+        (step.defined_fields.iter()).map(|f| (StepItemKey::DefinedField(f.id), f.name.clone()));
     let history = (step.history_outputs.iter())
         .filter_map(|id| outputs.iter().find(|o| o.id == *id))
         .map(|h| (StepItemKey::HistoryOutput(h.id), h.name.clone()));
@@ -375,8 +375,8 @@ fn find_item<'a>(
             .find(|b| b.id == *id)
             .map(Item::Boundary),
         StepItemKey::Load(id) => (step.loads.iter()).find(|l| l.id == *id).map(Item::Load),
-        StepItemKey::DefinedField(name) => (step.defined_fields.iter())
-            .find(|f| f.name == *name)
+        StepItemKey::DefinedField(id) => (step.defined_fields.iter())
+            .find(|f| f.id == *id)
             .map(Item::Field),
         StepItemKey::HistoryOutput(id) => (step.history_outputs.contains(id))
             .then(|| outputs.iter().find(|o| o.id == *id))
@@ -469,7 +469,7 @@ impl ItemOwned {
                 put(&mut step.loads, l, |o| o.id == l.id)
             }
             Item::Field(f) if step.kind.supports_defined_fields() => {
-                put(&mut step.defined_fields, f, |o| o.name == f.name)
+                put(&mut step.defined_fields, f, |o| o.id == f.id)
             }
             // The step lists the output of the model; nothing is copied.
             Item::History(h) if step.kind.supports_history_output(&h.kind) => {

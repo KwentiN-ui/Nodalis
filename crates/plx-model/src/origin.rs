@@ -421,7 +421,7 @@ pub struct Active<'a> {
     fe: Cow<'a, crate::FeModel>,
     /// The parts of the mesh left out, whole; bodies of compound parts are left out of
     /// their part.
-    left_out: Vec<String>,
+    left_out: Vec<crate::PartRef>,
 }
 
 impl<'a> Active<'a> {
@@ -452,8 +452,8 @@ impl<'a> Active<'a> {
         }
     }
 
-    /// The parts of the mesh left out whole, by name.
-    pub fn left_out(&self) -> &[String] {
+    /// The parts of the mesh left out whole, by id.
+    pub fn left_out(&self) -> &[crate::PartRef] {
         &self.left_out
     }
 
@@ -484,17 +484,14 @@ pub fn active_model<'a>(
         };
     }
     let gone = |p: &&plx_mesh::Part| objects(p).iter().all(|b| suppressed.contains(b));
-    let left_out: Vec<String> = (mesh.parts.iter().filter(gone))
-        .map(|p| p.name.clone())
-        .collect();
-    let left_out_ids: Vec<crate::PartRef> = mesh.parts.iter().filter(gone).map(|p| p.id).collect();
+    let left_out: Vec<crate::PartRef> = mesh.parts.iter().filter(gone).map(|p| p.id).collect();
     let mut smaller = mesh.clone();
     smaller.remove_bodies(&suppressed);
     let mut fe = fe.clone();
     // An item on suppressed objects alone, e.g. a contact found with a suppressed part
     // before it was suppressed, goes with them; one on others too keeps those.
     fe.drop_items_left_empty(mesh, &smaller);
-    fe.remove_parts_from_regions(&left_out_ids);
+    fe.remove_parts_from_regions(&left_out);
     Active {
         mesh: Cow::Owned(smaller),
         fe: Cow::Owned(fe),
@@ -611,7 +608,7 @@ mod tests {
         assert_eq!(solved.mesh.node_count(), 4);
         geometry.suppressed.push(named("B"));
         let solved = active_model(&compound, &fe, Some(&geometry), &origins);
-        assert_eq!(solved.left_out, ["C"]);
+        assert_eq!(solved.left_out, [compound.parts[0].id]);
         assert!(solved.mesh.parts.is_empty());
     }
 
@@ -660,7 +657,7 @@ mod tests {
         geometry.suppressed.push(named("SOLID-1"));
         origins.set_suppressed(&[named("PART-1")], true);
         let solved = active_model(&mesh, &fe, Some(&geometry), &origins);
-        assert_eq!(solved.left_out, ["SOLID-1", "PART-1"]);
+        assert_eq!(solved.left_out, [named("SOLID-1"), named("PART-1")]);
         assert_eq!(solved.mesh.element_count(), 0);
         assert_eq!(
             solved.fe.mesh_sets[0].region,
@@ -668,7 +665,7 @@ mod tests {
         );
         origins.set_suppressed(&[named("PART-1")], false);
         let solved = active_model(&mesh, &fe, Some(&geometry), &origins);
-        assert_eq!(solved.left_out, ["SOLID-1"]);
+        assert_eq!(solved.left_out, [named("SOLID-1")]);
         assert_eq!(solved.mesh.parts[0].name, "PART-1");
         assert_eq!(solved.mesh.node_count(), 4);
     }
@@ -703,7 +700,7 @@ mod tests {
         fe.steps.push(step);
         origins.set_suppressed(&[named("PART-3")], true);
         let solved = active_model(&mesh, &fe, None, &origins);
-        assert_eq!(solved.left_out(), ["PART-3"]);
+        assert_eq!(solved.left_out(), [named("PART-3")]);
         let names = |fe: &crate::FeModel| -> Vec<String> {
             (fe.contact_regions.iter().map(|c| c.name.clone()))
                 .chain(
