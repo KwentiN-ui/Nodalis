@@ -1167,6 +1167,7 @@ impl Procedure for SensitivityProcedure {
             // The eigenfrequencies get a table per mode, the other responses share one.
             if *kind == ResponseKind::Eigenfrequency {
                 ctx.results.history.push(HistoryBlock {
+                    origin: None,
                     step: ctx.step_number,
                     increment: 0,
                     quantity: HistoryQuantity::DesignResponses,
@@ -1181,6 +1182,7 @@ impl Procedure for SensitivityProcedure {
         }
         if !table_rows.is_empty() {
             ctx.results.history.push(HistoryBlock {
+                origin: None,
                 step: ctx.step_number,
                 increment: 0,
                 quantity: HistoryQuantity::DesignResponses,

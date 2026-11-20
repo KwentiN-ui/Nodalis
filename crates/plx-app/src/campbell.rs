@@ -898,7 +898,7 @@ fn run_speed(
     };
     // The results are taken in memory: the history output, else the result fields.
     let modes = job.solver_results().map_or_else(Vec::new, |solved| {
-        let history = plx_io::solver::history(&solved, None);
+        let history = plx_io::solver::history(&solved);
         let modes = history.map_or_else(Vec::new, |h| modes_of_history(&h, step));
         if modes.is_empty() {
             modes_of_frd(&plx_io::solver::import(&solved), step)

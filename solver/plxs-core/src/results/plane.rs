@@ -478,6 +478,7 @@ mod tests {
     #[test]
     fn a_plane_model_drops_trailing_zeros_of_the_history() {
         let block = |quantity, rows: Vec<(u32, Vec<f64>)>| HistoryBlock {
+            origin: None,
             step: 1,
             increment: 1,
             quantity,

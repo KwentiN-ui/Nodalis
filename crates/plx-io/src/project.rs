@@ -879,8 +879,9 @@ impl BoundResults {
     /// from their files written into `dir` first.
     pub fn read(&self, dir: &Path) -> Result<ReadResults, String> {
         if let Some((solved, file)) = self.open_solver_results().map_err(|e| e.to_string())? {
-            let input = self.text("inp");
-            let history = crate::solver::history(&solved, input.as_deref());
+            // The built-in solver ran the analysis itself, not an input file.
+            let input = None;
+            let history = crate::solver::history(&solved);
             return Ok(ReadResults {
                 // The fields are read from the project file when they are wanted.
                 results: crate::solver::import_from(&solved, file),

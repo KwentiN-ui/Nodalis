@@ -34,33 +34,7 @@ pub const ALL_CONTACT_ELEMENTS: &str = "ALL_CONTACT_ELEMENTS";
 
 pub fn read_dat(path: &Path) -> std::io::Result<DatImport> {
     let bytes = std::fs::read(path)?;
-    let mut text = String::from_utf8_lossy(&bytes).into_owned();
-    // Names too long for CalculiX were shortened; the input file beside names them in full.
-    let input = ["inp", "INP"]
-        .map(|e| path.with_extension(e))
-        .into_iter()
-        .find(|p| p.is_file());
-    if let Some(input) = input.and_then(|p| std::fs::read(p).ok()) {
-        text = restore_shortened_names(&text, &String::from_utf8_lossy(&input));
-    }
-    Ok(parse_dat(&text))
-}
-
-/// The `.dat` text with the full names of the names `input` shortened.
-pub fn restore_shortened_names(dat: &str, input: &str) -> String {
-    let mut text = dat.to_owned();
-    for line in input.lines() {
-        let Some((short, full)) =
-            (line.strip_prefix(crate::inp::SHORTENED_NAME)).and_then(|rest| rest.split_once(" = "))
-        else {
-            continue;
-        };
-        text = text.replace(
-            &short.to_ascii_uppercase(),
-            &full.trim().to_ascii_uppercase(),
-        );
-    }
-    text
+    Ok(parse_dat(&String::from_utf8_lossy(&bytes)))
 }
 
 /// How the columns of a block are read.
@@ -377,6 +351,7 @@ impl Collector {
                     })
                     .collect();
                 let mut set = HistorySet {
+                    output: None,
                     name: set.name,
                     rows: order.iter().map(|&r| rows[r]).collect(),
                     fields,
