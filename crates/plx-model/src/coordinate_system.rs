@@ -404,12 +404,6 @@ impl Frame {
         ))
     }
 
-    /// The point at coordinates along the system's x, y and z axes, also for a cylindrical
-    /// system: how the definitions of systems given in this one are read.
-    pub fn cartesian_point(&self, local: [f64; 3]) -> Result<[f64; 3], String> {
-        Ok(add(self.origin, to_global(&self.axes()?, local)))
-    }
-
     /// Coordinates of a global point along the system's x, y and z axes.
     pub fn cartesian_local(&self, point: [f64; 3]) -> Result<[f64; 3], String> {
         let axes = self.axes()?;

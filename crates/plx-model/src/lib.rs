@@ -265,7 +265,7 @@ pub struct FeModel {
     pub properties: ModelProperties,
     pub materials: Vec<Material>,
     pub sections: Vec<Section>,
-    /// Profiles of beams, which beam sections pick by name.
+    /// Profiles of beams, which beam sections pick by id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cross_sections: Vec<CrossSection>,
     /// Springs, supports and ties.
@@ -298,10 +298,10 @@ pub struct FeModel {
     /// and ties they stand for ([`FeModel::lower_bolts`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bolts: Vec<Bolt>,
-    /// Time curves boundary conditions and loads refer to by name.
+    /// Time curves boundary conditions and loads refer to by id.
     #[serde(default)]
     pub amplitudes: Vec<Amplitude>,
-    /// Factors over the model that pressures and temperatures refer to by name.
+    /// Factors over the model that pressures and temperatures refer to by id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub distributions: Vec<Distribution>,
     /// State of the model before the first step, such as its initial temperature.
@@ -312,7 +312,7 @@ pub struct FeModel {
     /// they print ([`Step::history_outputs`]).
     #[serde(default)]
     pub history_outputs: Vec<HistoryOutput>,
-    /// The features: points and coordinate systems other items refer to by name.
+    /// The features: points and coordinate systems other items refer to by id.
     #[serde(default)]
     pub reference_points: Vec<ReferencePoint>,
     #[serde(default)]
@@ -1061,13 +1061,6 @@ impl StepKind {
     pub fn design_region(&self) -> Option<&Region> {
         match self {
             StepKind::Sensitivity(settings) => Some(&settings.design_region),
-            _ => None,
-        }
-    }
-
-    pub fn design_region_mut(&mut self) -> Option<&mut Region> {
-        match self {
-            StepKind::Sensitivity(settings) => Some(&mut settings.design_region),
             _ => None,
         }
     }

@@ -55,8 +55,8 @@ pub enum Problem {
     /// refuses them ("dependent side of a MPC and a SPC"), so the input file leaves them
     /// out of the rigid body.
     HeldRigidBodyNodes,
-    /// Slave nodes of a tie CalculiX did not tie: the master side lies opposite them but
-    /// further away than the position tolerance. Found in the output of a run.
+    /// Slave nodes of a tie the solver did not tie: the master side lies opposite them but
+    /// further away than the position tolerance. Found by the solver's model check.
     TieNodesNotTied,
     /// A plastic hardening curve the solver rejects: no elasticity, a row without a yield
     /// stress, or plastic strains that do not start at 0 and grow.
@@ -251,10 +251,6 @@ pub enum Problem {
     SolverUnsupported,
     /// The solver could not write or read its files. Found in the solver output only.
     SolverFiles,
-    /// Found in the solver output only.
-    MpcAndSpc,
-    /// Found in the solver output only.
-    RotationIn2d,
     /// A failure inside the solver, or an `*ERROR` of the output of another solver run that
     /// Nodalis cannot classify.
     SolverError,
@@ -409,8 +405,6 @@ impl Problem {
             Problem::SolverInput => "Value rejected by the solver",
             Problem::SolverUnsupported => "Not supported by the solver",
             Problem::SolverFiles => "Solver files not written",
-            Problem::MpcAndSpc => "Degree of freedom bound twice",
-            Problem::RotationIn2d => "Rotation in a 2D model",
             Problem::SolverError => "Internal solver error",
             Problem::NotLowered => "Analysis not set up",
         }
@@ -952,19 +946,6 @@ impl Problem {
                  restart or stored modes): the disk is full, the folder is not writable, \
                  or a file it needs is missing or from another model."
             }
-            Problem::MpcAndSpc => {
-                "A degree of freedom is both fixed by a boundary condition and bound as \
-                 the dependent degree of freedom of an equation (MPC). The run then aborts. \
-                 Nodalis keeps the equations and rigid bodies it writes itself off the \
-                 degrees of freedom that boundary conditions or other constraints hold (the \
-                 solver output lists what it changed), so the overlap comes from a \
-                 combination it does not resolve yet."
-            }
-            Problem::RotationIn2d => {
-                "Rotations (degrees of freedom 4 to 6) were fixed in a 2D model. \
-                 The solver expands 2D elements internally into solid elements and cannot \
-                 prescribe rotations for them; the run aborts."
-            }
             Problem::NoPhysicalConstants => {
                 "Radiation (*RADIATE) depends on the fourth power of the absolute \
                  temperature, so the solver needs the absolute zero of the model's temperature \
@@ -1385,12 +1366,6 @@ impl Problem {
                  and solve the analysis that provides restart data or stored modes \
                  again."
             }
-            Problem::MpcAndSpc => {
-                "Look up the node of the message in the input file and leave it out of \
-                 the boundary condition or of the constraint, contact region or remote \
-                 displacement that binds it."
-            }
-            Problem::RotationIn2d => "In 2D models prescribe only U1 and U2.",
             Problem::NoPhysicalConstants => {
                 "Open Model Properties (Material tab of the FE Model ribbon) and enter Absolute zero and Stefan-Boltzmann \
                  under Physical Constants; Defaults fills them in for the unit system."

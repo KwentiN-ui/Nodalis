@@ -4391,9 +4391,9 @@ mod tests {
         assert!(regions.iter().all(|&r| (1..=6).contains(&r)));
     }
 
-    /// Meshes the plate with a hole, sets up a tension test and checks CalculiX's stress.
+    /// Meshes the plate with a hole, sets up a tension test and checks the solver's stress.
     #[test]
-    fn generated_meshes_solve_with_calculix() {
+    fn generated_meshes_solve() {
         if !gmsh_available() {
             eprintln!("Gmsh missing, test skipped");
             return;
@@ -4459,14 +4459,15 @@ mod tests {
             ..FeModel::default()
         };
         let inp = plx_io::inp::write_inp(&model.active(), "Platte").unwrap();
-        let dir = std::env::temp_dir().join(format!("nodalis-ccx-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nodalis-plate-solve-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("platte.inp"), inp).unwrap();
         plxs_session::run_input_file(&dir, "platte").unwrap_or_else(|e| panic!("{e}"));
         let results = read_frd(&dir.join("platte.frd")).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         // A strain of 0.1 / 100 gives about 210 MPa in the net section away from the hole;
-        // the hole raises the peak, CalculiX's extrapolation keeps it below a few times that.
+        // the hole raises the peak, the extrapolation to the nodes keeps it below a few times
+        // that.
         let stress = results.increments.last().unwrap().field("STRESS").unwrap();
         let sxx = &stress.component("S11").unwrap().values;
         let max = sxx.get().iter().copied().fold(f32::MIN, f32::max);

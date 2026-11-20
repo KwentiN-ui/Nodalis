@@ -22,7 +22,7 @@
 //!
 //! A state link, `["State", "Step-1"]`, makes the target continue the source: it takes the
 //! source's model and its steps up to that step, then solves its own steps from the state
-//! CalculiX wrote after it.
+//! the solver left after it.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
