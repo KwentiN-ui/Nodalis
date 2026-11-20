@@ -338,6 +338,17 @@ impl SurfaceFaces {
         faces
     }
 
+    /// The faces of all surfaces of a part.
+    pub fn of_part(&self, part: usize) -> Vec<ElementFace> {
+        let mut faces: Vec<ElementFace> = (self.0.iter())
+            .filter(|f| f.surface.0 == part)
+            .map(|f| (f.element, f.face))
+            .collect();
+        faces.sort_unstable();
+        faces.dedup();
+        faces
+    }
+
     /// [`facing_faces`] of two sides.
     pub fn facing(
         &self,
