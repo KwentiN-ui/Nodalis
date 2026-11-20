@@ -251,9 +251,15 @@ the pushed fibres of a bent part alike. Where tension and compression are equall
 near the neutral axis of a bent beam, its direction turns by 90 degrees; the streaks fade
 along that line.
 
-The streaks are drawn for the view on the screen, so they keep their fineness when zooming;
-the noise stays on the model when the view turns. Section faces (@section-view) show the
+The streaks are drawn for the view on the screen, so they keep their fineness when zooming:
+#ui("Streak length") and #ui("Grain size") are in pixels, and zooming in, the noise refines on
+the model step by step, fading from one grain size to the next half as large, so that a close
+view of a fillet shows streaks as sharp as the overall view. The noise stays on the model when
+the view turns. Section faces (@section-view) show the
 streaks inside the part: move the plane through it to follow the force flow in the volume.
+
+#screenshot("lic-zoom.png", [A close view of a cantilever beam, about ten times larger than the
+  whole beam: the streaks of the Max principal direction stay a pixel fine])
 
 #screenshot("lic-section.png", [The bracket cut by a section plane: the streaks continue on the
   section face])
@@ -261,8 +267,8 @@ streaks inside the part: move the plane through it to follow the force flow in t
 #fields(
   [Streak length], [Length of a streak to either side of each pixel, in pixels (default 15).
     Longer streaks are smoother but blur small details.],
-  [Grain size], [Size of the noise grains in percent of the model size (default 0.1), never
-    finer than a pixel. Coarser grains give wider streaks.],
+  [Grain size], [Size of the noise grains on the screen in pixels (1 to 10, default 1.5), at
+    any zoom. Coarser grains give wider streaks.],
   [Contrast], [How strongly the streaks stand out from each other (default 4).],
   [Mix], [How much of the brightness the streaks set, from 0 (contours alone) to 1 (default
     0.7).],

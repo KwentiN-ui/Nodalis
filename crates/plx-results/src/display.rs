@@ -71,8 +71,8 @@ impl ArrowOptions {
 pub struct LicOptions {
     /// Length of a streak to either side of a pixel, in pixels.
     pub length: u32,
-    /// Size of the grains of the noise the streaks are smeared from, in percent of the model
-    /// size; never finer than a pixel.
+    /// Size of the grains of the noise the streaks are smeared from, in pixels on the screen
+    /// at any zoom.
     pub grain: f64,
     /// How strongly the streaks stand out from each other.
     pub contrast: f64,
@@ -84,7 +84,7 @@ impl Default for LicOptions {
     fn default() -> Self {
         Self {
             length: 15,
-            grain: 0.1,
+            grain: 1.5,
             contrast: 4.0,
             mix: 0.7,
         }
@@ -93,7 +93,7 @@ impl Default for LicOptions {
 
 impl LicOptions {
     pub const LENGTH: std::ops::RangeInclusive<u32> = 3..=60;
-    pub const GRAIN: std::ops::RangeInclusive<f64> = 0.01..=2.0;
+    pub const GRAIN: std::ops::RangeInclusive<f64> = 1.0..=10.0;
     pub const CONTRAST: std::ops::RangeInclusive<f64> = 1.0..=10.0;
 }
 
