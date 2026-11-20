@@ -158,6 +158,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
             ..Default::default()
         }],
         sections: vec![Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: Some(named("Steel")),
@@ -3382,6 +3383,7 @@ fn plane_model(
             ..Default::default()
         }],
         sections: vec![Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: Some(named("Steel")),
@@ -3820,6 +3822,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         ..Default::default()
     });
     model.sections.push(Section {
+        id: plx_model::Id::new(),
         orientation: None,
         name: "Section-1".into(),
         material: Some(named("Steel")),
@@ -4586,6 +4589,7 @@ fn blocks_model(
             ..Default::default()
         }],
         sections: vec![Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: Some(named("Steel")),
@@ -5234,6 +5238,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
             hyperelastic: None,
         }],
         sections: vec![Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Beam-1".into(),
             material: Some(named("Steel")),
@@ -6301,6 +6306,7 @@ fn writes_heat_transfer_keywords() {
     model.properties.absolute_zero = Some(-273.15);
     model.properties.stefan_boltzmann = Some(5.67e-11);
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -6410,6 +6416,7 @@ fn solver_conducts_heat_along_a_bar() {
 
 fn defined_temperature(name: &str, region: Region, value: f64) -> DefinedField {
     DefinedField {
+        id: plx_model::Id::new(),
         distribution: None,
         name: name.into(),
         active: true,
@@ -6421,6 +6428,7 @@ fn defined_temperature(name: &str, region: Region, value: f64) -> DefinedField {
 
 fn temperature_from_file(name: &str, file: &str, step: u32) -> DefinedField {
     DefinedField {
+        id: plx_model::Id::new(),
         distribution: None,
         name: name.into(),
         active: true,
@@ -6571,6 +6579,7 @@ fn solver_sets_temperatures_back_in_a_step_without_them() {
         Vec::new(),
     );
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -6629,6 +6638,7 @@ fn solver_strains_the_bar_by_the_temperatures_of_a_result_file() {
     );
     // CalculiX refuses a *Temperature without an initial temperature.
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -6734,6 +6744,7 @@ fn solver_cools_the_bar_by_radiation() {
     model.properties.stefan_boltzmann = Some(sigma);
     // Radiation is nonlinear; CalculiX iterates from the initial temperature.
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -6821,6 +6832,7 @@ fn solver_warms_the_bar_transiently() {
         Vec::new(),
     );
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -6909,6 +6921,7 @@ fn expand_bar(kind: StepKind, name: &str) -> String {
         Vec::new(),
     );
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -7515,6 +7528,7 @@ fn coasting_cantilever(kind: plx_model::InitialConditionKind) -> (FeMesh, FeMode
     step.boundary_conditions.clear();
     step.loads.clear();
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Velocity-1".into(),
         active: true,
@@ -7532,6 +7546,7 @@ fn initial_velocities_are_written() {
     model.initial_conditions[0].region = Region::NodeSet("FIX".into());
     let tip = mesh.node(99).unwrap();
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Angular_Velocity-1".into(),
         active: true,
@@ -9249,6 +9264,7 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
         ("Section-2", "PLATE", plate_kind),
     ] {
         model.sections.push(Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: name.into(),
             material: Some(named("Steel")),
@@ -9403,6 +9419,7 @@ fn block_on_membrane(strip_is_master: bool) -> (FeMesh, FeModel) {
         ),
     ] {
         model.sections.push(Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: name.into(),
             material: Some(named("Steel")),
@@ -10887,6 +10904,7 @@ fn solver_conducts_heat_across_contact_regions_in_coupled_steps() {
         amplitude: None,
     });
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial-1".into(),
         active: true,
@@ -11233,6 +11251,7 @@ fn distributed_temperatures_are_written_per_node() {
     model.distributions.push(equation("Half", "=0.5"));
     model.steps[0].boundary_conditions[0].distribution = Some(named("Half"));
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: Some(named("Half")),
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -11277,6 +11296,7 @@ fn solver_strains_the_bar_by_a_distributed_temperature() {
         .distributions
         .push(equation("Gradient", "=(20 + x) / 120"));
     model.initial_conditions.push(plx_model::InitialCondition {
+        id: plx_model::Id::new(),
         distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
@@ -13677,6 +13697,7 @@ fn a_rope_on_a_symmetry_plane_touches_the_block_not_its_cut_face() {
     }
     let material = model.sections[0].material;
     model.sections.push(Section {
+        id: plx_model::Id::new(),
         orientation: None,
         name: "Block".into(),
         material,

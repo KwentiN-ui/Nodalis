@@ -9163,6 +9163,7 @@ mod tests {
             input: None,
         });
         model.fe.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: None,
@@ -9262,6 +9263,7 @@ mod tests {
             })
             .unwrap();
         let item = plx_model::MeshSetupItem {
+            id: plx_model::Id::new(),
             name: "Local_Mesh_Size-1".into(),
             kind: plx_model::MeshSetupKind::LocalMeshSize {
                 faces: vec![face],

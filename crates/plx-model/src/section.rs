@@ -16,6 +16,8 @@ use crate::{BeamProfile, InfillSection, Region};
 /// truss section of CalculiX.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Section {
+    /// The internal identity others refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     /// The material of the section; `None` until one is chosen.
     pub material: Option<crate::Id>,

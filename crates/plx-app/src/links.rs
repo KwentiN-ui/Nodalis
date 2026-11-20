@@ -907,6 +907,7 @@ pub fn apply_results(
                 return false;
             };
             let field = DefinedField {
+                id: plx_model::Id::new(),
                 distribution: None,
                 name: LINKED_TEMPERATURES.into(),
                 active: true,
@@ -2494,6 +2495,7 @@ mod tests {
         let mut own = shapes("old");
         own.meshing.max_size = 2.0;
         own.mesh_items.push(plx_model::MeshSetupItem {
+            id: plx_model::Id::new(),
             name: "Local Size-1".into(),
             kind: plx_model::MeshSetupKind::LocalMeshSize {
                 faces: vec![1],
@@ -2598,6 +2600,7 @@ mod tests {
             brep: brep.into(),
             meshing: Default::default(),
             mesh_items: vec![plx_model::MeshSetupItem {
+                id: plx_model::Id::new(),
                 name: "Local Size-1".into(),
                 kind: plx_model::MeshSetupKind::LocalMeshSize {
                     faces: vec![1, 2],

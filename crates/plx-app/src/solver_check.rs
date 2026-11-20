@@ -256,6 +256,7 @@ pub(crate) fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeMod
     FeModel {
         properties: Default::default(),
         sections: vec![Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: Some(material.id),

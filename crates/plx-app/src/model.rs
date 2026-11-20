@@ -3484,6 +3484,7 @@ mod tests {
         let (first, second) = (model.parts[0].name.clone(), model.parts[1].name.clone());
         let id = model.mesh.parts[0].id;
         model.fe.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
@@ -4100,6 +4101,7 @@ mod tests {
                 ..Default::default()
             });
             fe.sections.push(Section {
+                id: plx_model::Id::new(),
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(steel),
@@ -4461,6 +4463,7 @@ mod tests {
                 ..Default::default()
             }],
             sections: vec![Section {
+                id: plx_model::Id::new(),
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("Steel")),
@@ -4615,6 +4618,7 @@ mod tests {
         });
         let mut model = Model::new(Path::new("plate.inp"), mesh);
         model.fe.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Shell_Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
@@ -4665,6 +4669,7 @@ mod tests {
         });
         let mut model = Model::new(Path::new("beam.inp"), mesh);
         model.fe.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Beam_Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
@@ -4869,6 +4874,7 @@ S
             follower: false,
         });
         let solid = Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
@@ -4986,6 +4992,7 @@ S
                 ..Default::default()
             }],
             sections: vec![Section {
+                id: plx_model::Id::new(),
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("S235")),

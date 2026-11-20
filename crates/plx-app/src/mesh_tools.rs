@@ -212,6 +212,7 @@ impl MeshToolDialog {
         let name = self.name.trim().to_owned();
         let draft = plx_model::FeModel {
             mesh_operations: vec![MeshOperation {
+                id: plx_model::Id::new(),
                 name: name.clone(),
                 parts: Vec::new(),
                 kind: MeshOperationKind::Transform(self.transform.transform()),
@@ -371,6 +372,7 @@ impl MeshToolDialog {
                     .filter(|p| self.parts.contains(p))
                     .collect();
                 let operation = MeshOperation {
+                    id: plx_model::Id::new(),
                     name: name.clone(),
                     parts,
                     kind: MeshOperationKind::Transform(self.transform.transform()),

@@ -1238,6 +1238,7 @@ mod tests {
             speed: 5.0,
         };
         fe.initial_conditions.push(crate::InitialCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Spin".into(),
             active: true,
@@ -1336,6 +1337,7 @@ mod tests {
         });
         let mut fe = FeModel::default();
         let operation = |transform| crate::MeshOperation {
+            id: crate::Id::new(),
             name: "Transform-1".into(),
             parts: vec![a],
             kind: MeshOperationKind::Transform(transform),
@@ -1396,6 +1398,7 @@ mod tests {
             meshing: MeshingParameters::default(),
             mesh_items: vec![
                 MeshSetupItem {
+                    id: crate::Id::new(),
                     name: "Meshing_Parameters-1".into(),
                     kind: MeshSetupKind::MeshingParameters {
                         parts: vec!["PART_1".into()],
@@ -1406,6 +1409,7 @@ mod tests {
                     },
                 },
                 MeshSetupItem {
+                    id: crate::Id::new(),
                     name: "Local_Mesh_Size-1".into(),
                     kind: MeshSetupKind::LocalMeshSize {
                         faces: vec![1],

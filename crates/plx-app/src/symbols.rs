@@ -113,7 +113,6 @@ impl Kind {
                 Kind::Joint(Box::new(joint.clone())),
                 joint.locating_end()?.clone(),
             ),
-            Constraint::Tie(_) | Constraint::NodeTie(_) => return None,
         })
     }
 }

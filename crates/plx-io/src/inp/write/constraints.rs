@@ -120,7 +120,6 @@ pub(super) fn springs(
             }
             // Written as `*Rigid body` by the caller.
             Constraint::RigidBody(_) | Constraint::Joint(_) | Constraint::PointMass(_) => {}
-            Constraint::Tie(_) | Constraint::NodeTie(_) => {}
         }
     }
     *out = writer.out;

@@ -576,6 +576,8 @@ impl MeshingParameters {
 /// An item of the mesh setup, refining how parts are meshed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MeshSetupItem {
+    /// The internal identity others refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     pub kind: MeshSetupKind,
 }
@@ -873,6 +875,7 @@ mod tests {
             meshing: MeshingParameters::for_diagonal(100.0),
             mesh_items: vec![
                 MeshSetupItem {
+                    id: crate::Id::new(),
                     name: "Meshing_Parameters-1".into(),
                     kind: MeshSetupKind::MeshingParameters {
                         parts: vec!["SOLID-1".into()],
@@ -880,6 +883,7 @@ mod tests {
                     },
                 },
                 MeshSetupItem {
+                    id: crate::Id::new(),
                     name: "Tetrahedral_Gmsh-1".into(),
                     kind: MeshSetupKind::TetrahedralGmsh {
                         parts: vec!["SOLID-2".into()],
@@ -888,6 +892,7 @@ mod tests {
                     },
                 },
                 MeshSetupItem {
+                    id: crate::Id::new(),
                     name: "Local_Mesh_Size-1".into(),
                     kind: MeshSetupKind::LocalMeshSize {
                         faces: vec![3],
@@ -967,6 +972,7 @@ mod tests {
     #[test]
     fn a_later_tetrahedral_item_takes_a_part_back_from_an_extrusion() {
         let extrude = |parts: &[&str]| MeshSetupItem {
+            id: crate::Id::new(),
             name: "Extrude_Mesh-1".into(),
             kind: MeshSetupKind::ExtrudeMesh(ExtrudeMesh {
                 parts: parts.iter().map(|p| p.to_string()).collect(),
@@ -974,6 +980,7 @@ mod tests {
             }),
         };
         let tet = MeshSetupItem {
+            id: crate::Id::new(),
             name: "Tetrahedral_Gmsh-1".into(),
             kind: MeshSetupKind::TetrahedralGmsh {
                 parts: vec!["A".into()],

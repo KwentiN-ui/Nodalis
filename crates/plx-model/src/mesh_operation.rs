@@ -16,6 +16,8 @@ use crate::units::Quantity;
 /// A change of the mesh parts, applied in the order of the list after meshing.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MeshOperation {
+    /// The internal identity others refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     /// The mesh parts it changes, by id ([`plx_mesh::Part::id`]): parts, bodies of compound
     /// parts, and compound parts.
@@ -228,6 +230,7 @@ mod tests {
 
     fn transform(name: &str, parts: &[&str], transform: MeshTransform) -> MeshOperation {
         MeshOperation {
+            id: crate::Id::new(),
             name: name.into(),
             parts: parts.iter().map(|p| crate::named(p)).collect(),
             kind: MeshOperationKind::Transform(transform),

@@ -873,6 +873,7 @@ mod tests {
                 ..Default::default()
             }],
             sections: vec![Section {
+                id: crate::Id::new(),
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(steel),

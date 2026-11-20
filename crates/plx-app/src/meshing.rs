@@ -412,7 +412,11 @@ impl MeshItemEditor {
         let kind = new_kind(0, geometry);
         let name = next_name(kind.type_name(), others.iter().map(String::as_str));
         Self {
-            draft: MeshSetupItem { name, kind },
+            draft: MeshSetupItem {
+                id: plx_model::Id::new(),
+                name,
+                kind,
+            },
             index: None,
             others,
             picks: History::default(),
@@ -1582,6 +1586,7 @@ fn mesh_without_netgen(
     }
     let mut geometry = request.geometry.clone();
     geometry.mesh_items.push(plx_model::MeshSetupItem {
+        id: plx_model::Id::new(),
         name: "Without Netgen".into(),
         kind: plx_model::MeshSetupKind::MeshingParameters {
             parts: vec![part.to_string()],
@@ -1878,6 +1883,7 @@ mod tests {
         // A part that cannot be meshed is told by name, and the others are meshed.
         geometry.set_suppressed(&["SOLID-1".into()], false);
         geometry.mesh_items.push(plx_model::MeshSetupItem {
+            id: plx_model::Id::new(),
             name: "Meshing_Parameters-1".into(),
             kind: plx_model::MeshSetupKind::MeshingParameters {
                 parts: vec!["SOLID-1".into()],

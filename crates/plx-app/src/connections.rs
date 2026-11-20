@@ -1831,6 +1831,7 @@ mod tests {
             hyperelastic: None,
         });
         model.fe.sections.push(Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),
@@ -2012,6 +2013,7 @@ mod tests {
             hyperelastic: None,
         });
         model.fe.sections.push(Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),

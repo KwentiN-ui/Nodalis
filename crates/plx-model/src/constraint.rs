@@ -15,6 +15,8 @@ use crate::{Region, RemoteBehavior};
 /// finds them at the line ends.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NodeTie {
+    /// The internal identity others refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
@@ -33,6 +35,7 @@ pub struct NodeTie {
 impl NodeTie {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             region: Region::Nodes(Vec::new()),
@@ -50,6 +53,8 @@ impl NodeTie {
 /// reference point drive the selection: its translations and rotations, forces and moments.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RigidBody {
+    /// The internal identity others refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
@@ -67,6 +72,7 @@ pub struct RigidBody {
 impl RigidBody {
     pub fn new(name: impl Into<String>, reference_point: crate::Id) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             visible: true,
@@ -84,6 +90,8 @@ impl RigidBody {
 /// and gravity and centrifugal loads on the parts of its selection.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PointMass {
+    /// The internal identity others refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
@@ -181,6 +189,7 @@ fn symmetric_eigenvalues(m: [[f64; 3]; 3]) -> [f64; 3] {
 impl PointMass {
     pub fn new(name: impl Into<String>, reference_point: crate::Id) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             visible: true,
@@ -268,6 +277,8 @@ pub enum SpringLayout<'a> {
 /// points and ground the springs hold the rotations too.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Spring {
+    /// The internal identity others refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
@@ -299,6 +310,7 @@ pub struct Spring {
 impl Spring {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             visible: true,
@@ -527,6 +539,8 @@ impl JointAxis {
 /// joint, rigidly or on average (`behavior`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Joint {
+    /// The internal identity others refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
@@ -554,6 +568,7 @@ pub struct Joint {
 impl Joint {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             visible: true,

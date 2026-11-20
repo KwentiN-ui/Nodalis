@@ -65,6 +65,8 @@ impl SetKind {
 /// A node set, element set or surface defined by a selection.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MeshSet {
+    /// The internal identity others refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     pub kind: SetKind,
     /// What the user picked: nodes, faces, CAD entities or whole parts.
@@ -78,6 +80,7 @@ pub struct MeshSet {
 impl MeshSet {
     pub fn new(name: impl Into<String>, kind: SetKind, region: Region) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             kind,
             region,
@@ -211,6 +214,7 @@ mod tests {
         // Renamed and changed: the old name is gone, regions follow.
         let before = fe.mesh_sets.clone();
         fe.sections.push(crate::Section {
+            id: crate::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: None,

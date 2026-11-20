@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CompressionOnly, NodeTie, PointMass, Region, RigidBody, Spring, SpringEnd};
+use crate::{CompressionOnly, PointMass, Region, RigidBody, Spring, SpringEnd};
 
 /// Mechanical and thermal behaviour of touching surfaces (`*SURFACE INTERACTION`), referred to
 /// by contact pairs.
@@ -308,15 +308,9 @@ impl ContactPair {
 pub enum Constraint {
     Spring(Spring),
     CompressionOnly(CompressionOnly),
-    /// Only in projects saved while ties were constraints; [`crate::FeModel::migrate`] moves
-    /// them to the model's ties, listed with the contact pairs.
-    Tie(Tie),
     RigidBody(RigidBody),
     Joint(crate::Joint),
     PointMass(PointMass),
-    /// Only in projects saved while node ties were constraints; [`crate::FeModel::migrate`]
-    /// moves them to the model's node ties, where they belong with the contact pairs.
-    NodeTie(NodeTie),
 }
 
 impl Constraint {
@@ -324,11 +318,9 @@ impl Constraint {
         match self {
             Constraint::Spring(c) => &c.name,
             Constraint::CompressionOnly(c) => &c.name,
-            Constraint::Tie(tie) => &tie.name,
             Constraint::RigidBody(c) => &c.name,
             Constraint::PointMass(c) => &c.name,
             Constraint::Joint(c) => &c.name,
-            Constraint::NodeTie(c) => &c.name,
         }
     }
 
@@ -336,11 +328,9 @@ impl Constraint {
         match self {
             Constraint::Spring(c) => c.active,
             Constraint::CompressionOnly(c) => c.active,
-            Constraint::Tie(tie) => tie.active,
             Constraint::RigidBody(c) => c.active,
             Constraint::PointMass(c) => c.active,
             Constraint::Joint(c) => c.active,
-            Constraint::NodeTie(c) => c.active,
         }
     }
 
@@ -348,11 +338,9 @@ impl Constraint {
         match self {
             Constraint::Spring(c) => &mut c.active,
             Constraint::CompressionOnly(c) => &mut c.active,
-            Constraint::Tie(tie) => &mut tie.active,
             Constraint::RigidBody(c) => &mut c.active,
             Constraint::PointMass(c) => &mut c.active,
             Constraint::Joint(c) => &mut c.active,
-            Constraint::NodeTie(c) => &mut c.active,
         }
     }
 
@@ -364,7 +352,6 @@ impl Constraint {
             Constraint::RigidBody(c) => c.visible,
             Constraint::PointMass(c) => c.visible,
             Constraint::Joint(c) => c.visible,
-            Constraint::Tie(_) | Constraint::NodeTie(_) => true,
         }
     }
 
@@ -376,7 +363,6 @@ impl Constraint {
             Constraint::RigidBody(c) => Some(&mut c.visible),
             Constraint::PointMass(c) => Some(&mut c.visible),
             Constraint::Joint(c) => Some(&mut c.visible),
-            Constraint::Tie(_) | Constraint::NodeTie(_) => None,
         }
     }
 
@@ -384,11 +370,9 @@ impl Constraint {
         match self {
             Constraint::Spring(c) => &mut c.name,
             Constraint::CompressionOnly(c) => &mut c.name,
-            Constraint::Tie(tie) => &mut tie.name,
             Constraint::RigidBody(c) => &mut c.name,
             Constraint::PointMass(c) => &mut c.name,
             Constraint::Joint(c) => &mut c.name,
-            Constraint::NodeTie(c) => &mut c.name,
         }
     }
 
@@ -415,27 +399,22 @@ impl Constraint {
         }
     }
 
-    /// Swaps master and slave of a tie or spring connection, also in a name
-    /// `<master>_to_<slave>`; returns false for constraints without the two.
+    /// Swaps master and slave of a spring connection, also in a name `<master>_to_<slave>`;
+    /// returns false for constraints without the two.
     pub fn swap_master_slave(&mut self) -> bool {
-        let (name, master, slave) = match self {
-            Constraint::Tie(tie) => (&mut tie.name, &mut tie.master, &mut tie.slave),
+        match self {
             Constraint::Spring(spring) if spring.master_slave().is_some() => {
                 spring.ends.swap(0, 1);
                 spring.name = swapped_name(&spring.name);
-                return true;
+                true
             }
-            _ => return false,
-        };
-        std::mem::swap(master, slave);
-        *name = swapped_name(name);
-        true
+            _ => false,
+        }
     }
 
-    /// Master and slave region of a tie or spring connection.
+    /// Master and slave region of a spring connection.
     pub fn master_slave(&self) -> Option<[&Region; 2]> {
         match self {
-            Constraint::Tie(tie) => Some([&tie.master, &tie.slave]),
             Constraint::Spring(c) => c.master_slave(),
             _ => None,
         }
@@ -446,11 +425,9 @@ impl Constraint {
         match self {
             Constraint::Spring(c) => c.ends.iter().rev().filter_map(SpringEnd::region).collect(),
             Constraint::CompressionOnly(c) => vec![&c.region],
-            Constraint::Tie(tie) => vec![&tie.master, &tie.slave],
             Constraint::RigidBody(c) => vec![&c.region],
             Constraint::PointMass(c) => vec![&c.region],
             Constraint::Joint(c) => c.ends.iter().rev().filter_map(SpringEnd::region).collect(),
-            Constraint::NodeTie(c) => vec![&c.region],
         }
     }
 
@@ -460,13 +437,11 @@ impl Constraint {
                 .filter_map(SpringEnd::region_mut)
                 .collect(),
             Constraint::CompressionOnly(c) => vec![&mut c.region],
-            Constraint::Tie(tie) => vec![&mut tie.master, &mut tie.slave],
             Constraint::RigidBody(c) => vec![&mut c.region],
             Constraint::PointMass(c) => vec![&mut c.region],
             Constraint::Joint(c) => (c.ends.iter_mut().rev())
                 .filter_map(SpringEnd::region_mut)
                 .collect(),
-            Constraint::NodeTie(c) => vec![&mut c.region],
         }
     }
 }
@@ -485,6 +460,8 @@ pub struct Coupling<'a> {
 /// Slave surface glued to a master surface (`*TIE`), e.g. parts meshed separately.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Tie {
+    /// The internal identity others refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
@@ -679,6 +656,7 @@ impl Tie {
 
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             position_tolerance: None,
@@ -893,6 +871,7 @@ mod tests {
                 ..Default::default()
             });
             model.sections.push(crate::Section {
+                id: crate::Id::new(),
                 orientation: None,
                 name: part.into(),
                 material: model.materials.last().map(|m| m.id),
@@ -957,7 +936,6 @@ mod tests {
         assert!(constraint.visible());
         *constraint.visible_mut().unwrap() = false;
         assert!(!constraint.visible());
-        assert!(Constraint::Tie(Tie::new("Tie-1")).visible_mut().is_none());
     }
 
     #[test]
@@ -969,9 +947,6 @@ mod tests {
         assert_eq!(pair.name, "DISC_to_BEAM");
         assert_eq!(pair.master, Region::Surface("BOTTOM".into()));
         assert_eq!(pair.slave, Region::Surface("TOP".into()));
-        let mut tie = Constraint::Tie(Tie::new("Bearing"));
-        assert!(tie.swap_master_slave());
-        assert_eq!(tie.name(), "Bearing");
         assert_eq!(swapped_name("A_to_B_to_C"), "A_to_B_to_C");
     }
 }

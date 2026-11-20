@@ -1613,6 +1613,7 @@ mod tests {
         }
         FeModel {
             sections: vec![Section {
+                id: plx_model::Id::new(),
                 orientation: None,
                 name: "Paste".into(),
                 material: Some(material.id),
@@ -2013,6 +2014,7 @@ mod tests {
             missing.message
         );
         fe.initial_conditions.push(plx_model::InitialCondition {
+            id: plx_model::Id::new(),
             name: "Cold".into(),
             active: true,
             region: Region::Parts(vec![id("Paste")]),

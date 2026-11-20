@@ -2551,6 +2551,7 @@ impl Editor {
             )),
             NewItem::Section => Draft::Section(
                 Section {
+                    id: plx_model::Id::new(),
                     orientation: None,
                     name: next_name("Solid_Section", names(&fe.sections, |s| &s.name)),
                     material: fe.materials.first().map(|m| m.id),
@@ -2564,6 +2565,7 @@ impl Editor {
                 let existing = names(&fe.initial_conditions, |i| &i.name);
                 Draft::InitialCondition(
                     InitialCondition {
+                        id: plx_model::Id::new(),
                         distribution: None,
                         name: next_name(TEMPERATURE, existing),
                         active: true,
@@ -2580,6 +2582,7 @@ impl Editor {
                 Draft::DefinedField(
                     step,
                     DefinedField {
+                        id: plx_model::Id::new(),
                         distribution: None,
                         name: next_name(DEFINED_TEMPERATURE, existing),
                         active: true,
@@ -9119,6 +9122,7 @@ mod tests {
             .apply(&mut fe);
         assert_eq!(fe.cross_sections[0].name, "Cross_Section-1");
         fe.sections.push(Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Beam_Section-1".into(),
             material: None,
@@ -9509,9 +9513,6 @@ mod tests {
         assert!(swap_master_slave(&mut fe, &TreeItem::ContactPair(0)));
         assert_eq!(fe.contact_pairs[0].name, "B_to_A-1");
         assert_eq!(fe.contact_pairs[0].slave, Region::Surface("A".into()));
-        fe.constraints
-            .push(Constraint::Tie(plx_model::Tie::new("Tie-1")));
-        assert!(swap_master_slave(&mut fe, &TreeItem::Constraint(0)));
         assert!(!swap_master_slave(&mut fe, &TreeItem::Material(0)));
     }
 
@@ -9641,6 +9642,7 @@ mod tests {
             fe.materials.push(m);
         }
         let section = |name: &str, material: Option<plx_model::Id>| Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: name.into(),
             material,
@@ -9695,6 +9697,7 @@ mod tests {
 
         // A section on the set follows its new name.
         model.fe.sections.push(Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: Some(crate::test_ids::named("Steel")),

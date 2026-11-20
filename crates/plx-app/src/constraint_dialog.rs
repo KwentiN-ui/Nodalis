@@ -48,9 +48,6 @@ impl Type {
             Constraint::CompressionOnly(_) => Type::CompressionOnly,
             Constraint::RigidBody(_) => Type::RigidBody,
             Constraint::PointMass(_) => Type::PointMass,
-            // Moved to the ties and node ties when the project was read; never edited here.
-            Constraint::Tie(_) => unreachable!("ties are not constraints"),
-            Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
         }
     }
 
@@ -516,8 +513,6 @@ impl ConstraintDraft {
             Constraint::PointMass(mass) => {
                 point_mass_rows(ui, model, mass, &mut self.region, &mut self.new_point);
             }
-            Constraint::Tie(_) => unreachable!("ties are not constraints"),
-            Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
         }
     }
 
@@ -1156,8 +1151,6 @@ fn name_row(ui: &mut Ui, constraint: &mut Constraint) {
         Constraint::CompressionOnly(c) => &mut c.name,
         Constraint::RigidBody(c) => &mut c.name,
         Constraint::PointMass(c) => &mut c.name,
-        Constraint::Tie(_) => unreachable!("ties are not constraints"),
-        Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
     };
     ui.label("Name");
     ui.add(egui::TextEdit::singleline(name).desired_width(200.0));

@@ -14872,6 +14872,7 @@ mod tests {
         });
         let mut model = plx_model::FeModel::default();
         let shift = plx_model::MeshOperation {
+            id: plx_model::Id::new(),
             name: "Transform-1".into(),
             parts: mesh.ids_of(&["A"]),
             kind: plx_model::MeshOperationKind::Transform(plx_mesh::MeshTransform::Translate([
@@ -15659,6 +15660,7 @@ mod tests {
         assert_ne!(print(&fine, &empty, StudyMesh::Remeshed), remeshed);
         let mut setup = coarse.clone();
         setup.mesh_items.push(plx_model::MeshSetupItem {
+            id: plx_model::Id::new(),
             name: "Local-1".into(),
             kind: plx_model::MeshSetupKind::LocalMeshSize {
                 faces: vec![1],
@@ -15713,6 +15715,7 @@ mod tests {
             brep: "shapes".into(),
             meshing: plx_model::MeshingParameters::default(),
             mesh_items: vec![plx_model::MeshSetupItem {
+                id: plx_model::Id::new(),
                 name: "Meshing_Parameters-1".into(),
                 kind: plx_model::MeshSetupKind::MeshingParameters {
                     parts: vec!["PART_1".into()],

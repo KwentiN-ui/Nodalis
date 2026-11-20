@@ -533,20 +533,6 @@ impl FeModel {
             }))
     }
 
-    /// Brings a model read from an older project up to date: ties and node ties saved among
-    /// the constraints move to [`FeModel::ties`] and [`FeModel::node_ties`], in their order.
-    pub fn migrate(&mut self) {
-        let mut constraints = Vec::with_capacity(self.constraints.len());
-        for constraint in std::mem::take(&mut self.constraints) {
-            match constraint {
-                Constraint::Tie(tie) => self.ties.push(tie),
-                Constraint::NodeTie(tie) => self.node_ties.push(tie),
-                other => constraints.push(other),
-            }
-        }
-        self.constraints = constraints;
-    }
-
     /// Whether an active step that takes it has an active submodel boundary condition, so
     /// that the input file reads the results of the global model.
     pub fn uses_global_results(&self) -> bool {
@@ -935,6 +921,8 @@ pub struct Elastic {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Step {
+    /// The internal identity others refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     /// A deactivated step is written to the input file as a comment only.
     #[serde(default = "active")]
@@ -2155,6 +2143,7 @@ impl Step {
     /// A complex frequency step; its results are the mode shapes.
     pub fn new_complex_frequency(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             kind: StepKind::ComplexFrequency(ComplexFrequencyStep::default()),
@@ -2177,6 +2166,7 @@ impl Step {
     /// A static step.
     pub fn new_static(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             kind: StepKind::Static(StaticStep::default()),
@@ -2192,6 +2182,7 @@ impl Step {
     /// A frequency step; its results are the mode shapes.
     pub fn new_frequency(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             kind: StepKind::Frequency(FrequencyStep::default()),
@@ -2207,6 +2198,7 @@ impl Step {
     /// A buckle step; its results are the mode shapes.
     pub fn new_buckle(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             kind: StepKind::Buckle(BuckleStep::default()),
@@ -2222,6 +2214,7 @@ impl Step {
     /// A heat transfer step.
     pub fn new_heat_transfer(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             kind: StepKind::HeatTransfer(HeatTransferStep::default()),
@@ -2237,6 +2230,7 @@ impl Step {
     /// A dynamic step.
     pub fn new_dynamic(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             kind: StepKind::Dynamic(DynamicStep::default()),
@@ -2261,6 +2255,7 @@ impl Step {
     /// A coupled temperature-displacement step.
     pub fn new_coupled(name: impl Into<String>) -> Self {
         Self {
+            id: crate::Id::new(),
             name: name.into(),
             active: true,
             kind: StepKind::CoupledTempDisp(HeatTransferStep::default()),
@@ -2695,6 +2690,8 @@ impl GravityDirection {
 /// A state of the model before the first step.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InitialCondition {
+    /// The internal identity others refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     #[serde(default = "active")]
     pub active: bool,
@@ -2764,6 +2761,8 @@ impl InitialConditionKind {
 /// (`*TEMPERATURE`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DefinedField {
+    /// The internal identity others refer to; the user sees only the name.
+    pub id: crate::Id,
     pub name: String,
     /// A deactivated field is left out of the input file.
     #[serde(default = "active")]
@@ -2977,6 +2976,7 @@ mod tests {
         let [a, b, c] = [crate::Id::new(), crate::Id::new(), crate::Id::new()];
         let mut model = FeModel::default();
         model.sections.push(Section {
+            id: crate::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: None,
@@ -3030,6 +3030,7 @@ mod tests {
         let [a, b] = [crate::Id::new(), crate::Id::new()];
         let mut model = FeModel::default();
         model.sections.push(Section {
+            id: crate::Id::new(),
             orientation: None,
             name: "Section-1".into(),
             material: None,

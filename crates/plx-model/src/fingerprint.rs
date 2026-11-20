@@ -398,6 +398,7 @@ mod tests {
         let mut fe = FeModel::default();
         let mut step = Step::new_static("Step-1");
         let field = |file: &str| crate::DefinedField {
+            id: crate::Id::new(),
             distribution: None,
             name: "Temperatures".into(),
             active: true,
@@ -426,6 +427,7 @@ mod tests {
             mesh_input(&geometry, &[], space, "Solid-2"),
         );
         geometry.mesh_items.push(MeshSetupItem {
+            id: crate::Id::new(),
             name: "Meshing_Parameters-1".into(),
             kind: MeshSetupKind::MeshingParameters {
                 parts: vec!["Solid-1".into()],

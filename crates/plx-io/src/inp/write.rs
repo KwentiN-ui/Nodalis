@@ -2542,8 +2542,6 @@ fn constraints(
         }
         match constraint {
             Constraint::Spring(_) | Constraint::CompressionOnly(_) | Constraint::Joint(_) => {}
-            // Moved to the model's node ties when the project was read.
-            Constraint::NodeTie(_) => {}
             Constraint::RigidBody(_) => {
                 let coupling = constraint.coupling().expect("a rigid body couples");
                 couple_point(
@@ -2558,7 +2556,6 @@ fn constraints(
             }
             // After the rigid bodies, whose points they may sit on.
             Constraint::PointMass(_) => {}
-            Constraint::Tie(t) => items.push(tie(sets, t)?),
         }
     }
     // A point mass sits on the nodes of its reference point: those of the rigid body that

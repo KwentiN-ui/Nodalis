@@ -432,6 +432,7 @@ impl Reader {
                     // The model takes over no materials of the file.
                     let _ = material;
                     self.import.sections.push(Section {
+                        id: plx_model::Id::new(),
                         orientation: None,
                         name: set.clone(),
                         material: None,

@@ -1047,7 +1047,6 @@ fn parse_project(path: &Path, text: &str) -> Result<Project, ProjectError> {
     }
     let mut project: Project = ron::from_str(text).map_err(format_error)?;
     for analysis in project.analyses_mut() {
-        analysis.model.migrate();
         // Every part of the mesh belongs to a geometry object.
         analysis.origins.reconcile(&analysis.mesh);
     }
@@ -1233,7 +1232,7 @@ fn file_name(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use plx_model::{
-        Algorithm2d, Algorithm3d, Constraint, ContactPair, Friction, InteractionProperty, Material,
+        Algorithm2d, Algorithm3d, ContactPair, Friction, InteractionProperty, Material,
         MeshSetupItem, MeshSetupKind, MeshingParameters, Region, Step, SurfaceBehavior,
         SurfaceInteraction, Tie,
     };
@@ -1392,6 +1391,7 @@ mod tests {
         let (pads, metal) = (ids(pads), ids(metal));
         for (name, material, parts) in [("Steel", steel, metal), ("Rubber", rubber, pads)] {
             model.sections.push(plx_model::Section {
+                id: plx_model::Id::new(),
                 orientation: None,
                 name: name.into(),
                 material: Some(material),
@@ -1512,6 +1512,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Solid_Section-1".into(),
             material: Some(steel),
@@ -1623,6 +1624,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
@@ -1696,6 +1698,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
             region: Region::Parts(mesh.ids_of(&["Lever"])),
@@ -1775,6 +1778,7 @@ mod tests {
                 ..Default::default()
             });
             model.sections.push(plx_model::Section {
+                id: plx_model::Id::new(),
                 name: "Solid_Section-1".into(),
                 material: model.materials.last().map(|m| m.id),
                 region: Region::Parts(mesh.ids_of(&["Block"])),
@@ -1880,6 +1884,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
@@ -1951,6 +1956,7 @@ mod tests {
             ..Default::default()
         });
         model.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
@@ -2220,6 +2226,7 @@ mod tests {
             }
         }
         model.sections.push(plx_model::Section {
+            id: plx_model::Id::new(),
             orientation: None,
             name: "Solid_Section-1".into(),
             material: model.materials.last().map(|m| m.id),
@@ -2361,6 +2368,7 @@ mod tests {
                 type_name: "C3D20".into(),
             }],
             mesh_operations: vec![plx_model::MeshOperation {
+                id: plx_model::Id::new(),
                 name: "Transform-1".into(),
                 parts: vec![plx_model::Id::new()],
                 kind: plx_model::MeshOperationKind::Transform(plx_mesh::MeshTransform::Rotate {
@@ -2452,6 +2460,7 @@ mod tests {
                 ..plx_model::Amplitude::new("Amplitude-1")
             }],
             initial_conditions: vec![plx_model::InitialCondition {
+                id: plx_model::Id::new(),
                 distribution: None,
                 name: "Initial_Temperature-1".into(),
                 active: true,
@@ -2470,6 +2479,7 @@ mod tests {
             meshing: MeshingParameters::for_diagonal(100.0),
             mesh_items: vec![
                 MeshSetupItem {
+                    id: plx_model::Id::new(),
                     name: "Local_Mesh_Size-1".into(),
                     kind: MeshSetupKind::LocalMeshSize {
                         faces: vec![3, 4],
@@ -2479,6 +2489,7 @@ mod tests {
                     },
                 },
                 MeshSetupItem {
+                    id: plx_model::Id::new(),
                     name: "Tetrahedral_Gmsh-1".into(),
                     kind: MeshSetupKind::TetrahedralGmsh {
                         parts: vec!["SOLID-1".into()],
@@ -2487,6 +2498,7 @@ mod tests {
                     },
                 },
                 MeshSetupItem {
+                    id: plx_model::Id::new(),
                     name: "Extrude_Mesh-1".into(),
                     kind: MeshSetupKind::ExtrudeMesh(plx_model::ExtrudeMesh {
                         parts: vec!["SOLID-1".into()],
@@ -2878,25 +2890,6 @@ mod tests {
         assert!(text.contains("active:false,"), "{text}");
         let older: Step = ron::from_str(&text.replace("active:false,", "")).unwrap();
         assert!(older.active);
-    }
-
-    #[test]
-    fn ties_of_older_projects_move_to_the_contact_pairs() {
-        // Ties and node ties were constraints; a project saved then still opens with them.
-        let mut tie = plx_model::NodeTie::new("Node_Tie-1");
-        tie.region = Region::Nodes(vec![3, 7]);
-        let older = FeModel {
-            constraints: vec![
-                Constraint::Tie(Tie::new("Tie-1")),
-                Constraint::NodeTie(tie.clone()),
-            ],
-            ..FeModel::default()
-        };
-        let mut model: FeModel = ron::from_str(&ron::to_string(&older).unwrap()).unwrap();
-        model.migrate();
-        assert_eq!(model.constraints, []);
-        assert_eq!(model.ties, [Tie::new("Tie-1")]);
-        assert_eq!(model.node_ties, [tie]);
     }
 
     #[test]

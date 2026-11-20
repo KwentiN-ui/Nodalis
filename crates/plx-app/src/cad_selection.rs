@@ -834,6 +834,7 @@ mod tests {
                 hyperelastic: None,
             }],
             sections: vec![Section {
+                id: plx_model::Id::new(),
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("Steel")),
@@ -889,6 +890,7 @@ mod tests {
 
         // Finer, as after a first run, with the part's own meshing parameters.
         geometry.mesh_items.push(plx_model::MeshSetupItem {
+            id: plx_model::Id::new(),
             name: "Meshing_Parameters-1".into(),
             kind: plx_model::MeshSetupKind::MeshingParameters {
                 parts: vec!["SOLID-1".into()],
@@ -1010,6 +1012,7 @@ mod tests {
                 hyperelastic: None,
             }],
             sections: vec![Section {
+                id: plx_model::Id::new(),
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(crate::test_ids::named("Steel")),
@@ -1080,6 +1083,7 @@ mod tests {
 
         for part in &names {
             geometry.mesh_items.push(plx_model::MeshSetupItem {
+                id: plx_model::Id::new(),
                 name: format!("Meshing_Parameters-{part}"),
                 kind: plx_model::MeshSetupKind::MeshingParameters {
                     parts: vec![part.clone()],

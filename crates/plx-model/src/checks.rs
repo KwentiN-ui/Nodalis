@@ -3650,18 +3650,6 @@ impl FeModel {
                         support(node, normal, false);
                     }
                 }
-                Constraint::Tie(_) => {
-                    if let Some([master, slave]) = constraint.master_slave() {
-                        let (a, b) = (pieces(master), pieces(slave));
-                        join(&mut ties, &a, &b);
-                        join(&mut contacts, &a, &b);
-                    }
-                }
-                Constraint::NodeTie(c) => {
-                    let tied = pieces(&c.region);
-                    join(&mut ties, &tied, &[]);
-                    join(&mut contacts, &tied, &[]);
-                }
                 Constraint::Joint(joint) => {
                     let regions = |end: &crate::SpringEnd| -> Vec<Region> {
                         match end.region() {
@@ -3999,8 +3987,6 @@ impl FeModel {
         }
         for constraint in self.constraints.iter().filter(|c| c.active()) {
             match constraint {
-                // Moved to the node ties when the project was read.
-                Constraint::NodeTie(_) => {}
                 Constraint::Spring(c) => match c.acting_layout(|r| self.region_grounded(r)) {
                     Some(SpringLayout::SelectionToWorld { selection }) => {
                         for node in selection.nodes(mesh) {
@@ -4016,11 +4002,6 @@ impl FeModel {
                     }
                 },
                 Constraint::CompressionOnly(c) => mark(&c.region, &mut held_otherwise),
-                Constraint::Tie(_) => {
-                    for region in constraint.master_slave().into_iter().flatten() {
-                        mark(region, &mut held_otherwise);
-                    }
-                }
                 Constraint::RigidBody(_) | Constraint::PointMass(_) => {
                     if let Some(body) = constraint.coupling()
                         && !self.point_dofs(s, body.reference_point).is_empty()
@@ -4714,6 +4695,7 @@ mod tests {
         FeModel {
             materials: vec![steel],
             sections: vec![Section {
+                id: crate::Id::new(),
                 orientation: None,
                 name: "Section-1".into(),
                 material: Some(steel_id),
@@ -5171,6 +5153,7 @@ mod tests {
         let mesh = cubes(2, true);
         let mut model = model(&mesh);
         model.initial_conditions.push(crate::InitialCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Initial_Velocity-1".into(),
             active: true,
@@ -6042,6 +6025,7 @@ mod tests {
         let parts = mesh.part_ids();
         model.steps[0].loads.clear();
         model.initial_conditions.push(crate::InitialCondition {
+            id: crate::Id::new(),
             distribution: None,
             name: "Initial_Temperature-1".into(),
             active: true,
@@ -6049,6 +6033,7 @@ mod tests {
             kind: crate::InitialConditionKind::Temperature(20.0),
         });
         model.steps[0].defined_fields.push(crate::DefinedField {
+            id: crate::Id::new(),
             distribution: None,
             name: "Defined_Temperature-1".into(),
             active: true,
