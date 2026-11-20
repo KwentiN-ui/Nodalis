@@ -175,7 +175,10 @@ confirms, Escape cancels), and #ui("Dissolve"), which makes its parts parts of t
   (@contact-regions), shells edge to edge: the touching faces are found when the input file is
   written, with the tolerance of a contact detection on the mesh, and written as `*TIE`. The pieces are tied where
   they are: a gap between them within the tolerance, such as the play of a pin in its hole, is
-  bridged, not closed, so the nodes stay in place and no element is pulled inside out. These
+  bridged, not closed, so the nodes stay in place and no element is pulled inside out. Only the
+  nodes lying on the other piece are tied: where one piece reaches beyond the other, its nodes
+  beside the common area stay free. Two pieces with a third between them, such as the blocks on
+  both sides of a thin sheet, are tied to that piece and not to each other through it. These
   ties do not appear in the tree; problems the model check finds on them are shown on the
   compound part.
 - Changing a compound joins the existing mesh anew at once, without meshing again; the
