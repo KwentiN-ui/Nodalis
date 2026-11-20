@@ -120,9 +120,12 @@ model but are written to the input file only as a comment, so CalculiX ignores t
 
 Tree items are renamed in the #ui("Name") field of their dialog. Mesh parts are renamed in their
 #ui("Properties") dialog. A name can be any text, with umlauts, blanks, commas and other
-characters (`Gehäuse, oben (Ø 40)`), and keeps its case; it only has to differ from the names of
-the other parts, sets and surfaces, regardless of case. The solver never sees it: the input file
-gives each part a label of its own that CalculiX can read (`GEHAEUSE__OBEN_(__40)`). Renaming never breaks a reference: items refer to each
+characters (`Gehäuse, oben (Ø 40)`), and keeps its case. Parts and compound parts may even share
+a name: two parts called `Schraube` stay two parts, each with its own mesh, mesh setup,
+suppression and selections, as everything refers to a part by its identity, not by its name. The
+solver never sees the name: the input file gives each part a label of its own that CalculiX can
+read (`GEHAEUSE__OBEN_(__40)`, and `SCHRAUBE` and `SCHRAUBE-2` for two parts of the same
+name). Renaming never breaks a reference: items refer to each
 other by an internal identity that the name does not change. A history output stays on its
 reference point, a load keeps its amplitude, a section its material, a contact pair its
 interaction, a boundary condition its set, whatever they are renamed to. The links of the
@@ -136,6 +139,12 @@ mesh stays up to date, as nothing it was meshed from changed.
   image("../../images/part-names-any-text.png", width: 90%),
   caption: [The parts `oben` and `Stütze` of a STEP file joined in a compound part named
     `Gehäuse, oben (ø 40)`: the names stay as the CAD program and the user wrote them],
+)
+
+#figure(
+  image("../../images/part-names-same-name.png", width: 80%),
+  caption: [Both parts of a STEP file renamed to `Schraube`: they stay two parts, each meshed and
+    suppressed on its own],
 )
 
 === What acts on a part <acting>

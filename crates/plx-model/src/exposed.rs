@@ -751,13 +751,12 @@ impl Geometry {
             brep: String::new(),
             meshing: self.meshing,
             mesh_items: self.mesh_items.clone(),
-            part_names: Vec::new(),
+            parts: Vec::new(),
             refinement: self.refinement,
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -1386,13 +1385,12 @@ mod tests {
                     },
                 },
             ],
-            part_names: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
-            ids: vec![crate::PartId {
+            parts: vec![crate::GeometryPart {
                 name: "PART_1".into(),
                 id: part,
             }],
@@ -1424,7 +1422,7 @@ mod tests {
         assert_eq!(fe.value_in(None, &max), None);
 
         let input =
-            |g: &Geometry| crate::fingerprint::mesh_input(g, &[], ModelSpace::default(), "PART_1");
+            |g: &Geometry| crate::fingerprint::mesh_input(g, &[], ModelSpace::default(), part);
         let before = input(&geometry);
         assert!(geometry.set_value(&max, 0.01));
         assert!(!geometry.set_value(&max, 0.01));

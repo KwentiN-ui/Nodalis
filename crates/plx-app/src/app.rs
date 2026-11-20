@@ -134,7 +134,7 @@ struct Workbench {
     mesh_failure: BTreeSet<plx_mesher::CadEntity>,
     /// Problems of the last meshing of each part, by part name: shown with a warning sign at
     /// the part in the Geometry and FE Model trees until the part is meshed again.
-    mesh_findings: Vec<(String, plx_model::Problem, String)>,
+    mesh_findings: Vec<(plx_model::PartRef, plx_model::Problem, String)>,
     /// The results workspace: every results file opened in this session.
     /// One of them is shown on the Results tab.
     results: Vec<Model>,
@@ -1466,17 +1466,16 @@ pub(crate) fn merge_part_meshes(
         // In shapes a link brings, a part meshed here is meshed here from now on, also when
         // the link brings a mesh of it later.
         if let Some(own) = model.geometry.as_mut().filter(|g| g.from_link) {
-            let names: Vec<String> = (part.mesh.parts.iter())
-                .flat_map(plx_model::part_bodies)
-                .map(str::to_owned)
+            let ids: Vec<plx_model::PartRef> = (part.mesh.parts.iter())
+                .flat_map(plx_model::part_objects)
                 .collect();
-            own.set_own_meshes(&names, true);
+            own.set_own_meshes(&ids, true);
         }
         // What each part is meshed from, to tell when its mesh is out of date.
         for p in &part.mesh.parts {
             let matching = model.fe.matching_faces();
-            let input = plx_model::fingerprint::mesh_input(geometry, &matching, space, &p.name);
-            model.set_meshed(&p.name, input);
+            let input = plx_model::fingerprint::mesh_input(geometry, &matching, space, p.id);
+            model.set_meshed(p.id, input);
         }
         for warning in &part.warnings {
             output.push(format!("Gmsh: {warning}"));
@@ -1487,7 +1486,7 @@ pub(crate) fn merge_part_meshes(
             crate::numeric::format_physical(size)
         };
         for p in &part.mesh.parts {
-            let parameters = model.geometry.as_ref().map(|g| g.parameters(&p.name));
+            let parameters = model.geometry.as_ref().map(|g| g.parameters(p.id));
             output.push(format!(
                 "{}: {} elements (order {}, element size {} to {} {})",
                 p.name,
@@ -1578,46 +1577,21 @@ pub(crate) fn apply_compounds(model: &mut Model, before: &[plx_model::CompoundPa
     });
 }
 
-/// A name for a new compound part: `COMPOUND-<n>`, used by no part, set or compound.
-fn free_compound_name(
-    geometry: &plx_model::Geometry,
-    mesh: &plx_mesh::FeMesh,
-    parts: &[String],
-) -> String {
+/// A name for a new compound part: the first `COMPOUND-<n>` no other compound part has.
+fn free_compound_name(geometry: &plx_model::Geometry) -> String {
     (1..)
         .map(|n| format!("COMPOUND-{n}"))
-        .find(|name| {
-            geometry.compound_named(name).is_none()
-                && !parts.iter().any(|p| p.eq_ignore_ascii_case(name))
-                && !mesh.name_in_use(name)
-        })
+        .find(|name| !geometry.compounds.iter().any(|c| c.name == *name))
         .expect("unbounded range")
 }
 
-/// The name `typed` for the compound part `old`: any text, kept as typed apart from the
-/// surrounding blanks, used by no other part of the geometry or the mesh, set or compound,
-/// regardless of case. The solver never sees it: the export derives its own labels. `parts`
-/// are the parts of the geometry.
-fn compound_name(
-    geometry: &plx_model::Geometry,
-    mesh: &plx_mesh::FeMesh,
-    parts: &[String],
-    old: &str,
-    typed: &str,
-) -> Result<String, String> {
+/// The name `typed` for a compound part: any text, kept as typed apart from the
+/// surrounding blanks, also one another part has, as everything refers to parts by id. The
+/// solver never sees it: the export derives its own labels.
+fn compound_name(typed: &str) -> Result<String, String> {
     let name = typed.trim().to_owned();
     if name.is_empty() {
         return Err("The name must not be empty.".into());
-    }
-    // Only the case changes: the name is its own.
-    if name.eq_ignore_ascii_case(old) {
-        return Ok(name);
-    }
-    let taken = geometry.compound_named(&name).is_some()
-        || parts.iter().any(|p| p.eq_ignore_ascii_case(&name))
-        || mesh.name_in_use(&name);
-    if taken {
-        return Err(format!("The name {name} is already used."));
     }
     Ok(name)
 }
@@ -2702,7 +2676,7 @@ impl Workbench {
                     let parts = self.geometry.as_ref().map(|g| g.parts.as_slice());
                     items.extend(
                         (parts.unwrap_or(&[]).iter().enumerate())
-                            .filter(|(_, p)| !p.imported || model.is_linked(&p.name))
+                            .filter(|(_, p)| !p.imported || model.is_linked(p.id))
                             .map(|(i, _)| TreeItem::Part(i)),
                     );
                     items
@@ -2710,7 +2684,7 @@ impl Workbench {
                 TreeView::Geometry => Vec::new(),
                 TreeView::FeModel if path[0] == crate::links::GEOMETRY => (model.parts.iter())
                     .enumerate()
-                    .filter(|(_, p)| model.is_linked(&p.name))
+                    .filter(|(_, p)| model.is_linked(p.id))
                     .map(|(i, _)| TreeItem::Part(i))
                     .collect(),
                 TreeView::FeModel => crate::links::tree_items(&model.fe, path),
@@ -2789,7 +2763,7 @@ impl Workbench {
         let linked_mesh = |index: usize| {
             model
                 .and_then(|m| Some((m, m.mesh().parts.get(index)?)))
-                .is_some_and(|(m, p)| plx_model::part_bodies(p).iter().any(|b| m.is_linked(b)))
+                .is_some_and(|(m, p)| plx_model::part_objects(p).iter().any(|&b| m.is_linked(b)))
         };
         let any_linked =
             model.is_some_and(|m| m.origins().iter().any(|(id, _)| m.origins().is_linked(id)));
@@ -3103,20 +3077,20 @@ impl Workbench {
             } else {
                 vec![index]
             };
-            let names: Vec<String> = match self.geometry.as_ref() {
+            let ids: Vec<plx_model::PartRef> = match self.geometry.as_ref() {
                 // Imported meshes are not meshed.
                 Some(g) => (indices.iter())
                     .filter_map(|&i| g.parts.get(i).filter(|p| !p.imported))
-                    .map(|p| p.name.clone())
+                    .map(|p| p.id)
                     .collect(),
                 None => Vec::new(),
             };
-            if !names.is_empty() {
-                self.generate_mesh(ctx, Some(names));
+            if !ids.is_empty() {
+                self.generate_mesh(ctx, Some(ids));
             }
         }
-        if let Some(name) = response.mesh_unmeshed {
-            self.generate_mesh(ctx, Some(vec![name]));
+        if let Some(id) = response.mesh_unmeshed {
+            self.generate_mesh(ctx, Some(vec![id]));
         }
         if let Some(action) = response.compound {
             self.compound_action(ctx, action);
@@ -3957,7 +3931,7 @@ impl Workbench {
                 if remeshes {
                     remesh = Some(match &affected {
                         Some(parts) if !parts.is_empty() => Some(parts.clone()),
-                        _ => item.kind.parts().map(|ids| geometry.part_names_of(ids)),
+                        _ => item.kind.parts().map(<[_]>::to_vec),
                     });
                 }
                 let exposed = (editor.take_expose()).map(|s| (s, item.id));
@@ -3995,9 +3969,9 @@ impl Workbench {
         }
     }
 
-    /// Meshes the named parts of the geometry, or all with `None`, on a worker thread;
-    /// [`Self::poll_meshing`] takes the result.
-    fn generate_mesh(&mut self, ctx: &egui::Context, mut parts: Option<Vec<String>>) {
+    /// Meshes the given parts of the geometry (or FE parts of compounds), or all with
+    /// `None`, on a worker thread; [`Self::poll_meshing`] takes the result.
+    fn generate_mesh(&mut self, ctx: &egui::Context, mut parts: Option<Vec<plx_model::PartRef>>) {
         if self.meshing.is_some() {
             return;
         }
@@ -4006,39 +3980,38 @@ impl Workbench {
         };
         // Parts whose mesh a link brings: Mesh All leaves them as they come, a part meshed
         // on its own is meshed here from now on.
-        let linked: Vec<String> = (model.origins().iter())
+        let linked: Vec<plx_model::PartRef> = (model.origins().iter())
             .filter(|(_, origin)| *origin == plx_model::PartOrigin::Linked)
-            .filter_map(|(id, _)| model.geometry.as_ref()?.part_name(id).map(str::to_owned))
+            .map(|(id, _)| id)
+            .filter(|&id| {
+                model
+                    .geometry
+                    .as_ref()
+                    .is_some_and(|g| g.part(id).is_some())
+            })
             .collect();
         if !linked.is_empty() {
             match &parts {
                 Some(asked) => {
-                    let own: Vec<String> = (linked.iter())
+                    let own: Vec<plx_model::PartRef> = (linked.iter().copied())
                         .filter(|l| {
-                            asked.iter().any(|a| {
-                                a.eq_ignore_ascii_case(l)
-                                    || model.geometry.as_ref().is_some_and(|g| {
-                                        g.parts_of_fe_part(a)
-                                            .iter()
-                                            .any(|p| p.eq_ignore_ascii_case(l))
-                                    })
+                            asked.iter().any(|&a| {
+                                a == *l
+                                    || (model.geometry.as_ref())
+                                        .is_some_and(|g| g.parts_of_fe_part(a).contains(l))
                             })
                         })
-                        .cloned()
                         .collect();
                     if let Some(geometry) = &mut model.geometry {
                         geometry.set_own_meshes(&own, true);
                     }
                 }
                 None => {
-                    let rest: Vec<String> = (self.geometry.as_ref())
+                    let rest: Vec<plx_model::PartRef> = (self.geometry.as_ref())
                         .map(|g| {
                             (g.parts.iter())
-                                .filter(|p| {
-                                    !p.imported
-                                        && !linked.iter().any(|l| l.eq_ignore_ascii_case(&p.name))
-                                })
-                                .map(|p| p.name.clone())
+                                .filter(|p| !p.imported && !linked.contains(&p.id))
+                                .map(|p| p.id)
                                 .collect()
                         })
                         .unwrap_or_default();
@@ -4058,21 +4031,21 @@ impl Workbench {
             return;
         };
         // Suppressed parts are left out, see `meshing::mesh_parts`.
-        let asked: Vec<String> = match &parts {
+        let asked: Vec<plx_model::PartRef> = match &parts {
             Some(parts) => (parts.iter())
-                .flat_map(|p| geometry.parts_of_fe_part(p))
+                .flat_map(|&p| geometry.parts_of_fe_part(p))
                 .collect(),
             None => (self.geometry.as_ref())
                 .map(|g| {
                     (g.parts.iter())
                         .filter(|p| !p.imported)
-                        .map(|p| p.name.clone())
+                        .map(|p| p.id)
                         .collect()
                 })
                 .unwrap_or_default(),
         };
-        let left_out: Vec<&String> = (asked.iter())
-            .filter(|p| geometry.is_suppressed(p))
+        let left_out: Vec<plx_model::PartRef> = (asked.iter().copied())
+            .filter(|&p| geometry.is_suppressed(p))
             .collect();
         if !asked.is_empty() && left_out.len() == asked.len() {
             let line = match &parts {
@@ -4090,11 +4063,14 @@ impl Workbench {
             return;
         }
         if !left_out.is_empty() {
-            let names: Vec<&str> = left_out.iter().map(|p| p.as_str()).collect();
+            let names = geometry.part_names_of(&left_out);
             (self.output).push(format!("Suppressed, not meshed: {}", names.join(", ")));
         }
         let what = match &parts {
-            Some(parts) => parts.join(", "),
+            Some(parts) => (parts.iter())
+                .filter_map(|&p| geometry.name_of(p))
+                .collect::<Vec<_>>()
+                .join(", "),
             None => geometry.source.clone(),
         };
         self.output.push(format!("Meshing {what} …"));
@@ -4144,6 +4120,7 @@ impl Workbench {
                 }
                 let failed = std::mem::take(&mut generated.failed);
                 self.note_mesh_findings(&generated, &failed);
+                let failed: Vec<String> = failed.into_iter().map(|(_, m)| m).collect();
                 if generated.meshes.is_empty() {
                     self.show_mesh_failures(&failed);
                     return;
@@ -4184,54 +4161,67 @@ impl Workbench {
     /// Keeps what went wrong with each part meshed now, for the warning signs in the trees:
     /// the part that failed, or the one with flat elements; the parts meshed now lose what
     /// their last meshing left.
-    fn note_mesh_findings(&mut self, generated: &crate::meshing::PartMeshes, failed: &[String]) {
-        let names: Vec<String> = (self.geometry.as_ref())
-            .map(|g| g.parts.iter().map(|p| p.name.clone()).collect())
-            .unwrap_or_default();
-        // The part a message is about, which it begins with; the longest name that fits.
-        let part_of = |message: &str| {
-            (names.iter())
-                .filter(|n| {
-                    message.len() > n.len() + 1
-                        && message.is_char_boundary(n.len())
-                        && message[..n.len()].eq_ignore_ascii_case(n)
-                        && message[n.len()..].starts_with(": ")
-                })
-                .max_by_key(|n| n.len())
-                .cloned()
+    fn note_mesh_findings(
+        &mut self,
+        generated: &crate::meshing::PartMeshes,
+        failed: &[(plx_model::PartRef, String)],
+    ) {
+        // What a message says of its part, after the part's name it begins with.
+        let detail = |message: &str, name: &str| {
+            (message.strip_prefix(name))
+                .and_then(|rest| rest.strip_prefix(": "))
+                .unwrap_or(message)
+                .to_owned()
         };
         let mut found = Vec::new();
-        let mut touched: Vec<String> = Vec::new();
+        let mut touched: Vec<plx_model::PartRef> = Vec::new();
         for generated in &generated.meshes {
-            touched.extend(generated.mesh.parts.iter().map(|p| p.name.clone()));
-            for warning in &generated.warnings {
-                if plx_mesher::is_flat_warning(warning)
-                    && let Some(part) = part_of(warning)
-                {
-                    let detail = warning[part.len() + 2..].to_string();
-                    found.push((part, plx_model::Problem::FlatElements, detail));
+            // The parts of the geometry it is the mesh of, with their names.
+            let objects: Vec<(plx_model::PartRef, &str)> = (generated.mesh.parts.iter())
+                .flat_map(|p| {
+                    plx_model::part_objects(p)
+                        .into_iter()
+                        .zip(plx_model::part_bodies(p))
+                })
+                .collect();
+            touched.extend(objects.iter().map(|(id, _)| *id));
+            for warning in generated
+                .warnings
+                .iter()
+                .filter(|w| plx_mesher::is_flat_warning(w))
+            {
+                // The part a warning is about, which it begins with; the longest name that
+                // fits.
+                let part = (objects.iter())
+                    .filter(|(_, n)| warning.starts_with(&format!("{n}: ")))
+                    .max_by_key(|(_, n)| n.len());
+                if let Some(&(id, name)) = part {
+                    found.push((id, plx_model::Problem::FlatElements, detail(warning, name)));
                 }
             }
         }
-        for message in failed {
-            if let Some(part) = part_of(message) {
-                let detail = message[part.len() + 2..].to_string();
-                touched.push(part.clone());
-                found.push((part, plx_model::Problem::MeshFailed, detail));
-            }
+        let geometry = self.model.as_ref().and_then(|m| m.geometry.as_ref());
+        for (part, message) in failed {
+            let name = geometry
+                .and_then(|g| g.part_name(*part))
+                .unwrap_or_default();
+            touched.push(*part);
+            found.push((*part, plx_model::Problem::MeshFailed, detail(message, name)));
         }
-        (self.mesh_findings).retain(|(p, ..)| !touched.iter().any(|t| t.eq_ignore_ascii_case(p)));
+        (self.mesh_findings).retain(|(p, ..)| !touched.contains(p));
         self.mesh_findings.extend(found);
     }
 
-    /// The problems of the last meshing as findings at the parts of `model`, by name.
+    /// The problems of the last meshing as findings at the parts of `model`: the parts of
+    /// the geometry, or the parts of the FE model meshed from them.
     fn mesh_part_findings(&self, model: Option<&Model>) -> Vec<plx_model::Finding> {
         let Some(model) = model else {
             return Vec::new();
         };
         (self.mesh_findings.iter())
             .filter_map(|(part, problem, detail)| {
-                let index = (model.parts.iter()).position(|p| p.name.eq_ignore_ascii_case(part))?;
+                let index = (model.mesh().parts.iter())
+                    .position(|p| plx_model::part_objects(p).contains(part))?;
                 Some(plx_model::Finding::new(
                     plx_model::ModelItem::Part(index),
                     *problem,
@@ -6070,6 +6060,7 @@ impl Workbench {
                 model.set_mesh(mesh);
             }
         }
+        let added_names = import.geometry.part_names_of(&added);
         model.geometry = Some(import.geometry);
         for warning in &import.warnings {
             self.output.push(format!("Warning: {warning}"));
@@ -6080,7 +6071,7 @@ impl Workbench {
         self.output.push(format!(
             "{files} imported: {} part(s) added ({})",
             added.len(),
-            added.join(", ")
+            added_names.join(", ")
         ));
         self.geometry = Some(view);
         self.after_parts_changed();
@@ -6168,15 +6159,15 @@ impl Workbench {
     /// Deleting parts of the Geometry tree, by index in the geometry view: each is a
     /// geometry object, deleted with its mesh.
     fn delete_geometry_parts(&mut self, indices: &[usize]) {
-        let names: Vec<String> = (self.geometry.as_ref())
+        let objects: Vec<(plx_model::PartRef, String)> = (self.geometry.as_ref())
             .map(|g| {
                 (indices.iter())
                     .filter_map(|&i| g.parts.get(i))
-                    .map(|p| p.name.clone())
+                    .map(|p| (p.id, p.name.clone()))
                     .collect()
             })
             .unwrap_or_default();
-        self.delete_objects(&names);
+        self.delete_objects(&objects);
     }
 
     /// Deleting parts of the FE model, by index: the mesh of each belongs to a geometry
@@ -6185,31 +6176,34 @@ impl Workbench {
         let Some(model) = self.model.as_ref() else {
             return;
         };
-        let names: Vec<String> = (indices.iter())
+        let objects: Vec<(plx_model::PartRef, String)> = (indices.iter())
             .filter_map(|&i| model.mesh().parts.get(i))
-            .flat_map(plx_model::part_bodies)
-            .map(str::to_owned)
+            .flat_map(|p| {
+                plx_model::part_objects(p)
+                    .into_iter()
+                    .zip(plx_model::part_bodies(p))
+            })
+            .map(|(id, name)| (id, name.to_owned()))
             .collect();
-        self.delete_objects(&names);
+        self.delete_objects(&objects);
     }
 
-    /// Deletes the geometry objects `names`: parts of the geometry lose their solids or
-    /// faces, and every one of them its mesh, imported meshes being geometry objects of their
-    /// own. Undo brings them back.
-    fn delete_objects(&mut self, names: &[String]) {
+    /// Deletes the geometry objects `objects`, as (id, name): parts of the geometry lose
+    /// their solids or faces, and every one of them its mesh, imported meshes being geometry
+    /// objects of their own. Undo brings them back.
+    fn delete_objects(&mut self, objects: &[(plx_model::PartRef, String)]) {
         let Some(model) = self.model.as_mut() else {
             return;
         };
-        if names.is_empty() {
+        if objects.is_empty() {
             return;
         }
+        let names: Vec<String> = objects.iter().map(|(_, n)| n.clone()).collect();
         let name = names.join(", ");
-        let deleted: Vec<(plx_model::PartRef, String)> = (names.iter())
-            .filter_map(|n| Some((model.object_id(n)?, n.clone())))
-            .collect();
-        let cad: Vec<String> = (names.iter())
-            .filter(|n| !model.is_imported(n))
-            .cloned()
+        let ids: Vec<plx_model::PartRef> = objects.iter().map(|(id, _)| *id).collect();
+        let deleted = objects.to_vec();
+        let cad: Vec<plx_model::PartRef> = (ids.iter().copied())
+            .filter(|&id| !model.is_imported(id))
             .collect();
         // All in one go, so that Gmsh numbers the faces, edges and vertices anew once.
         let mut shapes = None;
@@ -6229,14 +6223,10 @@ impl Workbench {
         // The parts of the FE model that go whole: the selections that picked them simply
         // lose them.
         let gone: Vec<plx_model::PartRef> = (model.mesh().parts.iter())
-            .filter(|p| {
-                plx_model::part_bodies(p)
-                    .iter()
-                    .all(|b| names.iter().any(|n| n.eq_ignore_ascii_case(b)))
-            })
+            .filter(|p| plx_model::part_objects(p).iter().all(|b| ids.contains(b)))
             .map(|p| p.id)
             .collect();
-        let bodies = plx_model::body_ids(model.mesh(), names);
+        let bodies = ids.clone();
         let tags = shapes.as_ref().map(|(_, tags)| tags);
         // Both changes happen in one frame, so one undo brings back the mesh and the
         // selections.
@@ -6289,7 +6279,7 @@ impl Workbench {
             });
             model.geometry = smaller;
         }
-        self.output.push(deleted_message(names));
+        self.output.push(deleted_message(&names));
         self.requests.push(Request::Deleted(deleted));
         self.sync_imported();
         self.after_parts_changed();
@@ -6301,26 +6291,22 @@ impl Workbench {
         let (Some(model), Some(view)) = (self.model.as_mut(), self.geometry.as_ref()) else {
             return;
         };
-        let names: Vec<String> = (indices.iter())
+        let (ids, names): (Vec<plx_model::PartRef>, Vec<String>) = (indices.iter())
             .filter_map(|&i| view.parts.get(i))
-            .map(|p| p.name.clone())
-            .filter(|n| model.is_cad(n))
-            .collect();
-        if names.is_empty() {
+            .filter(|p| model.is_cad(p.id))
+            .map(|p| (p.id, p.name.clone()))
+            .unzip();
+        if ids.is_empty() {
             return;
         }
         // A part whose mesh a link brings is meshed here from now on.
-        let linked: Vec<String> = (names.iter())
-            .filter(|n| model.is_linked(n))
-            .cloned()
+        let linked: Vec<plx_model::PartRef> = (ids.iter().copied())
+            .filter(|&id| model.is_linked(id))
             .collect();
         if let Some(geometry) = &mut model.geometry {
             geometry.set_own_meshes(&linked, true);
         }
-        model.edit_mesh(|mesh, _| {
-            let bodies = plx_model::body_ids(mesh, &names);
-            mesh.remove_bodies(&bodies);
-        });
+        model.edit_mesh(|mesh, _| mesh.remove_bodies(&ids));
         self.output
             .push(format!("Mesh of {} discarded", names.join(", ")));
         self.after_parts_changed();
@@ -6332,14 +6318,14 @@ impl Workbench {
         let (Some(model), Some(view)) = (self.model.as_mut(), self.geometry.as_ref()) else {
             return;
         };
-        let names: Vec<String> = (indices.iter())
+        let (ids, names): (Vec<plx_model::PartRef>, Vec<String>) = (indices.iter())
             .filter_map(|&i| view.parts.get(i))
-            .map(|p| p.name.clone())
-            .collect();
+            .map(|p| (p.id, p.name.clone()))
+            .unzip();
         let Some(geometry) = &mut model.geometry else {
             return;
         };
-        if geometry.set_own_meshes(&names, false) {
+        if geometry.set_own_meshes(&ids, false) {
             // Until the link brings the mesh again, the mesh made here counts as linked.
             model.settle_origins();
             self.output
@@ -6378,13 +6364,9 @@ impl Workbench {
         let Some(geometry) = &model.geometry else {
             return Vec::new();
         };
-        let index =
-            |name: &String| (view.parts.iter()).position(|p| p.name.eq_ignore_ascii_case(name));
-        (geometry.compounds.iter().enumerate())
-            .map(|(i, c)| {
-                let members = geometry.member_names(i);
-                (c.name.clone(), members.iter().filter_map(index).collect())
-            })
+        let index = |id: &plx_model::PartRef| (view.parts.iter()).position(|p| p.id == *id);
+        (geometry.compounds.iter())
+            .map(|c| (c.name.clone(), c.parts.iter().filter_map(index).collect()))
             .collect()
     }
 
@@ -6425,19 +6407,22 @@ impl Workbench {
             TreeView::FeModel => self.model.as_ref(),
             TreeView::Results => None,
         };
-        let names: Vec<String> = (shown.into_iter())
+        let (ids, names): (Vec<plx_model::PartRef>, Vec<String>) = (shown.into_iter())
             .flat_map(|m| (parts.iter()).filter_map(|&i| m.mesh().parts.get(i)))
-            .flat_map(plx_model::part_bodies)
-            .map(str::to_owned)
-            .collect();
+            .flat_map(|p| {
+                plx_model::part_objects(p)
+                    .into_iter()
+                    .zip(plx_model::part_bodies(p))
+            })
+            .map(|(id, name)| (id, name.to_owned()))
+            .unzip();
         let Some(model) = self.model.as_mut() else {
             return;
         };
-        let cad: Vec<String> = (names.iter())
-            .filter(|n| !model.is_imported(n))
-            .cloned()
+        let cad: Vec<plx_model::PartRef> = (ids.iter().copied())
+            .filter(|&id| !model.is_imported(id))
             .collect();
-        let mut changed = model.set_imported_suppressed(&names, suppressed);
+        let mut changed = model.set_imported_suppressed(&ids, suppressed);
         if let Some(geometry) = model.geometry.as_mut() {
             changed |= geometry.set_suppressed(&cad, suppressed);
         }
@@ -6457,31 +6442,26 @@ impl Workbench {
     /// mesh that exists already is joined anew at once, without meshing again.
     fn compound_action(&mut self, ctx: &egui::Context, action: tree::CompoundAction) {
         use tree::CompoundAction;
-        let names = |indices: &[usize]| -> Vec<String> {
+        let of = |indices: &[usize]| -> Vec<(plx_model::PartRef, String)> {
             (self.geometry.as_ref())
                 .map(|g| {
                     (indices.iter())
                         .filter_map(|&i| g.parts.get(i))
-                        .map(|p| p.name.clone())
+                        .map(|p| (p.id, p.name.clone()))
                         .collect()
                 })
                 .unwrap_or_default()
         };
-        let all_parts: Vec<String> = (self.geometry.as_ref())
-            .map(|g| g.parts.iter().map(|p| p.name.clone()).collect())
-            .unwrap_or_default();
-        let action_parts = match &action {
+        let (action_parts, action_names): (Vec<plx_model::PartRef>, Vec<String>) = match &action {
             CompoundAction::Create(parts)
             | CompoundAction::Add(_, parts)
-            | CompoundAction::Remove(parts) => names(parts),
-            _ => Vec::new(),
+            | CompoundAction::Remove(parts) => of(parts).into_iter().unzip(),
+            _ => Default::default(),
         };
         let Some(model) = self.model.as_mut() else {
             return;
         };
-        let split = model.split();
-        let mesh = split.mesh;
-        let Some(geometry) = split.geometry.as_mut() else {
+        let Some(geometry) = model.geometry.as_mut() else {
             return;
         };
         let before = geometry.compounds.clone();
@@ -6494,8 +6474,8 @@ impl Workbench {
             }
             CompoundAction::Mesh(c) => {
                 if let Some(compound) = geometry.compounds.get(c) {
-                    let name = compound.name.clone();
-                    self.generate_mesh(ctx, Some(vec![name]));
+                    let id = compound.id;
+                    self.generate_mesh(ctx, Some(vec![id]));
                 }
                 return;
             }
@@ -6504,10 +6484,12 @@ impl Workbench {
                     return;
                 }
                 geometry.remove_from_compounds(&action_parts);
-                let name = free_compound_name(geometry, mesh, &all_parts);
-                let parts = geometry.part_ids_of(&action_parts);
-                (geometry.compounds).push(plx_model::CompoundPart::new(name.clone(), parts));
-                format!("Compound part {name} made of {}", action_parts.join(", "))
+                let name = free_compound_name(geometry);
+                (geometry.compounds).push(plx_model::CompoundPart::new(
+                    name.clone(),
+                    action_parts.clone(),
+                ));
+                format!("Compound part {name} made of {}", action_names.join(", "))
             }
             CompoundAction::Add(c, _) => {
                 let Some(name) = geometry.compounds.get(c).map(|c| c.name.clone()) else {
@@ -6515,7 +6497,7 @@ impl Workbench {
                 };
                 let id = geometry.compounds[c].id;
                 geometry.remove_from_compounds(&action_parts);
-                let parts = geometry.part_ids_of(&action_parts);
+                let parts = action_parts.clone();
                 match geometry.compound_with_id(id) {
                     Some(c) => geometry.compounds[c].parts.extend(parts),
                     // Left empty, it went: it comes back with the parts, the same part.
@@ -6525,20 +6507,20 @@ impl Workbench {
                         parts,
                     }),
                 }
-                format!("{} added to {name}", action_parts.join(", "))
+                format!("{} added to {name}", action_names.join(", "))
             }
             CompoundAction::Remove(_) => {
                 geometry.remove_from_compounds(&action_parts);
                 format!(
                     "{} taken out of their compound parts",
-                    action_parts.join(", ")
+                    action_names.join(", ")
                 )
             }
             CompoundAction::Rename(c, typed) => {
                 let Some(old) = geometry.compounds.get(c).map(|c| c.name.clone()) else {
                     return;
                 };
-                match compound_name(geometry, mesh, &all_parts, &old, &typed) {
+                match compound_name(&typed) {
                     Ok(name) if name == old => return,
                     Ok(name) => {
                         geometry.compounds[c].name = name.clone();
@@ -6555,7 +6537,7 @@ impl Workbench {
                 if c >= geometry.compounds.len() {
                     return;
                 }
-                let members = geometry.member_names(c);
+                let members = geometry.part_names_of(&geometry.compounds[c].parts);
                 let gone = geometry.compounds.remove(c);
                 format!(
                     "Compound part {} dissolved into {}",
@@ -6577,19 +6559,16 @@ impl Workbench {
         let Some(model) = self.model.as_mut() else {
             return;
         };
-        let bodies: Vec<String> = (parts.iter())
+        let bodies: Vec<plx_model::PartRef> = (parts.iter())
             .filter_map(|&i| model.mesh().parts.get(i))
-            .flat_map(plx_model::part_bodies)
-            .map(str::to_owned)
+            .flat_map(plx_model::part_objects)
             .collect();
-        let imported = bodies.iter().filter(|b| model.is_imported(b)).count();
+        let imported = bodies.iter().filter(|&&b| model.is_imported(b)).count();
         if imported == 0 {
             // Parts of the geometry: a compound part joins them.
             let indices: Vec<usize> = match &self.geometry {
                 Some(view) => (bodies.iter())
-                    .filter_map(|b| {
-                        (view.parts.iter()).position(|p| p.name.eq_ignore_ascii_case(b))
-                    })
+                    .filter_map(|b| (view.parts.iter()).position(|p| p.id == *b))
                     .collect(),
                 None => Vec::new(),
             };
@@ -6784,7 +6763,7 @@ impl Workbench {
             return;
         };
         let wanted: Vec<usize> = (model.mesh().parts.iter().enumerate())
-            .filter(|(_, p)| p.bodies.is_empty() && model.is_imported(&p.name))
+            .filter(|(_, p)| p.bodies.is_empty() && model.is_imported(p.id))
             .map(|(i, _)| i)
             .collect();
         let names: Vec<String> = (wanted.iter())
@@ -7033,7 +7012,6 @@ impl Workbench {
         };
         let geometry = self.model.as_ref().and_then(|m| m.geometry.as_ref());
         let items = geometry.map_or(&[][..], |g| g.mesh_items.as_slice());
-        let ids = geometry.map_or(&[][..], |g| g.ids.as_slice());
         let highlight = match (&self.mesh_item_editor, &self.tree.selected) {
             (Some(editor), _) => editor.highlight(view),
             (None, Some((TreeView::Geometry, TreeItem::Part(_)))) => {
@@ -7045,7 +7023,7 @@ impl Workbench {
             }
             (None, Some((TreeView::Geometry, TreeItem::MeshItem(index)))) => items
                 .get(*index)
-                .map(|item| crate::meshing::item_highlight(view, &item.kind, ids))
+                .map(|item| crate::meshing::item_highlight(view, &item.kind))
                 .unwrap_or_default(),
             // Without a selection, the faces and edges meshing failed on.
             _ => crate::meshing::entities_highlight(view, &self.mesh_failure),
@@ -7983,12 +7961,54 @@ impl Workbench {
                 self.highlighted = None;
             }
             match renamed {
-                Ok(()) => close = true,
+                Ok(()) => {
+                    close = true;
+                    self.rename_in_other_view(index, &name);
+                }
                 Err(error) => self.part_name.1 = Some(error),
             }
         }
         if !open || close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.dialog = None;
+        }
+    }
+
+    /// After the part at `index` of the shown tree was renamed to `name`: the same part,
+    /// by id, in the other of the Geometry and the FE Model workspace takes the name too,
+    /// and so does the part of the geometry.
+    fn rename_in_other_view(&mut self, index: usize, name: &str) {
+        let Some(id) = (self.shown())
+            .and_then(|m| m.mesh().parts.get(index))
+            .map(|p| p.id)
+        else {
+            return;
+        };
+        let index_in = |view: &Model| view.mesh().parts.iter().position(|p| p.id == id);
+        match self.tree_view {
+            TreeView::Geometry => {
+                let Some(model) = self.model.as_mut() else {
+                    return;
+                };
+                match index_in(model) {
+                    // Renaming the mesh renames the part of the geometry with it.
+                    Some(i) => {
+                        let _ = model.rename_part(i, name);
+                    }
+                    None => {
+                        if let Some(geometry) = model.geometry.as_mut() {
+                            geometry.rename_part(id, name);
+                        }
+                    }
+                }
+            }
+            TreeView::FeModel => {
+                if let Some(view) = self.geometry.as_mut()
+                    && let Some(i) = index_in(view)
+                {
+                    let _ = view.rename_part(i, name);
+                }
+            }
+            TreeView::Results => {}
         }
     }
 
@@ -8320,7 +8340,9 @@ impl Workbench {
         if self.tree_view != TreeView::Geometry {
             return;
         }
-        let stale = (self.cached_status()).map_or_else(Vec::new, |s| s.stale_parts);
+        let stale: Vec<plx_model::PartRef> = (self.cached_status()).map_or_else(Vec::new, |s| {
+            s.stale_parts.iter().map(|(id, _)| *id).collect()
+        });
         let (Some(model), Some(view)) = (&self.model, &self.geometry) else {
             return;
         };
@@ -9050,7 +9072,10 @@ pub(crate) fn note_solver_findings(analysis: &mut Analysis, findings: &[plx_mode
 }
 
 /// The parts that hold the faces and edges a local mesh size names, none for another item.
-fn local_size_parts(view: &Model, item: Option<&plx_model::MeshSetupItem>) -> Vec<String> {
+fn local_size_parts(
+    view: &Model,
+    item: Option<&plx_model::MeshSetupItem>,
+) -> Vec<plx_model::PartRef> {
     let Some(plx_model::MeshSetupKind::LocalMeshSize { faces, edges, .. }) = item.map(|i| &i.kind)
     else {
         return Vec::new();
@@ -9069,17 +9094,18 @@ fn keep_up_to_date(
     matching: &[plx_model::PeriodicFaces],
     before: &plx_model::Geometry,
     now: &plx_model::Geometry,
-    affected: &[String],
+    affected: &[plx_model::PartRef],
     inputs: &mut plx_model::PartOrigins,
 ) {
-    let affected: std::collections::BTreeSet<String> = (affected.iter())
-        .flat_map(|p| now.parts_of_fe_part(p))
+    let affected: std::collections::BTreeSet<plx_model::PartRef> = (affected.iter())
+        .flat_map(|&p| now.parts_of_fe_part(p))
         .collect();
     for (id, input) in inputs.made_from_mut() {
-        let Some(part) = now.part_name(id) else {
+        let part = id;
+        if now.part(part).is_none() {
             continue;
-        };
-        if !affected.contains(part)
+        }
+        if !affected.contains(&part)
             && *input == plx_model::fingerprint::mesh_input(before, matching, space, part)
         {
             *input = plx_model::fingerprint::mesh_input(now, matching, space, part);
@@ -9090,6 +9116,8 @@ fn keep_up_to_date(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use crate::test_ids::ByName;
 
     #[test]
     fn animation_frames_are_kept_while_they_fit() {
@@ -9175,8 +9203,8 @@ mod tests {
                 vec![part + 1],
             ));
         }
-        let ids = (mesh.parts.iter())
-            .map(|p| plx_model::PartId {
+        let parts = (mesh.parts.iter())
+            .map(|p| plx_model::GeometryPart {
                 name: p.name.clone(),
                 id: p.id,
             })
@@ -9188,13 +9216,12 @@ mod tests {
             brep: String::new(),
             meshing: plx_model::MeshingParameters::default(),
             mesh_items: Vec::new(),
-            part_names: Vec::new(),
+            parts,
             refinement: 1.0,
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
-            ids,
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -9247,31 +9274,23 @@ mod tests {
     }
 
     #[test]
-    fn compound_names_are_any_text_used_by_nothing_else() {
-        let model = two_part_model();
-        let geometry = model.geometry.as_ref().unwrap();
-        let parts = vec![
-            "SOLID-1".to_owned(),
-            "SOLID-2".to_owned(),
-            "SOLID-3".to_owned(),
-        ];
+    fn compound_names_are_any_text_also_one_a_part_has() {
+        let mut model = two_part_model();
+        let geometry = model.geometry.as_mut().unwrap();
+        assert_eq!(free_compound_name(geometry), "COMPOUND-1");
+        let ids = geometry.part_ids();
+        geometry
+            .compounds
+            .push(plx_model::CompoundPart::new("COMPOUND-1", ids));
+        assert_eq!(free_compound_name(geometry), "COMPOUND-2");
+        assert_eq!(compound_name(" Rahmen-2 "), Ok("Rahmen-2".into()));
         assert_eq!(
-            free_compound_name(geometry, model.mesh(), &parts),
-            "COMPOUND-1"
-        );
-        let name = |typed: &str| compound_name(geometry, model.mesh(), &parts, "COMPOUND-1", typed);
-        assert_eq!(name(" Rahmen-2 "), Ok("Rahmen-2".into()));
-        assert_eq!(
-            name("Gehäuse, oben (Ø 40)"),
+            compound_name("Gehäuse, oben (Ø 40)"),
             Ok("Gehäuse, oben (Ø 40)".into())
         );
-        assert_eq!(name("compound-1"), Ok("compound-1".into()), "its own name");
-        assert!(
-            name("solid-3").is_err(),
-            "a part of the geometry not meshed yet"
-        );
-        assert!(name("SOLID-1").is_err());
-        assert!(name("  ").is_err());
+        // Everything refers to parts by id: the name of a part is fine too.
+        assert_eq!(compound_name("SOLID-1"), Ok("SOLID-1".into()));
+        assert!(compound_name("  ").is_err());
     }
 
     /// A local mesh size on a face of one of two bodies touches that body only: the other
@@ -9317,18 +9336,18 @@ mod tests {
             },
         };
         let affected = local_size_parts(&view, Some(&item));
-        assert_eq!(affected, ["SOLID-2"]);
+        assert_eq!(affected, [before.part_id("SOLID-2").unwrap()]);
 
         let mut now = before.clone();
         now.mesh_items.push(item);
         let mut inputs = plx_model::PartOrigins::default();
         let id = |part: &str| before.part_id(part).unwrap();
         for part in ["SOLID-1", "SOLID-2"] {
-            let made = plx_model::fingerprint::mesh_input(&before, &[], space, part);
+            let made = plx_model::fingerprint::mesh_input(&before, &[], space, id(part));
             inputs.set_meshed(id(part), made);
         }
         keep_up_to_date(space, &[], &before, &now, &affected, &mut inputs);
-        let current = |part: &str| plx_model::fingerprint::mesh_input(&now, &[], space, part);
+        let current = |part: &str| plx_model::fingerprint::mesh_input(&now, &[], space, id(part));
         assert_eq!(inputs.made_from(id("SOLID-1")), Some(current("SOLID-1")));
         assert_ne!(inputs.made_from(id("SOLID-2")), Some(current("SOLID-2")));
         // A part that was out of date before stays so.

@@ -45,7 +45,7 @@ struct Loaded {
 /// of the analysis takes fingerprints of the whole model.
 enum Next {
     /// Mesh the parts first: all of them (`None`) or those out of date.
-    Mesh(Option<Vec<String>>),
+    Mesh(Option<Vec<plx_model::PartRef>>),
     /// Nothing to solve: the results are up to date.
     UpToDate,
     /// The solver was started, or could not be.
@@ -118,7 +118,9 @@ fn next_for(model: &Model, solver: &Solver, findings: &[Finding], work: &Work) -
     );
     match status.mesh {
         CellState::Missing => return Next::Mesh(None),
-        CellState::OutOfDate => return Next::Mesh(Some(status.stale_parts.clone())),
+        CellState::OutOfDate => {
+            return Next::Mesh(Some(status.stale_parts.iter().map(|(id, _)| *id).collect()));
+        }
         _ => {}
     }
     if !status.needs_solve() && !work.force {
@@ -446,7 +448,9 @@ impl BackgroundSolve {
                 match result {
                     // A solve needs every part meshed.
                     Ok(generated) if !generated.failed.is_empty() => {
-                        self.meshing_failed(generated.failed.join("\n"))
+                        let failed: Vec<&str> =
+                            generated.failed.iter().map(|(_, m)| m.as_str()).collect();
+                        self.meshing_failed(failed.join("\n"))
                     }
                     Ok(generated) => self.run(ctx, Some((geometry, generated, started))),
                     Err(error) => self.meshing_failed(error),
@@ -523,7 +527,10 @@ impl BackgroundSolve {
                     return self.fail("The model has no mesh and no geometry to mesh.".into());
                 };
                 let what = match &parts {
-                    Some(parts) => parts.join(", "),
+                    Some(parts) => (parts.iter())
+                        .filter_map(|&p| geometry.name_of(p))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     None => geometry.source.clone(),
                 };
                 self.before.push(format!("Meshing {what} …"));

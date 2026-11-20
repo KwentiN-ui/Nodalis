@@ -204,7 +204,7 @@ pub(super) fn take_cad_input(nodes: &mut [Node], links: &[Link], id: u64) {
         return;
     };
     let same = |a: &Option<Geometry>, b: &Option<Geometry>| match (a, b) {
-        (Some(a), Some(b)) => a.brep == b.brep && a.part_names == b.part_names,
+        (Some(a), Some(b)) => a.brep == b.brep && a.part_names() == b.part_names(),
         (None, None) => true,
         _ => false,
     };

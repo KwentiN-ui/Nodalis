@@ -229,9 +229,6 @@ impl ProjectApp {
                     }
                 },
             };
-            if let Some(merged) = &merged {
-                self.report_renamed(&name, &merged.renamed);
-            }
             let (copy, renamed) = links::merge_meshes(copies, merged);
             for (renamed, from) in renamed.iter().zip(&names) {
                 for (old, new) in renamed {
@@ -298,33 +295,25 @@ impl ProjectApp {
     pub(super) fn merging(&self) -> bool {
         (self.merges.values()).any(|(_, m)| matches!(m, Merge::Making(_)))
     }
-
-    fn report_renamed(&mut self, name: &str, renamed: &[BTreeMap<String, String>]) {
-        for (old, new) in renamed.iter().flatten() {
-            self.warn_once(format!(
-                "{name}: a second part {old} is called {new}, since parts need names of their own."
-            ));
-        }
-    }
 }
 
 /// The geometry put together of the meshes `with` of `count`, with their new tags and names
-/// given to each of them, by index: those without geometry keep theirs.
+/// ids given to each of them, by index: those without geometry keep theirs.
 fn spread(merged: MergedGeometry, with: &[usize], count: usize) -> MergedGeometry {
     let MergedGeometry {
         geometry,
         tags,
-        renamed,
+        ids,
     } = merged;
     let mut all_tags = vec![Default::default(); count];
-    let mut all_renamed = vec![Default::default(); count];
-    for ((&index, tags), renamed) in with.iter().zip(tags).zip(renamed) {
+    let mut all_ids = vec![Default::default(); count];
+    for ((&index, tags), ids) in with.iter().zip(tags).zip(ids) {
         all_tags[index] = tags;
-        all_renamed[index] = renamed;
+        all_ids[index] = ids;
     }
     MergedGeometry {
         geometry,
         tags: all_tags,
-        renamed: all_renamed,
+        ids: all_ids,
     }
 }

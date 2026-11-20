@@ -707,9 +707,11 @@ impl FileBlock {
             Some(Subset::Making(_)) => return Ok(None),
             None => {}
         }
-        let others: Vec<String> = (self.parts.iter())
-            .filter(|p| !key.contains(p))
-            .cloned()
+        // The file names its parts once each, see `plx_mesher::import_cad_files`; a link
+        // takes a part of it by that name.
+        let others: Vec<plx_model::PartRef> = (geometry.parts.iter())
+            .filter(|p| !key.contains(&p.name))
+            .map(|p| p.id)
             .collect();
         let (sender, receiver) = std::sync::mpsc::channel();
         let geometry = geometry.clone();
@@ -9709,7 +9711,7 @@ fn block_rows(
         state => format!("Geometry: {}", state.text()),
     };
     if !status.stale_parts.is_empty() {
-        (geometry.tip).push_str(&format!(" ({})", status.stale_parts.join(", ")));
+        (geometry.tip).push_str(&format!(" ({})", status.stale_names().join(", ")));
     }
     // A collection: the geometry objects of several links are put together.
     let mut sources: Vec<&str> = Vec::new();
@@ -14135,6 +14137,8 @@ fn block_name(base: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use crate::test_ids::ByName;
     /// Duplicating Analysis of File -> Analysis gives File -> Copy of Analysis; File ->
     /// Mesh -> Analysis duplicated together links the copies, and nothing the blocks feed
     /// is linked to a copy.
@@ -14469,7 +14473,7 @@ mod tests {
         assert_eq!(cad.state(), CellState::UpToDate);
         let made = cad.model.geometry.clone().unwrap();
         assert_ne!(made.brep, input.brep);
-        assert_eq!(made.part_names, input.part_names);
+        assert_eq!(made.part_names(), input.part_names());
         assert!(cad.link_data().is_some_and(|d| d.geometry.is_some()));
         // Rows: the geometry in and out, what it does, and the radius with an input pin.
         let rows = cad_rows(&node, &[]);
@@ -14691,11 +14695,10 @@ mod tests {
             brep: "shapes".into(),
             meshing: Default::default(),
             mesh_items: Vec::new(),
-            part_names: Vec::new(),
+            parts: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -14703,9 +14706,10 @@ mod tests {
         let mesh = MeshPrimitive::default_box().generate(ModelSpace::ThreeD, "Solid-1");
         let space = ModelSpace::ThreeD;
         let mut origins = plx_model::PartOrigins::default();
+        let solid = plx_model::object_id(&mesh, "SOLID-1").unwrap();
         origins.set_meshed(
-            plx_model::object_id(&mesh, "SOLID-1").unwrap(),
-            plx_model::fingerprint::mesh_input(&geometry, &[], space, "SOLID-1"),
+            solid,
+            plx_model::fingerprint::mesh_input(&geometry, &[], space, solid),
         );
         let mut model = plx_model::FeModel::default();
         model.properties.space = space;
@@ -15957,11 +15961,10 @@ mod tests {
                 ..Default::default()
             },
             mesh_items: Vec::new(),
-            part_names: Vec::new(),
+            parts: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -16057,11 +16060,10 @@ mod tests {
                     },
                 },
             }],
-            part_names: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
-            ids: vec![plx_model::PartId {
+            parts: vec![plx_model::GeometryPart {
                 name: "PART_1".into(),
                 id: crate::test_ids::named("PART_1"),
             }],
@@ -16076,7 +16078,8 @@ mod tests {
         let mut model = plx_model::FeModel::default();
         let key = model.expose_in(Some(&geometry), path.clone());
         let input = |g: &plx_model::Geometry| {
-            plx_model::fingerprint::mesh_input(g, &[], Default::default(), "PART_1")
+            let part = crate::test_ids::named("PART_1");
+            plx_model::fingerprint::mesh_input(g, &[], Default::default(), part)
         };
         let made_from = input(&geometry);
         let data = ProjectAnalysis {

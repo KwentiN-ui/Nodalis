@@ -26,7 +26,7 @@ use plxs_core::step::{
     Follower, HistoryOutput, Incrementation, Loads, ModalDamping, OutputDimension, Procedure,
     SolverMode, Totals,
 };
-use plxs_core::{Analysis, Model, Step};
+use plxs_core::{Analysis, ElementSetId, Model, Step};
 
 /// The file named for results an analysis was given as values ([`plxs_core::handover::Source::Loaded`]):
 /// there is none, so whoever exports such an analysis gives it a file of its own instead.
@@ -37,10 +37,11 @@ pub fn render(analysis: &Analysis) -> String {
     render_with_parts(analysis, &[])
 }
 
-/// [`render`] with the elements of the element sets `parts` in element blocks of those
-/// names (`*ELEMENT, ELSET=`), as far as the order of the elements allows: a mesh reader
-/// makes parts of them. The names are written as given, in any case.
-pub fn render_with_parts(analysis: &Analysis, parts: &[String]) -> String {
+/// [`render`] with the elements of the element sets `parts`, the sets of parts with their
+/// names, in element blocks of those sets (`*ELEMENT, ELSET=`), as far as the order of the
+/// elements allows: a mesh reader makes parts of them. A part's name is written as given,
+/// in any case, where its label is the name in upper case.
+pub fn render_with_parts(analysis: &Analysis, parts: &[(ElementSetId, String)]) -> String {
     let model = &analysis.model;
     let mut out = Out {
         text: String::new(),
@@ -324,7 +325,7 @@ fn heading(out: &mut Out, model: &Model) {
     }
 }
 
-fn mesh(out: &mut Out, model: &Model, parts: &[String]) {
+fn mesh(out: &mut Out, model: &Model, parts: &[(ElementSetId, String)]) {
     if !model.nodes.is_empty() {
         out.keyword("*Node");
         for (id, [x, y, z]) in model.nodes.iter() {
@@ -345,7 +346,7 @@ fn mesh(out: &mut Out, model: &Model, parts: &[String]) {
     // upper case, else the label, e.g. for a part named in words.
     let is_part = |set: usize| {
         let label = &labels.element_sets[set];
-        let part = (parts.iter()).find(|p| crate::normalized_name(p) == sets[set].name.as_str())?;
+        let (_, part) = (parts.iter()).find(|(id, _)| id.index() == set)?;
         Some(part.eq_ignore_ascii_case(label).then_some(part))
     };
     let part_name = |set: usize| is_part(set).flatten();

@@ -66,7 +66,6 @@ pub fn through(
         return Some(Geometry {
             source: source.source,
             refinement: source.refinement,
-            ids: own.ids.clone(),
             ..own.clone()
         });
     }
@@ -104,12 +103,14 @@ pub fn input_of(geometry: &Geometry, index: usize) -> Geometry {
 }
 
 fn same_shapes(a: &Geometry, b: &Geometry) -> bool {
-    a.brep == b.brep && a.part_names == b.part_names && a.compounds == b.compounds
+    a.brep == b.brep && a.part_names() == b.part_names() && a.compounds == b.compounds
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use crate::test_ids::ByName;
     use plx_model::{CadOperation, CadOperationKind, UnitSystem};
 
     fn gmsh_available() -> bool {

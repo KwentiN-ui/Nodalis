@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use plx_model::{ExtrudeMesh, Geometry, PeriodicFaces, Recombination};
+use plx_model::{ExtrudeMesh, Geometry, GeometryPart, PeriodicFaces, Recombination};
 
 use crate::extrude::{
     Motion, Point, Topology, add, dot, norm, recombination_number, scale, source_elements, sub,
@@ -236,7 +236,7 @@ fn local_sizes_on_cells(
 pub(crate) fn stacked_part_mesh(
     gmsh: &Gmsh,
     geometry: &Geometry,
-    part: &str,
+    part: &GeometryPart,
     volume: i32,
     extrude: &ExtrudeMesh,
     matching: &[PeriodicFaces],
@@ -320,7 +320,7 @@ pub(crate) fn stacked_part_mesh(
 
     // The layers: those the item asks for over the whole height, counted in each interval
     // between two heights of caps, which gets at least one, and spread evenly there.
-    let max_size = geometry.parameters(part).max_size;
+    let max_size = geometry.parameters(part.id).max_size;
     let asked = (extrude.layers.levels(max_size, top - base))
         .map_err(|reason| GmshError::Other(format!("{part}: {reason}")))?;
     let mut levels = Vec::new();

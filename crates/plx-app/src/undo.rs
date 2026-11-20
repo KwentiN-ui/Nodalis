@@ -48,7 +48,7 @@ impl Meshing {
 struct Shapes {
     source: String,
     brep: String,
-    part_names: Vec<String>,
+    parts: Vec<plx_model::GeometryPart>,
 }
 
 impl Shapes {
@@ -56,16 +56,14 @@ impl Shapes {
         geometry.map(|g| Self {
             source: g.source.clone(),
             brep: g.brep.clone(),
-            part_names: g.part_names.clone(),
+            parts: g.parts.clone(),
         })
     }
 
     fn matches(this: &Option<Self>, geometry: Option<&Geometry>) -> bool {
         match (this, geometry) {
             (None, None) => true,
-            (Some(s), Some(g)) => {
-                s.source == g.source && s.part_names == g.part_names && s.brep == g.brep
-            }
+            (Some(s), Some(g)) => s.source == g.source && s.parts == g.parts && s.brep == g.brep,
             _ => false,
         }
     }
@@ -316,6 +314,8 @@ fn restore_shapes(
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use crate::test_ids::ByName;
     use std::path::Path;
 
     use plx_mesh::{Element, ElementShape, Part};
@@ -411,14 +411,13 @@ mod tests {
             brep: String::new(),
             meshing: MeshingParameters::default(),
             mesh_items: Vec::new(),
-            part_names: parts.iter().map(|p| p.to_string()).collect(),
             refinement: 1.0,
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
-            ids: (parts.iter())
-                .map(|&name| plx_model::PartId {
+            parts: (parts.iter())
+                .map(|&name| plx_model::GeometryPart {
                     name: name.into(),
                     id: plx_model::Id::new(),
                 })
@@ -433,10 +432,10 @@ mod tests {
     fn meshed_model() -> Model {
         let mut model = model();
         let mut geometry = geometry(&["PART-1"]);
-        let part = model.object_id("PART-1").unwrap();
-        geometry.ids[0].id = part;
+        let part = plx_model::object_id(model.mesh(), "PART-1").unwrap();
+        geometry.parts[0].id = part;
         let space = model.fe.properties.space;
-        let input = plx_model::fingerprint::mesh_input(&geometry, &[], space, "PART-1");
+        let input = plx_model::fingerprint::mesh_input(&geometry, &[], space, part);
         model.geometry = Some(geometry);
         let mut origins = PartOrigins::default();
         origins.set_meshed(part, input);
@@ -448,14 +447,14 @@ mod tests {
     #[test]
     fn a_mesh_read_without_geometry_is_an_imported_mesh() {
         let model = model();
-        assert!(model.is_imported("PART-1"));
+        assert!(model.is_imported(model.mesh().parts[0].id));
         assert!(model.origins().complete_for(model.mesh()));
     }
 
     #[test]
     fn a_deleted_mesh_comes_back_with_its_origin() {
         let mut model = meshed_model();
-        let id = model.object_id("PART-1").unwrap();
+        let id = plx_model::object_id(model.mesh(), "PART-1").unwrap();
         let made_from = model.origins().made_from(id);
         assert!(made_from.is_some());
         let part = model.mesh().part_id("PART-1").unwrap();
@@ -472,7 +471,7 @@ mod tests {
     fn a_suppressed_imported_mesh_is_not_solved() {
         let mut model = model();
         assert_eq!(model.active().mesh().element_count(), 1);
-        assert!(model.set_imported_suppressed(&["part-1".into()], true));
+        assert!(model.set_imported_suppressed(&[model.mesh().parts[0].id], true));
         assert!(model.mark_own_suppressed());
         assert!(model.parts[0].suppressed);
         let active = model.active();
@@ -485,15 +484,15 @@ mod tests {
     #[test]
     fn a_renamed_part_of_the_geometry_is_renamed_with_its_mesh() {
         let mut model = meshed_model();
-        let id = model.object_id("PART-1").unwrap();
+        let id = plx_model::object_id(model.mesh(), "PART-1").unwrap();
         model.rename_part(0, "BRACKET").unwrap();
         let geometry = model.geometry.as_ref().unwrap();
-        assert_eq!(geometry.part_names, ["BRACKET"]);
+        assert_eq!(geometry.part_names(), ["BRACKET"]);
         let space = model.fe.properties.space;
-        let now = plx_model::fingerprint::mesh_input(geometry, &[], space, "BRACKET");
+        let now = plx_model::fingerprint::mesh_input(geometry, &[], space, id);
         // Still up to date: the part is not meshed again for its name.
         assert_eq!(model.origins().made_from(id), Some(now));
-        assert_eq!(model.object_id("BRACKET"), Some(id));
+        assert_eq!(plx_model::object_id(model.mesh(), "BRACKET"), Some(id));
     }
 
     #[test]
@@ -539,13 +538,12 @@ mod tests {
             brep: "ONE".into(),
             meshing: MeshingParameters::for_diagonal(1.0),
             mesh_items: Vec::new(),
-            part_names: Vec::new(),
+            parts: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
             from_link: false,
             operations: Vec::new(),
             input: None,

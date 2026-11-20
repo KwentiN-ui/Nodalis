@@ -50,7 +50,7 @@ pub struct CadOperationEditor {
     compound: bool,
     /// The parts selected when the split was opened: it cuts only them, and the view shows
     /// only them. All parts when empty.
-    parts: Vec<String>,
+    parts: Vec<plx_model::PartRef>,
     /// The global axis a split plane is tilted about and the angle in degrees.
     tilt_axis: usize,
     tilt_angle: f64,
@@ -106,7 +106,7 @@ impl CadOperationEditor {
         let picks = (operation.resolve(&input).unwrap_or_default().into_iter())
             .filter(|&e| operation.kind.picks(e))
             .collect();
-        let parts = input.part_names_of(&operation.parts);
+        let parts = operation.parts.clone();
         let mut editor = Self {
             id,
             name: name.to_owned(),
@@ -139,8 +139,8 @@ impl CadOperationEditor {
             editor.tilt_axis = axes[0];
         }
         if let Some(view) = &mut editor.view {
-            let names: Vec<String> = view.parts.iter().map(|p| p.name.clone()).collect();
-            hide_unchosen(view, &names, &editor.parts);
+            let ids: Vec<plx_model::PartRef> = view.parts.iter().map(|p| p.id).collect();
+            hide_unchosen(view, &ids, &editor.parts);
         }
         editor.update_highlight();
         editor
@@ -175,16 +175,14 @@ impl CadOperationEditor {
             keep: self.keep,
             compound: self.compound,
             faces: self.faces,
-            parts: (self.split_parts().iter())
-                .filter_map(|name| self.input.part_id(name))
-                .collect(),
+            parts: self.split_parts().to_vec(),
             tilt_axis: self.tilt_axis,
             tilt_angle: self.tilt_angle,
         }
     }
 
     /// The parts a split cuts; all when empty.
-    fn split_parts(&self) -> &[String] {
+    fn split_parts(&self) -> &[plx_model::PartRef] {
         if self.kind == CadOperationKind::SplitPlane {
             &self.parts
         } else {
@@ -198,7 +196,7 @@ impl CadOperationEditor {
             return Vec::new();
         };
         (view.parts.iter().enumerate())
-            .filter(|(_, p)| parts.iter().any(|n| n.eq_ignore_ascii_case(&p.name)))
+            .filter(|(_, p)| parts.contains(&p.id))
             .map(|(i, _)| i)
             .collect()
     }
@@ -404,10 +402,10 @@ impl CadOperationEditor {
             let display = plx_mesher::tessellate(&geometry).map_err(|e| e.to_string())?;
             let mut view = Model::geometry_view(Path::new(&self.name), display);
             view.mark_suppressed(&geometry);
-            let names: Vec<String> = (self.view.iter().flat_map(|v| &v.parts))
-                .map(|p| p.name.clone())
+            let ids: Vec<plx_model::PartRef> = (self.view.iter().flat_map(|v| &v.parts))
+                .map(|p| p.id)
                 .collect();
-            hide_unchosen(&mut view, &names, self.split_parts());
+            hide_unchosen(&mut view, &ids, self.split_parts());
             Ok((view, geometry))
         });
         match made {
@@ -1111,13 +1109,12 @@ fn tilted_rectangle(
 /// Hides the parts of a view of the input or of the result of a split that are parts of
 /// the input the split does not cut, so that only what is cut is shown; nothing when it
 /// cuts all parts.
-fn hide_unchosen(view: &mut Model, names: &[String], chosen: &[String]) {
+fn hide_unchosen(view: &mut Model, input: &[plx_model::PartRef], chosen: &[plx_model::PartRef]) {
     if chosen.is_empty() {
         return;
     }
-    let named = |list: &[String], name: &str| list.iter().any(|n| n.eq_ignore_ascii_case(name));
     for part in &mut view.parts {
-        if named(names, &part.name) && !named(chosen, &part.name) {
+        if input.contains(&part.id) && !chosen.contains(&part.id) {
             part.visible = false;
         }
     }

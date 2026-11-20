@@ -1091,7 +1091,13 @@ impl FeMesh {
     pub fn rename_part(&mut self, index: usize, name: &str) -> Option<String> {
         let part = self.parts.get_mut(index)?;
         let old = std::mem::replace(&mut part.name, name.to_string());
-        if let Some(elements) = self.element_sets.remove(&old) {
+        // The element set an input file names after the part goes with it, unless a set of
+        // the new name is there already or another part has the old name too.
+        let shared = (self.parts.iter()).any(|p| p.name == old);
+        if !shared
+            && !self.element_sets.contains_key(name)
+            && let Some(elements) = self.element_sets.remove(&old)
+        {
             self.element_sets.insert(name.to_string(), elements);
         }
         Some(old)

@@ -4,7 +4,9 @@
 use std::collections::BTreeSet;
 
 use plx_mesh::CadEntity;
-use plx_model::{CadOperation, CadOperationKind, EntitySignature, Geometry, match_entities};
+use plx_model::{
+    CadOperation, CadOperationKind, EntitySignature, Geometry, GeometryPart, match_entities,
+};
 
 use crate::gmsh::{Boolean, Gmsh, GmshError, with_gmsh};
 use crate::{Shape, TempFile, default_parts, parts, signatures};
@@ -112,34 +114,38 @@ pub fn apply_operation(
     })?;
     let brep = std::fs::read_to_string(&result.0)
         .map_err(|e| fail(format!("{}: {e}", result.0.display())))?;
-    let (part_names, signatures) = names;
-    let mut geometry = Geometry {
+    let (parts, signatures) = names;
+    Ok(Geometry {
         brep,
-        part_names,
+        parts,
         signatures,
         ..input.clone()
-    };
-    geometry.ensure_ids();
-    Ok(geometry)
+    })
 }
 
-/// The names of the parts of the model: each keeps the name of the one of `before` it was
-/// made from, the nearest of the same dimension.
+/// The parts of the model: each is the part of `before` it was made from, the nearest of the
+/// same dimension, with its id and name; a part made where none was, or where a part is
+/// already taken, is a new one.
 pub(crate) fn names_by_place(
     gmsh: &Gmsh,
-    before: &[(i32, String, [f64; 3])],
-) -> Result<Vec<String>, GmshError> {
+    before: &[(i32, GeometryPart, [f64; 3])],
+) -> Result<Vec<GeometryPart>, GmshError> {
     let after = default_parts(gmsh)?;
-    let mut names = Vec::with_capacity(after.len());
+    let mut parts: Vec<GeometryPart> = Vec::with_capacity(after.len());
     for (shape, name) in after {
         let place = place_of(gmsh, &shape)?;
         let nearest = (before.iter())
             .filter(|(d, _, _)| *d == shape.dim)
             .min_by(|a, b| distance(a.2, place).total_cmp(&distance(b.2, place)))
-            .map(|(_, n, _)| n.clone());
-        names.push(nearest.unwrap_or(name));
+            .map(|(_, p, _)| p.clone());
+        let part = match nearest {
+            Some(part) if !parts.iter().any(|p| p.id == part.id) => part,
+            Some(part) => GeometryPart::new(part.name),
+            None => GeometryPart::new(name),
+        };
+        parts.push(part);
     }
-    Ok(names)
+    Ok(parts)
 }
 
 /// A split of the geometry, see [`crate::split`]: the parts keep their names, those cut in
@@ -151,7 +157,7 @@ fn apply_split(
 ) -> Result<Geometry, GmshError> {
     let file = TempFile::with_contents("brep", &input.brep)?;
     let result = TempFile::new("brep");
-    let (part_names, signatures, mut compounds) = with_gmsh(|gmsh| {
+    let (parts, signatures, mut compounds) = with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
         let split = match operation.kind {
             CadOperationKind::SplitPlane => {
@@ -169,23 +175,18 @@ fn apply_split(
         Ok((names, signatures(gmsh)?, split.compounds))
     })?;
     for compound in &mut compounds {
-        compound.parts.retain(|p| part_names.contains(p));
+        compound.parts.retain(|p| parts.iter().any(|q| q.id == *p));
     }
     compounds.retain(|c| !c.parts.is_empty());
     let brep = std::fs::read_to_string(&result.0)
         .map_err(|e| GmshError::Other(format!("{}: {e}", result.0.display())))?;
-    let mut geometry = Geometry {
+    Ok(Geometry {
         brep,
-        part_names,
+        parts,
         signatures,
-        compounds: Vec::new(),
+        compounds,
         ..input.clone()
-    };
-    geometry.ensure_ids();
-    geometry.compounds = (compounds.into_iter())
-        .map(|c| c.with_ids(&mut geometry))
-        .collect();
-    Ok(geometry)
+    })
 }
 
 /// Rounds or bevels the edges among `entities`; returns the new solids.
@@ -597,10 +598,10 @@ fn capitalised(text: &str) -> String {
 }
 
 /// Each part as (dimension, name, centre).
-pub(crate) fn named_places(
+pub(crate) fn named_places<T: Clone>(
     gmsh: &Gmsh,
-    parts: &[(Shape, String)],
-) -> Result<Vec<(i32, String, [f64; 3])>, GmshError> {
+    parts: &[(Shape, T)],
+) -> Result<Vec<(i32, T, [f64; 3])>, GmshError> {
     (parts.iter())
         .map(|(shape, name)| Ok((shape.dim, name.clone(), place_of(gmsh, shape)?)))
         .collect()

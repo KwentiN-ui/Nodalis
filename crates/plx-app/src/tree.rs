@@ -425,8 +425,8 @@ pub struct TreeResponse {
     pub symbol_visibility: Vec<(TreeItem, bool)>,
     /// Mesh one part of the geometry, by index.
     pub mesh_part: Option<usize>,
-    /// Mesh a part of the geometry the FE Model lists without a mesh, by its name there.
-    pub mesh_unmeshed: Option<String>,
+    /// Mesh a part of the geometry the FE Model lists without a mesh, by its id there.
+    pub mesh_unmeshed: Option<plx_model::PartRef>,
     /// Use Linked Mesh on a part of the geometry, by index.
     pub linked_mesh: Option<usize>,
     /// Transform a mesh part (translate, rotate, mirror, scale), by index.
@@ -2104,8 +2104,8 @@ impl Tree<'_> {
                     }
                 }
             }
-            for name in &unmeshed {
-                tree.unmeshed_row(ui, name);
+            for (id, name) in &unmeshed {
+                tree.unmeshed_row(ui, *id, name);
             }
             if apart.is_empty() {
                 return;
@@ -2148,7 +2148,7 @@ impl Tree<'_> {
     /// The row of a part of the geometry without a mesh in the FE Model: gray, with a
     /// warning sign, and Create Mesh in its menu. It is no item of the FE model yet, so it
     /// cannot be selected.
-    fn unmeshed_row(&mut self, ui: &mut Ui, name: &str) {
+    fn unmeshed_row(&mut self, ui: &mut Ui, id: plx_model::PartRef, name: &str) {
         let tip = format!(
             "{name} is not meshed: it is a part of the geometry but has no mesh, so it is not \
              solved. Mesh it with Create Mesh, or in the Geometry workspace."
@@ -2173,7 +2173,7 @@ impl Tree<'_> {
                     .on_hover_text("Meshes the part with the mesh setup of the geometry.")
                     .clicked()
                 {
-                    self.response.mesh_unmeshed = Some(name.to_owned());
+                    self.response.mesh_unmeshed = Some(id);
                     ui.close();
                 }
             });

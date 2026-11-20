@@ -12,8 +12,8 @@ use plx_mesh::{ElementShape, FeMesh, NodeId};
 use plx_mesher::{CadEntity, GeneratedMesh};
 use plx_model::{
     Algorithm2d, Algorithm3d, ExtrudeLayers, ExtrudeMesh, FeModel, Field, Geometry, ItemRef,
-    MeshSetupItem, MeshSetupKind, MeshingParameters, PeriodicFaces, Quantity, Recombination,
-    ThickenShellMesh, UnitSystem, next_name,
+    MeshSetupItem, MeshSetupKind, MeshingParameters, PartRef, PeriodicFaces, Quantity,
+    Recombination, ThickenShellMesh, UnitSystem, next_name,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,10 +26,10 @@ use crate::viewport::{BoxSelect, Preview};
 
 /// Whether the parameters reach a part of faces, the only parts the quad-dominated option
 /// changes: of the parts named, or of all parts if none are; true without a geometry view.
-fn reaches_faces(view: Option<&Model>, parts: &BTreeSet<String>) -> bool {
+fn reaches_faces(view: Option<&Model>, parts: &BTreeSet<plx_model::PartRef>) -> bool {
     view.is_none_or(|view| {
         (view.parts.iter())
-            .any(|p| p.dimension == Some(2) && (parts.is_empty() || parts.contains(&p.name)))
+            .any(|p| p.dimension == Some(2) && (parts.is_empty() || parts.contains(&p.id)))
     })
 }
 
@@ -386,11 +386,9 @@ pub struct MeshItemEditor {
     /// An extrude mesh's relative layer sizes and elements per layer as typed.
     layer_text: [String; 2],
     /// The parts of the picked source faces, for the faces they were found for.
-    face_parts: (BTreeSet<CadEntity>, Vec<String>),
-    /// Names of the geometry's shell parts, the parts a thicken shell mesh takes.
-    shells: BTreeSet<String>,
-    /// The parts of the geometry with their ids, which the item keeps them by.
-    part_ids: Vec<plx_model::PartId>,
+    face_parts: (BTreeSet<CadEntity>, Vec<(plx_model::PartRef, String)>),
+    /// The geometry's shell parts, the parts a thicken shell mesh takes.
+    shells: BTreeSet<plx_model::PartRef>,
     /// The id of the edited item, for its exposed parameters.
     original: Option<plx_model::Id<plx_model::MeshSetupItem>>,
     /// The expose buttons of its numbers, see [`Self::set_linked`].
@@ -430,7 +428,6 @@ impl MeshItemEditor {
             layer_text: ["0.2; 0.6; 0.2;".into(), "2; 4; 2;".into()],
             face_parts: Default::default(),
             shells: BTreeSet::new(),
-            part_ids: geometry.ids.clone(),
             original: None,
             expose: None,
             linked: Vec::new(),
@@ -494,7 +491,6 @@ impl MeshItemEditor {
             layer_text,
             face_parts: Default::default(),
             shells: BTreeSet::new(),
-            part_ids: geometry.ids.clone(),
             original: Some(geometry.mesh_items.get(index)?.id),
             expose: None,
             linked: Vec::new(),
@@ -706,11 +702,7 @@ impl MeshItemEditor {
                 thicken.parts = self.parts.ids().into_iter().collect();
             }
             MeshSetupKind::ExtrudeMesh(extrude) if source_faces => {
-                let ids = &self.part_ids;
-                extrude.parts = (self.face_parts.1.iter())
-                    .filter_map(|name| ids.iter().find(|p| p.name.eq_ignore_ascii_case(name)))
-                    .map(|p| p.id)
-                    .collect();
+                extrude.parts = self.face_parts.1.iter().map(|(id, _)| *id).collect();
             }
             MeshSetupKind::ExtrudeMesh(extrude) => {
                 extrude.parts = self.parts.ids().into_iter().collect();
@@ -734,7 +726,9 @@ impl MeshItemEditor {
                 _ => None,
             })
             .collect();
-        let parts = parts_of_faces(view, &faces);
+        let parts = (parts_of_faces(view, &faces).into_iter())
+            .filter_map(|id| Some((id, view.parts.iter().find(|p| p.id == id)?.name.clone())))
+            .collect();
         self.face_parts = (picked, parts);
         self.sync_parts();
     }
@@ -746,7 +740,7 @@ impl MeshItemEditor {
         match &mut self.draft.kind {
             MeshSetupKind::MeshingParameters { parameters, .. } => {
                 parts_ui(ui, &mut self.parts);
-                let faces = reaches_faces(view, &self.parts.names());
+                let faces = reaches_faces(view, &self.parts.ids());
                 parameters_ui(ui, parameters, self.units, faces);
             }
             MeshSetupKind::LocalMeshSize { size, depth, .. } => {
@@ -873,7 +867,9 @@ impl MeshItemEditor {
                             }
                         });
                         if !self.face_parts.1.is_empty() {
-                            ui.weak(format!("Parts: {}", self.face_parts.1.join(", ")));
+                            let names: Vec<&str> =
+                                self.face_parts.1.iter().map(|(_, n)| n.as_str()).collect();
+                            ui.weak(format!("Parts: {}", names.join(", ")));
                         }
                         ui.weak("Click the faces at one end of the parts.");
                     });
@@ -996,12 +992,13 @@ impl MeshItemEditor {
                 if thicken.parts.is_empty() {
                     return Err("No shell part selected.".into());
                 }
-                let name = |id: &plx_model::PartRef| {
-                    (self.part_ids.iter().find(|p| p.id == *id))
-                        .map_or_else(|| id.to_string(), |p| p.name.clone())
-                };
-                if let Some(solid) =
-                    (thicken.parts.iter().map(name)).find(|p| !self.shells.contains(p))
+                if let Some(solid) = (thicken.parts.iter())
+                    .find(|p| !self.shells.contains(p))
+                    .map(|&id| {
+                        self.parts
+                            .name(id)
+                            .map_or_else(|| id.to_string(), str::to_owned)
+                    })
                 {
                     return Err(format!(
                         "{solid} is no shell: only shells can be thickened."
@@ -1128,7 +1125,7 @@ impl MeshItemEditor {
         if self.picks_entities() {
             entities_highlight(view, &self.picks.items())
         } else {
-            item_highlight(view, &self.draft.kind, &self.part_ids)
+            item_highlight(view, &self.draft.kind)
         }
     }
 }
@@ -1159,25 +1156,25 @@ fn algorithm_combo<T: Copy + PartialEq>(
         });
 }
 
-/// Names of the parts of faces outside the solids.
-fn shell_parts(view: &Model) -> BTreeSet<String> {
+/// The parts of faces outside the solids.
+fn shell_parts(view: &Model) -> BTreeSet<plx_model::PartRef> {
     (view.parts.iter())
         .filter(|p| p.dimension == Some(2))
-        .map(|p| p.name.clone())
+        .map(|p| p.id)
         .collect()
 }
 
-/// Names of the parts the CAD faces lie on.
-fn parts_of_faces(view: &Model, faces: &BTreeSet<i32>) -> Vec<String> {
+/// The parts the CAD faces lie on.
+fn parts_of_faces(view: &Model, faces: &BTreeSet<i32>) -> Vec<plx_model::PartRef> {
     parts_of_entities(view, faces, &BTreeSet::new())
 }
 
-/// The names of the parts that hold any of the CAD faces or edges.
+/// The parts that hold any of the CAD faces or edges.
 pub fn parts_of_entities(
     view: &Model,
     faces: &BTreeSet<i32>,
     edges: &BTreeSet<i32>,
-) -> Vec<String> {
+) -> Vec<plx_model::PartRef> {
     if faces.is_empty() && edges.is_empty() {
         return Vec::new();
     }
@@ -1189,7 +1186,7 @@ pub fn parts_of_entities(
                 _ => false,
             })
         })
-        .map(|(_, info)| info.name.clone())
+        .map(|(_, info)| info.id)
         .collect()
 }
 
@@ -1283,18 +1280,15 @@ pub fn entities_highlight(view: &Model, entities: &BTreeSet<CadEntity>) -> Highl
     }
 }
 
-/// How a stored mesh setup item shows on the geometry; `ids` are the parts of the geometry
-/// with their ids, which the item keeps them by.
-pub fn item_highlight(view: &Model, kind: &MeshSetupKind, ids: &[plx_model::PartId]) -> Highlight {
-    let holds = |parts: &[plx_model::PartRef], name: &str| {
-        (ids.iter()).any(|p| parts.contains(&p.id) && p.name.eq_ignore_ascii_case(name))
-    };
+/// How a stored mesh setup item shows on the geometry.
+pub fn item_highlight(view: &Model, kind: &MeshSetupKind) -> Highlight {
+    let holds = |parts: &[plx_model::PartRef], id: plx_model::PartRef| parts.contains(&id);
     match kind {
         MeshSetupKind::MeshingParameters { parts, .. }
         | MeshSetupKind::TetrahedralGmsh { parts, .. }
         | MeshSetupKind::ThickenShellMesh(ThickenShellMesh { parts, .. }) => Highlight {
             parts: (view.parts.iter().enumerate())
-                .filter(|(_, p)| holds(parts, &p.name))
+                .filter(|(_, p)| holds(parts, p.id))
                 .map(|(i, _)| i)
                 .collect(),
             ..Highlight::default()
@@ -1311,7 +1305,7 @@ pub fn item_highlight(view: &Model, kind: &MeshSetupKind, ids: &[plx_model::Part
         }
         MeshSetupKind::ExtrudeMesh(extrude) => Highlight {
             parts: (view.parts.iter().enumerate())
-                .filter(|(_, p)| holds(&extrude.parts, &p.name))
+                .filter(|(_, p)| holds(&extrude.parts, p.id))
                 .map(|(i, _)| i)
                 .collect(),
             ..Highlight::default()
@@ -1325,7 +1319,7 @@ pub struct PartMeshes {
     pub meshes: Vec<GeneratedMesh>,
     /// Why the parts that could not be meshed failed, one message each, naming the part:
     /// a part that fails leaves the others to be meshed.
-    pub failed: Vec<String>,
+    pub failed: Vec<(PartRef, String)>,
     /// Cancelled before all parts were done; the meshes are those finished before.
     pub cancelled: bool,
 }
@@ -1353,7 +1347,7 @@ struct WorkerRequest {
     #[serde(default)]
     matching: Vec<PeriodicFaces>,
     /// The parts to mesh, in order, as [`parts_to_mesh`] lists them.
-    parts: Vec<String>,
+    parts: Vec<PartRef>,
     /// The parts as the workers take them, see [`part_groups`]: places in `parts`.
     #[serde(default)]
     groups: Vec<Vec<usize>>,
@@ -1381,31 +1375,39 @@ type WorkerResult = Result<(), String>;
 /// The parts that are meshed when the named parts are asked for, or all with `None`: a
 /// compound part is meshed as the parts of the geometry it joins, and suppressed parts are
 /// left out.
-fn parts_to_mesh(geometry: &Geometry, parts: Option<Vec<String>>) -> Result<Vec<String>, String> {
+fn parts_to_mesh(geometry: &Geometry, parts: Option<Vec<PartRef>>) -> Result<Vec<PartRef>, String> {
     let parts = match parts {
         Some(parts) => {
-            let mut expanded: Vec<String> = Vec::new();
-            for part in parts.iter().flat_map(|p| geometry.parts_of_fe_part(p)) {
-                if !expanded.iter().any(|e| e.eq_ignore_ascii_case(&part)) {
+            let mut expanded: Vec<PartRef> = Vec::new();
+            for part in parts.iter().flat_map(|&p| geometry.parts_of_fe_part(p)) {
+                if !expanded.contains(&part) {
                     expanded.push(part);
                 }
             }
             expanded
         }
-        None => plx_mesher::part_names(geometry).map_err(|e| e.to_string())?,
+        None => (plx_mesher::geometry_parts(geometry).map_err(|e| e.to_string())?)
+            .into_iter()
+            .map(|p| p.id)
+            .collect(),
     };
     // Suppressed parts are left alone, with the mesh they may have.
     Ok((parts.into_iter())
-        .filter(|p| !geometry.is_suppressed(p))
+        .filter(|&p| !geometry.is_suppressed(p))
         .collect())
+}
+
+/// The name of a part of the geometry, for messages.
+fn part_name(geometry: &Geometry, part: PartRef) -> String {
+    geometry.part_name(part).unwrap_or("The part").to_owned()
 }
 
 /// The parts as the workers of a job take them, as places in `parts`: each part on its own,
 /// but the parts of a compound part together, since its shells may be meshed as one, the
 /// first of them standing for the others.
-fn part_groups(geometry: &Geometry, parts: &[String]) -> Vec<Vec<usize>> {
+fn part_groups(geometry: &Geometry, parts: &[PartRef]) -> Vec<Vec<usize>> {
     let mut groups: Vec<(Option<usize>, Vec<usize>)> = Vec::new();
-    for (k, part) in parts.iter().enumerate() {
+    for (k, &part) in parts.iter().enumerate() {
         let compound = geometry.compound_of(part);
         match groups
             .iter_mut()
@@ -1426,20 +1428,20 @@ fn part_groups(geometry: &Geometry, parts: &[String]) -> Vec<Vec<usize>> {
 fn mesh_list(
     geometry: &Geometry,
     matching: &[PeriodicFaces],
-    parts: &[String],
+    parts: &[PartRef],
     starting: &mut dyn FnMut(usize),
     outcome: &mut dyn FnMut(usize, Result<GeneratedMesh, String>),
 ) {
-    let mut meshed: Vec<String> = Vec::new();
-    for (k, part) in parts.iter().enumerate() {
-        if meshed.iter().any(|p| p.eq_ignore_ascii_case(part)) {
+    let mut meshed: Vec<PartRef> = Vec::new();
+    for (k, &part) in parts.iter().enumerate() {
+        if meshed.contains(&part) {
             continue;
         }
         starting(k);
         let result = plx_mesher::generate_part_mesh_matching(geometry, part, matching)
-            .map_err(|error| named_failure(part, &error.to_string()));
+            .map_err(|error| named_failure(&part_name(geometry, part), &error.to_string()));
         if let Ok(mesh) = &result {
-            meshed.extend(mesh.mesh.parts.iter().map(|p| p.name.clone()));
+            meshed.extend(mesh.mesh.parts.iter().flat_map(plx_model::part_objects));
         }
         outcome(k, result);
     }
@@ -1460,7 +1462,7 @@ fn named_failure(part: &str, message: &str) -> String {
 fn mesh_parts(
     geometry: &Geometry,
     matching: &[PeriodicFaces],
-    parts: Option<Vec<String>>,
+    parts: Option<Vec<PartRef>>,
 ) -> Result<PartMeshes, String> {
     let parts = parts_to_mesh(geometry, parts)?;
     let mut generated = PartMeshes {
@@ -1472,9 +1474,9 @@ fn mesh_parts(
         matching,
         &parts,
         &mut |_| {},
-        &mut |_, result| match result {
+        &mut |k, result| match result {
             Ok(mesh) => generated.meshes.push(mesh),
-            Err(message) => generated.failed.push(message),
+            Err(message) => generated.failed.push((parts[k], message)),
         },
     );
     Ok(generated)
@@ -1514,13 +1516,13 @@ pub fn worker_main() -> Option<i32> {
         let done = std::cell::Cell::new(0usize);
         // Meshes the parts at the given places of the request.
         let mut mesh = |places: &[usize]| {
-            let names: Vec<String> = (places.iter())
-                .filter_map(|&place| request.parts.get(place).cloned())
+            let ids: Vec<PartRef> = (places.iter())
+                .filter_map(|&place| request.parts.get(place).copied())
                 .collect();
             mesh_list(
                 &request.geometry,
                 &request.matching,
-                &names,
+                &ids,
                 &mut |k| {
                     let _ =
                         std::fs::write(dir.join(CURRENT), format!("{} {}", places[k], done.get()));
@@ -1665,7 +1667,7 @@ fn mesh_in_worker(
     program: &Path,
     geometry: Geometry,
     matching: Vec<PeriodicFaces>,
-    parts: Option<Vec<String>>,
+    parts: Option<Vec<PartRef>>,
     cancel: &AtomicBool,
     progress: &dyn Fn(MeshProgress),
 ) -> Result<PartMeshes, String> {
@@ -1697,7 +1699,8 @@ fn mesh_in_worker(
                         let mut board = board.lock().unwrap_or_else(|e| e.into_inner());
                         board[worker] = (current, done);
                         let now: Vec<String> = (board.iter())
-                            .filter_map(|&(k, _)| request.parts.get(k?).cloned())
+                            .filter_map(|&(k, _)| request.parts.get(k?).copied())
+                            .map(|part| part_name(&request.geometry, part))
                             .collect();
                         let _ = sender.send(MeshProgress {
                             done: board.iter().map(|&(_, done)| done).sum(),
@@ -1738,10 +1741,10 @@ fn mesh_in_worker(
         cancelled: all.cancelled,
         ..PartMeshes::default()
     };
-    for (_, outcome) in all.parts {
+    for (place, outcome) in all.parts {
         match outcome {
             Ok(mesh) => generated.meshes.push(mesh),
-            Err(message) => generated.failed.push(message),
+            Err(message) => generated.failed.push((request.parts[place], message)),
         }
     }
     Ok(generated)
@@ -1783,19 +1786,16 @@ fn mesh_as_worker(
         }
         // What is left of the group of the part that crashed Gmsh: the parts after it, but
         // not those meshed with others.
-        let meshed: Vec<&str> = (outcomes.parts.iter())
+        let meshed: Vec<PartRef> = (outcomes.parts.iter())
             .filter_map(|(_, outcome)| outcome.as_ref().ok())
-            .flat_map(|m| m.mesh.parts.iter().map(|p| p.name.as_str()))
+            .flat_map(|m| m.mesh.parts.iter().flat_map(plx_model::part_objects))
             .collect();
         let group = (request.groups.iter()).find(|group| group.contains(&k));
         task.first = (group.into_iter().flatten())
             .skip_while(|&&place| place != k)
             .skip(1)
             .copied()
-            .filter(|&place| {
-                let part = &request.parts[place];
-                !meshed.iter().any(|m| m.eq_ignore_ascii_case(part))
-            })
+            .filter(|&place| !meshed.contains(&request.parts[place]))
             .collect();
     }
     Ok(outcomes)
@@ -1812,7 +1812,7 @@ fn mesh_without_netgen(
     stopped: &dyn Fn() -> bool,
     outcomes: &mut Outcomes,
 ) -> Result<(), String> {
-    let part = &request.parts[k];
+    let part = request.parts[k];
     let parameters = request.geometry.parameters(part);
     if !parameters.optimize {
         outcomes.parts.push((k, Err(message)));
@@ -1823,7 +1823,7 @@ fn mesh_without_netgen(
         id: plx_model::Id::new(),
         name: "Without Netgen".into(),
         kind: plx_model::MeshSetupKind::MeshingParameters {
-            parts: request.geometry.part_id(part).into_iter().collect(),
+            parts: vec![part],
             // The parameters the part has, with the sizes before any refinement.
             parameters: plx_model::MeshingParameters {
                 optimize: false,
@@ -1836,7 +1836,7 @@ fn mesh_without_netgen(
         library: request.library.clone(),
         geometry,
         matching: request.matching.clone(),
-        parts: vec![part.to_string()],
+        parts: vec![part],
         groups: Vec::new(),
     };
     let job = WorkerDir::of_job(&retry)?;
@@ -1869,7 +1869,7 @@ fn mesh_without_netgen(
 }
 
 /// The meshing parameters of `part` as set, before the refinement of the geometry.
-fn unrefined(geometry: &Geometry, part: &str) -> plx_model::MeshingParameters {
+fn unrefined(geometry: &Geometry, part: PartRef) -> plx_model::MeshingParameters {
     let mut parameters = geometry.parameters(part);
     let refinement = geometry.refined(1.0);
     parameters.max_size /= refinement;
@@ -2033,7 +2033,7 @@ impl MeshingJob {
     pub fn start(
         geometry: Geometry,
         matching: Vec<PeriodicFaces>,
-        parts: Option<Vec<String>>,
+        parts: Option<Vec<PartRef>>,
         ctx: &egui::Context,
     ) -> Self {
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -2104,6 +2104,8 @@ impl Drop for MeshingJob {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use crate::test_ids::ByName;
     use glam::Vec3;
 
     use super::*;
@@ -2208,16 +2210,21 @@ mod tests {
         let mut geometry = loaded.model.geometry.unwrap();
         let mut view = loaded.geometry_view.unwrap();
         geometry.meshing.max_size = 5.0;
-        geometry.set_suppressed(&["SOLID-1".into()], true);
+        geometry.set_suppressed(&[geometry.part_id("SOLID-1").unwrap()], true);
         let meshed = mesh_parts(&geometry, &[], None).unwrap();
         let names: Vec<&str> = (meshed.meshes.iter())
             .flat_map(|m| m.mesh.parts.iter().map(|p| p.name.as_str()))
             .collect();
         assert_eq!(names, ["SOLID-2"]);
-        let asked = mesh_parts(&geometry, &[], Some(vec!["SOLID-1".into()])).unwrap();
+        let asked = mesh_parts(
+            &geometry,
+            &[],
+            Some(vec![geometry.part_id("SOLID-1").unwrap()]),
+        )
+        .unwrap();
         assert!(asked.meshes.is_empty());
         // A part that cannot be meshed is told by name, and the others are meshed.
-        geometry.set_suppressed(&["SOLID-1".into()], false);
+        geometry.set_suppressed(&[geometry.part_id("SOLID-1").unwrap()], false);
         geometry.mesh_items.push(plx_model::MeshSetupItem {
             id: plx_model::Id::new(),
             name: "Meshing_Parameters-1".into(),
@@ -2235,13 +2242,14 @@ mod tests {
             .collect();
         assert_eq!(names, ["SOLID-2"]);
         assert_eq!(partly.failed.len(), 1);
+        assert_eq!(partly.failed[0].0, geometry.part_id("SOLID-1").unwrap());
         assert!(
-            partly.failed[0].starts_with("SOLID-1: "),
+            partly.failed[0].1.starts_with("SOLID-1: "),
             "{:?}",
             partly.failed
         );
         geometry.mesh_items.pop();
-        geometry.set_suppressed(&["SOLID-1".into()], true);
+        geometry.set_suppressed(&[geometry.part_id("SOLID-1").unwrap()], true);
         // In the view it is drawn as its edges and a click goes through it.
         assert!(view.mark_suppressed(&geometry));
         assert!(!view.mark_suppressed(&geometry));
@@ -2440,7 +2448,7 @@ mod tests {
         );
         let error = editor.finish().unwrap_err();
         assert!(error.contains("no shell"), "{error}");
-        editor.shells.insert("SOLID-1".into());
+        editor.shells.insert(geometry.part_id("SOLID-1").unwrap());
         let item = editor.finish().unwrap();
         assert_eq!(
             item.kind.parts().unwrap(),
@@ -2483,10 +2491,7 @@ mod tests {
             MeshSetupKind::MeshingParameters { parts, .. }
                 if parts == &[geometry.part_id("SOLID-1").unwrap()]
         ));
-        assert_eq!(
-            item_highlight(&view, &item.kind, &geometry.ids).parts.len(),
-            1
-        );
+        assert_eq!(item_highlight(&view, &item.kind).parts.len(), 1);
         // Ctrl+click takes it out again, as in every selection.
         editor.click(&view, Some((&hit, 0.5)), Operation::Subtract);
         assert!(editor.finish().is_err());

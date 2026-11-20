@@ -600,6 +600,8 @@ pub(crate) fn transform_form(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use crate::test_ids::ByName;
     use plx_model::UnitSystem;
 
     /// The two blocks of `zwei_bloecke.step`, meshed as Mesh does; `None` without Gmsh.
@@ -625,7 +627,9 @@ mod tests {
         let geometry = model.geometry.clone().unwrap();
         let parts = parts.unwrap_or_else(|| plx_mesher::part_names(&geometry).unwrap());
         let meshes = (parts.iter())
-            .map(|p| plx_mesher::generate_part_mesh(&geometry, p).unwrap())
+            .map(|p| {
+                plx_mesher::generate_part_mesh(&geometry, geometry.part_id(p).unwrap()).unwrap()
+            })
             .collect();
         let generated = crate::meshing::PartMeshes {
             meshes,
@@ -804,7 +808,7 @@ mod tests {
         meshed.sort();
         let unmeshed =
             plx_model::unmeshed_parts(model.geometry.as_ref(), model.origins(), model.mesh());
-        (meshed, unmeshed)
+        (meshed, unmeshed.into_iter().map(|(_, name)| name).collect())
     }
 
     /// Meshing one part anew, also in shapes a link brings, keeps the mesh of the other;

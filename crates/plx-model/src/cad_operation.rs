@@ -382,7 +382,7 @@ impl CadOperation {
     pub fn fingerprint(&self, input: &Geometry) -> u64 {
         let mut hash = Fnv::new();
         hash.add_str(&input.brep);
-        hash.add_debug(&input.part_names);
+        hash.add_debug(&input.parts);
         hash.add_debug(&self.kind);
         hash.add_debug(&self.resolve(input));
         hash.add(&self.value.to_le_bytes());
@@ -441,11 +441,10 @@ mod tests {
             brep: format!("{signatures:?}"),
             meshing: MeshingParameters::default(),
             mesh_items: Vec::new(),
-            part_names: Vec::new(),
+            parts: Vec::new(),
             refinement: 1.0,
             signatures,
             own_meshes: Vec::new(),
-            ids: Vec::new(),
             from_link: false,
             operations: Vec::new(),
             input: None,

@@ -11260,6 +11260,28 @@ fn parts_named_in_any_text_get_labels_of_their_own() {
     }
 }
 
+/// Two parts of the same name are two parts: each has an element set of its own, by its
+/// id, and what refers to one of them gets its elements only.
+#[test]
+fn parts_of_the_same_name_keep_their_own_sets() {
+    let (mut mesh, model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Bonded);
+    mesh.rename_part(0, "Platte");
+    mesh.rename_part(1, "Platte");
+    assert_ne!(mesh.parts[0].id, mesh.parts[1].id);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let elsets: Vec<&str> = (text.lines())
+        .filter_map(|l| l.strip_prefix("*Element, Type=C3D8, Elset="))
+        .collect();
+    assert_eq!(elsets, ["Platte", "PLATTE-2"], "{text}");
+    let read = plxs_input::read_inp_str(&text, None).unwrap().analysis;
+    let sets = &read.model.sets.element_sets;
+    for (label, part) in elsets.iter().zip(&mesh.parts) {
+        let label = label.to_ascii_uppercase();
+        let set = sets.iter().find(|s| s.name == label).unwrap();
+        assert_eq!(set.elements, part.elements, "{label}");
+    }
+}
+
 /// A name made from the definition follows the type of the region; a name of the user
 /// stays.
 #[test]

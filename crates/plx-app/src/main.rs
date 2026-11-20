@@ -13,6 +13,47 @@ mod test_ids {
             LazyLock::new(Default::default);
         (*(IDS.lock().unwrap().entry(name.into())).or_default()).cast()
     }
+
+    /// The parts of a geometry by their names, in any case, as the tests name them; the
+    /// program refers to them by id only.
+    pub trait ByName {
+        /// The first part called `name`.
+        fn part_id(&self, name: &str) -> Option<plx_model::PartRef>;
+        /// The parts called `names`, of those that are there.
+        fn part_ids_of(&self, names: &[String]) -> Vec<plx_model::PartRef>;
+        /// Gives the parts and bodies of `mesh` the ids of the parts and compounds of their
+        /// names, as meshing the geometry does.
+        fn stamp_ids(&self, mesh: &mut plx_mesh::FeMesh);
+    }
+
+    impl ByName for plx_model::Geometry {
+        fn part_id(&self, name: &str) -> Option<plx_model::PartRef> {
+            (self.parts.iter())
+                .find(|p| p.name.eq_ignore_ascii_case(name))
+                .map(|p| p.id)
+        }
+
+        fn part_ids_of(&self, names: &[String]) -> Vec<plx_model::PartRef> {
+            names.iter().filter_map(|n| self.part_id(n)).collect()
+        }
+
+        fn stamp_ids(&self, mesh: &mut plx_mesh::FeMesh) {
+            for part in &mut mesh.parts {
+                let compound =
+                    (self.compounds.iter()).find(|c| c.name.eq_ignore_ascii_case(&part.name));
+                if let Some(c) = compound {
+                    part.id = c.id;
+                } else if let Some(id) = self.part_id(&part.name) {
+                    part.id = id;
+                }
+                for body in &mut part.bodies {
+                    if let Some(id) = self.part_id(&body.name) {
+                        body.id = id;
+                    }
+                }
+            }
+        }
+    }
 }
 mod analysis;
 mod animation;

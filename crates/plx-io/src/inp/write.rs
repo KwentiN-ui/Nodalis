@@ -281,8 +281,8 @@ pub struct Lowered {
     /// The constraints whose overlaps with others were resolved, each with what was
     /// changed, in words (see [`resolved_overlaps`]).
     pub resolved_overlaps: Vec<String>,
-    /// The names of the parts of the mesh, which are element sets.
-    pub part_sets: Vec<String>,
+    /// The element sets of the parts of the mesh, with the parts' names.
+    pub part_sets: Vec<(ir::ElementSetId, String)>,
     /// The profile of each general beam section, by its element set, as the comment the
     /// input file names it with (see [`super::PROFILE_COMMENT`]): the solver knows the
     /// section by its values only, the results draw it from the comment.
@@ -545,7 +545,7 @@ struct Built {
     /// The blocks of each step of the model; none for a deactivated step.
     steps: Vec<Vec<StepBlock>>,
     resolved_overlaps: Vec<String>,
-    part_sets: Vec<String>,
+    part_sets: Vec<(ir::ElementSetId, String)>,
     profile_comments: Vec<(String, String)>,
     /// The origins of everything but the steps, which [`Built::assemble`] adds.
     origins: Origins,
@@ -627,12 +627,20 @@ pub fn solver_name(item: &str) -> String {
 /// The handles of the sets and surfaces by their names in the lowering: the names are
 /// unique there (see [`Sets::free_name`]), the solver model refers to the sets by these
 /// handles and keeps the names as labels. The members follow when the model is built.
+///
+/// The element set of a part of the mesh is the part's by its id, labelled with its name,
+/// which other parts may have too: the export derives labels of their own.
 #[derive(Default)]
 struct Handles {
     node_sets: Vec<String>,
     element_sets: Vec<String>,
     surfaces: Vec<String>,
     index: HashMap<(u8, String), u32>,
+    /// The element sets of the parts, by part id.
+    parts: HashMap<plx_model::PartRef, u32>,
+    /// Element sets of the mesh that are the sets of parts, as an input file names a
+    /// part's set after it: the name stands for the part's set.
+    aliases: HashMap<String, (plx_model::PartRef, String)>,
 }
 
 impl Handles {
@@ -656,7 +664,21 @@ impl Handles {
     }
 
     fn element_set(&mut self, name: &str) -> ir::ElementSetId {
-        ir::ElementSetId(self.slot(1, name))
+        match self.aliases.get(name).cloned() {
+            Some((part, label)) => self.part_set(part, &label),
+            None => ir::ElementSetId(self.slot(1, name)),
+        }
+    }
+
+    /// The element set of the part `part`, labelled `name`.
+    fn part_set(&mut self, part: plx_model::PartRef, name: &str) -> ir::ElementSetId {
+        if let Some(&i) = self.parts.get(&part) {
+            return ir::ElementSetId(i);
+        }
+        self.element_sets.push(name.to_string());
+        let i = self.element_sets.len() as u32 - 1;
+        self.parts.insert(part, i);
+        ir::ElementSetId(i)
     }
 
     fn surface(&mut self, name: &str) -> ir::SurfaceId {
@@ -943,7 +965,9 @@ fn lower_model_owned(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Bu
         let ids = match members {
             Members::Ids(ids) => ids.clone(),
             Members::Parts(parts) => (parts.iter())
-                .flat_map(|p| ir_model.sets.elements(handles.element_set(p)).to_vec())
+                .flat_map(|&(id, ref name)| {
+                    ir_model.sets.elements(handles.part_set(id, name)).to_vec()
+                })
                 .collect(),
         };
         let set = handles.element_set(name);
@@ -1086,7 +1110,9 @@ fn lower_model_owned(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Bu
         model: ir_model,
         steps,
         resolved_overlaps,
-        part_sets: mesh.parts.iter().map(|p| p.name.clone()).collect(),
+        part_sets: (mesh.parts.iter())
+            .map(|p| (sets.handles.part_set(p.id, &p.name), p.name.clone()))
+            .collect(),
         profile_comments,
         origins,
     })
@@ -1257,7 +1283,7 @@ impl LineElements {
     }
 }
 
-/// The elements, per part and element type; the part name is their element set. Surface
+/// The elements, per part and element type; the part's set holds them. Surface
 /// elements get the type of the model space, e.g. `CAX6` in an axisymmetric model, line
 /// elements the type of their beam or truss section.
 fn elements(
@@ -1268,7 +1294,7 @@ fn elements(
     lines: &LineElements,
 ) -> Result<(), WriteError> {
     let mut written = vec![false; mesh.element_count()];
-    let mut groups: Vec<(Option<&str>, String, Vec<ElementId>)> = Vec::new();
+    let mut groups: Vec<(Option<&plx_mesh::Part>, String, Vec<ElementId>)> = Vec::new();
     let type_name = |element: &plx_mesh::Element| lines.written(element, space).0;
     for part in &mesh.parts {
         for &id in &part.elements {
@@ -1277,7 +1303,7 @@ fn elements(
             };
             if !std::mem::replace(&mut written[index], true) {
                 let type_name = type_name(&mesh.elements()[index]);
-                group(&mut groups, Some(&part.name), type_name).push(id);
+                group(&mut groups, Some(part), type_name).push(id);
             }
         }
     }
@@ -1286,8 +1312,8 @@ fn elements(
             group(&mut groups, None, type_name(element)).push(element.id);
         }
     }
-    for (set, type_name, mut ids) in groups {
-        let kind = element_type(set.unwrap_or("Mesh"), &type_name)?;
+    for (part, type_name, mut ids) in groups {
+        let kind = element_type(part.map_or("Mesh", |p| p.name.as_str()), &type_name)?;
         ids.sort_unstable();
         for element in ids.iter().filter_map(|&id| mesh.element(id)) {
             let (_, nodes) = lines.written(element, space);
@@ -1298,8 +1324,8 @@ fn elements(
                 section: None,
             });
         }
-        if let Some(set) = set {
-            let set = handles.element_set(set);
+        if let Some(part) = part {
+            let set = handles.part_set(part.id, &part.name);
             handles.fill(&mut out.sets);
             out.sets.add_elements(set, ids);
         }
@@ -1339,11 +1365,12 @@ fn generated_elements(
 }
 
 fn group<'a, 'b>(
-    groups: &'b mut Vec<(Option<&'a str>, String, Vec<ElementId>)>,
-    set: Option<&'a str>,
+    groups: &'b mut Vec<(Option<&'a plx_mesh::Part>, String, Vec<ElementId>)>,
+    set: Option<&'a plx_mesh::Part>,
     type_name: String,
 ) -> &'b mut Vec<ElementId> {
-    let index = match groups.iter().position(|g| g.0 == set && g.1 == type_name) {
+    let same = |a: Option<&plx_mesh::Part>| a.map(|p| p.id) == set.map(|p| p.id);
+    let index = match groups.iter().position(|g| same(g.0) && g.1 == type_name) {
         Some(index) => index,
         None => {
             groups.push((set, type_name, Vec::new()));
@@ -1355,8 +1382,8 @@ fn group<'a, 'b>(
 
 enum Members {
     Ids(Vec<ElementId>),
-    /// Element sets of whole parts, written by part name.
-    Parts(Vec<String>),
+    /// Element sets of whole parts, by id with their names.
+    Parts(Vec<(plx_model::PartRef, String)>),
 }
 
 enum Surface {
@@ -1476,11 +1503,15 @@ impl<'a> Sets<'a> {
             sets.node_sets.push((name.clone(), ids.clone()));
         }
         for (name, ids) in &mesh.element_sets {
-            // Part sets come from the element blocks; only extra members are written.
+            // Part sets come from the element blocks; only extra members are written. A set
+            // an input file names after a part is that part's set.
             let part = mesh
                 .parts
                 .iter()
                 .find(|p| p.name.eq_ignore_ascii_case(name));
+            if let Some(part) = part {
+                (sets.handles.aliases).insert(name.clone(), (part.id, part.name.clone()));
+            }
             // A lookup, as a part's set holds all its elements: searching the part's list for
             // each one takes seconds on a large mesh.
             let in_part: std::collections::HashSet<ElementId> = part
@@ -1594,7 +1625,7 @@ impl<'a> Sets<'a> {
             Region::Parts(parts) if !parts.is_empty() => Members::Parts(
                 (parts.iter())
                     .filter_map(|&id| self.mesh.part(id))
-                    .map(|p| p.name.clone())
+                    .map(|p| (p.id, p.name.clone()))
                     .collect(),
             ),
             _ => {

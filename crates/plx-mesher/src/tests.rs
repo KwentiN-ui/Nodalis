@@ -3,11 +3,72 @@
 
 use std::path::{Path, PathBuf};
 
-use plx_model::{Algorithm2d, Algorithm3d, MeshSetupItem, MeshSetupKind, UnitSystem};
+use plx_model::{Algorithm2d, Algorithm3d, MeshSetupItem, MeshSetupKind, PartRef, UnitSystem};
 
 use std::collections::BTreeSet;
 
 use super::*;
+
+// The tests name the parts of the geometries they read, which the files give each a name of
+// their own; the mesher takes them by id.
+
+/// The id of the part of `geometry` named `name`, in any case; a new id, of no part, if
+/// there is none.
+fn id_of(geometry: &Geometry, name: &str) -> PartRef {
+    // A geometry made in a test without its parts listed has the parts Gmsh finds.
+    (geometry_parts(geometry).unwrap_or_default().iter())
+        .find(|p| p.name.eq_ignore_ascii_case(name))
+        .map_or_else(PartRef::new, |p| p.id)
+}
+
+/// The geometry's parts by their names, in any case, see [`id_of`].
+trait ByName {
+    fn part_id(&self, name: &str) -> Option<PartRef>;
+    fn part_ids_of(&self, names: &[String]) -> Vec<PartRef>;
+}
+
+impl ByName for Geometry {
+    fn part_id(&self, name: &str) -> Option<PartRef> {
+        (self.parts.iter())
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+            .map(|p| p.id)
+    }
+
+    fn part_ids_of(&self, names: &[String]) -> Vec<PartRef> {
+        names.iter().filter_map(|n| self.part_id(n)).collect()
+    }
+}
+
+fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMesh, GmshError> {
+    super::generate_part_mesh(geometry, id_of(geometry, part))
+}
+
+fn generate_part_mesh_matching(
+    geometry: &Geometry,
+    part: &str,
+    matching: &[PeriodicFaces],
+) -> Result<GeneratedMesh, GmshError> {
+    super::generate_part_mesh_matching(geometry, id_of(geometry, part), matching)
+}
+
+fn delete_part(geometry: &Geometry, part: &str) -> Result<Option<Geometry>, GmshError> {
+    super::delete_part(geometry, id_of(geometry, part))
+}
+
+fn delete_part_renumbered(
+    geometry: &Geometry,
+    part: &str,
+) -> Result<(Option<Geometry>, BTreeMap<CadEntity, CadEntity>), GmshError> {
+    super::delete_part_renumbered(geometry, id_of(geometry, part))
+}
+
+fn delete_parts_renumbered(
+    geometry: &Geometry,
+    parts: &[String],
+) -> Result<(Option<Geometry>, BTreeMap<CadEntity, CadEntity>), GmshError> {
+    let ids: Vec<PartRef> = parts.iter().map(|p| id_of(geometry, p)).collect();
+    super::delete_parts_renumbered(geometry, &ids)
+}
 
 // The tests read CAD files without a unit system, in millimetres as they were drawn, so that
 // the sizes below are millimetres.
@@ -512,11 +573,10 @@ fn rectangle(origin: [f64; 3], size: [f64; 2], radius: f64) -> Geometry {
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        parts: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
         own_meshes: Vec::new(),
-        ids: Vec::new(),
         from_link: false,
         operations: Vec::new(),
         input: None,
@@ -695,11 +755,10 @@ fn box_and_lines() -> Geometry {
             ..MeshingParameters::default()
         },
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        parts: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
         own_meshes: Vec::new(),
-        ids: Vec::new(),
         from_link: false,
         operations: Vec::new(),
         input: None,
@@ -733,11 +792,10 @@ fn a_long_thin_round_bar_is_displayed_with_few_triangles() {
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::default(),
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        parts: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
         own_meshes: Vec::new(),
-        ids: Vec::new(),
         from_link: false,
         operations: Vec::new(),
         input: None,
@@ -967,7 +1025,7 @@ fn the_display_of_parts_that_stay_is_kept_as_tessellated_anew() {
     let smaller = smaller.unwrap();
     let kept = display
         .clone()
-        .without_parts(&deleted, &smaller, &tags)
+        .without_parts(&three.part_ids_of(&deleted), &smaller, &tags)
         .unwrap();
     let fresh = tessellate(&smaller).unwrap();
     assert_eq!(kept.part_dimensions, fresh.part_dimensions);
@@ -993,7 +1051,7 @@ fn the_display_of_parts_that_stay_is_kept_as_tessellated_anew() {
     // A display the smaller geometry does not fit is tessellated anew.
     assert!(
         display
-            .without_parts(&deleted[..1], &smaller, &tags)
+            .without_parts(&three.part_ids_of(&deleted[..1]), &smaller, &tags)
             .is_none()
     );
 }
@@ -1080,7 +1138,10 @@ fn added_files_keep_the_old_parts_with_names_sizes_and_faces() {
     let paths = [testdata("platte_mit_loch.step")];
     let addition = add_cad_files(Some(&geometry), &paths, UnitSystem::Unitless, &taken).unwrap();
     let combined = &addition.import.geometry;
-    assert_eq!(addition.added, ["SOLID-3"]);
+    assert_eq!(
+        addition.import.geometry.part_names_of(&addition.added),
+        ["SOLID-3"]
+    );
     let mut names = part_names(combined).unwrap();
     names.sort();
     assert_eq!(names, ["SOLID-2", "SOLID-3"]);
@@ -1110,15 +1171,21 @@ fn added_files_keep_the_old_parts_with_names_sizes_and_faces() {
     let mut names = part_names(&addition.import.geometry).unwrap();
     names.sort();
     assert_eq!(names, ["SOLID-1", "SOLID-2", "SOLID-3", "SOLID-4"]);
-    assert_eq!(addition.added, ["SOLID-1", "SOLID-4"]);
+    assert_eq!(
+        addition.import.geometry.part_names_of(&addition.added),
+        ["SOLID-1", "SOLID-4"]
+    );
 
     // Into a model with a mesh but no geometry, the new parts avoid the mesh's names.
     let taken = ["SOLID-1".to_string(), "SOLID-2".to_string()];
     let addition = add_cad_files(None, &again, UnitSystem::Unitless, &taken).unwrap();
-    assert_eq!(addition.added, ["SOLID-3", "SOLID-4"]);
+    assert_eq!(
+        addition.import.geometry.part_names_of(&addition.added),
+        ["SOLID-3", "SOLID-4"]
+    );
     assert_eq!(
         part_names(&addition.import.geometry).unwrap(),
-        addition.added
+        addition.import.geometry.part_names_of(&addition.added)
     );
     assert!(addition.renumbered.is_empty());
 }
@@ -1140,11 +1207,10 @@ fn beam_on_block() -> Geometry {
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(40.0),
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        parts: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
         own_meshes: Vec::new(),
-        ids: Vec::new(),
         from_link: false,
         operations: Vec::new(),
         input: None,
@@ -1243,11 +1309,10 @@ fn detection_on_geometry_keeps_to_the_faces_that_touch() {
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(60.0),
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        parts: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
         own_meshes: Vec::new(),
-        ids: Vec::new(),
         from_link: false,
         operations: Vec::new(),
         input: None,
@@ -1465,9 +1530,15 @@ fn parts_keep_the_names_of_the_cad_file() {
     let taken = ["OBEN".to_string()];
     let addition =
         add_cad_files(Some(&blocks.geometry), &paths, UnitSystem::Unitless, &taken).unwrap();
-    assert_eq!(addition.added, ["oben-2", "Stütze", "Membran"]);
+    assert_eq!(
+        addition.import.geometry.part_names_of(&addition.added),
+        ["oben-2", "Stütze", "Membran"]
+    );
     let addition = add_cad_files(None, &paths, UnitSystem::Unitless, &taken).unwrap();
-    assert_eq!(addition.added, ["oben-2", "Stütze", "Membran"]);
+    assert_eq!(
+        addition.import.geometry.part_names_of(&addition.added),
+        ["oben-2", "Stütze", "Membran"]
+    );
     let shown: Vec<&str> = (addition.import.display.mesh.parts.iter())
         .map(|p| p.name.as_str())
         .collect();
@@ -1766,11 +1837,10 @@ fn revolved(origin: [f64; 3], size: [f64; 2], radius: f64, angle: f64) -> Geomet
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        parts: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
         own_meshes: Vec::new(),
-        ids: Vec::new(),
         from_link: false,
         operations: Vec::new(),
         input: None,
@@ -1947,11 +2017,10 @@ fn plate_and_cube(size: [f64; 3], cube_first: bool) -> Geometry {
             ..MeshingParameters::default()
         },
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        parts: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
         own_meshes: Vec::new(),
-        ids: Vec::new(),
         from_link: false,
         operations: Vec::new(),
         input: None,
@@ -2038,11 +2107,10 @@ fn cube() -> Geometry {
             ..MeshingParameters::default()
         },
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        parts: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
         own_meshes: Vec::new(),
-        ids: Vec::new(),
         from_link: false,
         operations: Vec::new(),
         input: None,
@@ -2189,11 +2257,10 @@ fn corners_of_flat_faces_are_rounded_and_bevelled() {
             ..MeshingParameters::default()
         },
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        parts: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
         own_meshes: Vec::new(),
-        ids: Vec::new(),
         from_link: false,
         operations: Vec::new(),
         input: None,
@@ -2306,11 +2373,10 @@ fn a_rope_drawn_on_a_sheave_is_found_as_node_to_surface_contact() {
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::for_diagonal(400.0),
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        parts: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
         own_meshes: Vec::new(),
-        ids: Vec::new(),
         from_link: false,
         operations: Vec::new(),
         input: None,
@@ -2448,13 +2514,12 @@ fn cut_block() -> Geometry {
             ..MeshingParameters::default()
         },
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        parts: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
         compounds: Vec::new(),
         suppressed: Vec::new(),
         own_meshes: Vec::new(),
-        ids: Vec::new(),
         from_link: false,
         operations: Vec::new(),
         input: None,
@@ -2527,8 +2592,7 @@ fn made_geometry(make: impl FnOnce(&Gmsh) -> Result<(), GmshError>) -> Geometry 
     .unwrap();
     with_signatures(Geometry {
         brep: std::fs::read_to_string(&file.0).unwrap(),
-        part_names: Vec::new(),
-        ids: Vec::new(),
+        parts: Vec::new(),
         ..cube()
     })
     .unwrap()
@@ -3056,7 +3120,7 @@ fn faces_get_quasi_structured_quadrilaterals_unless_an_algorithm_is_chosen() {
         id: plx_model::Id::new(),
         name: "Gmsh".into(),
         kind: MeshSetupKind::TetrahedralGmsh {
-            parts: geometry.ids.iter().map(|p| p.id).collect(),
+            parts: geometry.part_ids(),
             algorithm_2d: Algorithm2d::FrontalDelaunay,
             algorithm_3d: Default::default(),
         },
@@ -3126,7 +3190,7 @@ fn spheres_are_meshed_whatever_algorithm_is_chosen() {
         id: plx_model::Id::new(),
         name: "Gmsh".into(),
         kind: MeshSetupKind::TetrahedralGmsh {
-            parts: geometry.ids.iter().map(|p| p.id).collect(),
+            parts: geometry.part_ids(),
             algorithm_2d: Algorithm2d::FrontalQuads,
             algorithm_3d: Default::default(),
         },
@@ -3370,11 +3434,10 @@ fn rounded_plate() -> Geometry {
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::default(),
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        parts: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
         own_meshes: Vec::new(),
-        ids: Vec::new(),
         from_link: false,
         operations: Vec::new(),
         input: None,
@@ -3519,11 +3582,10 @@ fn defeaturing_keeps_the_round_ends_of_slots_and_removes_pocket_corners() {
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::default(),
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        parts: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
         own_meshes: Vec::new(),
-        ids: Vec::new(),
         from_link: false,
         operations: Vec::new(),
         input: None,
@@ -3618,11 +3680,10 @@ fn bracket() -> Geometry {
         brep: std::fs::read_to_string(&file.0).unwrap(),
         meshing: MeshingParameters::default(),
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        parts: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
         own_meshes: Vec::new(),
-        ids: Vec::new(),
         from_link: false,
         operations: Vec::new(),
         input: None,
@@ -3670,10 +3731,18 @@ fn geometries_put_together_keep_their_parts_and_entities() {
     let merged = merge_geometries(&[blocks.clone(), plate.clone()]).unwrap();
     let mut names = part_names(&merged.geometry).unwrap();
     names.sort();
-    // The plate's SOLID-1 is a second one.
-    assert_eq!(names, ["SOLID-1", "SOLID-1-2", "SOLID-2"]);
-    assert!(merged.renamed[0].is_empty());
-    assert_eq!(merged.renamed[1]["SOLID-1"], "SOLID-1-2");
+    // The plate's SOLID-1 is a second part of the name, another part by its id.
+    assert_eq!(names, ["SOLID-1", "SOLID-1", "SOLID-2"]);
+    let ids: BTreeSet<PartRef> = merged.geometry.part_ids().into_iter().collect();
+    assert_eq!(ids.len(), 3);
+    assert!(merged.ids.iter().all(BTreeMap::is_empty));
+    // The same geometry twice: the second copy is other parts, with ids of their own.
+    let twice = merge_geometries(&[plate.clone(), plate.clone()]).unwrap();
+    let ids = twice.geometry.part_ids();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    assert!(twice.ids[0].is_empty());
+    assert_eq!(twice.ids[1][&plate.parts[0].id], ids[1]);
     // Every face of each input is found again.
     let faces = |g: &Geometry| {
         (g.signatures.iter())
@@ -3886,7 +3955,8 @@ fn suppressed_parts_are_left_alone_by_splits_and_cad_operations() {
     .unwrap();
     let names = part_names(&input).unwrap();
     let (first, second) = (names[0].clone(), names[1].clone());
-    input.set_suppressed(std::slice::from_ref(&first), true);
+    let first_id = input.parts[0].id;
+    input.set_suppressed(&[first_id], true);
     // A split of all parts cuts the second only.
     let once = apply_operation(&input, &split(SplitPlane, 4.0), &[]).unwrap();
     let mut after = part_names(&once).unwrap();
@@ -3894,10 +3964,10 @@ fn suppressed_parts_are_left_alone_by_splits_and_cad_operations() {
     let mut expected = vec![first.clone(), format!("{second}-1"), format!("{second}-2")];
     expected.sort();
     assert_eq!(after, expected);
-    assert!(once.is_suppressed(&first));
+    assert!(once.is_suppressed(first_id));
     // Chosen, the suppressed part is not cut either.
     let chosen = plx_model::CadOperation {
-        parts: input.part_id(&first).into_iter().collect(),
+        parts: vec![first_id],
         ..split(SplitPlane, 4.0)
     };
     let error = apply_operation(&input, &chosen, &[]).unwrap_err();
@@ -4022,11 +4092,10 @@ fn a_square_bar_is_swept_along_its_length_with_the_size_asked_for() {
             ..MeshingParameters::default()
         },
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        parts: Vec::new(),
         refinement: 1.0,
         signatures: Vec::new(),
         own_meshes: Vec::new(),
-        ids: Vec::new(),
         from_link: false,
         operations: Vec::new(),
         input: None,
@@ -4349,7 +4418,7 @@ fn parts_meshed_after_others_get_the_mesh_they_get_alone() {
             .unwrap()
             .geometry;
         geometry.meshing.hexahedra_where_possible = !tetrahedra;
-        let names = part_names(&geometry).unwrap();
+        let names = geometry_parts(&geometry).unwrap();
         let file = TempFile::with_contents("brep", &geometry.brep).unwrap();
         let (in_turn, read_again, alone) = gmsh::with_kept_shapes(1, |gmsh| {
             let mut in_turn = Vec::new();
