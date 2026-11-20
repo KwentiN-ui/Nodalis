@@ -17,7 +17,7 @@ use crate::units::Quantity;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MeshOperation {
     /// The internal identity others refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     /// The mesh parts it changes, by id ([`plx_mesh::Part::id`]): parts, bodies of compound
     /// parts, and compound parts.

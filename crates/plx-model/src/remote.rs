@@ -69,7 +69,7 @@ pub struct Displacement {
     pub values: [Option<f64>; 6],
     pub behavior: Behavior,
     /// Coordinate system of the location and of the directions; `None` is the global one.
-    pub system: Option<crate::Id>,
+    pub system: Option<crate::Id<crate::CoordinateSystem>>,
     /// Coordinates of the point in `system`; `None` is the centre of the selection. Setting
     /// it asks for a point.
     pub location: Option<[f64; 3]>,
@@ -160,7 +160,7 @@ impl FeModel {
     ) -> Option<(usize, &crate::BoundaryCondition, &Displacement)> {
         self.steps.iter().enumerate().find_map(|(s, step)| {
             let (i, bc) =
-                (step.boundary_conditions.iter().enumerate()).find(|(_, bc)| bc.id == id)?;
+                (step.boundary_conditions.iter().enumerate()).find(|(_, bc)| bc.id.any() == id)?;
             let BoundaryKind::Displacement(displacement) = &bc.kind else {
                 return None;
             };
@@ -366,7 +366,7 @@ impl Displacement {
         model: &FeModel,
         mesh: &FeMesh,
         region: &Region,
-        item: Option<(crate::Id, crate::Id)>,
+        item: Option<(crate::Id<crate::Step>, crate::Id<crate::BoundaryCondition>)>,
     ) -> Formulation {
         let point = match self.behavior {
             Behavior::EachNode => return Formulation::Nodes,

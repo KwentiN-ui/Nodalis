@@ -33,10 +33,10 @@ impl OverviewGroup {
 /// and history outputs by their id, defined fields, which have none, by their name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StepItemKey {
-    BoundaryCondition(Id),
-    Load(Id),
+    BoundaryCondition(Id<crate::BoundaryCondition>),
+    Load(Id<crate::Load>),
     DefinedField(String),
-    HistoryOutput(Id),
+    HistoryOutput(Id<crate::HistoryOutput>),
 }
 
 /// What an item is in one step.
@@ -603,7 +603,7 @@ mod tests {
             active: false,
             ..before
         };
-        fe.steps[2].set_contact_state(id, before, off);
+        fe.steps[2].set_contact_state(id.any(), before, off);
         let overview = fe.step_overview();
         let flange = row(&overview, "Flange");
         assert_eq!(flange.group, OverviewGroup::ModelWide);

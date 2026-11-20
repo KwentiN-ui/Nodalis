@@ -24,7 +24,7 @@ pub struct RemoteForce {
     /// How the selection follows the point.
     pub behavior: RemoteBehavior,
     /// Coordinate system of the location and of the directions; `None` is the global one.
-    pub system: Option<crate::Id>,
+    pub system: Option<crate::Id<crate::CoordinateSystem>>,
     /// Coordinates of the point in `system`; `None` is the centre of the selection.
     pub location: Option<[f64; 3]>,
     /// Only the nodes within this distance of the point take part, Ansys' pinball region.
@@ -177,7 +177,7 @@ impl FeModel {
     /// The first remote force of the id, of any step, that has a point of its own.
     pub fn remote_force_of(&self, id: Id) -> Option<(&Region, &RemoteForce)> {
         (self.steps.iter().flat_map(|step| &step.loads)).find_map(|load| match &load.kind {
-            LoadKind::RemoteForce(remote) if load.id == id && !load.region.is_point() => {
+            LoadKind::RemoteForce(remote) if load.id.any() == id && !load.region.is_point() => {
                 Some((&load.region, remote))
             }
             _ => None,
@@ -193,9 +193,9 @@ impl FeModel {
                 if matches!(
                     self.formulation(mesh, s, i),
                     Some(crate::Formulation::Point(_))
-                ) && !displacements.iter().any(|(id, _)| *id == bc.id)
+                ) && !displacements.iter().any(|(id, _)| *id == bc.id.any())
                 {
-                    displacements.push((bc.id, &bc.name));
+                    displacements.push((bc.id.any(), &bc.name));
                 }
             }
         }
@@ -203,10 +203,10 @@ impl FeModel {
         for load in self.steps.iter().flat_map(|step| &step.loads) {
             if matches!(load.kind, LoadKind::RemoteForce(_))
                 && !load.region.is_point()
-                && !displacements.iter().any(|(id, _)| *id == load.id)
-                && !forces.iter().any(|(id, _)| *id == load.id)
+                && !displacements.iter().any(|(id, _)| *id == load.id.any())
+                && !forces.iter().any(|(id, _)| *id == load.id.any())
             {
-                forces.push((load.id, &load.name));
+                forces.push((load.id.any(), &load.name));
             }
         }
         (displacements, forces)

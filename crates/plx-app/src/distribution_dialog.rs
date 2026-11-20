@@ -78,7 +78,7 @@ fn range_text(ui: &mut Ui, view: &DistributionView) {
 fn equation_help(
     ui: &mut Ui,
     fe: &FeModel,
-    system: Option<plx_model::Id>,
+    system: Option<plx_model::Id<plx_model::CoordinateSystem>>,
     variables: &[plx_model::DistributionVariable],
     length: &str,
 ) -> Option<Insert> {
@@ -555,7 +555,7 @@ pub fn validate(distribution: &Distribution, fe: &FeModel) -> Result<(), String>
 pub fn distribution_row(
     ui: &mut Ui,
     id: &str,
-    reference: &mut Option<plx_model::Id>,
+    reference: &mut Option<plx_model::Id<plx_model::Distribution>>,
     fe: &FeModel,
 ) {
     ui.label("Distribution");

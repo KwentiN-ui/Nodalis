@@ -469,7 +469,7 @@ impl Writer {
             let surface = sets.surface(&support.name, "Surface", &support.region)?;
             self.out
                 .support_surfaces
-                .push((support.id, surface.clone()));
+                .push((support.id.any(), surface.clone()));
             self.out
                 .compression_only
                 .push(plxs_core::contact::CompressionOnly {

@@ -11,7 +11,7 @@ use crate::Region;
 pub struct HistoryOutput {
     /// The internal identity the steps that print the output refer to: one output of the
     /// model, printed in every step that lists it.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     /// A deactivated history output is left out of the input file.
     pub active: bool,
@@ -336,11 +336,14 @@ pub fn history_variables(codes: &[&str]) -> Vec<HistoryVariable> {
 
 impl crate::FeModel {
     /// The history output of the model with the id.
-    pub fn history_output(&self, id: crate::Id) -> Option<&HistoryOutput> {
+    pub fn history_output(&self, id: crate::Id<HistoryOutput>) -> Option<&HistoryOutput> {
         self.history_outputs.iter().find(|o| o.id == id)
     }
 
-    pub fn history_output_mut(&mut self, id: crate::Id) -> Option<&mut HistoryOutput> {
+    pub fn history_output_mut(
+        &mut self,
+        id: crate::Id<HistoryOutput>,
+    ) -> Option<&mut HistoryOutput> {
         self.history_outputs.iter_mut().find(|o| o.id == id)
     }
 
@@ -368,7 +371,7 @@ impl crate::FeModel {
     }
 
     /// The steps that print the history output.
-    pub fn history_output_steps(&self, id: crate::Id) -> Vec<usize> {
+    pub fn history_output_steps(&self, id: crate::Id<HistoryOutput>) -> Vec<usize> {
         (self.steps.iter().enumerate())
             .filter(|(_, step)| step.history_outputs.contains(&id))
             .map(|(s, _)| s)
@@ -391,7 +394,7 @@ impl crate::FeModel {
     }
 
     /// Takes the history output out of the model and out of every step.
-    pub fn delete_history_output(&mut self, id: crate::Id) {
+    pub fn delete_history_output(&mut self, id: crate::Id<HistoryOutput>) {
         self.history_outputs.retain(|o| o.id != id);
         for step in &mut self.steps {
             step.history_outputs.retain(|&o| o != id);
@@ -402,7 +405,7 @@ impl crate::FeModel {
     /// the same id, for steps taken from another analysis; drops those no step prints any
     /// more.
     pub fn adopt_history_outputs(&mut self, from: &crate::FeModel) {
-        let printed: Vec<crate::Id> = (self.steps.iter())
+        let printed: Vec<crate::Id<HistoryOutput>> = (self.steps.iter())
             .flat_map(|s| s.history_outputs.iter().copied())
             .collect();
         for output in (from.history_outputs.iter()).filter(|o| printed.contains(&o.id)) {
@@ -423,7 +426,7 @@ impl crate::FeModel {
 
     /// Takes the history outputs no step prints out of the model.
     pub fn drop_unused_history_outputs(&mut self) {
-        let used: std::collections::BTreeSet<crate::Id> = (self.steps.iter())
+        let used: std::collections::BTreeSet<crate::Id<HistoryOutput>> = (self.steps.iter())
             .flat_map(|s| s.history_outputs.iter().copied())
             .collect();
         self.history_outputs.retain(|o| used.contains(&o.id));

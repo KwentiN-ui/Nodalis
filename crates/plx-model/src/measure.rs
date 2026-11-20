@@ -14,11 +14,11 @@ pub enum MeasureRegion {
     /// block, by its name.
     NodeSet(String),
     /// The nodes of a user-defined set of the analysis ([`crate::MeshSet`]).
-    Set(crate::Id),
+    Set(crate::Id<crate::MeshSet>),
     /// The nodes of the region of a boundary condition of the analysis.
-    BoundaryCondition(crate::Id),
+    BoundaryCondition(crate::Id<crate::BoundaryCondition>),
     /// The nodes of the region of a load of the analysis.
-    Load(crate::Id),
+    Load(crate::Id<crate::Load>),
 }
 
 /// What a Measure block computes from the results of a step: of its last increment, or of the
@@ -52,7 +52,7 @@ pub enum MeasureKind {
     /// the step, or with `whole` the values of all its increments, a series that goes to
     /// Math and Plot blocks. `None` until one is chosen.
     History {
-        output: Option<crate::Id>,
+        output: Option<crate::Id<crate::HistoryOutput>>,
         field: String,
         component: String,
         whole: bool,
@@ -164,6 +164,7 @@ impl MeasureKind {
     /// A short text of what it measures: "STRESS MISES in TIP"; `name` names the items of the
     /// analysis it refers to by id: its region or history output.
     pub fn describe(&self, name: impl Fn(crate::Id) -> Option<String>) -> String {
+        let in_item = |id| format!(" in {}", name(id).unwrap_or_else(|| "(deleted)".into()));
         match self {
             Self::FieldValues {
                 field,
@@ -173,11 +174,9 @@ impl MeasureKind {
                 let region = match region {
                     MeasureRegion::All => String::new(),
                     MeasureRegion::NodeSet(set) => format!(" in {set}"),
-                    MeasureRegion::Set(id)
-                    | MeasureRegion::BoundaryCondition(id)
-                    | MeasureRegion::Load(id) => {
-                        format!(" in {}", name(*id).unwrap_or_else(|| "(deleted)".into()))
-                    }
+                    MeasureRegion::Set(id) => in_item(id.any()),
+                    MeasureRegion::BoundaryCondition(id) => in_item(id.any()),
+                    MeasureRegion::Load(id) => in_item(id.any()),
                 };
                 format!("{field} {component}{region}")
             }
@@ -196,8 +195,8 @@ impl MeasureKind {
                 output,
             } => {
                 let take = if *whole { "History of " } else { "" };
-                let output =
-                    (output.and_then(&name)).unwrap_or_else(|| "(no history output)".into());
+                let output = (output.and_then(|o| name(o.any())))
+                    .unwrap_or_else(|| "(no history output)".into());
                 format!("{take}{field} {component} of {output}")
             }
             Self::Eigenfrequency { mode } => format!("Eigenfrequency of mode {mode}"),

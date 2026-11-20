@@ -12,7 +12,7 @@ use crate::{FeModel, Region};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MeshSet {
     /// The internal identity others refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub kind: SetKind,
     /// What the user picked: nodes, faces, CAD entities or whole parts.
@@ -39,7 +39,7 @@ impl MeshSet {
     /// items using it show their missing reference.
     pub fn write_into(&self, mesh: &mut FeMesh) {
         self.kind.remove(mesh, &self.name);
-        mesh.user_sets.remove(&self.id);
+        mesh.user_sets.remove(&self.id.any());
         match self.kind {
             SetKind::Nodes => {
                 let mut nodes = self.region.nodes(mesh);
@@ -73,7 +73,7 @@ impl MeshSet {
 impl MeshSet {
     /// Notes in the mesh that its set of the name is this one, for regions on it by id.
     fn mark(&self, mesh: &mut FeMesh) {
-        (mesh.user_sets).insert(self.id, (self.kind, self.name.clone()));
+        (mesh.user_sets).insert(self.id.any(), (self.kind, self.name.clone()));
     }
 }
 
@@ -88,14 +88,14 @@ impl FeModel {
     pub fn sync_mesh_sets(&self, before: &[MeshSet], mesh: &mut FeMesh) {
         for set in before {
             set.kind.remove(mesh, &set.name);
-            mesh.user_sets.remove(&set.id);
+            mesh.user_sets.remove(&set.id.any());
         }
         self.write_mesh_sets(mesh);
     }
 
     /// Makes the regions on the mesh's set of the kind and name refer to the user-defined set
     /// of the id that takes its place, e.g. when a set of an input file is edited.
-    pub fn adopt_set(&mut self, kind: SetKind, name: &str, id: crate::Id) {
+    pub fn adopt_set(&mut self, kind: SetKind, name: &str, id: crate::Id<MeshSet>) {
         let old = Region::named(kind, name);
         let adopt = |region: &mut Region| {
             if *region == old {

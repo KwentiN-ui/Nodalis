@@ -3425,7 +3425,7 @@ impl ProjectApp {
                         && matches!(links::slot(l), [c, n] if c == links::OUTPUTS && *n == links::key(column.id))
                 });
                 if !linked {
-                    gone.push((id, false, column.id, column.name.clone()));
+                    gone.push((id, false, column.id.any(), column.name.clone()));
                 }
             }
             for column in &study.table.inputs {
@@ -3434,7 +3434,7 @@ impl ProjectApp {
                         && matches!(l.item.as_slice(), [c, n] if c == links::LOOP && *n == links::key(column.id))
                 });
                 if !linked {
-                    gone.push((id, true, column.id, column.name.clone()));
+                    gone.push((id, true, column.id.any(), column.name.clone()));
                 }
             }
         }

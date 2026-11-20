@@ -19,9 +19,9 @@ pub enum PartTerm {
     /// for one character; a pattern without them matches names containing it.
     Pattern(String),
     /// Parts with elements of a section of this material.
-    Material(crate::Id),
+    Material(crate::Id<crate::Material>),
     /// The parts of this part group.
-    Group(crate::Id),
+    Group(crate::Id<crate::PartGroup>),
 }
 
 /// Parts chosen by terms: those any of `include` names, all parts if it names none, less
@@ -38,7 +38,7 @@ pub struct PartFilter {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PartGroup {
     /// The internal identity other items refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub filter: PartFilter,
 }
@@ -59,8 +59,8 @@ impl PartGroup {
 pub struct PartContext {
     pub ids: Vec<crate::Id>,
     pub names: Vec<String>,
-    pub materials: Vec<BTreeSet<crate::Id>>,
-    groups: HashMap<crate::Id, PartFilter>,
+    pub materials: Vec<BTreeSet<crate::Id<crate::Material>>>,
+    groups: HashMap<crate::Id<PartGroup>, PartFilter>,
     /// The parts left out of the analysis (suppressed): no filter takes them, not even by
     /// their names.
     left_out: crate::LeftOut,
@@ -139,15 +139,19 @@ impl PartFilter {
     /// Whether the filter refers to the material or part group of this id.
     pub fn refers_to(&self, id: crate::Id) -> bool {
         (self.include.iter().chain(&self.exclude)).any(|t| match t {
-            PartTerm::Material(m) | PartTerm::Group(m) => *m == id,
+            PartTerm::Material(m) => m.any() == id,
+            PartTerm::Group(g) => g.any() == id,
             _ => false,
         })
     }
 
     /// Drops the terms naming the material or part group `id`, which was deleted.
     pub fn forget(&mut self, id: crate::Id) {
-        let keep =
-            |t: &PartTerm| !matches!(t, PartTerm::Material(m) | PartTerm::Group(m) if *m == id);
+        let keep = |t: &PartTerm| match t {
+            PartTerm::Material(m) => m.any() != id,
+            PartTerm::Group(g) => g.any() != id,
+            _ => true,
+        };
         self.include.retain(keep);
         self.exclude.retain(keep);
     }
@@ -322,7 +326,7 @@ impl FeModel {
         }
     }
 
-    pub fn part_group(&self, id: crate::Id) -> Option<&PartGroup> {
+    pub fn part_group(&self, id: crate::Id<PartGroup>) -> Option<&PartGroup> {
         self.part_groups.iter().find(|g| g.id == id)
     }
 }

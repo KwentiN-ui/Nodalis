@@ -104,7 +104,7 @@ impl ValueKind {
 /// name it by its id, so that renaming it keeps them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Parameter {
-    pub id: Id,
+    pub id: Id<Self>,
     pub name: String,
     pub kind: ValueKind,
     /// In SI units.

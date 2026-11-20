@@ -29,7 +29,7 @@ type PartPair = (BTreeSet<usize>, BTreeSet<usize>);
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContactDetection {
     /// The internal identity other items refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     /// The parts searched. A filter naming no parts to include searches the visible parts,
     /// less those it excludes.
@@ -558,7 +558,7 @@ impl FeModel {
         let before = self.contact_regions.len();
         // A region found again keeps the id of the one it replaces, so that what refers to
         // it (a contact history output, a contact change of a step) stays on it.
-        let replaced: Vec<(String, crate::Id)> = (self.contact_regions.iter())
+        let replaced: Vec<(String, crate::Id<ContactRegion>)> = (self.contact_regions.iter())
             .filter(|r| ours(r) && !r.edited)
             .map(|r| (r.name.clone(), r.id))
             .collect();
@@ -592,8 +592,9 @@ impl FeModel {
         report.per_rule = vec![0; detection.rules.len() + 1];
         // A pair found by several detections belongs to the lowest of them in the tree:
         // the regions of detections above are taken over, those of detections below kept.
-        let position =
-            |id: Option<crate::Id>| (self.contact_detections.iter()).position(|d| Some(d.id) == id);
+        let position = |id: Option<crate::Id<ContactDetection>>| {
+            (self.contact_detections.iter()).position(|d| Some(d.id) == id)
+        };
         let mut below: HashMap<PartPair, String> = HashMap::new();
         let mut above: HashSet<PartPair> = HashSet::new();
         for r in &self.contact_regions {

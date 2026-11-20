@@ -21,6 +21,7 @@ pub use plxs_procedures::profile::{Phase, Profile};
 pub use plxs_session::JobProfile;
 
 pub mod awake;
+pub mod handover;
 pub mod live;
 pub mod monitor;
 pub mod particles;

@@ -308,7 +308,7 @@ mod tests {
         let math = math.as_number().unwrap().0.clone();
         let parameter = Parameter::new("Length", ValueKind::Factor, 0.0);
         let length = links::key(parameter.id);
-        let column = links::key(plx_model::Id::new());
+        let column = links::key(plx_model::Id::<plx_model::StudyColumn>::new());
         let mut study = NumberStudy {
             study: 1,
             blocks: vec![

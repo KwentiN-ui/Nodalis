@@ -82,11 +82,11 @@ fn stamp(mesh: &mut FeMesh) {
 
 /// The id of the test items called `name`, the same for all of them: a test refers to an
 /// item by its name, also before the item is made.
-fn named(name: &str) -> plx_model::Id {
+fn named<T: ?Sized>(name: &str) -> plx_model::Id<T> {
     use std::collections::HashMap;
     use std::sync::{LazyLock, Mutex};
     static IDS: LazyLock<Mutex<HashMap<String, plx_model::Id>>> = LazyLock::new(Default::default);
-    *(IDS.lock().unwrap().entry(name.into())).or_default()
+    (*(IDS.lock().unwrap().entry(name.into())).or_default()).cast()
 }
 
 /// The analysis the solver takes of the model.
@@ -10638,7 +10638,7 @@ fn detection_rules_give_the_pairs_their_type_and_the_lower_detection_wins() {
         .include
         .push(PartTerm::Group(group));
     model.part_groups.clear();
-    model.forget_in_filters(group);
+    model.forget_in_filters(group.any());
     assert!(model.contact_detections[0].scope.is_all());
     // A renamed part stays in the filters, which name it by id.
     let lower = mesh.ids_of(&["LOWER"]);
@@ -11188,7 +11188,7 @@ fn long_set_names_fit_the_exported_text() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Frictionless);
     let long = "Bonded - SPUR_GEAR__20_TEETH, SPUR_GEAR__60_TEETH-2 to SPUR_GEAR__20_TEETH-2";
     model.contact_regions[0].name = long.to_string();
-    let mut output = HistoryOutput::contact("CH_Output-1", Some(model.contact_regions[0].id));
+    let mut output = HistoryOutput::contact("CH_Output-1", Some(model.contact_regions[0].id.any()));
     output.variables = plx_model::history_variables(&["CF"]);
     model.put_history_output(0, output);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -14266,7 +14266,7 @@ fn load_on_point(bc: &BoundaryCondition, kind: LoadKind) -> Load {
     Load {
         id: named("On_Point-1"),
         name: "On_Point-1".into(),
-        region: Region::RemotePoint(bc.id),
+        region: Region::RemotePoint(bc.id.any()),
         kind,
         ..tip_force()
     }
@@ -14330,7 +14330,7 @@ fn a_remote_force_on_the_point_of_a_displacement_acts_on_that_point() {
         r.force = [0.0, -100.0, 0.0];
         r.moment = [0.0, 0.0, 1000.0];
     });
-    load.region = Region::RemotePoint(bc.id);
+    load.region = Region::RemotePoint(bc.id.any());
     let (mesh, mut model) = remote_cantilever(bc);
     model.steps[0].loads.push(load);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -14359,7 +14359,7 @@ fn solver_turns_the_point_of_a_displacement_of_a_plane_model_by_a_moment() {
     let mut bc = remote("Free-1", [None; 6]);
     bc.region = Region::Nodes(nodes_at(&mesh, 0, 10.0));
     let mut load = load_on_point(&bc, LoadKind::Moment([0.0, 0.0, m]));
-    load.region = Region::RemotePoint(bc.id);
+    load.region = Region::RemotePoint(bc.id.any());
     model.steps[0].boundary_conditions.push(bc);
     model.steps[0].loads.push(load);
     assert!(
