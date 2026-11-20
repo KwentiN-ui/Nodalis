@@ -1056,6 +1056,7 @@ mod tests {
             values: values.to_vec(),
         };
         vec![HistorySet {
+            output: None,
             name: "NH_OUTPUT-1".into(),
             rows: vec![(1, 1, 0.25), (1, 2, 0.5), (1, 3, 1.0)],
             fields: vec![HistoryField {
@@ -1298,6 +1299,7 @@ mod tests {
 
     fn forces() -> HistorySet {
         HistorySet {
+            output: None,
             name: "NH_OUTPUT-2".into(),
             rows: vec![(1, 1, 0.25), (1, 3, 1.0)],
             fields: vec![HistoryField {

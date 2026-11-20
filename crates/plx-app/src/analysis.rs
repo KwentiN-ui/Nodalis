@@ -290,7 +290,6 @@ pub fn prepare(
         preparation_steps: (lowered.preparation_steps.iter())
             .map(|&s| s as u32 + 1)
             .collect(),
-        text: lowered.text(),
         analysis: lowered.analysis,
         warnings: lowered.warnings,
     }
@@ -1113,7 +1112,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nodalis-continue-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         // The continuing analysis holds the end with a boundary condition of its own, on a
-        // set the first analysis does not use itself: its input file has that set too.
+        // set the first analysis does not use itself: the first analysis lowers that set too.
         let mut target = pulled_cubes(0.04);
         let own = &mut target.fe.steps[2];
         own.boundary_conditions[1].name = "Hold".into();
@@ -1125,12 +1124,8 @@ mod tests {
             ..Default::default()
         };
         solve_as(&source, &dir.join("Source"), "Source", &continuation);
-        let source_inp = std::fs::read_to_string(dir.join("Source/Source.inp")).unwrap();
-        assert!(
-            source_inp.to_ascii_uppercase().contains("HOLD"),
-            "{source_inp}"
-        );
-        assert_eq!(source_inp.matches("*Step").count(), 2);
+        let source = plx_results::SolverResults::read(&dir.join("Source/Source.ndlr")).unwrap();
+        assert_eq!(source.steps.len(), 2);
         let continuation = crate::links::Continuation {
             upstream: vec![(dir.join("Source"), "Source".into())],
             ..Default::default()

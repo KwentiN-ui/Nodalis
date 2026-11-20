@@ -145,19 +145,20 @@ pub fn check_analysis(
         out.dedup();
         out
     };
-    for (tie, missed) in &session.constraints.untied {
+    for &(tie, ref missed) in &session.constraints.untied {
+        let name = (session.model.constraints.ties.get(tie.index())).map_or("?", |t| &t.name);
         let mut diagnostic = Diagnostic::new(
-            DiagnosticCode::TieNodesNotTied { tie: tie.clone() },
+            DiagnosticCode::TieNodesNotTied { tie },
             Severity::Warning,
             format!(
-                "*TIE {tie}: {} slave node(s) are farther than the position tolerance from the master surface and are not tied",
+                "*TIE {name}: {} slave node(s) are farther than the position tolerance from the master surface and are not tied",
                 missed.len()
             ),
         );
         diagnostic.nodes = ids(missed);
         check
             .diagnostics
-            .push(diagnostic.concerning(plxs_core::ItemRef::Tie(tie.clone())));
+            .push(diagnostic.concerning(plxs_core::ItemRef::Tie(tie)));
     }
 
     // One rank test per distinct set of held DOFs; the stiffness is the same for all.

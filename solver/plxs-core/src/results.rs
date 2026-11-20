@@ -311,6 +311,9 @@ pub struct HistoryBlock {
     /// Rows: the id (node, element, mode, or 0 for totals) and the values. Values at
     /// integration points and contact faces start with the point or face number.
     pub rows: Vec<(u32, Vec<f64>)>,
+    /// The project item of the output request that printed the block, see
+    /// [`crate::step::HistoryOutput::origin`].
+    pub origin: Option<u64>,
 }
 
 /// What a history block is of.

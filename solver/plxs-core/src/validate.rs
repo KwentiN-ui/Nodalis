@@ -250,7 +250,7 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
             }
         }
     }
-    for joint in &model.constraints.joints {
+    for (j, joint) in model.constraints.joints.iter().enumerate() {
         let before = errors.len();
         for node in joint.ends.iter().flatten().flatten() {
             if model.nodes.index(*node).is_none() {
@@ -260,14 +260,14 @@ pub fn validate(analysis: &mut Analysis) -> Result<Vec<String>, Vec<Error>> {
         if joint.ends.iter().all(Option::is_none) {
             errors.push(Error::input("*JOINT", "both ends are ground"));
         }
-        concerning(&mut errors, before, ItemRef::Joint(joint.name.clone()));
+        concerning(&mut errors, before, ItemRef::Joint(crate::JointId::at(j)));
     }
-    for tie in &model.constraints.ties {
+    for (t, tie) in model.constraints.ties.iter().enumerate() {
         for surface in [tie.slave, tie.master] {
             if model.sets.surface(surface).is_none() {
                 errors.push(
                     Error::undefined("*TIE", "surface", handle(surface.0))
-                        .concerning(ItemRef::Tie(tie.name.clone())),
+                        .concerning(ItemRef::Tie(crate::TieId::at(t))),
                 );
             }
         }

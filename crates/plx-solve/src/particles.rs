@@ -511,11 +511,6 @@ impl Run {
                         Err(message) => failed = Some(message),
                         Ok(mut fe) => {
                             crate::keep_modes_as_shapes(&mut fe.analysis);
-                            if let Ok(mut text) = std::fs::read_to_string(&input_path) {
-                                text.push_str("**\n** The FE steps after the flow\n**\n");
-                                text.push_str(&fe.text);
-                                let _ = std::fs::write(&input_path, text);
-                            }
                             let fe_records = fe.steps.clone();
                             let preparation = fe.preparation_steps.clone();
                             let options = plxs_session::JobOptions {

@@ -53,6 +53,11 @@ impl Id {
         Self(hash | 1 << 63)
     }
 
+    /// The id of the number [`Self::raw`] gave, such as one the solver carried along.
+    pub fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
     /// The number behind the id, e.g. for a stable key in a map of the GUI.
     pub fn raw(self) -> u64 {
         self.0

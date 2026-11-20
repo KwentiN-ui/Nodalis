@@ -690,7 +690,7 @@ impl BackgroundSolve {
         // The eigenmodes of a frequency step go with them, for analyses that take them; the
         // built-in solver's results file holds the fields and the history output.
         let extensions: &[&str] = if plx_results::solver::is_solver_results(&results_file) {
-            &["inp", "eig", plx_results::wall_loads::EXTENSION]
+            &["eig", plx_results::wall_loads::EXTENSION]
         } else {
             &["inp", "dat", "eig"]
         };
@@ -785,7 +785,7 @@ mod tests {
         assert!(results.solver.is_some());
         let read = results.read(&dir.join("read")).unwrap();
         assert!(read.results.increments[0].field("DISP").is_some());
-        assert!(read.input.is_some());
+        assert!(read.input.is_none());
         // With them the analysis is up to date: a second solve has nothing to do.
         let status = crate::status::analysis_status(
             None,
