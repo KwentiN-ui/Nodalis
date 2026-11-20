@@ -1772,8 +1772,8 @@ impl AnalysisWindow {
             }
             if let Some(Show { view, step }) = self.show_when_loaded.take() {
                 self.workbench.set_tree_view(view);
-                if let (Some(name), Some(model)) = (step, &self.workbench.model)
-                    && let Some(i) = model.fe.steps.iter().position(|s| s.name == name)
+                if let (Some(key), Some(model)) = (step, &self.workbench.model)
+                    && let Some(i) = crate::links::step_index(&model.fe, &key)
                 {
                     self.workbench.tree.selected = Some((TreeView::FeModel, TreeItem::Step(i)));
                 }
@@ -9012,6 +9012,7 @@ fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Show {
     pub view: TreeView,
+    /// The step by its key, [`crate::links::key`].
     pub step: Option<String>,
 }
 

@@ -126,6 +126,9 @@ impl StepCategory {
 /// A step of the FE model as it was solved.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StepRecord {
+    /// The step of the FE model, by its id; `None` for results that do not name it (those
+    /// of an input file).
+    pub step: Option<plx_model::Id>,
     pub name: String,
     pub category: StepCategory,
     /// Computed with large deformations.
@@ -149,7 +152,15 @@ pub struct StepRecord {
 }
 
 impl StepRecord {
-    /// The record of the step `kind` of the model, solved as `solver_steps`.
+    /// The record of `step` of the model, solved as `solver_steps`.
+    pub fn of(step: &plx_model::Step, solver_steps: Vec<u32>) -> Self {
+        Self {
+            step: Some(step.id),
+            ..Self::new(&step.name, &step.kind, solver_steps)
+        }
+    }
+
+    /// The record of a step `kind` named `name` that no step of a model stands for.
     pub fn new(name: &str, kind: &plx_model::StepKind, solver_steps: Vec<u32>) -> Self {
         use plx_model::StepKind as K;
         let time_period = match kind {
@@ -167,6 +178,7 @@ impl StepRecord {
             _ => false,
         };
         Self {
+            step: None,
             name: name.to_owned(),
             category: StepCategory::of(kind),
             nlgeom: kind.nlgeom(),
@@ -199,6 +211,8 @@ pub struct IncrementRecord {
 /// A step of the results with the increments that belong to it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResultStep {
+    /// The step of the FE model, see [`StepRecord::step`].
+    pub step: Option<plx_model::Id>,
     pub name: String,
     pub category: StepCategory,
     pub nlgeom: bool,
@@ -337,6 +351,7 @@ impl ResultSteps {
                 Source::Record(i) => {
                     let r = &records[*i];
                     ResultStep {
+                        step: r.step,
                         name: r.name.clone(),
                         category: r.category,
                         nlgeom: r.nlgeom,
@@ -357,6 +372,7 @@ impl ResultSteps {
                 Source::Number(n) => {
                     let kind = (increments.iter()).find(|i| i.step == *n).map(|i| i.kind);
                     ResultStep {
+                        step: None,
                         name: format!("Step {n}"),
                         category: kind.map_or(StepCategory::Unknown, StepCategory::of_analysis),
                         nlgeom: false,
@@ -539,6 +555,7 @@ mod tests {
         steps: &[u32],
     ) -> StepRecord {
         StepRecord {
+            step: None,
             name: name.into(),
             category,
             nlgeom: false,

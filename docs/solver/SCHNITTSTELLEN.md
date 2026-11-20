@@ -53,28 +53,36 @@ gebaut und getestet werden kann; `plxs-verify` nutzt `plx-io` nur zum Lesen von 
 
 `plxs_core::Analysis { model: Model, steps: Vec<Step> }` ist das vollständige Datenmodell
 (Dokumentation in den Modulen `mesh`, `element`, `material`, `section`, `constraints`,
-`contact`, `amplitude`, `step`, `model`, `state`, `results`, `progress`, `error`). Regeln:
+`contact`, `amplitude`, `step`, `model`, `state`, `results`, `handover`, `diagnostic`,
+`progress`, `error`). Seit dem Umbau der Schnittstelle (2026-11-20, Abschnitt „Schnittstelle
+ohne Namen“ unten) gelten diese Regeln:
 
-1. **Nutzer-Ids bleiben** (Knoten- und Elementnummern der `.inp`); intern wird über dichte
-   Indizes gerechnet (`Nodes::index`, `Model::element_index`), die Ausgabe schreibt Ids.
-2. **Namen in Großbuchstaben** (Sets, Surfaces, Materialien, Interaktionen, Amplituden), wie
-   CalculiX sie liest (`normalized_name`).
-3. **Steps sind vollständig.** `Step` enthält, was während des Steps gilt; die
-   Carry-over-Regeln von CalculiX (`OP=NEW`/`OP=MOD` für Randbedingungen, Lasten,
-   Temperaturen; Ausgabeanforderungen werden übernommen, Lasten eines Perturbation-Steps
-   nicht) löst `plxs-input` auf. Prozeduren schauen nie in frühere Steps.
+1. **Nutzer-Ids bleiben** (Knoten- und Elementnummern); intern wird über dichte Indizes
+   gerechnet (`Nodes::index`, `Model::element_index`), die Ausgabe schreibt Ids.
+2. **Referenzen sind Handles, nie Namen.** Materialien, Orientierungen, Amplituden,
+   Interaktionen, Knoten- und Element-Sets, Surfaces, Ties und Joints werden über typisierte
+   Indizes angesprochen (`plxs_core::handle`: `MaterialId`, `AmplitudeId`, `NodeSetId`,
+   `SurfaceId`, `TieId`, `JointId`, ...). Ein `label` an einem Set oder Material ist reiner
+   Anzeigetext; Umbenennen, Sonderzeichen, Länge und Groß/Klein sind dem Solver egal.
+3. **Steps sind vollständig und direkt gebaut.** `Step` enthält, was während des Steps gilt,
+   und `TakesOver`/`HandedOn` sagt ausdrücklich, was aus dem Step davor weiterläuft. Der
+   Lowering in `plx-io` füllt das aus dem Projekt; die Carry-over-Regeln von CalculiX
+   (`OP=NEW`/`OP=MOD`, `Card`, `Assembler`) kennt nur noch der `.inp`-Leser. Prozeduren
+   schauen nie in frühere Steps.
 4. **Alles ist `Clone + Serialize + Deserialize`** (serde), auch `State` und `Results`, damit
-   Phase 2 Zustände zwischen Nodes reichen und Restarts speichern kann. Nach dem
+   Zustände zwischen Nodes gereicht und Restarts gespeichert werden können. Nach dem
    Deserialisieren `Model::rebuild_indices()` aufrufen.
-5. **Keine Rechenlogik in `plxs-core`**: nur Daten, `validate` (Referenzen, Sections
+5. **Keine Rechenlogik in `plxs-core`**: nur Daten, `validate` (Handles im Bereich, Sections
    zuweisen) und Fehlertypen.
-6. **Fehler tragen den Item-Namen** (`Error::Input { keyword, message, location }`,
-   `UndefinedReference { keyword, kind, name }`) und formatieren sich im ccx-Wortlaut
-   (`*ERROR reading *BOUNDARY: ...`, `*ERROR in calinput: keyword *X cannot be interpreted`),
-   weil `solver_check` und der Job-Monitor den Text lesen.
-7. **Änderungen an der IR sind ein eigener, kleiner PR** mit Begründung, den der Koordinator
-   reviewt; Threads hängen Felder an (`Option<..>` mit `Default`), statt Bestehendes
-   umzubauen. Ein PR, der nebenbei die IR ändert, wird nicht angenommen.
+6. **Diagnosen zeigen auf Handles, das Projekt auf Ids.** `ItemRef` trägt Handles bzw.
+   Indizes; `Lowered.origins` (`plx_model::solver_diagnostics::Origins`) bildet sie auf das
+   Item des Projekts ab. Fehler beim Lowering tragen die `Id` des Items und, wenn es in einem
+   Step liegt, die `Id` des Steps (`WriteError::Of { owner, step, .. }`), weil ein Item in
+   allen Steps dieselbe `Id` behält. Der ccx-Wortlaut der Fehlertexte bleibt nur für die
+   Kommandozeile und den `.inp`-Leser.
+7. **Änderungen an der IR sind ein eigener, kleiner PR** mit Begründung. Wer die IR ändert,
+   erhöht die Formatnummern, die sie serialisieren (Ergebnisse `PLXRES`, Step-Cache
+   `PLXSSTP`, Restart `FORMAT`); alte Dateien werden abgelehnt, nicht umgewandelt.
 
 Was die IR heute schon abdeckt, das aber erst später gerechnet wird: alle Elementtypen des
 Inventars (`ElementType`), alle Prozeduren (`Procedure`), Kontakt, zyklische Symmetrie,
@@ -1858,3 +1866,60 @@ groben Netzen, −6 % auf feinen, aber nicht auf der GPU). Offen: die Iteratione
 weiter mit h/t (zwei Stufen mit exakter Faserebene brauchen noch 171 bis 576), die GPU mit
 der neuen Stufe ist ungetestet, die automatische Wahl rechnet expandierte Modelle weiter
 direkt.
+
+
+## Schnittstelle ohne Namen (2026-11-20, Thread "Audit solver for legacy code")
+
+Entscheidung (Quentin, 2026-11-20): plxs muss nicht CCX/Abaqus-kompatibel bleiben; `.inp` ist
+nur noch Import/Export am Rand. Umgesetzt in sieben gestapelten Stufen (PRs #432, #434, #435,
+#439, #442, #445, #446, #447, #449, #452, #455 und Stufe 7), Konzept im Projektordner
+`solver-interface/KONZEPT_SOLVER_SCHNITTSTELLE.md`.
+
+### Hinweg: Projekt → IR
+
+- `plx_io::inp::write::lower` baut aus dem `FeModel` direkt eine `plxs_core::Analysis`. Der
+  Name heißt historisch noch `inp`, es entsteht aber kein Text: der eingebaute Solver bekommt
+  die IR im Speicher, eine `.inp`-Datei je Lauf gibt es nicht mehr.
+- Jedes Projekt-Item wird über seine `Id` gefunden; ein Handle-Register im Lowering vergibt
+  die IR-Handles. Zwei Items mit gleichem Namen sind zwei Dinge (der frühere Fehler, dass
+  „Steel 2“ und „Steel_2“ zu einem Material verschmolzen, ist damit ausgeschlossen).
+- Ausgabewünsche sind Enums (`OutputVariable`), History-Ausgaben tragen die `Id` ihres
+  Projekt-Items (`HistoryOutput.origin`).
+- Übergaben zwischen Analysen sind `plxs_core::handover::Source<T>`: `Path` (Datei, für den
+  Export und die Kommandozeile) oder `Loaded(Arc<T>)` (schon geladene Daten im Speicher). So
+  kommen globale Ergebnisse eines Submodells (`GlobalResults`), Knotentemperaturen
+  (`NodalTemperatures`, `DefinedFieldKind::TemperatureFrom`) und gespeicherte Eigenformen
+  (`Model::stored_modes`, `NodalModes`) in den Lauf, ohne `.frd`/`.eig` zu lesen.
+
+### Rückweg: Solver → Projekt
+
+- Feldergebnisse sind `FieldQuantity`-typisiert, History-Ergebnisse `HistoryBlock` mit
+  `HistorySource` und `HistoryQuantity`; der `.dat`-Text wird im Speicherpfad nicht mehr
+  geschrieben und wieder geparst.
+- `plx_results::HistorySet.output` nennt die `Id` der History-Ausgabe, `StepRecord.step` und
+  `ResultStep.step` die `Id` des Steps im Modell. Die App findet Steps, Sets und Felder über
+  diese Ids; ein Namensvergleich bleibt nur als Rückfall für Ergebnisse ohne Id (importierte
+  `.frd`/`.dat` fremder Läufe).
+- Diagnosen: siehe Regel 6.
+
+### `.inp` am Rand
+
+- `plxs-input` ist der einzige Ort mit `.inp`-Regeln: `read_inp`/`read_inp_str`/
+  `read_inp_continuing` (Text → IR, löst Namen in Handles auf, kennt `OP=NEW`/`OP=MOD`) und
+  `render`/`render_with_parts` (IR → Text, vergibt eindeutige Exportnamen, kürzt auf 80
+  Zeichen). `plxs_input::normalized_name` (Großbuchstaben, getrimmt) ist die Namensregel von
+  `.inp`; `plxs-core` kennt keine Namensregel mehr.
+- Benutzt werden die Konverter vom Mesh-/Modell-Import, vom `.inp`-Export der App, von der
+  Kommandozeile `plxs` und vom Fixture-Korpus (`plxs-verify`).
+- Eine Übergabe `Source::Loaded` hat keinen Pfad; `render` schreibt dafür einen Platzhalter
+  (`render::LOADED`). Für den Export wird daher mit `Source::Path` gelowert.
+
+### Formatnummern nach dem Umbau
+
+Ergebnisse `PLXRES\x00\x0e`, Step-Cache `PLXSSTP9`, Restart `FORMAT 8`.
+
+### Was noch Namen benutzt (bewusst oder offen)
+
+Liste in `legacy-audit/SOLVER.md` (Projektordner). Offen: Pfaddiagramme und Hot Spots suchen
+Ergebnispfade über den Namen, Campbell-Diagramme benennen Sets `STEP_n`, `AmplitudeKey` trägt
+Step-Namen, die Partikelbeschreibung wird noch als `.inp`-Text geschrieben.

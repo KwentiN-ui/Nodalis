@@ -29,6 +29,13 @@ use plxs_core::{Analysis, Error};
 pub use lexer::{Keyword, Line, split_fields};
 pub use render::{render, render_with_parts};
 
+/// A name as an input file compares it: upper case, surrounding blanks removed. Set,
+/// surface, material, interaction and amplitude names of an input file are compared this
+/// way.
+pub fn normalized_name(name: &str) -> String {
+    name.trim().to_ascii_uppercase()
+}
+
 /// What reading an input file produces: the analysis and what the reader noticed but did
 /// not stop for (`*WARNING` lines on the command line).
 #[derive(Debug, Default)]

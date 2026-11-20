@@ -621,7 +621,7 @@ impl ResultsView {
         };
         let id = system.id;
         for result_step in &self.steps.steps {
-            let Some(step) = fe.steps.iter().find(|s| s.name == result_step.name) else {
+            let Some(step) = fe.steps.iter().find(|s| Some(s.id) == result_step.step) else {
                 continue;
             };
             let results = fe.field_results(step);
@@ -2554,7 +2554,7 @@ mod tests {
         let records: Vec<_> = [&first, &second]
             .iter()
             .enumerate()
-            .map(|(i, s)| plx_results::steps::StepRecord::new(&s.name, &s.kind, vec![i as u32 + 1]))
+            .map(|(i, s)| plx_results::steps::StepRecord::of(s, vec![i as u32 + 1]))
             .collect();
         fe.steps = vec![first];
         view.set_step_records(&records, &[], None);
@@ -2740,6 +2740,7 @@ mod tests {
         use plx_results::steps::{StepCategory, StepRecord};
         let disp = [[0.0, 0.0, 1.0]];
         let record = |nlgeom: bool, step: u32| StepRecord {
+            step: None,
             name: format!("S{step}"),
             category: StepCategory::Static,
             nlgeom,
@@ -2827,6 +2828,7 @@ mod tests {
             None,
         );
         let record = |name: &str, category, steps: &[u32]| StepRecord {
+            step: None,
             name: name.into(),
             category,
             nlgeom: false,
@@ -2975,6 +2977,7 @@ mod tests {
         real.fields.push(disp_i);
         let mut view = ResultsView::new(vec![real], Some(([0.0; 3], [10.0; 3])));
         let record = plx_results::steps::StepRecord {
+            step: None,
             name: "Sweep".into(),
             category: plx_results::steps::StepCategory::SteadyStateDynamics,
             nlgeom: false,
@@ -3162,6 +3165,7 @@ mod tests {
         // A moving load: one step of three solver steps, one position each.
         use plx_results::steps::{StepCategory, StepRecord};
         let record = |name: &str, category, steps: &[u32]| StepRecord {
+            step: None,
             name: name.into(),
             category,
             nlgeom: false,

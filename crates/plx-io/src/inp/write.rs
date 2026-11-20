@@ -23,8 +23,8 @@ use plx_model::{
 };
 use plxs_core as ir;
 use plxs_core::mesh::{ElementRef, NodeRef};
-use plxs_core::normalized_name;
 use plxs_core::step::OutputVariable;
+use plxs_input::normalized_name;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum WriteError {
@@ -1044,7 +1044,7 @@ fn lower_model_owned(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<Bu
     for (s, step) in original.steps.iter().enumerate().filter(|(_, s)| s.active) {
         for table in step.tables() {
             let (_, item, label) = table_owner(step, &table);
-            let Some(amplitude) = amplitude_ids.table(&step.name, item, label) else {
+            let Some(amplitude) = amplitude_ids.table(step.id, item, label) else {
                 continue;
             };
             origins.insert(
@@ -1904,7 +1904,7 @@ fn amplitudes(
                 points: table.table.points.iter().map(|&[t, v]| (t, v)).collect(),
                 signal: None,
             };
-            let key = AmplitudeKey::Table(step.name.clone(), item_id, label);
+            let key = AmplitudeKey::Table(step.id, item_id, label);
             ids.add(&mut amplitudes, key, amplitude);
         }
         // Wall loads over time: an amplitude per frame of the run, 1 at its time and 0 at
@@ -1943,7 +1943,7 @@ fn amplitudes(
                     points,
                     signal: None,
                 };
-                let key = AmplitudeKey::Walls(step.name.clone(), load.id, k);
+                let key = AmplitudeKey::Walls(step.id, load.id, k);
                 ids.add(&mut amplitudes, key, amplitude);
             }
         }
@@ -1974,7 +1974,7 @@ fn amplitudes(
                 points: Vec::new(),
                 signal: Some(excitation.signal.to_ir(dynamic.duration)),
             };
-            let key = AmplitudeKey::Signal(step.name.clone(), load.id);
+            let key = AmplitudeKey::Signal(step.id, load.id);
             ids.add(&mut amplitudes, key, amplitude);
         }
     }
@@ -2014,11 +2014,11 @@ fn table_owner<'a>(step: &'a Step, table: &plx_model::StepTable) -> (&'a str, Id
 enum AmplitudeKey {
     User(Id),
     /// The time table of component `label` of a boundary condition or load.
-    Table(String, Id, &'static str),
+    Table(Id, Id, &'static str),
     /// Frame `frame` of wall loads.
-    Walls(String, Id, usize),
+    Walls(Id, Id, usize),
     /// The signal of an excitation.
-    Signal(String, Id),
+    Signal(Id, Id),
 }
 
 /// The handles of the amplitudes of the analysis.
@@ -2042,20 +2042,20 @@ impl AmplitudeIds {
     }
 
     /// The amplitude of the table of component `label` of item `item` in step `step`.
-    fn table(&self, step: &str, item: Id, label: &'static str) -> Option<ir::AmplitudeId> {
-        let key = AmplitudeKey::Table(step.to_owned(), item, label);
+    fn table(&self, step: Id, item: Id, label: &'static str) -> Option<ir::AmplitudeId> {
+        let key = AmplitudeKey::Table(step, item, label);
         self.ids.get(&key).copied()
     }
 
     /// The amplitude of frame `frame` of the wall loads `item` in step `step`.
-    fn walls(&self, step: &str, item: Id, frame: usize) -> Option<ir::AmplitudeId> {
-        let key = AmplitudeKey::Walls(step.to_owned(), item, frame);
+    fn walls(&self, step: Id, item: Id, frame: usize) -> Option<ir::AmplitudeId> {
+        let key = AmplitudeKey::Walls(step, item, frame);
         self.ids.get(&key).copied()
     }
 
     /// The amplitude of the signal of excitation `item` in step `step`.
-    fn signal(&self, step: &str, item: Id) -> Option<ir::AmplitudeId> {
-        let key = AmplitudeKey::Signal(step.to_owned(), item);
+    fn signal(&self, step: Id, item: Id) -> Option<ir::AmplitudeId> {
+        let key = AmplitudeKey::Signal(step, item);
         self.ids.get(&key).copied()
     }
 }
@@ -2075,7 +2075,7 @@ fn displacement_values(
         None => displacement.values[d],
     });
     let amplitudes = std::array::from_fn(|d| match displacement.table(d) {
-        Some(_) => amplitudes.table(&step.name, bc.id, DOF_TABLE_LABELS[d]),
+        Some(_) => amplitudes.table(step.id, bc.id, DOF_TABLE_LABELS[d]),
         None => *amplitude,
     });
     (values, amplitudes)
@@ -2096,7 +2096,7 @@ fn load_components<const N: usize>(
         None => values[c],
     });
     let amplitudes = std::array::from_fn(|c| match load.table(c) {
-        Some(_) => amplitudes.table(&step.name, load.id, labels[c]),
+        Some(_) => amplitudes.table(step.id, load.id, labels[c]),
         None => *amplitude,
     });
     (values, amplitudes)
@@ -4678,7 +4678,7 @@ fn step_block<'f>(
         }
         // An excitation follows its signal instead of an amplitude.
         let amplitude = match load.kind {
-            LoadKind::Excitation(_) => amplitudes.signal(&step.name, load.id),
+            LoadKind::Excitation(_) => amplitudes.signal(step.id, load.id),
             _ => {
                 amplitude_parameter(amplitudes, &load.name, &load.amplitude).map_err(by(load.id))?
             }
@@ -4710,7 +4710,7 @@ fn step_block<'f>(
                 let mut items = Vec::new();
                 for (k, (time, mapped)) in sets_of_forces.into_iter().enumerate() {
                     let amplitude = match time {
-                        Some(_) => amplitudes.walls(&step.name, load.id, k),
+                        Some(_) => amplitudes.walls(step.id, load.id, k),
                         None => amplitude,
                     };
                     for (node, force) in mapped.forces {

@@ -262,8 +262,14 @@ pub fn evaluate_expanded(
                 (sources.output(*output)).ok_or("the analysis has no such history output")?;
             let dat = dat.ok_or("the run printed no history output")?;
             let set = &output.name;
+            // The built-in solver names the output a set comes from; a `.dat` file of
+            // CalculiX only the set's name.
             let history = (dat.sets.iter())
-                .find(|s| s.name.eq_ignore_ascii_case(&output.set))
+                .find(|s| s.output == Some(output.id))
+                .or_else(|| {
+                    (dat.sets.iter())
+                        .find(|s| s.output.is_none() && s.name.eq_ignore_ascii_case(&output.set))
+                })
                 .ok_or_else(|| format!("the results have no history output {set}"))?;
             let rows: Vec<(usize, f64)> = (history.rows.iter().enumerate())
                 .filter(|(_, (s, _, _))| *s == step)
