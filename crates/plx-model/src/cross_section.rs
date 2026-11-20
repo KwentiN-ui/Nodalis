@@ -1,5 +1,5 @@
 //! Cross-sections of beams, kept apart from the sections that use them: a named profile a
-//! beam section picks by name, so that several beam sections, and analyses linked in the
+//! beam section picks by id, so that several beam sections, and analyses linked in the
 //! project, share one definition.
 //!
 //! Coordinates in the plane of a profile are those of CalculiX's `*BEAM SECTION`: `u` along
