@@ -200,6 +200,8 @@ quadrilaterals, and says so in the output pane:
 
 - if a face would get more than about 20 000 quadrilaterals, where the quasi-structured
   algorithm takes minutes;
+- if a face has more than 100 edges, like a gear or a plate with many holes, where the
+  quasi-structured algorithm takes minutes as well;
 - if the quasi-structured algorithm fails or leaves a badly distorted quadrilateral and the
   other algorithm does better.
 

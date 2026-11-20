@@ -4417,3 +4417,33 @@ fn a_part_that_fails_leaves_the_next_one_its_mesh() {
     assert_eq!(alone.mesh.coords(), after.mesh.coords());
     assert_eq!(alone.mesh.elements(), after.mesh.elements());
 }
+
+#[test]
+fn faces_of_many_edges_skip_the_quasi_structured_algorithm() {
+    if !gmsh_available() {
+        return;
+    }
+    // A plate of 100 by 100 with 10 by 10 holes: a face of 104 edges, on which the
+    // quasi-structured algorithm takes half a minute.
+    let import = import_cad(&testdata("lochblech.step"), UnitSystem::Unitless).unwrap();
+    assert!(import.geometry.meshing.quad_dominated);
+    let started = std::time::Instant::now();
+    let generated = generate_mesh(&import.geometry).unwrap();
+    assert!(
+        started.elapsed().as_secs() < 15,
+        "Meshing took {:?}",
+        started.elapsed()
+    );
+    assert!(
+        (generated.warnings.iter()).any(|w| w.contains("104 edges, too many")),
+        "{:?}",
+        generated.warnings
+    );
+    assert!(
+        generated
+            .mesh
+            .elements()
+            .iter()
+            .any(|e| e.type_name == "S8")
+    );
+}
