@@ -231,8 +231,10 @@ step. A frequency step takes no loads.
   [Remote Force], [Force `FX` to `FZ` and moment `MX` to `MZ` at a point that the selected
     faces, edges or points follow, rigidly or on average, as Ansys' remote force does
     (@remote-force). The way to put a moment on faces of solids.],
-  [Moment], [`MX`, `MY`, `MZ` at the reference point of a rigid body (@rigid-body) or at every
-    node of beams and shells, which have rotations. 3D models only.],
+  [Moment], [`MX`, `MY`, `MZ` at the reference point of a rigid body (@rigid-body), at the
+    point of a displacement or remote force (@load-on-bc-point) or at every node of beams and
+    shells, which have rotations. A 2D model has `MZ` alone, at a point, since its nodes have no
+    rotations.],
   [Pressure], [Pressure on faces; positive values push into the material (`*DLOAD`). A
     #ui("Distribution") (@distributions) makes it vary over the faces, e.g. with depth.],
   [Gravity], [Body force on the mass of whole parts or element sets (`*DLOAD`, `GRAV`); the materials need
@@ -386,9 +388,23 @@ face in another step still loads the face, but as a rigid one, and the model che
 warns "Deformable coupling on a rigid selection". To compare both behaviors, use one analysis for
 each.
 Nodes held directly by a support in a step with the load are left out of the coupling. On the
-reference point of a rigid body the force and moment act on the rigid body itself, without a
-point of their own. The force and moment components have a #ui("P") button for parameter
+reference point of a rigid body, or on the point of another displacement or remote force
+(@load-on-bc-point), the force and moment act on that point, without a point of their own. The force and moment components have a #ui("P") button for parameter
 studies (@exposed-parameters).
+
+=== Loads on the point of a displacement <load-on-bc-point>
+
+A #ui("Displacement/Rotation") condition whose #ui("Behavior") puts a point at the selection
+(#ui("Rigid"), #ui("Deformable"), or #ui("Automatic") when it picks a point) and a
+#ui("Remote Force") can carry further loads: a #ui("Force"), #ui("Moment"), #ui("Excitation") or
+#ui("Remote Force") with #ui("Region") #ui("Reference Point") lists them below the reference
+points of the features, under "Displacements on a point" and "Remote forces". The load acts on
+that point and so on the selection that follows it, for example a torque on a gear whose bore a
+rigid support holds in `X` and `Y` but lets turn in `RZ`. The load keeps the condition by its
+id, so renaming the condition keeps the link. Components are in the load's coordinate system;
+directions the condition holds take the load as a reaction.
+
+#screenshot("load-on-bc-point.png", [Moment `MZ` of a 2D model on the rigid point of a Displacement/Rotation condition])
 
 == Hiding symbols <hide-symbols>
 

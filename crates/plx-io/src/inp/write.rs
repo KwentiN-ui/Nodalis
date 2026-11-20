@@ -1309,6 +1309,12 @@ struct Sets<'a> {
     /// the boundary condition's id, and of each remote force by the load's id, with its
     /// behavior.
     remote_names: BTreeMap<Id, ([NodeId; 2], RemoteBehavior)>,
+    /// Position of each point of a displacement or remote force and the directions of its
+    /// degrees of freedom (`None` for the global ones), by its reference node.
+    remote_frames: BTreeMap<NodeId, ([f64; 3], Option<Axes>)>,
+    /// The node set holding the reference node of a point of a displacement or remote
+    /// force, by the id of the boundary condition or load, once something refers to it.
+    remote_sets: BTreeMap<Id, String>,
     /// Local coordinate systems (`*Transform`) of node sets whose symmetry plane is no
     /// coordinate plane or whose displacement is in a system of its own: the set with the
     /// local x and y axes (type R), or with two points on the axis (type C).
@@ -1358,6 +1364,8 @@ impl<'a> Sets<'a> {
             point_mass_names: BTreeMap::new(),
             remote_points: Vec::new(),
             remote_names: BTreeMap::new(),
+            remote_frames: BTreeMap::new(),
+            remote_sets: BTreeMap::new(),
             pre_tension_nodes: BTreeMap::new(),
             pre_tension_sets: BTreeMap::new(),
             cut_originals: BTreeMap::new(),
@@ -1543,6 +1551,16 @@ impl<'a> Sets<'a> {
             Region::NodeSet(set) => return Ok(set.clone()),
             Region::ReferencePoint(point) => {
                 return Ok(self.reference_nodes(item, *point)?.set.unwrap());
+            }
+            Region::RemotePoint(point) => {
+                if let Some(set) = self.remote_sets.get(point) {
+                    return Ok(set.clone());
+                }
+                let ([reference, _], _) = point_nodes(self, item, region)?;
+                let set = self.free_name("Internal_Selection", &format!("{}_Point", name(item)));
+                self.node_sets.push((set.clone(), vec![reference]));
+                self.remote_sets.insert(*point, set.clone());
+                return Ok(set);
             }
             Region::Surface(surface) => {
                 if let Some((_, nodes)) = self.surface_sets.get(surface) {
@@ -2722,7 +2740,7 @@ fn constraints(
     // point of a remote displacement of the same region and point. A force on a reference
     // point acts on its nodes and needs none.
     for (s, i, region, force) in model.remote_forces() {
-        if region.reference_point().is_some() {
+        if region.is_point() {
             continue;
         }
         let spec = force.point();
@@ -2928,6 +2946,7 @@ fn remote_point(
     *next_node += 2;
     generated.nodes.push((reference, point.position));
     generated.nodes.push((rotation, point.position));
+    (sets.remote_frames).insert(reference, (point.position, point.axes));
     sets.remote_points
         .push((region.clone(), spec.clone(), [reference, rotation]));
     if let Some([x, y, _]) = point.axes {
@@ -3940,6 +3959,60 @@ fn global_components(
     plx_model::Load::to_global(system.as_ref(), position, local).map_err(invalid)
 }
 
+/// The local x, y and z directions of a point.
+type Axes = [[f64; 3]; 3];
+
+/// The point a load on a point acts at: the reference point of a rigid body, or the point
+/// a displacement or remote force drives its region from.
+struct LoadPoint {
+    /// The reference node, which takes the forces, and the rotation node, which takes the
+    /// moments as its forces.
+    nodes: [NodeId; 2],
+    position: [f64; 3],
+    /// The directions of the point's degrees of freedom, the local axes of its displacement;
+    /// `None` for the global ones.
+    axes: Option<Axes>,
+}
+
+impl LoadPoint {
+    /// Global components in the directions of the point's degrees of freedom.
+    fn local(&self, global: [f64; 3]) -> [f64; 3] {
+        match self.axes {
+            Some(axes) => axes.map(|a| (0..3).map(|k| a[k] * global[k]).sum()),
+            None => global,
+        }
+    }
+}
+
+/// The point of a load's region, if it is one.
+fn load_point(
+    model: &FeModel,
+    sets: &mut Sets,
+    load: &plx_model::Load,
+) -> Result<Option<LoadPoint>, WriteError> {
+    Ok(match &load.region {
+        Region::ReferencePoint(point) => {
+            let nodes = sets.reference_nodes(&load.name, *point)?;
+            Some(LoadPoint {
+                nodes: [nodes.reference, nodes.rotation],
+                position: (model.reference_point(*point)).map_or([0.0; 3], |p| p.position),
+                axes: None,
+            })
+        }
+        Region::RemotePoint(_) => {
+            let (nodes, _) = point_nodes(sets, &load.name, &load.region)?;
+            let (position, axes) =
+                (sets.remote_frames.get(&nodes[0]).copied()).unwrap_or(([0.0; 3], None));
+            Some(LoadPoint {
+                nodes,
+                position,
+                axes,
+            })
+        }
+        _ => None,
+    })
+}
+
 /// Where a concentrated force or moment on `target` acts and the position its directions
 /// are taken at: the whole target in a rectangular system (the same directions everywhere),
 /// every node of it at its own position in a cylindrical one.
@@ -3957,9 +4030,8 @@ fn component_positions(
     if system.is_none_or(|s| s.kind != plx_model::CoordinateSystemKind::Cylindrical) {
         return Ok(vec![(target.clone(), [0.0; 3])]);
     }
-    if let Some(point) = load.region.reference_point() {
-        let position = (model.reference_point(point)).map_or([0.0; 3], |p| p.position);
-        return Ok(vec![(target.clone(), position)]);
+    if let Some(point) = load_point(model, sets, load)? {
+        return Ok(vec![(target.clone(), point.position)]);
     }
     let nodes = load.region.nodes(sets.mesh);
     Ok((nodes.into_iter())
@@ -3986,10 +4058,8 @@ fn follower(
     if !load.follower {
         return Ok(None);
     }
-    Ok(Some(match (load.region.reference_point(), set) {
-        (Some(point), _) => {
-            ir::step::Follower::Rotation(sets.reference_nodes(&load.name, point)?.rotation)
-        }
+    Ok(Some(match (load_point(model, sets, load)?, set) {
+        (Some(point), _) => ir::step::Follower::Rotation(point.nodes[1]),
         (None, Some(set)) => ir::step::Follower::Nodes(set.clone()),
         (None, None) => ir::step::Follower::Nodes(sets.region_ref(&load.name, &load.region)?),
     }))
@@ -4509,14 +4579,16 @@ fn step_block<'f>(
                 continue;
             }
             LoadKind::Moment(moment) => {
-                // Moments at a reference point act on the rotation node of its rigid body,
+                // Moments at a point act on its rotation node, in a 2D model about z alone,
                 // at nodes of beams and shells on their rotations.
-                let (target, first_dof) = match load.region.reference_point() {
-                    Some(point) => {
-                        let nodes = sets.reference_nodes(&load.name, point)?;
-                        (NodeRef::Node(nodes.rotation), 1)
-                    }
+                let point = load_point(model, sets, load)?;
+                let (target, first_dof) = match &point {
+                    Some(point) => (NodeRef::Node(point.nodes[1]), 1),
                     None => (sets.region_ref(&load.name, &load.region)?, 4),
+                };
+                let turns = |dof: usize| match &point {
+                    Some(_) => space.remote_dofs().contains(&(dof + 3)),
+                    None => dof + 4 <= dofs,
                 };
                 let (moment, component_amplitudes) = load_components(
                     step,
@@ -4530,35 +4602,46 @@ fn step_block<'f>(
                 let positions = component_positions(model, sets, load, &target)?;
                 let mut items = Vec::new();
                 for (target, position) in positions {
-                    let moment = global_components(model, load, position, moment)?;
+                    let mut moment = global_components(model, load, position, moment)?;
+                    if let Some(point) = &point {
+                        moment = point.local(moment);
+                    }
                     for (dof, value) in (0..).zip(moment) {
-                        if value != 0.0 && dof as usize + 4 <= dofs {
+                        if value != 0.0 && turns(dof as usize) {
                             let amplitude = &component_amplitudes[dof as usize];
                             items.push(cload(target.clone(), first_dof + dof, value, amplitude));
                         }
                     }
                 }
-                let set = load.region.reference_point().is_none().then_some(&target);
+                let set = point.is_none().then_some(&target);
                 set_follower(&mut items, follower(model, sets, load, set)?);
                 Content::cloads(items)
             }
             LoadKind::RemoteForce(ref remote) => {
                 // The force acts on the reference node of the point, the moment on its
-                // rotation node, in the point's directions; a reference point takes them in
-                // global directions.
-                let (nodes, force, moment) = match load.region.reference_point() {
+                // rotation node, in the point's directions; on a reference point or the point
+                // of a displacement it acts on that point, in global directions.
+                let allowed = space.remote_dofs();
+                let keep = |v: [f64; 3], offset: usize| -> [f64; 3] {
+                    std::array::from_fn(|k| {
+                        if allowed.contains(&(k + offset)) {
+                            v[k]
+                        } else {
+                            0.0
+                        }
+                    })
+                };
+                let (nodes, force, moment) = match load_point(model, sets, load)? {
                     Some(point) => {
-                        let nodes = sets.reference_nodes(&load.name, point)?;
-                        let position =
-                            (model.reference_point(point)).map_or([0.0; 3], |p| p.position);
                         let (force, moment) =
-                            (remote.global(model, position)).map_err(|reason| {
+                            (remote.global(model, point.position)).map_err(|reason| {
                                 WriteError::InvalidLoad {
                                     item: load.name.clone(),
                                     reason,
                                 }
                             })?;
-                        ([nodes.reference, nodes.rotation], force, moment)
+                        let (force, moment) = (point.local(force), point.local(moment));
+                        (point.nodes, keep(force, 0), keep(moment, 3))
                     }
                     None => {
                         let spec = remote.point();
@@ -4566,16 +4649,6 @@ fn step_block<'f>(
                             .find(|(r, p, _)| *r == load.region && p.same_point(&spec))
                         else {
                             return Err(empty(&load.name, "nodes"));
-                        };
-                        let allowed = space.remote_dofs();
-                        let keep = |v: [f64; 3], offset: usize| {
-                            std::array::from_fn(|k| {
-                                if allowed.contains(&(k + offset)) {
-                                    v[k]
-                                } else {
-                                    0.0
-                                }
-                            })
                         };
                         (nodes, keep(remote.force, 0), keep(remote.moment, 3))
                     }
@@ -4678,7 +4751,8 @@ fn step_block<'f>(
                 // whole: the share at every node of their set. With `each_node` every node
                 // of the region takes the whole force.
                 if each_node || (faces.is_empty() && edges.is_empty()) {
-                    let count = match load.region.reference_point() {
+                    let point = load_point(model, sets, load)?;
+                    let count = match &point {
                         _ if each_node => 1,
                         Some(_) => 1,
                         None => load.region.nodes(sets.mesh).len(),
@@ -4686,7 +4760,10 @@ fn step_block<'f>(
                     let target = sets.region_ref(&load.name, &load.region)?;
                     region_set = Some(target.clone());
                     for (target, position) in component_positions(model, sets, load, &target)? {
-                        let force = global_components(model, load, position, force)?;
+                        let mut force = global_components(model, load, position, force)?;
+                        if let Some(point) = &point {
+                            force = point.local(force);
+                        }
                         for (dof, value) in (1..).zip(force).take(dofs) {
                             if value != 0.0 {
                                 let share = value / count as f64;

@@ -103,8 +103,9 @@ impl RemoteForce {
 }
 
 impl FeModel {
-    /// The remote forces of the active steps, as step, load index, region and the load,
-    /// those the step takes.
+    /// The remote forces of the active steps that drive their region from a point of their
+    /// own, as step, load index, region and the load, those the step takes. One on a reference
+    /// point or the point of another item acts on that point and has none.
     pub fn remote_forces(&self) -> impl Iterator<Item = (usize, usize, &Region, &RemoteForce)> {
         (self.steps.iter().enumerate())
             .filter(|(_, step)| step.active && step.kind.supports_loads())
@@ -112,7 +113,9 @@ impl FeModel {
                 (step.loads.iter().enumerate())
                     .filter(move |(_, load)| load.active && step.kind.supports_load(&load.kind))
                     .filter_map(move |(i, load)| match &load.kind {
-                        LoadKind::RemoteForce(remote) => Some((s, i, &load.region, remote)),
+                        LoadKind::RemoteForce(remote) if !load.region.is_point() => {
+                            Some((s, i, &load.region, remote))
+                        }
                         _ => None,
                     })
             })
@@ -159,12 +162,22 @@ impl FeModel {
             .map(|(region, remote)| (region, remote.behavior))
     }
 
+    /// Where the point of `Region::RemotePoint(id)` lies: that of the displacement of the
+    /// id, else that of its remote force; `None` if it has none or it does not resolve.
+    pub fn remote_point_position(&self, mesh: &FeMesh, id: Id) -> Option<[f64; 3]> {
+        let none = BTreeSet::new();
+        if let Some((_, bc, displacement)) = self.remote_displacement(mesh, id) {
+            return (displacement.resolve(self, mesh, &bc.region, &none).ok())
+                .map(|point| point.position);
+        }
+        let (region, remote) = self.remote_force_of(id)?;
+        (remote.point().resolve(self, mesh, region, &none).ok()).map(|point| point.position)
+    }
+
     /// The first remote force of the id, of any step, that has a point of its own.
     pub fn remote_force_of(&self, id: Id) -> Option<(&Region, &RemoteForce)> {
         (self.steps.iter().flat_map(|step| &step.loads)).find_map(|load| match &load.kind {
-            LoadKind::RemoteForce(remote)
-                if load.id == id && load.region.reference_point().is_none() =>
-            {
+            LoadKind::RemoteForce(remote) if load.id == id && !load.region.is_point() => {
                 Some((&load.region, remote))
             }
             _ => None,
@@ -189,7 +202,7 @@ impl FeModel {
         let mut forces: Vec<(Id, &str)> = Vec::new();
         for load in self.steps.iter().flat_map(|step| &step.loads) {
             if matches!(load.kind, LoadKind::RemoteForce(_))
-                && load.region.reference_point().is_none()
+                && !load.region.is_point()
                 && !displacements.iter().any(|(id, _)| *id == load.id)
                 && !forces.iter().any(|(id, _)| *id == load.id)
             {
