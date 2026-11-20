@@ -171,8 +171,7 @@ impl StepTemperatures {
 /// step has none.
 pub fn insert_temperatures(ctx: &mut crate::ProcedureContext<'_>, step: &Step, t: Option<&[f64]>) {
     if !crate::fields::requested_variables(step)
-        .iter()
-        .any(|v| v == "NT")
+        .contains(&plxs_core::step::OutputVariable::Temperatures)
     {
         return;
     }
@@ -186,7 +185,8 @@ pub fn insert_temperatures(ctx: &mut crate::ProcedureContext<'_>, step: &Step, t
     };
     let order = crate::fields::node_order(ctx.model);
     let field = plxs_core::results::ResultField {
-        name: "NDTEMP".into(),
+        quantity: plxs_core::results::FieldQuantity::Temperatures,
+        imaginary: false,
         components: vec!["T".into()],
         nodes: order.iter().map(|&(id, _)| id).collect(),
         values: vec![order.iter().map(|&(_, i)| t[i as usize]).collect()],
@@ -197,7 +197,7 @@ pub fn insert_temperatures(ctx: &mut crate::ProcedureContext<'_>, step: &Step, t
     let at = last
         .fields
         .iter()
-        .position(|f| f.name == "DISP")
+        .position(|f| f.key() == (plxs_core::results::FieldQuantity::Displacements, false))
         .map_or(0, |p| p + 1);
     last.fields.insert(at, field);
 }

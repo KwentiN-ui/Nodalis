@@ -82,7 +82,10 @@ pub fn history_blocks(
     increment: u32,
     time: f64,
 ) -> Vec<HistoryBlock> {
-    if !(request.variables.iter()).any(|v| v.trim().eq_ignore_ascii_case("CF")) {
+    if !request
+        .variables
+        .contains(&plxs_core::step::OutputVariable::ContactStatistics)
+    {
         return Vec::new();
     }
     let mut out = Vec::new();

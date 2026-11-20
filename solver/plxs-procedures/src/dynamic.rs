@@ -416,10 +416,14 @@ impl DynamicProcedure {
         // every increment when a history output prints them.
         let history_stresses = step.outputs.el_print.iter().any(|request| {
             request.set.is_some()
-                && request
-                    .variables
-                    .iter()
-                    .any(|v| matches!(v.trim().to_ascii_uppercase().as_str(), "S" | "E" | "ENER"))
+                && request.variables.iter().any(|v| {
+                    matches!(
+                        v,
+                        plxs_core::step::OutputVariable::Stresses
+                            | plxs_core::step::OutputVariable::Strains
+                            | plxs_core::step::OutputVariable::StrainEnergyDensity
+                    )
+                })
         });
         let mut f_prev = f0;
         // Energies of the whole model, when a history output asks for them.
@@ -704,13 +708,24 @@ pub(crate) struct Energies {
 
 /// The variables (`ALLIE`, `ALLKE`, `ALLWK`, `ALLVD`) of each `*EL PRINT` of the step that
 /// asks for energies of the model, with its set.
-pub(crate) fn energy_requests(step: &Step) -> Vec<(HistorySource, Vec<String>)> {
+pub(crate) fn energy_requests(
+    step: &Step,
+) -> Vec<(HistorySource, Vec<plxs_core::step::OutputVariable>)> {
     (step.outputs.el_print.iter())
         .filter_map(|request| {
-            let variables: Vec<String> = (request.variables.iter())
-                .map(|v| v.trim().to_ascii_uppercase())
-                .filter(|v| ["ALLIE", "ALLKE", "ALLWK", "ALLVD"].contains(&v.as_str()))
-                .collect();
+            use plxs_core::step::OutputVariable as V;
+            let variables: Vec<plxs_core::step::OutputVariable> =
+                (request.variables.iter().copied())
+                    .filter(|v| {
+                        matches!(
+                            v,
+                            V::ModelInternalEnergy
+                                | V::ModelKineticEnergy
+                                | V::ModelExternalWork
+                                | V::ModelDampingDissipation
+                        )
+                    })
+                    .collect();
             let source = match request.set {
                 Some(plxs_core::step::HistorySet::Nodes(set)) => HistorySource::Nodes(set),
                 Some(plxs_core::step::HistorySet::Elements(set)) => HistorySource::Elements(set),
@@ -724,17 +739,18 @@ pub(crate) fn energy_requests(step: &Step) -> Vec<(HistorySource, Vec<String>)> 
 /// One history block per requested energy, a single total row each.
 pub(crate) fn write_energies(
     results: &mut plxs_core::Results,
-    requests: &[(HistorySource, Vec<String>)],
+    requests: &[(HistorySource, Vec<plxs_core::step::OutputVariable>)],
     energies: &Energies,
     (step, increment, time): (u32, u32, f64),
 ) {
     for (set, variables) in requests {
         for variable in variables {
             use plxs_core::results::HistoryQuantity as Q;
-            let (quantity, value) = match variable.as_str() {
-                "ALLIE" => (Q::ModelInternalEnergy, energies.internal),
-                "ALLKE" => (Q::ModelKineticEnergy, energies.kinetic),
-                "ALLWK" => (Q::ModelExternalWork, energies.external_work),
+            use plxs_core::step::OutputVariable as V;
+            let (quantity, value) = match variable {
+                V::ModelInternalEnergy => (Q::ModelInternalEnergy, energies.internal),
+                V::ModelKineticEnergy => (Q::ModelKineticEnergy, energies.kinetic),
+                V::ModelExternalWork => (Q::ModelExternalWork, energies.external_work),
                 _ => (Q::ModelDampingDissipation, energies.dissipation),
             };
             results.history.push(plxs_core::results::HistoryBlock {
@@ -996,19 +1012,29 @@ pub(crate) fn write_increment(
     let mut fields = crate::fields::build_fields_with(
         ctx.table, ctx.model, step, &motion.u, reactions, stresses, strains, material,
     );
-    if let (Some(carried), Some(ener)) = (carried, fields.iter_mut().find(|f| f.name == "ENER")) {
+    if let (Some(carried), Some(ener)) = (
+        carried,
+        fields.iter_mut().find(|f| {
+            f.key()
+                == (
+                    plxs_core::results::FieldQuantity::StrainEnergyDensity,
+                    false,
+                )
+        }),
+    ) {
         let order = node_order(ctx.model);
         for (value, &(_, i)) in ener.values[0].iter_mut().zip(&order) {
             *value += carried[i as usize];
         }
     }
     let variables = crate::fields::requested_variables(step);
-    let has = |v: &str| variables.iter().any(|x| x == v);
+    let has = |v: plxs_core::step::OutputVariable| variables.contains(&v);
     let order = node_order(ctx.model);
-    if has("V") {
+    if has(plxs_core::step::OutputVariable::Velocities) {
         let v = ctx.table.reported_displacements(&motion.v);
         let field = ResultField {
-            name: "VELO".into(),
+            quantity: plxs_core::results::FieldQuantity::Velocities,
+            imaginary: false,
             components: vec!["V1".into(), "V2".into(), "V3".into()],
             nodes: order.iter().map(|&(id, _)| id).collect(),
             values: (0..3)
@@ -1017,14 +1043,15 @@ pub(crate) fn write_increment(
         };
         let at = fields
             .iter()
-            .position(|f| f.name == "DISP")
+            .position(|f| f.key() == (plxs_core::results::FieldQuantity::Displacements, false))
             .map_or(0, |p| p + 1);
         fields.insert(at, field);
     }
-    if has("A") {
+    if has(plxs_core::step::OutputVariable::Accelerations) {
         let a = ctx.table.reported_displacements(&motion.a);
         let field = ResultField {
-            name: "ACCE".into(),
+            quantity: plxs_core::results::FieldQuantity::Accelerations,
+            imaginary: false,
             components: vec!["A1".into(), "A2".into(), "A3".into()],
             nodes: order.iter().map(|&(id, _)| id).collect(),
             values: (0..3)
@@ -1033,7 +1060,10 @@ pub(crate) fn write_increment(
         };
         let at = fields
             .iter()
-            .position(|f| f.name == "VELO" || f.name == "DISP")
+            .position(|f| {
+                f.key() == (plxs_core::results::FieldQuantity::Velocities, false)
+                    || f.key() == (plxs_core::results::FieldQuantity::Displacements, false)
+            })
             .map_or(0, |p| p + 1);
         fields.insert(at, field);
     }
@@ -1049,7 +1079,7 @@ pub(crate) fn write_increment(
         // As in a static increment: the contact fields before the error estimator.
         let at = fields
             .iter()
-            .position(|f| f.name == "ERROR")
+            .position(|f| f.key() == (plxs_core::results::FieldQuantity::StressError, false))
             .unwrap_or(fields.len());
         fields.splice(at..at, contact);
     }

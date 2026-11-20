@@ -259,7 +259,7 @@ fn steps_write_their_own_results_only() {
         (outputs.node_file.iter())
             .chain(&outputs.el_file)
             .chain(&outputs.contact_file)
-            .flat_map(|o| o.variables.iter().map(String::as_str))
+            .flat_map(|o| o.variables.iter().map(|v| v.code()))
             .collect()
     };
     assert_eq!(variables(0), ["RF", "U", "S", "E", "NOE"]);

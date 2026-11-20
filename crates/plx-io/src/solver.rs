@@ -379,7 +379,11 @@ mod tests {
         let (solved, _) = solve(&input, &dir).unwrap();
         let components = |name: &str| -> Vec<String> {
             let increment = solved.results.increments.last().unwrap();
-            let field = increment.fields.iter().find(|f| f.name == name).unwrap();
+            let field = increment
+                .fields
+                .iter()
+                .find(|f| f.frd_name() == name)
+                .unwrap();
             field.components.clone()
         };
         assert_eq!(components("STRESS"), ["SXX", "SYY", "SXY"]);

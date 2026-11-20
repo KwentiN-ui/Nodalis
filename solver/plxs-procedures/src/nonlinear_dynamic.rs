@@ -1021,7 +1021,10 @@ fn write_frame(
     setup: &Setup<'_>,
     state: &At,
     record: u32,
-    requests: &[(plxs_core::results::HistorySource, Vec<String>)],
+    requests: &[(
+        plxs_core::results::HistorySource,
+        Vec<plxs_core::step::OutputVariable>,
+    )],
     carried_nodal: Option<&[f64]>,
     fields: bool,
 ) {

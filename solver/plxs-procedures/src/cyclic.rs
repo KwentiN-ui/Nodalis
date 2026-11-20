@@ -27,7 +27,7 @@ use plxs_core::state::{NodalField, StoredModes};
 use plxs_core::step::Frequency;
 use plxs_core::{Error, Progress, ProgressEvent, Result, Step};
 use plxs_linalg::{Pattern, SparseMatrix, Unknowns};
-use plxs_output::{StaRow, imaginary_field_name};
+use plxs_output::StaRow;
 
 use crate::eigen::{
     increment_results, lanczos_modes, preload_displacements, reference_stiffness, restrict_to_free,
@@ -71,7 +71,7 @@ pub(crate) fn doubled(a: &SparseMatrix) -> SparseMatrix {
 fn interleave(real: Vec<ResultField>, imaginary: Vec<ResultField>) -> Vec<ResultField> {
     let mut out = Vec::with_capacity(2 * real.len());
     for (r, mut i) in real.into_iter().zip(imaginary) {
-        i.name = imaginary_field_name(&i.name);
+        i.imaginary = true;
         out.push(r);
         out.push(i);
     }
