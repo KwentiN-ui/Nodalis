@@ -1154,10 +1154,6 @@ fn procedure(out: &mut Out, procedure: &Procedure) {
                 out.keyword(&format!("*Filter, Type={}", filter.kind));
                 out.line(&number(filter.radius));
             }
-            if !settings.objectives.is_empty() {
-                out.keyword("*Objective");
-                out.list(settings.objectives.iter().map(String::as_str));
-            }
         }
     }
 }
