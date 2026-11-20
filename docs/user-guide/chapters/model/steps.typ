@@ -29,6 +29,33 @@ apart whatever you named them. Hover over the pictogram or the name to read the 
 
 A deactivated step shows the red no-entry sign instead; its tooltip still names the type.
 
+=== Solution settings in the tree <step-settings-tree>
+
+The second italic row under each step, behind a stopwatch, sums up the settings that decide how
+its solution runs, so that you can see them without opening the step. Hover over it for the
+details, double-click it to open the step.
+
+#screenshot("step-settings-tree.png", [The settings row of a static, a frequency and a dynamic
+  step, with the details of the static one])
+
+#fields(
+  [Static, visco, heat transfer], [Duration, result frames and the increments:
+    #ui("Δt 0.1 s") for automatic increments with the size of the first one,
+    #ui("20 × 0.05 s") for fixed ones with their number, #ui("max 500 inc.") for an increment
+    limit. #ui("Nlgeom") comes first when the step is computed with large deformations, also
+    when hyperelastic materials switch them on. A heat transfer step starts with
+    #ui("Steady state") or #ui("Transient").],
+  [Dynamic], [#ui("Nlgeom"), the method unless it is implicit, the duration, result frames and
+    the time steps with their number and size (#ui("2000 × 5e-4 s")), the damping ratio. An
+    explicit step takes its time step from the mesh.],
+  [Frequency, buckle], [The number of modes or buckling factors, and the frequency range and
+    nodal diameters where they are given.],
+  [Complex frequency, steady state dynamics], [The modes, the speed or the frequency range with
+    its points, the damping ratio.],
+  [Sensitivity], [What the sensitivities are of.],
+  [Particle flow], [Duration and result frames.],
+)
+
 === Order of the steps
 
 The solver runs the steps in the order of the list, and a step starts from the state at the end of
