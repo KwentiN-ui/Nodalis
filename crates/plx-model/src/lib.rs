@@ -60,12 +60,14 @@ mod remote_force;
 mod section;
 mod signature;
 mod solver_diagnostics;
+mod step_settings;
 mod study;
 mod symmetry;
 mod tables;
 mod torsion;
 pub mod units;
 mod wall_loads;
+pub use step_settings::StepSettings;
 pub use tables::{StepTable, TableOwner};
 mod validity;
 
