@@ -14169,7 +14169,8 @@ mod tests {
         assert_eq!(node.kind(), Kind::CrossSections);
         assert!(node.status().is_none(), "a source is not solved");
         // Its height is a parameter of the block, which a study sets.
-        let height = ValuePath::new(ItemRef::CrossSection("Girder".into()), Field::BeamB);
+        let girder = set.cross_sections[0].id;
+        let height = ValuePath::new(ItemRef::CrossSection(girder), Field::BeamB);
         let fe = node.exposing_fe_mut().unwrap();
         let key = fe.expose(height.clone());
         assert!(fe.set_value(&height, 0.05));
@@ -14903,8 +14904,9 @@ mod tests {
             elements: vec![1],
         });
         let mut model = plx_model::FeModel::default();
+        let transform = plx_model::Id::new();
         let shift = plx_model::MeshOperation {
-            id: plx_model::Id::new(),
+            id: transform,
             name: "Transform-1".into(),
             parts: mesh.ids_of(&["A"]),
             kind: plx_model::MeshOperationKind::Transform(plx_mesh::MeshTransform::Translate([
@@ -14913,7 +14915,7 @@ mod tests {
         };
         model.set_mesh_operations(&mut mesh, vec![shift]);
         let path = plx_model::ValuePath::new(
-            plx_model::ItemRef::MeshOperation("Transform-1".into()),
+            plx_model::ItemRef::MeshOperation(transform),
             plx_model::Field::Y,
         );
         let key = model.expose(path.clone());
@@ -14957,12 +14959,13 @@ mod tests {
             system: None,
             follower: false,
         });
+        let item = plx_model::ItemRef::Load {
+            step: step.id,
+            item: step.loads[0].id,
+        };
         model.steps.push(step);
         let force = plx_model::ValuePath::new(
-            plx_model::ItemRef::Load {
-                step: "Step-1".into(),
-                name: "Force-1".into(),
-            },
+            item,
             plx_model::Field::Y,
         );
         let key = model.expose(force.clone());
@@ -15770,7 +15773,7 @@ mod tests {
             input: None,
         };
         let path = plx_model::ValuePath::new(
-            plx_model::ItemRef::MeshSetup("Meshing_Parameters-1".into()),
+            plx_model::ItemRef::MeshSetup(geometry.mesh_items[0].id),
             plx_model::Field::MaxElementSize,
         );
         let mut model = plx_model::FeModel::default();

@@ -9372,7 +9372,10 @@ mod tests {
         }
         editor.apply(&mut fe);
         assert_eq!(fe.history_outputs.len(), 1);
-        assert_eq!(fe.step_history_outputs(0)[0].variables, ["U"]);
+        assert_eq!(
+            fe.step_history_outputs(0)[0].variables,
+            [plx_model::HistoryVariable::Displacements]
+        );
         // A Dynamic step prints the energies besides them.
         let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
         if let Draft::Step(step, _) = &mut editor.draft {

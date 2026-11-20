@@ -760,7 +760,7 @@ mod tests {
             },
             step: 1,
             results: bound.clone(),
-            node_sets: BTreeMap::new(),
+            sources: Sources::default(),
             units: UnitSystem::Unitless,
             dir: restore.clone(),
         };
@@ -789,7 +789,7 @@ mod tests {
             step,
             &frd,
             None,
-            &BTreeMap::new(),
+            &Sources::default(),
             UnitSystem::default(),
         )
         .unwrap();
@@ -797,7 +797,10 @@ mod tests {
         let max = plx_model::MathOp::SeriesMax.reduce(&all.series).unwrap();
         assert!(max > 0.0);
         let first = frd.mesh.node_ids()[0];
-        let sets = BTreeMap::from([("ONE".to_owned(), vec![first])]);
+        let sets = Sources {
+            node_sets: BTreeMap::from([("ONE".to_owned(), vec![first])]),
+            ..Sources::default()
+        };
         let in_set = MeasureKind::FieldValues {
             field: "STRESS".into(),
             component: "MISES".into(),
@@ -865,7 +868,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let expanded = plx_io::frd::expanded_nodes(&input, &frd.mesh);
         let step = frd.increments.last().unwrap().step;
-        let sets = BTreeMap::from([("CLAMP".to_owned(), vec![1, 2, 3])]);
+        let sets = Sources {
+            node_sets: BTreeMap::from([("CLAMP".to_owned(), vec![1, 2, 3])]),
+            ..Sources::default()
+        };
         let measure = |kind: &MeasureKind| {
             evaluate_expanded(
                 kind,
@@ -930,13 +936,21 @@ mod tests {
              \x20      2.0  4.0  6.0\n",
         );
         let frd = plx_io::frd::read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
+        let output = plx_model::Id::new();
         let mut kind = MeasureKind::History {
-            set: "TOP".into(),
+            output: Some(output),
             field: "TOTAL_FORCE".into(),
             component: "RF3".into(),
             whole: false,
         };
-        let sets = BTreeMap::new();
+        let sets = Sources {
+            outputs: vec![OutputSet {
+                id: output,
+                name: "Top".into(),
+                set: "TOP".into(),
+            }],
+            ..Sources::default()
+        };
         let last = evaluate(&kind, 1, &frd, Some(&dat), &sets, UnitSystem::default()).unwrap();
         assert_eq!(last, Measured::one(6.0));
         if let MeasureKind::History { whole, .. } = &mut kind {
@@ -952,7 +966,7 @@ mod tests {
     fn a_measure_at_a_node_equals_the_measure_at_its_point() {
         let frd = plx_io::frd::read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
         let step = frd.increments.last().unwrap().step;
-        let sets = BTreeMap::new();
+        let sets = Sources::default();
         for (index, &node) in frd.mesh.node_ids().iter().enumerate().step_by(7) {
             let at_node = MeasureKind::NodeValue {
                 field: "DISP".into(),
