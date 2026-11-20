@@ -118,6 +118,17 @@ the messages, and the pane can be made taller by dragging its upper edge.
 
 #screenshot("monitor.png", [The Analysis tab after a completed run])
 
+While the output pane is hidden, or shows another tab, the status bar tells that a run is going
+on: next to the tabs a spinner, the analysis, how long it has been running and the step and
+increment the solver is at, such as #ui("Beam 1: running 5 s | Step 1, increment 6"). Hovering
+it shows the whole line of the monitor, a click opens the #ui("Analysis") tab. A Check Model run
+shows there as well.
+
+#figure(
+  image("../../images/solve-status-bar.png", width: 70%),
+  caption: [A running solve in the status bar while the output pane is hidden],
+)
+
 The progress next to the running time follows the solver from its first iteration
 on: the step, the increment, the attempt once the solver has cut the increment back (attempt 2
 and later), the iteration, the size of the increment and the time reached in the step. So a
