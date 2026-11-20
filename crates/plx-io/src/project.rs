@@ -110,7 +110,6 @@ pub enum ProjectNode {
     /// A plot of the numbers linked to it, drawn in the block.
     Plot(PlotBlock),
     /// What is linked to it, drawn in the block: a mesh, a number or a series.
-    #[serde(alias = "MeshPreview")]
     Preview(Preview),
     /// Blocks put together into one, which opens into a schematic of its own, like a node
     /// group of Blender.
