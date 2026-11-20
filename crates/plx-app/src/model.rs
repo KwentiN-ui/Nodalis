@@ -220,12 +220,11 @@ fn mark_suppressed(
 ) -> bool {
     let mut changed = false;
     for (info, part) in parts.iter_mut().zip(&mesh.parts) {
-        let suppressed = (plx_model::part_bodies(part).iter()).all(|body| {
-            origins.is_suppressed(body) || geometry.is_some_and(|g| g.is_suppressed(body))
-        });
+        let suppressed = (plx_model::part_objects(part).into_iter())
+            .all(|body| plx_model::object_suppressed(body, geometry, origins));
         changed |= info.suppressed != suppressed;
         info.suppressed = suppressed;
-        info.own_mesh = geometry.is_some_and(|g| g.meshes_itself(&part.name));
+        info.own_mesh = geometry.is_some_and(|g| g.own_meshes.contains(&part.id));
     }
     changed
 }
@@ -1502,10 +1501,34 @@ impl Model {
         &self.origins
     }
 
+    /// The id of the geometry object `name`: a part or body of the mesh, else a part of
+    /// the geometry without a mesh, see [`plx_model::PartOrigins`].
+    pub fn object_id(&self, name: impl AsRef<str>) -> Option<plx_model::Id> {
+        let name = name.as_ref();
+        (plx_model::object_id(&self.mesh, name)).or_else(|| self.geometry.as_ref()?.part_id(name))
+    }
+
+    /// Whether `name` is an imported mesh, see [`plx_model::PartOrigins::is_imported`].
+    pub fn is_imported(&self, name: impl AsRef<str>) -> bool {
+        (self.object_id(name)).is_some_and(|id| self.origins.is_imported(id))
+    }
+
+    /// Whether `name` is the mesh of a part of the CAD geometry.
+    pub fn is_cad(&self, name: impl AsRef<str>) -> bool {
+        (self.object_id(name)).is_some_and(|id| self.origins.is_cad(id))
+    }
+
+    /// Whether a link brings the mesh of `name`.
+    pub fn is_linked(&self, name: impl AsRef<str>) -> bool {
+        (self.object_id(name)).is_some_and(|id| self.origins.is_linked(id))
+    }
+
     /// Notes that the part `name` of the geometry is meshed from inputs with the
     /// fingerprint `input`; for a part of the mesh being made, before [`Model::set_mesh`].
     pub fn set_meshed(&mut self, name: &str, input: u64) {
-        self.origins.set_meshed(name, input);
+        if let Some(id) = self.geometry.as_ref().and_then(|g| g.part_id(name)) {
+            self.origins.set_meshed(id, input);
+        }
     }
 
     /// Takes over the origins of the parts, e.g. with a mesh taken over through a link;
@@ -1541,7 +1564,8 @@ impl Model {
     /// Suppresses the imported meshes among `names`, or unsuppresses them; true if that
     /// changed anything.
     pub fn set_imported_suppressed(&mut self, names: &[String], suppressed: bool) -> bool {
-        self.origins.set_suppressed(names, suppressed)
+        let ids = plx_model::body_ids(&self.mesh, names);
+        self.origins.set_suppressed(&ids, suppressed)
     }
 
     /// Replaces the mesh with the origins of its parts, e.g. the mesh as it was before a
@@ -2797,27 +2821,16 @@ impl Model {
             // The name is the geometry object's: a compound part keeps it when it is meshed
             // anew, a part of the geometry is renamed with its mesh, an imported mesh is its
             // own geometry object.
-            let (space, matching) = (self.fe.properties.space, self.fe.matching_faces());
+            // The origin of its mesh is kept by id, so the mesh stays as up to date as it was.
             if let Some(geometry) = &mut self.geometry
                 && let Some(c) = id.and_then(|id| geometry.compound_with_id(id))
             {
                 geometry.compounds[c].name.clone_from(&name);
             } else if let Some(geometry) = &mut self.geometry
-                && self.origins.is_cad(&old)
+                && id.is_some_and(|id| self.origins.is_cad(id))
             {
-                let before = plx_model::fingerprint::mesh_input(geometry, &matching, space, &old);
-                if geometry.rename_part(&old, &name) {
-                    // The mesh stays as up to date as it was.
-                    let up_to_date = self.origins.made_from(&old) == Some(before);
-                    self.origins.rename(&old, &name);
-                    if up_to_date {
-                        let now =
-                            plx_model::fingerprint::mesh_input(geometry, &matching, space, &name);
-                        self.origins.set_meshed(&name, now);
-                    }
-                }
+                geometry.rename_part(&old, &name);
             }
-            self.origins.rename(&old, &name);
         }
         self.parts[index].name = name;
         Ok(())

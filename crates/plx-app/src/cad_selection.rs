@@ -893,7 +893,7 @@ mod tests {
             id: plx_model::Id::new(),
             name: "Meshing_Parameters-1".into(),
             kind: plx_model::MeshSetupKind::MeshingParameters {
-                parts: vec!["SOLID-1".into()],
+                parts: geometry.part_id("SOLID-1").into_iter().collect(),
                 parameters: plx_model::MeshingParameters {
                     max_size: 3.0,
                     ..geometry.meshing
@@ -1086,7 +1086,7 @@ mod tests {
                 id: plx_model::Id::new(),
                 name: format!("Meshing_Parameters-{part}"),
                 kind: plx_model::MeshSetupKind::MeshingParameters {
-                    parts: vec![part.clone()],
+                    parts: geometry.part_id(part).into_iter().collect(),
                     parameters: plx_model::MeshingParameters {
                         max_size: 4.0,
                         ..geometry.meshing

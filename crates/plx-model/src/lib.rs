@@ -138,7 +138,8 @@ pub use moving_load::{AXIS_LABELS, LoadStations, MovingFrame, MovingLoad, Wheel,
 pub use number::{MathOp, apply_series, switch};
 pub use origin::{
     Active, LeftOut, PartOrigin, PartOrigins, active_model, bodies as part_bodies, body_ids,
-    drop_orphans, orphans, suppressed_bodies, unmeshed_parts,
+    drop_orphans, is_suppressed as object_suppressed, named_objects, object_id,
+    objects as part_objects, orphans, suppressed_bodies, unmeshed_parts,
 };
 pub use overview::{Cell, OverviewGroup, OverviewRow, StepItemKey, StepOverview};
 pub use parameter::{Parameter, ValueKind};

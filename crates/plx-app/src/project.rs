@@ -10079,11 +10079,10 @@ fn take_refine_input(nodes: &mut [Node], links: &[Link], id: u64) {
                 }
                 // The parts of the geometry are meshed anew with the finer sizes by the
                 // analysis the geometry goes to: their meshes are not given on.
-                let cad: Vec<String> = (copy.origins.iter())
-                    .filter(|(name, _)| copy.origins.is_cad(name))
-                    .map(|(name, _)| name.to_owned())
+                let cad: Vec<plx_model::Id> = (copy.origins.iter())
+                    .filter(|&(id, _)| copy.origins.is_cad(id))
+                    .map(|(id, _)| id)
                     .collect();
-                let cad = plx_model::body_ids(&copy.mesh, &cad);
                 copy.mesh.remove_bodies(&cad);
                 copy.origins.reconcile(&copy.mesh);
                 refine.model.data_mut().take_mesh(copy);
@@ -14485,7 +14484,7 @@ mod tests {
         let space = ModelSpace::ThreeD;
         let mut origins = plx_model::PartOrigins::default();
         origins.set_meshed(
-            "SOLID-1",
+            plx_model::object_id(&mesh, "SOLID-1").unwrap(),
             plx_model::fingerprint::mesh_input(&geometry, &[], space, "SOLID-1"),
         );
         let mut model = plx_model::FeModel::default();
@@ -15831,7 +15830,7 @@ mod tests {
                 id: plx_model::Id::new(),
                 name: "Meshing_Parameters-1".into(),
                 kind: plx_model::MeshSetupKind::MeshingParameters {
-                    parts: vec!["PART_1".into()],
+                    parts: vec![crate::test_ids::named("PART_1")],
                     parameters: plx_model::MeshingParameters {
                         max_size: 0.03,
                         ..Default::default()
@@ -15842,7 +15841,10 @@ mod tests {
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
+            ids: vec![plx_model::PartId {
+                name: "PART_1".into(),
+                id: crate::test_ids::named("PART_1"),
+            }],
             from_link: false,
             operations: Vec::new(),
             input: None,

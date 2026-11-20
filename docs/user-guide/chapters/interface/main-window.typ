@@ -126,7 +126,9 @@ reference point, a load keeps its amplitude, a section its material, a contact p
 interaction, a boundary condition its set, whatever they are renamed to. The links of the
 project schematic name what they carry the same way: a renamed step, setup item, parameter or
 column of a parameter study keeps its wires. Items that refer to a
-renamed mesh part follow the new name. Geometry parts cannot be renamed, because the mesh setup refers to them by name.
+renamed mesh part follow the new name. A mesh part meshed from the geometry renames its part of
+the geometry with it: mesh setup items, suppression and CAD operations stay on the part, and its
+mesh stays up to date, as nothing it was meshed from changed.
 
 === What acts on a part <acting>
 

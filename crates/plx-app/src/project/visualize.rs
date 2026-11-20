@@ -556,7 +556,7 @@ impl ProjectApp {
                     // Triangulated as the Geometry workspace does, which takes Gmsh.
                     std::thread::spawn(move || {
                         let made = plx_mesher::tessellate(&geometry)
-                            .map(|display| draw_geometry(&display, &geometry.suppressed, size))
+                            .map(|display| draw_geometry(&display, &geometry, size))
                             .map_err(|e| e.to_string());
                         let _ = sender.send(made);
                     });
@@ -644,7 +644,7 @@ pub(super) fn draw_mesh(
 /// any face in the colour of their part. Seen like [`draw_mesh`].
 pub(super) fn draw_geometry(
     display: &plx_mesher::GeometryDisplay,
-    suppressed: &[String],
+    geometry: &plx_model::Geometry,
     size: [usize; 2],
 ) -> egui::ColorImage {
     let mesh = &display.mesh;
@@ -654,7 +654,7 @@ pub(super) fn draw_geometry(
     let parts = (mesh.parts.iter().enumerate())
         .map(|(index, part)| GeometryPart {
             wire: display.part_dimensions.get(index) == Some(&1),
-            suppressed: suppressed.contains(&part.name),
+            suppressed: geometry.is_suppressed(&part.name),
         })
         .collect::<Vec<_>>();
     draw_shapes(mesh, plane, size, Some(&parts))
@@ -1446,7 +1446,23 @@ mod tests {
             edges: 4,
             topology: Default::default(),
         };
-        let image = draw_geometry(&display, &[], [100, 100]);
+        let mut geometry = plx_model::Geometry {
+            source: "plate.step".into(),
+            brep: String::new(),
+            meshing: Default::default(),
+            mesh_items: Vec::new(),
+            part_names: vec!["PLATE".into()],
+            refinement: 1.0,
+            signatures: Vec::new(),
+            compounds: Vec::new(),
+            suppressed: Vec::new(),
+            own_meshes: Vec::new(),
+            ids: Vec::new(),
+            from_link: false,
+            operations: Vec::new(),
+            input: None,
+        };
+        let image = draw_geometry(&display, &geometry, [100, 100]);
         let pixel = |x: usize, y: usize| image.pixels[y * 100 + x];
         let face = pixel(50, 50);
         assert_eq!(face.a(), 255, "the middle shows the face");
@@ -1462,7 +1478,8 @@ mod tests {
         assert!(dark, "the edges are drawn dark");
         assert_eq!(pixel(0, 0).a(), 0);
         // A suppressed part is grey.
-        let grey = draw_geometry(&display, &["PLATE".to_owned()], [100, 100]);
+        geometry.set_suppressed(&["PLATE".to_owned()], true);
+        let grey = draw_geometry(&display, &geometry, [100, 100]);
         let p = grey.pixels[50 * 100 + 50];
         assert!(p.r().abs_diff(p.g()) < 8 && p.g().abs_diff(p.b()) < 12);
     }

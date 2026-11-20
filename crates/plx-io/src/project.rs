@@ -2406,6 +2406,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("plx-project-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("block.ndl");
+        let solid = plx_model::Id::new();
         let geometry = Geometry {
             compounds: Vec::new(),
             suppressed: Vec::new(),
@@ -2427,7 +2428,7 @@ mod tests {
                     id: plx_model::Id::new(),
                     name: "Tetrahedral_Gmsh-1".into(),
                     kind: MeshSetupKind::TetrahedralGmsh {
-                        parts: vec!["SOLID-1".into()],
+                        parts: vec![solid],
                         algorithm_2d: Algorithm2d::Delaunay,
                         algorithm_3d: Algorithm3d::Hxt,
                     },
@@ -2436,7 +2437,7 @@ mod tests {
                     id: plx_model::Id::new(),
                     name: "Extrude_Mesh-1".into(),
                     kind: MeshSetupKind::ExtrudeMesh(plx_model::ExtrudeMesh {
-                        parts: vec!["SOLID-1".into()],
+                        parts: vec![solid],
                         faces: vec![2],
                         layers: plx_model::ExtrudeLayers::MultiLayered {
                             sizes: vec![0.2, 0.8],
@@ -2450,7 +2451,10 @@ mod tests {
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
+            ids: vec![plx_model::PartId {
+                name: "SOLID-1".into(),
+                id: solid,
+            }],
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -2458,7 +2462,7 @@ mod tests {
         let mut saved = single(Some(&geometry), &mesh, &model, None);
         (saved.analyses_mut().next().unwrap())
             .origins
-            .set_meshed("SOLID-1", 42);
+            .set_meshed(solid, 42);
         // A second, empty analysis next to it.
         saved
             .nodes
@@ -2515,8 +2519,8 @@ mod tests {
         assert_eq!(project.mesh.node_sets, mesh.node_sets);
         // The origin of a part that the mesh does not have goes when the project is read.
         assert_eq!(
-            project.origins.made_from("SOLID-1"),
-            (project.mesh.parts.iter().any(|p| p.name == "SOLID-1")).then_some(42)
+            project.origins.made_from(solid),
+            (project.mesh.parts.iter().any(|p| p.id == solid)).then_some(42)
         );
 
         // The file starts with the length of its text in binary, which need not be UTF-8;

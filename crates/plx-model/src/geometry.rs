@@ -36,17 +36,18 @@ pub struct Geometry {
     /// of the FE model, its bodies tied where they touch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compounds: Vec<CompoundPart>,
-    /// Names of the suppressed parts: meshing and the CAD tools leave them alone, as if
-    /// they were not there, until they are unsuppressed. A mesh they have already stays.
+    /// The suppressed parts, by id: meshing and the CAD tools leave them alone, as if they
+    /// were not there, until they are unsuppressed. A mesh they have already stays.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub suppressed: Vec<String>,
-    /// Names of the parts this analysis meshes itself although a link brings their mesh
-    /// with them: the link's mesh of them is left out.
+    pub suppressed: Vec<crate::Id>,
+    /// The parts this analysis meshes itself although a link brings their mesh with them,
+    /// by id: the link's mesh of them is left out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub own_meshes: Vec<String>,
-    /// The identity of each part, by its name: a renamed part keeps its id, so that an
-    /// analysis taking the geometry through a link renames what it has of the part with it
-    /// instead of losing it, see [`Geometry::renames_since`]. Made with the parts, see
+    pub own_meshes: Vec<crate::Id>,
+    /// The identity of each part with its name: everything referring to a part of the
+    /// geometry, its suppression, the mesh setup and the compounds, does so by the id, so
+    /// that renaming the part keeps it. An analysis taking the geometry through a link takes
+    /// the names with the ids, see [`Geometry::renames_since`]. Made with the parts, see
     /// [`Geometry::ensure_ids`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ids: Vec<PartId>,
@@ -206,8 +207,8 @@ impl Geometry {
             .collect()
     }
 
-    /// Renames the part `old` of the geometry to `new`, with what refers to it by name: its
-    /// suppression and the mesh setup items. Its compound refers to it by id. False if the geometry has no part
+    /// Renames the part `old` of the geometry to `new`. Its suppression, the mesh setup
+    /// and its compound refer to it by id and stay on it. False if the geometry has no part
     /// of that name: its names are not known without Gmsh, see [`Geometry::part_names`].
     pub fn rename_part(&mut self, old: &str, new: &str) -> bool {
         let Some(at) = (self.part_names.iter()).position(|p| p.eq_ignore_ascii_case(old)) else {
@@ -220,19 +221,20 @@ impl Geometry {
                 entry.name = new.to_owned();
             }
         }
-        for part in self.suppressed.iter_mut().chain(&mut self.own_meshes) {
-            if part.eq_ignore_ascii_case(old) {
-                *part = new.to_owned();
-            }
-        }
-        for item in &mut self.mesh_items {
-            for part in item.kind.parts_mut().into_iter().flatten() {
-                if part.eq_ignore_ascii_case(old) {
-                    *part = new.to_owned();
-                }
-            }
-        }
         true
+    }
+
+    /// Whether `parts`, by id, hold the part named `part`.
+    pub fn holds(&self, parts: &[crate::Id], part: &str) -> bool {
+        self.part_id(part).is_some_and(|id| parts.contains(&id))
+    }
+
+    /// The names of the parts `ids`, of those that are there.
+    pub fn part_names_of(&self, ids: &[crate::Id]) -> Vec<String> {
+        (ids.iter())
+            .filter_map(|&id| self.part_name(id))
+            .map(str::to_owned)
+            .collect()
     }
 
     /// The parts of the geometry whose names are known: all of them since the geometry was
@@ -243,22 +245,13 @@ impl Geometry {
 
     /// Whether the part `part` is suppressed.
     pub fn is_suppressed(&self, part: &str) -> bool {
-        names(&self.suppressed, part)
+        self.holds(&self.suppressed, part)
     }
 
     /// Suppresses the parts `parts`, or unsuppresses them; true if that changed anything.
     pub fn set_suppressed(&mut self, parts: &[String], suppressed: bool) -> bool {
-        let before = self.suppressed.len();
-        if suppressed {
-            for part in parts {
-                if !self.is_suppressed(part) {
-                    self.suppressed.push(part.clone());
-                }
-            }
-        } else {
-            self.suppressed.retain(|p| !names(parts, p));
-        }
-        self.suppressed.len() != before
+        let ids = self.part_ids_of(parts);
+        set_ids(&mut self.suppressed, &ids, suppressed)
     }
 
     /// The id of the part `name`, if it has one, see [`Geometry::ids`].
@@ -334,11 +327,54 @@ impl Geometry {
     /// after a CAD operation made it of `from`; the other parts get new ones.
     pub fn inherit_ids(&mut self, from: &Geometry) {
         for entry in &from.ids {
-            if self.part_id(&entry.name).is_none() && names(&self.part_names, &entry.name) {
+            if self.part_id(&entry.name).is_none()
+                && self
+                    .part_names
+                    .iter()
+                    .any(|n| n.eq_ignore_ascii_case(&entry.name))
+            {
                 self.ids.push(entry.clone());
             }
         }
         self.ensure_ids();
+    }
+
+    /// Gives the parts of this geometry whose ids `before`, the geometry it replaces, does
+    /// not know the id of the part of the same name there that this geometry lacks: shapes
+    /// read anew from a file, whose parts have new ids, keep them the same parts to what
+    /// refers to them, as [`plx_mesh::FeMesh::adopt_ids`] does for a mesh. Returns the ids
+    /// changed, as (old, new), for the meshes of the parts; compounds follow here.
+    pub fn adopt_ids(&mut self, before: &Geometry) -> Vec<(crate::Id, crate::Id)> {
+        let known = |id: crate::Id, list: &[PartId]| list.iter().any(|p| p.id == id);
+        let mut changed = Vec::new();
+        for index in 0..self.ids.len() {
+            let entry = &self.ids[index];
+            if known(entry.id, &before.ids) {
+                continue;
+            }
+            let found = (before.ids.iter()).find(|p| {
+                p.name.eq_ignore_ascii_case(&entry.name)
+                    && !known(p.id, &self.ids)
+                    && !changed.iter().any(|(_, new)| *new == p.id)
+            });
+            if let Some(found) = found {
+                changed.push((entry.id, found.id));
+                self.ids[index].id = found.id;
+            }
+        }
+        for compound in &mut self.compounds {
+            for part in &mut compound.parts {
+                if let Some((_, new)) = changed.iter().find(|(old, _)| old == part) {
+                    *part = *new;
+                }
+            }
+        }
+        for id in self.suppressed.iter_mut().chain(&mut self.own_meshes) {
+            if let Some((_, new)) = changed.iter().find(|(old, _)| old == id) {
+                *id = *new;
+            }
+        }
+        changed
     }
 
     /// The parts renamed since `before`, an older copy of the same shapes, as (old, new)
@@ -355,23 +391,14 @@ impl Geometry {
 
     /// Whether this analysis meshes the part `part` itself although a link brings its mesh.
     pub fn meshes_itself(&self, part: &str) -> bool {
-        names(&self.own_meshes, part)
+        self.holds(&self.own_meshes, part)
     }
 
     /// Has this analysis mesh the parts `parts` itself, or take their mesh from the link
     /// that brings them again; true if that changed anything.
     pub fn set_own_meshes(&mut self, parts: &[String], own: bool) -> bool {
-        let before = self.own_meshes.len();
-        if own {
-            for part in parts {
-                if !self.meshes_itself(part) {
-                    self.own_meshes.push(part.clone());
-                }
-            }
-        } else {
-            self.own_meshes.retain(|p| !names(parts, p));
-        }
-        self.own_meshes.len() != before
+        let ids = self.part_ids_of(parts);
+        set_ids(&mut self.own_meshes, &ids, own)
     }
 
     /// Takes parts out of their compounds; compounds left empty go.
@@ -388,7 +415,9 @@ impl Geometry {
     pub fn parameters(&self, part: &str) -> MeshingParameters {
         let mut parameters = (self.mesh_items.iter().rev())
             .find_map(|item| match &item.kind {
-                MeshSetupKind::MeshingParameters { parts, parameters } if names(parts, part) => {
+                MeshSetupKind::MeshingParameters { parts, parameters }
+                    if self.holds(parts, part) =>
+                {
                     Some(*parameters)
                 }
                 _ => None,
@@ -422,7 +451,7 @@ impl Geometry {
                 parts,
                 algorithm_2d,
                 algorithm_3d,
-            } if names(parts, part) => Some((*algorithm_2d, *algorithm_3d)),
+            } if self.holds(parts, part) => Some((*algorithm_2d, *algorithm_3d)),
             _ => None,
         })
     }
@@ -432,10 +461,12 @@ impl Geometry {
     pub fn extrusion(&self, part: &str) -> Option<&ExtrudeMesh> {
         (self.mesh_items.iter().rev())
             .find_map(|item| match &item.kind {
-                MeshSetupKind::ExtrudeMesh(extrude) if names(&extrude.parts, part) => {
+                MeshSetupKind::ExtrudeMesh(extrude) if self.holds(&extrude.parts, part) => {
                     Some(Some(extrude))
                 }
-                MeshSetupKind::TetrahedralGmsh { parts, .. } if names(parts, part) => Some(None),
+                MeshSetupKind::TetrahedralGmsh { parts, .. } if self.holds(parts, part) => {
+                    Some(None)
+                }
                 _ => None,
             })
             .flatten()
@@ -444,7 +475,7 @@ impl Geometry {
     /// The thickening of a shell part: the last Thicken Shell Mesh item naming it.
     pub fn thickening(&self, part: &str) -> Option<&ThickenShellMesh> {
         (self.mesh_items.iter().rev()).find_map(|item| match &item.kind {
-            MeshSetupKind::ThickenShellMesh(thicken) if names(&thicken.parts, part) => {
+            MeshSetupKind::ThickenShellMesh(thicken) if self.holds(&thicken.parts, part) => {
                 Some(thicken)
             }
             _ => None,
@@ -456,7 +487,7 @@ impl Geometry {
     pub fn finds_hexahedra(&self, part: &str) -> bool {
         self.parameters(part).hexahedra_where_possible
             && !self.mesh_items.iter().any(|item| {
-                matches!(&item.kind, MeshSetupKind::TetrahedralGmsh { parts, .. } if names(parts, part))
+                matches!(&item.kind, MeshSetupKind::TetrahedralGmsh { parts, .. } if self.holds(parts, part))
             })
     }
 
@@ -517,8 +548,19 @@ impl Geometry {
     }
 }
 
-fn names(parts: &[String], part: &str) -> bool {
-    parts.iter().any(|p| p.eq_ignore_ascii_case(part))
+/// Adds `ids` to `list`, or takes them out of it; true if that changed anything.
+fn set_ids(list: &mut Vec<crate::Id>, ids: &[crate::Id], add: bool) -> bool {
+    let before = list.len();
+    if add {
+        for id in ids {
+            if !list.contains(id) {
+                list.push(*id);
+            }
+        }
+    } else {
+        list.retain(|p| !ids.contains(p));
+    }
+    list.len() != before
 }
 
 /// How a part is meshed with tetrahedra.
@@ -585,7 +627,8 @@ pub struct MeshSetupItem {
 pub enum MeshSetupKind {
     /// Own meshing parameters for some parts.
     MeshingParameters {
-        parts: Vec<String>,
+        /// The parts, by id.
+        parts: Vec<crate::Id>,
         parameters: MeshingParameters,
     },
     /// A smaller element size on faces and edges.
@@ -600,7 +643,8 @@ pub enum MeshSetupKind {
     },
     /// Gmsh's meshing algorithms for some parts.
     TetrahedralGmsh {
-        parts: Vec<String>,
+        /// The parts, by id.
+        parts: Vec<crate::Id>,
         algorithm_2d: Algorithm2d,
         algorithm_3d: Algorithm3d,
     },
@@ -623,7 +667,7 @@ impl MeshSetupKind {
     }
 
     /// [`MeshSetupKind::parts`] to change.
-    pub fn parts_mut(&mut self) -> Option<&mut Vec<String>> {
+    pub fn parts_mut(&mut self) -> Option<&mut Vec<crate::Id>> {
         match self {
             MeshSetupKind::MeshingParameters { parts, .. }
             | MeshSetupKind::TetrahedralGmsh { parts, .. } => Some(parts),
@@ -635,7 +679,7 @@ impl MeshSetupKind {
 
     /// The parts the item applies to; `None` for a local mesh size, which applies to faces
     /// and edges of any part.
-    pub fn parts(&self) -> Option<&[String]> {
+    pub fn parts(&self) -> Option<&[crate::Id]> {
         match self {
             MeshSetupKind::MeshingParameters { parts, .. }
             | MeshSetupKind::TetrahedralGmsh { parts, .. } => Some(parts),
@@ -653,8 +697,8 @@ impl MeshSetupKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExtrudeMesh {
-    /// The parts meshed this way.
-    pub parts: Vec<String>,
+    /// The parts meshed this way, by id.
+    pub parts: Vec<crate::Id>,
     /// The source faces; empty to find for each part a face it is an extrusion of.
     pub faces: Vec<i32>,
     pub algorithm_2d: Algorithm2d,
@@ -682,8 +726,8 @@ impl Default for ExtrudeMesh {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ThickenShellMesh {
-    /// The shell parts thickened.
-    pub parts: Vec<String>,
+    /// The shell parts thickened, by id.
+    pub parts: Vec<crate::Id>,
     pub thickness: f64,
     /// Layers of elements through the thickness.
     pub layers: u32,
@@ -852,7 +896,7 @@ mod tests {
         };
         let parts = ["SOLID-1".to_owned(), "solid-1".to_owned()];
         assert!(geometry.set_suppressed(&parts, true));
-        assert_eq!(geometry.suppressed, ["SOLID-1"]);
+        assert_eq!(geometry.suppressed, [geometry.part_id("SOLID-1").unwrap()]);
         assert!(geometry.is_suppressed("Solid-1"));
         assert!(!geometry.set_suppressed(&parts, true));
         assert!(geometry.set_suppressed(&["solid-1".into()], false));
@@ -871,35 +915,7 @@ mod tests {
             source: "a.step".into(),
             brep: String::new(),
             meshing: MeshingParameters::for_diagonal(100.0),
-            mesh_items: vec![
-                MeshSetupItem {
-                    id: crate::Id::new(),
-                    name: "Meshing_Parameters-1".into(),
-                    kind: MeshSetupKind::MeshingParameters {
-                        parts: vec!["SOLID-1".into()],
-                        parameters: fine,
-                    },
-                },
-                MeshSetupItem {
-                    id: crate::Id::new(),
-                    name: "Tetrahedral_Gmsh-1".into(),
-                    kind: MeshSetupKind::TetrahedralGmsh {
-                        parts: vec!["SOLID-2".into()],
-                        algorithm_2d: Algorithm2d::Delaunay,
-                        algorithm_3d: Algorithm3d::Hxt,
-                    },
-                },
-                MeshSetupItem {
-                    id: crate::Id::new(),
-                    name: "Local_Mesh_Size-1".into(),
-                    kind: MeshSetupKind::LocalMeshSize {
-                        faces: vec![3],
-                        edges: vec![],
-                        size: 0.5,
-                        depth: 0.0,
-                    },
-                },
-            ],
+            mesh_items: Vec::new(),
             part_names: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
@@ -909,6 +925,36 @@ mod tests {
             operations: Vec::new(),
             input: None,
         };
+        let ids = geometry.part_ids_of(&["SOLID-1".into(), "SOLID-2".into()]);
+        geometry.mesh_items = vec![
+            MeshSetupItem {
+                id: crate::Id::new(),
+                name: "Meshing_Parameters-1".into(),
+                kind: MeshSetupKind::MeshingParameters {
+                    parts: vec![ids[0]],
+                    parameters: fine,
+                },
+            },
+            MeshSetupItem {
+                id: crate::Id::new(),
+                name: "Tetrahedral_Gmsh-1".into(),
+                kind: MeshSetupKind::TetrahedralGmsh {
+                    parts: vec![ids[1]],
+                    algorithm_2d: Algorithm2d::Delaunay,
+                    algorithm_3d: Algorithm3d::Hxt,
+                },
+            },
+            MeshSetupItem {
+                id: crate::Id::new(),
+                name: "Local_Mesh_Size-1".into(),
+                kind: MeshSetupKind::LocalMeshSize {
+                    faces: vec![3],
+                    edges: vec![],
+                    size: 0.5,
+                    depth: 0.0,
+                },
+            },
+        ];
         assert_eq!(geometry.parameters("solid-1"), fine);
         assert_eq!(geometry.parameters("SOLID-2").max_size, 5.0);
         assert_eq!(
@@ -969,19 +1015,20 @@ mod tests {
 
     #[test]
     fn a_later_tetrahedral_item_takes_a_part_back_from_an_extrusion() {
-        let extrude = |parts: &[&str]| MeshSetupItem {
+        let extrude = |parts: &[crate::Id]| MeshSetupItem {
             id: crate::Id::new(),
             name: "Extrude_Mesh-1".into(),
             kind: MeshSetupKind::ExtrudeMesh(ExtrudeMesh {
-                parts: parts.iter().map(|p| p.to_string()).collect(),
+                parts: parts.to_vec(),
                 ..ExtrudeMesh::default()
             }),
         };
+        let (a, b) = (crate::Id::new(), crate::Id::new());
         let tet = MeshSetupItem {
             id: crate::Id::new(),
             name: "Tetrahedral_Gmsh-1".into(),
             kind: MeshSetupKind::TetrahedralGmsh {
-                parts: vec!["A".into()],
+                parts: vec![a],
                 algorithm_2d: Algorithm2d::default(),
                 algorithm_3d: Algorithm3d::default(),
             },
@@ -992,12 +1039,21 @@ mod tests {
             source: "a.step".into(),
             brep: String::new(),
             meshing: MeshingParameters::default(),
-            mesh_items: vec![tet.clone(), extrude(&["A", "B"])],
+            mesh_items: vec![tet.clone(), extrude(&[a, b])],
             part_names: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
+            ids: vec![
+                PartId {
+                    name: "A".into(),
+                    id: a,
+                },
+                PartId {
+                    name: "B".into(),
+                    id: b,
+                },
+            ],
             from_link: false,
             operations: Vec::new(),
             input: None,

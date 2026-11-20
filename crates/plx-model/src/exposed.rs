@@ -1356,6 +1356,7 @@ mod tests {
     #[test]
     fn mesh_setup_numbers_are_exposed_through_the_geometry() {
         use crate::{MeshSetupItem, MeshingParameters, ModelSpace};
+        let part = crate::Id::new();
         let mut geometry = Geometry {
             source: "plate.step".into(),
             brep: "shapes".into(),
@@ -1365,7 +1366,7 @@ mod tests {
                     id: crate::Id::new(),
                     name: "Meshing_Parameters-1".into(),
                     kind: MeshSetupKind::MeshingParameters {
-                        parts: vec!["PART_1".into()],
+                        parts: vec![part],
                         parameters: MeshingParameters {
                             max_size: 0.03,
                             ..MeshingParameters::default()
@@ -1389,7 +1390,10 @@ mod tests {
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
+            ids: vec![crate::PartId {
+                name: "PART_1".into(),
+                id: part,
+            }],
             from_link: false,
             operations: Vec::new(),
             input: None,

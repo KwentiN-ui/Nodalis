@@ -1272,17 +1272,28 @@ fn signatures(gmsh: &Gmsh) -> Result<Vec<EntitySignature>, GmshError> {
 }
 
 /// The geometry with the signatures of its entities as Gmsh reads its BREP, for a geometry
-/// made without them.
+/// made without them; parts without a name of their own get the ones Gmsh gives, and every
+/// part an id, as everything refers to parts by id.
 pub fn with_signatures(geometry: Geometry) -> Result<Geometry, GmshError> {
     let file = TempFile::with_contents("brep", &geometry.brep)?;
-    let signatures = with_gmsh(|gmsh| {
+    let (signatures, names) = with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
-        signatures(gmsh)
+        let names = if geometry.part_names.is_empty() {
+            (parts(gmsh, &geometry)?.into_iter())
+                .map(|(_, n)| n)
+                .collect()
+        } else {
+            geometry.part_names.clone()
+        };
+        Ok((signatures(gmsh)?, names))
     })?;
-    Ok(Geometry {
+    let mut geometry = Geometry {
         signatures,
+        part_names: names,
         ..geometry
-    })
+    };
+    geometry.ensure_ids();
+    Ok(geometry)
 }
 
 /// Whether a part name is a numbered default, as "SOLID-2", rather than one from the file.
@@ -1448,7 +1459,7 @@ fn part_mesh_in(
     let chosen = geometry.extrusion(part);
     let automatic = chosen.is_none() && geometry.finds_hexahedra(part);
     let found = plx_model::ExtrudeMesh {
-        parts: vec![part.to_string()],
+        parts: geometry.part_id(part).into_iter().collect(),
         ..Default::default()
     };
     let unsourced = chosen.filter(|extrude| extrude.faces.is_empty());
