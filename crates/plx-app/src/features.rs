@@ -2153,6 +2153,38 @@ mod tests {
     }
 
     #[test]
+    fn the_global_system_is_hidden_with_the_model_and_shared_with_results() {
+        let mut model = Model::new(std::path::Path::new("test.inp"), FeMesh::default());
+        assert!(!model.fe.global_system_hidden);
+        let item = crate::tree::TreeItem::GlobalCoordinateSystem;
+        assert!(crate::setup::set_visible(&mut model.fe, &item, false));
+        assert!(model.fe.global_system_hidden);
+        // Saved with the analysis, left out of the file while shown.
+        let saved = ron::to_string(&model.fe).unwrap();
+        assert!(
+            ron::from_str::<plx_model::FeModel>(&saved)
+                .unwrap()
+                .global_system_hidden
+        );
+        let mut shown = model.fe.clone();
+        crate::setup::set_visible(&mut shown, &item, true);
+        assert!(
+            !ron::to_string(&shown)
+                .unwrap()
+                .contains("global_system_hidden")
+        );
+        // Results share it with the FE model, like the other features.
+        let mut results = plx_model::FeModel::default();
+        results.set_shared_features(&model.fe);
+        assert!(results.global_system_hidden);
+        let before = results.clone();
+        crate::setup::set_visible(&mut results, &item, true);
+        let units = results.properties.units;
+        model.fe.take_feature_edit(&before, &results, units);
+        assert!(!model.fe.global_system_hidden);
+    }
+
+    #[test]
     fn a_new_point_at_the_centre_of_faces_couples_them_deformably() {
         let mut model = Model::new(std::path::Path::new("test.inp"), FeMesh::default());
         let dialog = new_point(&model, faces(2));

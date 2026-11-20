@@ -65,6 +65,18 @@ Hiding changes only the view, as for symbols of boundary conditions (@hide-symbo
 #screenshot("hide-reference-points.png", [Hidden reference points in the Results and the context
   menu of Reference Points])
 
+=== The global coordinate system <global-coordinate-system>
+
+#ui("Coordinate Systems") in the tree always starts with #ui("Global"), the coordinate system of
+the model, drawn as a triad at the origin. It cannot be edited, renamed or deleted, and every new
+analysis has it. #ui("Hide") in its context menu removes the triad from the 3D view, #ui("Show")
+brings it back; #ui("Hide All") and #ui("Show All") of #ui("Coordinate Systems") take it along.
+Like the other features it is hidden in the FE Model and the Results alike, and the Geometry
+workspace follows the FE model. The setting is saved with the analysis.
+
+#screenshot("global-coordinate-system.png", [The global coordinate system in the tree, hidden from
+  its context menu])
+
 === Coordinate systems <coordinate-systems>
 
 A coordinate system is given in a base system and either stays fixed in space or moves with a

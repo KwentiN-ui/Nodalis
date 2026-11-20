@@ -52,6 +52,8 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         history_outputs,
         reference_points,
         coordinate_systems,
+        // Only the view: the triad at the origin.
+        global_system_hidden: _,
         planes,
         result_planes: _,
         result_paths: _,
