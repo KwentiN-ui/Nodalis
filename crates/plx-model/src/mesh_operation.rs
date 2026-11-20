@@ -2,7 +2,9 @@
 //! Mesh Operations. Each is applied to the parts it names whenever they are meshed anew, and
 //! it can be edited or deleted later, which undoes it on the mesh there is.
 
-use plx_mesh::{FaceRenumbering, FeMesh, MeshTransform};
+use std::collections::BTreeSet;
+
+use plx_mesh::{ElementId, FaceRenumbering, FeMesh, MeshTransform};
 use serde::{Deserialize, Serialize};
 
 use crate::FeModel;
@@ -34,29 +36,67 @@ impl MeshOperationKind {
 }
 
 impl MeshOperation {
-    /// The indices of the parts of `mesh` it names; names without a part are left out.
+    /// Whether it names the part or body `name`, or with `compound` the compound part
+    /// that joins it.
+    fn names(&self, name: &str, compound: Option<&str>) -> bool {
+        (self.parts.iter()).any(|n| n == name || compound.is_some_and(|c| n == c))
+    }
+
+    /// The indices of the parts of `mesh` it changes: the parts it names, and the compound
+    /// parts of bodies it names; names without a part are left out.
     pub fn part_indices(&self, mesh: &FeMesh) -> Vec<usize> {
         (mesh.parts.iter().enumerate())
-            .filter(|(_, p)| self.parts.contains(&p.name))
+            .filter(|(_, p)| {
+                self.names(&p.name, None) || p.bodies.iter().any(|b| self.names(&b.name, None))
+            })
             .map(|(i, _)| i)
             .collect()
     }
 
-    /// Applies the operation to the parts of `mesh` it names; returns where the faces of
-    /// elements went that it turned inside out.
-    pub fn apply(&self, mesh: &mut FeMesh) -> FaceRenumbering {
-        let parts = self.part_indices(mesh);
+    /// The elements of `mesh` it changes: of the parts it names, and of the bodies it names
+    /// of compound parts. Gmsh meshes a compound part as the parts of the geometry it joins,
+    /// `compounds` as (name, members) like [`crate::Geometry::compound_members`]: an
+    /// operation on the compound changes those parts.
+    pub fn elements(
+        &self,
+        mesh: &FeMesh,
+        compounds: &[(String, Vec<String>)],
+    ) -> BTreeSet<ElementId> {
+        let compound_of = |part: &str| {
+            (compounds.iter())
+                .find(|(_, members)| members.iter().any(|m| m.eq_ignore_ascii_case(part)))
+                .map(|(name, _)| name.as_str())
+        };
+        let mut elements = BTreeSet::new();
+        for part in &mesh.parts {
+            if self.names(&part.name, compound_of(&part.name)) {
+                elements.extend(part.elements.iter().copied());
+                continue;
+            }
+            for body in part.bodies.iter().filter(|b| self.names(&b.name, None)) {
+                elements.extend(body.elements.iter().copied());
+            }
+        }
+        elements
+    }
+
+    /// Applies the operation to what of `mesh` it names, see [`Self::elements`]; returns
+    /// where the faces of elements went that it turned inside out.
+    pub fn apply(&self, mesh: &mut FeMesh, compounds: &[(String, Vec<String>)]) -> FaceRenumbering {
+        let elements = self.elements(mesh, compounds);
         match &self.kind {
-            MeshOperationKind::Transform(transform) => mesh.transform_parts(&parts, transform),
+            MeshOperationKind::Transform(transform) => {
+                mesh.transform_elements(&elements, transform)
+            }
         }
     }
 
-    /// Takes the operation back on the parts of `mesh` it names, see [`Self::apply`].
+    /// Takes the operation back on what of `mesh` it names, see [`Self::apply`].
     pub fn undo(&self, mesh: &mut FeMesh) -> FaceRenumbering {
-        let parts = self.part_indices(mesh);
+        let elements = self.elements(mesh, &[]);
         match &self.kind {
             MeshOperationKind::Transform(transform) => {
-                mesh.transform_parts(&parts, &transform.inverse())
+                mesh.transform_elements(&elements, &transform.inverse())
             }
         }
     }
@@ -77,10 +117,42 @@ impl MeshOperation {
 
 impl FeModel {
     /// Applies the mesh operations to a mesh made anew, e.g. the meshes of parts Gmsh just
-    /// made: each operation acts on those of its parts the mesh has.
-    pub fn apply_mesh_operations(&self, mesh: &mut FeMesh) {
+    /// made: each operation acts on those of its parts the mesh has, see
+    /// [`MeshOperation::elements`] for `compounds`.
+    pub fn apply_mesh_operations(&self, mesh: &mut FeMesh, compounds: &[(String, Vec<String>)]) {
         for operation in &self.mesh_operations {
-            operation.apply(mesh);
+            operation.apply(mesh, compounds);
+        }
+    }
+
+    /// Follows the compound parts changed from `before` to `after` (as (name, members)) in
+    /// the mesh operations: one that names a compound part dissolved or joining other parts
+    /// now names the parts it joined, which it moved, and one that names a part joined into
+    /// a compound keeps naming it alone. Call it after the other changes of names, e.g.
+    /// [`Self::rename_part`], that the compounds bring.
+    pub fn follow_compounds_in_mesh_operations(
+        &mut self,
+        operations: Vec<MeshOperation>,
+        before: &[(String, Vec<String>)],
+        after: &[(String, Vec<String>)],
+    ) {
+        let same = |name: &str, members: &[String]| {
+            (after.iter()).any(|(n, m)| n == name && m.as_slice() == members)
+        };
+        self.mesh_operations = operations;
+        for operation in &mut self.mesh_operations {
+            let mut parts = Vec::new();
+            for name in &operation.parts {
+                match before.iter().find(|(n, _)| n == name) {
+                    Some((_, members)) if !same(name, members) => {
+                        parts.extend(members.iter().cloned())
+                    }
+                    _ => parts.push(name.clone()),
+                }
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            parts.retain(|name| seen.insert(name.clone()));
+            operation.parts = parts;
         }
     }
 
@@ -98,7 +170,7 @@ impl FeModel {
             self.renumber_faces(&faces);
         }
         for operation in &operations[same..] {
-            let faces = operation.apply(mesh);
+            let faces = operation.apply(mesh, &[]);
             self.renumber_faces(&faces);
         }
         self.mesh_operations = operations;
@@ -191,7 +263,7 @@ mod tests {
 
         // A mesh made anew gets the same.
         let mut fresh = original.clone();
-        fe.apply_mesh_operations(&mut fresh);
+        fe.apply_mesh_operations(&mut fresh, &[]);
         for id in 1..=8 {
             assert!(close(fresh.node(id).unwrap(), mesh.node(id).unwrap()));
         }

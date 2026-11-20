@@ -56,7 +56,11 @@ Selecting one highlights its parts.
 
 #screenshot("transform-exposed.png", [The distance dX of a transform exposed as a parameter])
 
-A mesh operation names its parts; a part renamed under #ui("Mesh") stays in it. An analysis that
+A mesh operation names its parts; a part renamed under #ui("Mesh") stays in it. A transform of
+a compound part (@compound-parts) moves all its bodies, also when only one of them is meshed
+again. A part transformed on its own and then joined into a compound stays the only part the
+transform moves; a transformed compound that is dissolved or changed passes the transform on
+to the parts it joined. An analysis that
 takes its mesh from another one by a link takes its mesh operations too; change them in the
 analysis the mesh comes from.
 
