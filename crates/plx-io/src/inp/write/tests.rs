@@ -12023,8 +12023,9 @@ fn the_analysis_knows_the_items_it_came_from() {
     );
 }
 
-/// An error of the lowering names the item of the tree it stopped at, also when another
-/// step has an item of the same name.
+/// An error of the lowering names the item of the tree it stopped at by its id, in the step
+/// it stopped at: the copy of a step keeps the ids of its items, as an item acting in several
+/// steps does.
 #[test]
 fn a_lowering_error_names_its_item() {
     use plx_model::ModelItem;

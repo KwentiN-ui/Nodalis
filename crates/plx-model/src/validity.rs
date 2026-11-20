@@ -46,113 +46,55 @@ pub struct Invalid {
 }
 
 impl FeModel {
-    /// The item named `name`, for an error of the lowering that names the item it was
-    /// lowering: the items of `step` first (boundary conditions and loads of different steps
-    /// may share names), then those of the model, then those of any step.
-    pub fn item_named(&self, name: &str, step: Option<usize>) -> Option<ModelItem> {
-        let in_step = |s: usize| -> Option<ModelItem> {
-            let step = self.steps.get(s)?;
-            let position = |names: &mut dyn Iterator<Item = &String>| {
-                Iterator::position(&mut &mut *names, |n| n == name)
-            };
-            if let Some(i) = position(&mut step.boundary_conditions.iter().map(|b| &b.name)) {
+    /// The item of the tree with id `id`, for an error of the lowering that names the item
+    /// it was lowering: in the step with id `step` first, since an item of a step acts in
+    /// the steps after it by the same id.
+    pub fn item_with_id(
+        &self,
+        id: crate::Id,
+        step: Option<crate::Id<crate::Step>>,
+    ) -> Option<ModelItem> {
+        fn at<T, U>(items: &[T], id: crate::Id, of: impl Fn(&T) -> crate::Id<U>) -> Option<usize> {
+            items.iter().position(|x| of(x).any() == id)
+        }
+        let first = (self.steps.iter()).position(|s| Some(s.id) == step);
+        let order = first
+            .into_iter()
+            .chain((0..self.steps.len()).filter(|&s| Some(s) != first));
+        for s in order {
+            let step = &self.steps[s];
+            if step.id.any() == id {
+                return Some(ModelItem::Step(s));
+            }
+            if let Some(i) = at(&step.boundary_conditions, id, |b| b.id) {
                 return Some(ModelItem::BoundaryCondition(s, i));
             }
-            if let Some(i) = position(&mut step.loads.iter().map(|l| &l.name)) {
+            if let Some(i) = at(&step.loads, id, |l| l.id) {
                 return Some(ModelItem::Load(s, i));
             }
-            let history = self.step_history_outputs(s);
-            if let Some(i) = position(&mut history.iter().map(|o| &o.name)) {
-                return Some(ModelItem::HistoryOutput(s, i));
-            }
-            if let Some(i) = position(&mut step.defined_fields.iter().map(|f| &f.name)) {
+            if let Some(i) = at(&step.defined_fields, id, |f| f.id) {
                 return Some(ModelItem::DefinedField(s, i));
             }
-            None
-        };
-        if let Some(item) = step.and_then(in_step) {
-            return Some(item);
+            if let Some(i) = self
+                .step_history_outputs(s)
+                .iter()
+                .position(|o| o.id.any() == id)
+            {
+                return Some(ModelItem::HistoryOutput(s, i));
+            }
         }
-        let find = |names: &mut dyn Iterator<Item = &str>, item: fn(usize) -> ModelItem| {
-            Iterator::position(&mut &mut *names, |n| n == name).map(item)
-        };
-        find(
-            &mut self.sections.iter().map(|x| x.name.as_str()),
-            ModelItem::Section,
-        )
-        .or_else(|| {
-            find(
-                &mut self.materials.iter().map(|x| x.name.as_str()),
-                ModelItem::Material,
-            )
-        })
-        .or_else(|| {
-            find(
-                &mut self.constraints.iter().map(|x| x.name()),
-                ModelItem::Constraint,
-            )
-        })
-        .or_else(|| {
-            find(
-                &mut self.ties.iter().map(|x| x.name.as_str()),
-                ModelItem::Tie,
-            )
-        })
-        .or_else(|| {
-            find(
-                &mut self.node_ties.iter().map(|x| x.name.as_str()),
-                ModelItem::NodeTie,
-            )
-        })
-        .or_else(|| {
-            find(
-                &mut self.contact_pairs.iter().map(|x| x.name.as_str()),
-                ModelItem::ContactPair,
-            )
-        })
-        .or_else(|| {
-            find(
-                &mut self.contact_regions.iter().map(|x| x.name.as_str()),
-                ModelItem::ContactRegion,
-            )
-        })
-        .or_else(|| {
-            find(
-                &mut self.bolts.iter().map(|x| x.name.as_str()),
-                ModelItem::Bolt,
-            )
-        })
-        .or_else(|| {
-            find(
-                &mut self.amplitudes.iter().map(|x| x.name.as_str()),
-                ModelItem::Amplitude,
-            )
-        })
-        .or_else(|| {
-            find(
-                &mut self.distributions.iter().map(|x| x.name.as_str()),
-                ModelItem::Distribution,
-            )
-        })
-        .or_else(|| {
-            find(
-                &mut self.initial_conditions.iter().map(|x| x.name.as_str()),
-                ModelItem::InitialCondition,
-            )
-        })
-        .or_else(|| {
-            find(
-                &mut self.cross_sections.iter().map(|x| x.name.as_str()),
-                ModelItem::CrossSection,
-            )
-        })
-        .or_else(|| (0..self.steps.len()).find_map(in_step))
-        .or_else(|| {
-            find(
-                &mut self.steps.iter().map(|x| x.name.as_str()),
-                ModelItem::Step,
-            )
-        })
+        None.or_else(|| at(&self.sections, id, |x| x.id).map(ModelItem::Section))
+            .or_else(|| at(&self.materials, id, |x| x.id).map(ModelItem::Material))
+            .or_else(|| at(&self.constraints, id, |x| x.id()).map(ModelItem::Constraint))
+            .or_else(|| at(&self.ties, id, |x| x.id).map(ModelItem::Tie))
+            .or_else(|| at(&self.node_ties, id, |x| x.id).map(ModelItem::NodeTie))
+            .or_else(|| at(&self.contact_pairs, id, |x| x.id).map(ModelItem::ContactPair))
+            .or_else(|| at(&self.contact_regions, id, |x| x.id).map(ModelItem::ContactRegion))
+            .or_else(|| at(&self.bolts, id, |x| x.id).map(ModelItem::Bolt))
+            .or_else(|| at(&self.amplitudes, id, |x| x.id).map(ModelItem::Amplitude))
+            .or_else(|| at(&self.distributions, id, |x| x.id).map(ModelItem::Distribution))
+            .or_else(|| at(&self.initial_conditions, id, |x| x.id).map(ModelItem::InitialCondition))
+            .or_else(|| at(&self.cross_sections, id, |x| x.id).map(ModelItem::CrossSection))
     }
 
     /// Items that refer to materials, parts, sets or mesh entities that do not exist.
