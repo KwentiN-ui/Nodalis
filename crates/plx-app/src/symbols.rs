@@ -52,12 +52,12 @@ pub enum Kind {
     Boundary(BoundaryKind),
     /// A rigid body driven by the reference point.
     RigidBody {
-        reference_point: plx_model::Id,
+        reference_point: plx_model::Id<plx_model::ReferencePoint>,
     },
     /// A point mass: a ball at its reference point, with the lines of a rigid body from the
     /// selection that carries it.
     PointMass {
-        reference_point: plx_model::Id,
+        reference_point: plx_model::Id<plx_model::ReferencePoint>,
     },
     /// Springs with their stiffness K1..K3, to ground or to a surface.
     Spring {
@@ -124,10 +124,10 @@ pub struct Item {
     pub region: Region,
     /// The coordinate system the components of a force, moment or excitation are given in;
     /// `None` is the global one.
-    pub system: Option<plx_model::Id>,
+    pub system: Option<plx_model::Id<plx_model::CoordinateSystem>>,
     /// The distribution a pressure or temperature is scaled by: its arrows or balls are
     /// drawn as large as the factor where they are.
-    pub distribution: Option<plx_model::Id>,
+    pub distribution: Option<plx_model::Id<plx_model::Distribution>>,
     /// Selected in the tree or edited in a dialog: drawn in the highlight colour.
     pub selected: bool,
 }
@@ -184,7 +184,8 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
         };
         // Components of a force or moment in the load's coordinate system, in global
         // directions at a point.
-        let system = (item.system).and_then(|id| model.fe.coordinate_system_or_global(Some(id)));
+        let system =
+            (item.system).and_then(|id| model.fe.coordinate_system_or_global(Some(id.cast())));
         let cylindrical = system
             .as_ref()
             .is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
@@ -206,7 +207,7 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
         // The factors of the item's distribution, relative to the largest one over the
         // region, and the arrows or balls it scales.
         let sampler = (item.distribution)
-            .and_then(|id| model.fe.distribution(id))
+            .and_then(|id| model.fe.distribution(id.cast()))
             .and_then(|d| d.sampler(&model.fe.coordinate_systems).ok());
         let scaled = |points: &[DVec3]| -> Option<(Vec<f64>, f64, Vec<usize>)> {
             let sampler = sampler.as_ref()?;

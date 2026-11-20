@@ -173,10 +173,16 @@ fn used_features<'a>(
         let names = [
             points
                 .iter()
-                .map(|p| (&p.id, format!("{p:?}")))
+                .map(|p| (p.id.any(), format!("{p:?}")))
                 .collect::<Vec<_>>(),
-            systems.iter().map(|c| (&c.id, format!("{c:?}"))).collect(),
-            planes.iter().map(|p| (&p.id, format!("{p:?}"))).collect(),
+            systems
+                .iter()
+                .map(|c| (c.id.any(), format!("{c:?}")))
+                .collect(),
+            planes
+                .iter()
+                .map(|p| (p.id.any(), format!("{p:?}")))
+                .collect(),
         ];
         for (kind, items) in names.iter().enumerate() {
             for (i, (id, written)) in items.iter().enumerate() {

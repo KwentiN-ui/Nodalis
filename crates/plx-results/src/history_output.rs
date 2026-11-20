@@ -66,7 +66,7 @@ pub enum HistoryOutputKind {
         /// The hot spot, by id.
         hot_spot: plx_model::Id,
         /// The moving load whose position the values go with, by the id of one of its loads.
-        moving_load: Option<plx_model::Id>,
+        moving_load: Option<plx_model::Id<plx_model::Load>>,
     },
 }
 

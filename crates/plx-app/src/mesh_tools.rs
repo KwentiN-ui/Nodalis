@@ -122,7 +122,7 @@ pub enum MeshToolResult {
 pub struct MeshToolDialog {
     tool: MeshTool,
     /// The id of the mesh operation: of the one edited, or of the new one.
-    id: plx_model::Id,
+    id: plx_model::Id<plx_model::MeshOperation>,
     /// Name of the mesh operation.
     name: String,
     /// The parts the mesh operation changes, by id.

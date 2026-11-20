@@ -52,10 +52,11 @@ impl FeModel {
         if !c.from.has_units() || !c.to.has_units() {
             return notes;
         }
-        let cylindrical: Vec<Option<crate::Id>> = (self.coordinate_systems.iter())
-            .filter(|s| s.kind == crate::CoordinateSystemKind::Cylindrical)
-            .map(|s| Some(s.id))
-            .collect();
+        let cylindrical: Vec<Option<crate::Id<crate::CoordinateSystem>>> =
+            (self.coordinate_systems.iter())
+                .filter(|s| s.kind == crate::CoordinateSystemKind::Cylindrical)
+                .map(|s| Some(s.id))
+                .collect();
         for material in &mut self.materials {
             material.convert_units(&c);
         }
@@ -375,10 +376,11 @@ impl FeModel {
     /// and result paths, and the axis of cyclic symmetry.
     pub fn convert_features(&mut self, c: &Conversion) {
         let length = |p: &mut [f64; 3]| c.all(p, Quantity::Length);
-        let cylindrical: Vec<Option<crate::Id>> = (self.coordinate_systems.iter())
-            .filter(|s| s.kind == crate::CoordinateSystemKind::Cylindrical)
-            .map(|s| Some(s.id))
-            .collect();
+        let cylindrical: Vec<Option<crate::Id<crate::CoordinateSystem>>> =
+            (self.coordinate_systems.iter())
+                .filter(|s| s.kind == crate::CoordinateSystemKind::Cylindrical)
+                .map(|s| Some(s.id))
+                .collect();
         for point in &mut self.reference_points {
             length(&mut point.position);
             if let crate::PointDefinition::Local {

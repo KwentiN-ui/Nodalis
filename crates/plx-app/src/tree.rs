@@ -2745,7 +2745,8 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
         // lights it up in the earlier ones too.
         for (s, step) in fe.steps.iter().enumerate() {
             for (i, &id) in step.history_outputs.iter().enumerate() {
-                tree.history_links.insert(TreeItem::HistoryOutput(s, i), id);
+                tree.history_links
+                    .insert(TreeItem::HistoryOutput(s, i), id.any());
             }
         }
         tree.branch(ui, steps, text, true, |tree, ui| {

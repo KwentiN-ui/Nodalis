@@ -95,7 +95,7 @@ pub enum FieldOutputKind {
     CoordinateSystemTransform {
         field: String,
         /// The system, by id.
-        coordinate_system: plx_model::Id,
+        coordinate_system: plx_model::Id<plx_model::CoordinateSystem>,
     },
     /// The principal direction of a tensor field as a vector field: X, Y and Z of the unit
     /// vector, VALUE the principal value with its sign and ALL its magnitude.

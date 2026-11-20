@@ -57,7 +57,7 @@ impl ContactRegion {
     /// before it.
     pub fn state_in(&self, step: &Step, before: ContactState) -> ContactState {
         (step.contact_changes.iter())
-            .filter(|c| c.region == self.id)
+            .filter(|c| c.region == self.id.any())
             .fold(before, ContactState::changed)
     }
 
@@ -65,7 +65,7 @@ impl ContactRegion {
     fn changes<'a>(&'a self, steps: &'a [Step]) -> impl Iterator<Item = &'a ContactChange> {
         (steps.iter().filter(|s| s.active))
             .flat_map(|s| &s.contact_changes)
-            .filter(|c| c.region == self.id)
+            .filter(|c| c.region == self.id.any())
     }
 
     /// Whether a step switches the region off or on.
@@ -81,7 +81,7 @@ impl ContactRegion {
             .filter_map(|&id| outputs.iter().find(|o| o.id == id))
             .any(|o| {
                 o.active
-                    && matches!(&o.kind, crate::HistoryKind::Contact { pair } if *pair == Some(self.id))
+                    && matches!(&o.kind, crate::HistoryKind::Contact { pair } if *pair == Some(self.id.any()))
             })
     }
 
@@ -137,16 +137,16 @@ mod tests {
             active: false,
             ..before
         };
-        steps[0].set_contact_state(region.id, before, off);
+        steps[0].set_contact_state(region.id.any(), before, off);
         assert_eq!(steps[0].contact_changes[0].friction, None);
         // Step-2 follows on the change of Step-1.
         assert_eq!(region.state_after(&steps), off);
         assert!(region.switched(&steps) && !region.friction_changed(&steps));
         // Back to what it was: no change left.
-        steps[0].set_contact_state(region.id, before, before);
+        steps[0].set_contact_state(region.id.any(), before, before);
         assert!(steps[0].contact_changes.is_empty());
         // A deactivated step changes nothing.
-        steps[1].set_contact_state(region.id, before, off);
+        steps[1].set_contact_state(region.id.any(), before, off);
         steps[1].active = false;
         assert_eq!(region.state_after(&steps), before);
     }

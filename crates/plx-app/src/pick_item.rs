@@ -2,19 +2,19 @@
 //! follows the item when it is renamed.
 
 use egui::Ui;
-use plx_model::{FeModel, GLOBAL, Id};
+use plx_model::{CoordinateSystem, FeModel, GLOBAL, Id};
 
 /// Chooses among `items`, given by id and name; `none` names the choice of no item, which
 /// the list leaves out without it. Returns whether the choice changed.
-pub fn item_combo<'a>(
+pub fn item_combo<'a, T: ?Sized>(
     ui: &mut Ui,
     salt: impl std::hash::Hash + std::fmt::Debug,
-    chosen: &mut Option<Id>,
-    items: impl IntoIterator<Item = (Id, &'a str)>,
+    chosen: &mut Option<Id<T>>,
+    items: impl IntoIterator<Item = (Id<T>, &'a str)>,
     none: Option<&str>,
     width: f32,
 ) -> bool {
-    let items: Vec<(Id, &str)> = items.into_iter().collect();
+    let items: Vec<(Id<T>, &str)> = items.into_iter().collect();
     let shown = match *chosen {
         None => none.unwrap_or_default().to_string(),
         Some(id) => (items.iter().find(|(i, _)| *i == id))
@@ -39,12 +39,12 @@ pub fn item_combo<'a>(
 pub fn system_combo(
     ui: &mut Ui,
     salt: impl std::hash::Hash + std::fmt::Debug,
-    system: &mut Option<Id>,
+    system: &mut Option<Id<CoordinateSystem>>,
     fe: &FeModel,
     width: f32,
 ) -> bool {
     // Systems that move with a selection are marked.
-    let labels: Vec<(Id, String)> = (fe.coordinate_systems.iter())
+    let labels: Vec<(Id<CoordinateSystem>, String)> = (fe.coordinate_systems.iter())
         .map(|c| match c.moves(&fe.coordinate_systems) {
             true => (c.id, format!("{} (moving)", c.name)),
             false => (c.id, c.name.clone()),

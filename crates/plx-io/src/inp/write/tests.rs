@@ -82,11 +82,11 @@ fn stamp(mesh: &mut FeMesh) {
 
 /// The id of the test items called `name`, the same for all of them: a test refers to an
 /// item by its name, also before the item is made.
-fn named(name: &str) -> plx_model::Id {
+fn named<T: ?Sized>(name: &str) -> plx_model::Id<T> {
     use std::collections::HashMap;
     use std::sync::{LazyLock, Mutex};
     static IDS: LazyLock<Mutex<HashMap<String, plx_model::Id>>> = LazyLock::new(Default::default);
-    *(IDS.lock().unwrap().entry(name.into())).or_default()
+    (*(IDS.lock().unwrap().entry(name.into())).or_default()).cast()
 }
 
 /// The analysis the solver takes of the model.
@@ -10638,7 +10638,7 @@ fn detection_rules_give_the_pairs_their_type_and_the_lower_detection_wins() {
         .include
         .push(PartTerm::Group(group));
     model.part_groups.clear();
-    model.forget_in_filters(group);
+    model.forget_in_filters(group.any());
     assert!(model.contact_detections[0].scope.is_all());
     // A renamed part stays in the filters, which name it by id.
     let lower = mesh.ids_of(&["LOWER"]);
@@ -11188,7 +11188,7 @@ fn long_set_names_fit_the_exported_text() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Frictionless);
     let long = "Bonded - SPUR_GEAR__20_TEETH, SPUR_GEAR__60_TEETH-2 to SPUR_GEAR__20_TEETH-2";
     model.contact_regions[0].name = long.to_string();
-    let mut output = HistoryOutput::contact("CH_Output-1", Some(model.contact_regions[0].id));
+    let mut output = HistoryOutput::contact("CH_Output-1", Some(model.contact_regions[0].id.any()));
     output.variables = plx_model::history_variables(&["CF"]);
     model.put_history_output(0, output);
     let text = write_inp(&mesh, &model, "").unwrap();

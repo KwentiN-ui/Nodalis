@@ -2230,7 +2230,13 @@ mod tests {
         let mesh = read_inp(&root.join("testdata/block_c3d20r.inp"))
             .unwrap()
             .mesh;
-        let [rp, plane, interaction, region, detection] = [(); 5].map(|_| plx_model::Id::new());
+        let (rp, plane, interaction, region, detection) = (
+            plx_model::Id::new(),
+            plx_model::Id::new(),
+            plx_model::Id::new(),
+            plx_model::Id::<plx_model::ContactRegion>::new(),
+            plx_model::Id::new(),
+        );
         let model = FeModel {
             bolts: Vec::new(),
             field_output: plx_model::FieldOutput {
@@ -2253,7 +2259,7 @@ mod tests {
                 Step::new_static("Step-1"),
                 Step {
                     contact_changes: vec![plx_model::ContactChange {
-                        region,
+                        region: region.any(),
                         active: Some(false),
                         friction: Some(0.3),
                     }],

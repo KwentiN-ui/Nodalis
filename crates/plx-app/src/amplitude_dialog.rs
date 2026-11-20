@@ -273,7 +273,7 @@ pub fn amplitude_row(
     ui: &mut Ui,
     label: &str,
     id: &str,
-    reference: &mut Option<plx_model::Id>,
+    reference: &mut Option<plx_model::Id<plx_model::Amplitude>>,
     fe: &FeModel,
 ) {
     amplitude_row_with(ui, label, id, reference, fe, |_| {});
@@ -285,7 +285,7 @@ pub fn amplitude_row_with(
     ui: &mut Ui,
     label: &str,
     id: &str,
-    reference: &mut Option<plx_model::Id>,
+    reference: &mut Option<plx_model::Id<plx_model::Amplitude>>,
     fe: &FeModel,
     extra: impl FnOnce(&mut Ui),
 ) {

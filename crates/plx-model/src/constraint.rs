@@ -16,7 +16,7 @@ use crate::{Region, RemoteBehavior};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NodeTie {
     /// The internal identity others refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub active: bool,
     pub region: Region,
@@ -25,7 +25,7 @@ pub struct NodeTie {
     pub rotations: bool,
     /// The contact detection that found the tie at line ends; `None` for one made by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detected_by: Option<crate::Id>,
+    pub detected_by: Option<crate::Id<crate::ContactDetection>>,
     /// Changed by the user after its detection: detecting again keeps it as it is.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub edited: bool,
@@ -53,20 +53,20 @@ impl NodeTie {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RigidBody {
     /// The internal identity others refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub active: bool,
     /// Hidden constraints have no symbol in the 3D view unless selected.
     pub visible: bool,
     pub region: Region,
     /// The reference point ([`crate::ReferencePoint`]) the body is driven by.
-    pub reference_point: crate::Id,
+    pub reference_point: crate::Id<crate::ReferencePoint>,
     /// Whether the selection keeps its shape or the point follows its mean motion.
     pub behavior: RemoteBehavior,
 }
 
 impl RigidBody {
-    pub fn new(name: impl Into<String>, reference_point: crate::Id) -> Self {
+    pub fn new(name: impl Into<String>, reference_point: crate::Id<crate::ReferencePoint>) -> Self {
         Self {
             id: crate::Id::new(),
             name: name.into(),
@@ -87,7 +87,7 @@ impl RigidBody {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PointMass {
     /// The internal identity others refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub active: bool,
     /// Hidden constraints have no symbol in the 3D view unless selected.
@@ -95,7 +95,7 @@ pub struct PointMass {
     /// The selection that carries the mass; unused when a rigid body couples the point.
     pub region: Region,
     /// The reference point ([`crate::ReferencePoint`]) the mass sits at.
-    pub reference_point: crate::Id,
+    pub reference_point: crate::Id<crate::ReferencePoint>,
     /// How the selection carries the point.
     pub behavior: RemoteBehavior,
     pub mass: f64,
@@ -113,7 +113,7 @@ pub struct PointMass {
 pub struct RotaryInertia {
     /// The coordinate system of the axes; `None` is the global one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system: Option<crate::Id>,
+    pub system: Option<crate::Id<crate::CoordinateSystem>>,
     pub tensor: [f64; 6],
 }
 
@@ -180,7 +180,7 @@ fn symmetric_eigenvalues(m: [[f64; 3]; 3]) -> [f64; 3] {
 }
 
 impl PointMass {
-    pub fn new(name: impl Into<String>, reference_point: crate::Id) -> Self {
+    pub fn new(name: impl Into<String>, reference_point: crate::Id<crate::ReferencePoint>) -> Self {
         Self {
             id: crate::Id::new(),
             name: name.into(),
@@ -271,7 +271,7 @@ pub enum SpringLayout<'a> {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Spring {
     /// The internal identity others refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub active: bool,
     /// Hidden constraints have no symbol in the 3D view unless selected.
@@ -530,7 +530,7 @@ impl JointAxis {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Joint {
     /// The internal identity others refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub active: bool,
     /// Hidden constraints have no symbol in the 3D view unless selected.
@@ -543,7 +543,7 @@ pub struct Joint {
     pub behavior: crate::RemoteBehavior,
     /// Coordinate system of the location and the joint directions; `None` is the global
     /// one.
-    pub system: Option<crate::Id>,
+    pub system: Option<crate::Id<crate::CoordinateSystem>>,
     /// Coordinates of the joint in `system`; `None` is the centre of the first end (of the
     /// second with ground as the first).
     pub location: Option<[f64; 3]>,
@@ -665,7 +665,7 @@ impl crate::FeModel {
 pub struct CompressionOnly {
     /// The internal identity a contact history output refers to; the user sees only the
     /// name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub active: bool,
     /// Hidden constraints have no symbol in the 3D view unless selected.

@@ -11,7 +11,7 @@ use crate::{Id, ValueKind};
 /// reads. Links name the column by its id, so that renaming it keeps them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StudyColumn {
-    pub id: Id,
+    pub id: Id<Self>,
     pub name: String,
     /// The kind of number of an input, taken from the first parameter it was linked to;
     /// `None` for outputs, which show the units of their source.
@@ -188,7 +188,12 @@ impl StudyTable {
 
     /// Adds an input column of `kind`; every point gives it `value`, the value of what it
     /// was linked to, and a table without points gets its current point. Returns its id.
-    pub fn add_input(&mut self, name: &str, kind: Option<ValueKind>, value: f64) -> Id {
+    pub fn add_input(
+        &mut self,
+        name: &str,
+        kind: Option<ValueKind>,
+        value: f64,
+    ) -> Id<StudyColumn> {
         let id = Id::new();
         self.inputs.push(StudyColumn {
             id,
@@ -208,7 +213,7 @@ impl StudyTable {
 
     /// Adds an output column; the points solved before have no value for it yet. Returns
     /// its id.
-    pub fn add_output(&mut self, name: &str) -> Id {
+    pub fn add_output(&mut self, name: &str) -> Id<StudyColumn> {
         let id = Id::new();
         self.outputs.push(StudyColumn {
             id,

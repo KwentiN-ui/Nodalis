@@ -156,7 +156,7 @@ fn lower_whole(
             ));
         }
         walls.push(WallSource {
-            id: body.id,
+            id: body.id.any(),
             name: body.name.clone(),
             parts,
             constraint: Some(c),
@@ -176,7 +176,7 @@ fn lower_whole(
             continue;
         }
         walls.push(WallSource {
-            id: bc.id,
+            id: bc.id.any(),
             name: bc.name.clone(),
             parts,
             constraint: None,
@@ -235,13 +235,13 @@ fn lower_whole(
                     Some(ModelItem::Section(s)),
                 )
             })?;
-        let solver_material = match material_index.get(&material.id) {
+        let solver_material = match material_index.get(&material.id.any()) {
             Some(&i) => i,
             None => {
                 let law = particle_material(material)
                     .map_err(|e| error(e, Some(ModelItem::Material(m))))?;
                 model.materials.push(law);
-                material_index.insert(material.id, model.materials.len() - 1);
+                material_index.insert(material.id.any(), model.materials.len() - 1);
                 model.materials.len() - 1
             }
         };
@@ -396,7 +396,7 @@ fn lower_whole(
         }
     }
     // Boundary conditions move the rigid bodies at their reference points, and nothing else.
-    let drivers: BTreeSet<plx_model::Id> = (walls.iter())
+    let drivers: BTreeSet<plx_model::Id<plx_model::ReferencePoint>> = (walls.iter())
         .filter_map(|w| match &fe.constraints[w.constraint?] {
             Constraint::RigidBody(body) => Some(body.reference_point),
             _ => None,

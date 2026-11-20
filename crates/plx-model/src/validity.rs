@@ -480,12 +480,12 @@ impl FeModel {
     }
 
     /// The reference point, if the model does not have it.
-    fn missing_reference_point(&self, id: Id) -> Option<String> {
+    fn missing_reference_point(&self, id: Id<crate::ReferencePoint>) -> Option<String> {
         (self.reference_point(id).is_none()).then(|| "The reference point does not exist".into())
     }
 
     /// The rigid body that couples a reference point, if one does.
-    pub fn rigid_body_of(&self, point: Id) -> Option<&crate::RigidBody> {
+    pub fn rigid_body_of(&self, point: Id<crate::ReferencePoint>) -> Option<&crate::RigidBody> {
         self.constraints.iter().find_map(|c| match c {
             Constraint::RigidBody(body) if body.active && body.reference_point == point => {
                 Some(body)
@@ -607,7 +607,7 @@ impl FeModel {
     }
 
     /// The distribution reference, if the model does not have it.
-    fn missing_distribution(&self, reference: &Option<Id>) -> Option<String> {
+    fn missing_distribution(&self, reference: &Option<Id<crate::Distribution>>) -> Option<String> {
         (*reference)
             .filter(|&id| self.distribution(id).is_none())
             .map(|_| "The distribution does not exist".into())
@@ -616,7 +616,7 @@ impl FeModel {
     /// The first of the amplitude references the model does not have.
     fn missing_amplitude<'a>(
         &self,
-        references: impl IntoIterator<Item = &'a Option<Id>>,
+        references: impl IntoIterator<Item = &'a Option<Id<crate::Amplitude>>>,
     ) -> Option<String> {
         (references.into_iter().flatten())
             .find(|&&id| self.amplitude(id).is_none())

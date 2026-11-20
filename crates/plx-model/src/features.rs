@@ -12,7 +12,7 @@ use crate::{CoordinatePlane, CoordinateSystem, FeModel, Frame, Id, Region, UnitS
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReferencePoint {
-    pub id: Id,
+    pub id: Id<Self>,
     pub name: String,
     /// Position in global coordinates: as entered, or computed from the definition and kept
     /// up to date by [`FeModel::update_reference_points`].
@@ -31,7 +31,7 @@ pub enum PointDefinition {
     /// Coordinates in a coordinate system of the features: x, y, z, or for a cylindrical
     /// one r, θ in degrees, z.
     Local {
-        system: Option<Id>,
+        system: Option<Id<CoordinateSystem>>,
         coordinates: [f64; 3],
     },
     /// The area-weighted centre of selected faces (of edges in 2D models), e.g. the centre
@@ -144,7 +144,7 @@ pub(crate) fn face_centroid(
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PointRef {
     Coordinates([f64; 3]),
-    ReferencePoint(Id),
+    ReferencePoint(Id<ReferencePoint>),
 }
 
 impl PointRef {
@@ -169,7 +169,7 @@ pub enum PlaneSource {
     /// A plane of a coordinate system, or of the global one (`None`), shifted along its
     /// normal.
     CoordinateSystem {
-        system: Option<Id>,
+        system: Option<Id<CoordinateSystem>>,
         plane: CoordinatePlane,
         offset: f64,
     },
@@ -183,7 +183,7 @@ pub const GLOBAL: &str = "Global";
 /// input file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Plane {
-    pub id: Id,
+    pub id: Id<Self>,
     pub name: String,
     pub source: PlaneSource,
     /// A hidden plane has no mark in the 3D view unless selected.
@@ -248,7 +248,7 @@ impl Plane {
 pub struct ResultPlane {
     pub name: String,
     /// The plane feature.
-    pub plane: Id,
+    pub plane: Id<Plane>,
 }
 
 /// A straight path through the model on which results are read, e.g. across a wall: values
@@ -295,13 +295,13 @@ impl ResultPath {
 }
 
 impl FeModel {
-    pub fn reference_point(&self, id: Id) -> Option<&ReferencePoint> {
+    pub fn reference_point(&self, id: Id<ReferencePoint>) -> Option<&ReferencePoint> {
         self.reference_points.iter().find(|r| r.id == id)
     }
 
     /// Whether something besides loads and springs binds the degrees of freedom of a
     /// reference point: a boundary condition on it in an active step, or a joint.
-    pub fn point_bound(&self, id: Id) -> bool {
+    pub fn point_bound(&self, id: Id<ReferencePoint>) -> bool {
         let held = (self.steps.iter().filter(|s| s.active))
             .flat_map(|s| &s.boundary_conditions)
             .any(|bc| bc.active && bc.region.reference_point() == Some(id));
@@ -316,7 +316,7 @@ impl FeModel {
 
     /// Whether an active rigid body (or the coupling of a point mass) drives a reference
     /// point.
-    pub fn point_coupled(&self, id: Id) -> bool {
+    pub fn point_coupled(&self, id: Id<ReferencePoint>) -> bool {
         (self.constraints.iter()).any(|c| {
             c.coupling()
                 .is_some_and(|b| b.active && b.reference_point == id)
@@ -327,7 +327,7 @@ impl FeModel {
     /// an active spring ends on it. The spring then ends on ground at the point, and a
     /// displacement boundary condition on the point moves that ground end, which deflects
     /// the spring from the start.
-    pub fn point_grounded(&self, id: Id) -> bool {
+    pub fn point_grounded(&self, id: Id<ReferencePoint>) -> bool {
         self.reference_point(id).is_some()
             && !self.point_coupled(id)
             && (self.constraints.iter()).any(|c| match c {
@@ -349,20 +349,23 @@ impl FeModel {
     }
 
     /// The reference points [`FeModel::point_grounded`] fixes to the world.
-    pub fn grounded_points(&self) -> Vec<Id> {
+    pub fn grounded_points(&self) -> Vec<Id<ReferencePoint>> {
         (self.reference_points.iter())
             .map(|r| r.id)
             .filter(|&id| self.point_grounded(id))
             .collect()
     }
 
-    pub fn coordinate_system(&self, id: Id) -> Option<&CoordinateSystem> {
+    pub fn coordinate_system(&self, id: Id<CoordinateSystem>) -> Option<&CoordinateSystem> {
         self.coordinate_systems.iter().find(|c| c.id == id)
     }
 
     /// A coordinate system of the features resolved to global coordinates in the undeformed
     /// model, or the global one for `None`; `None` for a missing system.
-    pub fn coordinate_system_or_global(&self, system: Option<Id>) -> Option<Frame> {
+    pub fn coordinate_system_or_global(
+        &self,
+        system: Option<Id<CoordinateSystem>>,
+    ) -> Option<Frame> {
         match system {
             Some(id) => Some(self.coordinate_system(id)?.frame(&self.coordinate_systems)),
             None => Some(Frame::global_system()),
@@ -371,13 +374,13 @@ impl FeModel {
 
     /// The selection a coordinate system moves with, its own or that of a base; `None` for
     /// the global system and systems fixed in space.
-    pub fn system_attachment(&self, system: Option<Id>) -> Option<&Region> {
+    pub fn system_attachment(&self, system: Option<Id<CoordinateSystem>>) -> Option<&Region> {
         self.coordinate_system(system?)?
             .attachment(&self.coordinate_systems)
     }
 
     /// The name of a coordinate system for the GUI and messages: [`GLOBAL`] for `None`.
-    pub fn system_name(&self, system: Option<Id>) -> String {
+    pub fn system_name(&self, system: Option<Id<CoordinateSystem>>) -> String {
         match system {
             None => GLOBAL.to_string(),
             Some(id) => self.coordinate_system(id).map_or_else(
@@ -387,7 +390,7 @@ impl FeModel {
         }
     }
 
-    pub fn plane(&self, id: Id) -> Option<&Plane> {
+    pub fn plane(&self, id: Id<Plane>) -> Option<&Plane> {
         self.planes.iter().find(|p| p.id == id)
     }
 
@@ -428,7 +431,7 @@ impl FeModel {
             before: &[T],
             after: &[T],
             converted: &[T],
-            id: impl Fn(&T) -> Id,
+            id: impl Fn(&T) -> Id<T>,
         ) -> Vec<T> {
             (after.iter().zip(converted))
                 .map(|(item, converted)| {

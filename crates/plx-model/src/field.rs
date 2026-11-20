@@ -200,7 +200,7 @@ pub struct FieldOutput {
     /// global ones; `None` for the global system only. The solver writes global results;
     /// the transformation is made when the results are shown, so that it follows a moving
     /// system.
-    pub system: Option<crate::Id>,
+    pub system: Option<crate::Id<crate::CoordinateSystem>>,
     /// How shells and beams are written.
     pub dimension: OutputDimension,
 }

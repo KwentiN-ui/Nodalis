@@ -18,28 +18,28 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ItemRef {
     Load {
-        step: Id,
-        item: Id,
+        step: Id<crate::Step>,
+        item: Id<crate::Load>,
     },
     BoundaryCondition {
-        step: Id,
-        item: Id,
+        step: Id<crate::Step>,
+        item: Id<crate::BoundaryCondition>,
     },
     DefinedField {
-        step: Id,
-        item: Id,
+        step: Id<crate::Step>,
+        item: Id<crate::DefinedField>,
     },
-    Material(Id),
-    Section(Id),
-    CrossSection(Id),
-    Step(Id),
-    InitialCondition(Id),
+    Material(Id<crate::Material>),
+    Section(Id<crate::Section>),
+    CrossSection(Id<crate::CrossSection>),
+    Step(Id<crate::Step>),
+    InitialCondition(Id<crate::InitialCondition>),
     /// A mesh operation of Mesh > Mesh Operations, such as a transform.
-    MeshOperation(Id),
+    MeshOperation(Id<crate::MeshOperation>),
     /// A distribution, whose variables can be exposed.
-    Distribution(Id),
+    Distribution(Id<crate::Distribution>),
     /// A mesh setup item of the geometry, such as Meshing Parameters or a Local Mesh Size.
-    MeshSetup(Id),
+    MeshSetup(Id<crate::MeshSetupItem>),
     /// The default meshing parameters of the geometry, for the parts no Meshing Parameters
     /// item covers.
     DefaultMeshing,
@@ -65,7 +65,7 @@ impl ItemRef {
     }
 
     /// The step the item is in, or the step itself.
-    pub fn step(&self) -> Option<Id> {
+    pub fn step(&self) -> Option<Id<crate::Step>> {
         match *self {
             Self::Load { step, .. }
             | Self::BoundaryCondition { step, .. }
@@ -451,7 +451,8 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
     let real = |value: &'a mut f64, quantity: Quantity| {
         Some((Slot::Real(value), ValueKind::Quantity(quantity)))
     };
-    let step_of = |fe: &'a mut FeModel, step: Id| fe.steps.iter_mut().find(|s| s.id == step);
+    let step_of =
+        |fe: &'a mut FeModel, step: Id<crate::Step>| fe.steps.iter_mut().find(|s| s.id == step);
     match path.item {
         ItemRef::Load { step, item } => {
             let load = (step_of(fe, step)?.loads.iter_mut()).find(|l| l.id == item)?;
@@ -459,10 +460,11 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
         }
         ItemRef::BoundaryCondition { step, item } => {
             // The angle of a location in a cylindrical system is in degrees, no quantity.
-            let cylindrical: Vec<Option<crate::Id>> = (fe.coordinate_systems.iter())
-                .filter(|c| c.kind == crate::CoordinateSystemKind::Cylindrical)
-                .map(|c| Some(c.id))
-                .collect();
+            let cylindrical: Vec<Option<crate::Id<crate::CoordinateSystem>>> =
+                (fe.coordinate_systems.iter())
+                    .filter(|c| c.kind == crate::CoordinateSystemKind::Cylindrical)
+                    .map(|c| Some(c.id))
+                    .collect();
             let bc = (step_of(fe, step)?.boundary_conditions.iter_mut()).find(|b| b.id == item)?;
             match (&mut bc.kind, field) {
                 (BoundaryKind::Temperature(t), Field::Value) => real(t, Quantity::Temperature),
@@ -917,7 +919,7 @@ impl FeModel {
     /// without copying the whole model.
     fn item_copy(&self, item: &ItemRef) -> Option<FeModel> {
         let mut fe = FeModel::default();
-        let step = |id: Id| self.steps.iter().find(|s| s.id == id).cloned();
+        let step = |id: Id<crate::Step>| self.steps.iter().find(|s| s.id == id).cloned();
         match *item {
             ItemRef::BoundaryCondition { step: id, .. } => {
                 fe.steps.push(step(id)?);
@@ -944,7 +946,7 @@ impl FeModel {
     /// the model does not have it. The items of the mesh setup are named by
     /// [`Geometry::item_name`].
     pub fn item_name(&self, item: &ItemRef) -> Option<&str> {
-        let step = |id: Id| self.steps.iter().find(|s| s.id == id);
+        let step = |id: Id<crate::Step>| self.steps.iter().find(|s| s.id == id);
         Some(match *item {
             ItemRef::Load { step: s, item } => &step(s)?.loads.iter().find(|l| l.id == item)?.name,
             ItemRef::BoundaryCondition { step: s, item } => {

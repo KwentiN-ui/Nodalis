@@ -328,7 +328,7 @@ impl FeatureDialog {
     }
 
     /// The plane whose cut the edited plane result shows.
-    pub fn result_plane(&self) -> Option<plx_model::Id> {
+    pub fn result_plane(&self) -> Option<plx_model::Id<plx_model::Plane>> {
         match &self.draft {
             Draft::ResultPlane(result) => Some(result.plane),
             _ => None,
@@ -1596,7 +1596,10 @@ fn reference_point_rows(
 }
 
 /// The first rigid body constraint a reference point drives.
-fn coupling_of(fe: &FeModel, point: plx_model::Id) -> Option<(usize, &RigidBody)> {
+fn coupling_of(
+    fe: &FeModel,
+    point: plx_model::Id<plx_model::ReferencePoint>,
+) -> Option<(usize, &RigidBody)> {
     (fe.constraints.iter().enumerate()).find_map(|(i, c)| match c {
         Constraint::RigidBody(body) if body.reference_point == point => Some((i, body)),
         _ => None,

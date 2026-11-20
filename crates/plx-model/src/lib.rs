@@ -474,7 +474,7 @@ impl FeModel {
     }
 
     /// The distributions some item uses.
-    pub fn used_distributions(&self) -> std::collections::BTreeSet<Id> {
+    pub fn used_distributions(&self) -> std::collections::BTreeSet<Id<Distribution>> {
         let initial = self.initial_conditions.iter().map(|c| &c.distribution);
         let steps = self.steps.iter().flat_map(|step| {
             (step.boundary_conditions.iter().map(|b| &b.distribution))
@@ -629,7 +629,7 @@ pub struct Material {
     /// material library, whose materials nothing refers to, may hold materials without one:
     /// they get a new one when read, and one copied into a model a new one again.
     #[serde(default)]
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub density: Option<f64>,
     pub elastic: Option<Elastic>,
@@ -831,7 +831,7 @@ pub struct Elastic {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Step {
     /// The internal identity others refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     /// A deactivated step is written to the input file as a comment only.
     pub active: bool,
@@ -839,7 +839,7 @@ pub struct Step {
     pub boundary_conditions: Vec<BoundaryCondition>,
     pub loads: Vec<Load>,
     /// The history outputs of the model the step prints, by id, in their order.
-    pub history_outputs: Vec<Id>,
+    pub history_outputs: Vec<Id<HistoryOutput>>,
     /// Temperatures prescribed for the step.
     pub defined_fields: Vec<DefinedField>,
     /// Contact regions and pairs switched on or off, or given another friction, from this
@@ -1794,7 +1794,7 @@ pub struct ComplexFrequencyStep {
     pub axis: [f64; 3],
     /// A coordinate system whose z axis is the rotation axis, through its origin; `None`
     /// takes [`ComplexFrequencyStep::point`] and [`ComplexFrequencyStep::axis`].
-    pub system: Option<Id>,
+    pub system: Option<Id<CoordinateSystem>>,
     /// The elements that rotate (parts or an element set); no parts picked: the whole
     /// model. Centrifugal forces, stress stiffening, spin softening and Coriolis forces act
     /// on these elements only.
@@ -2143,7 +2143,7 @@ impl Step {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BoundaryCondition {
     /// The internal identity other items refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     /// A deactivated boundary condition is left out of the input file and the 3D view.
     pub active: bool,
@@ -2152,11 +2152,11 @@ pub struct BoundaryCondition {
     pub region: Region,
     pub kind: BoundaryKind,
     /// Amplitude the values follow over time; `None` is CalculiX's default ramp or step.
-    pub amplitude: Option<Id>,
+    pub amplitude: Option<Id<Amplitude>>,
     /// Distribution the value is scaled by over the region; `None` is the same value
     /// everywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distribution: Option<Id>,
+    pub distribution: Option<Id<Distribution>>,
 }
 
 // The tables of a displacement make it larger than the other kinds; there are few
@@ -2287,7 +2287,7 @@ impl BoundaryKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Load {
     /// The internal identity other items refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     /// A deactivated load is left out of the input file and the 3D view.
     pub active: bool,
@@ -2297,10 +2297,10 @@ pub struct Load {
     pub kind: LoadKind,
     /// Amplitude the value follows over time, of a film or radiation its sink temperature;
     /// `None` is CalculiX's default ramp or step.
-    pub amplitude: Option<Id>,
+    pub amplitude: Option<Id<Amplitude>>,
     /// Amplitude of the film coefficient or the emissivity (`FILM AMPLITUDE`,
     /// `RADIATION AMPLITUDE`); other loads have none.
-    pub factor_amplitude: Option<Id>,
+    pub factor_amplitude: Option<Id<Amplitude>>,
     /// A time table per component of the value (force and moment x, y, z; the pressure)
     /// that replaces the component: it follows the table over the step time instead of
     /// the amplitude. See [`LoadKind::table_components`].
@@ -2309,12 +2309,12 @@ pub struct Load {
     /// Distribution the value is scaled by over the region; `None` is the same value
     /// everywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distribution: Option<Id>,
+    pub distribution: Option<Id<Distribution>>,
     /// Coordinate system the components of a force, moment or excitation are given in;
     /// `None` is the global one. A cylindrical system turns them with the position of every
     /// node. See [`LoadKind::takes_system`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system: Option<Id>,
+    pub system: Option<Id<CoordinateSystem>>,
     /// A follower load: under large deformations (`NLGEOM`, explicit dynamics) its
     /// direction turns with the region, by the rigid rotation that fits the motion of the
     /// region's nodes best, or with the rotation of a reference point or of a single beam or
@@ -2554,7 +2554,7 @@ impl GravityDirection {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InitialCondition {
     /// The internal identity others refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     pub active: bool,
     pub region: Region,
@@ -2562,7 +2562,7 @@ pub struct InitialCondition {
     /// Distribution the value is scaled by over the region; `None` is the same value
     /// everywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distribution: Option<Id>,
+    pub distribution: Option<Id<Distribution>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -2624,7 +2624,7 @@ impl InitialConditionKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DefinedField {
     /// The internal identity others refer to; the user sees only the name.
-    pub id: crate::Id,
+    pub id: crate::Id<Self>,
     pub name: String,
     /// A deactivated field is left out of the input file.
     pub active: bool,
@@ -2634,11 +2634,11 @@ pub struct DefinedField {
     pub kind: DefinedFieldKind,
     /// Amplitude a value follows over time; `None` is CalculiX's default ramp. A field
     /// read from a file has none.
-    pub amplitude: Option<Id>,
+    pub amplitude: Option<Id<Amplitude>>,
     /// Distribution the value is scaled by over the region; `None` is the same value
     /// everywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distribution: Option<Id>,
+    pub distribution: Option<Id<Distribution>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2693,11 +2693,11 @@ pub fn next_name<'a>(prefix: &str, existing: impl IntoIterator<Item = &'a str>) 
 
 /// The id the tests give the part or item `name`: the same for the same name.
 #[cfg(test)]
-pub(crate) fn named(name: &str) -> Id {
+pub(crate) fn named<T: ?Sized>(name: &str) -> Id<T> {
     use std::collections::HashMap;
     use std::sync::{LazyLock, Mutex};
     static IDS: LazyLock<Mutex<HashMap<String, Id>>> = LazyLock::new(Default::default);
-    *(IDS.lock().unwrap().entry(name.into())).or_default()
+    (*(IDS.lock().unwrap().entry(name.into())).or_default()).cast()
 }
 
 #[cfg(test)]

@@ -392,7 +392,7 @@ pub struct MeshItemEditor {
     /// The parts of the geometry with their ids, which the item keeps them by.
     part_ids: Vec<plx_model::PartId>,
     /// The id of the edited item, for its exposed parameters.
-    original: Option<plx_model::Id>,
+    original: Option<plx_model::Id<plx_model::MeshSetupItem>>,
     /// The expose buttons of its numbers, see [`Self::set_linked`].
     expose: Option<expose::Scope>,
     /// The exposed parameters of the analysis that value links give, with where from.

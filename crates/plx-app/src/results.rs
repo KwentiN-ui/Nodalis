@@ -18,7 +18,7 @@ use plx_results::{AnalysisKind, Component, Field, Increment};
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutputSystem {
     pub field: String,
-    pub system: plx_model::Id,
+    pub system: plx_model::Id<plx_model::CoordinateSystem>,
     pub name: String,
     pub increments: Vec<usize>,
 }

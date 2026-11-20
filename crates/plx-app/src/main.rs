@@ -6,12 +6,12 @@ mod amplitude_dialog;
 mod test_ids {
     /// The id of the test items called `name`, the same for all of them: a test refers to
     /// an item by its name, also before the item is made.
-    pub fn named(name: &str) -> plx_model::Id {
+    pub fn named<T: ?Sized>(name: &str) -> plx_model::Id<T> {
         use std::collections::HashMap;
         use std::sync::{LazyLock, Mutex};
         static IDS: LazyLock<Mutex<HashMap<String, plx_model::Id>>> =
             LazyLock::new(Default::default);
-        *(IDS.lock().unwrap().entry(name.into())).or_default()
+        (*(IDS.lock().unwrap().entry(name.into())).or_default()).cast()
     }
 }
 mod analysis;

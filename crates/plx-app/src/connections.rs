@@ -1587,7 +1587,7 @@ pub(crate) fn change_regions(
         for i in indices.into_iter().rev() {
             if i < fe.contact_regions.len() {
                 let region = fe.contact_regions.remove(i);
-                fe.remove_contact_changes(region.id);
+                fe.remove_contact_changes(region.id.any());
             }
         }
         tree.selected = None;
@@ -1705,7 +1705,7 @@ pub fn step_contacts(ui: &mut Ui, fe: &FeModel, step: &mut plx_model::Step, inde
                         }
                     }
                     if wanted != region.state_in(step, before) {
-                        step.set_contact_state(region.id, before, wanted);
+                        step.set_contact_state(region.id.any(), before, wanted);
                     }
                     if wanted != before {
                         ui.weak("changed here");
