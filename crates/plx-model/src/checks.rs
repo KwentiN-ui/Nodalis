@@ -1680,9 +1680,9 @@ impl FeModel {
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
             if let BoundaryKind::Flow(flow) = &bc.kind {
                 let problem = flow.problem(!bc.region.is_empty()).or_else(|| {
-                    let like = flow.like.as_ref()?;
-                    (!mesh.parts.iter().any(|p| &p.name == like))
-                        .then(|| format!("The model has no part {like}."))
+                    let like = flow.like?;
+                    (!mesh.parts.iter().any(|p| p.id == like))
+                        .then(|| "The part whose material it feeds no longer exists.".to_owned())
                 });
                 if bc.active
                     && let Some(problem) = problem

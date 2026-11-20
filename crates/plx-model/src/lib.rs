@@ -614,6 +614,16 @@ impl FeModel {
         self.replace_part_in_filters(old, new);
         self.replace_part_in_mesh_operations(old, new);
         self.replace_part_in_regions(old, new);
+        // An inlet feeds the material of the first of them.
+        for step in &mut self.steps {
+            for bc in &mut step.boundary_conditions {
+                if let BoundaryKind::Flow(flow) = &mut bc.kind
+                    && flow.like == Some(old)
+                {
+                    flow.like = Some(first);
+                }
+            }
+        }
     }
 
     /// Follows a renamed element set, such as the one an input file defines for a part and

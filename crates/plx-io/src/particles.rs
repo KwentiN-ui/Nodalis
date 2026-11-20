@@ -472,13 +472,17 @@ fn lower_whole(
         for (shape, part) in shapes_of {
             // The material fed: the part named, the part of the faces, or at a side of the
             // box the filled part nearest to it.
-            let body = match (&flow.like, part) {
-                (Some(name), _) => bodies.iter().position(|n| n == name).ok_or_else(|| {
-                    error(
-                        format!("{}: part {name} is not filled with material.", bc.name),
-                        item,
-                    )
-                })?,
+            let body = match (flow.like, part) {
+                (Some(like), _) => (mesh.parts.iter().position(|p| p.id == like))
+                    .and_then(|index| body_part.iter().position(|&p| p == index))
+                    .ok_or_else(|| {
+                        let part = (mesh.parts.iter().find(|p| p.id == like))
+                            .map_or("it names", |p| p.name.as_str());
+                        error(
+                            format!("{}: the part {part} is not filled with material.", bc.name),
+                            item,
+                        )
+                    })?,
                 (None, Some(part)) => body_part.iter().position(|&p| p == part).unwrap_or(0),
                 (None, None) => nearest_body(&model, &shape),
             };

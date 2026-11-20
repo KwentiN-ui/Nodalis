@@ -1691,15 +1691,18 @@ fn flow_boundary_rows(
              nearest to it.",
         );
         let automatic = "Part it touches";
+        let parts = &model.mesh().parts;
+        let shown = match flow.like {
+            None => automatic,
+            Some(like) => (parts.iter().find(|p| p.id == like)).map_or("(missing)", |p| &p.name),
+        };
         egui::ComboBox::from_id_salt("flow like")
-            .selected_text(flow.like.as_deref().unwrap_or(automatic))
+            .selected_text(shown)
             .width(crate::dock::fit_width(ui, 200.0))
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut flow.like, None, automatic);
-                for part in &model.mesh().parts {
-                    let name = Some(part.name.clone());
-                    let label = part.name.clone();
-                    ui.selectable_value(&mut flow.like, name, label);
+                for part in parts {
+                    ui.selectable_value(&mut flow.like, Some(part.id), &part.name);
                 }
             });
         ui.end_row();
