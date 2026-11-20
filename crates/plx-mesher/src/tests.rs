@@ -485,13 +485,14 @@ fn invalid_sizes_and_files_are_reported() {
 }
 
 #[test]
-fn names_are_made_calculix_safe() {
+fn cad_names_are_kept_as_written() {
     assert_eq!(
-        calculix_name("Bracket v2.1").as_deref(),
-        Some("BRACKET_V2_1")
+        label_name("Shapes/Bracket v2.1").as_deref(),
+        Some("Bracket v2.1")
     );
-    assert_eq!(calculix_name("  "), None);
-    assert_eq!(calculix_name("3D-Teil"), None);
+    assert_eq!(label_name("  "), None);
+    assert_eq!(label_name("Shapes/Assembly/1"), None);
+    assert_eq!(label_name("3D-Teil").as_deref(), Some("3D-Teil"));
     assert!(is_cad_file(std::path::Path::new("a/B.STEP")));
     assert!(!is_cad_file(std::path::Path::new("a/b.inp")));
 }
@@ -1426,7 +1427,7 @@ fn parts_keep_the_names_of_the_cad_file() {
         return;
     }
     let import = import_cad(&testdata("benannte_teile.step"), UnitSystem::Unitless).unwrap();
-    let names = ["OBEN", "STUETZE", "MEMBRAN"];
+    let names = ["oben", "Stütze", "Membran"];
     assert_eq!(part_names(&import.geometry).unwrap(), names);
     let shown: Vec<&str> = (import.display.mesh.parts.iter())
         .map(|p| p.name.as_str())
@@ -1446,9 +1447,9 @@ fn parts_keep_the_names_of_the_cad_file() {
             .map(|n| import.display.mesh.node(n).unwrap()[2])
             .fold(f64::INFINITY, f64::min)
     };
-    assert!(lowest("OBEN") > 9.0);
-    assert!(lowest("STUETZE") < 1.0);
-    assert!((lowest("MEMBRAN") - 7.5).abs() < 1e-6);
+    assert!(lowest("oben") > 9.0);
+    assert!(lowest("Stütze") < 1.0);
+    assert!((lowest("Membran") - 7.5).abs() < 1e-6);
 
     let mut geometry = import.geometry;
     geometry.meshing.second_order = false;
@@ -1457,26 +1458,27 @@ fn parts_keep_the_names_of_the_cad_file() {
     let meshed: Vec<&str> = mesh.parts.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(meshed, names);
 
-    // Added to another geometry, the parts keep their names unless one is taken.
+    // Added to another geometry, the parts keep their names unless one is taken, regardless
+    // of case.
     let blocks = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless).unwrap();
     let paths = [testdata("benannte_teile.step")];
     let taken = ["OBEN".to_string()];
     let addition =
         add_cad_files(Some(&blocks.geometry), &paths, UnitSystem::Unitless, &taken).unwrap();
-    assert_eq!(addition.added, ["OBEN-2", "STUETZE", "MEMBRAN"]);
+    assert_eq!(addition.added, ["oben-2", "Stütze", "Membran"]);
     let addition = add_cad_files(None, &paths, UnitSystem::Unitless, &taken).unwrap();
-    assert_eq!(addition.added, ["OBEN-2", "STUETZE", "MEMBRAN"]);
+    assert_eq!(addition.added, ["oben-2", "Stütze", "Membran"]);
     let shown: Vec<&str> = (addition.import.display.mesh.parts.iter())
         .map(|p| p.name.as_str())
         .collect();
-    assert_eq!(shown, ["OBEN-2", "STUETZE", "MEMBRAN"]);
+    assert_eq!(shown, ["oben-2", "Stütze", "Membran"]);
 }
 
 #[test]
-fn part_names_are_calculix_names() {
+fn part_names_are_the_cad_labels() {
     assert_eq!(
         label_name("Shapes/Part Studio 1/2/Stütze").as_deref(),
-        Some("STUETZE")
+        Some("Stütze")
     );
     assert_eq!(
         label_name(
@@ -2410,7 +2412,7 @@ fn a_composite_curve_is_one_line_part() {
     // CAD program exports as one curve of two trimmed curves.
     let import = import_cad(&testdata("seilpendel.step"), UnitSystem::Unitless).unwrap();
     let names = part_names(&import.geometry).unwrap();
-    assert_eq!(names, ["KUGEL", "LINE-1"]);
+    assert_eq!(names, ["Kugel", "LINE-1"]);
     assert_eq!(import.display.part_dimensions, [3, 1]);
     // Both edges are shown as parts of the one line, which is meshed as a whole.
     let mesh = generate_mesh(&import.geometry).unwrap().mesh;

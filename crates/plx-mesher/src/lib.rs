@@ -1304,7 +1304,7 @@ fn is_default_name(name: &str) -> bool {
     })
 }
 
-/// `name`, or with "-2", "-3" … appended if it is used.
+/// `name`, or with "-2", "-3" … appended if it is used, regardless of case.
 fn unique_name(name: &str, used: &BTreeSet<String>) -> String {
     (1..)
         .map(|n| {
@@ -1314,7 +1314,7 @@ fn unique_name(name: &str, used: &BTreeSet<String>) -> String {
                 format!("{name}-{n}")
             }
         })
-        .find(|candidate| !used.contains(candidate))
+        .find(|candidate| !used.iter().any(|u| u.eq_ignore_ascii_case(candidate)))
         .unwrap_or_default()
 }
 
@@ -1327,7 +1327,7 @@ fn fresh_name(dim: i32, used: &BTreeSet<String>) -> String {
     };
     (1..)
         .map(|n| format!("{prefix}-{n}"))
-        .find(|name| !used.contains(name))
+        .find(|name| !used.iter().any(|u| u.eq_ignore_ascii_case(name)))
         .unwrap_or_default()
 }
 
@@ -2966,8 +2966,8 @@ fn cad_map(
 }
 
 /// Part names from the names in the CAD file, else "SOLID-n", "SHELL-n" or "LINE-n" after
-/// the dimension; upper case and unique among all parts, as CalculiX names are
-/// case-insensitive and solids, shells and lines share them.
+/// the dimension; unique among all parts regardless of case, as solids, shells and lines
+/// share them.
 fn entity_part_names(gmsh: &Gmsh, entities: &[Entity]) -> Result<Vec<String>, GmshError> {
     let mut names = Vec::with_capacity(entities.len());
     let mut used = BTreeSet::new();
@@ -2990,48 +2990,19 @@ fn entity_part_names(gmsh: &Gmsh, entities: &[Entity]) -> Result<Vec<String>, Gm
 }
 
 /// The part name for the name Gmsh gives an entity read from a CAD file, a path of labels
-/// such as "Shapes/Assembly/1/Bracket": [`calculix_name`] of its last label. OpenCASCADE's
-/// own "Open CASCADE STEP translator 7.8 1.2" is no name.
+/// such as "Shapes/Assembly/1/Bracket": its last label as the CAD program wrote it, any
+/// UTF-8 text. The solver never sees it: the export derives its own labels. A number, as an
+/// instance of an assembly has it, and OpenCASCADE's own "Open CASCADE STEP translator 7.8
+/// 1.2" are no names.
 fn label_name(label: &str) -> Option<String> {
     let last = label.rsplit('/').next().unwrap_or_default().trim();
-    if last.starts_with("Open CASCADE STEP translator") {
+    if last.is_empty()
+        || last.starts_with("Open CASCADE STEP translator")
+        || last.chars().all(|c| c.is_ascii_digit() || c == '.')
+    {
         return None;
     }
-    calculix_name(last)
-}
-
-/// A name the solver accepts: letters, digits, `-` and `_`, upper case, at most 60 characters.
-/// German umlauts are written out, as "Ä" as "AE".
-fn calculix_name(label: &str) -> Option<String> {
-    let name: String = label
-        .trim()
-        .chars()
-        .flat_map(|c| {
-            let written: &[char] = match c {
-                'ä' | 'Ä' => &['A', 'E'],
-                'ö' | 'Ö' => &['O', 'E'],
-                'ü' | 'Ü' => &['U', 'E'],
-                'ß' | 'ẞ' => &['S', 'S'],
-                _ => &[],
-            };
-            let one = if c.is_ascii_alphanumeric() || c == '-' {
-                c.to_ascii_uppercase()
-            } else {
-                '_'
-            };
-            if written.is_empty() {
-                vec![one]
-            } else {
-                written.to_vec()
-            }
-        })
-        .take(60)
-        .collect();
-    let name = name.trim_matches('_').to_string();
-    name.chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic())
-        .then_some(name)
+    Some(last.to_owned())
 }
 
 /// Builds the display mesh from Gmsh's surface mesh: per solid its faces as triangles and its
