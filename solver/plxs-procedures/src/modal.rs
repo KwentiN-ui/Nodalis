@@ -329,10 +329,14 @@ impl Procedure for ModalDynamicsProcedure {
         let (mut external_work, mut dissipation) = (0.0, 0.0);
         let history_stresses = step.outputs.el_print.iter().any(|request| {
             request.set.is_some()
-                && request
-                    .variables
-                    .iter()
-                    .any(|v| matches!(v.trim().to_ascii_uppercase().as_str(), "S" | "E" | "ENER"))
+                && request.variables.iter().any(|v| {
+                    matches!(
+                        v,
+                        plxs_core::step::OutputVariable::Stresses
+                            | plxs_core::step::OutputVariable::Strains
+                            | plxs_core::step::OutputVariable::StrainEnergyDensity
+                    )
+                })
         });
         let mut qdd = vec![0.0; q.len()];
         let mut steps: Vec<ModeStep> = Vec::new();
@@ -701,7 +705,7 @@ impl Procedure for SteadyStateProcedure {
             }
             fields.extend(imaginary);
             let variables = crate::fields::requested_variables(step);
-            if variables.iter().any(|v| v == "PU") {
+            if variables.contains(&plxs_core::step::OutputVariable::DisplacementPhase) {
                 let u_re = superpose(&modes.modes, &re, n);
                 let u_im = superpose(&modes.modes, &im, n);
                 let a = ctx.table.reported_displacements(&u_re);
@@ -716,7 +720,7 @@ impl Procedure for SteadyStateProcedure {
                     &b,
                 ));
             }
-            if variables.iter().any(|v| v == "PHS") {
+            if variables.contains(&plxs_core::step::OutputVariable::StressPhase) {
                 let stress = |name: &str| fields.iter().find(|f| f.name == name).cloned();
                 match (stress("STRESS"), stress("STRESSI")) {
                     (Some(sr), Some(si)) => fields.push({

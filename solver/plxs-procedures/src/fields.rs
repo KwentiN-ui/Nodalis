@@ -15,18 +15,18 @@ use crate::ProcedureContext;
 
 /// The variables a field request asks for, upper case, from all `*NODE FILE` / `*EL FILE`
 /// lines of the step.
-fn requested(step: &Step) -> Vec<String> {
+fn requested(step: &Step) -> Vec<plxs_core::step::OutputVariable> {
     step.outputs
         .node_file
         .iter()
         .chain(&step.outputs.el_file)
         .chain(&step.outputs.contact_file)
-        .flat_map(|o| o.variables.iter().map(|v| v.trim().to_ascii_uppercase()))
+        .flat_map(|o| o.variables.iter().copied())
         .collect()
 }
 
 /// The requested field variables of a step, upper case.
-pub fn requested_variables(step: &Step) -> Vec<String> {
+pub fn requested_variables(step: &Step) -> Vec<plxs_core::step::OutputVariable> {
     requested(step)
 }
 
@@ -371,7 +371,7 @@ pub fn build_fields_with(
     material: Option<&IntegrationPointField>,
 ) -> Vec<ResultField> {
     let variables = requested(step);
-    let has = |v: &str| variables.iter().any(|x| x == v);
+    let has = |v: plxs_core::step::OutputVariable| variables.contains(&v);
     let order = node_order(model);
     let mut fields = Vec::new();
     // Native membranes: their values at the nodes.
@@ -424,15 +424,15 @@ pub fn build_fields_with(
     let membrane_strains: Vec<_> = membrane_strains.into_iter().chain(beam_strains).collect();
     // Internal unknowns (thickness change of plane stress nodes) are no displacements.
     // The reported forces cost an element stiffness of every plane element: only for `RF`.
-    let (u, reactions) = &if has("RF") {
+    let (u, reactions) = &if has(plxs_core::step::OutputVariable::ReactionForces) {
         table.reported(model, u, reactions)
     } else {
         (table.reported_displacements(u), Vec::new())
     };
-    if has("U") {
+    if has(plxs_core::step::OutputVariable::Displacements) {
         fields.push(vector_field("DISP", ["D1", "D2", "D3"], &order, u));
     }
-    if has("S") {
+    if has(plxs_core::step::OutputVariable::Stresses) {
         let (average, _) = nodal_average_with(table, model, stresses, &membrane_stresses);
         fields.push(tensor_field(
             "STRESS",
@@ -441,7 +441,7 @@ pub fn build_fields_with(
             &average,
         ));
     }
-    if has("S") && !beam_values.is_empty() {
+    if has(plxs_core::step::OutputVariable::Stresses) && !beam_values.is_empty() {
         // Averaged over the beams at a node; other nodes have none.
         // The bending moment as its magnitude: the beam's 1- and 2-direction turn with
         // the rotation about its axis, which nothing may hold (a rope on a frictionless
@@ -474,7 +474,7 @@ pub fn build_fields_with(
                 .collect(),
         });
     }
-    if has("E") {
+    if has(plxs_core::step::OutputVariable::Strains) {
         let (average, _) = nodal_average_with(table, model, strains, &membrane_strains);
         fields.push(tensor_field(
             "TOSTRAIN",
@@ -483,10 +483,10 @@ pub fn build_fields_with(
             &average,
         ));
     }
-    if has("RF") {
+    if has(plxs_core::step::OutputVariable::ReactionForces) {
         fields.push(vector_field("FORC", ["F1", "F2", "F3"], &order, reactions));
     }
-    if has("PEEQ") {
+    if has(plxs_core::step::OutputVariable::EquivalentPlasticStrain) {
         let peeq = match material {
             Some(m) if m.per_point > 0 => scalar_of(m, 0),
             _ => IntegrationPointField {
@@ -498,7 +498,7 @@ pub fn build_fields_with(
         let nodal = nodal_average_scalar(table, model, &peeq);
         fields.push(scalar_field("PE", "PE", &order, &nodal));
     }
-    if has("ENER") {
+    if has(plxs_core::step::OutputVariable::StrainEnergyDensity) {
         let energy = internal_energy_density(stresses, strains);
         let nodal = nodal_average_scalar(table, model, &energy);
         fields.push(ResultField {
@@ -510,7 +510,10 @@ pub fn build_fields_with(
     }
     // CalculiX writes the error estimator whenever stresses are requested, unless `NOE`
     // switches it off.
-    if (has("S") || has("ERR")) && !has("NOE") {
+    if (has(plxs_core::step::OutputVariable::Stresses)
+        || has(plxs_core::step::OutputVariable::StressError))
+        && !has(plxs_core::step::OutputVariable::NoStressError)
+    {
         let error = stress_error(table, model, stresses);
         fields.push(ResultField {
             name: "ERROR".into(),
@@ -570,17 +573,36 @@ pub fn write_increment(
     Ok(())
 }
 
-/// The output variables of a step the solver does not produce yet, for a warning.
-pub fn unsupported_outputs(step: &Step) -> Vec<String> {
+/// The field output variables of a step the solver does not produce, for a warning.
+pub fn unsupported_outputs(step: &Step) -> Vec<plxs_core::step::OutputVariable> {
+    use plxs_core::step::OutputVariable as V;
     // `V` only means something in dynamic steps, `PU`/`PHS` in steady state and complex
     // frequency steps; CalculiX ignores them in the others.
     let known = [
-        "U", "V", "A", "S", "E", "RF", "ERR", "NOE", "PEEQ", "ENER", "NT", "HFL", "RFL", "PU",
-        "PHS", "SEN", "CDIS", "CSTR", "CELS", "EVOL",
+        V::Displacements,
+        V::Velocities,
+        V::Accelerations,
+        V::Stresses,
+        V::Strains,
+        V::ReactionForces,
+        V::StressError,
+        V::NoStressError,
+        V::EquivalentPlasticStrain,
+        V::StrainEnergyDensity,
+        V::Temperatures,
+        V::HeatFlux,
+        V::ReactionHeatFlows,
+        V::DisplacementPhase,
+        V::StressPhase,
+        V::Sensitivities,
+        V::ContactDisplacements,
+        V::ContactStresses,
+        V::ContactEnergy,
+        V::ElementVolume,
     ];
     let mut out = Vec::new();
     for v in requested(step) {
-        if !known.contains(&v.as_str()) && !out.contains(&v) {
+        if !known.contains(&v) && !out.contains(&v) {
             out.push(v);
         }
     }

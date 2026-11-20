@@ -575,7 +575,7 @@ impl Procedure for ComplexFrequencyProcedure {
             let re = ctx.table.reported_displacements(&x_re);
             let im = ctx.table.reported_displacements(&x_im);
             let variables = crate::fields::requested_variables(step);
-            if variables.iter().any(|v| v == "PU") {
+            if variables.contains(&plxs_core::step::OutputVariable::DisplacementPhase) {
                 let at = fields
                     .iter()
                     .position(|f| f.name == "ERROR")

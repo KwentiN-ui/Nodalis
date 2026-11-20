@@ -192,9 +192,10 @@ pub fn history_blocks(
         }
         rows
     };
+    use plxs_core::step::OutputVariable as V;
     for variable in &request.variables {
-        match variable.trim().to_ascii_uppercase().as_str() {
-            "CNUM" => {
+        match variable {
+            V::ContactElements => {
                 let n = pairs
                     .iter()
                     .map(|&i| evaluation.points[i].iter().filter(|r| r.element).count())
@@ -205,22 +206,22 @@ pub fn history_blocks(
                     vec![(0, vec![n as f64])],
                 ));
             }
-            "CDIS" => out.push(block(
+            V::ContactDisplacements => out.push(block(
                 HistoryQuantity::RelativeContactDisplacement { faces },
                 HistorySource::Step,
                 elements(&|_, r, _| vec![r.state.gap, r.tangential[0], r.tangential[1]]),
             )),
-            "CSTR" => out.push(block(
+            V::ContactStresses => out.push(block(
                 HistoryQuantity::ContactStress { faces },
                 HistorySource::Step,
                 elements(&|_, r, _| vec![r.state.pressure, r.shear[0], r.shear[1]]),
             )),
-            "CELS" => out.push(block(
+            V::ContactEnergy => out.push(block(
                 HistoryQuantity::ContactSpringEnergy { faces },
                 HistorySource::Step,
                 elements(&|_, r, _| vec![r.energy]),
             )),
-            "CF" => {
+            V::ContactStatistics => {
                 // CalculiX prints the statistics for face-to-face pairs only.
                 for &i in pairs
                     .iter()

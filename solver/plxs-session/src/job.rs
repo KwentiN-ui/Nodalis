@@ -426,7 +426,8 @@ fn run_continuing(
     for (index, step) in analysis.steps.iter().enumerate().skip(first) {
         for variable in crate::unsupported_outputs(step) {
             progress.event(ProgressEvent::Warning(format!(
-                "output variable {variable} is not implemented yet and is left out"
+                "output variable {} is not implemented yet and is left out",
+                variable.code()
             )));
         }
         if options.cancel.is_cancelled() {

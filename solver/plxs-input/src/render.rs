@@ -1723,7 +1723,7 @@ fn outputs(out: &mut Out, step: &Step) {
         for output in list {
             let header = field_output_header(&out.labels, keyword, output);
             out.keyword(&header);
-            out.list(output.variables.iter().map(String::as_str));
+            out.list(output.variables.iter().map(|v| v.code()));
         }
     }
     for (keyword, set, list) in [
@@ -1734,7 +1734,7 @@ fn outputs(out: &mut Out, step: &Step) {
         for output in list {
             let header = history_output_header(&out.labels, keyword, set, output);
             out.keyword(&header);
-            out.list(output.variables.iter().map(String::as_str));
+            out.list(output.variables.iter().map(|v| v.code()));
         }
     }
 }

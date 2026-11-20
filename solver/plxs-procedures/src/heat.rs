@@ -1009,7 +1009,7 @@ impl<'h> HeatRun<'h> {
         t: &[f64],
     ) -> Result<()> {
         let variables = crate::fields::requested_variables(step);
-        let has = |v: &str| variables.iter().any(|x| x == v);
+        let has = |v: plxs_core::step::OutputVariable| variables.contains(&v);
         let model = ctx.model;
         let table = ctx.table;
         let order = crate::fields::node_order(model);
@@ -1022,10 +1022,10 @@ impl<'h> HeatRun<'h> {
         };
         let mut front = Vec::new();
         let mut back = Vec::new();
-        if has("NT") {
+        if has(plxs_core::step::OutputVariable::Temperatures) {
             front.push(scalar("NDTEMP", "T", t));
         }
-        if has("HFL") {
+        if has(plxs_core::step::OutputVariable::HeatFlux) {
             let flux = heat_flux(model, table, self.heat, t)?;
             let (average, _) = nodal_average(table, model, &flux);
             back.push(ResultField {
@@ -1037,7 +1037,7 @@ impl<'h> HeatRun<'h> {
                     .collect(),
             });
         }
-        if has("RFL") {
+        if has(plxs_core::step::OutputVariable::ReactionHeatFlows) {
             // CalculiX' RFL is the conduction K·T at every node (prescribed nodes: the heat
             // that leaves through the boundary).
             // Nodes of plane and axisymmetric elements report 0, as CalculiX does.

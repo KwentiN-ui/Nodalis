@@ -30,8 +30,8 @@ use plxs_core::step::{
     DesignResponse, DesignResponseKind, DistributedFlux, DistributedLoad, DistributedLoadKind,
     Dynamic, ExplicitControls, FieldOutput, Film, Filter, FluxKind, Follower, Frequency,
     HeatTransfer, HistoryOutput, HistorySet, Incrementation, Integration, ModalDamping,
-    ModalDynamics, OutputDimension, Procedure, Radiate, Rayleigh, RestartWrite, Sensitivity,
-    SolverMode, Static, SteadyStateDynamics, Step, Totals, Visco,
+    ModalDynamics, OutputDimension, OutputVariable, Procedure, Radiate, Rayleigh, RestartWrite,
+    Sensitivity, SolverMode, Static, SteadyStateDynamics, Step, Totals, Visco,
 };
 use plxs_core::{Error, normalized_name};
 
@@ -2926,10 +2926,7 @@ impl Reader {
             "OUTPUT ALL",
             "SECTION FORCES",
         ])?;
-        let mut variables = Vec::new();
-        for d in data {
-            variables.extend(d.fields().into_iter().map(|v| v.to_ascii_uppercase()));
-        }
+        let variables = self.output_variables(data);
         let nset = (k.value("NSET")).map(|set| self.node_set_ref(set, &k.name, ""));
         let output = FieldOutput {
             variables,
@@ -2952,6 +2949,22 @@ impl Reader {
             FileKind::Contact => Card::ContactFile(output),
         };
         self.apply(k, card)
+    }
+
+    /// The variables of an output request; those the solver does not know are left out
+    /// with a warning.
+    fn output_variables(&mut self, data: &[Data<'_>]) -> Vec<OutputVariable> {
+        let mut variables = Vec::new();
+        for code in data.iter().flat_map(|d| d.fields()) {
+            match OutputVariable::from_code(code) {
+                Some(v) => variables.push(v),
+                None => self.warn(format!(
+                    "output variable {} is not implemented yet and is left out",
+                    code.trim().to_ascii_uppercase()
+                )),
+            }
+        }
+        variables
     }
 
     fn history_output(
@@ -2982,10 +2995,7 @@ impl Reader {
         if set.is_none() && kind != FileKind::Contact {
             return Err(k.error("the set is needed"));
         }
-        let mut variables = Vec::new();
-        for d in data {
-            variables.extend(d.fields().into_iter().map(|v| v.to_ascii_uppercase()));
-        }
+        let variables = self.output_variables(data);
         let surfaces = match (kind, k.value("SLAVE"), k.value("MASTER")) {
             (FileKind::Contact, Some(slave), master) => Some((
                 self.surface_ref(slave, &k.name),

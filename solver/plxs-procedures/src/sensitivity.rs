@@ -1090,8 +1090,7 @@ impl Procedure for SensitivityProcedure {
         };
         let writes_sen = step.outputs.node_file.iter().any(|o| {
             o.variables
-                .iter()
-                .any(|v| v.trim().eq_ignore_ascii_case("SEN"))
+                .contains(&plxs_core::step::OutputVariable::Sensitivities)
         });
         let normals: Vec<Vec<f64>> = (0..3)
             .map(|k| nodes.iter().map(|n| n.normal[k]).collect())

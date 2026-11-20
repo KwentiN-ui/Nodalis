@@ -171,8 +171,7 @@ impl StepTemperatures {
 /// step has none.
 pub fn insert_temperatures(ctx: &mut crate::ProcedureContext<'_>, step: &Step, t: Option<&[f64]>) {
     if !crate::fields::requested_variables(step)
-        .iter()
-        .any(|v| v == "NT")
+        .contains(&plxs_core::step::OutputVariable::Temperatures)
     {
         return;
     }
