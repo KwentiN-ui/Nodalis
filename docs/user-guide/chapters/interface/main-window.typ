@@ -119,8 +119,10 @@ model but are written to the input file only as a comment, so CalculiX ignores t
 === Renaming
 
 Tree items are renamed in the #ui("Name") field of their dialog. Mesh parts are renamed in their
-#ui("Properties") dialog. Names are converted to upper case and may contain letters (no umlauts),
-digits, `_` and `-`, up to 80 characters. Renaming never breaks a reference: items refer to each
+#ui("Properties") dialog. A name can be any text, with umlauts, blanks, commas and other
+characters (`Gehäuse, oben (Ø 40)`), and keeps its case; it only has to differ from the names of
+the other parts, sets and surfaces, regardless of case. The solver never sees it: the input file
+gives each part a label of its own that CalculiX can read (`GEHAEUSE__OBEN_(__40)`). Renaming never breaks a reference: items refer to each
 other by an internal identity that the name does not change. A history output stays on its
 reference point, a load keeps its amplitude, a section its material, a contact pair its
 interaction, a boundary condition its set, whatever they are renamed to. The links of the
@@ -129,6 +131,12 @@ column of a parameter study keeps its wires. Items that refer to a
 renamed mesh part follow the new name. A mesh part meshed from the geometry renames its part of
 the geometry with it: mesh setup items, suppression and CAD operations stay on the part, and its
 mesh stays up to date, as nothing it was meshed from changed.
+
+#figure(
+  image("../../images/part-names-any-text.png", width: 90%),
+  caption: [The parts `oben` and `Stütze` of a STEP file joined in a compound part named
+    `Gehäuse, oben (ø 40)`: the names stay as the CAD program and the user wrote them],
+)
 
 === What acts on a part <acting>
 

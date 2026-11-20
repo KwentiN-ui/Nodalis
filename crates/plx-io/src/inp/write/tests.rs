@@ -11215,6 +11215,33 @@ fn long_set_names_fit_the_exported_text() {
     }
 }
 
+/// Parts may be named in any text: the exported text gives each one a label of its own
+/// that an input file can hold, ASCII without blanks or commas, also for two parts whose
+/// names come out the same, and the text reads back with each part's elements in its set.
+#[test]
+fn parts_named_in_any_text_get_labels_of_their_own() {
+    let (mut mesh, model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Bonded);
+    mesh.rename_part(0, "Platte, oben (Ø 40) – Stütze");
+    mesh.rename_part(1, "Platte_ oben (Ø 40) – Stütze");
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.is_ascii(), "{text}");
+    let elsets: Vec<&str> = (text.lines())
+        .filter_map(|l| l.strip_prefix("*Element, Type=C3D8, Elset="))
+        .collect();
+    assert_eq!(elsets.len(), 2, "{text}");
+    assert_ne!(elsets[0], elsets[1]);
+    for label in &elsets {
+        assert!(label.starts_with("PLATTE__OBEN_(") && label.contains("STUETZE"));
+        assert!(!label.contains([' ', ',']), "{label}");
+    }
+    let read = plxs_input::read_inp_str(&text, None).unwrap().analysis;
+    let sets = &read.model.sets.element_sets;
+    for (label, part) in elsets.iter().zip(&mesh.parts) {
+        let set = sets.iter().find(|s| s.name == *label).unwrap();
+        assert_eq!(set.elements, part.elements, "{label}");
+    }
+}
+
 /// A name made from the definition follows the type of the region; a name of the user
 /// stays.
 #[test]
