@@ -77,6 +77,15 @@ impl Profile {
         self.count[i] += 1;
     }
 
+    /// Counts `time` measured within phase `from` as `count` calls of phase `to` instead
+    /// (a factorization a solve had to make itself).
+    pub fn shift(&mut self, from: Phase, to: Phase, time: Duration, count: u32) {
+        let time = time.min(self.time[from.index()]);
+        self.time[from.index()] -= time;
+        self.time[to.index()] += time;
+        self.count[to.index()] += count;
+    }
+
     pub fn time(&self, phase: Phase) -> Duration {
         self.time[phase.index()]
     }

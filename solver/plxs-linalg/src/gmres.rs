@@ -20,6 +20,29 @@ pub fn gmres(
     restart: usize,
     max_iterations: usize,
 ) -> Result<(Vec<f64>, f64)> {
+    gmres_while(
+        apply,
+        precondition,
+        b,
+        tolerance,
+        restart,
+        max_iterations,
+        &|_, _| true,
+    )
+}
+
+/// [`gmres`] that goes on only while `go_on(iterations, estimate)` holds, asked after
+/// every iteration with the relative residual the iteration estimates: a caller that sees
+/// the iteration will not make it in its budget stops it early and gets the iterate so far.
+pub fn gmres_while(
+    apply: &dyn Fn(&[f64], &mut [f64]),
+    precondition: &dyn Fn(&mut [f64]) -> Result<()>,
+    b: &[f64],
+    tolerance: f64,
+    restart: usize,
+    max_iterations: usize,
+    go_on: &dyn Fn(usize, f64) -> bool,
+) -> Result<(Vec<f64>, f64)> {
     let n = b.len();
     let b_norm = norm(b);
     let mut x = b.to_vec();
@@ -32,6 +55,7 @@ pub fn gmres(
     let mut previous = f64::INFINITY;
     // The iterate the current cycle started from, with its relative residual `previous`.
     let mut before = x.clone();
+    let mut stopped = false;
     loop {
         apply(&x, &mut work);
         let r: Vec<f64> = b.iter().zip(&work).map(|(b, a)| b - a).collect();
@@ -43,7 +67,7 @@ pub fn gmres(
         if relative > previous {
             return Ok((before, previous));
         }
-        if relative <= tolerance || used >= max_iterations || relative > 0.5 * previous {
+        if relative <= tolerance || used >= max_iterations || relative > 0.5 * previous || stopped {
             return Ok((x, relative));
         }
         previous = relative;
@@ -90,6 +114,10 @@ pub fn gmres(
             g[k] *= cs[k];
             k += 1;
             if g[k].abs() <= tolerance * b_norm || hn == 0.0 {
+                break;
+            }
+            if !go_on(used, g[k].abs() / b_norm) {
+                stopped = true;
                 break;
             }
             v.push(w.iter().map(|w| w / hn).collect());

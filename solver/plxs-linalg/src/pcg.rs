@@ -138,6 +138,14 @@ pub struct PcgSolver {
     /// reasonable.
     iterations_after_build: AtomicUsize,
     last_iterations: AtomicUsize,
+    /// The loose solves ([`Self::solve_loosely`]) since the last factorization, their
+    /// iterations in all, and the iterations per loose solve of the first system after
+    /// the hierarchy was built (bits of an `f64`, 0: none yet): a procedure that only
+    /// solves loosely (GMRES around the multigrid on the unsymmetric tangent of sliding
+    /// friction) keeps its hierarchy by these.
+    loose_solves: AtomicUsize,
+    loose_iterations: AtomicUsize,
+    loose_after_build: std::sync::atomic::AtomicU64,
     /// The seconds the hierarchy took to build and the seconds per iteration of the last
     /// solve (as bits of an `f64`): what a stale hierarchy costs against a new one.
     build_seconds: f64,
@@ -178,6 +186,9 @@ impl Default for PcgSolver {
             probed: std::sync::Mutex::new(None),
             iterations_after_build: AtomicUsize::new(0),
             last_iterations: AtomicUsize::new(0),
+            loose_solves: AtomicUsize::new(0),
+            loose_iterations: AtomicUsize::new(0),
+            loose_after_build: std::sync::atomic::AtomicU64::new(0),
             build_seconds: 0.0,
             seconds_per_iteration: std::sync::atomic::AtomicU64::new(0),
             reused: false,
@@ -228,6 +239,9 @@ impl PcgSolver {
         *self.deflation.get_mut().unwrap_or_else(|e| e.into_inner()) = None;
         self.reused = false;
         self.iterations_after_build.store(0, Ordering::Relaxed);
+        self.loose_after_build.store(0, Ordering::Relaxed);
+        self.loose_solves.store(0, Ordering::Relaxed);
+        self.loose_iterations.store(0, Ordering::Relaxed);
         self.built_diagonal = self.full.diagonal();
         let unknowns = self.padded_unknowns();
         let started = std::time::Instant::now();
@@ -772,8 +786,9 @@ impl PcgSolver {
                     *deflation = learned;
                 }
                 if loose.is_some() {
-                    // Not the count of a solve to the tolerance, which the kept hierarchy
-                    // is judged by.
+                    // Not the count of a solve to the tolerance; the loose solves are
+                    // counted on their own.
+                    self.count_loose(iteration, clock.elapsed().as_secs_f64());
                     return Ok(self.unconverged(x, rhs, iteration, residual));
                 }
                 return Ok(self.converged(
@@ -860,6 +875,7 @@ impl PcgSolver {
         }
         if loose.is_some() && residual.is_finite() {
             finish(x);
+            self.count_loose(max_iterations, clock.elapsed().as_secs_f64());
             return Ok(self.unconverged(x, rhs, max_iterations, residual));
         }
         Err(not_converged(max_iterations, residual, self.reused))
@@ -878,6 +894,17 @@ impl PcgSolver {
         PcgStats {
             iterations,
             relative_residual: residual,
+        }
+    }
+
+    /// The bookkeeping of a loose solve of `iterations` in `seconds`.
+    fn count_loose(&self, iterations: usize, seconds: f64) {
+        self.loose_solves.fetch_add(1, Ordering::Relaxed);
+        self.loose_iterations
+            .fetch_add(iterations, Ordering::Relaxed);
+        if iterations > 0 {
+            self.seconds_per_iteration
+                .store((seconds / iterations as f64).to_bits(), Ordering::Relaxed);
         }
     }
 
@@ -1394,6 +1421,9 @@ impl LinearSolver for PcgSolver {
         self.candidates_pending.store(false, Ordering::Relaxed);
         self.reused = false;
         self.iterations_after_build.store(0, Ordering::Relaxed);
+        self.loose_after_build.store(0, Ordering::Relaxed);
+        self.loose_solves.store(0, Ordering::Relaxed);
+        self.loose_iterations.store(0, Ordering::Relaxed);
         self.factorized = false;
         Ok(())
     }
@@ -1445,7 +1475,31 @@ impl LinearSolver for PcgSolver {
             let after_build = self.iterations_after_build.load(Ordering::Relaxed);
             let last = self.last_iterations.load(Ordering::Relaxed);
             let pace = f64::from_bits(self.seconds_per_iteration.load(Ordering::Relaxed));
-            let stale_cost = STALE_HORIZON * last.saturating_sub(after_build) as f64 * pace;
+            // A system solved loosely only (many times, as the preconditioner of GMRES)
+            // counts by its loose solves: their iterations beyond those of the first
+            // system after the build. Without this a bolt sliding on its seat built the
+            // hierarchy anew in every Newton iteration, 25 s of 42.
+            let loose_solves = self.loose_solves.swap(0, Ordering::Relaxed);
+            let loose_iterations = self.loose_iterations.swap(0, Ordering::Relaxed) as f64;
+            let mut loose_extra = 0.0;
+            if loose_solves > 0 {
+                let each = loose_iterations / loose_solves as f64;
+                let first = f64::from_bits(self.loose_after_build.load(Ordering::Relaxed));
+                if first == 0.0 {
+                    self.loose_after_build
+                        .store(each.to_bits(), Ordering::Relaxed);
+                } else {
+                    loose_extra = (loose_iterations - first * loose_solves as f64).max(0.0);
+                }
+            }
+            let served = after_build > 0 || loose_solves > 0;
+            // (`last` is of a solve before the build while none followed it.)
+            let full_extra = if after_build > 0 {
+                last.saturating_sub(after_build) as f64
+            } else {
+                0.0
+            };
+            let stale_cost = STALE_HORIZON * (full_extra + loose_extra) * pace;
             let cheaper_to_keep = stale_cost <= self.build_seconds;
             let similar = || {
                 let now = self.full.diagonal();
@@ -1457,10 +1511,10 @@ impl LinearSolver for PcgSolver {
                 now.len() == self.built_diagonal.len() && change <= 0.25 * 0.25 * scale
             };
             let pending = self.candidates_pending.load(Ordering::Relaxed);
-            let keep = after_build > 0 && cheaper_to_keep && !pending && !reuse_disabled();
-            if std::env::var("PLXS_PCG_TRACE").is_ok() && after_build > 0 {
+            let keep = served && cheaper_to_keep && !pending && !reuse_disabled();
+            if std::env::var("PLXS_PCG_TRACE").is_ok() && served {
                 eprintln!(
-                    "pcg: hierarchy {}: last solve {last} iterations, first after build {after_build}, {pace:.3} s per iteration, build {:.2} s",
+                    "pcg: hierarchy {}: last solve {last} iterations, first after build {after_build}, {loose_solves} loose solves of {loose_iterations} iterations ({loose_extra:.0} extra), {pace:.3} s per iteration, build {:.2} s",
                     if keep { "kept" } else { "rebuilt" },
                     self.build_seconds
                 );
@@ -2354,6 +2408,30 @@ mod tests {
         let scale = expected.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
         for (x, e) in x.iter().zip(&expected) {
             assert!((x - e).abs() <= 1e-7 * scale, "{x} vs {e}");
+        }
+    }
+
+    #[test]
+    fn the_hierarchy_is_kept_for_systems_solved_only_loosely() {
+        // The preconditioner of GMRES on the tangent of sliding friction: every system
+        // is solved loosely a few times and never to the tolerance. The hierarchy was
+        // built anew for each of them.
+        let n = 20_000;
+        let a = chain(n);
+        let mut pcg = PcgSolver::new();
+        pcg.analyze(a.pattern()).unwrap();
+        pcg.factorize(&a).unwrap();
+        for factor in [1.05, 1.1] {
+            for _ in 0..3 {
+                let mut x = vec![1.0; n];
+                pcg.solve_loosely(&mut x, 1e-1, 100).unwrap();
+            }
+            let mut b = SparseMatrix::zeros(a.pattern().clone());
+            for (v, w) in b.values_mut().iter_mut().zip(a.values()) {
+                *v = factor * w;
+            }
+            pcg.factorize(&b).unwrap();
+            assert!(pcg.is_reused(), "{}", pcg.preconditioner());
         }
     }
 
