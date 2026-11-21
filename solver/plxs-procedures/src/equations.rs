@@ -52,6 +52,10 @@ pub const UNSYMMETRIC_TOLERANCE: f64 = 1e-10;
 /// [`Equations::solve_unsymmetric`]).
 pub const UNSYMMETRIC_ACCEPTED: f64 = 1e-6;
 
+/// The GMRES iterations the unsymmetric part of sliding friction takes with a fresh factor
+/// (six for ten digits on a bolt in its thread), on top of the budget of a kept factor.
+pub const UNSYMMETRIC_ITERATIONS: usize = 6;
+
 /// The iterative solver as the preconditioner of GMRES: the relative residual it stops
 /// at, and its iterations at most. One digit is enough: the flexible GMRES takes a few
 /// more outer iterations, each far cheaper (a contact gasket sliding with friction solved
@@ -66,6 +70,10 @@ pub const PRECONDITIONER_ITERATIONS: usize = 100;
 pub const KEPT_FACTOR_SOLVES: f64 = 3000.0;
 pub const KEPT_FACTOR_FEWEST: usize = 3;
 pub const KEPT_FACTOR_ITERATIONS: usize = 20;
+
+/// The iterations over which GMRES on a kept factor measures its pace (see
+/// [`Equations::solve_unsymmetric`]).
+pub const KEPT_FACTOR_PACE: usize = 3;
 
 /// The relative residual the conjugate gradients on a kept factor stop at when the
 /// procedure asked for no tolerance: as good as the direct solve they stand in for.
@@ -122,6 +130,9 @@ pub struct Equations {
     refresh: bool,
     /// Whether a slow iteration was weighed against the direct solver already (once).
     probed: bool,
+    /// The factorizations a solve had to make itself (a kept factor that did not serve),
+    /// see [`Self::take_late_factorizations`].
+    late: (std::time::Duration, u32),
 }
 
 impl Equations {
@@ -146,7 +157,24 @@ impl Equations {
             stale: None,
             refresh: false,
             probed: false,
+            late: (std::time::Duration::ZERO, 0),
         }
+    }
+
+    /// The time and number of the factorizations made within the solves since the last
+    /// call: a kept factor that did not precondition the current tangent is replaced
+    /// there. The profile counts them as factorizations, not as substitutions.
+    pub fn take_late_factorizations(&mut self) -> (std::time::Duration, u32) {
+        std::mem::take(&mut self.late)
+    }
+
+    fn factorize_late(&mut self, direct: &mut LdltSolver, k: &SparseMatrix) -> Result<()> {
+        let started = std::time::Instant::now();
+        let result = direct.factorize(k);
+        self.late.0 += started.elapsed();
+        self.late.1 += 1;
+        self.refresh = false;
+        result
     }
 
     /// The direct solver keeps its factor over the systems to come while it still serves:
@@ -400,8 +428,7 @@ impl Equations {
                 Err(_) => {
                     // The kept factor does not fit this matrix: its own factor solves.
                     rhs.copy_from_slice(&b);
-                    direct.factorize(&k)?;
-                    self.refresh = false;
+                    self.factorize_late(direct, &k)?;
                 }
             }
         }
@@ -432,14 +459,70 @@ impl Equations {
         b: &[f64],
         progress: &mut dyn Progress,
     ) -> Result<Vec<f64>> {
-        // GMRES is preconditioned by the factor of `k` itself.
+        // Inexact Newton as for the symmetric tangent: no further than the procedure asked.
+        let tolerance = self.tolerance.unwrap_or(UNSYMMETRIC_TOLERANCE);
+        let accepted = |result: &Result<(Vec<f64>, f64)>| matches!(result, Ok((_, residual)) if *residual <= UNSYMMETRIC_ACCEPTED.max(tolerance));
+        // A kept factor of an earlier tangent preconditions as well (see
+        // `keeping_factors`): GMRES then resolves the change of the tangent along with
+        // the unsymmetric part, as long as that takes fewer substitutions than a share of
+        // a factorization is worth. Without this every Newton iteration with sliding
+        // friction factorized anew: a bolt turned on its seat (838 000 equations, a
+        // factor of 2.5e9 entries) spent two minutes per iteration on it.
         if self.stale.take().is_some() {
-            direct.factorize(k)?;
-            self.refresh = false;
+            let budget = direct
+                .factor_nonzeros()
+                .map_or(KEPT_FACTOR_FEWEST, |nonzeros| {
+                    ((nonzeros as f64).sqrt() / KEPT_FACTOR_SOLVES) as usize
+                })
+                .clamp(KEPT_FACTOR_FEWEST, KEPT_FACTOR_ITERATIONS)
+                + UNSYMMETRIC_ITERATIONS;
+            let started = std::time::Instant::now();
+            let substitutions = std::cell::Cell::new(0usize);
+            let precondition = |v: &mut [f64]| {
+                substitutions.set(substitutions.get() + 1);
+                direct.solve(v)
+            };
+            // Given up for a factorization as soon as the pace of the last iterations
+            // will not reach the tolerance within twice the budget: a tangent many of
+            // whose contact points changed their state since the factor takes an
+            // iteration for each, and running those to the limit first cost a
+            // factorization on top of the one that follows.
+            let limit = 2 * budget;
+            let history = std::cell::RefCell::new(Vec::<f64>::new());
+            let go_on = |iterations: usize, estimate: f64| {
+                let mut history = history.borrow_mut();
+                history.push(estimate);
+                let n = history.len();
+                if n <= KEPT_FACTOR_PACE {
+                    return true;
+                }
+                let pace =
+                    (estimate / history[n - 1 - KEPT_FACTOR_PACE]).ln() / KEPT_FACTOR_PACE as f64;
+                pace < 0.0 && iterations as f64 + (tolerance / estimate).ln() / pace <= limit as f64
+            };
+            let kept =
+                plxs_linalg::gmres_while(apply, &precondition, b, tolerance, limit, limit, &go_on);
+            if let (true, Ok((x, residual))) = (accepted(&kept), &kept) {
+                if substitutions.get() > budget {
+                    self.refresh = true;
+                }
+                progress.event(ProgressEvent::LinearSolve {
+                    iterations: substitutions.get() as u32,
+                    relative_residual: *residual,
+                    seconds: started.elapsed().as_secs_f64(),
+                    quiet: true,
+                });
+                return Ok(x.clone());
+            }
+            if matches!(kept, Err(Error::Cancelled)) {
+                return kept.map(|(x, _)| x);
+            }
+            // The kept factor does not fit this tangent: its own factor preconditions.
+            self.factorize_late(direct, k)?;
         }
         let attempt = |equations: &Self, direct: &LdltSolver| {
             let precondition = |v: &mut [f64]| equations.apply_inverse(direct, v);
-            plxs_linalg::gmres(apply, &precondition, b, UNSYMMETRIC_TOLERANCE, 60, 300)
+            plxs_linalg::gmres(apply, &precondition, b, tolerance, 60, 300)
         };
         let mut result = attempt(self, direct);
         if !accepted(&result) && self.is_iterative() {
@@ -465,7 +548,7 @@ impl Equations {
         }
         match result {
             Ok((x, residual)) => {
-                if residual > UNSYMMETRIC_ACCEPTED {
+                if residual > UNSYMMETRIC_ACCEPTED.max(tolerance) {
                     progress.event(ProgressEvent::Warning(format!(
                         "GMRES on the unsymmetric tangent of sliding friction reached only a \
                          relative residual of {residual:.1e}; the Newton iteration goes on \
@@ -771,10 +854,6 @@ fn message(error: &Error) -> String {
     }
 }
 
-fn accepted(result: &Result<(Vec<f64>, f64)>) -> bool {
-    matches!(result, Ok((_, residual)) if *residual <= UNSYMMETRIC_ACCEPTED)
-}
-
 fn with_message(error: Error, f: impl FnOnce(&str) -> String) -> Error {
     error.map_message(|message| f(&message))
 }
@@ -949,6 +1028,58 @@ mod tests {
         equations.set_tolerance(Some(1e-3));
         let (kept, relative) = solve_keeping(&mut equations, &mut direct, &chain(n, 2.5));
         assert!(kept && relative < 1e-3, "{relative}");
+    }
+
+    /// Solves `(k + e) x = b` with GMRES for the unsymmetric `e` of two entries (and
+    /// `diagonal` times a varying share on the diagonal); the residual relative to `b`.
+    fn solve_unsymmetric_keeping(
+        equations: &mut Equations,
+        direct: &mut LdltSolver,
+        k: &SparseMatrix,
+        diagonal: f64,
+    ) -> f64 {
+        let n = k.dimension();
+        equations
+            .prepare(direct, k, coordinates(n), true, &mut NoProgress)
+            .unwrap();
+        let apply = |v: &[f64], out: &mut [f64]| {
+            k.multiply(v, out);
+            out[3] += 0.5 * v[170];
+            out[150] -= 0.3 * v[20];
+            for (i, (o, v)) in out.iter_mut().zip(v).enumerate() {
+                *o += diagonal * (i % 37) as f64 * v;
+            }
+        };
+        let b: Vec<f64> = (0..n).map(|i| 1.0 + (i % 7) as f64).collect();
+        let x = equations
+            .solve_unsymmetric(direct, k, coordinates(n), &apply, &b, &mut NoProgress)
+            .unwrap();
+        let mut ax = vec![0.0; n];
+        apply(&x, &mut ax);
+        let r = (ax.iter().zip(&b))
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        r / b.iter().map(|b| b * b).sum::<f64>().sqrt()
+    }
+
+    #[test]
+    fn a_kept_factor_preconditions_the_unsymmetric_tangent() {
+        // Sliding friction in every Newton iteration: the factor of the first tangent
+        // serves the next one too, GMRES resolves its change with the unsymmetric part.
+        let n = 200;
+        let mut equations = Equations::new(SolverMode::Direct).keeping_factors();
+        let mut direct = LdltSolver::new(1);
+        let relative = solve_unsymmetric_keeping(&mut equations, &mut direct, &chain(n, 2.0), 0.0);
+        assert!(relative < 1e-9, "{relative}");
+        let relative = solve_unsymmetric_keeping(&mut equations, &mut direct, &chain(n, 3.0), 0.0);
+        assert!(relative < 1e-9, "{relative}");
+        assert_eq!(equations.take_late_factorizations().1, 0);
+        // A tangent the kept factor does not fit (it changed in every unknown) is given
+        // up early and factorized itself.
+        let relative = solve_unsymmetric_keeping(&mut equations, &mut direct, &chain(n, 2.5), 0.2);
+        assert!(relative <= UNSYMMETRIC_ACCEPTED, "{relative}");
+        assert_eq!(equations.take_late_factorizations().1, 1);
     }
 
     #[test]

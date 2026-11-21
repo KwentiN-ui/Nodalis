@@ -218,7 +218,11 @@ multigrid hierarchy with their sizes, its memory relative to the matrix, the num
 iterations and the remaining relative residual (below 1e-12). The results of both solvers
 agree to that accuracy. In a nonlinear step the hierarchy is kept over the Newton
 iterations while that is cheaper than building it again (the monitor reports the
-rebuilds). A node held by a stiff spring in one direction only (a gap or contact spring)
+rebuilds), also while contacts slide with friction. The direct solver keeps its factor
+over the Newton iterations in the same way and corrects it by a few iterations, until
+a new factorization is cheaper. A large model whose contacts change state in many
+points at once (a bolt turned into its thread) gives the kept factor little to hold on
+to: with a factor of several gigabytes #ui("Iterative") is several times faster there. A node held by a stiff spring in one direction only (a gap or contact spring)
 is scaled by its whole stiffness block, so that its other directions still converge.
 Bodies that touch only through contact, such as a pin in a bore, are coarsened
 one by one, so that each keeps its own rigid body motion on the coarse levels; and the

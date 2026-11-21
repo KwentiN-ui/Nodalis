@@ -29,7 +29,7 @@ pub mod solver;
 pub mod supernodal;
 
 pub use amg::{Amg, AmgOptions, GpuMode, Unknowns};
-pub use gmres::gmres;
+pub use gmres::{gmres, gmres_while};
 pub use memory::available_memory;
 
 pub use eigen::{EigenPairs, EigenSolver, LanczosOptions, ShiftInvertLanczos};

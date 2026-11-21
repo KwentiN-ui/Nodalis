@@ -1278,15 +1278,15 @@ impl NonlinearStatic {
                         .collect()
                 })
                 .unwrap_or_default();
+            // Inexact Newton: the correction only has to bring the residual a tenth below
+            // its limit, everything beyond is redone by the next iteration anyway. Without
+            // a force scale the correction decides, solved in full.
+            let forcing = (scale > 0.0 && r_max > 0.0 && inexact_newton()).then(|| {
+                (FORCING_SHARE * controls.residual * scale / r_max)
+                    .clamp(FORCING_TIGHTEST, FORCING_LOOSEST)
+            });
+            equations.set_tolerance(forcing);
             let solved = if unsymmetric.is_empty() {
-                // Inexact Newton: the correction only has to bring the residual a tenth
-                // below its limit, everything beyond is redone by the next iteration
-                // anyway. Without a force scale the correction decides, solved in full.
-                let forcing = (scale > 0.0 && r_max > 0.0 && inexact_newton()).then(|| {
-                    (FORCING_SHARE * controls.residual * scale / r_max)
-                        .clamp(FORCING_TIGHTEST, FORCING_LOOSEST)
-                });
-                equations.set_tolerance(forcing);
                 let mut dv = residual;
                 let mut sink = crate::equations::FirstOrWarnings {
                     inner: &mut *progress,
@@ -1320,6 +1320,9 @@ impl NonlinearStatic {
                 )
             };
             ctx.profile.add(Phase::Solve, started);
+            let (late, count) = equations.take_late_factorizations();
+            ctx.profile
+                .shift(Phase::Solve, Phase::Factorization, late, count);
             let dv = match solved {
                 Ok(dv) => dv,
                 // A tangent that turns indefinite on the way (a body lifting off and
