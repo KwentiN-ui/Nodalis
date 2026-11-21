@@ -148,6 +148,15 @@ every increment one below the other. The filter applies while the solver is stil
 
 #screenshot("monitor-filter.png", [The Analysis tab showing only the lines with "cpu"])
 
+#ui("Copy") next to #ui("Clear") copies the whole output to the clipboard, or with a filter all
+the lines it shows, also those scrolled out of view. Part of the output is selected by dragging
+over it: past the upper or lower edge the lines scroll along, so a selection can span the whole
+run. Shift and a click extend it, a double click selects a line, Ctrl+A selects all lines and
+Ctrl+C copies the selection. The right-click menu has #ui("Copy"), #ui("Copy All") and
+#ui("Select All"). The #ui("Output") tab copies the same way.
+
+#screenshot("monitor-copy.png", [Three selected lines of the output and its right-click menu])
+
 The monitor keeps the last 20000 lines of a run, so a long run with many increments stays fast.
 Once there are more, the oldest lines go and the top row tells how many, for example
 #ui("10085 earlier lines not kept"); the new lines keep coming in at the bottom.

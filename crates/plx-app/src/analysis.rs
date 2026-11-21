@@ -170,6 +170,7 @@ impl RunView {
             {
                 self.filter.clear();
             }
+            crate::virtual_table::copy_button(ui, &self.lines, &self.filter);
             ui.separator();
             if self.active {
                 ui.spinner();
@@ -797,6 +798,7 @@ impl Analysis {
             {
                 self.filter.clear();
             }
+            crate::virtual_table::copy_button(ui, &self.output, &self.filter);
             ui.separator();
             if status == JobStatus::Running {
                 ui.spinner();
