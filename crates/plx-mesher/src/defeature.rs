@@ -180,18 +180,17 @@ pub fn defeature(
             kept,
         )))
     })?;
-    let Some((part_names, signatures, removed, kept)) = outcome else {
+    let Some((parts, signatures, removed, kept)) = outcome else {
         return Ok(unchanged());
     };
     let brep = std::fs::read_to_string(&result.0)
         .map_err(|e| fail(format!("{}: {e}", result.0.display())))?;
-    let mut geometry = Geometry {
+    let geometry = Geometry {
         brep,
-        part_names,
+        parts,
         signatures,
         ..input.clone()
     };
-    geometry.ensure_ids();
     Ok(Defeatured {
         geometry,
         removed,

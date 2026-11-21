@@ -194,7 +194,7 @@ pub(super) fn preview_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> V
     } else if let Some(source) = from(&geometry) {
         let tip = match &preview.model.geometry {
             Some(g) => {
-                let parts = g.part_names.len();
+                let parts = g.parts.len();
                 let mut tip = format!("Geometry: {}", g.source);
                 if parts > 0 {
                     tip.push_str(&format!(", {parts} parts"));
@@ -647,7 +647,7 @@ fn geometry_key(geometry: &plx_model::Geometry) -> u64 {
     let step = (brep.len() / 4096).max(1);
     let sample: Vec<u8> = brep.iter().step_by(step).copied().collect();
     print.add(&sample);
-    print.add_debug(&geometry.part_names);
+    print.add_debug(&geometry.parts);
     print.add_debug(&geometry.suppressed);
     print.finish()
 }
@@ -678,7 +678,7 @@ pub(super) fn draw_geometry(
     let parts = (mesh.parts.iter().enumerate())
         .map(|(index, part)| GeometryPart {
             wire: display.part_dimensions.get(index) == Some(&1),
-            suppressed: geometry.is_suppressed(&part.name),
+            suppressed: geometry.is_suppressed(part.id),
         })
         .collect::<Vec<_>>();
     draw_shapes(mesh, plane, size, Some(&parts))
@@ -1445,6 +1445,8 @@ impl Stats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use crate::test_ids::ByName;
 
     #[test]
     fn a_mesh_is_drawn_into_the_middle_of_its_picture() {
@@ -1485,13 +1487,12 @@ mod tests {
             brep: "DBRep_DrawableShape".into(),
             meshing: Default::default(),
             mesh_items: Vec::new(),
-            part_names: Vec::new(),
+            parts: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -1537,6 +1538,7 @@ mod tests {
     #[test]
     fn a_geometry_is_drawn_with_dark_edges() {
         // A square face of two triangles bounded by four edges, and a wire of its own.
+        let plate = plx_model::GeometryPart::new("PLATE");
         let mut mesh = plx_mesh::FeMesh::default();
         let points = [
             [0.0, 0.0, 0.0],
@@ -1567,8 +1569,11 @@ mod tests {
         for (k, (a, b)) in [(11, 12), (12, 13), (13, 14), (14, 11)].iter().enumerate() {
             element(3 + k as u32, plx_mesh::ElementShape::Line2, vec![*a, *b]);
         }
-        mesh.parts
-            .push(plx_mesh::Part::new("PLATE", vec![1, 2, 3, 4, 5, 6]));
+        mesh.parts.push(plx_mesh::Part::with_id(
+            plate.id,
+            "PLATE",
+            vec![1, 2, 3, 4, 5, 6],
+        ));
         let display = plx_mesher::GeometryDisplay {
             mesh,
             entities: Vec::new(),
@@ -1583,13 +1588,12 @@ mod tests {
             brep: String::new(),
             meshing: Default::default(),
             mesh_items: Vec::new(),
-            part_names: vec!["PLATE".into()],
+            parts: vec![plate.clone()],
             refinement: 1.0,
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -1610,7 +1614,7 @@ mod tests {
         assert!(dark, "the edges are drawn dark");
         assert_eq!(pixel(0, 0).a(), 0);
         // A suppressed part is grey.
-        geometry.set_suppressed(&["PLATE".to_owned()], true);
+        geometry.set_suppressed(&[geometry.part_id("PLATE").unwrap()], true);
         let grey = draw_geometry(&display, &geometry, [100, 100]);
         let p = grey.pixels[50 * 100 + 50];
         assert!(p.r().abs_diff(p.g()) < 8 && p.g().abs_diff(p.b()) < 12);

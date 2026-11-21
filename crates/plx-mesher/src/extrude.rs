@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use plx_mesh::{CadMap, Element, ElementId, ElementShape, FeMesh, NodeId, Part};
-use plx_model::{ExtrudeMesh, Geometry, PeriodicFaces, Recombination};
+use plx_model::{ExtrudeMesh, Geometry, GeometryPart, PeriodicFaces, Recombination};
 
 use crate::gmsh::{Gmsh, GmshError};
 use crate::{
@@ -288,7 +288,11 @@ impl Topology {
 
 /// The source faces for an item: its faces on the part, else the first face, by most edges,
 /// that the part is an extrusion of.
-fn find_sweep(topology: &Topology, extrude: &ExtrudeMesh, part: &str) -> Result<Sweep, String> {
+fn find_sweep(
+    topology: &Topology,
+    extrude: &ExtrudeMesh,
+    part: &GeometryPart,
+) -> Result<Sweep, String> {
     let error = |reason: String| format!("{part}: {reason}");
     let chosen: Vec<i32> = (extrude.faces.iter())
         .filter(|f| topology.faces.contains(f))
@@ -452,7 +456,7 @@ pub(crate) fn source_elements(
 /// Sweeps the source elements through the levels: hexahedra from quadrilaterals, wedges
 /// from triangles, one part. Only the elements present in a layer are swept through it.
 pub(crate) fn sweep_mesh<'a>(
-    part: &str,
+    part: &GeometryPart,
     coords: &'a HashMap<usize, Point>,
     elements: &[SourceElement],
     motion: Motion,
@@ -463,9 +467,9 @@ pub(crate) fn sweep_mesh<'a>(
     let mut builder = Builder::new(coords, motion, levels, quadratic);
     let mut mesh = FeMesh::default();
     let mut part_elements = Part {
-        id: Default::default(),
+        id: part.id,
         bodies: Vec::new(),
-        name: part.to_string(),
+        name: part.name.clone(),
         elements: Vec::new(),
     };
     for layer in 0..levels.len() {
@@ -517,7 +521,7 @@ pub(crate) fn sweep_mesh<'a>(
 pub(crate) fn extrude_part_mesh(
     gmsh: &Gmsh,
     geometry: &Geometry,
-    part: &str,
+    part: &GeometryPart,
     volume: i32,
     extrude: &ExtrudeMesh,
     matching: &[PeriodicFaces],
@@ -578,7 +582,7 @@ pub(crate) fn extrude_part_mesh(
         }
     }
 
-    let max_size = geometry.parameters(part).max_size;
+    let max_size = geometry.parameters(part.id).max_size;
     let levels = (extrude.layers.levels(max_size, norm(sweep.vector)))
         .map_err(|reason| GmshError::Other(format!("{part}: {reason}")))?;
     let (mut mesh, builder) = sweep_mesh(

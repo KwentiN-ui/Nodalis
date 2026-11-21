@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use plx_mesh::CadEntity;
-use plx_model::{CadOperation, CompoundPart, Geometry, SplitKeep, SplitPlane};
+use plx_model::{CadOperation, CompoundPart, Geometry, GeometryPart, SplitKeep, SplitPlane};
 
 use crate::gmsh::{Boolean, Gmsh, GmshError};
 use crate::operation::{distance, outward_normal, plane_normal};
@@ -17,42 +17,12 @@ type Ring = ([f64; 3], f64, [f64; 3]);
 /// A Gmsh entity as (dimension, tag).
 type Entity = (i32, i32);
 
-/// What a split gives on: the names of the parts as Gmsh will read the result, keyed by a
-/// point of each of their entities, and the compounds.
+/// What a split gives on: the parts as Gmsh will read the result, keyed by a point of each
+/// of their entities, and the compounds.
 pub(crate) struct Split {
-    /// (dimension, centre of mass, part name) of every entity of a part.
-    pub(crate) places: Vec<(i32, [f64; 3], String)>,
-    pub(crate) compounds: Vec<NamedCompound>,
-}
-
-/// A compound part with its members by name, while a split names the pieces; their ids
-/// are given once the geometry has them, see [`NamedCompound::with_ids`].
-pub(crate) struct NamedCompound {
-    pub(crate) id: plx_model::PartRef,
-    pub(crate) name: String,
-    pub(crate) parts: Vec<String>,
-}
-
-impl NamedCompound {
-    /// The compounds of `geometry`, their members by name.
-    pub(crate) fn of(geometry: &Geometry) -> Vec<Self> {
-        (geometry.compounds.iter().enumerate())
-            .map(|(i, c)| Self {
-                id: c.id,
-                name: c.name.clone(),
-                parts: geometry.member_names(i),
-            })
-            .collect()
-    }
-
-    /// The compound part, its members by their ids in `geometry`.
-    pub(crate) fn with_ids(self, geometry: &mut Geometry) -> CompoundPart {
-        CompoundPart {
-            id: self.id,
-            name: self.name,
-            parts: geometry.part_ids_of(&self.parts),
-        }
-    }
+    /// (dimension, centre of mass, part) of every entity of a part.
+    pub(crate) places: Vec<(i32, [f64; 3], GeometryPart)>,
+    pub(crate) compounds: Vec<CompoundPart>,
 }
 
 fn fail(message: impl Into<String>) -> GmshError {
@@ -71,10 +41,11 @@ pub(crate) fn split_by_plane(
     let (point, normal) = cut_plane(gmsh, operation, entities)?;
     let parts = parts(gmsh, input)?;
     // Only the chosen parts are cut, or all; never the suppressed ones.
-    let named = |name: &str| operation.parts.is_empty() || input.holds(&operation.parts, name);
-    let chosen = |name: &str| named(name) && !input.is_suppressed(name);
-    if !parts.iter().any(|(_, name)| chosen(name)) {
-        return Err(fail(if parts.iter().any(|(_, name)| named(name)) {
+    let named =
+        |part: &GeometryPart| operation.parts.is_empty() || operation.parts.contains(&part.id);
+    let chosen = |part: &GeometryPart| named(part) && !input.is_suppressed(part.id);
+    if !parts.iter().any(|(_, part)| chosen(part)) {
+        return Err(fail(if parts.iter().any(|(_, part)| named(part)) {
             "The parts to split are all suppressed"
         } else {
             "None of the parts to split is in the geometry"
@@ -97,18 +68,19 @@ pub(crate) fn split_by_plane(
     };
     let extent = 2.0 * size;
     let frame = plane_frame(normal, foot);
-    let mut compounds = NamedCompound::of(input);
-    let mut used: BTreeSet<String> = parts.iter().map(|(_, n)| n.clone()).collect();
+    let mut compounds = input.compounds.clone();
+    let mut used: BTreeSet<String> = parts.iter().map(|(_, p)| p.name.clone()).collect();
     let mut places = Vec::new();
     let mut cut_any = false;
     let mut half = None;
-    let mut edges: Vec<(Shape, String)> = Vec::new();
+    let mut edges: Vec<(Shape, GeometryPart)> = Vec::new();
     let mut gone: Vec<Entity> = Vec::new();
-    for (shape, name) in parts {
-        if !chosen(&name) {
-            record(gmsh, &shape, &name, &mut places)?;
+    for (shape, part) in parts {
+        if !chosen(&part) {
+            record(gmsh, &shape, &part, &mut places)?;
             continue;
         }
+        let name = part.name.clone();
         // Where the part lies: on one side, or across.
         let (min, max) = shape.bounding_box(gmsh)?;
         let corners =
@@ -125,16 +97,16 @@ pub(crate) fn split_by_plane(
                 -1.0
             };
             if s == 0.0 || keeps(s) {
-                record(gmsh, &shape, &name, &mut places)?;
+                record(gmsh, &shape, &part, &mut places)?;
             } else {
                 gone.extend(shape.entities());
                 used.remove(&name);
-                remove_from(&mut compounds, &name, &[]);
+                remove_from(&mut compounds, part.id, &[]);
             }
             continue;
         }
         if shape.dim == 1 {
-            edges.push((shape, name));
+            edges.push((shape, part));
             continue;
         }
         let half = match half {
@@ -177,11 +149,11 @@ pub(crate) fn split_by_plane(
                 gmsh.remove(&copies)?;
             }
             if keeps(if negative.is_empty() { 1.0 } else { -1.0 }) {
-                record(gmsh, &shape, &name, &mut places)?;
+                record(gmsh, &shape, &part, &mut places)?;
             } else {
                 gone.extend(shape.entities());
                 used.remove(&name);
-                remove_from(&mut compounds, &name, &[]);
+                remove_from(&mut compounds, part.id, &[]);
             }
             continue;
         }
@@ -211,35 +183,33 @@ pub(crate) fn split_by_plane(
             }
         }
         used.remove(&name);
-        let names: Vec<String> = if kept.len() == 1 {
-            vec![name.clone()]
+        // A part cut into pieces is gone: each piece is a new part, numbered after it.
+        let pieces: Vec<GeometryPart> = if kept.len() == 1 {
+            vec![part.clone()]
         } else {
             (1..=kept.len())
                 .map(|k| {
                     let piece = unique_name(&format!("{name}-{k}"), &used);
                     used.insert(piece.clone());
-                    piece
+                    GeometryPart::new(piece)
                 })
                 .collect()
         };
-        used.extend(names.iter().cloned());
-        for (piece, name) in kept.iter().zip(&names) {
-            for &tag in piece {
+        used.extend(pieces.iter().map(|p| p.name.clone()));
+        for (tags, piece) in kept.iter().zip(&pieces) {
+            for &tag in tags {
                 places.push((
                     shape.dim,
                     gmsh.center_of_mass(shape.dim, tag)?,
-                    name.clone(),
+                    piece.clone(),
                 ));
             }
         }
-        if names.len() > 1 && operation.compound && input.compound_of(&name).is_none() {
-            compounds.push(NamedCompound {
-                id: plx_model::Id::new(),
-                name: unique_name(&name, &used),
-                parts: names,
-            });
+        let ids: Vec<plx_model::PartRef> = pieces.iter().map(|p| p.id).collect();
+        if ids.len() > 1 && operation.compound && input.compound_of(part.id).is_none() {
+            compounds.push(CompoundPart::new(unique_name(&name, &used), ids));
         } else {
-            remove_from(&mut compounds, &name, &names);
+            remove_from(&mut compounds, part.id, &ids);
         }
     }
     if let Some(half) = half {
@@ -259,7 +229,7 @@ pub(crate) fn split_by_plane(
         let pieces = fragment_keeping(gmsh, &objects, &[(2, sheet)])
             .map_err(|e| fail(format!("OpenCASCADE could not split the edges: {e}")))?;
         let mut pieces = pieces.into_iter();
-        for (shape, name) in &edges {
+        for (shape, part) in &edges {
             let made: Vec<Entity> = pieces.by_ref().take(shape.tags.len()).flatten().collect();
             if made.len() > shape.tags.len() {
                 cut_any = true;
@@ -268,7 +238,7 @@ pub(crate) fn split_by_plane(
             for (dim, tag) in made {
                 let place = gmsh.center_of_mass(dim, tag)?;
                 if keeps(side(place)) {
-                    places.push((dim, place, name.clone()));
+                    places.push((dim, place, part.clone()));
                 } else {
                     dropped.push((dim, tag));
                 }
@@ -378,9 +348,10 @@ pub(crate) fn split_around_holes(
         return Err(fail("No circular edges picked"));
     }
     let mut places = Vec::new();
-    for (index, (shape, name)) in parts.iter().enumerate() {
+    for (index, (shape, part)) in parts.iter().enumerate() {
+        let name = &part.name;
         let Some(list) = rings.get(&index) else {
-            record(gmsh, shape, name, &mut places)?;
+            record(gmsh, shape, part, &mut places)?;
             continue;
         };
         let objects: Vec<Entity> = shape.entities().collect();
@@ -409,12 +380,12 @@ pub(crate) fn split_around_holes(
             )));
         }
         for (dim, tag) in made {
-            places.push((dim, gmsh.center_of_mass(dim, tag)?, name.clone()));
+            places.push((dim, gmsh.center_of_mass(dim, tag)?, part.clone()));
         }
     }
     Ok(Split {
         places,
-        compounds: NamedCompound::of(input),
+        compounds: input.compounds.clone(),
     })
 }
 
@@ -479,50 +450,50 @@ fn loose(gmsh: &Gmsh) -> Result<BTreeSet<Entity>, GmshError> {
     Ok(loose)
 }
 
-/// Records where each entity of a part lies, with the part's name.
+/// Records where each entity of a part lies, with the part.
 fn record(
     gmsh: &Gmsh,
     shape: &Shape,
-    name: &str,
-    places: &mut Vec<(i32, [f64; 3], String)>,
+    part: &GeometryPart,
+    places: &mut Vec<(i32, [f64; 3], GeometryPart)>,
 ) -> Result<(), GmshError> {
     for (dim, tag) in shape.entities() {
-        places.push((dim, gmsh.center_of_mass(dim, tag)?, name.to_owned()));
+        places.push((dim, gmsh.center_of_mass(dim, tag)?, part.clone()));
     }
     Ok(())
 }
 
 /// Puts the pieces of a split part in its place in the compound holding it.
-fn remove_from(compounds: &mut Vec<NamedCompound>, part: &str, pieces: &[String]) {
+fn remove_from(
+    compounds: &mut Vec<CompoundPart>,
+    part: plx_model::PartRef,
+    pieces: &[plx_model::PartRef],
+) {
     for compound in compounds.iter_mut() {
-        if let Some(at) = compound
-            .parts
-            .iter()
-            .position(|p| p.eq_ignore_ascii_case(part))
-        {
-            compound.parts.splice(at..=at, pieces.iter().cloned());
+        if let Some(at) = compound.parts.iter().position(|&p| p == part) {
+            compound.parts.splice(at..=at, pieces.iter().copied());
         }
     }
     compounds.retain(|c| !c.parts.is_empty());
 }
 
-/// The names of the parts Gmsh read from the result, by where their entities lie, as
-/// recorded by the split.
+/// The parts Gmsh read from the result, by where their entities lie, as recorded by the
+/// split; a part where none was recorded is a new one.
 pub(crate) fn names_after(
     gmsh: &Gmsh,
-    places: &[(i32, [f64; 3], String)],
-) -> Result<Vec<String>, GmshError> {
-    let mut names = Vec::new();
+    places: &[(i32, [f64; 3], GeometryPart)],
+) -> Result<Vec<GeometryPart>, GmshError> {
+    let mut parts = Vec::new();
     for (shape, default) in default_parts(gmsh)? {
         let (dim, tag) = shape.first();
         let at = gmsh.center_of_mass(dim, tag)?;
         let nearest = (places.iter())
             .filter(|(d, _, _)| *d == dim)
             .min_by(|a, b| distance(a.1, at).total_cmp(&distance(b.1, at)))
-            .map(|(_, _, n)| n.clone());
-        names.push(nearest.unwrap_or(default));
+            .map(|(_, _, p)| p.clone());
+        parts.push(nearest.unwrap_or_else(|| GeometryPart::new(default)));
     }
-    Ok(names)
+    Ok(parts)
 }
 
 /// The plane to cut along as a point on it and its unit normal: the plane shifted by the

@@ -53,6 +53,10 @@ pub const SECONDARY_HIGHLIGHT_COLOR: [f32; 3] = [238.0 / 255.0, 130.0 / 255.0, 2
 
 /// Summary of one part, computed once on load so the GUI never iterates large meshes.
 pub struct PartInfo {
+    /// The id of the part of the mesh, which is also that of the geometry object it is the
+    /// mesh of, see [`plx_mesh::Part::id`]: what to find the part by, its name being
+    /// display text only.
+    pub id: plx_model::PartRef,
     pub name: String,
     pub color: [f32; 3],
     pub element_count: usize,
@@ -233,7 +237,6 @@ fn mark_suppressed(
 pub struct Split<'a> {
     pub fe: &'a mut FeModel,
     pub results: &'a mut Option<ResultsView>,
-    pub geometry: &'a mut Option<Geometry>,
     pub mesh: &'a FeMesh,
     pub origins: &'a plx_model::PartOrigins,
 }
@@ -896,6 +899,7 @@ impl Model {
                 skin.faces.iter_mut().for_each(|f| f.region = 0);
             }
             parts.push(PartInfo {
+                id: part.id,
                 name: part.name.clone(),
                 color: part_color(index),
                 element_count: part.elements.len(),
@@ -990,7 +994,7 @@ impl Model {
     pub fn mark_suppressed(&mut self, geometry: &Geometry) -> bool {
         let mut changed = false;
         for part in &mut self.parts {
-            let suppressed = geometry.is_suppressed(&part.name);
+            let suppressed = geometry.is_suppressed(part.id);
             changed |= part.suppressed != suppressed;
             part.suppressed = suppressed;
         }
@@ -1050,13 +1054,13 @@ impl Model {
     /// the geometry has to be tessellated anew.
     pub fn geometry_view_without(
         mut self,
-        deleted: &[String],
+        deleted: &[plx_model::PartRef],
         smaller: &Geometry,
         tags: &BTreeMap<CadEntity, CadEntity>,
     ) -> Option<Self> {
         let path = self.path.clone();
         let kept: Vec<bool> = (self.parts.iter())
-            .map(|p| !deleted.iter().any(|d| p.name.eq_ignore_ascii_case(d)))
+            .map(|p| !deleted.contains(&p.id))
             .collect();
         let skins = std::sync::Arc::unwrap_or_clone(std::mem::take(&mut self.skins));
         let elements: Vec<ElementId> = self.mesh.elements().iter().map(|e| e.id).collect();
@@ -1463,7 +1467,6 @@ impl Model {
         Split {
             fe: &mut self.fe,
             results: &mut self.results,
-            geometry: &mut self.geometry,
             mesh: &self.mesh,
             origins: &self.origins,
         }
@@ -1500,34 +1503,25 @@ impl Model {
         &self.origins
     }
 
-    /// The id of the geometry object `name`: a part or body of the mesh, else a part of
-    /// the geometry without a mesh, see [`plx_model::PartOrigins`].
-    pub fn object_id(&self, name: impl AsRef<str>) -> Option<plx_model::PartRef> {
-        let name = name.as_ref();
-        (plx_model::object_id(&self.mesh, name)).or_else(|| self.geometry.as_ref()?.part_id(name))
+    /// Whether `id` is an imported mesh, see [`plx_model::PartOrigins::is_imported`].
+    pub fn is_imported(&self, id: plx_model::PartRef) -> bool {
+        self.origins.is_imported(id)
     }
 
-    /// Whether `name` is an imported mesh, see [`plx_model::PartOrigins::is_imported`].
-    pub fn is_imported(&self, name: impl AsRef<str>) -> bool {
-        (self.object_id(name)).is_some_and(|id| self.origins.is_imported(id))
+    /// Whether `id` is the mesh of a part of the CAD geometry.
+    pub fn is_cad(&self, id: plx_model::PartRef) -> bool {
+        self.origins.is_cad(id)
     }
 
-    /// Whether `name` is the mesh of a part of the CAD geometry.
-    pub fn is_cad(&self, name: impl AsRef<str>) -> bool {
-        (self.object_id(name)).is_some_and(|id| self.origins.is_cad(id))
+    /// Whether a link brings the mesh of `id`.
+    pub fn is_linked(&self, id: plx_model::PartRef) -> bool {
+        self.origins.is_linked(id)
     }
 
-    /// Whether a link brings the mesh of `name`.
-    pub fn is_linked(&self, name: impl AsRef<str>) -> bool {
-        (self.object_id(name)).is_some_and(|id| self.origins.is_linked(id))
-    }
-
-    /// Notes that the part `name` of the geometry is meshed from inputs with the
-    /// fingerprint `input`; for a part of the mesh being made, before [`Model::set_mesh`].
-    pub fn set_meshed(&mut self, name: &str, input: u64) {
-        if let Some(id) = self.geometry.as_ref().and_then(|g| g.part_id(name)) {
-            self.origins.set_meshed(id, input);
-        }
+    /// Notes that the part `id` of the geometry is meshed from inputs with the fingerprint
+    /// `input`; for a part of the mesh being made, before [`Model::set_mesh`].
+    pub fn set_meshed(&mut self, id: plx_model::PartRef, input: u64) {
+        self.origins.set_meshed(id, input);
     }
 
     /// Takes over the origins of the parts, e.g. with a mesh taken over through a link;
@@ -1560,11 +1554,14 @@ impl Model {
         gone
     }
 
-    /// Suppresses the imported meshes among `names`, or unsuppresses them; true if that
-    /// changed anything.
-    pub fn set_imported_suppressed(&mut self, names: &[String], suppressed: bool) -> bool {
-        let ids = plx_model::body_ids(&self.mesh, names);
-        self.origins.set_suppressed(&ids, suppressed)
+    /// Suppresses the imported meshes among the objects `ids`, or unsuppresses them; true if
+    /// that changed anything.
+    pub fn set_imported_suppressed(
+        &mut self,
+        ids: &[plx_model::PartRef],
+        suppressed: bool,
+    ) -> bool {
+        self.origins.set_suppressed(ids, suppressed)
     }
 
     /// Replaces the mesh with the origins of its parts, e.g. the mesh as it was before a
@@ -2278,27 +2275,25 @@ impl Model {
     pub fn mesh_overlay_source(
         &self,
         view: &Model,
-        stale: &[String],
+        stale: &[plx_model::PartRef],
         stale_shown: bool,
     ) -> MeshOverlaySource {
         let mesh = &self.mesh;
         let geometry = self.geometry.as_ref();
-        let fe_part =
-            |name: &str| (mesh.parts.iter()).position(|p| p.name.eq_ignore_ascii_case(name));
+        let fe_part = |id: plx_model::PartRef| (mesh.parts.iter()).position(|p| p.id == id);
         let parts = (view.parts.iter())
             .map(|part| {
-                let name = part.name.as_str();
-                let fe_name = geometry.map_or(name, |g| g.fe_part_name(name));
-                let stale = stale.iter().any(|s| s.eq_ignore_ascii_case(fe_name));
+                let fe_id = geometry.map_or(part.id, |g| g.fe_part(part.id).0);
+                let stale = stale.contains(&fe_id);
                 if stale && !stale_shown {
                     return None;
                 }
-                let index = fe_part(fe_name)?;
+                let index = fe_part(fe_id)?;
                 let bodies = &mesh.parts[index].bodies;
                 if bodies.is_empty() {
                     return Some((index, None, stale));
                 }
-                let body = bodies.iter().find(|b| b.name.eq_ignore_ascii_case(name))?;
+                let body = bodies.iter().find(|b| b.id == part.id)?;
                 let elements = (body.elements.iter())
                     .filter_map(|&id| mesh.element_index(id))
                     .collect();
@@ -2794,9 +2789,8 @@ impl Model {
         self.mesh.elements().first().is_some_and(|e| e.is_plane())
     }
 
-    /// Renames a part: any text, unique among parts, sets and surfaces regardless of case.
-    /// Sections, boundary conditions and loads on the part refer to it by id and
-    /// stay on it.
+    /// Renames a part: any text, also one another part has, as everything refers to parts
+    /// by id. Sections, boundary conditions and loads on the part stay on it.
     pub fn rename_part(&mut self, index: usize, name: &str) -> Result<(), String> {
         // Any text: the solver never sees it, the export derives its own labels.
         let name = name.trim().to_owned();
@@ -2807,17 +2801,12 @@ impl Model {
         if current.name == name {
             return Ok(());
         }
-        // A part, set or surface of the same name regardless of case would share its name
-        // with this one; a change of case alone keeps it its own.
-        if !current.name.eq_ignore_ascii_case(&name) && self.mesh.name_in_use(&name) {
-            return Err(format!("The name {name} is already used."));
-        }
         if self.history.follows() {
             self.history
                 .mesh_replaced(self.mesh.clone(), self.origins.clone());
         }
         let id = self.mesh.parts.get(index).map(|p| p.id);
-        if let Some(old) = self.mesh.rename_part(index, &name) {
+        if self.mesh.rename_part(index, &name).is_some() {
             // The name is the geometry object's: a compound part keeps it when it is meshed
             // anew, a part of the geometry is renamed with its mesh, an imported mesh is its
             // own geometry object.
@@ -2827,9 +2816,9 @@ impl Model {
             {
                 geometry.compounds[c].name.clone_from(&name);
             } else if let Some(geometry) = &mut self.geometry
-                && id.is_some_and(|id| self.origins.is_cad(id))
+                && let Some(id) = id.filter(|&id| self.origins.is_cad(id))
             {
-                geometry.rename_part(&old, &name);
+                geometry.rename_part(id, &name);
             }
         }
         self.parts[index].name = name;
@@ -3416,6 +3405,8 @@ impl SceneBase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use crate::test_ids::ByName;
 
     /// Results of the built-in solver open from their `.ndlr` file like CalculiX's from the
     /// `.frd`: with their parts and the history output, without any `.frd`, `.dat` or `.inp`
@@ -3528,7 +3519,6 @@ mod tests {
         });
         assert!(model.rename_part(0, "").is_err());
         assert!(model.rename_part(0, "  ").is_err());
-        assert!(model.rename_part(0, &second.to_lowercase()).is_err());
         let typed = "Platte, oben (Ø 40 mm) – Stütze";
         assert_eq!(model.rename_part(0, &format!(" {typed} ")), Ok(()));
         assert_eq!(model.parts[0].name, typed);
@@ -3547,6 +3537,15 @@ mod tests {
         // A change of case alone is the part's own name.
         assert_eq!(model.rename_part(0, &typed.to_uppercase()), Ok(()));
         assert_eq!(model.parts[0].name, typed.to_uppercase());
+        // The name of another part is fine: the parts stay two parts, by id, and the other
+        // keeps its set.
+        let theirs = model.mesh.element_sets.get(&second).cloned();
+        assert_eq!(model.rename_part(0, &second), Ok(()));
+        assert_eq!(model.mesh.parts[0].id, id);
+        assert_ne!(model.mesh.parts[1].id, id);
+        assert_eq!(model.mesh.element_sets.get(&second).cloned(), theirs);
+        assert_eq!(model.rename_part(0, "Platte"), Ok(()));
+        assert_eq!(model.mesh.element_sets.get(&second).cloned(), theirs);
     }
 
     #[test]
@@ -3954,9 +3953,7 @@ mod tests {
             start.elapsed(),
             view.parts.len()
         );
-        let names: Vec<String> = (view.parts.iter().step_by(2))
-            .map(|p| p.name.clone())
-            .collect();
+        let names: Vec<plx_model::PartRef> = (view.parts.iter().step_by(2)).map(|p| p.id).collect();
         let start = Instant::now();
         let (smaller, tags) = plx_mesher::delete_parts_renumbered(&geometry, &names).unwrap();
         eprintln!(
@@ -4366,10 +4363,8 @@ mod tests {
         assert!(meshes[1].mesh_edges.is_empty());
         // An out-of-date mesh, e.g. after a change of the mesh setup, stays until the part
         // is meshed again and is drawn faded, not as the mesh edges.
-        let name = model.mesh.parts[0].name.clone();
-        let stale = model
-            .mesh_overlay_source(&view, std::slice::from_ref(&name), true)
-            .build();
+        let name = model.mesh.parts[0].id;
+        let stale = model.mesh_overlay_source(&view, &[name], true).build();
         let faded = stale[0].clone().expect("the out-of-date mesh is kept");
         assert!(faded.stale && faded.edges == first.edges);
         view.set_mesh_overlay(2, stale);
@@ -4430,7 +4425,7 @@ mod tests {
         }
         let path = testdata("zwei_bloecke.step");
         let import = plx_mesher::import_cad(&path, UnitSystem::Unitless).unwrap();
-        let deleted = ["SOLID-1".to_string()];
+        let deleted = [import.geometry.part_id("SOLID-1").unwrap()];
         let (smaller, tags) =
             plx_mesher::delete_parts_renumbered(&import.geometry, &deleted).unwrap();
         let smaller = smaller.unwrap();

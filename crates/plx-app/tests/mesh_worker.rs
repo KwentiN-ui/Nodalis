@@ -18,7 +18,7 @@ use serde::Serialize;
 struct Request {
     library: Option<PathBuf>,
     geometry: Geometry,
-    parts: Vec<String>,
+    parts: Vec<plx_model::PartRef>,
     groups: Vec<Vec<usize>>,
 }
 
@@ -64,7 +64,10 @@ fn folder(name: &str) -> PathBuf {
 /// A job of all parts of the geometry in `dir`, each part a group, and the task of a worker
 /// in the same folder that takes groups.
 fn write_request(dir: &Path, geometry: Geometry) {
-    let parts = plx_mesher::part_names(&geometry).unwrap();
+    let parts: Vec<plx_model::PartRef> = (plx_mesher::geometry_parts(&geometry).unwrap())
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
     let request = Request {
         library: plx_mesher::library_path(),
         groups: (0..parts.len()).map(|k| vec![k]).collect(),

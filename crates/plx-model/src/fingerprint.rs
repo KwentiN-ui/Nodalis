@@ -228,28 +228,22 @@ pub fn mesh_input(
     geometry: &Geometry,
     matching: &[PeriodicFaces],
     space: ModelSpace,
-    part: &str,
+    part: crate::PartRef,
 ) -> u64 {
     let mut hash = Fnv::new();
     hash.add_str(&geometry.brep);
     // The parts by id, in the order they bind to the solids, so that renaming a part
     // leaves its mesh up to date.
-    let order: Vec<Option<crate::PartRef>> = (geometry.part_names.iter())
-        .map(|name| geometry.part_id(name))
-        .collect();
-    hash.add_debug(&order);
+    hash.add_debug(&geometry.part_ids());
     hash.add_debug(&space);
-    match geometry.part_id(part) {
-        Some(id) => hash.add_debug(&id),
-        None => hash.add_str(&part.to_ascii_lowercase()),
-    }
+    hash.add_debug(&part);
     hash.add_debug(&geometry.parameters(part));
     hash.add_debug(&geometry.algorithms(part));
     for item in &geometry.mesh_items {
         // A local mesh size applies to faces and edges of any part.
         let applies = match &item.kind {
             MeshSetupKind::LocalMeshSize { .. } => true,
-            kind => geometry.holds(kind.parts().unwrap_or_default(), part),
+            kind => kind.parts().is_some_and(|parts| parts.contains(&part)),
         };
         if applies {
             hash.add_debug(&item.kind);
@@ -288,11 +282,12 @@ mod tests {
             brep: "shapes".into(),
             meshing: MeshingParameters::default(),
             mesh_items: Vec::new(),
-            part_names: Vec::new(),
+            parts: (1..=4)
+                .map(|k| crate::GeometryPart::new(format!("SOLID-{k}")))
+                .collect(),
             refinement: 1.0,
             signatures: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -303,22 +298,21 @@ mod tests {
     fn joining_a_compound_leaves_the_mesh_out_of_date() {
         let space = ModelSpace::default();
         let mut joined = geometry();
-        let names = ["SOLID-1", "SOLID-2", "SOLID-3", "SOLID-4"].map(String::from);
-        let ids = joined.part_ids_of(&names);
-        let alone = mesh_input(&joined, &[], space, "SOLID-1");
+        let ids = joined.part_ids();
+        let alone = mesh_input(&joined, &[], space, ids[0]);
         joined
             .compounds
             .push(crate::CompoundPart::new("COMPOUND-1", vec![ids[0], ids[1]]));
-        let first = mesh_input(&joined, &[], space, "SOLID-1");
+        let first = mesh_input(&joined, &[], space, ids[0]);
         assert_ne!(alone, first);
         // Another member changes it too, a part outside the compound stays.
-        let outside = mesh_input(&joined, &[], space, "SOLID-3");
+        let outside = mesh_input(&joined, &[], space, ids[2]);
         joined.compounds[0].parts.push(ids[3]);
-        assert_ne!(first, mesh_input(&joined, &[], space, "SOLID-1"));
-        assert_eq!(outside, mesh_input(&joined, &[], space, "SOLID-3"));
+        assert_ne!(first, mesh_input(&joined, &[], space, ids[0]));
+        assert_eq!(outside, mesh_input(&joined, &[], space, ids[2]));
         // Dissolved, the input is what it was.
         joined.compounds.clear();
-        assert_eq!(alone, mesh_input(&joined, &[], space, "SOLID-1"));
+        assert_eq!(alone, mesh_input(&joined, &[], space, ids[0]));
     }
 
     #[test]
@@ -442,11 +436,11 @@ mod tests {
     #[test]
     fn meshing_settings_of_one_part_leave_the_others_up_to_date() {
         let mut geometry = geometry();
-        let ids = geometry.part_ids_of(&["Solid-1".into(), "Solid-2".into()]);
+        let ids = geometry.part_ids();
         let space = ModelSpace::default();
         let (a, b) = (
-            mesh_input(&geometry, &[], space, "Solid-1"),
-            mesh_input(&geometry, &[], space, "Solid-2"),
+            mesh_input(&geometry, &[], space, ids[0]),
+            mesh_input(&geometry, &[], space, ids[1]),
         );
         geometry.mesh_items.push(MeshSetupItem {
             id: crate::Id::new(),
@@ -459,32 +453,34 @@ mod tests {
                 },
             },
         });
-        assert_ne!(mesh_input(&geometry, &[], space, "Solid-1"), a);
-        assert_eq!(mesh_input(&geometry, &[], space, "Solid-2"), b);
+        assert_ne!(mesh_input(&geometry, &[], space, ids[0]), a);
+        assert_eq!(mesh_input(&geometry, &[], space, ids[1]), b);
         // New shapes need every part meshed again.
         geometry.brep = "other shapes".into();
-        assert_ne!(mesh_input(&geometry, &[], space, "Solid-2"), b);
+        assert_ne!(mesh_input(&geometry, &[], space, ids[1]), b);
     }
 
     #[test]
     fn a_refinement_puts_every_part_out_of_date() {
         let mut geometry = geometry();
+        let ids = geometry.part_ids();
         let space = ModelSpace::default();
-        let before = mesh_input(&geometry, &[], space, "SOLID-1");
+        let before = mesh_input(&geometry, &[], space, ids[0]);
         geometry.refinement = 1.5;
-        assert_ne!(mesh_input(&geometry, &[], space, "SOLID-1"), before);
+        assert_ne!(mesh_input(&geometry, &[], space, ids[0]), before);
     }
 
     #[test]
     fn a_cyclic_symmetry_puts_the_mesh_out_of_date() {
         let geometry = geometry();
+        let ids = geometry.part_ids();
         let space = ModelSpace::default();
-        let before = mesh_input(&geometry, &[], space, "SOLID-1");
+        let before = mesh_input(&geometry, &[], space, ids[0]);
         let matching = [PeriodicFaces {
             master: vec![3],
             slave: vec![5],
             cyclic: crate::CyclicSymmetry::default(),
         }];
-        assert_ne!(mesh_input(&geometry, &matching, space, "SOLID-1"), before);
+        assert_ne!(mesh_input(&geometry, &matching, space, ids[0]), before);
     }
 }

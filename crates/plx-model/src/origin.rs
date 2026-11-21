@@ -275,12 +275,11 @@ impl PartOrigins {
 
 /// The meshes of parts of the geometry that `geometry` no longer has, e.g. after a split
 /// that cut a part into new ones or a deleted part, by id: deleting a part of the geometry
-/// deletes its mesh. Unknown while the parts of the geometry are not known
-/// ([`crate::Geometry::known_parts`]).
+/// deletes its mesh.
 pub fn orphans(geometry: Option<&crate::Geometry>, origins: &PartOrigins) -> Vec<crate::PartRef> {
     let known = |id: crate::PartRef| match geometry {
         None => false,
-        Some(g) => g.known_parts().is_empty() || g.part_name(id).is_some(),
+        Some(g) => g.part(id).is_some(),
     };
     (origins.iter())
         .filter(|(id, origin)| !matches!(origin, PartOrigin::Imported { .. }) && !known(*id))
@@ -320,30 +319,28 @@ pub fn drop_orphans(
 
 /// The parts of the FE model that `geometry` has without a mesh: every part of the geometry
 /// that is not suppressed belongs to the FE model, meshed or not, so the FE Model lists those
-/// without a mesh too. By FE name (a compound part once), in the order of the geometry; a
-/// compound part whose mesh lacks only some of its bodies has a mesh and is not among them.
+/// without a mesh too. By the id and name of the FE part (a compound part once), in the order
+/// of the geometry; a compound part whose mesh lacks only some of its bodies has a mesh and
+/// is not among them.
 pub fn unmeshed_parts(
     geometry: Option<&crate::Geometry>,
     origins: &PartOrigins,
     mesh: &FeMesh,
-) -> Vec<String> {
+) -> Vec<(crate::PartRef, String)> {
     let Some(geometry) = geometry else {
         return Vec::new();
     };
-    let mut unmeshed: Vec<String> = Vec::new();
-    for part in geometry.known_parts() {
-        let meshed = geometry
-            .part_id(part)
-            .is_some_and(|id| origins.get(id).is_some());
-        if geometry.is_suppressed(part) || meshed {
+    let mut unmeshed: Vec<(crate::PartRef, String)> = Vec::new();
+    for part in &geometry.parts {
+        if geometry.is_suppressed(part.id) || origins.get(part.id).is_some() {
             continue;
         }
-        let name = geometry.fe_part_name(part);
-        let listed = (unmeshed.iter().map(String::as_str))
-            .chain(mesh.parts.iter().map(|p| p.name.as_str()))
-            .any(|n| n.eq_ignore_ascii_case(name));
+        let (id, name) = geometry.fe_part(part.id);
+        let listed = (unmeshed.iter().map(|(i, _)| *i))
+            .chain(mesh.parts.iter().map(|p| p.id))
+            .any(|i| i == id);
         if !listed {
-            unmeshed.push(name.to_owned());
+            unmeshed.push((id, name.to_owned()));
         }
     }
     unmeshed
@@ -589,13 +586,17 @@ mod tests {
             brep: String::new(),
             meshing: crate::MeshingParameters::default(),
             mesh_items: Vec::new(),
-            part_names: vec!["A".into(), "B".into()],
+            parts: ["A", "B"]
+                .map(|name| crate::GeometryPart {
+                    name: name.into(),
+                    id: named(name),
+                })
+                .to_vec(),
             refinement: 1.0,
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: vec![named("A")],
             own_meshes: Vec::new(),
-            ids: Vec::new(),
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -641,13 +642,12 @@ mod tests {
             brep: String::new(),
             meshing: crate::MeshingParameters::default(),
             mesh_items: Vec::new(),
-            part_names: Vec::new(),
+            parts: Vec::new(),
             refinement: 1.0,
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
-            ids: Vec::new(),
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -740,18 +740,17 @@ mod tests {
             brep: String::new(),
             meshing: crate::MeshingParameters::default(),
             mesh_items: Vec::new(),
-            part_names: vec!["SOLID-2".into(), "SOLID-3".into()],
+            parts: ["SOLID-2", "SOLID-3"]
+                .map(|name| crate::GeometryPart {
+                    name: name.into(),
+                    id: named(name),
+                })
+                .to_vec(),
             refinement: 1.0,
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: Vec::new(),
-            ids: ["SOLID-2", "SOLID-3"]
-                .map(|name| crate::PartId {
-                    name: name.into(),
-                    id: named(name),
-                })
-                .to_vec(),
             from_link: false,
             operations: Vec::new(),
             input: None,
@@ -801,13 +800,17 @@ mod tests {
             brep: String::new(),
             meshing: Default::default(),
             mesh_items: Vec::new(),
-            part_names: vec!["OWN".into(), "OTHER".into()],
+            parts: ["OWN", "OTHER"]
+                .map(|name| crate::GeometryPart {
+                    name: name.into(),
+                    id: named(name),
+                })
+                .to_vec(),
             refinement: 1.0,
             signatures: Vec::new(),
             compounds: Vec::new(),
             suppressed: Vec::new(),
             own_meshes: vec![named("OWN")],
-            ids: Vec::new(),
             from_link: true,
             operations: Vec::new(),
             input: None,
@@ -839,7 +842,12 @@ mod tests {
             brep: String::new(),
             meshing: crate::MeshingParameters::default(),
             mesh_items: Vec::new(),
-            part_names: ["A", "B", "C", "D", "E"].map(String::from).to_vec(),
+            parts: ["A", "B", "C", "D", "E"]
+                .map(|name| crate::GeometryPart {
+                    name: name.into(),
+                    id: named(name),
+                })
+                .to_vec(),
             refinement: 1.0,
             signatures: Vec::new(),
             compounds: vec![crate::CompoundPart::new(
@@ -848,19 +856,17 @@ mod tests {
             )],
             suppressed: vec![named("C")],
             own_meshes: Vec::new(),
-            ids: ["A", "B", "C", "D", "E"]
-                .map(|name| crate::PartId {
-                    name: name.into(),
-                    id: crate::named(name),
-                })
-                .to_vec(),
             from_link: false,
             operations: Vec::new(),
             input: None,
         };
+        let unmeshed = unmeshed_parts(Some(&geometry), &origins, &mesh);
         assert_eq!(
-            unmeshed_parts(Some(&geometry), &origins, &mesh),
-            ["B", "JOINED"]
+            unmeshed,
+            [
+                (crate::named("B"), "B".to_owned()),
+                (geometry.compounds[0].id, "JOINED".to_owned())
+            ]
         );
         assert!(unmeshed_parts(None, &origins, &mesh).is_empty());
     }

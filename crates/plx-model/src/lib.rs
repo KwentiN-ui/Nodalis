@@ -124,8 +124,8 @@ pub use features::{
 pub use field::{FieldOutput, FieldResult, OutputDimension};
 pub use geometry::{
     Algorithm2d, Algorithm3d, CompoundPart, ExtrudeLayers, ExtrudeMesh, Geometry,
-    GeometryOperation, MeshSetupItem, MeshSetupKind, MeshingParameters, PartId, PeriodicFaces,
-    Recombination, ThickenShellMesh,
+    GeometryOperation, GeometryPart, MeshSetupItem, MeshSetupKind, MeshingParameters,
+    PeriodicFaces, Recombination, ThickenShellMesh,
 };
 pub use handover::Handover;
 pub use history::{HistoryKind, HistoryOutput, HistoryVariable, Totals, history_variables};
@@ -185,7 +185,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// Format 59: result paths have an id ([`ResultPath::id`]), by which the plots of paths
 /// and hot spots saved with bound results refer to them, not by their names.
-pub const PROJECT_FORMAT: u32 = 59;
+///
+/// Format 60: the parts of a geometry are kept with their ids ([`Geometry::parts`]); names
+/// are labels only and may repeat.
+pub const PROJECT_FORMAT: u32 = 60;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

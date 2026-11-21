@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use plx_mesh::{CadEntity, CadMap, Element, ElementId, ElementShape, FeMesh, NodeId, Part};
-use plx_model::ThickenShellMesh;
+use plx_model::{GeometryPart, ThickenShellMesh};
 
 use crate::extrude::{Point, add, cross, dot, norm, scale, sub};
 
@@ -32,7 +32,7 @@ struct ShellElement {
 /// The shell mesh of one part as a solid, numbered from 1, with its CAD map.
 pub(crate) fn thicken(
     shell: &FeMesh,
-    part: &str,
+    part: &GeometryPart,
     thicken: &ThickenShellMesh,
 ) -> Result<FeMesh, String> {
     thicken.check()?;
@@ -89,9 +89,9 @@ pub(crate) fn thicken(
         Ok(new)
     };
     let mut part_elements = Part {
-        id: Default::default(),
+        id: part.id,
         bodies: Vec::new(),
-        name: part.to_string(),
+        name: part.name.clone(),
         elements: Vec::new(),
     };
     for layer in 0..layers {
@@ -571,7 +571,12 @@ mod tests {
     fn an_l_becomes_hexahedra_of_its_thickness_on_both_legs() {
         for mixed in [false, true] {
             let shell = l_shell(false, mixed);
-            let solid = thicken(&shell, "SHELL-1", &item(0.2, 2, 0.0)).unwrap();
+            let solid = thicken(
+                &shell,
+                &plx_model::GeometryPart::new("SHELL-1"),
+                &item(0.2, 2, 0.0),
+            )
+            .unwrap();
             assert_eq!(solid.element_count(), 8 * 2);
             assert!(solid.elements().iter().all(|e| e.type_name == "C3D8"));
             assert_eq!(solid.node_count(), 15 * 3);
@@ -600,7 +605,12 @@ mod tests {
     #[test]
     fn the_offset_moves_the_solid_along_the_normals() {
         let shell = l_shell(false, false);
-        let solid = thicken(&shell, "SHELL-1", &item(0.2, 1, 0.1)).unwrap();
+        let solid = thicken(
+            &shell,
+            &plx_model::GeometryPart::new("SHELL-1"),
+            &item(0.2, 1, 0.1),
+        )
+        .unwrap();
         // On face 1 the solid reaches from z = 0 to 0.2, towards the inside of the L.
         let mut far: Vec<f64> = (solid.node_ids().iter())
             .filter_map(|&n| solid.node(n))
@@ -628,7 +638,12 @@ mod tests {
     #[test]
     fn quadratic_shells_become_twenty_node_hexahedra() {
         let shell = l_shell(true, false);
-        let solid = thicken(&shell, "SHELL-1", &item(0.2, 1, 0.0)).unwrap();
+        let solid = thicken(
+            &shell,
+            &plx_model::GeometryPart::new("SHELL-1"),
+            &item(0.2, 1, 0.0),
+        )
+        .unwrap();
         assert_eq!(solid.element_count(), 8);
         assert!(solid.elements().iter().all(|e| e.type_name == "C3D20"));
         assert!(
@@ -646,9 +661,28 @@ mod tests {
     fn too_thick_folds_and_is_refused() {
         let shell = l_shell(false, false);
         // The inner side of the corner would lie beyond the far end of the legs.
-        let error = thicken(&shell, "SHELL-1", &item(5.0, 1, 0.0)).unwrap_err();
+        let error = thicken(
+            &shell,
+            &plx_model::GeometryPart::new("SHELL-1"),
+            &item(5.0, 1, 0.0),
+        )
+        .unwrap_err();
         assert!(error.contains("fold over"), "{error}");
-        assert!(thicken(&shell, "SHELL-1", &item(0.0, 1, 0.0)).is_err());
-        assert!(thicken(&shell, "SHELL-1", &item(0.1, 0, 0.0)).is_err());
+        assert!(
+            thicken(
+                &shell,
+                &plx_model::GeometryPart::new("SHELL-1"),
+                &item(0.0, 1, 0.0)
+            )
+            .is_err()
+        );
+        assert!(
+            thicken(
+                &shell,
+                &plx_model::GeometryPart::new("SHELL-1"),
+                &item(0.1, 0, 0.0)
+            )
+            .is_err()
+        );
     }
 }

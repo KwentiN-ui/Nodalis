@@ -556,6 +556,8 @@ pub fn highlight(model: &Model, entities: &[CadEntity]) -> Highlight {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use crate::test_ids::ByName;
     use plx_io::frd::read_frd;
     use plx_model::{
         BoundaryCondition, BoundaryKind, Elastic, FeModel, Load, LoadKind, Material, Region,
@@ -900,7 +902,8 @@ mod tests {
                 },
             },
         });
-        let part = plx_mesher::generate_part_mesh(&geometry, "SOLID-1").unwrap();
+        let part = plx_mesher::generate_part_mesh(&geometry, geometry.part_id("SOLID-1").unwrap())
+            .unwrap();
         let mesh = plx_mesher::merge_part(model.mesh(), part.mesh);
         model.set_mesh(mesh);
         let fine = check(&model);
@@ -1095,7 +1098,8 @@ mod tests {
             });
         }
         for part in &names {
-            let fine = plx_mesher::generate_part_mesh(&geometry, part).unwrap();
+            let fine =
+                plx_mesher::generate_part_mesh(&geometry, geometry.part_id(part).unwrap()).unwrap();
             let mesh = plx_mesher::merge_part(model.mesh(), fine.mesh);
             model.set_mesh(mesh);
         }

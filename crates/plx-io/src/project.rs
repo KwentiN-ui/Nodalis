@@ -908,7 +908,7 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
 
 /// The oldest format that can still be opened. While Nodalis is being designed, a new
 /// format is not converted: older projects are refused.
-pub const FIRST_PROJECT_FORMAT: u32 = 59;
+pub const FIRST_PROJECT_FORMAT: u32 = 60;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
@@ -2454,14 +2454,13 @@ mod tests {
                     }),
                 },
             ],
-            part_names: vec!["SOLID-1".into()],
-            refinement: 1.0,
-            signatures: Vec::new(),
-            own_meshes: Vec::new(),
-            ids: vec![plx_model::PartId {
+            parts: vec![plx_model::GeometryPart {
                 name: "SOLID-1".into(),
                 id: solid,
             }],
+            refinement: 1.0,
+            signatures: Vec::new(),
+            own_meshes: Vec::new(),
             from_link: false,
             operations: Vec::new(),
             input: None,

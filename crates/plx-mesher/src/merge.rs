@@ -4,12 +4,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use plx_model::{CompoundPart, Geometry, TagMap};
+use plx_model::{CompoundPart, Geometry, GeometryPart, PartRef, TagMap};
 
 use crate::gmsh::with_gmsh;
 use crate::{
     BoundingBox, Entity, GmshError, TempFile, default_parts, part_boxes, parts, same_box,
-    signatures, unchanged, unique_name,
+    signatures, unchanged,
 };
 
 /// Geometries put together by [`merge_geometries`].
@@ -19,14 +19,14 @@ pub struct MergedGeometry {
     /// For each input, the new tag of each of its faces, edges and vertices by its old one,
     /// for a mesh made of it.
     pub tags: Vec<TagMap>,
-    /// For each input, the new names of the parts and compound parts that had to be renamed
-    /// since an earlier input has a part of the name.
-    pub renamed: Vec<BTreeMap<String, String>>,
+    /// For each input, the new ids of the parts and compound parts that had to take new
+    /// ones, by their old ones, since an earlier input has a part of the id, as when two
+    /// links bring the same block: the second copy is other parts then.
+    pub ids: Vec<BTreeMap<PartRef, PartRef>>,
 }
 
 /// Puts the parts of `inputs` together into one geometry, in their order. Each part keeps
-/// its name unless an earlier input has a part of that name: it gets "-2", "-3" … then.
-/// The shapes are not joined: parts that touch stay parts of their own, as in an assembly
+/// its id and name; it takes a new id if an earlier input has a part of its id. The shapes are not joined: parts that touch stay parts of their own, as in an assembly
 /// read from a file. The meshing parameters are those of the first input, with no mesh
 /// setup items, since those of the inputs name their own faces.
 pub fn merge_geometries(inputs: &[Geometry]) -> Result<MergedGeometry, GmshError> {
@@ -65,56 +65,53 @@ pub fn merge_geometries(inputs: &[Geometry]) -> Result<MergedGeometry, GmshError
         Ok((part_boxes(gmsh, found)?, signatures(gmsh)?, closures))
     })?;
     // The parts of the whole are found in the inputs by where they lie, in input order.
-    let mut wanted: Vec<Vec<Option<(i32, String, BoundingBox)>>> = (alone.iter())
+    let mut wanted: Vec<Vec<Option<(i32, GeometryPart, BoundingBox)>>> = (alone.iter())
         .map(|(parts, _)| parts.iter().cloned().map(Some).collect())
         .collect();
-    let mut owner: Vec<Option<(usize, String)>> = Vec::with_capacity(new_parts.len());
+    let mut owner: Vec<Option<(usize, GeometryPart)>> = Vec::with_capacity(new_parts.len());
     for (dim, _, bounds) in &new_parts {
         let found = wanted.iter_mut().enumerate().find_map(|(input, parts)| {
             let part = parts.iter_mut().find(|p| {
                 p.as_ref()
                     .is_some_and(|(d, _, b)| d == dim && same_box(b, bounds))
             })?;
-            part.take().map(|(_, name, _)| (input, name))
+            part.take().map(|(_, found, _)| (input, found))
         });
         owner.push(found);
     }
-    // Names: in input order, so that the first input keeps all of its own.
-    let mut used = BTreeSet::new();
-    let mut renamed = vec![BTreeMap::new(); inputs.len()];
+    // Ids: in input order, so that the first input keeps all of its own.
+    let mut used: BTreeSet<PartRef> = BTreeSet::new();
+    let mut ids = vec![BTreeMap::new(); inputs.len()];
     let mut order: Vec<usize> = (0..new_parts.len()).collect();
     order.sort_by_key(|&i| owner[i].as_ref().map_or(usize::MAX, |(input, _)| *input));
-    let mut names = vec![String::new(); new_parts.len()];
+    let mut parts: Vec<Option<GeometryPart>> = vec![None; new_parts.len()];
     for input in 0..inputs.len() {
-        let own: Vec<String> = (inputs[input].compounds.iter())
-            .map(|c| c.name.clone())
-            .collect();
         for &i in order
             .iter()
             .filter(|&&i| owner[i].as_ref().is_some_and(|o| o.0 == input))
         {
-            let name = &owner[i].as_ref().map(|o| o.1.clone()).unwrap_or_default();
-            let unique = unique_name(name, &used);
-            if &unique != name {
-                renamed[input].insert(name.clone(), unique.clone());
+            let Some(mut part) = owner[i].as_ref().map(|o| o.1.clone()) else {
+                continue;
+            };
+            if !used.insert(part.id) {
+                let new = PartRef::new();
+                ids[input].insert(part.id, new);
+                part.id = new;
+                used.insert(new);
             }
-            used.insert(unique.clone());
-            names[i] = unique;
+            parts[i] = Some(part);
         }
-        for name in own {
-            let unique = unique_name(&name, &used);
-            if unique != name {
-                renamed[input].insert(name, unique.clone());
+        for compound in &inputs[input].compounds {
+            if !used.insert(compound.id) {
+                let new = PartRef::new();
+                ids[input].insert(compound.id, new);
+                used.insert(new);
             }
-            used.insert(unique);
         }
     }
-    for (i, name) in names.iter_mut().enumerate() {
-        if owner[i].is_none() {
-            *name = unique_name(&new_parts[i].1, &used);
-            used.insert(name.clone());
-        }
-    }
+    let parts: Vec<GeometryPart> = (parts.into_iter().zip(&new_parts))
+        .map(|(part, (_, name, _))| part.unwrap_or_else(|| GeometryPart::new(name.clone())))
+        .collect();
     // Each input's entities in the parts found for it, renumbered.
     let mut tags = Vec::with_capacity(inputs.len());
     for (input, (_, old)) in alone.iter().enumerate() {
@@ -128,20 +125,20 @@ pub fn merge_geometries(inputs: &[Geometry]) -> Result<MergedGeometry, GmshError
             .collect();
         tags.push(unchanged(old, &new));
     }
-    let rename = |input: usize, name: &str| {
-        renamed[input]
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| name.to_owned())
-    };
-    let compounds: Vec<CompoundPart> = (inputs.iter().enumerate())
+    let id = |input: usize, id: &PartRef| ids[input].get(id).copied().unwrap_or(*id);
+    let mut compounds: Vec<CompoundPart> = (inputs.iter().enumerate())
         .flat_map(|(input, g)| g.compounds.iter().map(move |c| (input, c)))
         .map(|(input, c)| CompoundPart {
-            id: c.id,
-            name: rename(input, &c.name),
-            parts: c.parts.clone(),
+            id: id(input, &c.id),
+            name: c.name.clone(),
+            parts: c.parts.iter().map(|p| id(input, p)).collect(),
         })
         .collect();
+    // The members of parts that went leave the compounds.
+    for compound in &mut compounds {
+        compound.parts.retain(|p| parts.iter().any(|q| q.id == *p));
+    }
+    compounds.retain(|c| !c.parts.is_empty());
     let mut sources: Vec<&str> = Vec::new();
     for geometry in inputs {
         for source in geometry.source.split(", ") {
@@ -150,44 +147,26 @@ pub fn merge_geometries(inputs: &[Geometry]) -> Result<MergedGeometry, GmshError
             }
         }
     }
-    // Each part keeps the id it has in its input, under its new name.
-    let mut ids: Vec<plx_model::PartId> = Vec::new();
-    for (input, geometry) in inputs.iter().enumerate() {
-        for entry in &geometry.ids {
-            let name = rename(input, &entry.name);
-            if names.contains(&name) && !ids.iter().any(|p| p.id == entry.id || p.name == name) {
-                ids.push(plx_model::PartId { name, id: entry.id });
-            }
-        }
-    }
     let first = &inputs[0];
-    let mut geometry = Geometry {
+    let geometry = Geometry {
         source: sources.join(", "),
         brep,
         meshing: first.meshing,
         mesh_items: Vec::new(),
-        part_names: names,
+        parts,
         refinement: first.refinement,
         signatures: new_signatures,
         compounds,
         suppressed: Vec::new(),
         own_meshes: Vec::new(),
-        ids,
         from_link: false,
         operations: Vec::new(),
         input: None,
     };
-    geometry.ensure_ids();
-    // The members keep their ids; those of parts that went leave the compounds.
-    let known: Vec<plx_model::PartRef> = geometry.ids.iter().map(|p| p.id).collect();
-    for compound in &mut geometry.compounds {
-        compound.parts.retain(|p| known.contains(p));
-    }
-    geometry.compounds.retain(|c| !c.parts.is_empty());
     Ok(MergedGeometry {
         geometry,
         tags,
-        renamed,
+        ids,
     })
 }
 

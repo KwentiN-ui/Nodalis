@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::f64::consts::{PI, TAU};
 
 use plx_mesh::{CadEntity, CadMap, ElementId, FeMesh, NodeId};
-use plx_model::Geometry;
+use plx_model::{Geometry, GeometryPart};
 
 use crate::extrude::{
     Motion, Point, Topology, add, cross, dot, norm, scale, source_elements, sub, sweep_mesh,
@@ -305,7 +305,7 @@ fn revolution(
 pub(crate) fn revolve_part_mesh(
     gmsh: &Gmsh,
     geometry: &Geometry,
-    part: &str,
+    part: &GeometryPart,
     volume: i32,
 ) -> Result<Result<GeneratedMesh, String>, GmshError> {
     let topology = Topology::read(gmsh, volume)?;
@@ -357,7 +357,7 @@ pub(crate) fn revolve_part_mesh(
             "{part}: no body of revolution: it touches its axis"
         )));
     }
-    let max_size = geometry.parameters(part).max_size;
+    let max_size = geometry.parameters(part.id).max_size;
     let steps = ((revolution.angle * revolution.radius / max_size).round())
         .max((revolution.angle / (PI / 8.0)).ceil())
         .clamp(1.0, 100_000.0) as u32;

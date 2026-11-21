@@ -1135,6 +1135,11 @@ impl PartPicks {
             .collect()
     }
 
+    /// The name of a part picked once, as it was then.
+    pub fn name(&self, id: plx_model::PartRef) -> Option<&str> {
+        self.names.get(&id).map(String::as_str)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.ids().is_empty()
     }

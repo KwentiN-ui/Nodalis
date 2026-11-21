@@ -217,7 +217,7 @@ pub(super) fn take_transform_input(nodes: &mut [Node], all: &[Link], id: u64) {
         match &input {
             Input::Geometry(g) => {
                 print.add_str(&g.brep);
-                print.add_debug(&g.part_names);
+                print.add_debug(&g.parts);
                 print.add_debug(&g.compounds);
             }
             Input::Mesh(copy) => {

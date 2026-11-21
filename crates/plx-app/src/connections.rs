@@ -178,10 +178,9 @@ impl DetectionScope {
 /// regions before the parts are meshed and keeps them to whole CAD faces.
 pub fn detection_display<'a>(model: &Model, geometry: Option<&'a Model>) -> Option<&'a Model> {
     let geometry = geometry.filter(|g| g.is_geometry() && !g.mesh().parts.is_empty())?;
-    let from_geometry =
-        |name: &str| (geometry.mesh().parts.iter()).any(|p| p.name.eq_ignore_ascii_case(name));
+    let from_geometry = |id| (geometry.mesh().parts.iter()).any(|p| p.id == id);
     (model.mesh().parts.iter())
-        .all(|p| from_geometry(&p.name))
+        .all(|p| from_geometry(p.id))
         .then_some(geometry)
 }
 
@@ -197,7 +196,7 @@ pub fn detect(
             let visible = detection_visibility(model, display);
             let dimensions = display.part_dimensions();
             let compounds: Vec<Option<usize>> = (display.mesh().parts.iter())
-                .map(|p| model.geometry.as_ref()?.compound_of(&p.name))
+                .map(|p| model.geometry.as_ref()?.compound_of(p.id))
                 .collect();
             let geometry = plx_model::DetectionGeometry {
                 mesh: display.mesh(),
@@ -268,7 +267,7 @@ pub fn detection_visibility(model: &Model, geometry: &Model) -> Vec<bool> {
     (geometry.mesh().parts.iter().zip(&geometry.parts))
         .map(|(part, shown)| {
             (model.mesh().parts.iter().zip(&model.parts))
-                .find(|(p, _)| p.name.eq_ignore_ascii_case(&part.name))
+                .find(|(p, _)| p.id == part.id)
                 .map_or(shown.visible, |(_, s)| s.visible)
         })
         .collect()
@@ -1721,6 +1720,8 @@ pub fn step_contacts(ui: &mut Ui, fe: &FeModel, step: &mut plx_model::Step, inde
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use crate::test_ids::ByName;
     use plx_io::frd::read_frd;
     use plx_mesh::CadEntity;
     use plx_model::{
@@ -1925,8 +1926,8 @@ mod tests {
         // it takes part in nothing: the solver gets neither the region found with it, which
         // would have nothing on one side, nor the pressure on it alone.
         let block = names[1].clone();
-        (model.geometry.as_mut().unwrap()).set_suppressed(std::slice::from_ref(&block), true);
         let block_id = model.mesh().part_id(&block).unwrap();
+        (model.geometry.as_mut().unwrap()).set_suppressed(&[block_id], true);
         let active = model.active();
         assert_eq!(active.left_out(), [block_id]);
         assert!(active.fe().contact_regions.is_empty());
