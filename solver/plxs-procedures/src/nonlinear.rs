@@ -3,7 +3,8 @@
 //! "Convergence criteria" and the `*CONTROLS` defaults): residual check against the average
 //! element force, solution check against the incremental displacement, cutbacks on
 //! divergence or too many iterations, growth by 1.5 after two fast increments, reduction
-//! by 0.75 after a slow one, the creep strain tolerance `CETOL` in visco steps. Exact
+//! by 0.75 after a slow one (slow by the iterations after the last change of the contact
+//! status), the creep strain tolerance `CETOL` in visco steps. Exact
 //! equality of CalculiX's increment sequence is not a goal (concept section 4.5); the
 //! defaults make the sequences agree where the problem is benign.
 //!
@@ -239,7 +240,32 @@ fn contact_settling(residuals: &[f64]) -> bool {
     least(&residuals[n - 4..]) < 0.5 * least(&residuals[n - 8..n - 4])
 }
 
+/// How an increment converged, for the size of the next one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pace {
+    Fast,
+    Normal,
+    Slow,
+}
+
 impl Controls {
+    /// The pace of an increment that converged in `iterations`, `settled` of them after the
+    /// last change of the contact status. Slow is an increment by the settled iterations
+    /// only: the iterations in which contact points still opened, closed, stuck or slid
+    /// are as many for a small increment as for a large one. A screw turned in the play of
+    /// its thread let go of its last contact points over 14 iterations in every increment;
+    /// counted as slow, each one made the next 0.75 times as long, 22 times in a row, down
+    /// to 1/560 of the frame. Fast stays an increment with few iterations in all.
+    fn pace(&self, iterations: u32, settled: u32) -> Pace {
+        if settled > self.slow_iterations {
+            Pace::Slow
+        } else if iterations <= self.fast_iterations {
+            Pace::Fast
+        } else {
+            Pace::Normal
+        }
+    }
+
     /// The controls of a step: the defaults, changed by `*CONTROLS, PARAMETERS=TIME
     /// INCREMENTATION` or `FIELD` where the input has them.
     pub fn of_step(step: &Step) -> Self {
@@ -318,6 +344,8 @@ enum Failure {
 /// A converged attempt.
 struct Converged {
     iterations: u32,
+    /// The iterations after the last change of the contact status.
+    settled: u32,
     /// The contact springs at the converged displacements.
     contact: Option<plxs_contact::Evaluation>,
     u: Vec<f64>,
@@ -723,6 +751,7 @@ impl Procedure for NonlinearStatic {
             }
             let Converged {
                 iterations,
+                settled,
                 u,
                 output,
                 ..
@@ -829,13 +858,13 @@ impl Procedure for NonlinearStatic {
                 dt = full;
             }
             if !direct && !last {
-                let fast = iterations <= controls.fast_iterations;
-                if iterations > controls.slow_iterations {
+                let pace = controls.pace(iterations, settled);
+                if pace == Pace::Slow {
                     dt *= controls.reduce_slow;
-                } else if fast && previous_fast {
+                } else if pace == Pace::Fast && previous_fast {
                     dt *= controls.grow;
                 }
-                previous_fast = fast;
+                previous_fast = pace == Pace::Fast;
                 dt = dt.min(maximum);
             }
         }
@@ -1183,6 +1212,7 @@ impl NonlinearStatic {
                     }
                     return Ok(Ok(Converged {
                         iterations: iteration,
+                        settled: iteration - last_change.unwrap_or(0),
                         u,
                         output,
                         average_force: flux,
@@ -1396,7 +1426,19 @@ impl NonlinearStatic {
 
 #[cfg(test)]
 mod tests {
-    use super::weighted_residual;
+    use super::{Controls, Pace, weighted_residual};
+
+    #[test]
+    fn iterations_with_changing_contact_do_not_slow_the_next_increment() {
+        let controls = Controls::default();
+        // Without contact every iteration counts.
+        assert_eq!(controls.pace(4, 4), Pace::Fast);
+        assert_eq!(controls.pace(7, 7), Pace::Normal);
+        assert_eq!(controls.pace(11, 11), Pace::Slow);
+        // Thirteen iterations of points letting go, converged in the next one.
+        assert_eq!(controls.pace(14, 1), Pace::Normal);
+        assert_eq!(controls.pace(14, 11), Pace::Slow);
+    }
 
     #[test]
     fn a_residual_counts_against_the_forces_on_its_own_dof() {
