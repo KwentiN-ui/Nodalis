@@ -5994,6 +5994,7 @@ impl ProjectApp {
             {
                 filter.clear();
             }
+            crate::virtual_table::copy_button(ui, &output, &filter);
             crate::analysis::dropped_note(ui, dropped);
         });
         ui.horizontal_top(|ui| {
